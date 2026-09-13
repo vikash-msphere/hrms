@@ -10,6 +10,7 @@ import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
 import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 import { idFromPath } from "./documentsCommon";
+import { orgToday, dayStartMs } from "./orgDay";
 
 const CHECK_TYPES = ["identity", "address", "education", "employment", "criminal", "reference", "credit", "other"] as const;
 const STATUSES = ["pending", "in_progress", "clear", "discrepancy", "failed"] as const;
@@ -54,11 +55,15 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.b
   collection: "background-checks",
   auditName: "background-check",
   notFound: "background check not found",
-  insert: (input) => {
+  insert: async (input, deps) => {
     const employeeId = idFromPath(input.employee);
     if (!employeeId) throw invalidArgument("employee is required");
     validate(input);
     const status = input.status ?? "pending";
+    // `initiated_date` / `completed_date` are DAY columns - a caller's value is parsed to UTC midnight and the
+    // serializer reads them back with `.slice(0, 10)` - so a stamped default has to be the ORG's day, not the
+    // instant the request arrived. In IST a check completed at 00:30 local was filed as completed yesterday.
+    const today = new Date(dayStartMs(await orgToday(deps)));
     return {
       employeeId,
       checkType: input.check_type ?? "identity",
@@ -66,13 +71,13 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.b
       // Empty string clears, like an omitted field (see web/src/api.ts: nothing on the wire is ever null).
       vendor: input.vendor?.trim() || null,
       referenceNo: input.reference_no?.trim() || null,
-      initiatedDate: input.initiated_date ? parseDate(input.initiated_date, "initiated_date") : new Date(),
-      completedDate: input.completed_date ? parseDate(input.completed_date, "completed_date") : isFinal(status) ? new Date() : null,
+      initiatedDate: input.initiated_date ? parseDate(input.initiated_date, "initiated_date") : today,
+      completedDate: input.completed_date ? parseDate(input.completed_date, "completed_date") : isFinal(status) ? today : null,
       notes: input.notes?.trim() || null,
       documentId: idFromPath(input.document) ?? null,
     };
   },
-  patch: (patch, row) => {
+  patch: async (patch, row, deps) => {
     validate(patch);
     const set: SetOf<typeof schema.backgroundChecks> = {};
     if (has(patch, "employee")) {
@@ -89,8 +94,9 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.b
     if (has(patch, "document")) set.documentId = idFromPath(patch.document) ?? null;
     if (has(patch, "status")) {
       set.status = patch.status;
-      // Reaching a final status stamps completion (unless one was given); reopening clears it.
-      if (patch.status && isFinal(patch.status) && !has(patch, "completed_date") && !row.completedDate) set.completedDate = new Date();
+      // Reaching a final status stamps completion (unless one was given); reopening clears it. The org's
+      // calendar day, for the reason the insert states.
+      if (patch.status && isFinal(patch.status) && !has(patch, "completed_date") && !row.completedDate) set.completedDate = new Date(dayStartMs(await orgToday(deps)));
       if (patch.status && !isFinal(patch.status) && !has(patch, "completed_date")) set.completedDate = null;
     }
     return set;

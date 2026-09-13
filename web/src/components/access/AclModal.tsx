@@ -24,6 +24,7 @@ import { scopesForCollection, fetchScopeCapabilities } from "./permMatrix";
 import { metaFor } from "./collectionMeta";
 import { verbInfo } from "./verbMeta";
 import { PreviewPanel, fetchPreview } from "./PreviewPanel";
+import { restoreAccessRules } from "./cloneRules";
 import { usePermission } from "@/lib/perm";
 
 // The rule shape is the shared one (permMatrix) - roles and users are the same primitive, and the matrix,
@@ -385,9 +386,18 @@ export function AclModal({
       if (blocker && !(await confirm({ title: "A deny is already in place", description: `${ruleSentence(blocker, roleLabel(blocker.subject))}. A deny always wins, so this allow will have NO effect until that rule is removed. Add it anyway?`, confirmLabel: "Add anyway" }))) return;
     }
     setBusy(true);
+    // Delete-then-create, with the two consequences SubjectPermissionsDialog names: the deletes are COMMITTED
+    // whether or not the create that justifies them lands, so a failure between the halves is a removal, and
+    // "Could not update role" reads as "nothing happened" while the role has in fact just lost its access. So
+    // track what was removed, put it back in the catch, say how much could not be put back - and reload on
+    // EVERY path, so this modal can never go on showing a level the server no longer holds.
+    const before = roleAll(name).filter((x) => !x.verb);
+    const removed: AccessRule[] = [];
     try {
-      const before = roleAll(name).filter((x) => !x.verb);
-      for (const r of before) await remove(r.path, r.etag); // edit = delete + create
+      for (const r of before) {
+        await remove(r.path, r.etag);
+        removed.push(r);
+      }
       // An expiring DENY would quietly re-open access on a date nobody is watching, so an expiry only ever
       // rides on a grant.
       if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...levelBody(value), ...(value === "deny" ? {} : expiryBody()) });
@@ -395,11 +405,17 @@ export function AclModal({
         for (const r of (await fetchAllAccessRules()).filter((x) => x.subject_kind === "role" && x.subject === name && matchesTarget(x) && !x.verb)) await remove(r.path, r.etag);
         for (const r of before) await recreate(r);
       });
-      await reload();
     } catch (e) {
-      toast({ variant: "destructive", title: "Could not update role", description: String((e as Error).message) });
-      setBusy(false);
+      const outstanding = removed.length - (await restoreAccessRules(removed));
+      toast({
+        variant: "destructive",
+        title: "Could not update role",
+        description: outstanding
+          ? `${String((e as Error).message)} - and ${outstanding} rule${outstanding === 1 ? "" : "s"} that had to be removed first could not be put back. Check ${roleLabel(name)} before relying on it.`
+          : String((e as Error).message),
+      });
     }
+    await reload();
   }
 
   async function setRoleVerb(name: string, v: string, value: string) {
@@ -408,19 +424,31 @@ export function AclModal({
       if (!ok) return;
     }
     setBusy(true);
+    // Same delete-then-create contract as the level editor above: restore what was removed if the create
+    // fails, and reload on every path.
+    const before = roleAll(name).filter((x) => x.verb === v);
+    const removed: AccessRule[] = [];
     try {
-      const before = roleAll(name).filter((x) => x.verb === v);
-      for (const r of before) await remove(r.path, r.etag);
+      for (const r of before) {
+        await remove(r.path, r.etag);
+        removed.push(r);
+      }
       if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...verbBody(v, value as "allow" | "deny"), ...(value === "deny" ? {} : expiryBody()) });
       undoable(`Updated ${roleLabel(name)} · ${v}`, async () => {
         for (const r of (await fetchAllAccessRules()).filter((x) => x.subject_kind === "role" && x.subject === name && matchesTarget(x) && x.verb === v)) await remove(r.path, r.etag);
         for (const r of before) await recreate(r);
       });
-      await reload();
     } catch (e) {
-      toast({ variant: "destructive", title: "Could not update role", description: String((e as Error).message) });
-      setBusy(false);
+      const outstanding = removed.length - (await restoreAccessRules(removed));
+      toast({
+        variant: "destructive",
+        title: "Could not update role",
+        description: outstanding
+          ? `${String((e as Error).message)} - and ${outstanding} rule${outstanding === 1 ? "" : "s"} that had to be removed first could not be put back. Check ${roleLabel(name)} · ${v} before relying on it.`
+          : String((e as Error).message),
+      });
     }
+    await reload();
   }
 
   // One-click canonical rule bundles on the Everyone role - the patterns admins hand-assemble over and

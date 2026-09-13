@@ -20,6 +20,7 @@ import { getSettingValue } from "./settings";
 import { orgToday } from "./orgDay";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig } from "../domain/attendance";
 import { refHolidays } from "../lib/refData";
+import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 
 // Holidays (UTC YYYY-MM-DD) in [startMs, endMs] - the days leave shouldn't count. Non-deleted, non-disabled
 // holidays of any kind, minus the location-scoped ones that aren't this employee's (a Mumbai-only holiday must
@@ -301,28 +302,52 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   return row;
 }
 
-// Add `delta` days to an employee's balance for a leave type (negative = consume). Creates the row if the
-// employee has no balance for that type yet (so an approval before any accrual still records the usage).
-async function adjustLeaveBalance(deps: Deps, employeeId: string, leaveTypeId: string, delta: number) {
+// The employee's balance row for a leave type, created at zero if they have none yet (so an approval before
+// any accrual still has somewhere to record the usage).
+async function leaveBalanceRow(deps: Deps, employeeId: string, leaveTypeId: string) {
   const bal = (await deps.db
     .select()
     .from(schema.leaveBalances)
     .where(and(eq(schema.leaveBalances.employeeId, employeeId), eq(schema.leaveBalances.leaveTypeId, leaveTypeId)))
     .limit(1))[0];
-  if (bal) {
-    // SQL-side delta (not a JS read-modify-write): an increment computed in the DB can't lose a concurrent
-    // reserve/release on the same balance row the way read-then-write would. Mirrors the guarded debit above.
-    await deps.db
-      .update(schema.leaveBalances)
-      .set({ balanceDays: sql`round((${schema.leaveBalances.balanceDays} + ${delta}) * 100) / 100`, updatedAt: new Date() })
-      .where(eq(schema.leaveBalances.uuid, bal.uuid));
-  } else {
-    await withFreshCode(async () =>
-      deps.db
-        .insert(schema.leaveBalances)
-        .values({ code: await allocOwnedCode(deps, schema.leaveBalances, schema.leaveBalances.employeeId, employeeId), employeeId, leaveTypeId, balanceDays: round2(delta) }),
-    );
-  }
+  if (bal) return bal;
+  return (await withFreshCode(async () => deps.db
+    .insert(schema.leaveBalances)
+    .values({ code: await allocOwnedCode(deps, schema.leaveBalances, schema.leaveBalances.employeeId, employeeId), employeeId, leaveTypeId, balanceDays: 0 })
+    .returning()))[0]!;
+}
+
+// Add `delta` days to an employee's balance for a leave type (negative = consume).
+async function adjustLeaveBalance(deps: Deps, employeeId: string, leaveTypeId: string, delta: number) {
+  const bal = await leaveBalanceRow(deps, employeeId, leaveTypeId);
+  // SQL-side delta (not a JS read-modify-write): an increment computed in the DB can't lose a concurrent
+  // reserve/release on the same balance row the way read-then-write would. Mirrors the guarded debit above.
+  await deps.db
+    .update(schema.leaveBalances)
+    .set({ balanceDays: sql`round((${schema.leaveBalances.balanceDays} + ${delta}) * 100) / 100`, updatedAt: new Date() })
+    .where(eq(schema.leaveBalances.uuid, bal.uuid));
+}
+
+// The refund half of a decision, as ONE statement that can go in the same batch as the state flip - and that
+// carries the SAME precondition the flip does, so it cannot apply on its own. The balance row is materialized
+// first because a conditional INSERT is not expressible as a single statement, and a zero-day row is inert if
+// the decision then fails.
+//
+// Returned as an ARRAY, never a bare statement: a drizzle builder is a thenable, so an async function that
+// RESOLVES with one has the promise machinery await it - i.e. run the query - and hand back its rows instead.
+// Every other statement builder in the app returns an array for the same reason (loans.ts, payroll.ts).
+async function leaveRefundStmts(deps: Deps, requestId: string, from: string, employeeId: string, leaveTypeId: string, days: number): Promise<BatchStmt[]> {
+  const bal = await leaveBalanceRow(deps, employeeId, leaveTypeId);
+  return [deps.db
+    .update(schema.leaveBalances)
+    .set({ balanceDays: sql`round((${schema.leaveBalances.balanceDays} + ${days}) * 100) / 100`, updatedAt: new Date() })
+    .where(and(
+      eq(schema.leaveBalances.uuid, bal.uuid),
+      // "...only if this request is still the thing I read". Runs BEFORE the flip in the batch, so it sees the
+      // pre-decision state; if somebody else decided the request first, this matches nothing and the flip's
+      // own guard matches nothing either, so a lost race refunds no days rather than refunding them twice.
+      sql`exists (select 1 from ${schema.leaveRequests} where ${schema.leaveRequests.uuid} = ${requestId} and ${schema.leaveRequests.state} = ${from})`,
+    ))];
 }
 
 async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED") {
@@ -350,14 +375,29 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   // balance twice (leave days are encashable = money, so a double refund is a real payout). 0 rows = someone
   // else already decided it.
   const from = row.state;
-  const [updated] = await deps.db
-    .update(schema.leaveRequests)
-    .set({ state: to, decidedBy: actor.uuid, updatedAt: new Date() })
-    .where(and(eq(schema.leaveRequests.uuid, id), eq(schema.leaveRequests.state, from)))
-    .returning();
-  if (!updated) throw failedPrecondition("request was already decided");
-  // Balance is reserved at request time, so approval changes nothing; rejecting or cancelling releases it back.
-  if (to === "REJECTED" || to === "CANCELLED") await adjustLeaveBalance(deps, row.employeeId, row.leaveTypeId, row.days);
+  const flip: CheckedStmt = {
+    stmt: deps.db
+      .update(schema.leaveRequests)
+      .set({ state: to, decidedBy: actor.uuid, updatedAt: new Date() })
+      .where(and(eq(schema.leaveRequests.uuid, id), eq(schema.leaveRequests.state, from)))
+      .returning(),
+    expect: 1,
+    label: "leave request",
+  };
+  // Balance is reserved at request time, so approval changes nothing; rejecting or cancelling releases it back
+  // - IN THE SAME BATCH as the flip, because the two are one act. As two statements, a D1 error or the
+  // invocation ending between them left the request CANCELLED with the days simply gone, and the exactly-once
+  // guard made that permanent: a retry re-reads the row, finds it is no longer `from`, and refuses, so the
+  // refund could never be attempted again. Nothing reconciles leave balances (the accrual job only ever adds),
+  // so the only repair was somebody editing a balance by hand - on the action an employee takes when they
+  // decide not to go away after all. One batch is one implicit transaction: either the request is decided and
+  // the days are back, or neither happened and the caller may try again. The refund goes FIRST and carries the
+  // same `state = from` precondition, so a lost race writes neither half (a batch reports a short count, it
+  // does not roll one statement back).
+  const refund = to === "REJECTED" || to === "CANCELLED" ? await leaveRefundStmts(deps, id, from, row.employeeId, row.leaveTypeId, row.days) : [];
+  const drifted = await runBatchChecked(deps.db, [...refund, flip]);
+  if (drifted.length) throw failedPrecondition("request was already decided");
+  const updated = (await deps.db.select().from(schema.leaveRequests).where(eq(schema.leaveRequests.uuid, id)).limit(1))[0]!;
   await audit(deps, actor, `leave_request.${to.toLowerCase()}`, "leave-requests", id, stateMeta(from, to, { employee: `employees/${row.employeeId}` }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
     await notify(deps, { recipient: row.employeeId, type: `leave.${to.toLowerCase()}`, title: `Leave ${to.toLowerCase()}`, body: `Your leave request was ${to.toLowerCase()}.`, link: "leave-requests/history", subject: `leave-requests/${id}`, actorId: actor.employeeId });

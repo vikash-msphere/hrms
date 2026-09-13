@@ -5,6 +5,7 @@ import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
+import { orgToday, dayStartMs } from "./orgDay";
 
 // Aggregated dashboard KPI counts: one request, one D1 batch, numbers only. Replaces the SPA fetching a whole
 // collection page per KPI card just to count it client-side.
@@ -17,8 +18,17 @@ import type { AppUser } from "../env";
 //
 // PARITY. Every aggregate's WHERE mirrors its collection's own list service binding - the same
 // applyScope(code, owner) columns and the same soft-delete filter - plus the KPI's predicate, so the number
-// here always equals what the SPA would have counted from the list response. Dates are UTC midnights
-// (timestamp_ms columns), matching the SPA's toISOString().slice(0, 10) comparisons.
+// here always equals what the SPA would have counted from the list response.
+//
+// "TODAY" IS THE ORG'S CALENDAR DAY, not the UTC one. Dates are still UTC midnights, because that is how
+// date-only columns are anchored (domain/attendance.ts#utcDay) - what changed is WHICH day is chosen. The
+// justification for reading the UTC clock here used to be that it matched the client, and it stopped being
+// true when web/src/lib/orgDay.ts removed `new Date().toISOString().slice(0, 10)` from the SPA: "In IST the
+// two disagree between midnight and 05:30 local". Roughly fourteen tiles key off `today` or a window derived
+// from it - who is on leave today, joiners in the last 30 days, probations ending, compliance due or
+// overdue, cards overdue, goals overdue - so for the first 5.5 hours of every working day in IST the
+// dashboard was counting YESTERDAY, on the first screen of the morning. The server's other day-sensitive
+// paths (payroll, leave, attendance, comp-off, the cron) all ask `orgToday(deps)`; this one did not.
 
 export type SummaryEntry = { value: number; extra?: number };
 
@@ -180,10 +190,6 @@ function registry(deps: Deps): AggDef[] {
   ];
 }
 
-const utcMidnight = (ms: number) => {
-  const d = new Date(ms);
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-};
 
 /** Compute the requested KPI aggregates the caller may see. `scopes` carries only the collections the
  *  middleware decided are listable; anything else is silently absent from the result. One D1 batch. */
@@ -194,8 +200,11 @@ export async function dashboardSummary(
   keysCsv: string | undefined,
 ): Promise<Record<string, SummaryEntry>> {
   const requested = new Set((keysCsv ?? "").split(",").map((s) => s.trim()).filter(Boolean));
-  const now = new Date();
-  const today = utcMidnight(now.getTime());
+  // `deps.clock`, not `new Date()`: every other time-sensitive service takes its instant from the injected
+  // clock, and a service that reads the wall clock directly cannot be driven across a day boundary by a test
+  // (the complaint services/leaveAccrual.ts makes about its own former self).
+  const now = new Date(+deps.clock.now());
+  const today = new Date(dayStartMs(await orgToday(deps)));
   const DAY = 86_400_000;
   const dow = (today.getUTCDay() + 6) % 7; // 0 = Monday
   const ctx: Ctx = {

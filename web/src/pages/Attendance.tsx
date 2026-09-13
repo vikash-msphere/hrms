@@ -143,10 +143,11 @@ export default function Attendance({ me }: { me: Me }) {
   const canApprove = me.capabilities.includes("attendance-regularizations.approve");
   const canExport = usePermission("export.read");
   const canLogOvertime = usePermission("overtime-requests.write");
-  const { rows: employees } = useCollection<Employee>("employees");
+  // `all: true` on the roster: this is the grid's list of PEOPLE, one row each, with no "load more" for a
+  // reader to press - the shape `all` exists for. On one page, an org past a hundred simply had rows missing.
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments", { enabled: canApprove });
   const { rows: holidays } = useCollection<Holiday>("holidays");
-  const { rows: leaves } = useCollection<LeaveRequest>("leave-requests");
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
   const { rows: regularizations, reload: reloadRegs } = useCollection<AttendanceRegularization>("attendance-regularizations");
   const rosterTruncated = useCollectionHasMore(["employees", "leave-requests"]);
@@ -206,6 +207,25 @@ export default function Attendance({ me }: { me: Me }) {
   }, [view, fromYmd]);
   const windowLabel = view === "calendar" ? monthLabel(fromYmd) : `${formatDate(fromYmd)} – ${formatDate(toYmd)}`;
   const prevLabel = view === "calendar" ? "last month" : "the previous 30 days";
+
+  // Leave is fetched for the DAYS ON SCREEN, not as "the 100 most recently created requests in the org".
+  //
+  // This feed is what tells the grid which days are excused, and one page of it meant anybody whose approved
+  // leave was older than that window arrived at `buildRows` with an empty range list - so their leave days
+  // were classified `absent`, counted into their absence total by `statsOf`, and then sorted to the TOP of the
+  // list, because the grid deliberately leads with the rows a manager has to act on. A person on holiday
+  // presented as the one needing attention is worse than a missing row, and the truncation warning below does
+  // not describe it. `leave-requests` takes `from`/`to` (services/dateWindow.ts) and the window is bounded by
+  // what is being shown rather than by the org's whole history.
+  //
+  // The span covers everything that reads this feed: the visible window, the previous one (the opt-in
+  // comparison), and today (the personal "today" row, which is outside the window when paging back).
+  const leaveWindow = useMemo(() => {
+    const lo = [prevWindow.from, fromYmd, orgToday].sort();
+    const hi = [prevWindow.to, toYmd, orgToday].sort();
+    return { from: lo[0]!, to: hi[hi.length - 1]! };
+  }, [prevWindow.from, prevWindow.to, fromYmd, toYmd, orgToday]);
+  const { rows: leaves } = useCollection<LeaveRequest>("leave-requests", { all: true, params: { from: leaveWindow.from, to: leaveWindow.to } });
 
   const toggleDay = useCallback((day: string) => {
     setExpanded((prev) => {
@@ -1490,9 +1510,11 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
             </button>
           ))}
         </div>
-        {/* The roster and its leave come from cached collection pages; if either is a window, the per-person
-            figures below are too - say so rather than presenting a partial team as the whole one. */}
-        {truncated && <p className="text-xs text-warning">Showing the first page of employees and leave only, so some people or leave days may be missing.</p>}
+        {/* Both feeds complete themselves now (the roster with `all`, the leave with `all` over the window on
+            screen), so this only fires at the reader cap - an org larger than the walk will follow. If either
+            is still a window, the per-person figures below are too: say so rather than presenting a partial
+            team as the whole one. */}
+        {truncated && <p className="text-xs text-warning">This org is larger than the grid loads in one go, so some people or leave days may be missing.</p>}
         {tab === "today" && (
           <>
             {off && <p className="text-xs text-muted-foreground">{off} - nobody is expected to clock in.</p>}

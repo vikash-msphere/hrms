@@ -47,7 +47,7 @@ function JoinPill({ label }: { label: string }) {
 
 // `focusId` deep-links straight to one person's subtree (the directory's "view in org chart").
 export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focusId?: string }) {
-  const { rows: employees, state: empState, error: empErr, reload: reloadEmp } = useCollection<Employee>("employees");
+  const { rows: employees, state: empState, error: empErr, reload: reloadEmp } = useCollection<Employee>("employees", { all: true });
   const { rows: departments, state: deptState, reload: reloadDept } = useCollection<Department>("departments");
   const confirm = useConfirm();
   const { toast } = useToast();
@@ -90,7 +90,11 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
   const [showVacancies, setShowVacancies] = useState(false);
   const canSeeLeaves = usePermission("leave-requests.read");
   const canSeeReqs = usePermission("job-requisitions.read");
-  const { rows: leaves, state: leaveState } = useCollection<LeaveRequest>("leave-requests", { enabled: showLeave, max: 500 });
+  // Narrowed to TODAY at the server, which is the only day this overlay asks about. `max: 500` was a fiction -
+  // the server caps a page at 100 (api.ts says so now) - so the overlay marked whoever happened to be in the
+  // hundred most recently created requests and silently left everyone else unmarked.
+  const leaveDay = todayStr();
+  const { rows: leaves, state: leaveState } = useCollection<LeaveRequest>("leave-requests", { enabled: showLeave, all: true, params: { from: leaveDay, to: leaveDay } });
   const { rows: reqs, state: reqState } = useCollection<JobRequisition>("job-requisitions", { enabled: showVacancies });
 
   const canEditPeople = usePermission("employees.write");

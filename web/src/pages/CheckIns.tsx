@@ -52,7 +52,7 @@ const PAST_PREVIEW = 8;
 
 export default function CheckIns({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<CheckIn>("check-ins");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   // Prefill for the dialog. "Schedule next" from a past 1:1 carries the person AND its open action

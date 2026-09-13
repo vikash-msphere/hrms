@@ -12,7 +12,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, stateMeta } from "../lib/audit";
+import { audit, createdMeta, noteMeta, stateMeta } from "../lib/audit";
 import { aborted, invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { getSettingValue, getDefaultDepartmentId } from "./settings";
 import { assertUploadSize, isAllowedUpload, storedContentType } from "./documentsCommon";
@@ -192,7 +192,7 @@ export async function createTicket(deps: Deps, actor: AppUser, input: TicketInpu
   // Visibility: share read with the category's viewers (assignee + members) AND the servicing department's
   // managers. The requester is excluded - they already see their own ticket via the owner scope.
   const viewers = [...new Set([...(await categoryViewers(deps, categoryKey)), ...(await departmentManagers(deps, departmentId))])].filter((e) => e !== employeeId);
-  await shareTicketWith(deps, row.code!, viewers);
+  await shareTicketWith(deps, actor, row.code!, viewers);
   await audit(deps, actor, "ticket.create", "tickets", row.uuid, createdMeta(row, "tickets"), row);
   await emitEvent(deps, actor, "ticket.created", { subject: `tickets/${row.uuid}`, employeeId, payload: { category: categoryKey, priority } });
   // Nudge whoever services this ticket (its assignee + category members + the servicing department's managers -
@@ -242,13 +242,13 @@ export async function assignTicket(deps: Deps, actor: AppUser, id: string, assig
   // share unless they remain a category viewer (or the requester, who reads via the owner scope anyway).
   const prev = row.assigneeId;
   if (assigneeId && assigneeId !== prev) {
-    for (const u of await usersForEmployees(deps, [assigneeId])) await grantTicketRead(deps, row.code!, u);
+    for (const u of await usersForEmployees(deps, [assigneeId])) await grantTicketRead(deps, actor, row.code!, u);
     await notify(deps, { recipient: assigneeId, type: "ticket.assigned", title: "Ticket assigned to you", body: row.subject, link: "tickets", action: "respond", actorId: actor.employeeId });
   }
   if (prev && prev !== assigneeId) {
     const viewers = await categoryViewers(deps, row.category);
     if (prev !== row.employeeId && !viewers.includes(prev)) {
-      for (const u of await usersForEmployees(deps, [prev])) await revokeTicketRead(deps, row.code!, u);
+      for (const u of await usersForEmployees(deps, [prev])) await revokeTicketRead(deps, actor, row.code!, u);
     }
   }
   await audit(deps, actor, "ticket.assign", "tickets", id, { diff: { assignee: { from: prev ? `employees/${prev}` : null, to: assigneeId ? `employees/${assigneeId}` : null } } }, updated);
@@ -269,11 +269,11 @@ export async function routeTicket(deps: Deps, actor: AppUser, id: string, depart
   if (departmentId === prev) return row; // no-op
   const [updated] = await deps.db.update(schema.tickets).set({ departmentId, updatedAt: new Date() }).where(eq(schema.tickets.uuid, id)).returning();
   const newMgrs = await departmentManagers(deps, departmentId);
-  for (const u of await usersForEmployees(deps, newMgrs.filter((e) => e !== row.employeeId))) await grantTicketRead(deps, row.code!, u);
+  for (const u of await usersForEmployees(deps, newMgrs.filter((e) => e !== row.employeeId))) await grantTicketRead(deps, actor, row.code!, u);
   // Drop the previous dept's managers, keeping anyone still entitled by another path.
   const keep = new Set([row.employeeId, row.assigneeId, ...(await categoryViewers(deps, row.category)), ...newMgrs].filter(Boolean) as string[]);
   const drop = (await departmentManagers(deps, prev)).filter((e) => !keep.has(e));
-  for (const u of await usersForEmployees(deps, drop)) await revokeTicketRead(deps, row.code!, u);
+  for (const u of await usersForEmployees(deps, drop)) await revokeTicketRead(deps, actor, row.code!, u);
   await audit(deps, actor, "ticket.route", "tickets", id, prev !== departmentId ? { from: prev ? `departments/${prev}` : null, to: departmentId ? `departments/${departmentId}` : null } : undefined);
   return updated!;
 }
@@ -294,7 +294,7 @@ export async function commentTicket(deps: Deps, actor: AppUser, id: string, body
   await deps.db.insert(schema.ticketComments).values({ ticketId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
   // Touch the ticket so its update_time reflects the latest activity.
   await deps.db.update(schema.tickets).set({ updatedAt: new Date() }).where(eq(schema.tickets.uuid, id));
-  await audit(deps, actor, "ticket.comment", "tickets", id, { note: text.length > 140 ? `${text.slice(0, 140)}…` : text }, t);
+  await audit(deps, actor, "ticket.comment", "tickets", id, noteMeta("tickets", text), t);
   // Notify the other party (requester <-> assignee) that there's a new comment on the thread.
   for (const rid of [t.employeeId, t.assigneeId].filter((r): r is string => !!r && r !== actor.employeeId))
     await notify(deps, { recipient: rid, type: "ticket.comment", title: "New comment on a ticket", body: t.subject, link: "tickets", subject: `tickets/${id}`, actorId: actor.employeeId });

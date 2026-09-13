@@ -829,7 +829,7 @@ function ApplicationDrawer({ app, me, candidate, req, stages, criteria, siblings
 }) {
   const { toast } = useToast();
   const confirm = useConfirm();
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const [rounds, setRounds] = useState<Interview[] | null>(null);
   const [feedback, setFeedback] = useState<InterviewFeedback[]>([]);
   const [offers, setOffers] = useState<Offer[] | null>(null);

@@ -16,6 +16,7 @@ import { renderLetterPdf, type LetterContent, type LetterBlock } from "../lib/le
 import { money as fmtMoney, formatLongDate } from "../lib/pdfPrimitives";
 import { decimalsFor, type CurrencyDecimals } from "../domain/currency";
 import { refPayComponents } from "../lib/refData";
+import { orgToday, dayStartMs } from "./orgDay";
 
 const r0 = (n: number) => Math.round(n);
 
@@ -110,7 +111,10 @@ export async function assembleForm16(deps: Deps, employeeId: string, financialYe
     org: { name: org.name ?? "", address: org.address, logo: org.logo, legalName: org.legal_name || undefined },
     ...(letterhead ? { letterhead } : {}),
     ...(letterheadRef ? { letterheadRef } : {}),
-    date: formatLongDate(new Date()),
+    // The org's calendar day, not the UTC one. This date is on a STATUTORY tax certificate the employee files
+    // with their return, so "issued yesterday" for the first hours of an IST morning is not cosmetic. See
+    // services/orgDay.ts, and services/letterSign.ts for the same fix on the signature block.
+    date: formatLongDate(new Date(dayStartMs(await orgToday(deps)))),
     ref: `Form No. 16 · Part B · FY ${fy.financialYear}`,
     to: { name: `${emp.firstName} ${emp.lastName}`, lines: [emp.code ? `Employee code: ${emp.code}` : "", emp.jobTitle ?? ""].filter(Boolean) },
     blocks,

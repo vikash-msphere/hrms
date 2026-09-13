@@ -46,7 +46,7 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
   const { rows: assets, setRows: setAssets } = useCollection<Asset>("assets");
   const { rows: counts, setRows: setCounts, reload: reloadCounts } = useCollection<Count>("stocktakes");
   const { rows: assetCategories } = useCollection<AssetCategory>("asset-categories");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
 
   const [openPath, setOpenPath] = useState<string | null>(null); // the count being walked
   const [manual, setManual] = useState("");

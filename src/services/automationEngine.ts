@@ -28,6 +28,7 @@ import { assertPublicHttpsUrl } from "../lib/urlGuard";
 import { buildBankFile } from "./bankFile";
 import { renderEmail, loadEmailBrand, escapeHtml } from "../lib/emailLayout";
 import { fanOutEmail } from "./emailFanOut";
+import { ENCODABLE } from "../middleware/encodeWireIds";
 
 export { systemActor };
 
@@ -174,6 +175,45 @@ function template(value: unknown, ctx: EvalContext): unknown {
 }
 
 /**
+ * The same context with its three ID roots tokenized, for text that LEAVES the app.
+ *
+ * `subject`, `employeeId` and `actorId` hold INTERNAL primary keys - events are emitted with them because
+ * everything server-side works in internal ids, and the outbound JSON edge (middleware/encodeWireIds.ts)
+ * tokenizes them on the way out. An email never reaches that edge (`deps.email.send` is an outbound fetch),
+ * so a rule whose body said `{{subject}}` mailed `leave-requests/<internal id>` to whoever it was addressed
+ * to - and the `email` action's recipient may be a literal address, i.e. anybody. The in-app lane leaked a
+ * narrower version: the response encoder only rewrites strings shaped `<collection>/<id>`, so a BARE
+ * `{{employeeId}}` uuid was published as-is in the notification body.
+ *
+ * src/lib/ics.ts states the rule after the same thing happened to a calendar UID: "the internal primary key
+ * the wire codec exists to keep off the wire was being published to people outside the org ... Authz decides
+ * by CODE, so this was disclosure rather than a way in." Identical here, with a mail client instead.
+ *
+ * Only the human-facing lanes use this - an email's subject/body and a notification's title/body. The raw ctx
+ * stays for everything that consumes an id as an id: `resolveAttachments` looks a document up by internal
+ * uuid, `apiCall` paths/bodies are decoded by the dispatcher's own edge, and a condition compares against
+ * what the event carries. `pushLink` (services/notifications.ts) gives the one other lane that leaves without
+ * passing the edge exactly this treatment.
+ */
+async function outboundCtx(deps: Deps, ctx: EvalContext): Promise<EvalContext> {
+  const ref = async (v: string | null | undefined) => {
+    const m = v ? /^([a-z][a-z-]*)\/([0-9a-hj-km-np-tv-z]{13})$/.exec(v) : null;
+    if (!m || !ENCODABLE.has(m[1]!)) return v ?? null;
+    return `${m[1]}/${await deps.idCodec.encode(m[1]!, m[2]!)}`;
+  };
+  // A bare uuid has no collection in it, so it is tokenized against the table it comes from: `employeeId` is
+  // an `employees` row, `actorId` a `users` row (resolveRecipient reads it out of `users`).
+  const bare = async (collection: string, v: string | null | undefined) =>
+    (v && /^[0-9a-hj-km-np-tv-z]{13}$/.test(v) ? await deps.idCodec.encode(collection, v) : v ?? null);
+  return {
+    ...ctx,
+    subject: await ref(ctx.subject),
+    employeeId: await bare("employees", ctx.employeeId),
+    actorId: await bare("users", ctx.actorId),
+  };
+}
+
+/**
  * The same templating for a value that is going into an email's HTML BODY, with every substitution escaped.
  *
  * The markup is the rule author's, and authoring a rule is super-only - but the values folded into it are
@@ -279,7 +319,8 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
     case "notify": {
       const recipient = await resolveRecipient(deps, ctx, action.recipient);
       if (!recipient) return { kind: action.kind, status: "skipped", detail: "no recipient" };
-      await notify(deps, { recipient, type: action.type ?? event.type, title: String(template(action.title, ctx)), body: action.body ? String(template(action.body, ctx)) : null, link: action.link ?? null, subject: event.subject ?? undefined, action: action.action ?? null });
+      const out = await outboundCtx(deps, ctx); // the title/body are read by a person, not by the app
+      await notify(deps, { recipient, type: action.type ?? event.type, title: String(template(action.title, out)), body: action.body ? String(template(action.body, out)) : null, link: action.link ?? null, subject: event.subject ?? undefined, action: action.action ?? null });
       return { kind: action.kind, status: "done" };
     }
     case "notifyManager": {
@@ -291,7 +332,8 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
       // Template the audience too, so a rule can target a department/employees carried in the event
       // (e.g. { kind: "department", department: "{{departmentId}}" }).
       const audience = template(action.audience, ctx) as typeof action.audience;
-      await notifyAudience(deps, audience, { type: action.type ?? event.type, title: String(template(action.title, ctx)), body: action.body ? String(template(action.body, ctx)) : null, link: action.link ?? null });
+      const out = await outboundCtx(deps, ctx);
+      await notifyAudience(deps, audience, { type: action.type ?? event.type, title: String(template(action.title, out)), body: action.body ? String(template(action.body, out)) : null, link: action.link ?? null });
       return { kind: action.kind, status: "done" };
     }
     case "apiCall": {
@@ -360,9 +402,12 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
         to = emp?.workEmail ?? null;
       }
       if (!to) return { kind: action.kind, status: "skipped", detail: "recipient has no email" };
-      const subject = String(template(action.subject, ctx));
+      // The mail is read by a person and never passes the wire-id edge; the ATTACHMENT spec is resolved
+      // against internal ids, so it keeps the raw context.
+      const out = await outboundCtx(deps, ctx);
+      const subject = String(template(action.subject, out));
       const atts = await resolveAttachments(deps, ctx, action.attachments);
-      const html = renderEmail({ heading: subject, preheader: subject, bodyHtml: templateHtml(action.html, ctx) }, await loadEmailBrand(deps));
+      const html = renderEmail({ heading: subject, preheader: subject, bodyHtml: templateHtml(action.html, out) }, await loadEmailBrand(deps));
       await deps.email.send(to, subject, html, atts);
       return { kind: action.kind, status: "done", detail: `emailed ${to}${atts.length ? ` (+${atts.length} attachment)` : ""}` };
     }
@@ -370,9 +415,10 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
       const audience = template(action.audience, ctx) as typeof action.audience;
       const ids = await audienceEmployeeIds(deps, audience);
       if (!ids.length) return { kind: action.kind, status: "skipped", detail: "empty audience" };
-      const subject = String(template(action.subject, ctx));
+      const out = await outboundCtx(deps, ctx);
+      const subject = String(template(action.subject, out));
       // Wrap the body in the branded shell once (same message for every recipient); load the brand once.
-      const html = renderEmail({ heading: subject, preheader: subject, bodyHtml: templateHtml(action.html, ctx) }, await loadEmailBrand(deps));
+      const html = renderEmail({ heading: subject, preheader: subject, bodyHtml: templateHtml(action.html, out) }, await loadEmailBrand(deps));
       // BOUNDED per invocation, remainder to the queue. `{kind:"everyone"}` is the whole active roster, and
       // every send is an outbound fetch off this invocation's subrequest budget - so a rule with an org-wide
       // audience used to run the budget out mid-roster and take the rest of the action list down with it.

@@ -43,7 +43,7 @@ const upper = (s?: string) => (s ?? "").toUpperCase();
 
 export default function RemoteWork({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<RemoteWorkRequest>("remote-work-requests");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const canCreate = usePermission("remote-work-requests.write");

@@ -7,7 +7,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, stateMeta } from "../lib/audit";
+import { audit, noteMeta, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, failedPrecondition, forbidden } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { notify, notifyMany } from "./notifications";
@@ -196,7 +196,9 @@ export async function declineFeedback(deps: Deps, actor: AppUser, id: string, re
   const text = reason?.trim() || null;
   const updated = (await deps.db.update(schema.reviewFeedback).set({ state: "DECLINED", declineReason: text, updatedAt: new Date() }).where(and(eq(schema.reviewFeedback.uuid, id), eq(schema.reviewFeedback.state, "REQUESTED"))).returning())[0];
   if (!updated) throw failedPrecondition("this feedback request is no longer open");
-  await audit(deps, actor, "review-feedback.decline", "review-feedback", id, stateMeta("REQUESTED", "DECLINED", { employee: `employees/${row.revieweeId}`, ...(text ? { note: text } : {}) }), updated);
+  // The reason itself stays on the row, not in the trail: it is a peer's own words under an anonymity promise
+  // this file keeps everywhere else (lib/audit.ts#noteMeta).
+  await audit(deps, actor, "review-feedback.decline", "review-feedback", id, stateMeta("REQUESTED", "DECLINED", { employee: `employees/${row.revieweeId}`, ...noteMeta("review-feedback", text) }), updated);
   return updated;
 }
 

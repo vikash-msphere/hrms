@@ -1,4 +1,4 @@
-import { list, patch } from "@/api";
+import { listAll, patch } from "@/api";
 import { publish, subscribeTopic } from "@/lib/crossTabBus";
 
 // One read of the caller's OWN preferences, shared by every consumer of them.
@@ -16,9 +16,13 @@ type Row = { key: string; value?: unknown };
 
 let loaded: Promise<Map<string, unknown>> | null = null;
 
+// Follows the cursor rather than asking for a page size the server will not grant: `max: 200` was clamped to
+// 100 silently (api.ts#listPath), and a preference that fell past the page read as ABSENT - i.e. as the
+// default - which is indistinguishable from never having been set. One request in practice; a caller with
+// many saved table layouts pays a second.
 function load(): Promise<Map<string, unknown>> {
-  return (loaded ??= list<Row>("preferences", { max: 200 })
-    .then((r) => new Map((r.results ?? []).map((p) => [p.key, p.value])))
+  return (loaded ??= listAll<Row>("preferences")
+    .then((rows) => new Map(rows.map((p) => [p.key, p.value])))
     .catch(() => new Map<string, unknown>()) // no rows / offline: every key reads as absent
     .then(adoptUnconfirmed));
 }

@@ -332,6 +332,37 @@ export function fieldsMeta(patch: Record<string, unknown> | null | undefined) {
   return fields.length ? { fields: fields.slice(0, MAX_AUDIT_FIELDS) } : undefined;
 }
 
+/**
+ * Collections whose user-written note may keep a SNIPPET in the trail, opted in by name the way DIFFABLE_BLOBS
+ * opts a blob in - never left to each call site to remember.
+ *
+ * A board reply is a post on a wall the whole org reads, so the feed entry reading "replied: nice work" is not
+ * wider than the thing it describes. Everything else here is narrower than `audit_log`: a 360 nominee's
+ * decline reason (which the review machinery goes to some length to keep off the reviewee's copy), the
+ * employee's acknowledgement comment on their own review, a ticket/goal/card comment, an RSVP note.
+ */
+const SNIPPETABLE_NOTES = new Set<string>(["announcements"]);
+
+/**
+ * A user-written note, recorded the way `fieldsMeta` records a patch: THAT one was written and how long it
+ * was, not what it said.
+ *
+ * `AUDIT_DENY` closed the GENERIC walk - `rowValues` and `fieldDiff` - and every note lands in `meta` by name
+ * instead (`{ note: text }`, `stateMeta(..., { note })`), which never goes near that list. The rule it breaks
+ * is the one stated over AUDIT_DENY: "material whose own access control lives somewhere else must not be
+ * copied here", and beside it, "What a person did still lands in the trail - the action, the row, the actor -
+ * it is only the VALUES that stay on the record." The decision that this particular material is too narrow
+ * for this table had already been taken once, when services/activity.ts stopped substring-searching `meta`
+ * over exactly these values; that fix removed the haystack and said so - "Whatever is in meta is still shown
+ * on the entry it belongs to" - and this is the other half of it.
+ */
+export function noteMeta(collection: string, text: string | null | undefined): Record<string, unknown> {
+  const t = text?.trim();
+  if (!t) return {};
+  if (SNIPPETABLE_NOTES.has(collection)) return { note: t.length > MAX_AUDIT_LEN ? `${t.slice(0, MAX_AUDIT_LEN)}…` : t };
+  return { note_chars: t.length };
+}
+
 // Shallow before→after field diff for update audits: { field: {from, to} } over `keys`, only where the value
 // changed. Dates are compared/emitted as ISO; `updatedAt` is skipped (always changes, never interesting).
 export function fieldDiff(before: Record<string, unknown>, after: Record<string, unknown>, keys: string[], collection?: string): Record<string, { from: unknown; to: unknown }> {

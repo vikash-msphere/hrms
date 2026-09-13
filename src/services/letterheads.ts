@@ -1,9 +1,9 @@
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, removedMeta } from "../lib/audit";
-import { invalidArgument, notFound } from "../lib/errors";
+import { aborted, invalidArgument, notFound } from "../lib/errors";
 import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 import {
   letterheadDesignOrStock,
@@ -117,6 +117,38 @@ async function loadRow(deps: Deps, id: string) {
   return row;
 }
 
+/**
+ * Change `assets_json` by reading it, editing it in memory and writing it back - with a COMPARE-AND-SET on the
+ * exact value that was read, the way services/tickets.ts#writeAttachments and services/stocktakes.ts do.
+ *
+ * The column holds every image of BOTH versions of the letterhead, so an unguarded rewrite from a read loses
+ * the other one: two uploads in flight at once - the screen mark and the print mark, which is the ordinary way
+ * somebody sets a letterhead up - and the second write is built from a snapshot taken before the first. The
+ * first image vanishes from the record while its bytes stay in R2, so the generated document quietly prints
+ * without it and nothing says why.
+ *
+ * The whole step re-runs against the fresh row on a lost race (so "there is no such image" is re-decided
+ * against what is actually there), and is bounded so a pathological hot row fails loudly instead of spinning.
+ */
+async function writeAssets(
+  deps: Deps,
+  id: string,
+  step: (current: LetterheadAssets, row: typeof schema.letterheads.$inferSelect) => LetterheadAssets,
+) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const row = await loadRow(deps, id);
+    const next = step(assetsOf(row), row);
+    const json = Object.keys(next).length ? JSON.stringify(next) : null;
+    const [updated] = await deps.db
+      .update(schema.letterheads)
+      .set({ assetsJson: json, updatedAt: new Date() })
+      .where(and(eq(schema.letterheads.uuid, id), row.assetsJson === null ? isNull(schema.letterheads.assetsJson) : eq(schema.letterheads.assetsJson, row.assetsJson)))
+      .returning();
+    if (updated) return { updated, before: row };
+  }
+  throw aborted("this letterhead's images are being changed by somebody else - try again");
+}
+
 export async function uploadLetterheadImage(
   deps: Deps,
   actor: AppUser,
@@ -134,37 +166,36 @@ export async function uploadLetterheadImage(
   const key = r2Key(row.uuid, variant, slot);
   await deps.docs.put(key, bytes, type);
   // Written into THIS version's images only - the other version keeps whatever it had, including nothing.
-  const all = assetsOf(row);
-  const assets: LetterheadAssets = { ...all, [variant]: { ...(all[variant] ?? {}), [slot]: { key, content_type: type, size_bytes: bytes.byteLength } } };
-  const [updated] = await deps.db
-    .update(schema.letterheads)
-    .set({ assetsJson: JSON.stringify(assets), updatedAt: new Date() })
-    .where(eq(schema.letterheads.uuid, row.uuid))
-    .returning();
+  let had = false;
+  const { updated } = await writeAssets(deps, row.uuid, (all) => {
+    had = !!all[variant]?.[slot]?.key;
+    return { ...all, [variant]: { ...(all[variant] ?? {}), [slot]: { key, content_type: type, size_bytes: bytes.byteLength } } };
+  });
   // WHICH image on which version. The snapshot argument was carrying that pair, where nothing reads it -
   // `describeRow` wants the record, and the variant/slot belong in the meta the feed renders.
-  await audit(deps, actor, "letterhead.image.update", "letterheads", row.uuid, { diff: { [`${variant} ${slot}`]: { from: all[variant]?.[slot]?.key ? "an image" : null, to: `${type}, ${bytes.byteLength} bytes` } } }, updated);
-  return updated!;
+  await audit(deps, actor, "letterhead.image.update", "letterheads", row.uuid, { diff: { [`${variant} ${slot}`]: { from: had ? "an image" : null, to: `${type}, ${bytes.byteLength} bytes` } } }, updated);
+  return updated;
 }
 
 /** Drop one image from one version. Nothing else moves - not the other slots, not the other version. */
 export async function deleteLetterheadImage(deps: Deps, actor: AppUser, id: string, slot: LetterheadSlot, variant: LetterheadVariant = "screen") {
-  const row = await loadRow(deps, id);
-  const all = assetsOf(row);
-  const mine = { ...(all[variant] ?? {}) };
-  const asset = mine[slot];
-  if (!asset) throw notFound(`this letterhead's ${variant} version has no ${slot} image`);
-  await deps.docs.delete(asset.key).catch(() => {}); // a missing object still clears the record
-  delete mine[slot];
-  const assets: LetterheadAssets = { ...all, [variant]: mine };
-  if (!Object.keys(mine).length) delete assets[variant];
-  const [updated] = await deps.db
-    .update(schema.letterheads)
-    .set({ assetsJson: Object.keys(assets).length ? JSON.stringify(assets) : null, updatedAt: new Date() })
-    .where(eq(schema.letterheads.uuid, row.uuid))
-    .returning();
-  await audit(deps, actor, "letterhead.image.delete", "letterheads", row.uuid, { diff: { [`${variant} ${slot}`]: { from: "an image", to: null } } }, updated);
-  return updated!;
+  // Which object to drop from R2 is decided inside the guarded step, against the row that is actually
+  // written - the same shape as the upload, and for the same reason: the other version's images live in this
+  // one column, so an unguarded rewrite from a read deletes whichever one landed in between.
+  let deletedKey: string | undefined;
+  const { updated } = await writeAssets(deps, id, (all) => {
+    const mine = { ...(all[variant] ?? {}) };
+    const asset = mine[slot];
+    if (!asset) throw notFound(`this letterhead's ${variant} version has no ${slot} image`);
+    deletedKey = asset.key;
+    delete mine[slot];
+    const assets: LetterheadAssets = { ...all, [variant]: mine };
+    if (!Object.keys(mine).length) delete assets[variant];
+    return assets;
+  });
+  if (deletedKey) await deps.docs.delete(deletedKey).catch(() => {}); // a missing object still clears the record
+  await audit(deps, actor, "letterhead.image.delete", "letterheads", id, { diff: { [`${variant} ${slot}`]: { from: "an image", to: null } } }, updated);
+  return updated;
 }
 
 /** One raw image, for the branding editor's thumbnails. */

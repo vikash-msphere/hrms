@@ -158,7 +158,9 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
   const searching = debouncedQ.length >= 2;
   const { rows: searchRows, hasMore: searchHasMore, loadMore: loadMoreSearch } = useCollection<Ticket>("tickets", { q: debouncedQ, enabled: searching });
   const source = searching ? searchRows : rows;
-  const { rows: employees } = useCollection<Employee>("employees");
+  // Also the @-mention picker's source (useMentions): on one page you could only mention the first hundred
+  // people, and a colleague the menu cannot offer is indistinguishable from one who does not exist.
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments");
   const { toast } = useToast();
   const confirm = useConfirm();

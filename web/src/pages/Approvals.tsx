@@ -115,7 +115,7 @@ export default function Approvals({ me }: { me: Me }) {
   // not reimbursement categories, projects and asset categories as well. An empty inbox reads nothing at all.
   const anyOf = (kind: keyof typeof history) => (history[kind]?.length ?? 0) > 0;
   const hasLeave = leaves.length > 0 || anyOf("leaves");
-  const { rows: employees } = useCollection<Employee>("employees", { enabled: total > 0 || Object.values(history).some((b) => b.length > 0) });
+  const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: total > 0 || Object.values(history).some((b) => b.length > 0) });
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types", { enabled: hasLeave || encashments.length > 0 || anyOf("encashments") });
   const { rows: categories } = useCollection<ReimbursementCategory>("reimbursement-categories", { enabled: reimbs.length > 0 || anyOf("reimbs") });
   const { rows: projects } = useCollection<Project>("projects", { enabled: timeEntries.length > 0 || anyOf("timeEntries") });

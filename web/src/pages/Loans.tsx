@@ -38,7 +38,7 @@ const STATUS: Record<LoanStatus, { label: string; variant: "muted" | "secondary"
 
 export default function Loans({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<Loan>("loans");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const { org } = useOrg();

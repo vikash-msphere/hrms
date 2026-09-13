@@ -99,7 +99,10 @@ export async function createRequisition(deps: Deps, actor: AppUser, input: Requi
       description: input.description?.trim() || null,
       payGradeId: input.pay_grade ? idFromPath(input.pay_grade) : null,
       status,
-      openedDate: input.opened_date ? parseDate(input.opened_date, "opened_date") : status === "open" ? new Date() : null,
+      // A day column (read back as `iso(...).slice(0, 10)`), so the fallback is the ORG's calendar day at UTC
+      // midnight rather than the request instant - a requisition opened at 00:30 IST is opened today, not
+      // yesterday. See services/orgDay.ts.
+      openedDate: input.opened_date ? parseDate(input.opened_date, "opened_date") : status === "open" ? new Date(dayStartMs(await orgToday(deps))) : null,
       closedDate: input.closed_date ? parseDate(input.closed_date, "closed_date") : null,
     })
     .returning())[0]!;

@@ -222,8 +222,26 @@ function validateAttendance(value: unknown) {
 // [0, 4] - money is stored full-precision, so this only sets how many places a currency is shown and paid in.
 // `document_logos` maps a generated-document kind to the letterhead it prints on; an unknown kind would be a
 // silently ignored choice, so the vocabulary is closed here.
+// The org's images live INSIDE the `organization` blob as data URLs, and that blob is read on essentially
+// every request (services/settings.ts#MAX_SETTING_BYTES says why that matters). The SPA caps what it will
+// upload - 256 KB per logo, 64 KB for the favicon (web/src/pages/Settings.tsx) - and until these checks the
+// server did not, so the limit held only for people using the form. Compared against the length of the data
+// URL rather than the file: base64 is 4 bytes per 3, plus the `data:image/...;base64,` prefix.
+const dataUrlCap = (fileBytes: number) => Math.ceil(fileBytes / 3) * 4 + 64;
+const ORG_IMAGE_CAPS: Record<string, number> = {
+  logo: dataUrlCap(256 * 1024), logo_dark: dataUrlCap(256 * 1024),
+  wordmark: dataUrlCap(256 * 1024), wordmark_dark: dataUrlCap(256 * 1024),
+  favicon: dataUrlCap(64 * 1024),
+};
+
 function validateOrganization(value: unknown) {
   if (!isObj(value)) return;
+  for (const [field, cap] of Object.entries(ORG_IMAGE_CAPS)) {
+    const v = value[field];
+    if (v == null) continue;
+    if (typeof v !== "string") throw invalidArgument(`organization.${field} must be an image data URL`);
+    if (v.length > cap) throw invalidArgument(`organization.${field} is larger than the ${Math.round(cap / 1024)} KB limit`);
+  }
   if (value.document_logos != null) {
     const dl = value.document_logos;
     if (!isObj(dl)) throw invalidArgument("organization.document_logos must be an object mapping a document kind to a letterhead");

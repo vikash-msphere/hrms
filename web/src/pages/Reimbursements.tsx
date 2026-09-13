@@ -49,7 +49,11 @@ const EMPTY = { category: "", amount: "", incurred_on: "", description: "" };
 export default function Reimbursements({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<Reimbursement>("reimbursements");
   const { rows: categories } = useCollection<ReimbursementCategory>("reimbursement-categories");
-  const { rows: employees } = useCollection<Employee>("employees");
+  // `all: true` on the directory read, here and on every page that resolves a NAME out of it. One page meant
+  // a `new Map(employees.map(...))` lookup rendered the wire token (or "Employee") for everyone past the
+  // hundredth - in the column that says who the money is for, and in `confirmDecision`'s prompt, which exists
+  // to make somebody read what they are about to approve. See useCollection's `all` docstring.
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const { org } = useOrg();

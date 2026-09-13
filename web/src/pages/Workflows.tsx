@@ -652,7 +652,7 @@ function EventPill({ meta, type }: { meta: WorkflowMeta | null; type: string }) 
 
 // Resolve an "employees/<token>" ref to a display name (for showing WHO a run/event/wait is about).
 function useEmployeeName() {
-  const { rows } = useCollection<Employee>("employees");
+  const { rows } = useCollection<Employee>("employees", { all: true });
   return useMemo(() => {
     const m = new Map(rows.map((e) => [e.path, ((e as { display_name?: string }).display_name || `${e.first_name ?? ""} ${e.last_name ?? ""}`).trim() || e.path] as const));
     return (ref?: string) => (ref ? m.get(ref) ?? null : null);

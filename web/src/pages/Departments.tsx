@@ -30,7 +30,7 @@ const NONE = "__none__";
 
 export default function Departments({ embedded, title }: { me?: Me; embedded?: boolean; title?: string }) {
   const { rows, state, error, reload } = useCollection<Department>("departments", { showDeleted: true });
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const sd = useSoftDelete("departments", "department", reload);
   const lc = useLifecycle("departments", "department", reload);

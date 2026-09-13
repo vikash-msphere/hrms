@@ -504,7 +504,9 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   // holds for assignees and departments. The card composer is the exception - it must offer everyone, every
   // goal and every department regardless of what this board currently uses - so an open dialog pulls them in.
   const composing = !!addTo || !!editing;
-  const { rows: employees } = useCollection<Employee>("employees", { enabled: composing || board.swimlane_mode === "assignee" || cards.some((c) => c.assignee) });
+  // `all` once the read is enabled: these rows name assignees, fill the picker and feed the card composer's
+  // @-mention menu, and each of those is wrong rather than short when the directory runs past one page.
+  const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: composing || board.swimlane_mode === "assignee" || cards.some((c) => c.assignee) });
   const { rows: goals } = useCollection<Goal>("goals", { enabled: composing || board.swimlane_mode === "goal" || cards.some((c) => c.goal) });
   const { rows: departments } = useCollection<Department>("departments", { enabled: composing || board.swimlane_mode === "department" || cards.some((c) => c.department) });
   const empName = useMemo(() => {
@@ -2040,7 +2042,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
   const { editing, openCard, closeCard } = useOpenCard(undefined, cards);
   // The list shows one name column (Assignee); goals and departments are the task dialog's pickers, so they
   // are read when a row is actually opened. Same rule as the board grid.
-  const { rows: employees } = useCollection<Employee>("employees", { enabled: !!editing || cards.some((c) => c.assignee) });
+  const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: !!editing || cards.some((c) => c.assignee) });
   const { rows: goals } = useCollection<Goal>("goals", { enabled: !!editing });
   const { rows: departments } = useCollection<Department>("departments", { enabled: !!editing });
   const empName = useMemo(() => {
@@ -2197,7 +2199,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const { editing, openCard, closeCard } = useOpenCard(openId, cards);
   // Reference lists on the same rule as the board grid: read when the cards or the composer actually need them.
   const composing = addBacklog || !!editing;
-  const { rows: employees } = useCollection<Employee>("employees", { enabled: composing || cards.some((c) => c.assignee) });
+  const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: composing || cards.some((c) => c.assignee) });
   const { rows: goals } = useCollection<Goal>("goals", { enabled: composing || cards.some((c) => c.goal) });
   const { rows: departments } = useCollection<Department>("departments", { enabled: composing || cards.some((c) => c.department) });
   const sprints = useMemo(

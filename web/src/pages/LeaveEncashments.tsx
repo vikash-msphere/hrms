@@ -34,7 +34,7 @@ const EMPTY = { employee: "", leave_type: "", days: "" };
 
 export default function LeaveEncashments({ embedded, initialType, meEmployeeId }: { me?: Me; embedded?: boolean; initialType?: string | null; meEmployeeId?: string | null }) {
   const { rows, state, error, reload } = useCollection<LeaveEncashment>(COL);
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
   const { rows: balances } = useCollection<LeaveBalance>("leave-balances");
   const { toast } = useToast();

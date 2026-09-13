@@ -46,7 +46,7 @@ export default function Stocktakes({ me }: { me: Me }) {
   const route = useRoute();
   const { rows: counts, setRows: setCounts, state, error, reload } = useCollection<Stocktake>("stocktakes");
   const { rows: assets } = useCollection<Asset>("assets");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: categories } = useCollection<AssetCategory>("asset-categories");
   const [staleDays, setStaleDays] = useState(DEFAULT_STALE_DAYS);
   const { toast } = useToast();

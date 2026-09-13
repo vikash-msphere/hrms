@@ -8,6 +8,7 @@ import { holdsForAnyone, roleHolderEmployeeIds } from "./capabilityHolders";
 import { notFound, invalidArgument, failedPrecondition } from "../lib/errors";
 import { getEmployeeTaxProjection, readDeclarations, readRawTaxDetails, type TaxDeclarations, type TaxProjection } from "./taxProjection";
 import type { Wire } from "../http/wire";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Income-tax (TDS) sub-resource: stores only the employee's manual DECLARATIONS (prior-employer income + TDS
 // for mid-year joiners) as an encrypted blob - everything else (the year's tax, the monthly schedule, the
@@ -138,8 +139,20 @@ const num = (v: unknown): number | undefined => {
 // REJECT. Maker-checker is structural: verify/reject require the actor NOT be the subject employee (so an HR
 // user can't rubber-stamp their OWN prior-employer figures - another reviewer must). Only VERIFIED figures feed
 // withholding (the readDeclarations gate). `action` ("verify"/"reject") rides in the values body; absent = declare.
-export async function setTaxDetails(deps: Deps, actor: AppUser, employeeId: string, input: Record<string, unknown>) {
+export async function setTaxDetails(deps: Deps, actor: AppUser, employeeId: string, input: Record<string, unknown>, ifMatch?: string) {
   const emp = await loadEmployee(deps, employeeId);
+  // VERSION-GUARDED, and here that is load-bearing rather than merely correct.
+  //
+  // Maker-checker says WHO decides; it said nothing about WHAT is being decided. Re-declaring is the subject
+  // employee's own action, takes no state precondition and resets the record, so HR could open the queue,
+  // read 50,000, click Verify - and stamp VERIFIED on the 5,00,000 the employee declared in between, because
+  // `raw` is re-read inside this function and `?? raw.priorEmployerIncome` takes whatever it now says. Only
+  // VERIFIED figures feed withholding, so the amount nobody reviewed is the amount that cuts the tax
+  // deducted. And the whole declaration is ONE ENCRYPTED BLOB rewritten from a read, so a declare landing
+  // between the read and the write was not just decided unseen - it was overwritten and gone. Same fix as
+  // `tax-declarations:verify` on the other declaration surface. The guard applies whether or not a header was
+  // sent (services/versionGuard.ts).
+  checkEtag(emp, ifMatch);
   const raw = await readRawTaxDetails(deps, emp.taxDetailsEnc);
   const isSelf = actor.employeeId === employeeId;
   const action = typeof input.action === "string" ? input.action : undefined;
@@ -179,10 +192,11 @@ export async function setTaxDetails(deps: Deps, actor: AppUser, employeeId: stri
   // what makes the verification queue countable without decrypting anything. A declaration with no figures on
   // it isn't in any queue, so it clears the column rather than parking it in DECLARED forever.
   const declared = next.priorEmployerIncome != null || next.priorEmployerTds != null;
-  await deps.db
-    .update(schema.employees)
-    .set({ taxDetailsEnc: enc, taxVerificationStatus: declared ? next.status ?? "DECLARED" : null, updatedAt: new Date() })
-    .where(eq(schema.employees.uuid, emp.uuid));
+  await updateAtVersion(deps, schema.employees, "employee", emp, {
+    taxDetailsEnc: enc,
+    taxVerificationStatus: declared ? next.status ?? "DECLARED" : null,
+    updatedAt: new Date(),
+  });
   // The STATUS is the auditable fact (it decides withholding); the declared figures stay off the trail.
   await audit(deps, actor, `employee.tax_details.${event}`, "employees", emp.uuid, stateMeta(emp.taxVerificationStatus, declared ? next.status ?? "DECLARED" : null, fieldsMeta(next)), emp);
   // Tell the subject employee when HR/payroll acts on their declaration (verify makes it apply to withholding;

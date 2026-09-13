@@ -179,7 +179,7 @@ const REQUIRES_SELECT = (value: string, onChange: (v: string) => void) => (
  *  live preview (rendered server-side from the draft, without saving). */
 export default function LettersTab({ toast }: { toast: Toast }) {
   const confirm = useConfirm();
-  const { rows: employees, state: employeesState } = useCollection<Employee>("employees");
+  const { rows: employees, state: employeesState } = useCollection<Employee>("employees", { all: true });
   // The employee lookup feeds the preview picker; surface a load failure instead of a silently empty dropdown.
   useEffect(() => {
     if (employeesState === "error") toast({ title: "Couldn't load employees", description: "The preview picker may be empty. Try reloading.", variant: "destructive" });

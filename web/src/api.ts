@@ -372,6 +372,15 @@ export function listPath(collection: string, opts: ListOptions): string {
   // 100 is what the server actually grants (http/pagination.ts clampPageSize caps there), so asking for more
   // just made every caller's stated page size a fiction. Truncation is reported through `next_page_token`
   // either way; the two numbers should agree so nobody sizes a view against a page they will never get.
+  //
+  // And the clamp SAYS SO in development, because seven call sites had been written in the belief that they
+  // had raised the window (the settings snapshot, two "who is off" overlays, the ops history, tab activity,
+  // preferences) - each reading one page as the whole set. A silent ceiling is how that belief forms: nothing
+  // on the request, the response or the screen contradicts it. A caller that genuinely needs more than a page
+  // follows the cursor (`all: true` on useCollection, `listAll`/`getAllPages` here).
+  if (import.meta.env.DEV && (opts.max ?? 0) > 100) {
+    console.warn(`[api] max_page_size ${opts.max} on "${collection}" is clamped to 100 by the server; follow the cursor instead (useCollection { all: true }, listAll, getAllPages)`);
+  }
   const params = new URLSearchParams({ max_page_size: String(Math.min(opts.max ?? 100, 100)) });
   // Three states, two params (`show_deleted` stays a boolean, as AEP requires): `deleted_only` is what lets a
   // "Deleted" view be its own fetch. Including the live rows and

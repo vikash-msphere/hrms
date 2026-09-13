@@ -9,6 +9,7 @@ CREATE TABLE `access_rules` (
 	`match_code` text,
 	`level` text,
 	`effect` text NOT NULL,
+	`source` text DEFAULT 'acl' NOT NULL,
 	`status` text DEFAULT 'active' NOT NULL,
 	`requested_by` text,
 	`expires_at` integer,
@@ -825,6 +826,7 @@ CREATE UNIQUE INDEX `document_acknowledgements_code_unique` ON `document_acknowl
 CREATE INDEX `document_acknowledgements_page_idx` ON `document_acknowledgements` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `dack_emp_idx` ON `document_acknowledgements` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `dack_doc_idx` ON `document_acknowledgements` (`document_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `dack_once_idx` ON `document_acknowledgements` (`document_id`,`employee_id`,`version`) WHERE "document_acknowledgements"."delete_time" is null;--> statement-breakpoint
 CREATE TABLE `employees` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,

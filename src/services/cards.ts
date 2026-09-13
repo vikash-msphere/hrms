@@ -10,7 +10,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta, noteMeta } from "../lib/audit";
 import { getDefaultDepartmentId } from "./settings";
 import { orgToday, dayStartMs } from "./orgDay";
 import { genId } from "../lib/idCodec";
@@ -410,7 +410,7 @@ export async function commentCard(deps: Deps, actor: AppUser, id: string, body?:
   const text = (body ?? "").trim();
   if (!text) throw invalidArgument("a comment body is required");
   await deps.db.insert(schema.cardComments).values({ cardId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
-  await audit(deps, actor, "card.comment", "cards", id, { note: text.length > 140 ? `${text.slice(0, 140)}…` : text }, card);
+  await audit(deps, actor, "card.comment", "cards", id, noteMeta("cards", text), card);
   // Naming someone in a comment is how work gets handed over on a board, so it tells them. A mention is a
   // notification and nothing more: if they cannot see this board, they still cannot - see services/mentions.ts.
   await notifyMentions(deps, actor, { subject: `cards/${id}`, link: "boards", type: "board.mention", body: text, title: card.title });
@@ -662,10 +662,14 @@ export type MoveCardTarget = {
   sprint?: string | null;
 };
 
-export async function moveCard(deps: Deps, actor: AppUser, id: string, to: MoveCardTarget) {
+export async function moveCard(deps: Deps, actor: AppUser, id: string, to: MoveCardTarget, ifMatch?: string) {
   const { column: toColumn, swimlane: toSwimlane, rank, assignee: toAssignee, goal: toGoal, priority: toPriority, department: toDepartment, sprint: toSprint } = to;
   const row = await getCard(deps, actor, id);
   if (row.deleteTime) throw notFound("card not found");
+  // The SPA has always sent the card's ETag with a move (`invoke(..., "move", card.etag, move)`), and the
+  // sibling verbs on this collection take one; `move` alone discarded it, so the client was being careful
+  // about a version the server ignored.
+  checkEtag(row, ifMatch);
   const board = (await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, row.boardId)).limit(1))[0];
   if (!board) throw notFound("board not found");
   const cols = parseColumns(board.columnsJson);
@@ -720,7 +724,17 @@ export async function moveCard(deps: Deps, actor: AppUser, id: string, to: MoveC
     justDelivered = true;
   }
 
-  const updated = (await deps.db.update(schema.cards).set(set).where(eq(schema.cards.uuid, id)).returning())[0]!;
+  // GUARDED ON THE COLUMN THAT WAS READ. The WIP check above counts a column and then writes without claiming
+  // anything, so two people dragging into a column sitting one below its limit both counted `limit - 1`, both
+  // passed, and both landed - the one thing the feature exists to prevent, on a surface several people work
+  // at once by definition. The same window also let a move be decided against a column the card had already
+  // left: the movement row below records `fromColumn: row.columnKey`, so a losing race wrote a transition
+  // that never happened into `card_movements`, which is what `boardMetrics` builds the flow/CFD analytics
+  // from. Zero rows here means somebody moved it first; the database decides who won, not the gap between two
+  // statements. (Not `updateAtVersion`: a plain re-render bumps `updated_at`, while what this move depends on
+  // is specifically where the card is.)
+  const updated = (await deps.db.update(schema.cards).set(set).where(and(eq(schema.cards.uuid, id), eq(schema.cards.columnKey, row.columnKey))).returning())[0];
+  if (!updated) throw aborted("the card moved while this move was being applied; re-read it and try again");
   if (changingColumn) {
     await deps.db.insert(schema.cardMovements).values({ cardId: id, boardId: row.boardId, fromColumn: row.columnKey, toColumn, actorId: actor.employeeId ?? null });
   }

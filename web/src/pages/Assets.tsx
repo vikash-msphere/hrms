@@ -83,11 +83,16 @@ const EMPTY = { asset_tag: "", name: "", category: "", serial_number: "", status
 type Form = typeof EMPTY;
 
 export default function Assets({ me, openId }: { me: Me; openId?: string }) {
-  const { rows, state, error, reload } = useCollection<Asset>("assets");
+  // `all: true`, because two things on this page are WRONG rather than merely short on one page: the
+  // duplicate-serial guard below searches these rows ("there to catch the same machine being added twice"),
+  // and an inventory is the collection most certain to exceed a page - so past 100 assets the warning simply
+  // stopped appearing, and an absent warning reads as "no clash", not as "not checked". The table pages these
+  // rows client-side, so completing the fetch makes the table whole too.
+  const { rows, state, error, reload } = useCollection<Asset>("assets", { all: true });
   const route = useRoute();
   // A deep link WITH a tag secret is a scan, not a request to edit the row - the custody dialog below claims it.
   useDeepOpen(route.query.s ? undefined : openId, rows, openEdit);
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: categories } = useCollection<AssetCategory>("asset-categories");
   const { toast } = useToast();
   const confirm = useConfirm();

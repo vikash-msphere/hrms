@@ -519,7 +519,17 @@ export default function App() {
       case "profile":
         return <Profile me={gme} />;
       case "employees":
-        return route.id ? <EmployeeProfile id={route.id} me={gme} sub={route.sub ?? undefined} /> : <Directory me={gme} />;
+        // `key` makes a different person a different component instance. Without it, navigating
+        // #/employees/A -> #/employees/B re-rendered the SAME mounted tree with a new prop, and the profile
+        // paints immediately (it resolves the employee out of the cached directory) rather than unmounting
+        // its children while it fetches. The nine profile tabs that load by `employeeId` through a bespoke
+        // endpoint - bank, compensation, tax, identity, personal, bonuses, settlement, role history - have no
+        // cancellation flag, so two requests for two different people were in flight with nothing to say
+        // which answer belonged to the current one and the last to land won: person A's salary history beside
+        // person B's projected tax, under person B's name, on the surface where somebody decides a raise.
+        // Store-backed reads never had this (a `useCollection` entry is keyed by collection+params); these
+        // bypass the store. The remount per navigation is the price, and it fixes every tab at once.
+        return route.id ? <EmployeeProfile key={route.id} id={route.id} me={gme} sub={route.sub ?? undefined} /> : <Directory me={gme} />;
       case "org-chart":
         return <OrgChart me={gme} focusId={route.id ?? undefined} />;
       case "departments": // moved into Settings; deep-link to its tab

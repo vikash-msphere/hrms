@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta, noteMeta, stateMeta } from "../lib/audit";
 import { byIdChunks, chunk, insertBatches, runBatch } from "../lib/dbBatch";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
@@ -1010,7 +1010,7 @@ export async function requestGoalChanges(deps: Deps, actor: AppUser, id: string,
   if (!text) throw invalidArgument("say what needs changing");
   const updated = await applyStage(deps, id, "PROPOSED", { stage: "DRAFT" });
   await deps.db.insert(schema.goalComments).values({ goalId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
-  await audit(deps, actor, "goal.requestChanges", "goals", id, stateMeta("PROPOSED", "DRAFT", { employee: `employees/${row.employeeId}`, note: text.slice(0, 140) }), updated);
+  await audit(deps, actor, "goal.requestChanges", "goals", id, stateMeta("PROPOSED", "DRAFT", { employee: `employees/${row.employeeId}`, ...noteMeta("goals", text) }), updated);
   await notify(deps, { recipient: row.employeeId, type: "goal.changes_requested", title: "Goal sent back", body: `${row.title} - ${text.slice(0, 140)}`, link: "goals", subject: `goals/${id}`, action: "respond", actorId: actor.employeeId });
   return updated;
 }
@@ -1109,7 +1109,7 @@ export async function commentGoal(deps: Deps, actor: AppUser, id: string, body?:
   const text = (body ?? "").trim();
   if (!text) throw invalidArgument("a comment body is required");
   await deps.db.insert(schema.goalComments).values({ goalId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
-  await audit(deps, actor, "goal.comment", "goals", id, { employee: `employees/${row.employeeId}`, note: text.length > 140 ? `${text.slice(0, 140)}…` : text }, row);
+  await audit(deps, actor, "goal.comment", "goals", id, { employee: `employees/${row.employeeId}`, ...noteMeta("goals", text) }, row);
   // The other party is told, because a comment nobody sees is a comment nobody answers: the owner hears from a
   // manager, and the manager hears from their report.
   const other = actor.employeeId === row.employeeId ? await managerIdOf(deps, row.employeeId) : row.employeeId;

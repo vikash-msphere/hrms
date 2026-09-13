@@ -9,7 +9,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
-import { invalidArgument, notFound, forbidden, failedPrecondition } from "../lib/errors";
+import { invalidArgument, notFound, forbidden, failedPrecondition, isDocumentAckDuplicate } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
@@ -283,15 +283,51 @@ export function makeDocumentService(cfg: Cfg) {
     // Legal name on file is the attestation (not a value the signer can alter).
     const legalName = (emp.legalName || `${emp.firstName} ${emp.lastName}`).trim();
 
-    // Idempotency per (doc, employee, version). A completed ack short-circuits; a still-pending Aadhaar ack
-    // re-returns its signing link so the employee can resume rather than starting a duplicate request.
-    const existing = (await deps.db.select().from(schema.documentAcknowledgements).where(eq(schema.documentAcknowledgements.documentId, id)))
-      .find((a) => a.employeeId === employeeId && a.version === version && !a.deleteTime);
-    if (existing) {
-      if (existing.acknowledgedTime) return { ...row, ackedVersion: version };
-      const copy = existing.signedDocId ? (await deps.db.select().from(schema.personalDocuments).where(eq(schema.personalDocuments.uuid, existing.signedDocId)).limit(1))[0] : undefined;
+    // Idempotency per (doc, employee, version) is the UNIQUE index `dack_once_idx`; this read is only the
+    // probe in front of it, so the ordinary "already signed" answer costs no write (services/compOff.ts
+    // splits the same way, and says why the index rather than the read is what makes it true). It narrows by
+    // EMPLOYEE in SQL: an org-wide policy collects one row per employee per version, so matching in JS meant
+    // reading the whole company's acknowledgements - every version of them - on the one path everybody walks.
+    // `dack_emp_idx` serves this; the version/delete filter stays in JS over the one or two rows it returns.
+    const findAck = async () =>
+      (await deps.db.select().from(schema.documentAcknowledgements).where(and(
+        eq(schema.documentAcknowledgements.documentId, id),
+        eq(schema.documentAcknowledgements.employeeId, employeeId),
+      ))).find((a) => a.version === version && !a.deleteTime);
+    // A completed ack short-circuits; a still-pending Aadhaar ack re-returns its signing link so the employee
+    // can resume rather than starting a duplicate request.
+    const ackResult = async (a: { acknowledgedTime: Date | null; signedDocId: string | null }) => {
+      if (a.acknowledgedTime) return { ...row, ackedVersion: version };
+      const copy = a.signedDocId ? (await deps.db.select().from(schema.personalDocuments).where(eq(schema.personalDocuments.uuid, a.signedDocId)).limit(1))[0] : undefined;
       return { ...row, ackedVersion: 0, esignUri: copy?.esignUri ?? undefined };
-    }
+    };
+    const existing = await findAck();
+    if (existing) return ackResult(existing);
+
+    // Claim the acknowledgement BEFORE any of the work it authorises - the stamped copy, the personal-document
+    // row, and on the vendor lane a paid e-sign transaction. The index decides who won, so the same person in
+    // two tabs (or the Aadhaar path resuming its own pending ack) gets one signed copy and one signing link
+    // instead of two. Each caller allocates its own `code`, and a collision on THAT is a different answer -
+    // look again - so it is left to propagate as the retryable 409 the error handler already makes of it.
+    const claimAck = async () => {
+      try {
+        return (await deps.db.insert(schema.documentAcknowledgements).values({
+          code: await allocOwnedCode(deps, schema.documentAcknowledgements, schema.documentAcknowledgements.employeeId, employeeId),
+          // signedDocId/acknowledgedTime are filled in once the copy exists; a null row is a pending ack.
+          employeeId, documentId: id, version, signature: legalName,
+        }).returning() as any[])[0]! as typeof schema.documentAcknowledgements.$inferSelect;
+      } catch (e) {
+        if (!isDocumentAckDuplicate(e)) throw e;
+        return null;
+      }
+    };
+    // The loser of that race reads the winner's row and answers from it, which is the same answer the probe
+    // above gives - "you have already acknowledged this" - rather than an error the employee cannot act on.
+    const lost = async () => {
+      const won = await findAck();
+      if (won) return ackResult(won);
+      throw failedPrecondition("this document has already been acknowledged");
+    };
 
     const orgBuf = await deps.docs.get(row.r2Key);
     if (!orgBuf) throw failedPrecondition(`${singular} file not found in storage`);
@@ -307,22 +343,31 @@ export function makeDocumentService(cfg: Cfg) {
       // The on-file signature image is mandatory (it is what gets stamped). Employee uploads it on their profile.
       if (!emp.signatureKey) throw failedPrecondition("upload a signature image to your profile before acknowledging documents");
       const sigBuf = await deps.docs.get(emp.signatureKey);
-      // The date printed ON the signature is the ORG's calendar day, not UTC. This is the last place in the
-      // app that derived a "today" from the UTC clock (services/orgDay.ts explains why the rest moved off
-      // it), and it is the worst one to leave: the stamp is baked into a PDF that is then LOCKED, so an
-      // acknowledgement signed before 05:30 in IST carried yesterday's date on the face of the document, for
-      // good, on the one record whose whole purpose is to say when somebody signed.
-      const stamped = await stampSignature(orgBytes, sigBuf ? new Uint8Array(sigBuf) : undefined, anchor, { name: legalName, date: await orgToday(deps) });
-      await deps.docs.put(copyKey, stamped, "application/pdf");
-      await deps.db.insert(schema.personalDocuments).values({
-        uuid: copyId, code: await allocOwnedCode(deps, schema.personalDocuments, schema.personalDocuments.employeeId, employeeId),
-        employeeId, documentType: "POLICY", title: copyTitle, fileName: copyFileName, r2Key: copyKey, contentType: "application/pdf", sizeBytes: stamped.byteLength,
-        sourceDocId: id, published: true, signedTime: new Date(), signatureName: legalName, locked: true,
-      });
-      await deps.db.insert(schema.documentAcknowledgements).values({
-        code: await allocOwnedCode(deps, schema.documentAcknowledgements, schema.documentAcknowledgements.employeeId, employeeId),
-        employeeId, documentId: id, version, signature: legalName, signedDocId: copyId, acknowledgedTime: new Date(),
-      });
+      const ack = await claimAck();
+      if (!ack) return lost();
+      try {
+        // The date printed ON the signature is the ORG's calendar day, not UTC. Deriving a "today" from the
+        // UTC clock is wrong everywhere (services/orgDay.ts explains why the app moved off it), and worst
+        // here: the stamp is baked into a PDF that is then LOCKED, so an acknowledgement signed before 05:30
+        // in IST carried yesterday's date on the face of the document, for good, on the one record whose
+        // whole purpose is to say when somebody signed. services/letterSign.ts signs the same way.
+        const stamped = await stampSignature(orgBytes, sigBuf ? new Uint8Array(sigBuf) : undefined, anchor, { name: legalName, date: await orgToday(deps) });
+        await deps.docs.put(copyKey, stamped, "application/pdf");
+        await deps.db.insert(schema.personalDocuments).values({
+          uuid: copyId, code: await allocOwnedCode(deps, schema.personalDocuments, schema.personalDocuments.employeeId, employeeId),
+          employeeId, documentType: "POLICY", title: copyTitle, fileName: copyFileName, r2Key: copyKey, contentType: "application/pdf", sizeBytes: stamped.byteLength,
+          sourceDocId: id, published: true, signedTime: new Date(), signatureName: legalName, locked: true,
+        });
+        await deps.db.update(schema.documentAcknowledgements).set({ signedDocId: copyId, acknowledgedTime: new Date() })
+          .where(eq(schema.documentAcknowledgements.uuid, ack.uuid));
+      } catch (e) {
+        // Unwind so a failure part-way leaves nothing holding the claim - the index would otherwise refuse
+        // the retry and the employee could never sign - and no orphan copy. Each step is best-effort.
+        await deps.docs.delete(copyKey).catch(() => {});
+        await deps.db.delete(schema.personalDocuments).where(eq(schema.personalDocuments.uuid, copyId)).catch(() => {});
+        await deps.db.delete(schema.documentAcknowledgements).where(eq(schema.documentAcknowledgements.uuid, ack.uuid)).catch(() => {});
+        throw e;
+      }
       await audit(deps, actor, "document.acknowledge", collection, id, { version, method });
       return { ...row, ackedVersion: version };
     }
@@ -337,14 +382,15 @@ export function makeDocumentService(cfg: Cfg) {
     if (provider.requiresAadhaar && !aadhaar) throw failedPrecondition("this employee has no Aadhaar on file; cannot request Aadhaar e-sign");
     const signer = { name: legalName, email: emp.workEmail ?? undefined, aadhaar };
 
+    // Claimed before the R2 put and the vendor call, which is the whole point on this lane: `createRequest`
+    // is a paid transaction and a second signing link to somebody who only agreed to sign once.
+    const ack = await claimAck();
+    if (!ack) return lost();
+
     await deps.docs.put(copyKey, orgBytes, "application/pdf");
     // The ack and its signed copy reference each other (ack.signedDocId <-> copy.ackId), a circular FK that
-    // SQLite/D1 enforce per-statement. Insert the ack WITHOUT signedDocId, insert the copy carrying ackId, then
-    // backfill ack.signedDocId - neither row can name the other at insert time.
-    const ack = (await deps.db.insert(schema.documentAcknowledgements).values({
-      code: await allocOwnedCode(deps, schema.documentAcknowledgements, schema.documentAcknowledgements.employeeId, employeeId),
-      employeeId, documentId: id, version, signature: legalName, // signedDocId backfilled below; acknowledgedTime stays null -> pending
-    }).returning() as any[])[0]!;
+    // SQLite/D1 enforce per-statement. The ack above went in WITHOUT signedDocId; insert the copy carrying
+    // ackId, then backfill ack.signedDocId - neither row can name the other at insert time.
     await deps.db.insert(schema.personalDocuments).values({
       uuid: copyId, code: await allocOwnedCode(deps, schema.personalDocuments, schema.personalDocuments.employeeId, employeeId),
       employeeId, documentType: "POLICY", title: copyTitle, fileName: copyFileName, r2Key: copyKey, contentType: "application/pdf", sizeBytes: orgBytes.byteLength,

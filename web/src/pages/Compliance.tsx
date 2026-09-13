@@ -83,7 +83,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
   const { rows, state, error, reload } = useCollection<ComplianceEvent>("compliance-events", { showDeleted: true });
   useDeepOpen(openId, rows, openEdit);
   const { rows: rules, state: ruleState, error: ruleError, reload: reloadRules } = useCollection<ComplianceRule>("compliance-rules", { showDeleted: true });
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const sd = useSoftDelete("compliance-events", "compliance event", reload);
   const sdRule = useSoftDelete("compliance-rules", "compliance rule", reloadRules);

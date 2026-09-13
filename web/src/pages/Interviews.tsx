@@ -66,7 +66,7 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
   const { rows: apps } = useCollection<Application>("applications", { enabled: labelled });
   const { rows: candidates } = useCollection<Candidate>("candidates", { enabled: labelled });
   const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { enabled: labelled });
-  const { rows: employees } = useCollection<Employee>("employees", { enabled: labelled });
+  const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: labelled });
   useDeepOpen(openId, rows, setDialog);
   // A slot being argued about over chat is pasteable; `useDeepOpen` above reads the id back in.
   function openDialog(d: Interview | "new") { setDialog(d); setRouteRecord(d === "new" ? null : idOf(d.path)); }

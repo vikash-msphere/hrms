@@ -164,7 +164,7 @@ export function CommandPalette({
   useEffect(() => {
     if (open) setOpened(true);
   }, [open]);
-  const { rows: employees } = useCollection<Employee>("employees", { enabled: opened });
+  const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: opened });
 
   // Global ⌘K / Ctrl+K to open from anywhere.
   useEffect(() => {

@@ -83,7 +83,7 @@ function BonusCell({ r, money }: { r: Referral; money: (n?: number) => string })
 
 export default function Referrals({ me, openId }: { me: Me; openId?: string }) {
   const { rows, state, error, reload } = useCollection<Referral>("referrals");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments");
   // Only loads for callers who can read candidates (HR/recruiters); others get an empty list, which is fine -
   // it's only used to stop "To pipeline" creating the same candidate twice, and to mark the referrals that

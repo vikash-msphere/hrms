@@ -14,6 +14,7 @@ import { createCard, updateCard, moveCard, deleteCard, setCardBlocked, commentCa
 import { createGoal } from "../src/services/goals";
 import { createSprint, activateSprint, completeSprint } from "../src/services/sprints";
 import { listActivity, listAllActivity } from "../src/services/activity";
+import { etagOf } from "../src/http/serialize";
 
 // Real-D1 (miniflare) flow test for the kanban board: WIP enforcement, commitment/delivery timestamps, the
 // movement log feeding analytics, and the delivery -> goal roll-up. Exercises the actual services end to end.
@@ -66,6 +67,28 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     await expect(moveCard(deps, actor, c2.uuid, { column: "doing" })).rejects.toThrow(/WIP limit/i);
     // Moving back out of a full column is always allowed.
     await expect(moveCard(deps, actor, c1.uuid, { column: "todo" })).resolves.toBeTruthy();
+  });
+
+  it("honours the ETag the SPA sends with a move", async () => {
+    // The SPA has always sent the card's version with a move (`invoke(..., "move", card.etag, move)`) and the
+    // sibling verbs take one, but `move` discarded it - so the client was being careful about a version the
+    // server ignored. (The write is also guarded on the column that was read, which is what makes the WIP
+    // count above hold under two people dragging at once; that half needs an interleaved race to observe.)
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Guarded board" });
+    const card = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Contended", column_key: "backlog" });
+    const current = etagOf(+new Date((await deps.db.select().from(schema.cards).where(eq(schema.cards.uuid, card.uuid)).limit(1))[0]!.updatedAt));
+
+    const movesOf = () => deps.db.select().from(schema.cardMovements).where(eq(schema.cardMovements.cardId, card.uuid));
+    const atCreate = (await movesOf()).length; // the create logs the card's arrival (null -> backlog)
+
+    await expect(moveCard(deps, actor, card.uuid, { column: "ready" }, '"not-the-version"')).rejects.toThrow(/etag/i);
+    expect(await movesOf()).toHaveLength(atCreate); // refused before anything was written
+
+    await expect(moveCard(deps, actor, card.uuid, { column: "ready" }, current)).resolves.toBeTruthy();
+    const moves = await movesOf();
+    expect(moves).toHaveLength(atCreate + 1);
+    expect(moves[moves.length - 1]!.fromColumn).toBe("backlog");
   });
 
   it("enforces per-assignee WIP independently per person", async () => {

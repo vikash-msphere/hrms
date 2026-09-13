@@ -1439,7 +1439,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
   const [cats, setCats] = useState<TicketCategory[]>([]);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments");
 
   useEffect(() => {
@@ -2567,7 +2567,7 @@ type DashSection = "kpis" | "timeline";
 function DashboardTab({ toast }: { toast: Toast }) {
   const [cfg, setCfg] = useState<DashboardConfig>({});
   const [roles, setRoles] = useState<{ name: string }[]>([]);
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   // Which KPI category bands are expanded in this editor (all collapsed by default so the list stays short).

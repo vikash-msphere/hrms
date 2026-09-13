@@ -103,7 +103,7 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
   const canSettings = usePermission("settings.write");
   const { emp, state, error, reload } = useEmployee(id);
   const { rows: depts } = useCollection<Department>("departments");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: types } = useCollection<LeaveType>("leave-types");
   // This person's balances, narrowed server-side. Filtering a page of the whole collection in the browser was
   // both dearer and blind to anything past the cursor.

@@ -217,7 +217,8 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   // post on the board: switch to the list it lives in, scroll, highlight. Editing stays behind the pencil.
   // Solo mode is already showing that one post, so there is nothing to scroll to and nothing to switch.
   useDeepOpen(solo ? undefined : openId, source, openView);
-  const { rows: employees } = useCollection<Employee>("employees");
+  // Feeds the board composer's @-mention picker as well as the author labels - see Tickets.tsx.
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments");
   const { toast } = useToast();
   // Deleting the post a solo page IS leaves nothing to render, so that page goes back to the board.

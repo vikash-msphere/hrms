@@ -200,7 +200,7 @@ export const employees = new Hono<AppEnv>()
   })
   .patch("/:employee_id/bank-account", zValidator("json", bankSchema), async (c) => {
     const id = c.req.param("employee_id")!;
-    const view = await setBankDetails(c.get("deps"), c.get("user"), id, c.req.valid("json"));
+    const view = await setBankDetails(c.get("deps"), c.get("user"), id, c.req.valid("json"), c.req.header("If-Match"));
     return c.json({ path: `employees/${id}/bank-account`, ...redactedSub(c, "bank-account", view) });
   })
   .get("/:employee_id/identity", async (c) => {
@@ -211,7 +211,7 @@ export const employees = new Hono<AppEnv>()
   .patch("/:employee_id/identity", async (c) => {
     const id = c.req.param("employee_id")!;
     const body = await jsonBody<{ values?: Record<string, string> }>(c);
-    const view = await setIdentityDetails(c.get("deps"), c.get("user"), id, body.values ?? {});
+    const view = await setIdentityDetails(c.get("deps"), c.get("user"), id, body.values ?? {}, c.req.header("If-Match"));
     return c.json({ path: `employees/${id}/identity`, ...redactIdentity(view, c.get("objectGrant"), fieldScopeCode(c), { employeeCode: c.get("user").employeeCode }) });
   })
   .get("/:employee_id/personal-info", async (c) => {
@@ -231,13 +231,13 @@ export const employees = new Hono<AppEnv>()
   .patch("/:employee_id/tax", async (c) => {
     const id = c.req.param("employee_id")!;
     const body = await jsonBody<{ values?: Record<string, unknown> }>(c);
-    const view = await setTaxDetails(c.get("deps"), c.get("user"), id, body.values ?? {});
+    const view = await setTaxDetails(c.get("deps"), c.get("user"), id, body.values ?? {}, c.req.header("If-Match"));
     return c.json({ path: `employees/${id}/tax`, ...redactedSub(c, "tax", view) });
   })
   .patch("/:employee_id/personal-info", async (c) => {
     const id = c.req.param("employee_id")!;
     const body = await jsonBody<Parameters<typeof setPersonalDetails>[3]>(c);
-    const view = await setPersonalDetails(c.get("deps"), c.get("user"), id, body ?? {});
+    const view = await setPersonalDetails(c.get("deps"), c.get("user"), id, body ?? {}, c.req.header("If-Match"));
     return c.json({ path: `employees/${id}/personal-info`, ...redactedSub(c, "personal-info", view) });
   })
   .get("/:employee_id/notification-prefs", async (c) => {

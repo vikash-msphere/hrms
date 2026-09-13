@@ -43,7 +43,7 @@ const troubled = (g: Goal) => behind(g) || quiet(g);
  */
 export default function GoalCockpit({ me }: { me: Me }) {
   const { rows: goals, state, error, reload } = useCollection<Goal>("goals");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: cycles } = useCollection<ReviewCycle>("review-cycles");
   const { toast } = useToast();
   const [cycle, setCycle] = useState("all");

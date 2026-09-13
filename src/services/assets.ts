@@ -28,6 +28,7 @@ import {
 } from "../domain/assetCustody";
 import { allocTagRun, FALLBACK_TAG_CODE, formatAssetTag, nextSeq, normalizeTagConfig, type AssetTagConfig } from "../domain/assetTag";
 import { requireOpenStocktake } from "./stocktakes";
+import { orgToday, dayStartMs } from "./orgDay";
 import { atVersion, checkEtag, updateAtVersion, versionConflict } from "./versionGuard";
 
 export type AssetInput = {
@@ -269,7 +270,12 @@ export async function createAsset(deps: Deps, actor: AppUser, input: AssetInput)
       serialNumber,
       status,
       assignedTo,
-      assignedOn: assignedTo ? (dayMs(input.assigned_on) ?? now) : null,
+      // A DAY column: the caller's value is a UTC midnight (`dayMs`), so the fallback has to be one too - and
+      // the org's day, not the UTC one. `now` here is the request INSTANT, which reads back through
+      // `iso(...).slice(0, 10)` as whatever day it was in UTC: in IST an asset handed over at 00:30 local was
+      // recorded as assigned the previous day. See services/orgDay.ts; `custodySince` below is a real instant
+      // and stays one.
+      assignedOn: assignedTo ? (dayMs(input.assigned_on) ?? new Date(dayStartMs(await orgToday(deps)))) : null,
       purchaseDate: dayMs(input.purchase_date),
       tagSecret: mintTagSecret(),
       custodySince: isPending(status) ? now : null,
@@ -471,7 +477,9 @@ export async function updateAsset(deps: Deps, actor: AppUser, id: string, patch:
   if (has("assigned_to")) {
     const to = idFromPath(patch.assigned_to) ?? null;
     set.assignedTo = to;
-    set.assignedOn = to ? (dayMs(patch.assigned_on) ?? (row.assignedTo === to ? row.assignedOn : new Date())) : null;
+    // Same day column, same rule as the create: the fallback is the ORG's calendar day at UTC midnight, not
+    // the instant the request arrived (which the serializer would read back as the UTC day).
+    set.assignedOn = to ? (dayMs(patch.assigned_on) ?? (row.assignedTo === to ? row.assignedOn : new Date(dayStartMs(await orgToday(deps))))) : null;
     derivedAssigned = to;
   }
   // A hand-over (to somebody, or back to the company) re-opens the custody question: the new state is

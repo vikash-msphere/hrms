@@ -29,8 +29,10 @@ const lsKey = () => {
   return id ? `tab_seen:${id}` : null;
 };
 const PREF_KEY = "tab_seen"; // /v1/preferences/{key}
-// Match the default page reads (max 200, live rows) so the activity fetch shares the store entry pages use.
-const OPTS = { showDeleted: false, max: 200 } as const;
+// Match the default page reads (one page, live rows) so the activity fetch shares the store entry pages use.
+// 100 rather than 200 because 100 is what the server grants (api.ts#listPath); the old number described a
+// page nobody was ever given.
+const OPTS = { showDeleted: false, max: 100 } as const;
 
 type SeenMap = Record<string, number>; // tabKey -> epoch ms last viewed
 

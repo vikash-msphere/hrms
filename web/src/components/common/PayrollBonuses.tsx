@@ -33,7 +33,7 @@ const KINDS = ["Performance Bonus", "Joining Bonus", "Retention Bonus", "Festiva
 // line per award. Bonuses are paid - as a taxable earning - by the next payroll run.
 export function PayrollBonuses() {
   const { rows, state, error, reload } = useCollection<Bonus>("bonuses");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments");
   const { toast } = useToast();
   const confirm = useConfirm();

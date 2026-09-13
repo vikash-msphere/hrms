@@ -65,7 +65,7 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
   void me;
   const { rows, state, error, reload } = useCollection<NoticePeriod>("notice-periods", { showDeleted: true });
   useDeepOpen(openId, rows, openEdit);
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const sd = useSoftDelete("notice-periods", "notice period", reload);

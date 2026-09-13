@@ -61,7 +61,7 @@ const STATUS_ORDER: Record<string, number> = { open: 0, draft: 1, on_hold: 2, fi
 
 export default function Requisitions({ me, openId }: { me: Me; openId?: string }) {
   const { rows, state, error, reload } = useCollection<JobRequisition>("job-requisitions");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments");
   // Applications exist to put a pipeline count on each requisition, so no requisitions means nothing to count.
   const { rows: apps } = useCollection<Application>("applications", { enabled: rows.length > 0 });

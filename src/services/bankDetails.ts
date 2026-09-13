@@ -5,6 +5,7 @@ import type { AppUser } from "../env";
 import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
 import { getSettingValue } from "./settings";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 /** The org's declared banks (settings/organization `banks`), normalized for comparison. Empty = not configured. */
 export async function orgBanks(deps: Deps): Promise<string[]> {
@@ -89,8 +90,9 @@ export async function getBankDetails(deps: Deps, _actor: AppUser, employeeId: st
   }
 }
 
-export async function setBankDetails(deps: Deps, actor: AppUser, employeeId: string, input: BankDetailsInput) {
+export async function setBankDetails(deps: Deps, actor: AppUser, employeeId: string, input: BankDetailsInput, ifMatch?: string) {
   const emp = await loadEmployee(deps, employeeId);
+  checkEtag(emp, ifMatch); // the precise 409 for a caller that already knows its read is stale
   if (input == null || typeof input !== "object") throw invalidArgument("bank details body required");
   // `bank_name` IS AN ENUM, and it has to be enforced here rather than only in the picker.
   //
@@ -147,7 +149,13 @@ export async function setBankDetails(deps: Deps, actor: AppUser, employeeId: str
     delete stored[f];
   }
   const enc = await deps.encryptor.encrypt(JSON.stringify(stored));
-  await deps.db.update(schema.employees).set({ bankDetailsEnc: enc, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid));
+  // VERSION-GUARDED. The blob above is built from a read, so two overlapping edits did not conflict, they
+  // overwrote: the second caller's blob was composed before the first caller's write, and everything the
+  // first one changed was gone with a 200 on both requests. Concretely - HR corrects the account number while
+  // the employee updates their IFSC, and whichever lands second restores the other's old value; the trail
+  // cannot help, because this path deliberately records field NAMES only. The comment above states the cost
+  // of losing these fields by a different route: "a payroll disbursement that cannot be paid".
+  await updateAtVersion(deps, schema.employees, "employee", emp, { bankDetailsEnc: enc, updatedAt: new Date() });
   // WHICH fields changed, never their values: an account number in a table read by everyone with the `audit`
   // capability outlives the access control on the record it came from. `fieldsMeta` is the shape for exactly
   // this - the trail says "they changed the account number", which is the whole of what it is owed.

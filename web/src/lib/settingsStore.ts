@@ -102,16 +102,34 @@ function dropDisk() {
   del("snapshot", DISK_KEY);
 }
 
-function fetchAll(): Promise<Map<string, unknown>> {
-  return list<Row>("settings", { max: 200 })
-    .then((r) => {
-      const rows = r.results ?? [];
-      // Etags are replaced wholesale alongside the values they describe, never merged into the old set: a
-      // leftover etag for a key this read did not return would be a version claim about a row we have not seen.
-      etags = new Map(rows.flatMap((s) => (s.etag ? [[s.key, s.etag] as [string, string]] : [])));
-      return new Map(rows.map((s) => [s.key, s.value]));
-    })
-    .catch(() => new Map<string, unknown>()); // unreadable / offline: every key reads as unset
+// WALKS THE CURSOR, unconditionally. This used to ask for `max: 200` and read the answer as the whole table -
+// but the server caps a page at 100 (http/pagination.ts#clampPageSize) and api.ts clamps the request to match,
+// silently, so the 200 was a belief rather than a window. This is the CONFIG SNAPSHOT: a key that falls past
+// the page reads as unset and every consumer of it quietly falls back to its default, which is an org policy
+// that is configured and not applied - the failure `getSettingValue`'s own header calls out. The app reads
+// about two dozen keys today, so it is a cliff rather than a present defect, and invisible right up to it. A
+// partial snapshot is worse than a slow one.
+async function fetchAll(): Promise<Map<string, unknown>> {
+  try {
+    const rows: Row[] = [];
+    let pageToken: string | undefined;
+    const seen = new Set<string>();
+    // Same two guards `listAll` uses: a repeated token catches a cursor that is stuck, the page ceiling one
+    // that advances but never ends. Settings is a tiny table, so this is one request in practice.
+    for (let page = 0; page < 20; page++) {
+      const r = await list<Row>("settings", { max: 100, pageToken });
+      rows.push(...(r.results ?? []));
+      pageToken = r.next_page_token;
+      if (!pageToken || seen.has(pageToken)) break;
+      seen.add(pageToken);
+    }
+    // Etags are replaced wholesale alongside the values they describe, never merged into the old set: a
+    // leftover etag for a key this read did not return would be a version claim about a row we have not seen.
+    etags = new Map(rows.flatMap((s) => (s.etag ? [[s.key, s.etag] as [string, string]] : [])));
+    return new Map(rows.map((s) => [s.key, s.value]));
+  } catch {
+    return new Map<string, unknown>(); // unreadable / offline: every key reads as unset
+  }
 }
 
 // How long a config read waits for the change feed's verdict before serving the stored copy anyway. Generous

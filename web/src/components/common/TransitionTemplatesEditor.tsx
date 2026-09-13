@@ -24,7 +24,7 @@ const BG_CHECK_TYPES: BgCheckType[] = ["identity", "address", "education", "empl
 // when a transition is started. Due offsets are days from the anchor (negative = before the start / last day).
 export function TransitionTemplatesEditor() {
   const { toast } = useToast();
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const [templates, setTemplates] = useState<TransitionTemplate[]>(DEFAULT_TRANSITION_TEMPLATES);
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);

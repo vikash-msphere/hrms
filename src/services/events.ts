@@ -5,7 +5,7 @@ import { byIdChunks } from "../lib/dbBatch";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import type { EventRepeat } from "../domain/calendar";
-import { audit } from "../lib/audit";
+import { audit, noteMeta } from "../lib/audit";
 import { invalidArgument, notFound } from "../lib/errors";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -156,7 +156,7 @@ export async function respondToEvent(deps: Deps, actor: AppUser, id: string, res
   const text = note?.trim() || null;
   if (existing) await deps.db.update(schema.eventResponses).set({ response, note: text, updatedAt: new Date() }).where(eq(schema.eventResponses.uuid, existing.uuid));
   else await deps.db.insert(schema.eventResponses).values({ eventId: id, employeeId: actor.employeeId, response, note: text });
-  await audit(deps, actor, "event.respond", "events", id, { response, ...(text ? { note: text } : {}) });
+  await audit(deps, actor, "event.respond", "events", id, { response, ...noteMeta("events", text) });
   const [decorated] = await withResponses(deps, actor, [row]);
   return decorated;
 }

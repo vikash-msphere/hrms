@@ -127,10 +127,12 @@ export default function LeaveCalendar({ me }: { me: Me }) {
     return { from: ymdUtc(cells[0]), to: ymdUtc(cells[cells.length - 1]) };
   }, [view, cursor, cells]);
 
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments");
+  // `all: true`, not `max: 500`: the server caps a page at 100 whatever is asked for, so a busy month's
+  // calendar silently drew only part of itself. The read is already narrowed to the grid's own window.
   const { rows: leaves, state: leavesState, reload: reloadLeaves } = useCollection<LeaveRequest>("leave-requests", {
-    max: 500,
+    all: true,
     params: { from: range.from, to: range.to },
   });
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");

@@ -37,7 +37,7 @@ const CHIP = "inline-flex items-center gap-1 rounded-full border bg-muted/40 px-
 export default function Profile({ me }: { me: Me }) {
   const { emp, state, error, reload } = useEmployee(me.employee_id);
   const { rows: depts } = useCollection<Department>("departments");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   // Controlled so the completeness meter's chips can jump to a section / open its dialog.
   const [tab, setTab] = useState("profile");

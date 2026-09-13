@@ -92,6 +92,42 @@ describe("internal acknowledgement stamps the signature and completes synchronou
   });
 });
 
+describe("acknowledging twice files ONE signed copy", () => {
+  // The idempotency used to be a read with nothing claiming it, so the same person in two tabs (or the
+  // Aadhaar path re-entering its own pending ack) filed two stamped copies of the same policy - each
+  // `locked: true`, so neither could be tidied away - and on the vendor lane bought a second Aadhaar
+  // transaction. `dack_once_idx` is what makes the second caller lose; the service claims the ack before it
+  // stamps anything.
+  it("two concurrent acknowledgements leave one ack row and one copy", async () => {
+    const emp = await seedEmployee({ signatureKey: `sigs/${genId()}` });
+    await deps.docs.put((await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, emp)).limit(1))[0]!.signatureKey!, PNG_1x1, "image/png");
+    const docId = await seedOrgDoc("internal", await makePdf());
+    const actor = actorFor(emp);
+
+    await Promise.allSettled([orgSvc.acknowledge(deps, actor, docId), orgSvc.acknowledge(deps, actor, docId)]);
+
+    const acks = await deps.db.select().from(schema.documentAcknowledgements).where(eq(schema.documentAcknowledgements.documentId, docId));
+    expect(acks).toHaveLength(1);
+    expect(acks[0]!.acknowledgedTime).toBeTruthy();
+    const copies = await deps.db.select().from(schema.personalDocuments).where(eq(schema.personalDocuments.sourceDocId, docId));
+    expect(copies).toHaveLength(1);
+  });
+
+  it("acknowledging again after it completed is a no-op that reports the version", async () => {
+    const emp = await seedEmployee({ signatureKey: `sigs/${genId()}` });
+    await deps.docs.put((await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, emp)).limit(1))[0]!.signatureKey!, PNG_1x1, "image/png");
+    const docId = await seedOrgDoc("internal", await makePdf());
+    const actor = actorFor(emp);
+
+    await orgSvc.acknowledge(deps, actor, docId);
+    const again = await orgSvc.acknowledge(deps, actor, docId);
+
+    expect((again as { ackedVersion: number }).ackedVersion).toBe(1);
+    expect(await deps.db.select().from(schema.documentAcknowledgements).where(eq(schema.documentAcknowledgements.documentId, docId))).toHaveLength(1);
+    expect(await deps.db.select().from(schema.personalDocuments).where(eq(schema.personalDocuments.sourceDocId, docId))).toHaveLength(1);
+  });
+});
+
 describe("cashfree acknowledgement completes on the signed webhook", () => {
   it("a signed Cashfree webhook for the copy flips the linked ack to acknowledged and signs the copy", async () => {
     const emp = await seedEmployee();

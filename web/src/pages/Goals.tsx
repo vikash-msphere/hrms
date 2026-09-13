@@ -129,7 +129,7 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
   const [cycleFilter, setCycleFilter] = useState("all");
   const { rows, state, error, reload } = useCollection<Goal>("goals", { params: cycleFilter === "all" ? undefined : { cycle: cycleFilter } });
   useDeepOpen(openId, rows, openDetail);
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   // Review cycles: a small, flat catalogue used to attach a goal to the cycle whose review will score it, and
   // to name that cycle on the card. Empty for anyone who can't read them, which just hides the field.
   const { rows: reviewCycles } = useCollection<ReviewCycle>("review-cycles");

@@ -344,7 +344,7 @@ export default function Dashboard({ me }: { me: Me }) {
   const readEmployees =
     wantTimeline || wantApprovals || wantBoard ||
     wantRows("headcount") || wantRows("joiners") || wantRows("probation_ending") || forNotClockedIn("headcount");
-  const { rows: employees, state: employeesState } = useCollection<Employee>("employees", { enabled: readEmployees });
+  const { rows: employees, state: employeesState } = useCollection<Employee>("employees", { all: true, enabled: readEmployees });
   // Leave: the timeline's away bands, my-day's next time off, and - for a caller who decides nothing - their
   // own pending count (an approver's card reads the approvals count instead, which costs no rows). Gated on
   // the PERMISSION rather than on `isApprover`, because the approvals count arrives asynchronously and a gate

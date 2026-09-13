@@ -89,7 +89,7 @@ function halfLabel(lr: LeaveRequest): string | null {
 export default function Leaves({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<LeaveRequest>("leave-requests");
   const { rows: types } = useCollection<LeaveType>("leave-types");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: balances } = useCollection<LeaveBalance>("leave-balances");
   const { toast } = useToast();
   const confirm = useConfirm();

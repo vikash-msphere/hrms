@@ -47,7 +47,7 @@ const thisMonth = () => toLocalInput(new Date().toISOString()).slice(0, 7);
 
 export default function Overtime({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<OvertimeRequest>("overtime-requests");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const guardClose = useDiscardGuard();

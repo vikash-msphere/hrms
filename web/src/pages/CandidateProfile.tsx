@@ -84,7 +84,7 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
   // candidate in is as likely as not past the cursor - which read as "nobody referred them".
   const { row: referral } = useResource<Referral>("referrals", candidate?.referral ? idOf(candidate.referral) : null);
   const needNames = !!candidate?.referral || interviews.some((i) => (i.interviewers ?? []).length > 0);
-  const { rows: employees } = useCollection<Employee>("employees", { enabled: needNames });
+  const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: needNames });
   const reqTitle = useMemo(() => {
     const m = new Map(reqs.map((r) => [idOf(r.path), r.title]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Unknown role" : "Unknown role");

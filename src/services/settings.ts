@@ -3,7 +3,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, fieldDiff } from "../lib/audit";
-import { AppError, aborted, isSettingKeyCollision, notFound } from "../lib/errors";
+import { AppError, aborted, invalidArgument, isSettingKeyCollision, notFound } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { paginate } from "../http/pagination";
 import { refSettings, bustRef } from "../lib/refData";
@@ -72,8 +72,29 @@ function settingDiff(before: string, after: string): Record<string, { from: unkn
   return Object.keys(diff).length ? diff : undefined;
 }
 
+/** The most one settings value may serialize to.
+ *
+ *  A ceiling here is not tidiness, it is the read cost of every request in the app: `refSettings`
+ *  (lib/refData.ts) selects the WHOLE settings table - every key, every value - and it is the read behind
+ *  `getSettingValue`, so essentially nothing runs without pulling it (the org's calendar day, the
+ *  serializers' `organization` blob, payroll's five keys). D1 bills rows read by their bytes, so ONE
+ *  oversized value taxes every request in the system until somebody edits it back.
+ *
+ *  The only ceiling before this was the global body limit, `MAX_DOCUMENT_BYTES` = 10 MB
+ *  (middleware/bodyLimit.ts), which is sized for uploading a PDF rather than for a config row - and that file
+ *  says what a limit of that size is: "reject once the buffer exists is not a cap, it is a report".
+ *
+ *  2 MB is generous for the biggest value the app has, `organization`, which carries four logos and a favicon
+ *  INSIDE it as data URLs (the per-image caps are checked in routes/settings.ts#validateOrganization, so the
+ *  form's limits are the app's limits) - and is far under the body limit, so a request that trips this one is
+ *  saying something about the value rather than about the transport. */
+export const MAX_SETTING_BYTES = 2 * 1024 * 1024;
+
 export async function upsertSetting(deps: Deps, actor: AppUser, key: string, value: unknown, ifMatch?: string) {
   const json = JSON.stringify(value ?? {});
+  if (json.length > MAX_SETTING_BYTES) {
+    throw invalidArgument(`this setting is ${Math.round(json.length / 1024)} KB; a settings value may be at most ${Math.round(MAX_SETTING_BYTES / 1024)} KB`);
+  }
   // Read-for-diff goes straight to the row: this is the one path that must see the CURRENT value (a stale
   // snapshot would write a wrong audit diff).
   const existing = (await deps.db.select().from(schema.settings).where(eq(schema.settings.key, key)).limit(1))[0];

@@ -63,7 +63,7 @@ export function RequestLeaveDialog({
   const { rows: balances } = useCollection<LeaveBalance>("leave-balances");
   const { rows: holidays } = useCollection<Holiday>("holidays");
   const { rows: requests } = useCollection<LeaveRequest>("leave-requests");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   // Private by default: without read access the hook returns [] and fires no request, so this only ever
   // sharpens the "who decides this" line for callers who can already see the cover arrangement.
   const { rows: delegations } = useCollection<ApprovalDelegation>("approval-delegations");

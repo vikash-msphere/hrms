@@ -4,6 +4,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Personal contact + emergency info. Stored as an encrypted JSON blob; returned in full to the
 // employee, HR and super_admin (not masked - HR needs to read these). Health data lives here too.
@@ -66,8 +67,9 @@ export async function getPersonalDetails(deps: Deps, _actor: AppUser, employeeId
  * contact - so saving one after opening the other wiped the fields the other one had just written, and the
  * loser only found out by reloading. Merging is also what the route says it does: it is a PATCH.
  */
-export async function setPersonalDetails(deps: Deps, actor: AppUser, employeeId: string, input: PersonalDetails): Promise<PersonalDetails> {
+export async function setPersonalDetails(deps: Deps, actor: AppUser, employeeId: string, input: PersonalDetails, ifMatch?: string): Promise<PersonalDetails> {
   const emp = await loadEmployee(deps, employeeId);
+  checkEtag(emp, ifMatch);
   const next: PersonalDetails = { ...(await read(deps, emp.personalDetailsEnc)) };
   const MAX_LEN = 2000;
   for (const k of PERSONAL_FIELDS) {
@@ -88,7 +90,10 @@ export async function setPersonalDetails(deps: Deps, actor: AppUser, employeeId:
     delete next.same_as_communication;
   }
   const enc = await deps.encryptor.encrypt(JSON.stringify(next));
-  await deps.db.update(schema.employees).set({ personalDetailsEnc: enc, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid));
+  // The merge above fixes two dialogs fighting WITHIN one read; the version in the WHERE is what stops two
+  // reads fighting (services/versionGuard.ts). Both are needed - merging a stale blob still discards whatever
+  // landed after it was read.
+  await updateAtVersion(deps, schema.employees, "employee", emp, { personalDetailsEnc: enc, updatedAt: new Date() });
   // Field names only, never the values (see bankDetails): a home address and a date of birth are the record.
   await audit(deps, actor, "employee.personal_details.update", "employees", emp.uuid, fieldsMeta(next), emp);
   return next;

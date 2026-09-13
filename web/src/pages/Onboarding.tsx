@@ -44,7 +44,7 @@ const STATE_ORDER: Record<Transition["state"], number> = { ACTIVE: 0, COMPLETED:
 export default function Onboarding({ me }: { me: Me }) {
   const { rows: transitions, state, error, reload } = useCollection<Transition>("transitions");
   const { rows: myTasks, reload: reloadTasks } = useCollection<TransitionTask>("transition-tasks");
-  const { rows: employees, state: empState } = useCollection<Employee>("employees");
+  const { rows: employees, state: empState } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const [templates, setTemplates] = useState<TransitionTemplate[]>(DEFAULT_TRANSITION_TEMPLATES);

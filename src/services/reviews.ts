@@ -4,7 +4,7 @@ import { scopeFor, type ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, fieldDiff, stateMeta } from "../lib/audit";
+import { audit, fieldDiff, noteMeta, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { byIdChunks } from "../lib/dbBatch";
@@ -14,6 +14,7 @@ import { documentLetterhead, type LetterheadMedia, type OrgWithDocumentLogos } f
 import { DEFAULT_PERFORMANCE, competenciesForCycle, competencyScore, goalAttainment, type GoalSnapshot, type GoalVerdict, type PerformanceFramework } from "../domain/performance";
 import { renderLetterPdf, type LetterBlock } from "../lib/letterPdf";
 import { formatLongDate } from "../lib/pdfPrimitives";
+import { orgToday, dayStartMs } from "./orgDay";
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 type State = typeof schema.reviews.$inferSelect.state;
@@ -461,7 +462,9 @@ export async function submitManager(
 export async function acknowledgeReview(deps: Deps, actor: AppUser, id: string, comment?: string | null) {
   await loadInState(deps, id, "SHARED");
   const row = await applyState(deps, id, "SHARED", { state: "ACKNOWLEDGED", ackComment: comment?.trim() || null });
-  await audit(deps, actor, "review.acknowledge", "reviews", id, stateMeta("SHARED", "ACKNOWLEDGED", { employee: `employees/${row.employeeId}`, ...(comment?.trim() ? { note: comment.trim() } : {}) }), row);
+  // The comment stays on the review (where the manager and HR read it) and out of the trail: it is what an
+  // employee writes back about their own performance review, which the serializer treats as narrow throughout.
+  await audit(deps, actor, "review.acknowledge", "reviews", id, stateMeta("SHARED", "ACKNOWLEDGED", { employee: `employees/${row.employeeId}`, ...noteMeta("reviews", comment) }), row);
   // A note on the acknowledgement is feedback aimed at the manager - surface it, don't bury it.
   if (comment?.trim()) {
     const reviewerId = await reviewerIdOf(deps, row);
@@ -603,7 +606,10 @@ export async function renderReviewPdf(deps: Deps, _actor: AppUser, id: string, m
   const { bytes } = await renderLetterPdf({
     org: { name: org.name || "", address: org.address, logo: org.logo, legalName: org.legal_name || undefined },
     ...(letterhead ? { letterhead } : {}),
-    date: formatLongDate(new Date()),
+    // The org's calendar day. `formatLongDate` reads with `getUTC*`, so `new Date()` printed yesterday for the
+    // first hours of an IST morning; the two uses above it format STORED date-only columns, where reading in
+    // UTC is correct and stays. See services/orgDay.ts.
+    date: formatLongDate(new Date(dayStartMs(await orgToday(deps)))),
     to: { name: empName, lines: cycle?.name ? [cycle.name] : [] },
     blocks,
   });

@@ -42,7 +42,7 @@ export default function TaxDeclarations({ me, openId }: { me: Me; openId?: strin
   // unlike a render-time read, never corrects itself.
   const FY_OPTIONS = useMemo(() => fyOptions(1), []);
   const { rows, state, error, reload } = useCollection<TaxDeclaration>("tax-declarations");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const { org } = useOrg();

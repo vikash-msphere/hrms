@@ -4,7 +4,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
-import { audit, createdMeta, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta, noteMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { applyScope } from "./listScope";
@@ -554,7 +554,9 @@ export async function addReply(deps: Deps, actor: AppUser, id: string, body?: st
   const row = await getAnnouncement(deps, id);
   assertNotLocked(row);
   await deps.db.insert(schema.announcementReplies).values({ announcementId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
-  await audit(deps, actor, "announcement.reply", "announcements", id, { note: text.length > 140 ? `${text.slice(0, 140)}…` : text }, row);
+  // A reply on the board is read by the whole org, so a snippet in the trail is no wider than the thing it
+  // describes - `announcements` is the one collection opted in for that (lib/audit.ts#SNIPPETABLE_NOTES).
+  await audit(deps, actor, "announcement.reply", "announcements", id, noteMeta("announcements", text), row);
   // Notify the post's author that someone replied (skip replying to your own post).
   if (row.authorEmployeeId && row.authorEmployeeId !== actor.employeeId)
     await notify(deps, { recipient: row.authorEmployeeId, type: "announcement.reply", title: "New reply to your post", body: richExcerpt(text, 120), link: boardPostLink(id), subject: `announcements/${id}`, actorId: actor.employeeId });

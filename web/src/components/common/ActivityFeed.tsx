@@ -284,7 +284,7 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
   /** Narrow to one long-running STORY, by its root record (`applications/<id>`, `transitions/<id>`, ...). */
   caseRoot?: string;
 }) {
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const [rows, setRows] = useState<Activity[] | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [q, setQ] = useState(""); // typed text

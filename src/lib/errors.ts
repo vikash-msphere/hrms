@@ -183,6 +183,17 @@ export function isCompOffDuplicate(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\bcomp_off_credits\.(employee_id|worked_date)\b/i.test(errorChainText(err));
 }
 
+/** This person has already acknowledged this version of this document (`dack_once_idx`).
+ *
+ *  Like the comp-off credit above, this is the EXPECTED answer rather than a race to retry: `:acknowledge`
+ *  claims the ack row before it stamps a PDF, files the signed copy or calls the e-sign vendor, so the loser
+ *  of a two-tab double-submit is supposed to collide here and be told "already acknowledged" instead of
+ *  filing a second locked copy and buying a second Aadhaar transaction. The matcher is narrow for the same
+ *  reason `isCompOffDuplicate` is: the same insert also allocates a `code`, and THAT collision must retry. */
+export function isDocumentAckDuplicate(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\bdocument_acknowledgements\.(document_id|employee_id|version)\b/i.test(errorChainText(err));
+}
+
 /** That person is already rostered on that day (`sa_emp_day_idx`, partial on the live rows).
  *
  *  The service checks for an existing entry before it writes, so reaching here means two rostering calls for

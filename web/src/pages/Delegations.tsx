@@ -29,7 +29,7 @@ const EMPTY = { delegate: "", from_date: todayStr(), to_date: todayStr(), reason
 
 export default function Delegations({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<ApprovalDelegation>(COL);
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const canWrite = usePermission(`${COL}.write`);

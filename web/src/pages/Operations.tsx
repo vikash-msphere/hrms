@@ -62,8 +62,11 @@ const fmtSummary = (s?: Record<string, number>) => (s && Object.keys(s).length ?
 
 export default function Operations({ embedded }: { me?: Me; embedded?: boolean }) {
   const { toast } = useToast();
-  const crons = useCollection<CronRun>("cron-runs", { max: 200 });
-  const jobs = useCollection<Operation>("operations", { max: 200 });
+  // One page each, said honestly. `max: 200` read as "the last 200 runs" and was clamped to 100 by the server
+  // without saying so (api.ts#listPath); these are history feeds where a window is the right answer, so the
+  // number is simply the one that is actually granted.
+  const crons = useCollection<CronRun>("cron-runs", { max: 100 });
+  const jobs = useCollection<Operation>("operations", { max: 100 });
   // A deliberate TRIGGER, not a reference: the factory reads neither list, it just needs a fresh clock each
   // time the data reloads so "next run" is computed against now rather than against page-open. The linter
   // cannot tell that apart from a stale dependency, so it is silenced here with the reason rather than

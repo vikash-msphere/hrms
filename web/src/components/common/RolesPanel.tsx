@@ -30,7 +30,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
   const isAdmin = usePermission("users.write");
   const canManagePerms = usePermission("access-rules.write");
   const { rows, state, error, reload } = useCollection<User>("users");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
 
   const [editing, setEditing] = useState<User | null>(null);

@@ -54,7 +54,7 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
   // `solo` is one suggestion on a page of its own (`#/suggestions/<id>/view`): the board list is not read
   // there at all - the single row is fetched by id below - so a popped-out suggestion costs one read.
   const { rows, setRows, state, error, reload, hasMore, loadMore } = useCollection<Suggestion>("suggestions", { enabled: !solo, max: BOARD_PAGE_SIZE });
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const canSubmit = usePermission("suggestions.write");

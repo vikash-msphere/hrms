@@ -115,7 +115,7 @@ export default function Expenses({ me }: { me: Me }) {
   const { rows: categories } = useCollection<ExpenseCategory>("expense-categories");
   const { rows: vendors } = useCollection<Vendor>("vendors"); // empty for callers without vendors.read (403 isolated)
   const { rows: budgets } = useCollection<ExpenseBudget>("expense-budgets"); // finance-only; empty otherwise
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments");
   const { org } = useOrg();
   const { toast } = useToast();

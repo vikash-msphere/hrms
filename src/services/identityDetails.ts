@@ -6,6 +6,7 @@ import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
 import { getSettingValue } from "./settings";
 import { getAttachmentsFor } from "./attachments";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // A field can optionally carry a supporting document (e.g. a scan of the PAN card): none / allowed / required.
 export type DocMode = "none" | "allowed" | "required";
@@ -99,8 +100,9 @@ export async function getIdentityDetails(deps: Deps, _actor: AppUser, employeeId
   return toView(defs, values, slots);
 }
 
-export async function setIdentityDetails(deps: Deps, actor: AppUser, employeeId: string, input: Record<string, string>) {
+export async function setIdentityDetails(deps: Deps, actor: AppUser, employeeId: string, input: Record<string, string>, ifMatch?: string) {
   const emp = await loadEmployee(deps, employeeId);
+  checkEtag(emp, ifMatch);
   const defs = await getFieldDefs(deps);
   const current = await readValues(deps, emp.identityDetailsEnc);
   const next: Record<string, string> = { ...current };
@@ -123,7 +125,9 @@ export async function setIdentityDetails(deps: Deps, actor: AppUser, employeeId:
   if (missing.length) throw invalidArgument(`required: ${missing.join(", ")}`);
 
   const enc = await deps.encryptor.encrypt(JSON.stringify(next));
-  await deps.db.update(schema.employees).set({ identityDetailsEnc: enc, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid));
+  // Version-guarded: this column is one blob merged over a read, so without it two overlapping edits both
+  // return 200 and the earlier one's change is simply gone (see setBankDetails, and services/versionGuard.ts).
+  await updateAtVersion(deps, schema.employees, "employee", emp, { identityDetailsEnc: enc, updatedAt: new Date() });
   // Field names only - an Aadhaar or passport number must not be copied into the audit table (see bankDetails).
   await audit(deps, actor, "employee.identity_details.update", "employees", emp.uuid, fieldsMeta(next), emp);
   return toView(defs, next, await attachedSlots(deps, emp.uuid));

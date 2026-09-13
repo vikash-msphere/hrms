@@ -67,9 +67,13 @@ function StatusBadge({ s }: { s: string }) {
 
 export default function BackgroundChecks({ me, openId }: { me: Me; openId?: string }) {
   void me;
-  const { rows, state, error, reload } = useCollection<BackgroundCheck>("background-checks", { showDeleted: true });
+  // `all: true`: the clash guard below searches these rows, and on one page it searched the 100 most recent
+  // checks in the WHOLE org - so ordering a second check on somebody whose first is older than that window
+  // showed no warning at all, and the comment on that guard states the cost in money ("two vendor invoices
+  // for one answer"). Advisory is the right call; silently not checking is not.
+  const { rows, state, error, reload } = useCollection<BackgroundCheck>("background-checks", { showDeleted: true, all: true });
   useDeepOpen(openId, rows, openEdit);
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const sd = useSoftDelete("background-checks", "background check", reload);
   const writable = usePermission("background-checks.write");

@@ -4,7 +4,7 @@
 // letter's resolved content was frozen as an R2 sidecar at generation; signing re-renders THAT exact content
 // with the owner's signature image dropped into the placeholder block, replaces the file in place, then stamps
 // the typed-name attestation + signedTime and locks the row.
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -13,6 +13,7 @@ import { notFound, invalidArgument, forbidden, failedPrecondition } from "../lib
 import { renderLetterPdf, type LetterContent } from "../lib/letterPdf";
 import { formatLongDate } from "../lib/pdfPrimitives";
 import { rehydrateLetterhead } from "./letterheads";
+import { orgToday, dayStartMs } from "./orgDay";
 
 export async function signLetter(deps: Deps, actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.personalDocuments).where(eq(schema.personalDocuments.uuid, id)).limit(1))[0];
@@ -39,7 +40,15 @@ export async function signLetter(deps: Deps, actor: AppUser, id: string) {
   // The owner's stored signature image (owner-private; guaranteed present by the guard above).
   const sigBuf = await deps.docs.get(emp.signatureKey);
   const sigBytes = sigBuf ? new Uint8Array(sigBuf) : undefined;
-  const date = formatLongDate(new Date());
+  // The date drawn into the signature block is the ORG's calendar day, not UTC. `formatLongDate` reads its
+  // parts with `getUTC*`, so `new Date()` gave the UTC day of the instant the request arrived - east of UTC
+  // that is YESTERDAY for the first hours of the working day (in IST, anything signed before 05:30). The
+  // document is rendered, written to R2 and LOCKED in this same function, so a wrong date is permanent on the
+  // face of a signed letter: an offer acceptance, a contract, a policy undertaking. `dayStartMs` returns the
+  // org day anchored at UTC midnight, which is exactly what `getUTC*` then reads back. Same fix as the
+  // acknowledgement path (services/documentService.ts); see services/orgDay.ts for why the app is off the UTC
+  // clock. Where `formatLongDate` formats a STORED date-only column, reading it in UTC is correct and stays.
+  const date = formatLongDate(new Date(dayStartMs(await orgToday(deps))));
 
   // Fill every e-signature placeholder block with the signature image + legal name + date.
   for (const b of content.blocks) {
@@ -51,11 +60,15 @@ export async function signLetter(deps: Deps, actor: AppUser, id: string) {
   const { bytes: pdf } = await renderLetterPdf(content);
   await deps.docs.put(row.r2Key, pdf, "application/pdf");
 
+  // Guarded on "still unsigned", so signing is EXACTLY ONCE rather than a read at the top and a write here:
+  // two concurrent signs both passed the `row.signedTime` check and both stamped the row. Same shape as every
+  // other one-time flip in the app - the database decides who won, not the gap between two statements.
   const [updated] = await deps.db
     .update(schema.personalDocuments)
     .set({ sizeBytes: pdf.byteLength, signedTime: new Date(), signatureName: name, locked: true, updatedAt: new Date() })
-    .where(eq(schema.personalDocuments.uuid, id))
+    .where(and(eq(schema.personalDocuments.uuid, id), isNull(schema.personalDocuments.signedTime)))
     .returning();
+  if (!updated) throw invalidArgument("this document is already signed");
   // That it was signed and when, never the attestation name itself: lib/audit strips `signature*` from any
   // meta, and this trail is read more widely than the signed document is.
   await audit(deps, actor, "personal-document.sign", "personal-documents", id, { diff: { signedTime: { from: row.signedTime, to: updated!.signedTime }, locked: { from: row.locked, to: true } } }, updated);

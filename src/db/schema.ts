@@ -155,6 +155,18 @@ export const accessRules = sqliteTable("access_rules", {
   matchCode: text("match_code"), // exact object code for per-object rows (user OR exact role rules), the IN-narrowing key; NULL for scope rules
   level: text("level", { enum: ["read", "write", "admin"] }), // NULL for verb (allow) / deny rules
   effect: text("effect", { enum: ["allow", "deny"] }).notNull(),
+  // WHO OWNS THIS ROW: "acl" = a person authored it (the ACL modal, the permissions panels, the seed);
+  // "ticket-share" = the category/department viewer machinery wrote it (services/ticketShares.ts).
+  //
+  // The share rows are byte-identical to a hand-authored `scope:exact, level:read` user rule, which is the
+  // point on the way in and was the bug on the way out: the revoke matched on (subject, kind, pattern,
+  // effect), so a routine `:assign` or `:route` that dropped somebody from the viewer set deleted the grant an
+  // admin had authored on that same ticket - at WHATEVER level it granted, since the level is not in the
+  // predicate either. softDelete.ts takes the opposite care over the same question and says why: removing a
+  // scope an admin declared "would be destroying a grant, not tidying a dangling one". Nothing in the table
+  // could tell the two apart; this column is that difference, and both the machinery's dedupe and its delete
+  // are scoped to it.
+  source: text("source", { enum: ["acl", "ticket-share"] }).notNull().default("acl"),
   // Row lifecycle, for orgs that want four-eyes on permission changes (settings key `access-approval`).
   // A rule awaiting approval to be ADDED (`pending`) is inert; a rule awaiting approval to be REMOVED
   // (`pending_delete`) keeps enforcing. Fail-safe in both directions - a pending change never applies itself,
@@ -605,7 +617,20 @@ export const documentAcknowledgements = sqliteTable("document_acknowledgements",
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete (admin cleanup)
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ pageIdx: index("document_acknowledgements_page_idx").on(t.createdAt, t.uuid), empIdx: index("dack_emp_idx").on(t.employeeId, t.createdAt, t.uuid), docIdx: index("dack_doc_idx").on(t.documentId) }));
+}, (t) => ({
+  pageIdx: index("document_acknowledgements_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("dack_emp_idx").on(t.employeeId, t.createdAt, t.uuid),
+  docIdx: index("dack_doc_idx").on(t.documentId),
+  // ONE acknowledgement per (document, employee, version). `:acknowledge` used to be a read-then-write with
+  // nothing claiming it, so the same person in two tabs (or the Aadhaar path resuming its own pending ack)
+  // filed TWO stamped copies of the same policy - each `locked: true`, so neither could be tidied away - and
+  // on the vendor lane fired `provider.createRequest` twice, which is a paid transaction and a second signing
+  // link to somebody who agreed to sign once. The service inserts the ack FIRST and treats this index's
+  // rejection as "already acknowledged" (lib/errors.ts#isDocumentAckDuplicate), so the copy and the vendor
+  // call only happen for the caller who won. Partial on the live rows, like `sa_emp_day_idx`: an admin
+  // soft-deleting an ack must leave the person able to sign again.
+  onceIdx: uniqueIndex("dack_once_idx").on(t.documentId, t.employeeId, t.version).where(sql`${t.deleteTime} is null`),
+}));
 
 export const announcements = sqliteTable("announcements", {
   uuid: pk(),

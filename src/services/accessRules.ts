@@ -254,15 +254,21 @@ export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown
     status: (await approvalRequired(deps)) ? ("pending" as const) : ("active" as const),
     requestedBy: actor.uuid,
     expiresAt: r.expiresAt ?? null,
+    source: "acl" as const, // authored by a person here; services/ticketShares.ts owns the "ticket-share" rows
   };
 
   // Dedup at row grain (no new DB index - keep the read query plan untouched): the same (subject, pattern,
   // effect) is a duplicate. Editing a level = delete the old rule then create the new one.
+  //
+  // Scoped to the AUTHORED rows. A ticket share is byte-identical to a `scope:exact, level:read` user rule, so
+  // without `source` in the predicate an automatic share on a ticket would refuse an admin's own grant on it
+  // (and the share's revoke would then take the admin's away) - the two rows are separate things that happen
+  // to spell the same permission.
   const dup = (
     await deps.db
       .select({ id: schema.accessRules.uuid })
       .from(schema.accessRules)
-      .where(and(eq(schema.accessRules.subject, subject), eq(schema.accessRules.subjectKind, r.subjectKind), eq(schema.accessRules.pattern, pattern), eq(schema.accessRules.effect, r.effect)))
+      .where(and(eq(schema.accessRules.subject, subject), eq(schema.accessRules.subjectKind, r.subjectKind), eq(schema.accessRules.pattern, pattern), eq(schema.accessRules.effect, r.effect), eq(schema.accessRules.source, "acl")))
       .limit(1)
   )[0];
   if (dup) throw alreadyExists("an identical access rule already exists");

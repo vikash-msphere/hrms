@@ -58,7 +58,7 @@ const LEGEND: { status: TimeEntryStatus; label: string; swatch: string }[] = [
 
 export default function Timesheets({ me }: { me: Me }) {
   const { rows: projects, state: projectsState } = useCollection<Project>("projects");
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const [submitting, setSubmitting] = useState(false);
