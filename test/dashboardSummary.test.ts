@@ -10,6 +10,8 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import type { ListScope } from "../src/domain/access";
 import { dashboardSummary } from "../src/services/dashboardSummary";
+import { dayStartMs } from "../src/services/orgDay";
+import { localDay, DEFAULT_ATTENDANCE } from "../src/domain/attendance";
 
 // The summary endpoint's contract: every aggregate equals what the caller would have counted from the
 // corresponding list response - same scope binding, same soft-delete filter, same predicate - and a
@@ -42,13 +44,15 @@ const all = (): ListScope => ({ breadth: "all", deptCode: null, ownerId: null, s
 const own = (ownerId: string): ListScope => ({ breadth: "own", deptCode: null, ownerId, seeRestricted: false });
 
 const DAY = 86_400_000;
-const utcToday = () => {
-  const d = new Date();
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-};
+// THE ORG'S CALENDAR DAY, anchored at UTC midnight - the same pair the service derives "today" from
+// (orgToday + dayStartMs), not `new Date()` read in UTC. The seed has no `settings/attendance` row, so the
+// service falls back to DEFAULT_ATTENDANCE's timezone and this has to fall back to the identical one. Reading
+// the UTC day here instead made every leave/joiner/probation assertion below fail for the 5.5 hours a day IST
+// is already into tomorrow - which is exactly the drift services/orgDay.ts exists to remove.
+const orgDayStart = () => new Date(dayStartMs(localDay(Date.now(), DEFAULT_ATTENDANCE.timezone)));
 
 async function seed() {
-  const day = utcToday().getTime();
+  const day = orgDayStart().getTime();
   // A is a recent joiner whose probation ends inside the 30-day window; B joined long ago and their probation
   // date sits outside it. Both drive the directory aggregates.
   await deps.db.insert(schema.employees).values([
@@ -64,7 +68,7 @@ async function seed() {
     { uuid: genId(), code: `${B.code}-t1`, employeeId: B.uuid, subject: "b1", priority: "medium", state: "OPEN" },
   ]);
   // Cards: A one open+blocked, one open due yesterday, one DELIVERED blocked (must not count); B one open blocked.
-  const today = utcToday();
+  const today = orgDayStart();
   const board = genId();
   await deps.db.insert(schema.boards).values({ uuid: board, code: "01-001", name: "Board" });
   await deps.db.insert(schema.cards).values([
@@ -110,7 +114,7 @@ describe("dashboard summary aggregates", () => {
 
   it("counts the directory and today's leave, so the wall needs no page of rows", async () => {
     await seed();
-    const day = utcToday().getTime();
+    const day = orgDayStart().getTime();
     const type = genId();
     await deps.db.insert(schema.leaveTypes).values({ uuid: type, code: "lt-1", name: "Annual" });
     await deps.db.insert(schema.leaveRequests).values([
@@ -131,7 +135,7 @@ describe("dashboard summary aggregates", () => {
 
   it("binds the leave count to an own-breadth scope", async () => {
     await seed();
-    const day = utcToday().getTime();
+    const day = orgDayStart().getTime();
     const type = genId();
     await deps.db.insert(schema.leaveTypes).values({ uuid: type, code: "lt-1", name: "Annual" });
     await deps.db.insert(schema.leaveRequests).values([

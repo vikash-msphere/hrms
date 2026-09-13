@@ -38,7 +38,11 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // The one page that always has every role's own label in hand - hand it to the shared lookup so a rule
   // subject reads as "Finance Lead" rather than `finance_lead` wherever it is rendered next.
   useEffect(() => registerRoleLabels(roles), [roles]);
-  const { rows: users } = useCollection<User>("users");
+  // `all`: these rows are counted, not listed - the "Users" column and the delete confirm both branch on how
+  // many people hold a role. A holder outside a single page counts as zero, so the dialog says "this removes
+  // the role and all its permission rules" about a role in active use, and the server then refuses the delete
+  // the operator was told would work.
+  const { rows: users } = useCollection<User>("users", { all: true });
   const canWrite = usePermission("roles.write");
   const canManagePerms = usePermission("access-rules.write");
   // Copying a whole role's permissions is its own custom method (`access-rules:clone`), grantable apart from

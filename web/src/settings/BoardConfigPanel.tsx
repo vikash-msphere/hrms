@@ -53,7 +53,18 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
   const [busy, setBusy] = useState(false);
 
   const setCol = (i: number, patch: Partial<BoardColumn>) => setCols((cs) => cs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
-  const addCol = () => setCols((cs) => [...cs, { key: `col_${cs.length + 1}`, label: "New column", wipLimit: null, policy: "", commitment: false, delivery: false }]);
+  // A key that is FREE, not one derived from how many columns there happen to be - the same rule ATS stages
+  // took (pages/Settings.tsx `addStage`). `col_${cols.length + 1}` repeats the moment the list has ever
+  // shrunk: add three columns (col_6, col_7, col_8), delete col_7, add another - the length is 7 again, so the
+  // new column is col_8 too, and a card's `column_key` is stored AS this key. The uniquing in `save()` below
+  // then renames whichever of the two comes SECOND in the array, so putting the new column first hands
+  // `col_8` to the empty one and every card stored against it moves there.
+  const addCol = () => setCols((cs) => {
+    const taken = new Set(cs.map((c) => c.key));
+    let n = cs.length + 1;
+    while (taken.has(`col_${n}`)) n++;
+    return [...cs, { key: `col_${n}`, label: "New column", wipLimit: null, policy: "", commitment: false, delivery: false }];
+  });
   const removeCol = (i: number) => setCols((cs) => cs.filter((_, j) => j !== i));
   const moveCol = (i: number, d: -1 | 1) => setCols((cs) => {
     const j = i + d;
@@ -94,10 +105,24 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
     if (!name.trim()) return;
     setBusy(true);
     // Ensure keys are unique slugs (labels drive keys for freshly added columns).
+    //
+    // THE COLUMN THAT ALREADY HAS THE CARDS KEEPS THE KEY. A card's `column_key` is stored as this string, so
+    // renaming a key is what relocates its cards - and a plain first-come walk renames whichever duplicate
+    // comes SECOND in the array, which is array ORDER, not history. Reorder a colliding pair and the repair
+    // hands the incumbent key to the new, empty column and renames the one holding the cards: every card
+    // "moves" to the new column and the original is left empty, with a valid, unique list arriving at the
+    // server so nothing there can catch it. So a key already on the saved board is claimed by its own column
+    // first, and only the others are nudged.
+    const onBoard = new Set(board.columns.map((c) => c.key));
+    const incumbent = new Map<string, number>(); // existing key -> index of the column that already holds it
+    cols.forEach((c, i) => {
+      const k = slug(c.key || c.label);
+      if (onBoard.has(k) && !incumbent.has(k)) incumbent.set(k, i);
+    });
     const seen = new Set<string>();
-    const columns = cols.map((c) => {
+    const columns = cols.map((c, i) => {
       let k = slug(c.key || c.label);
-      while (seen.has(k)) k = `${k}_`;
+      while (seen.has(k) || (incumbent.has(k) && incumbent.get(k) !== i)) k = `${k}_`;
       seen.add(k);
       return { ...c, key: k, wipLimit: c.wipLimit === null || Number.isNaN(c.wipLimit) ? null : Number(c.wipLimit) };
     });

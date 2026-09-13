@@ -5,6 +5,7 @@ import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreview
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { idOf, formatDate, formatMoney, round2 } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { navigate } from "@/router";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { BankFormat, Me, Operation, PayPeriod, PayrollRun, PayrollRunItem } from "@/types";
@@ -74,12 +75,19 @@ function monthDefaults(y: number, m: number) {
 
 // Which month to default to: payroll is usually run for the current month near its end, or for the previous
 // month in the first days of the next one. So early in the month -> last month, otherwise current month.
+// Read off the ORG's day, not a UTC clock: for an IST org between 00:00 and 05:30 on the 11th, `getUTCDate()`
+// still said the 10th and the dialog defaulted to the previous month.
 function defaultMonth(): { y: number; m: number } {
-  const now = new Date();
-  const offset = now.getUTCDate() <= 10 ? -1 : 0; // first ~third of the month -> previous month
-  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + offset, 1));
+  const today = todayStr();
+  const y = Number(today.slice(0, 4));
+  const m = Number(today.slice(5, 7)) - 1;
+  const offset = Number(today.slice(8, 10)) <= 10 ? -1 : 0; // first ~third of the month -> previous month
+  const d = new Date(Date.UTC(y, m + offset, 1));
   return { y: d.getUTCFullYear(), m: d.getUTCMonth() };
 }
+
+/** The org's current calendar month index (0-11) - what `defaultMonth` is compared against. */
+const orgMonthIdx = (): number => Number(todayStr().slice(5, 7)) - 1;
 
 // Does a pay period fall in calendar month (y, m)? Matched on its start date.
 function isMonth(period: PayPeriod, y: number, m: number): boolean {
@@ -198,8 +206,12 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
   // Split drift needs BOTH steps and in this order: re-apply re-solves each employee's basic / Special Allowance
   // from their (unchanged) annual CTC, then the rebuild re-prices the run off the corrected rows. Re-applying
   // alone would leave the run's stored items on the old numbers.
+  // The invariant above is now ENFORCED, not just stated: `reapply` reports whether it succeeded, and a
+  // rebuild over uncorrected splits is worse than no rebuild - it re-prices the run off the exact rows this
+  // button exists to fix and then clears the drift banner over them. The failure toast has already been shown
+  // by `reapply`.
   async function reapplyAndRebuild() {
-    await doReapply();
+    if (!(await doReapply())) return;
     await rebuildReview();
   }
 
@@ -308,7 +320,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
 
   const periodName = useMemo(() => {
     const m = new Map(periods.map((p) => [idOf(p.path), p.display_name]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown period" : "-");
   }, [periods]);
 
   // Periods that already carry a run, so the picker can say so instead of letting the create collide. A second
@@ -452,8 +464,16 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
               <Loader2 className="h-4 w-4 animate-spin" /> Generating payslips…
             </span>
           );
-        // Approval is restricted to super admins (also enforced server-side).
-        const steps = (NEXT[run.state?.toUpperCase()] ?? []).filter((s) => s.verb !== "approve" || isSuperAdmin);
+        // Every step is gated the way the three lines below are: by the ROW's server-computed `can`, applied
+        // centrally in RowActions. `approve` is one of the candidate verbs accessHint computes for this
+        // collection, so `can` already holds it exactly when the caller may invoke it. Asking `me.role ===
+        // "super_admin"` here instead asked about a ROLE rather than a PERMISSION, and cost two things: a
+        // finance director granted `payroll-runs.*.approve` by an access rule still saw no button (the only
+        // remedy being an edit to grants.ts, which is the thing access rules exist to avoid), and because the
+        // filter ran before RowActions - which deliberately bypasses its own filter in access mode so an admin
+        // can manage gates they cannot use - Approve had no manage-access affordance anywhere in the app.
+        // Separation of duties stays where it is enforced: grants.ts and the authz middleware.
+        const steps = NEXT[run.state?.toUpperCase()] ?? [];
         // Bank file: downloadable once the run is approved (or published), one file per configured bank.
         const canBankFile = run.access?.can?.includes("bankFile") && ["APPROVED", "PUBLISHED"].includes(run.state?.toUpperCase() ?? "") && banks.length > 0;
         // Statutory report (PF/ESI/PT/TDS): available once the run is built (review onward).
@@ -611,7 +631,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
           <DialogHeader>
             <DialogTitle>Quick monthly run</DialogTitle>
             <DialogDescription>
-              Pick a month: the pay period is created for you if it doesn't exist, and a draft run opens against it. Defaulted to {defaultMonth().m === new Date().getUTCMonth() ? "this month" : "last month"} based on today.
+              Pick a month: the pay period is created for you if it doesn't exist, and a draft run opens against it. Defaulted to {defaultMonth().m === orgMonthIdx() ? "this month" : "last month"} based on today.
             </DialogDescription>
           </DialogHeader>
           <DialogBody>

@@ -154,13 +154,18 @@ export function useTabActivity(tabs: TabSpec[], deps: unknown[] = []): Record<st
   useEffect(() => {
     const withColl = tabs.filter((t) => t.collection);
     // Baseline any tab we have no reference for, so the first encounter doesn't badge the whole backlog.
+    // REPLACED, not mutated in place - the one convention in this module, since `seen` is what `stagePref` and
+    // `writePrefDeferred` hand around: mutating it made whether a staged change was visible to a pending write
+    // depend on which code path produced it.
     let seeded = false;
+    const baselined = { ...seen };
     for (const t of withColl) {
-      if (seen[t.key] === undefined) {
-        seen[t.key] = Date.now();
+      if (baselined[t.key] === undefined) {
+        baselined[t.key] = Date.now();
         seeded = true;
       }
     }
+    if (seeded) seen = baselined;
     // A baseline is not a cleared badge - there was nothing to clear - so it stays off the wire. The other
     // device baselines its own first visit the same way.
     if (seeded) persist(false);

@@ -8,7 +8,15 @@ import type { MetaEvent } from "./types";
 export type Step = { kind: string; label: string };
 
 // Naive singularizer for a collection token: tickets->ticket, bonuses->bonus, requisitions->requisition.
-const singular = (s: string) => s.replace(/ies$/, "y").replace(/ses$/, "s").replace(/s$/, "");
+//
+// One branch, not three replaces in sequence: chained, the `ses$` rule's output fed straight into the `s$`
+// rule, which ate the `s` it had just produced - so `expenses` became "expen" and `bonuses` became "bonu",
+// both of them real collections (src/domain/collections.ts). A label that is a truncated word is worse than
+// the raw path, because it reads as a different collection.
+const singular = (s: string) =>
+  /ies$/.test(s) ? s.replace(/ies$/, "y")
+  : /ses$/.test(s) ? s.replace(/es$/, "")
+  : s.replace(/s$/, "");
 const isTemplate = (s: string) => /\{\{/.test(s);
 // camelCase verb -> spaced words so humanize can title-case it (enrollDefaultBenefits -> "Enroll Default Benefits").
 const words = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, "$1 $2");

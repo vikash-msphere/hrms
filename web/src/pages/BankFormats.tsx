@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Upload, Save, FileSpreadsheet } from "lucide-react";
 import { get, patch, upload } from "@/api";
+import { describeError, isConflict } from "@/lib/formError";
+import { cn } from "@/lib/utils";
 import { usePermission } from "@/lib/perm";
 import type { BankFormat, BankFormatColumn, PayrollDebitAccount } from "@/types";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -115,10 +117,15 @@ export default function BankFormats({ toast }: { toast: Toast }) {
     })();
   }, [isSuper, reloadKey]);
 
+  // A picked workbook that has not been saved yet. It is the other half of the format - the mapping names
+  // columns IN this file - so it is held here and written by `save`, never by the picker.
+  const [pendingTemplate, setPendingTemplate] = useState<File | null>(null);
+
   // Load the editable drafts whenever the selected bank changes.
   useEffect(() => {
     setDraft(formats[sel] ? { ...blank(), ...formats[sel] } : blank());
     setDebitDraft({ account: "", currency_code: debit[sel]?.currency_code ?? "" });
+    setPendingTemplate(null); // a file picked for one bank is not a file for the next one
   }, [sel, formats, debit]);
 
   const setCol = (i: number, patch: Partial<BankFormatColumn>) =>
@@ -130,6 +137,7 @@ export default function BankFormats({ toast }: { toast: Toast }) {
   const restingDraft = formats[sel] ? { ...blank(), ...formats[sel] } : blank();
   const dirty =
     JSON.stringify(draft) !== JSON.stringify(restingDraft) ||
+    !!pendingTemplate || // a workbook read but not yet stored is an unsaved change like any other
     debitDraft.account.trim() !== "" ||
     debitDraft.currency_code !== (debit[sel]?.currency_code ?? "");
   useUnsavedTracker(dirty, () => save(), busy);
@@ -137,18 +145,18 @@ export default function BankFormats({ toast }: { toast: Toast }) {
   async function onTemplate(file: File) {
     setBusy(true);
     try {
-      const buf = await file.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      // Reject anything that is not really a workbook BEFORE handing bytes to the parser. This is the app's
-      // only parse of a caller-supplied spreadsheet, and it runs on the main thread, so it is kept on a short
-      // leash regardless of which SheetJS build is installed: an .xlsx is a ZIP, so it must open with the
-      // local-file-header magic "PK\x03\x04", and the size cap mirrors the server's MAX_TEMPLATE_BYTES so a
-      // pathological file cannot burn the main thread. Same two checks the server applies in
-      // src/services/bankFormats.ts - done here too because this parse happens before the upload.
-      if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 0x03 || bytes[3] !== 0x04) {
+      // BOTH GUARDS BEFORE THE FILE IS READ. The size cap mirrors the server's MAX_TEMPLATE_BYTES and exists
+      // so a pathological file cannot burn the main thread - which it cannot do if the cap runs after
+      // `file.arrayBuffer()`, because by then the whole thing is in the tab's heap (or the allocation has
+      // already thrown). `File.size` is synchronous, and the magic-byte test needs four bytes, not the file:
+      // an .xlsx is a ZIP, so it must open with the local-file-header magic "PK\x03\x04". Same two checks the
+      // server applies in src/services/bankFormats.ts - done here too because the parse happens before upload.
+      if (file.size > MAX_TEMPLATE_BYTES) throw new Error(`file exceeds the ${MAX_TEMPLATE_BYTES / 1048576} MB limit`);
+      const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+      if (head.length < 4 || head[0] !== 0x50 || head[1] !== 0x4b || head[2] !== 0x03 || head[3] !== 0x04) {
         throw new Error("not an .xlsx file");
       }
-      if (bytes.byteLength > MAX_TEMPLATE_BYTES) throw new Error(`file exceeds the ${MAX_TEMPLATE_BYTES / 1048576} MB limit`);
+      const buf = await file.arrayBuffer();
       // SheetJS is 488 kB and this is the only place on the page that reads a spreadsheet, so it loads here
       // rather than with the panel - the same import() every other xlsx call site in the app uses. As a static
       // import it also made this page the library's sole static owner, which pinned it to its own chunk.
@@ -165,9 +173,17 @@ export default function BankFormats({ toast }: { toast: Toast }) {
       const columns: BankFormatColumn[] = headers
         .map((header, i) => ({ col: i + 1, header, source: guessSource(header) }))
         .filter((c) => c.header.length > 0);
-      const out = await upload<{ r2_key: string; file_name: string }>(`bank-formats/${encodeURIComponent(sel)}`, file, { verb: "uploadTemplate" });
-      setDraft({ columns, header_row: 1, data_start_row: looksLikeInstructions ? 3 : 2, sheet, template_name: out.file_name ?? file.name, r2_key: out.r2_key });
-      toast({ title: "Template imported", description: `${columns.length} columns from "${sheet}". Map each below, then Save.` });
+      // THE BYTES ARE NOT UPLOADED HERE. They used to be, the moment the parse succeeded - and the key they go
+      // to is a pure function of the bank name (services/bankFormats.ts#templateKey), `put` overwrites, and
+      // the exporter reads that key directly rather than the `r2_key` on the format row. So picking a file
+      // replaced the live workbook immediately while its column mapping only landed on Save: abandon the
+      // draft, and the next payroll publish pairs the OLD mapping with the NEW workbook and writes names,
+      // IFSC codes and net amounts under whatever columns the old mapping names, in a file that goes to a bank
+      // for bulk disbursement. Held in state instead, and uploaded inside `save()` immediately before the
+      // mapping - so a discarded draft uploads nothing and a saved one writes both halves in one action.
+      setPendingTemplate(file);
+      setDraft((d) => ({ ...d, columns, header_row: 1, data_start_row: looksLikeInstructions ? 3 : 2, sheet, template_name: file.name }));
+      toast({ title: "Template read", description: `${columns.length} columns from "${sheet}". Map each below, then Save - nothing is stored until you do.` });
     } catch (e) {
       toast({ variant: "destructive", title: "Could not read template", description: String((e as Error).message) });
     } finally {
@@ -175,21 +191,66 @@ export default function BankFormats({ toast }: { toast: Toast }) {
     }
   }
 
+  // Two independent writes (the column mapping, and - for a super - the debit account) under one Save. They are
+  // reported separately, because the first COMMITS before the second runs: a failure on the debit account used
+  // to toast "Could not save" over a format that had just been saved, with `setFormats` already showing it.
   async function save() {
     setBusy(true);
     try {
-      const body = { sheet: draft.sheet, header_row: draft.header_row, data_start_row: draft.data_start_row, columns: draft.columns, template_name: draft.template_name ?? null, r2_key: draft.r2_key ?? null };
-      const saved = await patch<BankFormat>(`bank-formats/${encodeURIComponent(sel)}`, body);
+      // The workbook goes up as part of THIS action, immediately before the mapping it belongs to, so the two
+      // halves of one artefact are written by one press rather than by the file picker and the Save button
+      // independently. A failed upload stops here with nothing written.
+      let uploaded: { r2_key?: string; file_name?: string } | null = null;
+      if (pendingTemplate) {
+        try {
+          uploaded = await upload<{ r2_key: string; file_name: string }>(`bank-formats/${encodeURIComponent(sel)}`, pendingTemplate, { verb: "uploadTemplate" });
+        } catch (e) {
+          toast({ variant: "destructive", title: "Could not upload the template", description: `${describeError(e)} Nothing was saved - the stored template and mapping are unchanged.` });
+          return;
+        }
+      }
+      const body = {
+        sheet: draft.sheet,
+        header_row: draft.header_row,
+        data_start_row: draft.data_start_row,
+        columns: draft.columns,
+        template_name: uploaded?.file_name ?? draft.template_name ?? null,
+        r2_key: uploaded?.r2_key ?? draft.r2_key ?? null,
+      };
+      let saved: BankFormat;
+      try {
+        // Version-guarded: the mapping is written whole, so without `If-Match` one admin's column layout
+        // silently replaces another's. The etag is this BANK's own (the settings row holds every bank), so
+        // editing another bank never conflicts with this one.
+        saved = await patch<BankFormat>(`bank-formats/${encodeURIComponent(sel)}`, body, formats[sel]?.etag);
+      } catch (e) {
+        toast(isConflict(e)
+          ? {
+              variant: "destructive",
+              title: "Somebody else changed this format",
+              description: `Another admin saved the ${sel} column mapping while you had it open. Reload the page to see theirs before reapplying yours.`,
+            }
+          : { variant: "destructive", title: "Could not save the format", description: describeError(e) });
+        return;
+      }
       setFormats((m) => ({ ...m, [sel]: { ...saved, bank: sel } }));
+      setPendingTemplate(null); // it is stored now, and the draft resets to the saved row
       if (isSuper) {
         const body: Record<string, string> = { currency_code: debitDraft.currency_code };
         if (debitDraft.account.trim()) body.debit_account_number = debitDraft.account.trim();
-        const d = await patch<PayrollDebitAccount>(`payroll-debit-accounts/${encodeURIComponent(sel)}`, body);
-        setDebit((m) => ({ ...m, [sel]: { ...d, bank: sel } }));
+        try {
+          const d = await patch<PayrollDebitAccount>(`payroll-debit-accounts/${encodeURIComponent(sel)}`, body);
+          setDebit((m) => ({ ...m, [sel]: { ...d, bank: sel } }));
+        } catch (e) {
+          toast({
+            variant: "destructive",
+            title: `${sel} format saved, debit account not`,
+            description: `${describeError(e)} The column mapping is in force; press Save again to retry the debit account.`,
+          });
+          return;
+        }
       }
       toast({ title: `Saved ${sel} format` });
-    } catch (e) {
-      toast({ variant: "destructive", title: "Could not save", description: String((e as Error).message) });
     } finally {
       setBusy(false);
     }
@@ -228,7 +289,15 @@ export default function BankFormats({ toast }: { toast: Toast }) {
               <FileSpreadsheet className="h-5 w-5 text-primary" />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium">{draft.template_name ?? "No template uploaded"}</p>
-                <p className="text-xs text-muted-foreground">{draft.columns.length ? `${draft.columns.length} columns · sheet "${draft.sheet}"` : "Upload the bank's blank .xlsx to detect its columns."}</p>
+                {/* Says which of the two states this is. The picked file replaces the stored workbook only on
+                    Save, and the reader has to be able to tell "read, not stored yet" from "in force". */}
+                <p className={cn("text-xs", pendingTemplate ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")}>
+                  {pendingTemplate
+                    ? `${draft.columns.length} columns · sheet "${draft.sheet}" · not stored yet - Save to replace the bank's template`
+                    : draft.columns.length
+                      ? `${draft.columns.length} columns · sheet "${draft.sheet}"`
+                      : "Upload the bank's blank .xlsx to detect its columns."}
+                </p>
               </div>
               <AccessAction collection="bank-formats" verb="uploadTemplate" label="Upload template">
                 <label>

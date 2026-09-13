@@ -489,6 +489,20 @@ export async function purgeAll(): Promise<void> {
   });
 }
 
+/**
+ * How many unsaved drafts this device is holding for the current identity.
+ *
+ * `purgeAll` takes the `draft` class with it - a half-written announcement, a review write-up and its ratings
+ * grid, an unsent bulk delivery - and none of that exists on the server. Sign-out is a decision somebody makes
+ * one click from "View my profile", so the menu asks when there is something to lose and stays silent when
+ * there is not. Free: the index is already in memory, so this is a filter over a map, no read and no await.
+ */
+export function draftCount(): number {
+  let n = 0;
+  for (const m of index.values()) if (m.cls === "draft") n++;
+  return n;
+}
+
 /** The classes `purgeCachedData` removes: everything that is a COPY of a server answer. `draft` is absent. */
 const SERVER_DATA_CLASSES: StoreClass[] = ["rows", "faces", "snapshot"];
 
@@ -545,7 +559,21 @@ export async function purgeCachedData(): Promise<void> {
 // key per ticket, per board, per table) gets a rule that keeps it from climbing for the life of the browser
 // profile. Deliberately a data table rather than logic spread across the pages that write these: a new key
 // family is one line here, and a family nobody claims is visible as an omission.
-const LEGACY_KEYS = ["dash.hideAllClear"];
+// Also the un-namespaced ancestors of keys that now carry the caller's identity. They are not merely dead: each
+// holds one person's state under a key the next person on a shared browser reads, which is why they were
+// namespaced. `prefs.unconfirmed` is the sharpest - `adoptUnconfirmed` PATCHed whatever it held onto whoever is
+// signed in now - and `dash.personal` painted the dashboard from it before the server row arrived.
+const LEGACY_KEYS = [
+  "dash.hideAllClear",
+  "prefs.unconfirmed",
+  "dash.personal",
+  "hrms.board.filter",
+  "goals:filter",
+  "boards:last",
+  "hrms.letters.rail",
+  "letterTemplate:last",
+  "push-enroll-dismissed",
+];
 
 /**
  * localStorage families that must not grow without bound, and how many entries of each are worth keeping.

@@ -3,7 +3,7 @@ import { ChevronLeft, ChevronRight, ChevronUp, Cake, PartyPopper, UserPlus, Shie
 import type { Employee, LeaveRequest, LeaveType, Holiday, Celebration, AttendanceSession, Event, Me } from "@/types";
 import { cn, idOf } from "@/lib/utils";
 import { todayStr } from "@/lib/orgDay";
-import { get } from "@/api";
+import { listAllSessionsPaged } from "@/lib/clock";
 import { leaveColor } from "@/lib/leaveColors";
 import { usePermission } from "@/lib/perm";
 import { navigate } from "@/router";
@@ -106,6 +106,9 @@ const STATUS_DOT: Record<DayStatus, string | null> = {
   // Half the day was leave and the other half was never worked - it shows a dot (something is owed) rather
   // than the leave pill, which would read as a day fully spoken for.
   half_day_leave: "bg-yellow-400",
+  // Worked on a day nobody was rostered: worth seeing, and not an accusation - violet, beside the holiday it
+  // usually is.
+  worked_off_day: "bg-violet-400",
   on_leave: null,
   holiday: null,
 };
@@ -119,6 +122,7 @@ const STATUS_LABEL: Record<DayStatus, string> = {
   insufficient: "Too short to count",
   absent: "No log",
   half_day_leave: "Half day leave, half unworked",
+  worked_off_day: "Worked - not a working day",
   on_leave: "On leave",
   holiday: "Holiday",
 };
@@ -136,6 +140,7 @@ const STATUS_TEXT: Record<DayStatus, string> = {
   insufficient: "text-red-600 dark:text-red-400",
   absent: "text-red-600 dark:text-red-400",
   half_day_leave: "text-yellow-600 dark:text-yellow-400",
+  worked_off_day: "text-violet-600 dark:text-violet-400",
   on_leave: "text-brand-neutral-500 dark:text-brand-neutral-400",
   holiday: "text-violet-600 dark:text-violet-400",
 };
@@ -160,18 +165,27 @@ const leaveRange = (s: string, e: string) => {
 // "N days ago".
 const relFromDays = (n: number): string =>
   n === 0 ? "Today" : n === 1 ? "Tomorrow" : n === -1 ? "Yesterday" : n > 0 ? `in ${n} days` : `${-n} days ago`;
-// Relative ETA for a calendar date vs today (both as UTC days, matching the timeline's columns).
-const relDay = (ymd?: string): string => {
-  if (!ymd) return "";
-  const now = new Date();
-  const todayMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  return relFromDays(Math.round((parseYmd(ymd) - todayMs) / DAY_MS));
-};
+// Relative ETA for a calendar date vs the ORG's today - the same clock the grid's columns are anchored on
+// (`todayStr()`), and the same unit (a UTC-midnight calendar day, which is what `parseYmd` produces).
+//
+// It used to read the UTC calendar off `Date.now()`, which for an IST org is still yesterday between 00:00
+// and 05:30 - so every tooltip on the widget was a day out for the first five and a half hours of the day:
+// the attendance dot in the column RINGED AS TODAY said "Tomorrow", leave starting tomorrow read "in 2 days",
+// a probation ending today read "Tomorrow". And the two clocks sat side by side, because the per-column
+// "N away" tooltip already used `todayCol` and was org-anchored.
+const relDay = (ymd?: string): string =>
+  ymd ? relFromDays(Math.round((parseYmd(ymd) - Date.parse(`${todayStr()}T00:00:00Z`)) / DAY_MS)) : "";
 
-// UTC midnight of the Sunday that starts the week containing `ms`.
-function weekStartUtc(ms: number): number {
-  const d = new Date(ms);
-  const u = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+// UTC midnight of the Sunday that starts the week containing the calendar day `ymd`.
+//
+// Takes a DAY, not an instant. It used to take `Date.now()` and read the UTC calendar off it, so for an IST org
+// the week rolled over 5½ hours late: between 00:00 and 05:30 the timeline's "this week" was still last week's
+// window while `todayStr()` - which every other surface uses, including the `min` on the request dialog this
+// timeline opens - had already moved on. The columns are still UTC-anchored days (which is what makes
+// `toISOString().slice(0, 10)` the right way to hand a column to the leave dialog); only the clock that decides
+// WHICH days changed.
+function weekStartUtc(ymd: string): number {
+  const u = Date.parse(`${ymd}T00:00:00Z`);
   return u - new Date(u).getUTCDay() * DAY_MS;
 }
 
@@ -218,18 +232,28 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   const [page, setPage] = useState(0); // 0 = this week + next week (current week on the left); ± pages by 14 days
   const [showPending, setShowPending] = useState(true); // toggle: draw pending (not-yet-approved) leave as dashed pills
   // Start at the beginning of the current week, so the default window is the current week followed by next week.
-  const startMs = useMemo(() => weekStartUtc(Date.now()) + page * DAYS * DAY_MS, [page]);
+  const orgToday = todayStr();
+  const startMs = useMemo(() => weekStartUtc(orgToday) + page * DAYS * DAY_MS, [orgToday, page]);
   const endMs = startMs + DAYS * DAY_MS - 1;
 
   // Attendance sessions for the visible window (re-fetched on page change). Scoped server-side to the caller's
   // attendance visibility, so it stays empty if they can't read attendance.
+  // THE CURSOR IS FOLLOWED, through the helper written for exactly this shape (lib/clock.tsx). A bare `get`
+  // takes the server's default page of 50, most-recent-first, for a window of 14 days x every employee the
+  // caller can see - which two punches a day exhausts at about four people. Everything past the newest 50 was
+  // simply absent from `sessions`, and a past working day with no session, no leave and no holiday classifies
+  // as `absent`: a red "No log" dot against people who did clock in, filling the older half of the timeline
+  // on the Dashboard, and never recoverable by paging back (the refetch truncated the same way).
   const [sessions, setSessions] = useState<AttendanceSession[]>([]);
+  // ...and when even that walk stops on its ten-page ceiling, `absent` is suppressed below rather than
+  // printed: a missing session reads as an accusation, so a gap this widget did not load must not be one.
+  const [sessionsTruncated, setSessionsTruncated] = useState(false);
   useEffect(() => {
     let live = true;
     const q = `attendance?from=${encodeURIComponent(new Date(startMs).toISOString())}&to=${encodeURIComponent(new Date(endMs).toISOString())}`;
-    get<{ results: AttendanceSession[] }>(q)
-      .then((r) => live && setSessions(r.results ?? []))
-      .catch(() => live && setSessions([]));
+    listAllSessionsPaged(q)
+      .then((r) => { if (live) { setSessions(r.sessions); setSessionsTruncated(r.truncated); } })
+      .catch(() => { if (live) { setSessions([]); setSessionsTruncated(false); } });
     return () => { live = false; };
   }, [startMs, endMs, refreshKey]);
 
@@ -253,8 +277,9 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   const colOf = useCallback((ms: number) => Math.floor((ms - startMs) / DAY_MS), [startMs]);
   const inWindow = (ms: number) => ms >= startMs && ms <= endMs;
   const now = new Date();
-  const todayCol = colOf(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const todayYmd = todayStr(); // the ORG's day; the UTC one this replaced disagreed for part of every day
+  const todayYmd = orgToday; // the ORG's day; the UTC one this replaced disagreed for part of every day
+  // Off the same clock as the window's anchor, so the "today" column and the window can't disagree.
+  const todayCol = colOf(Date.parse(`${todayYmd}T00:00:00Z`));
   // Current time as a fraction of the working day (org tz) - places the live "now" line inside today's column.
   const nowFrac = Math.min(1, Math.max(0, (localMinutes(now.toISOString(), schedule.timezone) - shiftStart) / shiftSpan));
 
@@ -379,10 +404,14 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
         }
       }
       const rows = buildAttendanceRows({ fromYmd: empFrom, toYmd, todayYmd, sched: schedule, summaries, holidays: holSet, leaveRanges, workMinutesByDay });
-      out.set(eid, new Map(rows.map((r) => [r.day, r] as const)));
+      // A gap this widget did not load is not an absence. When the session walk stopped on its page ceiling,
+      // the `absent` days are dropped rather than drawn: a blank cell says "nothing to show", the red "No
+      // log" dot says "this person did not come in", and only one of those is knowable here.
+      const shown = sessionsTruncated ? rows.filter((r) => r.status !== "absent") : rows;
+      out.set(eid, new Map(shown.map((r) => [r.day, r] as const)));
     }
     return out;
-  }, [sessions, employees, leavesByEmp, eventsByEmp, holidays, schedule, startMs, endMs, workDays]);
+  }, [sessions, sessionsTruncated, employees, leavesByEmp, eventsByEmp, holidays, schedule, startMs, endMs, workDays]);
 
   // Styled tooltip card for an attendance day: a colored status header, the punch times / hours worked, and
   // late-arrival / early-departure chips (kept even when flexible hours count the day as full).
@@ -636,8 +665,14 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       });
       setDlgOpen(true);
     };
-    window.addEventListener("mouseup", finish);
-    return () => window.removeEventListener("mouseup", finish);
+    // `pointerup` (and `pointercancel`, which is how a touch drag ends when the browser takes the gesture over)
+    // rather than `mouseup`: a touch drag never produces one.
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    return () => {
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+    };
   }, [sel, cols, effRange]);
 
   const colBg = (i: number, d: Date) => {
@@ -911,12 +946,25 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
                       } else if (isSelf) setHover((c) => (c && c.col === i && c.half === h ? c : { col: i, half: h }));
                     };
                     const cell = (
+                      // POINTER events, not mouse. This is the timeline's primary interaction and the timeline
+                      // is a mobile surface by design (`dashboardPrefs.timelineOpen` is described as
+                      // "mobile-only"), but a touch drag fires no `mouseenter` on the cells it passes over, so
+                      // only a tap - a single half-day - ever worked on a phone; dragging a range scrolled the
+                      // page instead. `touch-none` on the selectable cells stops the scroll competing with the
+                      // drag, and the implicit pointer capture touch gives the element that received
+                      // `pointerdown` is released below so moves retarget to the cell under the finger.
                       <div
-                        className={cn("relative h-[72px] select-none border-l", i === 7 && "border-l-2", canSelect ? "cursor-cell" : "cursor-default", colBg(i, d), i === todayCol && "bg-amber-100/60 dark:bg-amber-900/20")}
-                        onMouseDown={canSelect ? (ev) => { ev.preventDefault(); const p = i * 2 + halfAt(ev); setHover(null); setSel({ a: p, b: p }); } : undefined}
-                        onMouseEnter={onMove}
-                        onMouseMove={onMove}
-                        onMouseLeave={() => setHover((c) => (c && c.col === i ? null : c))}
+                        className={cn("relative h-[72px] select-none border-l", i === 7 && "border-l-2", canSelect ? "cursor-cell touch-none" : "cursor-default", colBg(i, d), i === todayCol && "bg-amber-100/60 dark:bg-amber-900/20")}
+                        onPointerDown={canSelect ? (ev) => {
+                          ev.preventDefault();
+                          if (ev.pointerType !== "mouse") ev.currentTarget.releasePointerCapture(ev.pointerId);
+                          const p = i * 2 + halfAt(ev);
+                          setHover(null);
+                          setSel({ a: p, b: p });
+                        } : undefined}
+                        onPointerEnter={onMove}
+                        onPointerMove={onMove}
+                        onPointerLeave={() => setHover((c) => (c && c.col === i ? null : c))}
                       >
                         {selOverlay(i, isSelf, blocked)}
                         {dot && row && (

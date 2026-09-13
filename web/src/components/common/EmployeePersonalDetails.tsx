@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Contact } from "lucide-react";
 import { get, patch } from "@/api";
+import { isConflict } from "@/lib/formError";
 import type { PersonalDetails } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -44,11 +45,22 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
   const set = (patch: Partial<PersonalDetails>) => setForm((f) => ({ ...f, ...patch }));
 
   async function save() {
-    // Save the full record so emergency fields (edited in the emergency modal) are preserved.
-    const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form);
-    setData(updated);
-    toast({ title: "Contact details saved", variant: "success" });
-    onSaved?.();
+    // Save the full record so emergency fields (edited in the emergency modal) are preserved - and send the
+    // version it was read at, because "the full record" is exactly what makes an unversioned write dangerous:
+    // an employee editing their emergency contact on #/profile while HR corrects an address here are two
+    // whole-blob writes racing, and without If-Match the later one silently wins.
+    try {
+      const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form, data?.etag);
+      setData(updated);
+      toast({ title: "Contact details saved", variant: "success" });
+      onSaved?.();
+    } catch (e) {
+      if (isConflict(e)) {
+        await load();
+        throw new Error("Somebody else changed these details while you had them open. They have been reloaded - check them and save again.");
+      }
+      throw e;
+    }
   }
 
   if (denied) return null;

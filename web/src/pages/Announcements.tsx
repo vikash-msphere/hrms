@@ -26,7 +26,7 @@ import { PostComposer, type Kind } from "@/components/common/PostComposer";
 import { FEED_WIDTH, kudosTier } from "@/lib/boardCard";
 import { boardTime, byBoardOrder } from "@/lib/boardOrder";
 import { kudosCardArtUrl } from "@/lib/kudosArt";
-import { readLocalJson, writeLocalJson } from "@/lib/localPref";
+import { readLocalJson, writeLocalJson, userKey } from "@/lib/localPref";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { useMentions } from "@/components/common/MentionPicker";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
@@ -121,7 +121,9 @@ const REPLY_PEEK = 3;
 // Which kind chip the reader last picked, and whose posts they narrowed to, kept per browser so the view they
 // curated survives navigating away. Deliberately only the *stable* selections: "Unread" and "Drafts" empty out
 // as you work, and coming back to an empty list you did not ask for reads as a broken board.
-const FILTER_LS_KEY = "hrms.board.filter";
+// Namespaced to the caller: the saved filter can name an AUTHOR (an employee ref), so under a shared key B's
+// board opened filtered to a colleague A had picked.
+const FILTER_LS_KEY = () => userKey("hrms.board.filter");
 type SavedBoardFilter = { kind?: Kind; author?: string };
 // A post matches free text on anything the reader can see on the card: its title, its body, who wrote it, and
 // (for a kudos) who it was for. The board is one flat feed, so text is the only way to find an old post by hand.
@@ -219,7 +221,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   useDeepOpen(solo ? undefined : openId, source, openView);
   // Feeds the board composer's @-mention picker as well as the author labels - see Tickets.tsx.
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   const { toast } = useToast();
   // Deleting the post a solo page IS leaves nothing to render, so that page goes back to the board.
   const sd = useSoftDelete("announcements", "post", solo ? () => navigate("announcements") : reload);
@@ -271,7 +273,20 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   // old one rather than merging over it: a field that is now empty (an unpinned post's pin_time, a reopened
   // poll's closes_time) is absent from the JSON, so merging would keep the stale value and the change would
   // not show until a refetch.
-  const fold = (updated: Announcement) => setSource((prev) => prev.map((r) => (r.path === updated.path ? updated : r)));
+  //
+  // FOLDED INTO EVERY SOURCE THIS PAGE HOLDS, not just the active one. The board's verbs are mapped to "no
+  // invalidation" precisely because this fold is exact - but that reasoning assumed ONE feed, and there are
+  // three (the board's entry, the `q`-keyed search entry, and `soloRows`, which is plain component state
+  // outside the store). React to a post found by search and the unsearched entry kept the pre-action row;
+  // clearing the search drops the ephemeral `q` entry (`ephemeral()` in resourceStore) and reveals it, so
+  // within its 20 s TTL the reaction was simply gone from the card. A reaction taken on a post's own page
+  // reached no cached entry at all. Writing to all three is one helper and no extra requests.
+  const fold = (updated: Announcement) => {
+    const apply = (prev: Announcement[]) => (prev.some((r) => r.path === updated.path) ? prev.map((r) => (r.path === updated.path ? updated : r)) : prev);
+    setRows(apply);
+    srch.setRows(apply);
+    setSoloRows(apply);
+  };
 
   // Record the caller's read receipt for a post: clear the dot locally, then fire the (idempotent) server call
   // and fold its reserialized row back in (keeps the read-by count honest without refetching the board). A
@@ -416,7 +431,8 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   // What the reader last narrowed the board to. Read once, at mount, so a chip clicked here is not fighting a
   // write from the previous page.
   const [saved] = useState((): SavedBoardFilter => {
-    const raw = readLocalJson<SavedBoardFilter>(FILTER_LS_KEY, {});
+    const key = FILTER_LS_KEY();
+    const raw = key ? readLocalJson<SavedBoardFilter>(key, {}) : {};
     // Anything but a kind this build still knows is dropped, or a stale entry would land the reader on a chip
     // that isn't there and a feed that looks broken.
     return { kind: raw.kind && raw.kind in KIND_LABELS ? raw.kind : undefined, author: raw.author };
@@ -435,7 +451,8 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     const keep: SavedBoardFilter = {};
     if (filter !== "all" && filter !== "unread" && filter !== "drafts") keep.kind = filter;
     if (authorFilter) keep.author = authorFilter;
-    writeLocalJson(FILTER_LS_KEY, keep.kind || keep.author ? keep : null);
+    const key = FILTER_LS_KEY();
+    if (key) writeLocalJson(key, keep.kind || keep.author ? keep : null);
   }, [filter, authorFilter]);
   // The search text and the author filter are applied FIRST, and the chips count what they left - a chip
   // promising six polls that the search has already excluded sends the reader to an empty list.
@@ -583,19 +600,29 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unreadKey]);
 
-  // Most-recognized people this month (top 3 by points; a kudos with no level still counts as 1). Deliberately
-  // off `rows`, not `source`: it is a month rollup, not a result set, and it should not shrink while you type.
+  // Most-recognized people this month (top 3 by points; a kudos with no level still counts as 1).
+  //
+  // OFF ITS OWN READ, not off the feed. Choosing `rows` over `source` stopped the podium shrinking while you
+  // type in the search box and left the real instability in place: `rows` is the FEED WINDOW, twenty posts on
+  // a cold open and another twenty per scroll, so a medalled ranking of named colleagues reordered as the
+  // reader reached the foot of the page - and on a busy board those twenty mixed posts might hold three
+  // kudos. A leaderboard is the one aggregate a window suits least: it is ordinal, it is about people, and the
+  // window is biased towards the newest posts, which is exactly the bias a month rollup must not have.
+  const { rows: kudosRows } = useCollection<Announcement>("announcements", { enabled: !solo, all: true, params: { kind: "kudos" } });
   const leaderboard = useMemo(() => {
     const m = thisMonth();
     const by = new Map<string, number>();
-    for (const a of rows) if (a.kind === "kudos" && a.recipient && (a.create_time ?? "").slice(0, 7) === m) by.set(a.recipient, (by.get(a.recipient) ?? 0) + (a.points || 1));
+    for (const a of kudosRows) if (a.recipient && (a.create_time ?? "").slice(0, 7) === m) by.set(a.recipient, (by.get(a.recipient) ?? 0) + (a.points || 1));
     return [...by.entries()].map(([e, n]) => ({ employee: e, count: n })).sort((a, b) => b.count - a.count).slice(0, 3);
-  }, [rows]);
+  }, [kudosRows]);
 
   // The two shapes behind the podium: who is being recognized (six months, so a good month does not read as
-  // a reputation) and how often recognition happens at all. Off `rows`, like the leaderboard.
+  // a reputation) and how often recognition happens at all. Off the same kudos read as the leaderboard - on
+  // the feed window the twelve-month chart answered its own "a culture, or a campaign?" with "a campaign" for
+  // any board busier than twenty posts a month, because `monthlyTotals` pads the months it cannot see with
+  // zeros and absence then looks like data.
   const kudosCharts = useMemo(() => {
-    const kudos = rows.filter((a) => a.kind === "kudos" && (a.create_time ?? ""));
+    const kudos = kudosRows.filter((a) => a.create_time ?? "");
     const sixMonthsAgo = new Date(Date.now() - 182 * 86_400_000).toISOString().slice(0, 10);
     const recent = kudos.filter((a) => (a.create_time ?? "") >= sixMonthsAgo && a.recipient);
     return {
@@ -603,7 +630,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
       people: topSlices(recent, (a) => empName(a.recipient), (a) => a.points || 1, 8),
       months: monthlyTotals(kudos.map((a) => ({ date: (a.create_time ?? "").slice(0, 10), value: 1 })), 12, todayStr()),
     };
-  }, [rows, empName]);
+  }, [kudosRows, empName]);
 
   // What a fresh composer opens on when nobody said: HR defaults to an announcement (they can switch to a post);
   // a plain poster posts; kudos-only -> kudos.

@@ -6,7 +6,7 @@ import { usePermission } from "@/lib/perm";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 import { idOf, cn, tenureLabel } from "@/lib/utils";
-import { todayStr } from "@/lib/orgDay";
+import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
 import { leaveColor } from "@/lib/leaveColors";
 import { readLocal, writeLocal } from "@/lib/localPref";
 import { navigate } from "@/router";
@@ -36,7 +36,11 @@ const ZOOMS = [0.5, 0.65, 0.8, 1, 1.25];
 // last 30 days, or a future start already on the books. Deleted rows never badge.
 function joinBadge(e: Employee): "New" | "Joining" | null {
   if (!e.start_date || e.delete_time) return null;
-  const days = (Date.now() - new Date(e.start_date + "T00:00:00").getTime()) / 86400000;
+  // A calendar-day question, answered in day strings on the ORG's clock (lib/orgDay#daysBetweenYmd). Turning
+  // a date-only value into an instant at the VIEWER's midnight and differencing it against `Date.now()` is
+  // wrong for part of every day and by a different amount per viewer - which the Directory's own `isJoiningSoon`
+  // avoids by comparing day strings.
+  const days = daysBetweenYmd(e.start_date, todayStr());
   if (days < 0) return "Joining";
   return days <= 30 ? "New" : null;
 }
@@ -48,7 +52,7 @@ function JoinPill({ label }: { label: string }) {
 // `focusId` deep-links straight to one person's subtree (the directory's "view in org chart").
 export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focusId?: string }) {
   const { rows: employees, state: empState, error: empErr, reload: reloadEmp } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments, state: deptState, reload: reloadDept } = useCollection<Department>("departments");
+  const { rows: departments, state: deptState, reload: reloadDept } = useCollection<Department>("departments", { all: true });
   const confirm = useConfirm();
   const { toast } = useToast();
 
@@ -95,7 +99,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
   // hundred most recently created requests and silently left everyone else unmarked.
   const leaveDay = todayStr();
   const { rows: leaves, state: leaveState } = useCollection<LeaveRequest>("leave-requests", { enabled: showLeave, all: true, params: { from: leaveDay, to: leaveDay } });
-  const { rows: reqs, state: reqState } = useCollection<JobRequisition>("job-requisitions", { enabled: showVacancies });
+  const { rows: reqs, state: reqState } = useCollection<JobRequisition>("job-requisitions", { enabled: showVacancies, all: true });
 
   const canEditPeople = usePermission("employees.write");
   const canEditDepts = usePermission("departments.write");

@@ -84,11 +84,11 @@ function BonusCell({ r, money }: { r: Referral; money: (n?: number) => string })
 export default function Referrals({ me, openId }: { me: Me; openId?: string }) {
   const { rows, state, error, reload } = useCollection<Referral>("referrals");
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   // Only loads for callers who can read candidates (HR/recruiters); others get an empty list, which is fine -
   // it's only used to stop "To pipeline" creating the same candidate twice, and to mark the referrals that
   // already became one. Both need a referral on screen first, so an empty board reads nothing.
-  const { rows: candidates, reload: reloadCandidates } = useCollection<Candidate>("candidates", { enabled: rows.length > 0 });
+  const { rows: candidates, reload: reloadCandidates } = useCollection<Candidate>("candidates", { enabled: rows.length > 0, all: true });
   const inPipeline = useMemo(() => new Map(candidates.filter((c) => c.referral).map((c) => [idOf(c.referral!), idOf(c.path)])), [candidates]);
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -346,7 +346,7 @@ function ReferralDialog({ referral, referrals, candidates, employees, department
 
   // Both fetched with the dialog rather than the page: a referrer opens this once, and the page itself has no
   // use for either. An employee who can't read requisitions simply gets no role chips.
-  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions");
+  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { all: true });
   const [cfg, setCfg] = useState<ReferralsConfig>(DEFAULT_REFERRALS_CONFIG);
   useEffect(() => {
     getSetting<Partial<ReferralsConfig>>("referrals")
@@ -430,8 +430,20 @@ function ReferralDialog({ referral, referrals, candidates, employees, department
       const row = await create<Referral>("referrals", base);
       path = row.path;
     }
-    if (file) await upload(`referrals/${idOf(path)}`, file);
-    toast({ title: editing ? "Referral updated" : "Referral submitted 🎉", variant: "success" });
+    // The record exists (or the edit is committed) by here, so the CV is a follow-up. A throw used to reach
+    // WriteDialog as an in-form error over a form that still held everything, and pressing Submit again created
+    // a second referral for the same candidate.
+    let attached = true;
+    if (file) {
+      try {
+        await upload(`referrals/${idOf(path)}`, file);
+      } catch {
+        attached = false;
+      }
+    }
+    toast(attached
+      ? { title: editing ? "Referral updated" : "Referral submitted 🎉", variant: "success" }
+      : { title: editing ? "Saved, but the CV didn't attach" : "Referral submitted, but the CV didn't attach", description: "It's on the referrals list - use its attach button to add the CV.", variant: "destructive" });
     onSaved();
   }
 

@@ -54,16 +54,23 @@ export function PostCardBody({
   bodyPlaceholder?: string;
 }) {
   const [aspect, setAspect] = useState(1.4);
+  // THERE IS A PICTURE, not merely a URL. Everything below used to key off `artUrl` being truthy, so a
+  // picture that would not load still reserved its height, still floated the words around a box that drew
+  // nothing, and in the middle position still split the body into two columns with an empty gutter between
+  // them - a card whose text has been broken in half around nothing. A card with a broken picture should lay
+  // out as a card with no picture.
+  const [artBroken, setArtBroken] = useState(false);
+  const hasArt = !!artUrl && !artBroken;
   const text = body || bodyPlaceholder;
   const at = stickerLayout ?? POST_STICKER_LAYOUT;
   const wrap = at.wrap ?? DEFAULT_WRAP;
-  const floated = !!artUrl && isWrapped(wrap); // has to precede the line boxes it displaces
+  const floated = hasArt && isWrapped(wrap); // has to precede the line boxes it displaces
   // A band goes BETWEEN two paragraphs, so RichText places it rather than this wrapper - that is what gives it
   // words above as well as below, and lets it move through the body without pushing it down.
-  const banded = !!artUrl && wrap === "top-bottom";
-  const beside = !!artUrl && wrap === "inline"; // its own column next to them
+  const banded = hasArt && wrap === "top-bottom";
+  const beside = hasArt && wrap === "inline"; // its own column next to them
   // Words down both sides means splitting the body in two with the picture between - see the note in CardSticker.
-  const twoColumn = !!artUrl && needsColumns(stickerLayout, POST_STICKER_LAYOUT);
+  const twoColumn = hasArt && needsColumns(stickerLayout, POST_STICKER_LAYOUT);
 
   const art = artUrl ? (
     <PlacedElement
@@ -74,7 +81,7 @@ export function PostCardBody({
       label="sticker"
       artUrl={artUrl}
     >
-      <StickerImage url={artUrl} onAspect={setAspect} />
+      <StickerImage url={artUrl} onAspect={setAspect} onBroken={setArtBroken} />
     </PlacedElement>
   ) : null;
 
@@ -89,7 +96,7 @@ export function PostCardBody({
 
   return (
     // Room for a sticker floating clear of the text: its height is (size / aspect) of the card's width.
-    <CardCanvas reserve={artUrl ? reserveFor(stickerLayout, POST_STICKER_LAYOUT, aspect) || undefined : undefined}>
+    <CardCanvas reserve={hasArt ? reserveFor(stickerLayout, POST_STICKER_LAYOUT, aspect) || undefined : undefined}>
       {!wrapAll && heading}
       {/* A picture in its own column rides level with the words rather than at the top of them - the same
           default as everything else on a card (see DEFAULT_VALIGN). */}

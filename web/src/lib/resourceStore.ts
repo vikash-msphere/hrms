@@ -588,6 +588,11 @@ export function loadMoreRows(collection: string, opts: ListOpts): Promise<void> 
       const { results, ...meta } = resp as { results?: unknown[] } & Record<string, unknown>;
       const rows = [...e.snap.rows, ...(results ?? [])];
       setSnap(e, { rows, state: "ready", error: null, meta });
+      // Stored, like the pages a first fetch brings back. Without this the tab that did the scrolling reloaded
+      // from one page while a sibling tab that only WATCHED had the whole walk on disk - the TOPIC_ROWS
+      // subscriber below writes what it receives, so the reader who paid for the pages was the one who lost
+      // them.
+      writeDisk(e);
       // Carries THIS entry's validator, unchanged: a follow-on page does not mint one (the etag describes the
       // first page, which is still what a revalidation asks about). Sending the message without it set the
       // sibling's etag to undefined, so the sibling then re-read a whole page where this tab spends one

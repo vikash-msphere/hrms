@@ -10,6 +10,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { useIntent } from "@/lib/intent";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field, FieldRow } from "@/components/common/Field";
 import { ActivitySection } from "@/components/common/ActivitySection";
@@ -62,9 +63,9 @@ const STATUS_ORDER: Record<string, number> = { open: 0, draft: 1, on_hold: 2, fi
 export default function Requisitions({ me, openId }: { me: Me; openId?: string }) {
   const { rows, state, error, reload } = useCollection<JobRequisition>("job-requisitions");
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   // Applications exist to put a pipeline count on each requisition, so no requisitions means nothing to count.
-  const { rows: apps } = useCollection<Application>("applications", { enabled: rows.length > 0 });
+  const { rows: apps } = useCollection<Application>("applications", { enabled: rows.length > 0, all: true });
   // The band a role is budgeted at. It is what an auto-drafted offer is priced from, so the picker lives on the
   // requisition rather than being re-keyed into every offer.
   const { rows: payGrades } = useCollection<PayGrade>("pay-grades");
@@ -151,6 +152,9 @@ export default function Requisitions({ me, openId }: { me: Me; openId?: string }
   return (
     <div>
       <PageHeader title="Jobs" description="Open roles you're hiring for." actions={<>{newBtn}<PageSettings me={me} host="job-requisitions" /></>} />
+
+      {/* The pipeline count on each role is counted off `applications`, so a short read there understates it. */}
+      <TruncationNotice collection={["job-requisitions", "applications"]} what="roles" className="mb-3" />
 
       <DataState state={state} error={error} onRetry={reload}>
         {items.length > 0 && (

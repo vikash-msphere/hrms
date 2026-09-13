@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarClock, Check, ChevronLeft, ChevronRight, Plus, Trash2 } from "lucide-react";
 import { getAllPages, create, patch, remove } from "@/api";
 import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
+import { runSequential, batchSummary } from "@/lib/batchRun";
 import { useClock } from "@/lib/clock";
 import { usePermission } from "@/lib/perm";
 import { cn, idOf } from "@/lib/utils";
@@ -11,6 +12,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { AccessScope } from "@/components/access/AccessScope";
 import { EmptyState } from "@/components/common/EmptyState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { Field } from "@/components/common/Field";
 import { FormError } from "@/components/common/FormError";
 import { useDiscardGuard } from "@/hooks/useDiscardGuard";
@@ -35,13 +37,15 @@ const ROSTER_ROW_CAP = 2000;
 const dayNum = (s: string) => new Date(s + "T00:00:00").toLocaleDateString(undefined, { day: "numeric", month: "short" });
 
 export default function Schedule({ me }: { me: Me }) {
-  const { rows: shifts, state: shiftsState, reload: reloadShifts } = useCollection<Shift>("shifts");
+  // Complete for the same reason as employees below: `shiftById` labels every roster cell, and a shift past
+  // the first page renders as the literal word "Shift" on every day it is rostered on.
+  const { rows: shifts, state: shiftsState, reload: reloadShifts } = useCollection<Shift>("shifts", { all: true });
   // COMPLETE, not the first page: the grid is one row per person and `canManage` sees everyone, so a windowed
   // read means the hundred-and-first employee has no row at all and cannot be rostered from this page.
   const { rows: employees, state: employeesState } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments, state: departmentsState } = useCollection<Department>("departments");
+  const { rows: departments, state: departmentsState } = useCollection<Department>("departments", { all: true });
   // Holidays are read so the roster can say when a day it is about to fill is a closure day.
-  const { rows: holidays } = useCollection<Holiday>("holidays");
+  const { rows: holidays } = useCollection<Holiday>("holidays", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   // The roster has its own error handling; these three feed the filters/pickers. Surface a lookup failure so
@@ -214,7 +218,10 @@ export default function Schedule({ me }: { me: Me }) {
 
       {/* The two ways this grid can still be a window: more roster entries in the week than the cursor was
           followed for, or more people than the employee walk loaded. Either one means a blank cell is not
-          evidence that nobody is on - which is the one thing a scheduler reads this grid for. */}
+          evidence that nobody is on - which is the one thing a scheduler reads this grid for. The shift and
+          holiday catalogues are separately admitted below: those are lookups, so a short read there mislabels
+          a cell rather than emptying one. */}
+      <TruncationNotice collection={["shifts", "holidays"]} what="shifts and holidays" className="mb-3" />
       {(rosterTruncated || employeesTruncated) && (
         <p className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-muted-foreground">
           This week has more entries than the roster loads at once. An empty cell may not mean nobody is rostered - narrow by department or shift to be sure.
@@ -329,17 +336,33 @@ export default function Schedule({ me }: { me: Me }) {
           onSave={async (shiftRef, note, dates) => {
             // One dialog can cover several days of the visible week ("same shift Mon-Fri"), so each target
             // day is patched when it already has an assignment and created when it doesn't.
-            for (const d of dates) {
-              const at = cellFor(editing.employee, d);
-              // An emptied note is `""`, never `null`: a body carries VALUES, and every service reads the
-              // empty string as "clear it". `null` fails contract validation at the Prism proxy the dev
-              // server goes through - a 422 the worker never sees, so spreading a shift across the week did
-              // nothing at all there. See the "No nulls on the wire" note in web/src/api.ts.
-              if (at) await patch(`shift-assignments/${idOf(at.path)}`, { shift: shiftRef, note: note || "" }, at.etag);
-              else await create("shift-assignments", { employee: editing.employee, shift: shiftRef, date: d, note: note || undefined });
+            //
+            // WALKED, NOT A BARE LOOP, and the grid is reloaded whatever happens. Thrown out of the middle,
+            // the days before the failure were written and the days after were not, `load()` sat on the
+            // success path so `cellFor` still reported Monday empty - and the retry the open dialog invites
+            // then called `create` for a day that now has a row, which `shift_assignments`' partial unique
+            // index on (employee, date) refuses. So Save failed on MONDAY, a day the scheduler believed they
+            // had just failed to book, telling them to change an entry the un-reloaded grid does not show.
+            const res = await runSequential(
+              dates,
+              (d) => d,
+              async (d) => {
+                const at = cellFor(editing.employee, d);
+                // An emptied note is `""`, never `null`: a body carries VALUES, and every service reads the
+                // empty string as "clear it". `null` fails contract validation at the Prism proxy the dev
+                // server goes through - a 422 the worker never sees, so spreading a shift across the week did
+                // nothing at all there. See the "No nulls on the wire" note in web/src/api.ts.
+                if (at) await patch(`shift-assignments/${idOf(at.path)}`, { shift: shiftRef, note: note || "" }, at.etag);
+                else await create("shift-assignments", { employee: editing.employee, shift: shiftRef, date: d, note: note || undefined });
+              },
+            );
+            await load(); // whatever happened, the grid must show it - a retry then patches what exists
+            if (res.failures.length) {
+              // Thrown: the dialog stays open with the reason pinned, now naming the days it could not do.
+              throw new Error(`${batchSummary(res, "day")} Not done: ${res.failures.map((f) => `${f.label} (${f.message})`).join("; ")}`);
             }
             toast({ title: dates.length > 1 ? `${dates.length} days scheduled` : editing.existing ? "Shift updated" : "Shift assigned", variant: "success" });
-            setEditing(null); void load();
+            setEditing(null);
           }}
           onRemove={editing.existing ? async () => {
             const ok = await confirm({
@@ -415,6 +438,11 @@ function AssignDialog({ employeeName, date, existing, shifts, weekDays, workDays
   const offDays = dates.filter((d) => !!holidayOn(d) || !workDays.includes(weekdayOf(d)));
   const close = () => guardClose(dirty, onClose)(false);
   const save = async () => {
+    // The button's whole condition, checked here rather than restated on the Enter path. `dates.length === 0`
+    // is reachable (toggleDay can deselect the anchor day), and on the Enter path it was missing: `onSave`
+    // then ran `runSequential` over an empty list, wrote nothing, closed the dialog and toasted "Shift
+    // assigned" - a scheduler told a shift was rostered when no assignment was created.
+    if (saving || removing || !shift || dates.length === 0) return;
     setSaving(true); setError(null);
     try { await onSave(shift, note.trim(), dates); }
     catch (e) { setError((e as Error).message); }
@@ -431,7 +459,7 @@ function AssignDialog({ employeeName, date, existing, shifts, weekDays, workDays
   };
   return (
     <Dialog open onOpenChange={(o) => { if (!o && !busy) close(); }}>
-      <DialogContent scrollBody onEnterSubmit={() => { if (!busy && shift) void save(); }}>
+      <DialogContent scrollBody onEnterSubmit={() => void save()}>
         <DialogHeader>
           <DialogTitle>{existing ? "Edit shift" : "Assign shift"}</DialogTitle>
           <DialogDescription asChild>

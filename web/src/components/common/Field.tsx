@@ -68,19 +68,39 @@ function labelable(child: React.ReactNode): child is React.ReactElement<{ id?: s
   return !!name && LABELABLE.has(name);
 }
 
-function useLabelledControl(children: React.ReactNode, htmlFor?: string): [React.ReactNode, string | undefined] {
+/**
+ * Bind the label - and the error or hint - to the field's control.
+ *
+ * `aria` is the second half of the job the id half was already doing. The label was wired correctly and the
+ * MESSAGE was not: the control carried no `aria-describedby` pointing at the paragraph below it and no
+ * `aria-invalid` when one was an error, so a sighted reader saw a red border and a sentence while a
+ * screen-reader user tabbing back into the field was told the label and nothing else. `role="alert"` announces
+ * a message once when it first appears and never again, which is not the same thing.
+ */
+function useLabelledControl(
+  children: React.ReactNode,
+  htmlFor: string | undefined,
+  aria: { describedBy?: string; invalid?: boolean },
+): [React.ReactNode, string | undefined] {
   const generated = React.useId();
-  if (htmlFor) return [children, htmlFor]; // the caller wired it up itself
   // The FIRST labelable child, not "the only child". A field very often holds more than one thing - an input
   // plus its datalist, a stepper either side of it, a row of quick-set chips under it - and requiring a lone
   // child meant every one of those fields had a label that named nothing, silently. The first labelable
   // child is the field's control by construction: the extras are its helpers, and they come after it.
   const kids = React.Children.toArray(children);
   const control = kids.find(labelable);
+  const extra: Record<string, unknown> = {};
+  if (aria.describedBy) extra["aria-describedby"] = aria.describedBy;
+  if (aria.invalid) extra["aria-invalid"] = true;
+  const withProps = (props: Record<string, unknown>) =>
+    kids.map((k) => (k === control ? React.cloneElement(control as React.ReactElement, props) : k));
+
+  // The caller wired the id up itself - but it still owns no description, so the aria props are applied here.
+  if (htmlFor) return [control && Object.keys(extra).length ? withProps(extra) : children, htmlFor];
   if (!control) return [children, undefined];
-  const existing = control.props.id;
-  if (existing) return [children, existing]; // the control already has an identity; name that one
-  return [kids.map((k) => (k === control ? React.cloneElement(control, { id: generated }) : k)), generated];
+  const existing = control.props.id as string | undefined;
+  if (existing) return [Object.keys(extra).length ? withProps(extra) : children, existing];
+  return [withProps({ id: generated, ...extra }), generated];
 }
 
 export function Field({
@@ -132,7 +152,7 @@ export function Field({
   // that the field only takes its natural height and the control inside it never fills.
   const armedAll = React.useContext(ArmCtx);
   const [blurred, setBlurred] = React.useState(false);
-  const [control, controlId] = useLabelledControl(children, htmlFor);
+  const messageId = React.useId();
   // Re-arming on every submit attempt is what makes a second failed Save re-surface the same messages.
   const armed = eager || blurred || armedAll > 0;
   // The server's own verdict on this field, from the last failed submit. It wins over the local rule: the local
@@ -144,6 +164,12 @@ export function Field({
   const serverErrors = React.useContext(FieldErrorCtx);
   const fromServer = field ? serverErrors[field] : undefined;
   const shown = fromServer ?? (armed ? error : undefined);
+  // Whichever paragraph is actually rendered below is the one the control describes; neither means no
+  // `aria-describedby` at all, rather than one pointing at nothing.
+  const [control, controlId] = useLabelledControl(children, htmlFor, {
+    describedBy: shown || hint ? messageId : undefined,
+    invalid: !!shown,
+  });
   return (
     <div
       className={cn("space-y-1.5", grow && "flex min-h-0 flex-1 flex-col", className)}
@@ -163,11 +189,11 @@ export function Field({
         {control}
       </div>
       {shown ? (
-        <p role="alert" className="text-xs font-medium text-destructive">{shown}</p>
+        <p id={messageId} role="alert" className="text-xs font-medium text-destructive">{shown}</p>
       ) : hint ? (
         // data-sentry-unmask: a hint is copy we wrote, never the reader's data, and masking it left the
         // control it explains standing on its own inside a masked panel.
-        <p data-sentry-unmask className="text-xs text-muted-foreground">{hint}</p>
+        <p id={messageId} data-sentry-unmask className="text-xs text-muted-foreground">{hint}</p>
       ) : null}
     </div>
   );

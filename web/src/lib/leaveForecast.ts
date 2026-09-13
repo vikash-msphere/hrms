@@ -1,6 +1,7 @@
 import { computeAccrual, ymOf, type AccrualFrequency } from "../../../src/domain/leave";
 import { splitCarryForward } from "../../../src/domain/carryForward";
 import type { Employee, LeaveBalance, LeaveType } from "@/types";
+import { todayStr } from "@/lib/orgDay";
 
 // What a balance card can promise about the future: the next credit, where the balance lands by 31 Dec, and
 // how much of that never survives the year end. The arithmetic is the SERVER'S (src/domain/leave.ts accrual,
@@ -23,6 +24,15 @@ export type BalanceForecast = {
 
 const ymd = (d: Date) => d.toISOString().slice(0, 10);
 
+// "Now", as UTC midnight of the ORG's calendar day.
+//
+// Every reader below takes its calendar parts off `now` with `getUTC*`, which made the whole module run on the
+// UTC day - so on 1 January, before the org's offset from UTC had elapsed, the forecast projected to the
+// PREVIOUS 31 December and the year's accrual walk covered the wrong year. Anchoring the default at the org's
+// day keeps all of that arithmetic exactly as it is (it is deliberately UTC-anchored, matching how date-only
+// values are stored across the schema) while making the DAY it starts from the one the rest of the app means.
+const orgNow = () => new Date(`${todayStr()}T00:00:00Z`);
+
 // The next date the accrual cron would credit this type: the 1st of next month, or - for semi-monthly - the
 // next 1st/16th boundary.
 function nextCreditDate(now: Date, frequency: AccrualFrequency): string {
@@ -36,7 +46,7 @@ function nextCreditDate(now: Date, frequency: AccrualFrequency): string {
 export function accrualEntriesThisYear(
   type: LeaveType | undefined,
   employee: Employee | undefined,
-  now = new Date(),
+  now = orgNow(),
 ): { on: string; days: number; label: string }[] {
   const annual = type?.accrual_days_per_year ?? 0;
   if (!annual) return [];
@@ -78,7 +88,7 @@ export function forecastBalance(
   type: LeaveType | undefined,
   employee: Employee | undefined,
   caps: CarryForwardMode,
-  now = new Date(),
+  now = orgNow(),
 ): BalanceForecast | null {
   if (!type) return null;
   const annual = type.accrual_days_per_year ?? 0;

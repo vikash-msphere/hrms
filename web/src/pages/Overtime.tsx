@@ -4,6 +4,7 @@ import { create, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useClock, listAllSessions } from "@/lib/clock";
 import { hhmmToMin, localDay, localMinutes, zonedInstant } from "@/lib/attendance";
+import { orgDayOf, orgTimezone, thisMonthStr, todayStr } from "@/lib/orgDay";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useDiscardGuard } from "@/hooks/useDiscardGuard";
@@ -36,14 +37,25 @@ import { confirmDecision } from "@/lib/confirmDecision";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const upper = (s?: string) => (s ?? "").toUpperCase();
-// ISO instant -> "YYYY-MM-DDTHH:mm" in the viewer's local time, for <input type="datetime-local"> (mirrors Events).
-const toLocalInput = (iso: string) => {
-  const d = new Date(iso);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+// EVERY DATE ON THIS PAGE IS THE ORG'S, not the viewer's.
+//
+// These were built on the browser's clock (`new Date().getFullYear()` and friends) while the punch lookup in
+// the same file reads days with `localDay(iso, sched.timezone)` - so the two sides of one `===` were in
+// different zones, inside the effect that documents the distinction. Overtime is worked late by definition, so
+// its instants sit right against a midnight: a session clocked out at 01:30 IST on 11 March is
+// `2026-03-10T20:00Z`, which the viewer's clock in the UK calls the 10th and the org calls the 11th. The punch
+// chip then silently never appeared, for precisely the late shifts it exists for.
+//
+// It also moved money-adjacent totals: bucketing by the viewer's calendar meant two HR admins in different
+// zones read DIFFERENT approved-overtime totals per employee for the same month.
+const orgYmd = (iso?: string) => (iso ? orgDayOf(iso) : "");
+const orgHhmm = (iso?: string) => {
+  if (!iso) return "";
+  const m = localMinutes(iso, orgTimezone());
+  return `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
 };
-const localYmd = (iso?: string) => (iso ? toLocalInput(iso).slice(0, 10) : "");
-const localHhmm = (iso?: string) => (iso ? toLocalInput(iso).slice(11, 16) : "");
-const thisMonth = () => toLocalInput(new Date().toISOString()).slice(0, 7);
+const thisMonth = () => thisMonthStr();
 
 export default function Overtime({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<OvertimeRequest>("overtime-requests");
@@ -74,7 +86,7 @@ export default function Overtime({ me }: { me: Me }) {
     if (!me.employee_id) return 0;
     const cur = thisMonth();
     return rows
-      .filter((r) => r.employee && idOf(r.employee) === me.employee_id && upper(r.state) === "APPROVED" && localYmd(r.start_time).slice(0, 7) === cur)
+      .filter((r) => r.employee && idOf(r.employee) === me.employee_id && upper(r.state) === "APPROVED" && orgYmd(r.start_time).slice(0, 7) === cur)
       .reduce((s, r) => s + (r.minutes || 0), 0);
   }, [rows, me.employee_id]);
   const unpaidMinutes = useMemo(
@@ -86,29 +98,34 @@ export default function Overtime({ me }: { me: Me }) {
     [rows, me.employee_id],
   );
 
-  // Approved overtime per employee for the selected (local) month: minutes summed -> total hours+minutes.
+  // Approved overtime per employee for the selected ORG month: minutes summed -> total hours+minutes.
   const monthlyTotals = useMemo(() => {
     const by = new Map<string, number>();
     for (const r of rows) {
-      if (upper(r.state) !== "APPROVED" || localYmd(r.start_time).slice(0, 7) !== month) continue;
+      if (upper(r.state) !== "APPROVED" || orgYmd(r.start_time).slice(0, 7) !== month) continue;
       const key = r.employee ?? "";
       by.set(key, (by.get(key) ?? 0) + (r.minutes || 0));
     }
     return [...by.entries()].map(([e, mins]) => ({ employee: e, minutes: mins })).sort((a, b) => b.minutes - a.minutes);
   }, [rows, month]);
   const monthTotalMinutes = monthlyTotals.reduce((s, t) => s + t.minutes, 0);
-  const monthLabel = new Date(`${month}-01T00:00:00`).toLocaleDateString(undefined, { month: "short", year: "numeric" });
+  // Anchored at UTC and rendered there, so the header names the month the buckets above were built from
+  // rather than the viewer's reading of its first midnight.
+  const monthLabel = new Date(`${month}-01T00:00:00Z`).toLocaleDateString(undefined, { month: "short", year: "numeric", timeZone: "UTC" });
 
   // `prefill` carries a range worked past the shift end, handed over by the Attendance page's "Log overtime"
   // on a long day - so the hours are already in the form instead of being re-typed from the punch log.
   function openCreate(prefill?: unknown) {
     const p = prefill as { start_time?: string; end_time?: string; reason?: string } | undefined;
-    const s = new Date(); s.setHours(18, 0, 0, 0);
-    const e = new Date(s.getTime() + 3600000);
+    // Seeded from the ORG's shift end on the org's today, not a hard-coded 18:00 on the viewer's clock: a
+    // remote employee's form used to pre-fill six in the evening THEIR time, while `sched.shift_end` - the
+    // boundary the punch effect below treats as the start of overtime - was sitting right here unused.
+    const s = zonedInstant(todayStr(), sched.shift_end, sched.timezone);
+    const e = new Date(+new Date(s) + 3600000).toISOString();
     const seed = {
       employee: me.employee_id ? `employees/${me.employee_id}` : "",
-      start_time: p?.start_time ?? s.toISOString(),
-      end_time: p?.end_time ?? e.toISOString(),
+      start_time: p?.start_time ?? s,
+      end_time: p?.end_time ?? e,
       reason: p?.reason ?? "",
     };
     setForm(seed);
@@ -134,7 +151,9 @@ export default function Overtime({ me }: { me: Me }) {
 
   // The punch-derived suggestion, refreshed whenever the dialog's person or day changes. One lazy read behind an
   // explicit open, in the shape the Attendance page's "log overtime" already hands over.
-  const formDay = localYmd(form.start_time);
+  // The ORG's day, which is what `localDay(..., tz)` inside the effect compares against - these were a
+  // viewer-local day and an org-local day on the two sides of one `===`.
+  const formDay = orgYmd(form.start_time);
   useEffect(() => {
     if (!open || !form.employee || !formDay) { setFromPunches(null); return; }
     let cancelled = false;
@@ -177,7 +196,7 @@ export default function Overtime({ me }: { me: Me }) {
   }
 
   async function action(r: OvertimeRequest, verb: "approve" | "reject" | "cancel") {
-    if (!(await confirmDecision(confirm, verb, `${empName(r.employee)}'s overtime on ${formatDate(localYmd(r.start_time))}`))) return;
+    if (!(await confirmDecision(confirm, verb, `${empName(r.employee)}'s overtime on ${formatDate(orgYmd(r.start_time))}`))) return;
     try {
       await invoke("overtime-requests/" + idOf(r.path), verb, r.etag);
       toast({ title: `Request ${verb === "cancel" ? "cancelled" : verb === "approve" ? "approved" : "rejected"}`, variant: "success" });
@@ -192,8 +211,8 @@ export default function Overtime({ me }: { me: Me }) {
     cell: (r) => { const e = emp(r.employee); return <span className="inline-flex items-center gap-2"><PhotoAvatar employeeId={r.employee ? idOf(r.employee) : ""} name={empName(r.employee)} photo={e?.photo} className="h-6 w-6" /> {empName(r.employee)}</span>; },
   };
   const baseCols: Column<OvertimeRequest>[] = [
-    { id: "date", header: "Date", accessor: (r) => localYmd(r.start_time), cell: (r) => formatDate(localYmd(r.start_time)) },
-    { id: "worked", header: "Worked", sortable: false, accessor: (r) => localHhmm(r.start_time), cell: (r) => <span className="tabular-nums text-muted-foreground">{localHhmm(r.start_time)}-{localHhmm(r.end_time)}{localYmd(r.end_time) !== localYmd(r.start_time) && <span className="text-amber-600 dark:text-amber-400"> +1</span>}</span> },
+    { id: "date", header: "Date", accessor: (r) => orgYmd(r.start_time), cell: (r) => formatDate(orgYmd(r.start_time)) },
+    { id: "worked", header: "Worked", sortable: false, accessor: (r) => orgHhmm(r.start_time), cell: (r) => <span className="tabular-nums text-muted-foreground">{orgHhmm(r.start_time)}-{orgHhmm(r.end_time)}{orgYmd(r.end_time) !== orgYmd(r.start_time) && <span className="text-amber-600 dark:text-amber-400"> +1</span>}</span> },
     { id: "duration", header: "Duration", align: "right", accessor: (r) => r.minutes, cell: (r) => <span className="font-medium tabular-nums">{fmtDuration(r.minutes)}</span> },
     { id: "state", header: "Status", filter: "select", accessor: (r) => upper(r.state), cell: (r) => <span className="inline-flex items-center gap-1.5"><StatusBadge state={r.state} />{r.paid && <Badge variant="success">Paid</Badge>}</span> },
     { id: "reason", header: "Reason", accessor: (r) => r.reason ?? "", cell: (r) => r.reason || <span className="text-muted-foreground">-</span> },
@@ -226,7 +245,7 @@ export default function Overtime({ me }: { me: Me }) {
   const addBtn = canCreate && <AccessAction collection="overtime-requests" create><Button onClick={() => openCreate()}><Plus className="h-4 w-4" /> Log overtime</Button></AccessAction>;
 
   const renderTable = (search: RequestsHistorySearch, data: OvertimeRequest[], columns: Column<OvertimeRequest>[], tableId: string, emptyTitle: string) => (
-    <DataTable columns={columns} tableId={tableId} rows={data} search={search} getRowId={(r) => r.path} emptyTitle={emptyTitle} emptyAction={addBtn} accessCollection="overtime-requests" accessTargetOf={(r) => ({ objectPath: r.path, label: `${empName(r.employee)} · ${localYmd(r.start_time)}`, can: r.access?.can })} />
+    <DataTable columns={columns} tableId={tableId} rows={data} search={search} getRowId={(r) => r.path} emptyTitle={emptyTitle} emptyAction={addBtn} accessCollection="overtime-requests" accessTargetOf={(r) => ({ objectPath: r.path, label: `${empName(r.employee)} · ${orgYmd(r.start_time)}`, can: r.access?.can })} />
   );
 
   return (
@@ -331,12 +350,12 @@ export default function Overtime({ me }: { me: Me }) {
           {fromPunches && (fromPunches.start !== form.start_time || fromPunches.end !== form.end_time) && (
             <button type="button" onClick={() => { setForm((f) => ({ ...f, start_time: fromPunches.start, end_time: fromPunches.end })); setSeedNonce((n) => n + 1); }}
               className="self-start rounded-full border border-dashed px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-primary hover:text-primary">
-              From the punch log: <span className="tabular-nums">{localHhmm(fromPunches.start)}-{localHhmm(fromPunches.end)}</span> ({fmtDuration(Math.round((+new Date(fromPunches.end) - +new Date(fromPunches.start)) / 60000))})
+              From the punch log: <span className="tabular-nums">{orgHhmm(fromPunches.start)}-{orgHhmm(fromPunches.end)}</span> ({fmtDuration(Math.round((+new Date(fromPunches.end) - +new Date(fromPunches.start)) / 60000))})
             </button>
           )}
           {overlapping.length > 0 && (
             <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
-              These hours overlap {overlapping.length === 1 ? "a request" : `${overlapping.length} requests`} already filed: {overlapping.map((r) => `${localHhmm(r.start_time)}-${localHhmm(r.end_time)} on ${localYmd(r.start_time)}`).join(", ")}.
+              These hours overlap {overlapping.length === 1 ? "a request" : `${overlapping.length} requests`} already filed: {overlapping.map((r) => `${orgHhmm(r.start_time)}-${orgHhmm(r.end_time)} on ${orgYmd(r.start_time)}`).join(", ")}.
             </p>
           )}
           <Field label="Reason" hint="Whoever approves this reads it - say what the extra hours were for.">

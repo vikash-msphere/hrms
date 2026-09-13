@@ -17,6 +17,11 @@ export function writeHashQuery(key: string, value: string | null) {
   if (value === null) params.delete(key);
   else params.set(key, value);
   const q = params.toString();
-  history.replaceState(null, "", `${window.location.pathname}${window.location.search}#/${path}${q ? `?${q}` : ""}`);
+  // The CURRENT state object is carried through, not replaced with null - exactly as router.ts does. A dialog
+  // marks its own history entry `hrmsDialog: true` (lib/dialogHistory.ts) and refuses to pop one it cannot
+  // still see the marker on; replacing the state with null erased it, so closing the dialog from the UI left
+  // its entry buried and the reader owed one extra Back press per dialog they had already dismissed. Easy to
+  // hit on LeaveCalendar, which has eight `writeHashQuery` effects, one per filter.
+  history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}#/${path}${q ? `?${q}` : ""}`);
   syncLastHash(); // no hashchange fires, so the guard has to be told what the address bar now says
 }

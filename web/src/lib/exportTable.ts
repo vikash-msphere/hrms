@@ -4,7 +4,7 @@
 // `export` capability - but the ACT is recorded server-side (see `record` below).
 import { api } from "@/api";
 import { toast } from "@/components/ui/use-toast";
-import { saveBlob } from "@/lib/download";
+import { saveBlob, saveBytes } from "@/lib/download";
 
 type Cell = string | number | boolean | null | undefined;
 
@@ -78,7 +78,14 @@ export async function exportTable(filename: string, headers: string[], rows: Cel
       const ws = XLSX.utils.aoa_to_sheet([headers, ...rows.map((r) => r.map((c) => (c == null ? "" : c)))]);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Export");
-      XLSX.writeFile(wb, `${filename}.xlsx`);
+      // Written through `saveBytes`, not `XLSX.writeFile`: the library builds its own anchor and object URL,
+      // which is a fifth copy of the two details lib/download.ts exists to get right once (revoking in the same
+      // tick as the click, and not attaching the anchor) - four earlier hand-rolled copies each got one wrong.
+      saveBytes(
+        XLSX.write(wb, { bookType: "xlsx", type: "array" }) as ArrayBuffer,
+        `${filename}.xlsx`,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
     }
   } catch (e) {
     console.error("[export] the file could not be produced", e);

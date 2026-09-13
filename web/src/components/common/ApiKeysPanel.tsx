@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Plus, Trash2, MoreHorizontal, Ban, Copy, Check, TriangleAlert, RefreshCw, Pencil, History, RotateCcw } from "lucide-react";
 import { create, patch, invoke } from "@/api";
+import { describeError } from "@/lib/formError";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useDebounced } from "@/hooks/useDebounced";
@@ -111,13 +112,14 @@ function keyWarning(k: ApiKey): { label: string; title: string } | null {
 
 // THE ACTIONS AXIS BELONGS IN THIS SENTENCE, and leaving it out was the one way to be actively misled by it.
 //
-// A scope has three axes and `max_level` is only one of them: custom methods are gated by `verbs`, and the
-// ceiling does not apply to them (domain/keyScope.ts `inScope` checks the collection and the verb list, never
-// the level - a verb is not on the read/write/admin ladder). So a key minted with `max_level: "read"` and the
-// "Allow actions" box ticked can approve a leave request and publish a payroll run, and this column called it
-// "read only, all collections". The mint dialog is honest about it (a separate checkbox, off by default, and
-// the pre-mint sentence ends "· actions allowed"); the list a person actually audits keys in was not, and the
-// list is where a key minted months ago gets looked at.
+// A scope has three axes and `max_level` is only one of them: custom methods are gated by `verbs`, and a key
+// that carries them can approve a leave request or publish a payroll run. The level ceiling DOES bound them -
+// a verb counts as a write, so a read-ceilinged scope holds no verbs at all (domain/keyScope.ts
+// `verbsAllowedAt`, enforced in `inScope`, in `narrowAllow`, in `parseScope` on the way back, and refused at
+// mint by services/apiKeys.ts) - but naming only the level still called such a key "read & write, all
+// collections" and left the actions unsaid. The mint dialog is honest about it (a separate checkbox, off by
+// default, disabled at read, and the pre-mint sentence ends "· actions allowed"); the list a person actually
+// audits keys in was not, and the list is where a key minted months ago gets looked at.
 //
 // Same clause and same words as the mint sentence, so what was authored and what is listed read the same -
 // which is what the comment beside `scopeSentence` already claimed and this is what makes true.
@@ -357,11 +359,24 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
       setCopied(false);
       setMinted(created.secret ?? null);
       // Only now is the old one taken out: a failed mint must never leave the caller with nothing working.
-      await invoke(k.path, "revoke");
-      toast({ title: "Rotated - the old key is revoked", variant: "success" });
+      //
+      // CAUGHT SEPARATELY, because by this point the outcome is no longer "nothing happened". The new key
+      // exists and its secret dialog is already open; a failed revoke used to put a red "Couldn't rotate" over
+      // it, skip `reload()`, and leave the operator with two live credentials, one of which they could not find
+      // again once the dialog closed.
+      try {
+        await invoke(k.path, "revoke");
+        toast({ title: "Rotated - the old key is revoked", variant: "success" });
+      } catch (e) {
+        toast({
+          title: "New key ready, old one still live",
+          description: `${describeError(e)} The new key is on screen - copy it now, then revoke "${k.display_name}" from the list.`,
+          variant: "destructive",
+        });
+      }
       reload();
     } catch (e) {
-      toast({ title: "Couldn't rotate", description: (e as Error).message, variant: "destructive" });
+      toast({ title: "Couldn't rotate", description: describeError(e), variant: "destructive" });
     }
   }
 
@@ -728,11 +743,20 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
             <Input readOnly value={minted ?? ""} className="font-mono text-xs" onFocus={(e) => e.currentTarget.select()} />
             <Button
               variant={copied ? "outline" : "default"}
-              onClick={async () => {
-                await navigator.clipboard.writeText(minted ?? "");
-                setCopied(true);
-                toast({ title: "Key copied", variant: "success" });
-              }}
+              // `writeText` REJECTS on a non-secure context, an unfocused document or a denied permission, and
+              // this is the one dialog in the app whose copy says the value cannot be recovered. Unhandled, the
+              // rejection meant `setCopied` never ran, no toast appeared, and the button looked dead - with the
+              // rejection surfacing in Sentry instead of on screen. The thirteen other copy sites in the app
+              // already use this both-toasts shape.
+              onClick={() =>
+                navigator.clipboard.writeText(minted ?? "").then(
+                  () => {
+                    setCopied(true);
+                    toast({ title: "Key copied", variant: "success" });
+                  },
+                  () => toast({ title: "Couldn't copy the key", description: "Select the key above and copy it by hand - it cannot be shown again.", variant: "destructive" }),
+                )
+              }
             >
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />} {copied ? "Copied" : "Copy"}
             </Button>
@@ -746,11 +770,17 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={async () => {
-                  await navigator.clipboard.writeText(curlSnippet);
-                  setCopied(true);
-                  toast({ title: "Command copied", variant: "success" });
-                }}
+                // Both outcomes reported, as above - and `copied` only set when the copy actually happened,
+                // since it is what lets `closeMinted` stop asking before it throws the secret away.
+                onClick={() =>
+                  navigator.clipboard.writeText(curlSnippet).then(
+                    () => {
+                      setCopied(true);
+                      toast({ title: "Command copied", variant: "success" });
+                    },
+                    () => toast({ title: "Couldn't copy the command", description: "Select it below and copy it by hand.", variant: "destructive" }),
+                  )
+                }
               >
                 <Copy className="h-3.5 w-3.5" /> Copy command
               </Button>

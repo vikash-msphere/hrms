@@ -15,6 +15,11 @@ const DEEP_OPEN: Record<string, string> = {
   automations: "workflows", // the rule's builder, opened on the Rules tab
   cards: "boards", // a kanban card → the Boards page selects its board + opens the task dialog
   stocktakes: "stocktakes", // one count, read in place on its own page route
+  // The three routes that take an `openId` in App.tsx and were missing here, so a link from the activity feed,
+  // the approvals inbox or search landed one level too shallow - or, for a saved table, nowhere at all.
+  applications: "pipeline", // `#/pipeline/<id>` opens that application's drawer, not just the board
+  "table-views": "tables", // "a saved table is a record people link to, not a dialog" (App.tsx)
+  "expense-budgets": "expense-budgets", // opens that budget rather than the list
 };
 
 // Collection -> the nav page that shows it (record not auto-opened). Covers the navigable collections; the

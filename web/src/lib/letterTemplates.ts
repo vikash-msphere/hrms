@@ -7,7 +7,7 @@ export type LetterTemplateInput = { key: string; label: string; type?: "text" | 
 export type LetterTemplateOption = { path: string; label: string; category?: string; letterhead?: string; inputs?: LetterTemplateInput[]; blocks?: { kind: string }[] };
 
 export function useLetterTemplates(): LetterTemplateOption[] {
-  const { rows } = useCollection<{ path: string; label: string; category?: string; letterhead?: string; inputs?: LetterTemplateInput[]; blocks?: { kind: string }[] }>("letter-templates");
+  const { rows } = useCollection<{ path: string; label: string; category?: string; letterhead?: string; inputs?: LetterTemplateInput[]; blocks?: { kind: string }[] }>("letter-templates", { all: true }); // a picker, so the hundred-and-first template has to be offerable too
   return rows.map((t) => ({ path: t.path, label: t.label, category: t.category, letterhead: t.letterhead, inputs: t.inputs, blocks: t.blocks }));
 }
 

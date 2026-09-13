@@ -147,7 +147,15 @@ export function MyCompensation({ employeeId }: { employeeId: string }) {
                       return (
                         <tr key={r.path} className={cn("border-b last:border-0", r.current && "bg-muted/30")}>
                           <td data-label="Effective" className="py-2 pr-3 font-medium">{r.effective_from}</td>
-                          <td data-label={`CTC (${unit})`} className="py-2 pr-3 tabular-nums">{money(r.annual_ctc / (unit === "annual" ? 1 : 12))}</td>
+                          {/* The SAME number the headline above uses for the same revision. `annual_ctc` is
+                              the target as typed; `ctc_monthly` is what the split could actually reach, and
+                              the two are documented not to agree - `CTC_TOL` is one rupee on purpose, because
+                              ESI rounds up and the CTC curve climbs in one-rupee steps, so some targets are
+                              not attainable at all. Dividing the annual here printed a different salary from
+                              the card six inches above it, on the page an employee opens to find out what
+                              they are paid. `ctc_monthly` rides only the current row of a single-employee
+                              read (src/http/serialize.ts), so the fallback still covers the history. */}
+                          <td data-label={`CTC (${unit})`} className="py-2 pr-3 tabular-nums">{money(unit === "annual" ? r.annual_ctc : r.ctc_monthly ?? r.annual_ctc / 12)}</td>
                           <td data-label="Change" className="py-2 pr-3">
                             {delta == null ? <span className="text-muted-foreground">-</span> : (
                               <span className={cn("inline-flex items-center gap-0.5 tabular-nums", delta >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-destructive")}>

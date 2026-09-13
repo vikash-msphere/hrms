@@ -8,7 +8,7 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf } from "@/lib/utils";
-import { todayStr, thisMonthStr } from "@/lib/orgDay";
+import { daysBetweenYmd, todayStr, thisMonthStr } from "@/lib/orgDay";
 import { navigate } from "@/router";
 import type { Department, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -52,7 +52,11 @@ const PROBATION_SOON_DAYS = 30;
 // start already on the books. Deleted rows never badge.
 function joinBadge(e: Employee): "New" | "Joining" | null {
   if (!e.start_date || e.delete_time) return null;
-  const days = (Date.now() - new Date(e.start_date + "T00:00:00").getTime()) / 86400000;
+  // A calendar-day question, answered in day strings on the ORG's clock (lib/orgDay#daysBetweenYmd). Turning
+  // a date-only value into an instant at the VIEWER's midnight and differencing it against `Date.now()` is
+  // wrong for part of every day and by a different amount per viewer - which `isJoiningSoon` five lines down
+  // already avoids by comparing day strings.
+  const days = daysBetweenYmd(e.start_date, todayStr());
   if (days < 0) return "Joining";
   return days <= 30 ? "New" : null;
 }
@@ -68,8 +72,7 @@ function isJoiningSoon(e: Employee) {
 // Probation ending inside the window (or already past it, unconfirmed): a review somebody owes.
 function isProbationDue(e: Employee) {
   if (e.delete_time || !e.probation_end_date) return false;
-  const days = (new Date(`${e.probation_end_date}T00:00:00`).getTime() - Date.now()) / 86400000;
-  return days <= PROBATION_SOON_DAYS;
+  return daysBetweenYmd(todayStr(), e.probation_end_date) <= PROBATION_SOON_DAYS;
 }
 
 /** Hover peek for a person, built entirely from the already-loaded row (no fetch). Wraps its
@@ -148,23 +151,28 @@ function PersonPeek({
 function EmployeeCard({ e, deptLabel, clocked }: { e: Employee; deptLabel: string; clocked: boolean }) {
   const badge = joinBadge(e);
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => navigate(`employees/${idOf(e.path)}`)}
-      onKeyDown={(ev) => { if (ev.key === "Enter") navigate(`employees/${idOf(e.path)}`); }}
-      className="group relative flex cursor-pointer flex-col items-center gap-1 rounded-xl border bg-card p-4 text-center shadow-sm transition hover:border-primary/40 hover:shadow-md"
-    >
-      <div className="absolute right-2 top-2 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+    // A childless button stretched over the card, rather than `role="button"` on the card itself: ARIA makes a
+    // button's children presentational (WAI-ARIA 1.2 §5.2.7), so the org-chart control nested inside one was
+    // flattened into the card's accessible name and stopped being a control at all.
+    <div className="group relative flex flex-col items-center gap-1 rounded-xl border bg-card p-4 text-center shadow-sm transition hover:border-primary/40 hover:shadow-md focus-within:border-primary/40">
+      <button
+        type="button"
+        onClick={() => navigate(`employees/${idOf(e.path)}`)}
+        aria-label={`Open ${fullName(e)}`}
+        className="absolute inset-0 z-0 cursor-pointer rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      />
+      <div className="absolute right-2 top-2 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
         <button
+          type="button"
           className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           title="View in org chart"
-          onClick={(ev) => { ev.stopPropagation(); navigate(`org-chart/${idOf(e.path)}`); }}
+          aria-label={`View ${fullName(e)} in the org chart`}
+          onClick={() => navigate(`org-chart/${idOf(e.path)}`)}
         >
           <Network className="h-3.5 w-3.5" />
         </button>
       </div>
-      <span className="relative">
+      <span className="pointer-events-none relative">
         <PhotoAvatar employeeId={idOf(e.path)} name={fullName(e)} photo={e.photo} className="h-14 w-14" />
         {clocked && <span className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-card bg-success" title="Clocked in" />}
       </span>
@@ -174,7 +182,8 @@ function EmployeeCard({ e, deptLabel, clocked }: { e: Employee; deptLabel: strin
       </div>
       {e.job_title && <div className="w-full truncate text-xs text-muted-foreground">{e.job_title}</div>}
       {deptLabel && <Badge variant="muted" className="max-w-full truncate font-normal">{deptLabel}</Badge>}
-      <div className="mt-0.5 flex w-full items-center justify-center gap-1 text-[11px] text-muted-foreground">
+      {/* Above the overlay, so the copy affordance stays pressable - it is a control, not card text. */}
+      <div className="relative z-10 mt-0.5 flex w-full items-center justify-center gap-1 text-[11px] text-muted-foreground">
         <Mail className="h-3 w-3 shrink-0" />
         <CopyEmail email={e.work_email} />
       </div>
@@ -189,8 +198,15 @@ export default function Directory({ me }: { me: Me }) {
   // on a large directory would push live colleagues off it.
   const [stateFilter, setStateFilter] = useState("");
   const deletedOnly = stateFilter === "Deleted";
-  const { rows, state, error, reload, loadMore, hasMore } = useCollection<Employee>("employees", { deletedOnly });
-  const { rows: depts } = useCollection<Department>("departments");
+  // `all`: this read backs the stats strip and the two charts, which claim to describe the whole org - the
+  // comment on the second read below says so in as many words. Folded over a page they described the newest
+  // hundred hires instead: "Employees · 100 · everyone you can see", a joiners-by-month chart that renders
+  // every month before that hundred as zero growth (a steadily hiring company shows a cliff), and a "No
+  // manager" count taken from the newest people, which is the opposite of where an orphaned reporting line
+  // usually is. The search box was moved server-side for exactly this reason; the numbers above it were not.
+  // `hasMore` stays true at ALL_CAP, so the grid's Load more still works.
+  const { rows, state, error, reload, loadMore, hasMore } = useCollection<Employee>("employees", { deletedOnly, all: true });
+  const { rows: depts } = useCollection<Department>("departments", { all: true });
   const { toast } = useToast();
   const sd = useSoftDelete("employees", "employee", reload);
   const lc = useLifecycle("employees", "employee", reload);
@@ -238,11 +254,13 @@ export default function Directory({ me }: { me: Me }) {
 
   const deptName = useMemo(() => {
     const m = new Map(depts.map((d) => [idOf(d.path), d.display_name]));
-    return (path?: string) => (path ? m.get(idOf(path)) ?? idOf(path) : "");
+    return (path?: string) => (path ? m.get(idOf(path)) ?? "Unknown department" : "");
   }, [depts]);
   const empName = useMemo(() => {
     const m = new Map(rows.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
-    return (path?: string) => (path ? m.get(idOf(path)) ?? idOf(path) : "");
+    // A manager outside the caller's slice of the directory is the ordinary case here, and reads as a word
+    // rather than as a 26-character wire id (lib/utils.ts `personName`).
+    return (path?: string) => (path ? m.get(idOf(path)) ?? "Someone" : "");
   }, [rows]);
 
   // One search box across the fields people actually look someone up by (name/ID/title/email), instead of
@@ -558,7 +576,9 @@ export default function Directory({ me }: { me: Me }) {
       {/* Each metric focuses the table below it, so the strip sits against the table - under the charts. */}
       <SummaryStrip
         items={[
-          { label: "Employees", value: stats.total, icon: Users, hint: "everyone you can see", onClick: () => setFocus(null), active: focus === null },
+          // A very large directory still passes ALL_CAP, and at that point the headline stops asserting a
+          // completeness it cannot check: the `+` is the vocabulary the pager already uses.
+          { label: "Employees", value: `${stats.total}${hasMore ? "+" : ""}`, icon: Users, hint: hasMore ? "loaded so far" : "everyone you can see", onClick: () => setFocus(null), active: focus === null },
           {
             label: "Clocked in now",
             value: stats.clockedIn,

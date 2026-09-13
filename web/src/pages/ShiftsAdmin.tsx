@@ -5,6 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { idOf } from "@/lib/utils";
 import type { Shift } from "@/types";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { AccessScope } from "@/components/access/AccessScope";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessItem } from "@/components/access/AccessItem";
@@ -38,7 +39,15 @@ const spanOf = (start: string, end: string) => { const d = toMin(end) - toMin(st
 
 // HR editor for the shift catalog (Settings → Time off → Shifts).
 export default function ShiftsAdmin({ openId }: { openId?: string }) {
-  const { rows, state, error, reload } = useCollection<Shift>("shifts");
+  // `all`: this is the whole catalog rendered as a CARD LIST, not a list page. A DataTable admits a window -
+  // it draws "Showing 1-100 of ..." and a Load more - but a stack of cards has nowhere to say so and nothing
+  // for a reader to press, so the first page silently presented itself as the entire catalog. Past a hundred
+  // shifts an admin could not see, edit or archive the rest; `useDeepOpen` below could not open a link to one;
+  // `duplicateName` stopped catching a clash, which is the outcome its own comment says it exists to prevent;
+  // and `COLORS[rows.length % COLORS.length]` stopped rotating, assigning every new shift the same colour on a
+  // surface whose whole point is telling shifts apart by colour. The roster that consumes this catalog already
+  // reads all of it (pages/Schedule.tsx), so the editor has to agree with that read.
+  const { rows, state, error, reload } = useCollection<Shift>("shifts", { all: true });
   useDeepOpen(openId, rows, openEdit);
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -114,6 +123,9 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
         </AccessAction>
       </div>
 
+      {/* The walk stops at the hook's ALL_CAP, so `all` moves the window rather than removing it - and the
+          card list still needs somewhere to admit that it is showing part of the catalog. */}
+      <TruncationNotice collection="shifts" what="shifts" className="mb-3" />
       <DataState state={state} error={error} onRetry={reload}>
         {sorted.length === 0 ? (
           <EmptyState icon={CalendarClock} title="No shifts" description="Add a shift pattern to assign on the schedule." action={<AccessAction create label="Shift"><Button onClick={openCreate}><Plus className="h-4 w-4" /> New shift</Button></AccessAction>} />

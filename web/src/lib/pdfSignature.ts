@@ -248,6 +248,11 @@ async function verifyOne(pdfBin: string, raw: RawSig, isLast: boolean): Promise<
       if (attr.type === "1.2.840.113549.1.9.5") { try { signingTime = (attr.values[0] as any).toDate().toISOString(); } catch { /* ignore */ } }
     }
 
+    // An RFC 3161 timestamp token (1.2.840.113549.1.9.16.2.14) is what makes a signing time somebody ELSE's
+    // claim. Without one the time below is asserted by the signer - covered by the signature, but chosen by
+    // them - which is exactly the moment a holder of a since-revoked or since-expired certificate would pick.
+    const timestamped = (sd.signerInfos[0]?.unsignedAttrs?.attributes ?? []).some((a) => a.type === "1.2.840.113549.1.9.16.2.14");
+
     // TRUST: signer cert chains to a bundled root, checked AS OF the signing time (eSign certs are short-lived,
     // so validating "now" would wrongly reject a signature that was valid when made).
     let trusted = false;
@@ -285,7 +290,18 @@ async function verifyOne(pdfBin: string, raw: RawSig, isLast: boolean): Promise<
       signingTime,
       reason: pdfStringAfter(pdfBin, "/Reason", raw.dictStart),
       location: pdfStringAfter(pdfBin, "/Location", raw.dictStart),
-      note: coverageNote ?? (integrity && !trusted ? "the signer's certificate does not chain to a trusted root" : undefined),
+      // A "Signature valid" stamp with nothing under it is read as more than it means. Verification here is
+      // deliberately OFFLINE (the header: "the server is never asked"), which costs two things the green tick
+      // would otherwise imply: the engine is given no `crls` and no `ocsps`, so a REVOKED certificate that
+      // still chains to a bundled root verifies clean; and without a timestamp token the chain is validated as
+      // of a time the signer chose. Say so on the stamp - the viewer already renders `note` under the label.
+      note:
+        coverageNote ??
+        (integrity && !trusted
+          ? "the signer's certificate does not chain to a trusted root"
+          : validity === "valid"
+            ? `checked offline: revocation not checked${timestamped ? "" : ", and the signing time is the signer's own"}`
+            : undefined),
     };
   } catch (e) {
     return { validity: "unknown", integrity: false, trusted: false, coversDocument: false, error: (e as Error).message || "could not parse signature" };

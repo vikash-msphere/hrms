@@ -6,6 +6,7 @@ import { useEmployee } from "@/hooks/useEmployee";
 import { useCollection } from "@/hooks/useCollection";
 import { useIntent } from "@/lib/intent";
 import { formatDate, idOf, probationLabel, tenureLabel } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import type { Department, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
@@ -36,7 +37,7 @@ const CHIP = "inline-flex items-center gap-1 rounded-full border bg-muted/40 px-
 
 export default function Profile({ me }: { me: Me }) {
   const { emp, state, error, reload } = useEmployee(me.employee_id);
-  const { rows: depts } = useCollection<Department>("departments");
+  const { rows: depts } = useCollection<Department>("departments", { all: true });
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   // Controlled so the completeness meter's chips can jump to a section / open its dialog.
@@ -141,7 +142,10 @@ export default function Profile({ me }: { me: Me }) {
                     <div className="flex flex-wrap items-center justify-end gap-2">
                       {/* Employment status isn't shown anywhere else on the self profile - surface tenure + probation here. */}
                       {!!emp.start_date && <span className="text-xs text-muted-foreground">{tenureLabel(emp.start_date)}</span>}
-                      {!!emp.probation_end_date && Date.parse(emp.probation_end_date) >= Date.now() && (
+                      {/* The badge's own gate, on the ORG's day: `Date.parse` of a date-only value is UTC
+                          midnight, so this and the label inside it disagreed about the last day of probation
+                          for part of it. A day-string comparison has no offset to lose. */}
+                      {!!emp.probation_end_date && emp.probation_end_date.slice(0, 10) >= todayStr() && (
                         <Badge variant="warning">{probationLabel(emp.probation_end_date) || "On probation"}</Badge>
                       )}
                     </div>

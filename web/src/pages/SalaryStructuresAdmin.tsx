@@ -39,7 +39,7 @@ const defaultRateLabel = (c?: PayComponent) =>
 export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; embedded?: boolean; openId?: string }) {
   const { rows, state, error, reload } = useCollection<SalaryStructure>("salary-structures", { showDeleted: true });
   useDeepOpen(openId, rows, openEdit);
-  const { rows: payComponents } = useCollection<PayComponent>("pay-components");
+  const { rows: payComponents } = useCollection<PayComponent>("pay-components", { all: true });
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
   // A structure's earning lines feed each assigned employee's CTC split, so editing/deleting one can stale
@@ -57,7 +57,7 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
   // rejects them in a structure; keep them out of the picker too.
   const earnings = useMemo(() => payComponents.filter((c) => c.kind === "earning" && c.method !== "rate_qty" && !c.delete_time), [payComponents]);
   const byPath = useMemo(() => new Map(payComponents.map((c) => [c.path, c])), [payComponents]);
-  const nameOf = (compPath: string) => byPath.get(compPath)?.display_name ?? idOf(compPath);
+  const nameOf = (compPath: string) => byPath.get(compPath)?.display_name ?? "Unknown component";
 
   const money = useMoney();
   const [open, setOpen] = useState(false);
@@ -106,6 +106,13 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
   }, 0);
 
   async function submit() {
+    // ONE expression for "may this be saved", checked HERE rather than restated on the Enter path. Enter fires
+    // from any <input> in a DialogContent (ui/dialog.tsx), every rate field is one, and the Enter handler used
+    // to carry a subset of the button's condition - so pressing Enter saved a structure the disabled button
+    // refuses. The server has no percentage-sum check at all (services/salaryStructures.ts#normalizeLines
+    // validates the components and nothing else), so this expression IS the rule, and a rule enforced only by
+    // a `disabled` attribute is not enforced.
+    if (busy || !form.name.trim() || percentOfBasic >= 100) return;
     setBusy(true);
     setErr(null);
     try {
@@ -193,7 +200,7 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
       </DataState>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim()) void submit(); }}>
+        <DialogContent scrollBody onEnterSubmit={() => void submit()}>
           <AccessScope collection="salary-structures" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit salary structure" : "New salary structure"}</DialogTitle>

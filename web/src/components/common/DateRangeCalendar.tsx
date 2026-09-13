@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { todayStr, addDaysYmd } from "@/lib/orgDay";
+import { longDate } from "@/lib/leaveCalendar";
 
 // A month grid for picking a date RANGE, built for leave: the thing that decides a request is not the two
 // dates, it's what sits between them - which days are already off, which are holidays, and who else on the
@@ -123,6 +124,9 @@ export function DateRangeCalendar({
     if (!anchor) setAnchor(from);
     onSelect(orient(from, ymd));
   }
+  // `dragged` deliberately SURVIVES this: the click event that follows a pointerup is the tail of the drag,
+  // and `pick` swallows exactly one of them. What must not survive it is the latch reaching a KEYBOARD
+  // activation - see `onKeyDown`, which clears it before picking.
   function releaseDay(ymd: string) {
     if (dragged.current && pressedOn.current && pressedOn.current !== ymd) {
       setAnchor(null);
@@ -145,6 +149,10 @@ export function DateRangeCalendar({
     }
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
+      // Not the tail of a mouse drag, whatever the latch says. `pick` swallows one activation after a drag so
+      // the click that ends it cannot start a new range; left set, that latch was still there whenever the
+      // reader next used the keyboard, and the first Enter or Space after any drag did nothing.
+      dragged.current = false;
       pick(ymd);
     }
     if (e.key === "Escape" && anchor) {
@@ -163,8 +171,12 @@ export function DateRangeCalendar({
       className={cn("cal-scope select-none rounded-lg border p-3", className)}
       onPointerUp={() => { pressedOn.current = null; }}
       // Releasing outside the grid ends the gesture: clear the drag too, or the next click would be swallowed
-      // as if it were the end of one.
-      onPointerLeave={() => { pressedOn.current = null; dragged.current = false; setHover(null); }}
+      // as if it were the end of one - AND clear the anchor, because a half-open gesture is worse. With the
+      // anchor left behind, `preview` fell through to its single-day branch (hover has just been cleared), so
+      // the grid drew only the day the drag started while the inputs beside it read the full range the last
+      // `enterDay` emitted - and the next click, meant as "start again here", closed a range from the old
+      // anchor. On the leave dialog this feeds, that range is the number of days being booked.
+      onPointerLeave={() => { pressedOn.current = null; dragged.current = false; setHover(null); setAnchor(null); }}
     >
       <div className="mb-2 flex items-center gap-1">
         <button
@@ -293,7 +305,8 @@ function Month({
                 tabIndex={ymd === focusDay ? 0 : -1}
                 disabled={dis}
                 title={title || undefined}
-                aria-label={`${ymd}${title ? ` - ${title}` : ""}`}
+                // A spoken date, not the ISO string a screen reader reads out as digits.
+                aria-label={`${longDate(ymd)}${title ? ` - ${title}` : ""}`}
                 aria-pressed={inRange}
                 onFocus={() => onFocusDay(ymd)}
                 onClick={() => onPick(ymd)}

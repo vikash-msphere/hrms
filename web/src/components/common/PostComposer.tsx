@@ -263,6 +263,11 @@ export function PostComposer({
   const [showPreview, setShowPreview] = useState(false);
   // The form as it was seeded, so "dirty" means "differs from what was opened" rather than "differs from blank".
   const seedRef = useRef<Form>(EMPTY);
+  // The version this dialog last WROTE, which `editing.etag` (a prop the parent only refreshes via `onSaved`)
+  // does not know about. "Publish now" on a draft is a save then a publish; when the publish half failed, the
+  // save had already committed, so a retry re-sent the stale prop etag and the server answered 409 - telling
+  // the author somebody else had changed the post, when the somebody else was them, a second ago.
+  const [liveEtag, setLiveEtag] = useState<string | undefined>(undefined);
   const [rescued, setRescued] = useState<StoredDraft | null>(null); // an older draft waiting to be taken back
 
   // What this viewer is allowed to make. Also the switcher's options, so the dialog can only ever open on
@@ -314,6 +319,7 @@ export function PostComposer({
     setShowPreview(false);
     // A composer reopened after a failure starts clean rather than showing the last attempt's message.
     setError(null);
+    setLiveEtag(undefined); // a fresh opening reads the version off the row again
     const seed: Form = !editing
       // A kudos opened ABOUT somebody (from their completed goal) starts with them already picked.
       ? { ...EMPTY, kind: kinds.includes(initialKind) ? initialKind : kinds[0] ?? initialKind, level: levels[0]?.name ?? "", recipient: initialRecipient ?? "" }
@@ -606,11 +612,18 @@ export function PostComposer({
                 // people it was aimed at have already been told.
                 ...(showPublishing ? { publish_time: scheduleIso ?? null, ...reach } : {}),
               };
-        saved = await patch<Announcement>("announcements/" + idOf(editing.path), payload, editing.etag);
+        saved = await patch<Announcement>("announcements/" + idOf(editing.path), payload, liveEtag ?? editing.etag);
+        setLiveEtag(saved?.etag); // this dialog now knows the current version; a retry must not re-send the old one
         // Going live is its own verb (it owns the notification), so "Publish now" on a draft is a save then a
         // publish - and the etag has moved on by then, hence the fresh one off the response.
         if (showPublishing && form.publishing === "now") {
-          saved = await invoke<Announcement>("announcements/" + idOf(editing.path), "publish", saved?.etag);
+          try {
+            saved = await invoke<Announcement>("announcements/" + idOf(editing.path), "publish", saved?.etag);
+          } catch (e) {
+            // The edit is COMMITTED and the post is still a draft. Say that, rather than letting the generic
+            // catch below report a failure that half happened.
+            throw new Error(`${describeError(e)} Your changes were saved - the post is still a draft. Press Publish now again to publish it.`);
+          }
           toast({ title: "Published", variant: "success" });
         } else {
           toast({ title: scheduleIso ? `Scheduled for ${whenLabel(scheduleIso)}` : "Updated", variant: "success" });

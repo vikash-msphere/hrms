@@ -3,7 +3,7 @@ import { Paperclip, Users, X } from "lucide-react";
 import { create, get, upload } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
-import { todayStr } from "@/lib/orgDay";
+import { orgDayFromToday, todayStr } from "@/lib/orgDay";
 import { chargeableDays } from "@/lib/leaveDays";
 import { bestBridge, breakAround } from "@/lib/holidayBreaks";
 import type { ApprovalDelegation, Employee, Holiday, LeaveBalance, LeaveRequest, LeaveType, Me } from "@/types";
@@ -27,8 +27,13 @@ const upper = (s?: string) => (s ?? "").toUpperCase();
 // Named `…LongOf` so it cannot be mistaken for orgDay's `weekdayOf`, which answers a NUMBER.
 const weekdayLongOf = (ymd: string) => new Date(ymd + "T00:00:00Z").toLocaleDateString(undefined, { weekday: "long", timeZone: "UTC" });
 const fmtDays = (n: number) => String(Math.round(n * 2) / 2);
-// Local calendar dates for the quick picks (toISOString would flip to UTC's date late in the evening).
-const ymdIn = (days: number) => { const d = new Date(); d.setDate(d.getDate() + days); return d.toLocaleDateString("en-CA"); };
+// The ORG's day for the quick picks, not the browser's - the same clock `minDate` below uses. This was
+// `new Date()` stepped locally and formatted `en-CA`, which is the VIEWER's calendar: for London staff in an
+// IST org the org has already rolled over from about 18:30 local, so `min` was D+1 while "Today" wrote D.
+// `<input type="date">` does not clear an out-of-range value set programmatically and the form validates on
+// `form.start_date` rather than on `validity`, so Submit stayed enabled and the server refused the request as
+// back-dated - the exact shape lib/orgDay.ts's header describes.
+const ymdIn = (days: number) => orgDayFromToday(days);
 // Namespaced to the caller (draftKey), so a half-written request on a shared machine - dates, and a reason
 // that is often personal - is never handed to whoever opens this dialog next. Session-scoped, which is the
 // useful lifetime of a draft.
@@ -60,8 +65,18 @@ export function RequestLeaveDialog({
   onSubmitted?: () => void;
 }) {
   const { rows: types } = useCollection<LeaveType>("leave-types");
-  const { rows: balances } = useCollection<LeaveBalance>("leave-balances");
-  const { rows: holidays } = useCollection<Holiday>("holidays");
+  // THE CALLER'S OWN ROWS, asked for as such. `leave-balances` and `leave-requests` are scoped by AUTHZ, not
+  // by person: for an employee that is themselves and filtering here is a no-op, but for a manager or HR it is
+  // the department's or the org's newest hundred - one row per employee per leave type, so a 60-person org with
+  // five types has 300 of them. Their own row simply may not be in the window, and `?? 0` below then reads
+  // "not loaded" as "none left": a manager with eighteen days is shown a red panel saying they have none and
+  // `canSubmit` refuses to let them file at all. A dialog has no "load more" and nothing admits a window.
+  const mineParams = me.employee_id ? { employee: `employees/${me.employee_id}` } : undefined;
+  const { rows: balances } = useCollection<LeaveBalance>("leave-balances", { params: mineParams, enabled: !!mineParams });
+  const { rows: myRequests } = useCollection<LeaveRequest>("leave-requests", { params: mineParams, enabled: !!mineParams });
+  const { rows: holidays } = useCollection<Holiday>("holidays", { all: true });
+  // The department "who else is away then" panel is advisory and deliberately stays a window: it is about
+  // other people, and being short there costs a hint rather than blocking a request.
   const { rows: requests } = useCollection<LeaveRequest>("leave-requests");
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   // Private by default: without read access the hook returns [] and fires no request, so this only ever
@@ -197,7 +212,11 @@ export function RequestLeaveDialog({
     for (const b of balances) if (me.employee_id && b.employee && idOf(b.employee) === me.employee_id && b.leave_type) m.set(idOf(b.leave_type), b.balance_days);
     return m;
   }, [balances, me.employee_id]);
-  const availableFor = (t: LeaveType): number | null => (t.paid ? (balanceByType.get(idOf(t.path)) ?? 0) : null);
+  // `undefined` = no balance row for this type (untracked, or not visible to this caller), which is NOT the
+  // same answer as zero and must not block a request - the sibling helper for the same data says so in as many
+  // words (lib/leaveApproval.tsx: "undefined = not visible / untracked"), and degrades to showing no balance
+  // line rather than to "you have none". `null` stays "this type has no balance to track" (unpaid leave).
+  const availableFor = (t: LeaveType): number | null | undefined => (t.paid ? balanceByType.get(idOf(t.path)) : null);
   const selectedType = types.find((t) => form.leave_type && idOf(t.path) === idOf(form.leave_type));
   const selectedAvail = selectedType ? availableFor(selectedType) : null;
   const insufficient = selectedAvail != null && formDays != null && formDays > selectedAvail + 1e-9;
@@ -231,7 +250,9 @@ export function RequestLeaveDialog({
   const myConflicts = useMemo(() => {
     if (!form.start_date || !form.end_date || !me.employee_id || form.end_date < form.start_date) return [];
     const nS = form.start_date, nE = form.end_date;
-    return requests
+    // The caller's own requests, read as the caller's: this guard gates `canSubmit`, so leave that fell off a
+    // department-wide window would let a double-booking through to the server to be caught there instead.
+    return myRequests
       .filter((lr) => {
         if (!lr.employee || idOf(lr.employee) !== me.employee_id) return false;
         const st = upper(lr.state);
@@ -246,7 +267,7 @@ export function RequestLeaveDialog({
         return a1 <= b2 && b1 <= a2;
       })
       .sort((a, b) => a.start_date.localeCompare(b.start_date));
-  }, [requests, me.employee_id, form.start_date, form.end_date, form.startSession, form.endSession]);
+  }, [myRequests, me.employee_id, form.start_date, form.end_date, form.startSession, form.endSession]);
 
   // What each day on the calendar is: its holiday, and which of my department is already away then. Both come
   // from rows this dialog already holds, so the picker costs no extra reads.

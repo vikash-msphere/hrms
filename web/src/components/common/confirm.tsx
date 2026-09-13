@@ -27,6 +27,17 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
   const resolver = React.useRef<((v: boolean) => void) | null>(null);
 
   const confirm = React.useCallback<ConfirmFn>((o) => {
+    // The outgoing resolver is SETTLED before it is replaced. There is one slot, so a second `confirm()` while
+    // one was open overwrote it and the first promise never settled - and every decision handler in the app is
+    // `if (!(await confirmDecision(...))) return; setBusy(true); try { … } finally { setBusy(false) }`, so the
+    // caller's `finally` never ran: a button that spins forever and a row that cannot be acted on again without
+    // a reload. Reachable by double-pressing a destructive row action before the dialog paints (the trigger is
+    // not disabled during the await), and by any two overlapping prompts.
+    //
+    // Resolved FALSE, not rejected: "the prompt this call was waiting on was replaced" means the person never
+    // agreed to anything, which is exactly what false says - and a rejection would turn it into an error toast
+    // in handlers that do not expect confirm to throw.
+    resolver.current?.(false);
     setOpts(o);
     return new Promise<boolean>((resolve) => {
       resolver.current = resolve;
@@ -49,12 +60,19 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
           className="z-[60] max-w-md"
           overlayClassName="z-[60]"
           // Enter confirms from anywhere in the dialog (Esc cancels via the dialog default), so a confirmation
-          // is a single keystroke. preventDefault stops a focused button's own Enter-activation double-firing.
+          // is a single keystroke - EXCEPT on a button, which activates itself.
+          //
+          // The exception is the whole point on a destructive prompt. There `autoFocus` is deliberately
+          // withheld (so nobody deletes by reflex), which leaves focus on the dialog and makes the first Tab
+          // land on Cancel - the first button in the markup. Without this check, a keyboard user pressing Enter
+          // to CANCEL had that suppressed by `preventDefault` and ran `close(true)` instead: the delete they
+          // were declining. Every `confirm({ destructive: true })` in the app - reject, cancel, revoke,
+          // rescind, "Discard your changes?", the bulk destructive actions, the purge prompts.
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              close(true);
-            }
+            if (e.key !== "Enter") return;
+            if ((e.target as HTMLElement | null)?.closest("button")) return; // let the focused button act
+            e.preventDefault();
+            close(true);
           }}
         >
           <DialogHeader>

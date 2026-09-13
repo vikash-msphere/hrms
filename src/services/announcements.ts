@@ -114,12 +114,17 @@ export async function listAnnouncements(
   pageToken?: string,
   showDeleted = false,
   q?: string,
+  kind?: "announcement" | "post" | "poll" | "kudos",
 ) {
   // Server-side text filter (FTS over title, body, category, kind). It ANDs onto the visibility above and can
   // never widen it, so an author still finds their own drafts and nobody else starts seeing them.
   const textMatch = await searchFilter(deps, "announcements", q, schema.announcements.uuid);
   const visible = visibleWhere(scope, showDeleted);
-  const where = textMatch ? and(visible, textMatch) : visible;
+  // `?kind=kudos` narrows the board to one kind. The board itself is a FEED - a window by design - but the
+  // recognition rollups beside it (a month's podium, six months of who was recognized, twelve months of how
+  // often) are aggregates, and an aggregate folded over whatever the feed happens to have loaded redraws as
+  // the reader scrolls. This is what lets them be their own bounded read instead.
+  const where = and(visible, textMatch ?? undefined, kind ? eq(schema.announcements.kind, kind) : undefined);
   // Paged in the board's OWN order (pinned first, then when the post went live), not by when the row was
   // written: a feed that pages on one key and is read in another can put an "older" page's post at the top of
   // the board and hide a pinned post behind the cursor. See domain/board.ts - the web mirrors this key.

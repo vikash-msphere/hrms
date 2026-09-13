@@ -5,7 +5,8 @@ import { cn, idOf, formatDate } from "@/lib/utils";
 import { todayStr as today } from "@/lib/orgDay";
 import { navigate } from "@/router";
 import type { Asset, AssetCategory, Employee, Stocktake as Count } from "@/types";
-import { useCollection } from "@/hooks/useCollection";
+import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { parseScanPayload, ASSET_STATUS_LABEL, ASSET_CONDITION_LABEL } from "@/lib/assetTags";
 import { SCOPE_PRESETS, inScopeWire, lastClosed, missingPaths, presetOf, scopeStatuses, sightedIn, type ScopePresetId } from "@/lib/stocktake";
 import { useCodeScanner, hasNativeDetector } from "@/lib/scanner";
@@ -43,9 +44,17 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
   const confirm = useConfirm();
   // Assets and counts are read through the shared store, so this modal reuses what the Assets page already
   // fetched and a `:verify` response can be folded straight back into the rows every view is watching.
-  const { rows: assets, setRows: setAssets } = useCollection<Asset>("assets");
+  // `all`, as the Assets page itself reads it: this walk is not a list, it is the input to an IRREVERSIBLE
+  // report. `scope` below is meant to be "the count's scope", and on one page it was the count's scope
+  // intersected with the newest hundred assets - so the walk reads "83 / 83" and closes, while the server
+  // scores the close over the whole inventory and freezes the other 317 as missing, each with its holder
+  // notified to go and look, under a confirm that promised zero.
+  const { rows: assets, setRows: setAssets } = useCollection<Asset>("assets", { all: true });
+  // The walk stops at ALL_CAP, and a register can exceed even that - so the count cannot be CLOSED from a
+  // partial scope (see closeCount). A count is the one artefact in this app that cannot be reopened.
+  const assetsTruncated = useCollectionHasMore("assets");
   const { rows: counts, setRows: setCounts, reload: reloadCounts } = useCollection<Count>("stocktakes");
-  const { rows: assetCategories } = useCollection<AssetCategory>("asset-categories");
+  const { rows: assetCategories } = useCollection<AssetCategory>("asset-categories", { all: true });
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
 
   const [openPath, setOpenPath] = useState<string | null>(null); // the count being walked
@@ -58,6 +67,7 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
   const [newCategory, setNewCategory] = useState("all");
   const [failed, setFailed] = useState<Record<string, string>>({}); // asset path -> why the sighting did not save
   const [checkedIn, setCheckedIn] = useState<string[]>([]); // sightings that also counted something into stock
+  const [foundFailed, setFoundFailed] = useState<Record<string, string>>({}); // scan payload -> why the find did not save
   const fileRef = useRef<HTMLInputElement | null>(null);
   const foundRef = useRef(new Set<string>()); // unexpected payloads already logged, so a sticker in frame is one find
 
@@ -199,8 +209,15 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
     try {
       const updated = await invoke<Count>(session.path, "recordFound", undefined, { scan: raw });
       setCounts((prev) => prev.map((c) => (c.path === updated.path ? updated : c)));
+      setFoundFailed(({ [raw]: _gone, ...rest }) => rest);
       toast({ title: "Logged as an unexpected find", description: raw.slice(0, 80) });
     } catch (e) {
+      // The dedupe means "already LOGGED", not "already attempted". Latched on failure it was permanent for
+      // the session: the camera returns at the guard above and so does the manual box, so a scan lost to one
+      // 502 could never be logged again - and an unexpected find is the one output this walk exists to
+      // produce. Same posture as recordSighting above: un-latch, and say there is something still to re-scan.
+      foundRef.current.delete(raw);
+      setFoundFailed((prev) => ({ ...prev, [raw]: (e as Error).message }));
       toast({ variant: "destructive", title: "Couldn't log that scan", description: (e as Error).message });
     }
   }
@@ -250,6 +267,17 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
   // cannot be undone (another walk is another count), so it asks first and says what it is about to do.
   async function closeCount() {
     if (!session) return;
+    // Refused, not merely flagged: the server scores the close over every asset in the stored scope, so a walk
+    // that could not LIST every asset would freeze rows nobody was given the chance to scan - and the confirm
+    // below would promise "0 missing" while hundreds of holders get chased.
+    if (assetsTruncated) {
+      toast({
+        variant: "destructive",
+        title: "Too many assets to close this count here",
+        description: "Not every asset in scope could be loaded, so anything not listed would be frozen as missing. Narrow the count's scope and walk it again.",
+      });
+      return;
+    }
     const held = remaining.filter((a) => a.assigned_to).length;
     const ok = await confirm({
       title: `Close "${session.label}"?`,
@@ -267,6 +295,7 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
       stopCamera();
       toast({ title: `Count closed: ${updated.result?.counts?.missing ?? 0} missing`, variant: "success" });
       setOpenPath(null);
+      setFoundFailed({}); // the walk is over; unsaved finds belong to the count that just closed
       void reloadCounts();
       // The result is a record now, so hand them to the record: the page shows the frozen numbers, the missing
       // list, and what turns up afterwards.
@@ -472,7 +501,9 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
                 {condition !== "good" && <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">Everything you sight next is recorded as {ASSET_CONDITION_LABEL[condition] ?? condition}.</p>}
               </div>
 
-              <div className="mt-auto rounded-md border bg-muted/40 p-3 text-center">
+              <div className="mt-auto space-y-2">
+              <TruncationNotice collection="assets" what="assets" />
+              <div className="rounded-md border bg-muted/40 p-3 text-center">
                 <div className="text-2xl font-semibold">{seen.length}<span className="text-base font-normal text-muted-foreground"> / {scope.length}</span></div>
                 <div className="text-xs text-muted-foreground">sighted in this count</div>
                 {(flagged > 0 || (session.found?.length ?? 0) > 0) && (
@@ -480,6 +511,15 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
                     {flagged > 0 && `${flagged} flagged`}{flagged > 0 && (session.found?.length ?? 0) > 0 && " · "}{(session.found?.length ?? 0) > 0 && `${session.found!.length} unexpected`}
                   </div>
                 )}
+                {/* A find whose write failed is NOT on the record, and the walker is the only person who can
+                    put it there - so it is said here, before they close the count, rather than living in a
+                    toast that has already gone. Re-scanning the same sticker retries it. */}
+                {Object.keys(foundFailed).length > 0 && (
+                  <div className="mt-1 text-[11px] text-destructive">
+                    {Object.keys(foundFailed).length} unexpected {Object.keys(foundFailed).length === 1 ? "find" : "finds"} did not save - scan {Object.keys(foundFailed).length === 1 ? "it" : "them"} again
+                  </div>
+                )}
+              </div>
               </div>
             </div>
 

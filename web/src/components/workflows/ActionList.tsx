@@ -37,7 +37,7 @@ const LABEL: Record<Action["kind"], string> = {
 // the engine resolves the audience - a raw id typed into a text box reached the engine still tokenised and
 // matched nobody. Mounted only while the audience IS a department, so the list is fetched on demand.
 function DepartmentPicker({ value, onChange }: { value: string; onChange: (ref: string) => void }) {
-  const { rows } = useCollection<Department>("departments");
+  const { rows } = useCollection<Department>("departments", { all: true });
   return (
     <Select value={value} onValueChange={onChange}>
       <SelectTrigger className="h-9 flex-1" aria-label="Department"><SelectValue placeholder="Pick a department" /></SelectTrigger>
@@ -259,11 +259,33 @@ type BodyRow = { key: string; value: string };
 function bodyToRows(body: unknown): BodyRow[] {
   return body && typeof body === "object" && !Array.isArray(body) ? Object.entries(body as Record<string, unknown>).map(([k, v]) => ({ key: k, value: typeof v === "string" ? v : JSON.stringify(v) })) : [];
 }
+
+/** A body this field form cannot represent: an array, or a scalar. Shown read-only rather than erased. */
+function isFieldMap(body: unknown): boolean {
+  return body == null || (typeof body === "object" && !Array.isArray(body));
+}
+
+// THE ROUND-TRIP HAS TO BE LOSSLESS. Numbers and booleans survived it; an array, a nested object and `null`
+// did not - `rowsToBody` had no branch that parsed one back, so `["employees/a1"]` was shown in the row and
+// written back as the STRING '["employees/a1"]'. And editing any row re-serialises all of them, so touching
+// an unrelated field was enough. Several write schemas require arrays (goal-templates `:assign` takes
+// `employees`, cards `initial_todos`, announcements poll `options`), the guided form cannot author one at
+// all, so such a rule has to be written through the JSON hatch - and then merely OPENING it here and
+// touching the body converted it to a string, which the server rejects with a 400 naming a field the reader
+// never typed wrong.
+function parseValue(v: string): unknown {
+  if (v === "true") return true;
+  if (v === "false") return false;
+  if (v === "null") return null;
+  if (v.includes("{{")) return v; // a template is always a string
+  if (/^[[{]/.test(v.trim())) { try { return JSON.parse(v); } catch { return v; } }
+  return v !== "" && !Number.isNaN(Number(v)) ? Number(v) : v;
+}
 function rowsToBody(rows: BodyRow[]): Record<string, unknown> | undefined {
   const entries = rows.filter((r) => r.key.trim());
   if (!entries.length) return undefined;
   const out: Record<string, unknown> = {};
-  for (const r of entries) { const v = r.value; out[r.key] = v === "true" ? true : v === "false" ? false : v !== "" && !Number.isNaN(Number(v)) && !v.includes("{{") ? Number(v) : v; }
+  for (const r of entries) out[r.key] = parseValue(r.value);
   return out;
 }
 
@@ -312,7 +334,17 @@ function ApiCallEditor({ action, onChange: onChangeProp, meta, vars }: { action:
   };
   const resourceOf = (path: string) => path.replace("/v1/", "").split(/[/:]/)[0] ?? "";
 
-  const bodyForm = (
+  // A body that is not a field map (an array, or a scalar) has no rows to show, and the form used to render
+  // empty - as if the action had no body at all - so the first "Add field" wrote that emptiness back over it.
+  // Surfaced instead, read-only, naming the editor that can change it.
+  const bodyForm = !isFieldMap(action.body) ? (
+    <Field label="Body">
+      <p className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        This body is not a field map, so it can't be edited here without changing its shape. Use <span className="font-medium">Edit as JSON</span>.
+      </p>
+      <pre className="mt-1.5 overflow-x-auto rounded-lg border bg-muted/30 p-2 font-mono text-[11px]">{JSON.stringify(action.body, null, 2)}</pre>
+    </Field>
+  ) : (
     <Field label="Fields">
       <div className="space-y-1.5">
         {rows.map((r, i) => (

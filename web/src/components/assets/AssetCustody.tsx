@@ -89,8 +89,11 @@ export function AssetCustodyDialog({
   const { cameraState, startCamera, stopCamera, decodeFiles } = scanner;
 
   // Straight to the camera when there is nothing to confirm with yet: this dialog exists to be scanned into.
+  // Released on unmount - without it, StrictMode's mount/unmount/mount left one stream running with no
+  // reference to stop it, and the sensor stayed held after the dialog closed.
   useEffect(() => {
     if (!presetScan) void startCamera();
+    return () => stopCamera();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

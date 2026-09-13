@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MessagesSquare, Plus, Trash2, Check, X, CalendarDays, CalendarPlus, CalendarClock, ChevronRight, ArrowDownToLine, ListPlus, ListTodo, History, Repeat, Search, SquareKanban, Lock, Sparkles } from "lucide-react";
 import { create, patch, remove, list } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -6,6 +6,8 @@ import { cn, formatDate, idOf } from "@/lib/utils";
 import { todayStr, addDaysYmd } from "@/lib/orgDay";
 import type { Board, CheckIn, CheckInActionItem, Employee, Goal, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
+import { runSequential, batchSummary } from "@/lib/batchRun";
 import { useIntent } from "@/lib/intent";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { DataState } from "@/components/common/DataState";
@@ -51,7 +53,12 @@ const relativeDay = (iso: string): string | null => {
 const PAST_PREVIEW = 8;
 
 export default function CheckIns({ me }: { me: Me }) {
-  const { rows, state, error, reload } = useCollection<CheckIn>("check-ins");
+  // `all`: "from last time" has to mean the last time, not the last time on this page. Check-ins are one row
+  // per pair per cadence - a manager with six reports on a weekly rhythm files over 300 a year - and they are
+  // read newest-first, so the older meetings, which is where a stranded action item most likely sits, are
+  // exactly what a window drops. `openByPerson` and `carryCount` below are built from these rows, so the amber
+  // "bring forward" button simply does not appear for items it cannot see.
+  const { rows, state, error, reload } = useCollection<CheckIn>("check-ins", { all: true });
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -162,24 +169,50 @@ export default function CheckIns({ me }: { me: Me }) {
 
   // Marks a 1:1's open items done, used when they have been carried into a newer 1:1 - "moved
   // forward", not completed, but done is what keeps them from being offered (and counted) twice.
+  // Version-pinned and idempotent: running it twice on an already-retired 1:1 writes the same array.
   const retireOpenItems = (c: CheckIn) =>
-    patch(`check-ins/${idOf(c.path)}`, { action_items: (c.action_items ?? []).map((i) => (i.done ? i : { ...i, done: true })) });
+    patch(`check-ins/${idOf(c.path)}`, { action_items: (c.action_items ?? []).map((i) => (i.done ? i : { ...i, done: true })) }, c.etag);
+
+  // Sources whose items are already in the target, in THIS session. A retire that fails leaves its source
+  // holding open items, so the amber button comes back - and without this the press that follows would copy
+  // them a second time, into a list where a genuine repeat ("follow up with Finance") is indistinguishable
+  // from a duplicate. Same shape as Attendance's `filedThisDialog`.
+  const carriedSources = useRef<Set<string>>(new Set());
 
   async function bringForward(target: CheckIn) {
     const sources = openByPerson.get(idOf(otherRef(target) ?? "")) ?? [];
-    const moved = sources.flatMap((s) => s.items);
-    if (!moved.length) return;
-    try {
-      await patch(`check-ins/${idOf(target.path)}`, {
-        action_items: [...(target.action_items ?? []), ...moved.map((i) => ({ text: i.text, done: false }))],
+    const moved = sources.reduce((s, x) => s + x.items.length, 0);
+    if (!moved) return;
+    // One source at a time, each COPIED AND THEN RETIRED before the next is touched, so a failure leaves that
+    // source's items in one place rather than two - and `runSequential` keeps going and names what was missed
+    // instead of reporting a clean failure over a half-applied carry.
+    let current = target; // the target's latest row: each copy bumps its version, and the next copy needs it
+    const result = await runSequential(
+      sources,
+      (s) => formatDate(s.c.meeting_date ?? "") || "a past 1:1",
+      async (s) => {
+        if (!carriedSources.current.has(s.c.path)) {
+          current = await patch<CheckIn>(
+            `check-ins/${idOf(current.path)}`,
+            { action_items: [...(current.action_items ?? []), ...s.items.map((i) => ({ text: i.text, done: false }))] },
+            current.etag,
+          );
+          carriedSources.current.add(s.c.path);
+        }
+        await retireOpenItems(s.c);
+      },
+    );
+    reload();
+    if (result.failures.length) {
+      toast({
+        title: "Couldn't bring every item forward",
+        description: `${batchSummary(result, "1:1")} ${result.failures.map((f) => f.label).join(", ")} - press again to finish, nothing will be copied twice.`,
+        variant: "destructive",
       });
-      for (const s of sources) await retireOpenItems(s.c);
-      reload();
-      toast({ title: `Brought ${moved.length} item${moved.length === 1 ? "" : "s"} forward`, variant: "success" });
-    } catch (e) {
-      toast({ title: "Couldn't bring items forward", description: (e as Error).message, variant: "destructive" });
-      reload();
+      return;
     }
+    for (const s of sources) carriedSources.current.delete(s.c.path);
+    toast({ title: `Brought ${moved} item${moved === 1 ? "" : "s"} forward`, variant: "success" });
   }
 
   async function reschedule(c: CheckIn, date: string) {
@@ -263,6 +296,7 @@ export default function CheckIns({ me }: { me: Me }) {
   return (
     <div>
       <PageHeader title="1:1s" description="Your 1:1s. Keep shared notes and action items between you and your manager." actions={newBtn} />
+      <TruncationNotice collection="check-ins" what="1:1s" className="mb-4" />
 
       <DataState state={state} error={error} onRetry={reload}>
         {rows.length === 0 ? (

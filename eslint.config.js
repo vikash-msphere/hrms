@@ -166,7 +166,58 @@ export default tseslint.config(
       // count, which means the existing debt is tolerated and ONE MORE fails the build. The number in
       // package.json comes down as these are paid off; it must never go up.
       "react-hooks/exhaustive-deps": "warn",
+
+      // "WHAT DAY IS IT" HAS ONE ANSWER, and it is lib/orgDay.
+      //
+      // `new Date().getFullYear()` / `.getMonth()` / `.getDate()` / `.getDay()` reads the VIEWER's calendar,
+      // which is neither the org's day (what the server decides in, and what every date `min`, default and
+      // window in the app is measured against) nor UTC. The two disagree for the whole of the local offset -
+      // the entire IST morning up to 05:30, and everything after ~18:30 west of the org - which is how a
+      // "Today" chip wrote a date the form's own `min` forbade, a holiday added on 1 January was filed against
+      // last year, and a year-to-date total counted the wrong year.
+      //
+      // lib/orgDay.ts exists to end that class, and it had been worked through by hand twice before; the
+      // reason it kept coming back is that nothing FAILED when a new one was written. Now something does.
+      // `todayStr`, `thisYearStr`, `thisMonthStr`, `orgDayFromToday(n)`, `addDaysYmd` and `weekStartYmd` cover
+      // every case this rule reports.
+      //
+      // Deliberately narrow: it matches the getter called directly on a bare `new Date()`, which is the shape
+      // every one of these took. A Date that came from somewhere else is a real instant and its getters are
+      // nobody's business but the caller's.
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            'CallExpression[callee.object.type="NewExpression"][callee.object.callee.name="Date"][callee.object.arguments.length=0][callee.property.name=/^(getFullYear|getMonth|getDate|getDay)$/]',
+          message:
+            "This reads the viewer's calendar, not the org's. Use lib/orgDay (todayStr, thisYearStr, thisMonthStr, orgDayFromToday, addDaysYmd, weekStartYmd) - see its header.",
+        },
+        {
+          // AN UNRESOLVABLE REF READS AS A WORD, NEVER AS AN ID.
+          //
+          // `m.get(idOf(p)) ?? idOf(p)` puts a 26-character internal uuid on screen where a name belongs
+          // ("Goes to 5q5an4xdav8t… for approval"). lib/utils.ts `personName` was written to end exactly that,
+          // and it kept coming back because nothing failed when the next lookup was open-coded: the trigger is
+          // not paging but SCOPE - the server narrows every list to what the caller may read, so a ticket
+          // assigned outside the reader's department, an asset held by another team, or a document issued to
+          // somebody they cannot see all miss the map in the ordinary case. It had grown from the six sites
+          // the helper was written for to twenty-seven.
+          //
+          // `personName(people, ref, "…")` covers the employee case; for a catalogue lookup any word does
+          // ("Unknown department"). A ref used as an IDENTIFIER rather than rendered - picking which board to
+          // select - is a different thing and takes a disable comment saying so.
+          selector: 'LogicalExpression[operator="??"] > CallExpression.right[callee.name="idOf"]',
+          message:
+            "A ref that doesn't resolve must read as a word, not as a raw wire id - see lib/utils.ts personName. Use personName(people, ref, \"…\") for people, or any plain fallback word for a catalogue.",
+        },
+      ],
     },
+  },
+  // The two modules the rule above is about: `lib/orgDay` IS the answer, and `lib/attendance` owns the
+  // timezone maths it is built on. Both have to read a clock somewhere.
+  {
+    files: ["web/src/lib/orgDay.ts", "web/src/lib/attendance.ts"],
+    rules: { "no-restricted-syntax": "off" },
   },
   // `no-undef` is off for the whole tree, which is the standard advice for a TypeScript project and not a
   // weakening: `tsc --noEmit` already resolves every identifier against the lib and `@types` sets each

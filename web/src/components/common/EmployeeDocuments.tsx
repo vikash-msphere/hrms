@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { FileText, FileLock, CheckCircle2, AlertCircle } from "lucide-react";
 import { useCollection } from "@/hooks/useCollection";
-import { formatDate, humanize, idOf } from "@/lib/utils";
+import { formatDate, humanize } from "@/lib/utils";
 import type { DocumentResource } from "@/types";
 import { DocumentDownload } from "@/components/common/DocumentDownload";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,15 +14,21 @@ import { useToast } from "@/components/ui/use-toast";
 /** Lists the documents tied to one employee. The server only returns documents the
  *  caller is allowed to see (owner + HR + super_admin for employee files). */
 export function EmployeeDocuments({ employeeId, title = "Documents" }: { employeeId: string; title?: string }) {
-  // Personal (employee-owned) documents; the server scopes the list to what the caller may see, and we
-  // narrow to this employee. Org-wide documents live on the Documents page, not the profile.
-  const { rows } = useCollection<DocumentResource>("personal-documents");
+  // THIS PERSON'S documents, asked for as such (`?employee=`, which documentRoutes takes and every sibling
+  // profile panel already passes). Reading the collection and filtering here looked equivalent and is not: the
+  // server scope is an AUTHZ scope, not a per-employee one, so for the employee themselves it coincides and
+  // for HR it is the whole org - a hundred newest personal-documents across everybody, of which this person's
+  // may be none. The card then renders "No documents on file" over a shelf that is not empty, and `officialFys`
+  // below stops marking a generated Form 16 as superseded because the official copy fell off the page.
+  //
+  // `all`, because a long-tenured employee's own file can itself pass a page and this is a file rather than a
+  // feed - there is no "load more" on it. It also stops the profile pulling other people's identity scans and
+  // contracts into the browser, on the one collection instrument.ts singles out by name.
+  const { rows: docs } = useCollection<DocumentResource>("personal-documents", {
+    all: true,
+    params: { employee: `employees/${employeeId}` },
+  });
   const { toast } = useToast();
-
-  const docs = useMemo(
-    () => rows.filter((d) => d.employee && idOf(d.employee) === employeeId),
-    [rows, employeeId]
-  );
 
   // Form 16 precedence: for each financial year that has an OFFICIAL (TRACES) copy, the HRMS-generated copy is
   // superseded (still listed, but marked - the official one is the one to file). Built once per doc set.
@@ -32,7 +38,14 @@ export function EmployeeDocuments({ employeeId, title = "Documents" }: { employe
   );
 
   return (
-    <Card className="mt-6">
+    // `sentry-mask` on the whole card. This reads the SAME collection (`personal-documents`) that
+    // `SENSITIVE_PAGES` masks the Documents route for - "scanned identity documents, contracts, insurance
+    // cards" - but renders on #/profile and #/employees/<id>, neither of which is on that list, and the
+    // posture is unmask-by-default. Without this, document names, types (FORM16, insurance, identity),
+    // financial years and expiry dates went to Sentry in full, and "Report a problem" attaches the recording
+    // to a ticket. It is the eighth panel on the profile; the other seven are tagged and pinned by
+    // test/replayMaskCoverage.test.ts.
+    <Card className="mt-6 sentry-mask">
       <CardHeader>
         <CardTitle className="text-base">
           <AccessAction collection="personal-documents" label={title}>

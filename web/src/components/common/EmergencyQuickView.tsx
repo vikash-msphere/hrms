@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { HeartPulse, ShieldPlus, Download as DownloadIcon, Upload as UploadIcon, Loader2 } from "lucide-react";
 import { get, patch, list, upload, download } from "@/api";
+import { describeError, isConflict } from "@/lib/formError";
 import { createDocument, documentFileName } from "@/lib/documents";
 import type { PersonalDetails, DocumentResource } from "@/types";
 import { Button } from "@/components/ui/button";
@@ -75,8 +76,13 @@ export function EmergencyQuickView({
 
   async function loadInsurance() {
     try {
-      const r = await list<DocumentResource>("personal-documents");
-      setInsDocs((r.results ?? []).filter((x) => x.employee === `employees/${employeeId}` && x.document_type === "INSURANCE"));
+      // Ask the server for THIS person's documents (`?employee=`, which the list route takes), rather than
+      // reading the newest page of everybody's and filtering here. The server scope is an AUTHZ scope, not a
+      // per-employee one: for HR it is the whole org, so a hundred rows is a few weeks of uploads and the card
+      // then shows "no insurance on file" for somebody who has one - next to an upload button that would file
+      // a duplicate. It hid its own failure too, because a card just uploaded is always the newest row.
+      const r = await list<DocumentResource>("personal-documents", { params: { employee: `employees/${employeeId}` } });
+      setInsDocs((r.results ?? []).filter((x) => x.document_type === "INSURANCE"));
     } catch {
       setInsDocs([]);
     }
@@ -104,15 +110,23 @@ export function EmergencyQuickView({
     setSaving(true);
     setErr(null);
     try {
-      // Save the full record so the contact fields (edited elsewhere) are preserved.
-      const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form);
+      // Save the full record so the contact fields (edited elsewhere) are preserved - which is exactly why the
+      // version goes with it: a whole-blob write with no If-Match does not lose a race, it silently restores
+      // the old value of whatever the Contact or Personal editor wrote while this dialog was open.
+      const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form, data?.etag);
       setData(updated);
       guard.markSaved();
       setEdit(false);
       toast({ title: "Emergency details saved", variant: "success" });
       onSaved?.();
     } catch (e) {
-      setErr((e as Error).message);
+      if (isConflict(e)) {
+        const fresh = await get<PersonalDetails>(`employees/${employeeId}/personal-info`).catch(() => null);
+        if (fresh) setData(fresh);
+        setErr("Somebody else changed these details while you had them open. They have been reloaded - check them and save again.");
+        return;
+      }
+      setErr(describeError(e));
     } finally {
       setSaving(false);
     }
@@ -151,7 +165,12 @@ export function EmergencyQuickView({
         <FieldAccess accessTarget={subRef} />
       </span>
       <Dialog open={open} onOpenChange={(next) => (edit ? guard.onOpenChange(next) : setOpen(next))}>
-        <DialogContent scrollBody onEnterSubmit={() => { if (edit && !saving) void save(); }}>
+        {/* `sentry-mask`, like the seven sibling panels over this record: a dialog renders through a PORTAL,
+            outside `<main data-page>`, so instrument.ts's route-level masking cannot reach it - and what is in
+            here is blood group, allergies and free-text medical notes, the only genuinely medical fields in the
+            app. Replay is unmask-by-default, and "Report a problem" attaches the current replay to a ticket,
+            so without this a colleague's allergies ride into the helpdesk queue. */}
+        <DialogContent scrollBody className="sentry-mask" onEnterSubmit={() => { if (edit && !saving) void save(); }}>
           <DialogHeader className="flex flex-row items-start justify-between gap-3">
             <div className="min-w-0 space-y-1.5">
               <DialogTitle className="flex items-center gap-2">
@@ -202,8 +221,11 @@ export function EmergencyQuickView({
                   </SelectContent>
                 </Select>
               </Field>
-              <Field label="Allergies" field="personal-info.allergies" hint="Anything a paramedic should know before treating them."><Textarea rows={2} value={form.allergies ?? ""} onChange={(e) => set({ allergies: e.target.value })} /></Field>
-              <Field label="Medical notes" field="personal-info.medical_notes"><Textarea rows={2} value={form.medical_notes ?? ""} onChange={(e) => set({ medical_notes: e.target.value })} /></Field>
+              {/* `data-sentry-ignore` as well as the dialog's mask: keystroke recording is a separate channel
+                  from element masking, so a masked box still ships what was typed into it. Same pairing
+                  RequestLeaveDialog uses for a leave reason, and for the same reason - this text is a diagnosis. */}
+              <Field label="Allergies" field="personal-info.allergies" hint="Anything a paramedic should know before treating them."><Textarea rows={2} data-sentry-ignore value={form.allergies ?? ""} onChange={(e) => set({ allergies: e.target.value })} /></Field>
+              <Field label="Medical notes" field="personal-info.medical_notes"><Textarea rows={2} data-sentry-ignore value={form.medical_notes ?? ""} onChange={(e) => set({ medical_notes: e.target.value })} /></Field>
               {!(form.emergency_name ?? "").trim() !== !(form.emergency_phone ?? "").trim() && (
                 <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
                   A contact needs both a name and a number to be worth calling.

@@ -28,7 +28,18 @@ export function fyOptions(back = 4, from: string = todayStr()): string[] {
   return Array.from({ length: back + 1 }, (_, i) => fyLabel(start - i));
 }
 
-export const isFyLabel = (s: string) => /^\d{4}-\d{2}$/.test(s.trim());
+/**
+ * Whether `s` is an FY label ("2025-26") rather than a month key ("2026-09").
+ *
+ * The shape alone cannot tell them apart - `/^\d{4}-\d{2}$/` matches both, and `YYYY-MM` is the month key used
+ * throughout the app (`monthOf`, `thisMonthStr`, `periodKeyOf`) - so the second pair has to be checked against
+ * the first: an FY label's tail is its start year plus one, modulo a century.
+ */
+export const isFyLabel = (s: string) => {
+  const m = /^(\d{4})-(\d{2})$/.exec(s.trim());
+  if (!m) return false;
+  return Number(m[2]) === (Number(m[1]) + 1) % 100;
+};
 
 /** "1 Apr 2025 to 31 Mar 2026" - spells out what a bare FY label covers. */
 export function fySpan(fy: string): string {

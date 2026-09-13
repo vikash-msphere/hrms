@@ -1,12 +1,29 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useCollection, type LoadState } from "@/hooks/useCollection";
-import { patch, invoke, get, type ListResponse } from "@/api";
+import { patch, invoke, getAllPages } from "@/api";
 import { idOf } from "@/lib/utils";
 import { usePermission } from "@/lib/perm";
 import { toast } from "@/components/ui/use-toast";
 import { categoryOf } from "@/lib/notificationMeta";
 import { publish, subscribeTopic } from "@/lib/crossTabBus";
+import { broadcastInvalidation, invalidateCollections } from "@/lib/resourceStore";
 import type { Notification } from "@/types";
+
+/**
+ * The PAGE KEY a notification's `link` points at.
+ *
+ * `link` is documented as "Web route to open (page key, optional /id)" - but four server-built links store the
+ * hash form (`#/settings/permissions`, src/services/accessRules.ts). `router.navigate` strips that deliberately,
+ * so CLICKING one has always worked; the two readers that split the string did not, and both failed silently:
+ * `unreadByPage` bucketed them under `"#"`, which no nav item carries, so they badged nothing, and the
+ * leave-a-page sweep compared `"#" === "settings"`, so they were never auto-marked-read and sat unread in the
+ * bell indefinitely. Normalising here means all three readers agree whichever form the row holds.
+ */
+const pageOfLink = (link: string): string => link.replace(/^#?\//, "").split("/")[0] ?? "";
+
+/** Row ceiling for the snoozed walk. Bounded because each page is a request; high enough that the wake timer
+ *  and the list are right for anybody's real snooze pile, and `truncated` is what says when it was not. */
+const SNOOZED_CAP = 500;
 
 // Priority ordering + presentation. urgent/high float to the top of the bell + list and get visual emphasis.
 const PRIORITY_RANK: Record<string, number> = { urgent: 3, high: 2, normal: 1, low: 0 };
@@ -94,6 +111,8 @@ type NotificationsState = {
   snoozedCount: number;
 
   markRead: (n: Notification) => Promise<void>;
+  /** A set of rows in one go: one local update, one refresh - not one of each per row. */
+  markManyRead: (ns: Notification[]) => Promise<void>;
   markUnread: (n: Notification) => Promise<void>;
   markAllRead: () => Promise<void>;
   dismiss: (n: Notification) => Promise<void>;
@@ -124,7 +143,7 @@ const EMPTY: NotificationsState = {
   // zero state rather than wait forever for a feed that is never coming.
   notifications: [], unread: 0, unreadByPage: {}, newSubjects: new Set(), available: false, state: "ready",
   snoozed: [], snoozedLoaded: false, loadSnoozed: () => {}, snoozedCount: 0,
-  markRead: noop, markUnread: noop, markAllRead: noop, dismiss: noop, snooze: noop, unsnooze: noop, reload: () => {},
+  markRead: noop, markManyRead: noop, markUnread: noop, markAllRead: noop, dismiss: noop, snooze: noop, unsnooze: noop, reload: () => {},
 };
 const NotificationsContext = createContext<NotificationsState>(EMPTY);
 export const useNotifications = () => useContext(NotificationsContext);
@@ -143,11 +162,30 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // Snoozed rows live outside the feed - fetched lazily (once) when the Snoozed view is first opened.
   const [snoozed, setSnoozed] = useState<Notification[]>([]);
   const [snoozedLoaded, setSnoozedLoaded] = useState(false);
+  const [snoozedTruncated, setSnoozedTruncated] = useState(false);
+  // THE CURSOR IS WALKED, because a page of this collection is not a subset of it in any useful order. The
+  // server clamps any page size to 100 (http/pagination.ts) and says so only through `next_page_token` - this
+  // asked for 200 and read the answer as the whole set, which is the same mistake four other files carry a
+  // comment about having fixed. It matters twice here: the Snoozed badge dropped to 100 the moment the tab was
+  // opened (a count that gets LESS accurate when you look at it), and the wake timer below aims at the soonest
+  // pending snooze while these rows are ordered by create_time DESC - so the next wake due is not
+  // preferentially in the first page, and a busy approver's reminder simply never armed.
+  // A GENERATION COUNTER, because this walks the cursor (several sequential round-trips) and is invoked
+  // directly from three places that can overlap: the Snoozed view opening, every snooze/unsnooze write, and the
+  // wake timer firing. There is no effect cleanup to hang a flag on. Without the guard a slower earlier walk
+  // resolves last and repaints the list with rows the user has already woken - and re-arms the wake timer off
+  // that stale set, so the next reminder aims at a snooze that no longer exists.
+  const reqSeq = useRef(0);
   const loadSnoozed = useCallback(() => {
     setSnoozedLoaded(true);
-    void get<ListResponse<Notification>>("notifications?snoozed=true&max_page_size=200")
-      .then((r) => setSnoozed(r.results ?? []))
-      .catch(() => setSnoozedLoaded(false));
+    const seq = ++reqSeq.current;
+    void getAllPages<Notification>("notifications?snoozed=true&max_page_size=100", SNOOZED_CAP)
+      .then(({ results, truncated }) => {
+        if (seq !== reqSeq.current) return;
+        setSnoozed(results);
+        setSnoozedTruncated(truncated);
+      })
+      .catch(() => { if (seq === reqSeq.current) setSnoozedLoaded(false); });
   }, []);
 
   // Proactive wake: a single-shot timer to the SOONEST pending snooze so an idle open tab actually surfaces a
@@ -182,7 +220,8 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     const m: Record<string, number> = {};
     for (const n of rows) {
       if (n.read || !n.link) continue;
-      const page = n.link.split("/")[0]!;
+      const page = pageOfLink(n.link);
+      if (!page) continue;
       m[page] = (m[page] ?? 0) + 1;
     }
     return m;
@@ -316,6 +355,35 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     [setRows, reload, post],
   );
 
+  /**
+   * Mark a SET of notifications read as one unit: rows applied locally once, writes sent together, and the
+   * collection refreshed ONCE when they settle.
+   *
+   * Leaving a page marks every unread notification for it read, which through `markRead` was one PATCH plus one
+   * FORCED list read each - `withInvalidation` re-reads every cached key with a live subscriber, and the
+   * provider wraps the whole app so `notifications` always has one. Worse, `patchRows` stamps `patchedAt`, so a
+   * forced read still in flight when the next write landed failed `e.patchedAt >= startedAt` and scheduled yet
+   * another read instead of adopting its answer. On an app whose primary constraint is request count, a storm
+   * on every navigation is the wrong shape.
+   */
+  const markManyRead = useCallback(
+    async (ns: Notification[]) => {
+      const unreadOnes = ns.filter((n) => !n.read);
+      if (!unreadOnes.length) return;
+      const paths = new Set(unreadOnes.map((n) => n.path));
+      setRows((prev) => prev.map((r) => (paths.has(r.path) ? { ...r, read: true } : r)));
+      for (const n of unreadOnes) post({ op: "read", path: n.path });
+      const results = await Promise.allSettled(
+        unreadOnes.map((n) => patch(`notifications/${idOf(n.path)}`, { read: true }, undefined, { skipInvalidation: true })),
+      );
+      // One refresh for the batch - the debt `skipInvalidation` incurs. A failure inside it reloads, which is
+      // the same recovery a single `markRead` does.
+      if (results.some((r) => r.status === "rejected")) reload();
+      else broadcastInvalidation(invalidateCollections(["notifications"]));
+    },
+    [setRows, reload, post],
+  );
+
   const markUnread = useCallback(
     async (n: Notification) => {
       if (!n.read) return;
@@ -395,12 +463,13 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     [reload, loadSnoozed, post],
   );
 
-  // Once the list is opened, the loaded array is truth (kept live by the snooze/unsnooze deltas); before that,
-  // fall back to the count that rode along on the feed read.
-  const snoozedCount = snoozedLoaded ? snoozed.length : (metaSnoozedCount ?? 0);
+  // Once the list is opened IN FULL, the loaded array is truth (kept live by the snooze/unsnooze deltas).
+  // Before that - and when the walk hit its ceiling - the server's own count is the better number: a badge
+  // that drops to the page size the moment somebody opens the tab is worse than one that stays approximate.
+  const snoozedCount = snoozedLoaded && !snoozedTruncated ? snoozed.length : (metaSnoozedCount ?? snoozed.length);
   const value = useMemo<NotificationsState>(
-    () => ({ notifications: rows, unread, unreadByPage, newSubjects, available, state, snoozed, snoozedLoaded, loadSnoozed, snoozedCount, markRead, markUnread, markAllRead, dismiss, snooze, unsnooze, reload }),
-    [rows, unread, unreadByPage, newSubjects, available, state, snoozed, snoozedLoaded, loadSnoozed, snoozedCount, markRead, markUnread, markAllRead, dismiss, snooze, unsnooze, reload],
+    () => ({ notifications: rows, unread, unreadByPage, newSubjects, available, state, snoozed, snoozedLoaded, loadSnoozed, snoozedCount, markRead, markManyRead, markUnread, markAllRead, dismiss, snooze, unsnooze, reload }),
+    [rows, unread, unreadByPage, newSubjects, available, state, snoozed, snoozedLoaded, loadSnoozed, snoozedCount, markRead, markManyRead, markUnread, markAllRead, dismiss, snooze, unsnooze, reload],
   );
   return <NotificationsContext.Provider value={value}>{children}</NotificationsContext.Provider>;
 }
@@ -411,16 +480,16 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 // gone next time. Marking read reduces the count everywhere it shows (bell total, sidebar nav item,
 // workspace/sub tabs - all read the same rows). Render once inside the provider with the current route page.
 export function NotificationClearOnLeave({ page }: { page: string }) {
-  const { notifications, markRead } = useNotifications();
+  const { notifications, markManyRead } = useNotifications();
   const prev = useRef(page);
   useEffect(() => {
     if (prev.current === page) return; // same page (a re-render, not a navigation) - leave the badge alone
     const left = prev.current;
     prev.current = page;
-    for (const n of notifications) {
-      if (n.read || !n.link) continue;
-      if (n.link.split("/")[0] === left) void markRead(n);
-    }
-  }, [page, notifications, markRead]);
+    // Collected first and sent as ONE batch: a per-row `markRead` cost a forced re-read of the whole feed per
+    // notification (see `markManyRead`).
+    const leaving = notifications.filter((n) => !n.read && n.link && pageOfLink(n.link) === left);
+    if (leaving.length) void markManyRead(leaving);
+  }, [page, notifications, markManyRead]);
   return null;
 }

@@ -3,7 +3,7 @@ import { AlertTriangle, ListPlus } from "lucide-react";
 import { create } from "@/api";
 import { cn } from "@/lib/utils";
 import { dmy } from "@/lib/leaveCalendar";
-import { parseHolidayLines, type HolidayDraft } from "@/lib/holidayBulk";
+import { parseHolidayLines, toLine, type HolidayDraft } from "@/lib/holidayBulk";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -72,8 +72,12 @@ export function BulkAddDialog({ open, onOpenChange, existingDates, onDone }: {
         description: failed.slice(0, 3).map((f) => `${f.draft.date}: ${f.message}`).join(" · "),
         variant: "destructive",
       });
-      // Leave the failures in the box so they can be fixed and re-submitted; drop what succeeded.
-      setText(failed.map((f) => `${f.draft.date}  ${f.draft.name}`).join("\n"));
+      // Leave the failures in the box so they can be fixed and re-submitted; drop what succeeded. The WHOLE
+      // draft is written back, in the comma form the parser reads flags from: a rewrite that carried only the
+      // date and the name turned every re-submitted row into `kind: "fixed"`, `half_day: false`,
+      // `location: null` - which quietly converts an optional or half day into a company-wide closure, and
+      // that then feeds the leave calendar, the attendance grid's holiday set and `workingDaysInRange`.
+      setText(failed.map((f) => toLine(f.draft)).join("\n"));
     }
     onDone();
   }

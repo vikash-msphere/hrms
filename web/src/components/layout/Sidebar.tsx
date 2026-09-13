@@ -156,13 +156,13 @@ export function Sidebar({
   onNavigate: () => void;
 }) {
   const approvals = useApprovals();
-  const { unread: unreadTotal, unreadByPage } = useNotifications();
+  const { unreadByPage } = useNotifications();
   const has = (perm: string) => hasCapability(me.capabilities, perm);
-  // Unread notifications owned by a nav item = sum over its page subtree (the item + its tabs). The dedicated
-  // Notifications item carries the grand total; Approvals keeps its own pending count (not notifications).
+  // Unread notifications owned by a nav item = sum over its page subtree (the item + its tabs). Approvals keeps
+  // its own pending count (not notifications). There is no Notifications nav ITEM - the feed is reached from the
+  // bell in the top bar, which carries the grand total - so no branch for it here.
   const itemBadge = (item: (typeof NAV)[number]["items"][number]): number => {
     if (item.key === "approvals") return approvals.total;
-    if (item.key === "notifications") return unreadTotal;
     return itemPageKeys(item).reduce((s, k) => s + (unreadByPage[k] ?? 0), 0);
   };
   const groups = NAV.map((g) => ({
@@ -171,13 +171,14 @@ export function Sidebar({
   })).filter((g) => g.items.length > 0);
 
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed(me.email));
-  const toggleGroup = (label: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      next.has(label) ? next.delete(label) : next.add(label);
-      saveCollapsed(me.email, next);
-      return next;
-    });
+  // The save is OUTSIDE the updater: a React updater must be pure, and StrictMode (web/src/main.tsx)
+  // deliberately invokes it twice, so a localStorage write in there happens twice per click.
+  const toggleGroup = (label: string) => {
+    const next = new Set(collapsed);
+    next.has(label) ? next.delete(label) : next.add(label);
+    setCollapsed(next);
+    saveCollapsed(me.email, next);
+  };
 
   // Whole-sidebar icon-rail collapse: the user's manual preference, OR auto when the sidebar is docked but the
   // viewport is narrow (md up to just below lg). Below md the sidebar is a full-width drawer, so the rail never

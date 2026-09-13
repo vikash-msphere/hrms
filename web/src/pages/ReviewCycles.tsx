@@ -84,7 +84,7 @@ export default function ReviewCycles({ embedded }: { embedded?: boolean }) {
   const { rows, state, error, reload } = useCollection<ReviewCycle>("review-cycles");
   // COMPLETE: the participant picker chooses from this list, so a window silently excludes people from a cycle.
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
 

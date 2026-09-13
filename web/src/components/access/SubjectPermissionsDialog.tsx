@@ -18,6 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+import { confirmDecision } from "@/lib/confirmDecision";
 
 // View + modify ALL of one subject's (a role or a user) collection-wide permissions in one place. Each row is
 // a collection; the dropdown sets the subject's org-scope level (none/read/write/admin/deny) via the same
@@ -136,6 +137,9 @@ export function SubjectPermissionsDialog({
   const pending = mine.filter((r) => r.status === "pending" || r.status === "pending_delete");
 
   async function decide(r: AccessRule, decision: "approve" | "reject") {
+    // A pending rule can be either of the two directions setCell below stops for - taking access away, or
+    // handing out admin - so approving it gets the same beat of friction, named by the rule itself.
+    if (!(await confirmDecision(confirm, decision, ruleSentence(r, label)))) return;
     setBusy(true);
     try {
       await invoke("access-rules", decision, undefined, { rule: r.path });

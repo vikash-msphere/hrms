@@ -119,8 +119,14 @@ export function validateAtsConfig(value: unknown): string[] {
     if (typeof s.label !== "string" || !s.label.trim()) errors.push(`ats.stages[${i}].label must be a non-empty string`);
     if (s.kind !== "active" && s.kind !== "hired" && s.kind !== "rejected") errors.push(`ats.stages[${i}].kind must be "active", "hired" or "rejected"`);
   });
-  if (!cfg.stages.some((s) => (s as AtsStage | null)?.kind === "hired")) {
+  // EXACTLY one, not at least one. `:hire` and `offers:accept` resolve the hired stage with `find`, so a second
+  // one is a terminal column a recruiter can reach and the server will never file anybody into - the same
+  // "two stages are the same stage to everything downstream" failure the duplicate-key check above rejects.
+  const hired = cfg.stages.filter((s) => (s as AtsStage | null)?.kind === "hired").length;
+  if (hired === 0) {
     errors.push('ats.stages must include one stage of kind "hired": it is the terminal that marks a candidate hired');
+  } else if (hired > 1) {
+    errors.push(`ats.stages has ${hired} stages of kind "hired": exactly one may be the terminal that marks a candidate hired`);
   }
   if (cfg.scorecard_criteria != null) {
     if (!Array.isArray(cfg.scorecard_criteria)) errors.push("ats.scorecard_criteria must be an array");

@@ -29,7 +29,11 @@ const roleVariant = (role: string) => (role === "super_admin" ? "default" : role
 export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLElement | null }) {
   const isAdmin = usePermission("users.write");
   const canManagePerms = usePermission("access-rules.write");
-  const { rows, state, error, reload } = useCollection<User>("users");
+  // `all`: these rows are not only listed, they are searched. `employeeOptions` below builds the "already
+  // linked to <email>" warning out of them, and past one page that hint silently stops appearing - so an admin
+  // links a second login to an employee who already has one, which is the single thing the hint exists to
+  // prevent. An absent warning reads as "no clash", not as "not checked".
+  const { rows, state, error, reload } = useCollection<User>("users", { all: true });
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
 
@@ -39,7 +43,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
 
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Someone" : "-");
   }, [employees]);
 
   // One searchable list: "not linked", then every active employee, each saying whether another login already
@@ -167,7 +171,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
         {rows.length === 0 ? (
           <EmptyState icon={ShieldAlert} title="No users yet" description="Users appear here after their first sign-in." />
         ) : (
-          <DataTable tableId="users" columns={columns} rows={rows} getRowId={(u) => u.path} emptyTitle="No users match" rowClassName={() => "group"} controlsSlot={controlsSlot} bulkActions={bulkActions} />
+          <DataTable tableId="users" columns={columns} rows={rows} getRowId={(u) => u.path} accessCollection="users" emptyTitle="No users match" rowClassName={() => "group"} controlsSlot={controlsSlot} bulkActions={bulkActions} />
         )}
       </DataState>
 

@@ -1,7 +1,7 @@
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
-import { invalidArgument } from "../lib/errors";
+import { aborted, invalidArgument } from "../lib/errors";
 import { getSettingValue, mutateSetting } from "./settings";
 
 // Bank bulk-payment Excel formats. Three pieces, all owned here:
@@ -39,6 +39,10 @@ export type BankFormat = {
   header_row?: number; // 1-based row holding the headers
   data_start_row?: number; // 1-based row where data rows begin
   columns: BankFormatColumn[];
+  // When this bank's entry was last written, in epoch ms - the version `etag` / `If-Match` are built from.
+  // PER BANK, not per settings row: the `bank-formats` row holds every bank, so its own `updatedAt` moves when
+  // any of them is edited and a guard built on that would 409 an admin whose bank nobody had touched.
+  updated_at?: number;
 };
 
 export type BankFormats = Record<string, BankFormat>; // keyed by bank name (org's allowed banks)
@@ -70,15 +74,41 @@ export async function getBankFormat(deps: Deps, bank: string): Promise<(BankForm
 // Through `mutateSetting`, because editing ONE bank rewrites the WHOLE map: read-then-write let two admins
 // saving two different banks silently revert each other. See the note on that function - the version is taken
 // and pinned server-side, across the read and the write, so no client contract changes.
-export async function saveBankFormat(deps: Deps, actor: AppUser, bank: string, patch: Partial<BankFormat>): Promise<BankFormat & { bank: string }> {
+/**
+ * Write one bank's column mapping.
+ *
+ * VERSION-GUARDED, when the caller sends one. This replaces a whole blob - the column mapping that decides how
+ * the payroll bank file is laid out - so an unguarded write is not "last write wins" over a field, it is one
+ * admin's entire layout replacing another's with no sign anything was lost. That is the failure
+ * `lib/settingsStore.ts#saveSetting` was given `If-Match` for, on arguably the most consequential config in the
+ * app. `mutateSetting` already retries the settings ROW's own compare-and-swap, so two admins editing different
+ * banks merge; this closes the case where they are editing the same one.
+ *
+ * No `ifMatch` writes unguarded, exactly as before - and so does a first write, which has no version to hold.
+ */
+export async function saveBankFormat(
+  deps: Deps,
+  actor: AppUser,
+  bank: string,
+  patch: Partial<BankFormat>,
+  ifMatch?: string,
+): Promise<BankFormat & { bank: string }> {
   if (!bank.trim()) throw invalidArgument("bank is required");
   let next: BankFormat = { columns: [] };
   await mutateSetting<BankFormats>(deps, actor, "bank-formats", {}, (m) => {
-    next = { columns: [], ...m[bank], ...patch };
+    const current = m[bank];
+    if (ifMatch && current && ifMatch !== bankFormatEtag(current)) {
+      throw aborted("this bank format was changed by somebody else; re-read it and reapply your change");
+    }
+    next = { columns: [], ...current, ...patch, updated_at: Date.now() };
     return { ...m, [bank]: next };
   });
   return { bank, ...next };
 }
+
+/** The version of one bank's entry. Undefined `updated_at` (an entry written before versioning) has no version
+ *  to claim, so it answers a stable sentinel rather than a moving one. */
+export const bankFormatEtag = (f: BankFormat): string => `W/"${f.updated_at ?? 0}"`;
 
 // ---- super-only debit config (settings key `payroll-debit`) ----------------------------------------------
 const maskAccount = (n?: string) => (!n ? undefined : n.length <= 4 ? "••••" : `•••• ${n.slice(-4)}`);

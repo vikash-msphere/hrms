@@ -5,6 +5,7 @@ import type { AppUser } from "../env";
 import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
 import { getSettingValue } from "./settings";
+import { etagOf } from "../http/serialize";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
 /** The org's declared banks (settings/organization `banks`), normalized for comparison. Empty = not configured. */
@@ -80,13 +81,16 @@ export function toMaskedBankView(stored: StoredBank | null) {
 export async function getBankDetails(deps: Deps, _actor: AppUser, employeeId: string) {
   // Access (owner / super by default) is enforced by the middleware on employees/<code>/bank-account.
   const emp = await loadEmployee(deps, employeeId);
-  if (!emp.bankDetailsEnc) return { on_file: false };
+  // The employee row's version rides every answer, including the empty ones: `setBankDetails` is
+  // version-guarded, and that guard does nothing unless the caller was handed a version to send back.
+  const etag = etagOf(+new Date(emp.updatedAt));
+  if (!emp.bankDetailsEnc) return { on_file: false, etag };
   try {
     const json = await deps.encryptor.decrypt(emp.bankDetailsEnc);
-    return toMaskedBankView(JSON.parse(json) as StoredBank);
+    return { ...toMaskedBankView(JSON.parse(json) as StoredBank), etag };
   } catch {
     // Legacy / unreadable blob: report it's on file without exposing anything.
-    return { on_file: true };
+    return { on_file: true, etag };
   }
 }
 
@@ -155,10 +159,10 @@ export async function setBankDetails(deps: Deps, actor: AppUser, employeeId: str
   // the employee updates their IFSC, and whichever lands second restores the other's old value; the trail
   // cannot help, because this path deliberately records field NAMES only. The comment above states the cost
   // of losing these fields by a different route: "a payroll disbursement that cannot be paid".
-  await updateAtVersion(deps, schema.employees, "employee", emp, { bankDetailsEnc: enc, updatedAt: new Date() });
+  const updated = await updateAtVersion(deps, schema.employees, "employee", emp, { bankDetailsEnc: enc, updatedAt: new Date() });
   // WHICH fields changed, never their values: an account number in a table read by everyone with the `audit`
   // capability outlives the access control on the record it came from. `fieldsMeta` is the shape for exactly
   // this - the trail says "they changed the account number", which is the whole of what it is owed.
   await audit(deps, actor, "employee.bank_details.update", "employees", emp.uuid, fieldsMeta(stored), emp);
-  return toMaskedBankView(stored);
+  return { ...toMaskedBankView(stored), etag: etagOf(+new Date(updated.updatedAt)) };
 }

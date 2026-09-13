@@ -40,8 +40,8 @@ const EMPTY = { title: "", description: "", weight: "", dueInDays: "", unit: "",
 export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?: boolean; openId?: string }) {
   const { rows, state, error, reload } = useCollection<GoalTemplate>("goal-templates", { showDeleted: true });
   useDeepOpen(openId, rows, openEdit);
-  const { rows: departments } = useCollection<Department>("departments");
-  const { rows: cycles } = useCollection<ReviewCycle>("review-cycles");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
+  const { rows: cycles } = useCollection<ReviewCycle>("review-cycles", { all: true });
   const { toast } = useToast();
   const sd = useSoftDelete("goal-templates", "template", reload);
   const lc = useLifecycle("goal-templates", "template", reload);

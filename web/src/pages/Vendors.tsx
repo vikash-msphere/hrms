@@ -34,7 +34,7 @@ const EMPTY = { name: "", contact_email: "", contact_phone: "", tax_id: "", paym
 
 export default function Vendors({ openId }: { me?: Me; openId?: string }) {
   const { rows, state, error, reload } = useCollection<Vendor>("vendors", { showDeleted: true });
-  const { rows: categories } = useCollection<ExpenseCategory>("expense-categories");
+  const { rows: categories } = useCollection<ExpenseCategory>("expense-categories", { all: true });
   useDeepOpen(openId, rows, openEdit);
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
@@ -62,7 +62,7 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
 
   const catName = useMemo(() => {
     const m = new Map(categories.map((c) => [idOf(c.path), c.display_name]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown category" : "-");
   }, [categories]);
 
   function openCreate() { setEditing(null); setForm(EMPTY); setErr(null); setOpen(true); }

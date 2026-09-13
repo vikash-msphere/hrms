@@ -11,7 +11,7 @@ import { usePermission } from "@/lib/perm";
 import { navigate } from "@/router";
 import { formatDate, idOf, cn } from "@/lib/utils";
 import { dmy, longDate, monthLabelOf } from "@/lib/leaveCalendar";
-import { todayStr, daysBetweenYmd } from "@/lib/orgDay";
+import { todayStr, thisYearStr, daysBetweenYmd } from "@/lib/orgDay";
 import { breakAround, bestBridge, breakLabel, isWeekendDay, longBreakCount, type Break, type Bridge } from "@/lib/holidayBreaks";
 import { buildIcs, downloadIcs } from "@/lib/ics";
 import { readHashQuery, writeHashQuery } from "@/lib/urlQuery";
@@ -104,7 +104,11 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
   const dirty = JSON.stringify(form) !== JSON.stringify(baseline);
   const closeDialog = () => { setOpen(false); setFormErr(null); };
   const [selBusy, setSelBusy] = useState(""); // path of the row whose selection is being toggled
-  const [year, setYear] = useState(readHashQuery("year") ?? String(new Date().getFullYear()));
+  // `thisYearStr()` (lib/orgDay), not `new Date().getFullYear()` - the ORG's year, like `todayStr` above. The
+  // browser's was a second calendar in a file that already carries the note about removing the first: around
+  // New Year the page opened on the viewer's year, and the create form's `defaultFrom` seeded it too, so a
+  // holiday added on 1 January by someone whose browser still said 31 December was created against last year.
+  const [year, setYear] = useState(readHashQuery("year") ?? thisYearStr());
   const [view, setView] = useState<View>(isView(readHashQuery("view")) ? (readHashQuery("view") as View) : "calendar");
   const [query, setQuery] = useState(readHashQuery("q") ?? "");
   const [kindFilter, setKindFilter] = useState(readHashQuery("kind") ?? "all");
@@ -153,7 +157,7 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
   const activeYear = years.includes(year) ? year : "";
   // The optional allowance is per calendar year (services/holidaySelections.ts caps it that way), so the count
   // shown has to be the year's, not every pick ever made.
-  const pickYear = activeYear || String(new Date().getFullYear());
+  const pickYear = activeYear || thisYearStr();
   const selectedCount = useMemo(
     () => rows.filter((h) => h.kind === "optional" && h.selected && h.date.slice(0, 4) === pickYear).length,
     [rows, pickYear],
@@ -623,7 +627,7 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
               <button
                 key={v}
                 type="button"
-                onClick={() => { setView(v); if (v === "year" && !activeYear) setYear(years[0] ?? String(new Date().getFullYear())); }}
+                onClick={() => { setView(v); if (v === "year" && !activeYear) setYear(years[0] ?? thisYearStr()); }}
                 aria-pressed={view === v}
                 className={cn(
                   "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
@@ -689,7 +693,7 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
           />
         ) : view === "year" ? (
           <YearView
-            year={activeYear || String(new Date().getFullYear())}
+            year={activeYear || thisYearStr()}
             infos={focusedInfos}
             isOff={isOff}
             workDays={workDays}
@@ -836,7 +840,7 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
           holidays={rows}
           years={years}
           workDays={workDays}
-          defaultFrom={activeYear || years[0] || String(new Date().getFullYear())}
+          defaultFrom={activeYear || years[0] || thisYearStr()}
           onDone={reload}
         />
       )}
@@ -860,11 +864,13 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
  * are (the client cache dedupes). Proposing leave someone hasn't got is worse than not proposing it.
  */
 function BridgeAction({ bridge, me, onPick }: { bridge: Bridge; me: Me; onPick: (d: LeaveDraft) => void }) {
-  const { rows: balances } = useCollection<LeaveBalance>("leave-balances");
-  const available = useMemo(
-    () => balances.filter((b) => (me.employee_id ? idOf(b.employee ?? "") === me.employee_id : false)).reduce((n, b) => n + (b.balance_days ?? 0), 0),
-    [balances, me.employee_id],
-  );
+  // The CALLER's balance rows, asked for by employee rather than filtered out of the org's newest hundred.
+  // The authz scope is self for an employee and the whole org for a manager or HR, so filtering client-side
+  // made this sum 0 for exactly the people whose rows are past the window - and 0 available disables every
+  // bridge on the page, which is the one direction that silently removes the feature the header defends.
+  const mine = me.employee_id ? { employee: `employees/${me.employee_id}` } : undefined;
+  const { rows: balances } = useCollection<LeaveBalance>("leave-balances", { params: mine, enabled: !!mine });
+  const available = useMemo(() => balances.reduce((n, b) => n + (b.balance_days ?? 0), 0), [balances]);
   const first = bridge.take[0]!;
   const last = bridge.take[bridge.take.length - 1]!;
   const label = bridge.take.length === 1 ? `${weekdayShortOf(first)} ${dayNumOf(first)}` : `${weekdayShortOf(first)}-${weekdayShortOf(last)}`;
@@ -958,7 +964,11 @@ function YearView({ year, infos, isOff, workDays, weekStart, me, onSelectDay }: 
   me: Me;
   onSelectDay: (ymd: string) => void;
 }) {
-  const { rows: leaves } = useCollection<LeaveRequest>("leave-requests");
+  // Scoped to the caller server-side, for the same reason as the balances above: this shading is "your
+  // approved leave", and filtering the department's or the org's newest hundred down to one person drops the
+  // person's own older requests first.
+  const mineParams = me.employee_id ? { employee: `employees/${me.employee_id}` } : undefined;
+  const { rows: leaves } = useCollection<LeaveRequest>("leave-requests", { params: mineParams, enabled: !!mineParams });
   const myLeave = useMemo(() => {
     const days = new Set<string>();
     for (const l of leaves) {

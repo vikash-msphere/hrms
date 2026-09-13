@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { UserRound } from "lucide-react";
 import { get, patch } from "@/api";
+import { isConflict } from "@/lib/formError";
 import type { PersonalDetails } from "@/types";
 import { formatDate } from "@/lib/utils";
 import { todayStr } from "@/lib/orgDay";
@@ -66,11 +67,21 @@ export function EmployeeProfilePersonal({ employeeId, canEdit, onSaved }: { empl
   const set = (patch: Partial<PersonalDetails>) => setForm((f) => ({ ...f, ...patch }));
 
   async function save() {
-    // Save the full record so the sibling contact/emergency fields are preserved (full-replace on the server).
-    const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form);
-    setData(updated);
-    toast({ title: "Personal details saved", variant: "success" });
-    onSaved?.();
+    // Save the full record so the sibling contact/emergency fields are preserved - with the version it was
+    // read at, so a whole-record write cannot quietly undo whatever the other dialog on this person wrote
+    // while this one was open.
+    try {
+      const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form, data?.etag);
+      setData(updated);
+      toast({ title: "Personal details saved", variant: "success" });
+      onSaved?.();
+    } catch (e) {
+      if (isConflict(e)) {
+        await load();
+        throw new Error("Somebody else changed these details while you had them open. They have been reloaded - check them and save again.");
+      }
+      throw e;
+    }
   }
 
   if (denied) return null;

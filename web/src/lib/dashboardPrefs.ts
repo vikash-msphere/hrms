@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { storedIdentity } from "@/lib/clientStore";
 import { readPref, writePrefDeferred } from "@/lib/prefs";
 import type { KpiCategory } from "@/lib/dashboardConfig";
 
@@ -19,13 +20,26 @@ export type DashPersonalPrefs = {
 };
 
 const PREF_KEY = "dashboard"; // /v1/preferences/{key}
-const LS_KEY = "dash.personal";
+// NAMESPACED to the caller, like `tab_seen:`, `dt:` and `draft:`. `loadLocal` is the `useState` initializer, so
+// the dashboard paints from this key before the server row arrives: under one global key that was user A's
+// pinned KPIs, hidden KPIs, hidden sections and section order shown to user B on a shared browser - and since
+// the `readPref` guard only replaces it when a row comes BACK, a B with no row yet kept A's layout, and their
+// next pin or hide wrote it to B's server row. `lib/tabActivity.ts` documents the same failure for its own key.
+//
+// Null until the identity is known: an "anon" copy written before it lands is adopted by the first real caller,
+// which is the leak with an extra step.
+const lsKey = () => {
+  const id = storedIdentity();
+  return id ? `dash.personal:${id}` : null;
+};
 // The pre-prefs "hide all-clear" toggle lived under this key; migrate it once so nobody loses the setting.
 const LEGACY_HIDE_CLEAR_KEY = "dash.hideAllClear";
 
 function loadLocal(): DashPersonalPrefs {
+  const key = lsKey();
+  if (!key) return {};
   try {
-    const raw = localStorage.getItem(LS_KEY);
+    const raw = localStorage.getItem(key);
     if (raw) return JSON.parse(raw) as DashPersonalPrefs;
     return localStorage.getItem(LEGACY_HIDE_CLEAR_KEY) === "1" ? { hideClear: true } : {};
   } catch {
@@ -33,12 +47,18 @@ function loadLocal(): DashPersonalPrefs {
   }
 }
 
-function persist(p: DashPersonalPrefs) {
+function writeLocal(p: DashPersonalPrefs) {
+  const key = lsKey();
+  if (!key) return;
   try {
-    localStorage.setItem(LS_KEY, JSON.stringify(p));
+    localStorage.setItem(key, JSON.stringify(p));
   } catch {
     /* private mode */
   }
+}
+
+function persist(p: DashPersonalPrefs) {
+  writeLocal(p);
   // Coalesced like the other high-churn preferences: one request per quiet window (or when the tab is hidden),
   // not one per pin/hide/reorder.
   writePrefDeferred(PREF_KEY, p, 5_000);
@@ -54,11 +74,7 @@ export function useDashPrefs(): [DashPersonalPrefs, (patch: Partial<DashPersonal
       .then((v) => {
         if (live && v && typeof v === "object") {
           setPrefs(v);
-          try {
-            localStorage.setItem(LS_KEY, JSON.stringify(v));
-          } catch {
-            /* private mode */
-          }
+          writeLocal(v);
         }
       })
       .catch(() => {}); // no row yet or offline - the local snapshot stands
@@ -66,12 +82,17 @@ export function useDashPrefs(): [DashPersonalPrefs, (patch: Partial<DashPersonal
       live = false;
     };
   }, []);
+  // The next value is computed from a ref rather than inside the updater, because `persist` is a side effect:
+  // a localStorage write, a read-modify-write of the unconfirmed record and a `setTimeout` re-arm. A React
+  // updater must be pure - React re-runs it whenever it likes, and StrictMode (web/src/main.tsx) deliberately
+  // invokes it twice - so every one of those happened twice per pin, hide or reorder.
+  const latest = useRef(prefs);
+  latest.current = prefs;
   const update = useCallback((p: Partial<DashPersonalPrefs>) => {
-    setPrefs((prev) => {
-      const next = { ...prev, ...p };
-      persist(next);
-      return next;
-    });
+    const next = { ...latest.current, ...p };
+    latest.current = next; // so two updates in one tick compose rather than the second dropping the first
+    setPrefs(next);
+    persist(next);
   }, []);
   return [prefs, update];
 }

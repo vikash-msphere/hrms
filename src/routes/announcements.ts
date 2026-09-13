@@ -16,6 +16,8 @@ import { accessHint, withAccess } from "../http/accessHint";
 import { WRAP_MODES } from "../domain/illustration";
 
 const COL = "announcements";
+/** The board's post kinds, as the `?kind=` list filter accepts them. */
+const KINDS = ["announcement", "post", "poll", "kudos"] as const;
 
 // Everything a board card carries beyond its own row: the caller's read receipt, the reaction groups, the reply
 // thread and the poll tallies - one query each per PAGE, not per card. `_readers` is the receipt list minus the
@@ -210,9 +212,10 @@ export const announcements = collectionRoutes<AnnouncementInput, typeof schema.a
     update: (deps, actor, id, patch, ifMatch) => updateAnnouncement(deps, actor, id, patch, ifMatch),
   },
   // The board's own list: state visibility (drafts and disabled posts are editors-only) is bound in SQL there,
-  // alongside the caller's scope.
+  // alongside the caller's scope. `?kind=` narrows to one kind and is matched against the known set rather
+  // than passed through, so an unknown value is simply no filter instead of a query that matches nothing.
   list: (c, page) =>
-    listAnnouncements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q")),
+    listAnnouncements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q"), KINDS.find((k) => k === c.req.query("kind"))),
   verbs: {
     // Idempotent self-action: record that the caller opened this post.
     markRead: { run: (deps, user, id) => markAnnouncementRead(deps, user, id) },

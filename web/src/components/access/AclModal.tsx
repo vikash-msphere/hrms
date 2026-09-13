@@ -11,9 +11,10 @@ import { Input } from "@/components/ui/input";
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+import { confirmDecision } from "@/lib/confirmDecision";
 import { api, create, invoke, listAll, remove } from "@/api";
 import { fetchAllAccessRules, scopeText, permText, accessTone, type AccessRule } from "./permMatrix";
-import { ruleSentence, expiryLabel, denyBlocking } from "./ruleLogic";
+import { ruleSentence, expiryLabel, denyBlocking, ALL_VERBS } from "./ruleLogic";
 import { usePaged, Pager } from "@/components/common/Pager";
 import { roleLabel, registerRoleLabels, EVERYONE_ROLE } from "@/lib/roles";
 import type { Employee, User } from "@/types";
@@ -50,8 +51,8 @@ const WHY_LABEL: Record<string, string> = {
 };
 // Custom-method effects (no ladder; fail-closed): `none` = no rule (denied), allow, or deny (wins).
 const VERB_EFFECTS = ["none", "allow", "deny"] as const;
-// Wildcard verb sentinel = ALL custom methods in one rule (matches the engine's `*` verb token).
-const ALL_VERBS = "*";
+// Wildcard verb sentinel = ALL custom methods in one rule (matches the engine's `*` verb token). Defined in
+// ruleLogic, where the dead-rule lint has to know that such a rule covers every specific verb.
 
 // The trigger's default `[&>span]:line-clamp-1` turns the value slot into a -webkit-box, which fights the
 // dot+label row: keep it a single flex line and give the control WIDTH (w-40 fits "cannot create") instead of
@@ -423,6 +424,14 @@ export function AclModal({
       const ok = await confirm({ title: `Deny ${roleLabel(name)} the "${v}" method here?`, description: await impactLine(), destructive: true, confirmLabel: "Deny" });
       if (!ok) return;
     }
+    // The same lint the other three grant paths run, with `v` as the verb: an allow authored where a deny
+    // already covers the target is a DEAD rule - the dropdown reads "allow" and the person still gets a 403.
+    // This was the one editor without it, and `ruleFlags`' `denied` badge is rendered only in FineRulesEditor,
+    // not on the role matrix where the rule is authored, so nothing said so where the admin was looking.
+    if (value !== "none" && value !== "deny") {
+      const blocker = denyBlocking({ subject_kind: "role", subject: name, collection: collection ?? "", scope: scopeSel, field, verb: v }, rules);
+      if (blocker && !(await confirm({ title: "A deny is already in place", description: `${ruleSentence(blocker, roleLabel(blocker.subject))}. A deny always wins, so this allow will have NO effect until that rule is removed. Add it anyway?`, confirmLabel: "Add anyway" }))) return;
+    }
     setBusy(true);
     // Same delete-then-create contract as the level editor above: restore what was removed if the create
     // fails, and reload on every path.
@@ -534,6 +543,11 @@ export function AclModal({
   // Four-eyes decision on a pending change (the verbs are fail-closed, so the buttons only appear for people
   // the server would actually let decide - and it re-checks that the requester is not the approver).
   async function decide(r: AccessRule, decision: "approve" | "reject") {
+    // Approving is the step that makes the grant LIVE, and it cannot be taken back from the button that made
+    // it - which is the whole case confirmDecision exists for. Everything else in this modal (deny, remove,
+    // an allow a deny would kill) already asks; the half that actually takes effect did not.
+    const subject = ruleSentence(r, r.subject_kind === "role" ? roleLabel(r.subject) : emailOf(r.subject));
+    if (!(await confirmDecision(confirm, decision, subject))) return;
     setBusy(true);
     try {
       await invoke("access-rules", decision, undefined, { rule: r.path });

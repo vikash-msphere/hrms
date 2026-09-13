@@ -206,9 +206,14 @@ const dayMs = (s?: string | null) => (s ? new Date(Date.parse(s + "T00:00:00Z"))
 // page the rest of the API promises (so nothing downstream could tell it was looking at a window). Newest-first,
 // like every other list: on an inventory larger than a page, the assets someone is looking for are the ones just
 // bought, not the ones bought first. The presentation sort below puts one page back in tag order.
-export async function listAssets(deps: Deps, scope: ListScope, opts: { employeeId?: string; maxPageSize: number; pageToken?: string }) {
+export async function listAssets(deps: Deps, scope: ListScope, opts: { employeeId?: string; status?: AssetStatus; maxPageSize: number; pageToken?: string }) {
   const conds = [applyScope(scope, schema.assets.code, schema.assets.assignedTo)];
   if (opts.employeeId) conds.push(eq(schema.assets.assignedTo, opts.employeeId));
+  // Narrowed HERE rather than in the browser. "What is in stock" is the question the assign-a-device picker
+  // asks, and filtering a page client-side answers it with "whichever of the 50 newest assets are in stock" -
+  // which, since recently-added kit is the kit most likely to have been handed out, routinely reads as
+  // "nothing in stock" on a register that holds plenty. One indexed query instead of walking the collection.
+  if (opts.status) conds.push(eq(schema.assets.status, opts.status));
   const { items, nextPageToken } = await keysetPage<typeof schema.assets.$inferSelect>(
     deps,
     schema.assets,

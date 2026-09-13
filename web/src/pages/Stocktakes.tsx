@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ScanLine, ArrowLeft, Flag, Play, Trash2, ShieldCheck, CircleSlash, Clock, CheckCircle2, AlertTriangle, ExternalLink, TrendingDown, TrendingUp } from "lucide-react";
 import { get, invoke, remove } from "@/api";
 import { navigate, useRoute } from "@/router";
-import { useCollection } from "@/hooks/useCollection";
+import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { cn, formatDate, idOf } from "@/lib/utils";
 import type { Asset, AssetCategory, Employee, Me, Stocktake, StocktakeMissing, StocktakeSighted } from "@/types";
 import type { AssetTagSettings } from "@/lib/assetTags";
@@ -45,9 +46,14 @@ const DEFAULT_STALE_DAYS = 180;
 export default function Stocktakes({ me }: { me: Me }) {
   const route = useRoute();
   const { rows: counts, setRows: setCounts, state, error, reload } = useCollection<Stocktake>("stocktakes");
-  const { rows: assets } = useCollection<Asset>("assets");
+  // `all`, like the two reads below it and like Assets.tsx: every consumer here is in the "wrong rather than
+  // merely short" class. The confidence score divides by the rows it was handed and is offered as how much of
+  // the inventory can be PROVED; `reconcileMissing` treats an asset it cannot find in these rows as still
+  // missing, which re-reports found kit as lost; and `progressOf` feeds the numbers on an irreversible close.
+  const { rows: assets } = useCollection<Asset>("assets", { all: true });
+  const assetsTruncated = useCollectionHasMore("assets");
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: categories } = useCollection<AssetCategory>("asset-categories");
+  const { rows: categories } = useCollection<AssetCategory>("asset-categories", { all: true });
   const [staleDays, setStaleDays] = useState(DEFAULT_STALE_DAYS);
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -93,6 +99,17 @@ export default function Stocktakes({ me }: { me: Me }) {
   };
 
   async function closeCount(c: Stocktake) {
+    // Refused while the inventory is only partly loaded: the server scores the close over every asset in the
+    // stored scope, so the numbers below would be a claim about a quarter of the register and the "will be
+    // notified to go and look" promise would be made about a count of zero while hundreds are chased.
+    if (assetsTruncated) {
+      toast({
+        variant: "destructive",
+        title: "Too many assets to close this count here",
+        description: "Not every asset in scope could be loaded, so anything not listed would be frozen as missing. Narrow the count's scope and walk it again.",
+      });
+      return;
+    }
     const p = progressOf(c);
     const held = p.scope.filter((a) => !sightedIn(c, a) && a.assigned_to).length;
     const ok = await confirm({
@@ -221,9 +238,12 @@ export default function Stocktakes({ me }: { me: Me }) {
           can express it. */}
       {/* Each number opens the assets behind it: "Gone stale" is only useful if you can see WHICH things went
           stale, and the inventory is already in memory, so the list costs nothing to show. */}
+      {/* The residual case: the walk stops at ALL_CAP, and every number below is a claim about the WHOLE
+          inventory. Said out loud rather than left to be read as a fact about the business. */}
+      <TruncationNotice collection="assets" what="assets" className="mb-4" />
       <SummaryStrip
         items={[
-          { label: `Sighted in ${staleDays}d`, value: `${confidence.freshPct}%`, icon: ShieldCheck, tone: confidence.freshPct >= 90 ? "success" : confidence.freshPct >= 60 ? "primary" : "warning", hint: `${confidence.fresh} of ${confidence.total}`, onClick: () => setBand(band === "fresh" ? null : "fresh"), active: band === "fresh" },
+          { label: `Sighted in ${staleDays}d`, value: `${confidence.freshPct}%`, icon: ShieldCheck, tone: confidence.freshPct >= 90 ? "success" : confidence.freshPct >= 60 ? "primary" : "warning", hint: `${confidence.fresh} of ${confidence.total}${assetsTruncated ? "+ loaded" : ""}`, onClick: () => setBand(band === "fresh" ? null : "fresh"), active: band === "fresh" },
           { label: "Scan-proved", value: `${confidence.proofPct}%`, icon: CheckCircle2, tone: confidence.proofPct >= 90 ? "success" : "muted", hint: "of those sightings", onClick: () => setBand(band === "proved" ? null : "proved"), active: band === "proved" },
           { label: "Gone stale", value: confidence.stale, icon: Clock, tone: confidence.stale > 0 ? "warning" : "muted", hint: `not seen in ${staleDays}d`, onClick: () => setBand(band === "stale" ? null : "stale"), active: band === "stale" },
           { label: "Never sighted", value: confidence.never, icon: CircleSlash, tone: confidence.never > 0 ? "destructive" : "muted", hint: "no scan on record", onClick: () => setBand(band === "never" ? null : "never"), active: band === "never" },

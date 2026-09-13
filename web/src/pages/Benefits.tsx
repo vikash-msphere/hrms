@@ -11,6 +11,7 @@ import { PageSettings } from "@/components/common/SettingsButton";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { useKpiFocus } from "@/lib/kpiFocus";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field } from "@/components/common/Field";
 import { Card } from "@/components/ui/card";
@@ -38,7 +39,9 @@ const DEP_EMPTY = { name: "", relationship: "spouse" as DependentRelationship, d
 
 export default function Benefits({ me }: { me: Me }) {
   const { rows: plans, state, error, reload: reloadPlans } = useCollection<BenefitPlan>("benefit-plans");
-  const { rows: enrollments, reload: reloadEnr } = useCollection<BenefitEnrollment>("benefit-enrollments");
+  // Per-plan enrolment state is read off these rows, so a window would show a plan the caller is enrolled in
+  // as one they are not.
+  const { rows: enrollments, reload: reloadEnr } = useCollection<BenefitEnrollment>("benefit-enrollments", { all: true });
   // This page is strictly self-service, and server list scoping can hand an HR viewer EVERYONE's dependents -
   // so ask for the caller's own, server-side. One person's rows instead of a page of the org's.
   const { rows: dependents, reload: reloadDeps } = useCollection<Dependent>("dependents", {
@@ -125,6 +128,8 @@ export default function Benefits({ me }: { me: Me }) {
   return (
     <div>
       <PageHeader title="Benefits" actions={<PageSettings me={me} host="benefits" />} />
+
+      <TruncationNotice collection={["benefit-plans", "benefit-enrollments"]} what="plans" className="mb-3" />
 
       <DataState state={state} error={error} onRetry={reloadAll}>
         {plans.length > 0 && (

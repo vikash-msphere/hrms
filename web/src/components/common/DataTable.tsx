@@ -68,8 +68,20 @@ export type BulkAction<T> = {
   confirm?: { title: string; description?: string };
   /** Return a reason to disable the action for this selection, or null to allow it. */
   disabled?: (rows: T[]) => string | null;
-  /** Runs with the selected rows. Selection clears only on success; throw to keep it for a retry. */
-  run: (rows: T[]) => void | Promise<void>;
+  /**
+   * Runs with the selected rows.
+   *
+   * The return value says WHAT TO KEEP SELECTED: rows back means keep exactly those (a partial failure hands
+   * back the rows that failed), nothing back means the run succeeded and the selection is cleared, and a throw
+   * keeps the whole selection for a blanket retry.
+   *
+   * Keeping everything selected after a partial failure is a dead end on a queue: approve ten expenses, two
+   * fail, the reload lands and eight of them are now APPROVED - and the Approve action's own `disabled` guard
+   * (`every(r => state === "SUBMITTED")`) then evaluates false, so the button the reader needs is greyed out
+   * with nothing on screen saying which two failed or that the way forward is to deselect eight rows by hand.
+   * `bulkInvoke` already computes `failedRows`; this is the channel it had no way to return through.
+   */
+  run: (rows: T[]) => void | Promise<void> | T[] | Promise<T[] | void>;
 };
 
 // --- Deep-linkable table state (sort + filters), carried in the hash query as one param per table ---------
@@ -325,7 +337,10 @@ export function DataTable<T>({
       if (value === null) params.delete(`t.${urlKey}`);
       else params.set(`t.${urlKey}`, value);
       const q = params.toString();
-      history.replaceState(null, "", `${window.location.pathname}${window.location.search}#/${path}${q ? `?${q}` : ""}`);
+      // Carries the current state object through, like router.ts and urlQuery.ts: a dialog's own history entry
+      // is marked `hrmsDialog: true` and `dropDialogEntry` refuses to pop one whose marker has gone, so
+      // replacing the state with null while a dialog was open left a dead back-entry behind it.
+      history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}#/${path}${q ? `?${q}` : ""}`);
       syncLastHash(); // no hashchange fires, so the guard has to be told what the address bar now says
     }, 250);
     return () => clearTimeout(t);
@@ -348,6 +363,9 @@ export function DataTable<T>({
 
   // The first real data column - child rows indent their content here so nesting reads under the parent.
   const firstDataColId = visibleColumns[0]?.id;
+  // Where "Total · N rows" goes in the footer: the first data column that isn't itself showing a sum, so the
+  // label never displaces a figure and never lands in a 1px gutter column.
+  const totalLabelColId = (visibleColumns.find((c) => c.aggregate !== "sum") ?? visibleColumns[0])?.id;
 
   // Leading columns (leftmost), in order: the fold chevron (when rows are expandable), then the "manage access"
   // icon (in access mode). Both lead rather than trail so a wide table's horizontal scroll never hides them.
@@ -526,8 +544,10 @@ export function DataTable<T>({
     if (rows.length === 0) return;
     setBulkBusy(action.label);
     try {
-      await action.run(rows);
-      setSelected(new Set()); // success: the selection's job is done
+      // Rows back = keep exactly those selected (a partial failure returns the ones that failed, so the retry
+      // acts on them and no others); nothing back = done, clear it.
+      const keep = await action.run(rows);
+      setSelected(Array.isArray(keep) && keep.length ? new Set(keep.map(getRowId)) : new Set());
     } catch {
       // the caller's run() surfaces its own error toast; keep the selection so the user can retry
     } finally {
@@ -558,6 +578,11 @@ export function DataTable<T>({
   // --- totals ----------------------------------------------------------------------------------------------
   // Summed over the FILTERED rows, not the visible page: a total that changed when you turned the page would
   // answer a question nobody asked.
+  //
+  // The rows are still one server page on a truncated collection, and every column that uses this is money -
+  // so the figure is marked with the same `+` and the same word ("loaded") the pager, the export button and
+  // the empty state already use. A partial sum printed as "Total", exact row count beside it, is the number
+  // that gets read out in a meeting while the pager two lines below says the set is bigger than that.
   const sumCols = React.useMemo(() => columns.filter((c) => c.aggregate === "sum"), [columns]);
   const sumOf = React.useCallback(
     (rs: T[], col: Column<T>) => rs.reduce((n, r) => n + (Number(col.accessor?.(r)) || 0), 0),
@@ -1314,9 +1339,11 @@ export function DataTable<T>({
           <div className="space-y-2">
             {showTotals && (
               <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border bg-muted/60 px-3 py-2 text-xs">
-                <span className="uppercase tracking-wide text-muted-foreground">Total · {total} row{total === 1 ? "" : "s"}</span>
+                <span className="uppercase tracking-wide text-muted-foreground">
+                  Total · {total}{truncated ? "+" : ""} row{total === 1 ? "" : "s"}{truncated ? " loaded" : ""}
+                </span>
                 {sumCols.map((col) => (
-                  <span key={col.id} className="font-medium tabular-nums">{col.header}: {fmtTotal(col, sumOf(filtered, col))}</span>
+                  <span key={col.id} className="font-medium tabular-nums">{col.header}: {fmtTotal(col, sumOf(filtered, col))}{truncated ? "+" : ""}</span>
                 ))}
               </div>
             )}
@@ -1549,16 +1576,23 @@ export function DataTable<T>({
           {showTotals && (
             <TableFooter>
               <TableRow className="hover:bg-transparent">
-                {renderCols.map((col, i) => (
+                {/* The label goes in the first DATA column, not `i === 0`: `renderCols` prepends up to three
+                    1px gutter columns (select, access, expand), so on a table with both totals and bulk
+                    actions "Total · N rows" landed in the checkbox column - and `truncate` (white-space:
+                    nowrap) then forced its min-content width onto that whole column. The gutters' own
+                    `className` is applied here too, so they stay 1px whatever the footer holds. */}
+                {renderCols.map((col) => (
                   <TableCell
                     key={col.id}
                     style={widthStyle(col.id)}
-                    className={cn("truncate text-xs", col.align === "right" && "text-right tabular-nums", col.align === "center" && "text-center")}
+                    className={cn("truncate text-xs", col.className, col.align === "right" && "text-right tabular-nums", col.align === "center" && "text-center")}
                   >
                     {col.aggregate === "sum" ? (
-                      fmtTotal(col, sumOf(filtered, col))
-                    ) : i === 0 ? (
-                      <span className="uppercase tracking-wide text-muted-foreground">Total · {total} row{total === 1 ? "" : "s"}</span>
+                      <>{fmtTotal(col, sumOf(filtered, col))}{truncated ? "+" : ""}</>
+                    ) : col.id === totalLabelColId ? (
+                      <span className="uppercase tracking-wide text-muted-foreground">
+                        Total · {total}{truncated ? "+" : ""} row{total === 1 ? "" : "s"}{truncated ? " loaded" : ""}
+                      </span>
                     ) : null}
                   </TableCell>
                 ))}

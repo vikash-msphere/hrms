@@ -2,7 +2,7 @@ import { Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import type { Comparison, CompareOp, Condition, WorkflowMeta } from "./types";
+import type { Comparison, CompareOp, Condition, MetaEventField, WorkflowMeta } from "./types";
 import { isComparison } from "./types";
 
 const NO_VALUE: CompareOp[] = ["exists", "notExists"];
@@ -15,10 +15,18 @@ export function ConditionBuilder({ meta, triggerType, value, onChange }: { meta:
     return <p className="text-sm text-muted-foreground">This condition is too complex to edit here - use the JSON toggle.</p>;
   }
   const { mode, rows } = parsed;
-  const fields = [
-    { name: "employeeId" }, { name: "subject" }, { name: "actorId" },
+  const fields: { name: string; type?: MetaEventField["type"] }[] = [
+    { name: "employeeId", type: "string" }, { name: "subject", type: "string" }, { name: "actorId", type: "string" },
     ...(meta?.events.find((e) => e.type === triggerType)?.fields ?? []).filter((f) => !["employeeId", "actorId", "subject"].includes(f.name)),
   ];
+  // THE CATALOGUE ALREADY SAYS WHAT A FIELD IS, so the value box is typed by the FIELD rather than by how the
+  // text happens to look. The server compares strictly in both directions (domain/automations.ts: `eq` is
+  // `===` with no coercion, `gte` requires both sides to be numbers) and the validator checks a field's NAME
+  // against the catalogue but never its value's type - so a mismatch saves cleanly, is listed, is enabled,
+  // and then matches nothing forever, with no error at save time, none at evaluation, and nothing in the run
+  // history beyond "did not fire". Typing a money threshold back the way this app displays it - `1,00,000` -
+  // was enough: `Number()` gives NaN, the string is stored, and `gte` is false for every row ever submitted.
+  const fieldType = new Map(fields.map((f) => [f.name, f.type]));
   const ops = meta?.conditionOps ?? ["eq", "ne", "gt", "gte", "lt", "lte", "in", "contains", "exists", "notExists"];
 
   const emit = (m: "all" | "any", rs: Comparison[]) => onChange(rs.length === 0 ? null : ({ [m]: rs } as Condition));
@@ -51,9 +59,21 @@ export function ConditionBuilder({ meta, triggerType, value, onChange }: { meta:
             <SelectContent>{ops.map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}</SelectContent>
           </Select>
           {!NO_VALUE.includes(r.op) && (
-            <Input className="h-9 flex-1" value={String(r.value ?? "")} onChange={(e) => setRow(i, { value: coerce(e.target.value) })} placeholder="value" />
+            <Input
+              className="h-9 flex-1"
+              value={String(r.value ?? "")}
+              onChange={(e) => setRow(i, { value: coerce(e.target.value, fieldType.get(r.field)) })}
+              placeholder="value"
+              aria-invalid={badNumber(r.value, fieldType.get(r.field)) || undefined}
+            />
           )}
           <Button type="button" variant="ghost" size="icon" aria-label="Remove this condition" onClick={() => delRow(i)}><X className="h-4 w-4" /></Button>
+          {/* Said now rather than never: the server would accept this rule and then silently never fire it. */}
+          {badNumber(r.value, fieldType.get(r.field)) && (
+            <p className="w-full text-xs text-destructive">
+              {r.field} is a number, and "{String(r.value)}" isn't one - this rule would save and then never match. Digits only, no symbols.
+            </p>
+          )}
         </div>
       ))}
       <Button type="button" variant="outline" size="sm" onClick={addRow}><Plus className="mr-1 h-4 w-4" /> Add condition</Button>
@@ -63,11 +83,27 @@ export function ConditionBuilder({ meta, triggerType, value, onChange }: { meta:
 }
 
 // Numbers/booleans typed into the value box become real JSON values (so gt/lt compare numerically).
-function coerce(s: string): unknown {
+//
+// `t` is the field's DECLARED type when the catalogue has one. Without it - a dotted payload path, or a field
+// the running server does not describe - the old look-at-it guess is still the best available, and stays.
+export function coerce(s: string, t?: MetaEventField["type"]): unknown {
+  if (t === "string" || t === "ref" || t === "date") return s; // a numeric-looking asset tag is still a string
+  if (t === "boolean") return s === "true";
+  if (t === "number") {
+    // Grouping separators are what a reader copies back off the screen (this app formats money en-IN).
+    const n = Number(s.replace(/,/g, ""));
+    return s.trim() === "" || Number.isNaN(n) ? s : n;
+  }
   if (s === "true") return true;
   if (s === "false") return false;
-  if (s !== "" && !Number.isNaN(Number(s))) return Number(s);
+  // `Number(" ")` is 0, so a box holding a single space is not a number anybody typed.
+  if (s.trim() !== "" && !Number.isNaN(Number(s))) return Number(s);
   return s;
+}
+
+/** A `number` field whose box does not parse: the rule would save and then never match. */
+export function badNumber(value: unknown, t?: MetaEventField["type"]): boolean {
+  return t === "number" && typeof value !== "number";
 }
 
 function parse(c: Condition | null): { mode: "all" | "any"; rows: Comparison[] } | null {

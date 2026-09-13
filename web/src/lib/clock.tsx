@@ -15,7 +15,21 @@ import { hasCapability } from "@/lib/perm";
 // approver's window covers their whole team, so a single page would silently drop days from the caller's own
 // history. Bounded so a pathological range can't spin forever.
 export async function listAllSessions(query: string): Promise<AttendanceSession[]> {
+  return (await listAllSessionsPaged(query)).sessions;
+}
+
+/** The same walk, saying whether it stopped on the page ceiling rather than on the end of the list.
+ *
+ *  A caller that reads a MISSING session as an accusation ("No log" against somebody who did clock in) needs
+ *  to know the difference: a day the walk never reached is not a day nobody worked. */
+export async function listAllSessionsPaged(query: string): Promise<{ sessions: AttendanceSession[]; truncated: boolean }> {
   const all: AttendanceSession[] = [];
+  // A STUCK CURSOR is a different failure from a long one, and the page ceiling only catches the second. The
+  // same `seen` set guards `api.ts#listAll` and `#getAllPages`, after the cases their notes describe - a keyset
+  // key that ties across more rows than a page holds, a filter change mid-walk, a bug in a route's own `list`
+  // hook. Here it would have meant the same page appended up to ten times, with duplicate rows in every total
+  // built off the result.
+  const seen = new Set<string>();
   let pageToken: string | undefined;
   for (let i = 0; i < 10; i++) {
     const page = await get<{ results?: AttendanceSession[]; next_page_token?: string }>(
@@ -23,9 +37,11 @@ export async function listAllSessions(query: string): Promise<AttendanceSession[
     );
     all.push(...(page.results ?? []));
     pageToken = page.next_page_token;
-    if (!pageToken) break;
+    if (!pageToken || seen.has(pageToken)) return { sessions: all, truncated: false };
+    seen.add(pageToken);
   }
-  return all;
+  // Ten pages of 100 and the cursor still had more: the window is a window.
+  return { sessions: all, truncated: true };
 }
 
 // Am I on the clock, and the one place that punches. Held session-wide so the top-bar chip and the Attendance

@@ -9,7 +9,10 @@ import type { LeaveRequest, Reimbursement, OvertimeRequest, RemoteWorkRequest, A
 // collection row - a bespoke queue assembled server-side from the encrypted per-employee tax blob - so it
 // rides its own field on the state, not the generic ApprovalsBuckets. The verify/reject action is a PATCH to
 // employees/<id>/tax, handled by its own inbox section (not the generic ApprovalRow).
-export type TaxVerification = { employee: string; employee_name: string; prior_employer_income: number; prior_employer_tds: number };
+// `etag` is the employee row's version as the queue read it, and it is sent back as If-Match on the decision:
+// re-declaring resets the record and takes no precondition, so without it a reviewer approves the figures on
+// the card and the server stamps VERIFIED on whatever was declared in the meantime.
+export type TaxVerification = { employee: string; employee_name: string; prior_employer_income: number; prior_employer_tds: number; etag: string };
 
 // Shared source of "things awaiting my decision", consumed by both the sidebar count badge and the pages that
 // show the queues - so the badge and a page never disagree, and deciding on a page updates the badge.
@@ -133,6 +136,11 @@ function ActiveProvider({ queues, withHistory, children }: { queues: readonly st
   // The badge: counts only, one request, every queue the caller may decide in. A caller who may decide in none
   // gets an empty map (the endpoint queries nothing for them).
   const [summary, setSummary] = useState<Summary>(() => readSummaryDisk() ?? {});
+  // Outside the inbox the COUNT is what enables every queue, so until it lands nothing is enabled, `active` is
+  // empty and the row-level `loading` below is false over a total of 0 - which is the "You're all caught up"
+  // claim being made before a single queue had been read, on the one request that gates them all. Only a cold
+  // start counts: a stored summary the change feed vouches for is answered without a request.
+  const [summaryLoading, setSummaryLoading] = useState(() => !(storedCopiesTrusted() && readSummaryDisk()));
   const loadSummary = useCallback(async () => {
     try {
       const fresh = await get<Summary>("approvals-summary");
@@ -140,6 +148,8 @@ function ActiveProvider({ queues, withHistory, children }: { queues: readonly st
       writeSummaryDisk(fresh);
     } catch {
       setSummary({}); // a failed count is a hidden badge, never a wrong one
+    } finally {
+      setSummaryLoading(false);
     }
   }, []);
   useEffect(() => {
@@ -284,7 +294,7 @@ function ActiveProvider({ queues, withHistory, children }: { queues: readonly st
     [wanted("asset-requests"), assetReq],
   ];
   const active = reads.filter(([on]) => on).map(([, q]) => q);
-  const loading = active.some((q) => q.state === "loading" && q.rows.length === 0);
+  const loading = summaryLoading || active.some((q) => q.state === "loading" && q.rows.length === 0);
   // A caller without a capability gets a 403 that `useCollection` isolates into an empty collection rather
   // than an error, so this only fires on a real failure to read something the caller may read. Over the same
   // enabled set: an entry nobody fetched has no error to report either, and pretending otherwise would only

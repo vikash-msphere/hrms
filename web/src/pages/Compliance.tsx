@@ -5,7 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf } from "@/lib/utils";
-import { todayStr } from "@/lib/orgDay";
+import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
 import type { ComplianceEvent, ComplianceRule, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
@@ -105,7 +105,8 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
     // `null` as well as undefined: an unassigned row carries the field as null, and both mean "nobody".
-    return (p?: string | null) => (p ? m.get(idOf(p)) ?? idOf(p) : "");
+    // An owner outside the caller's slice of the directory reads as a word, never as a wire id (`personName`).
+    return (p?: string | null) => (p ? m.get(idOf(p)) ?? "Someone" : "");
   }, [employees]);
 
   // "Mine" and "due this week" are the two questions a filer actually opens this page with, so they are
@@ -113,8 +114,10 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
   const isMine = (c: ComplianceEvent) => !!me.employee_id && !!c.assignee && idOf(c.assignee) === me.employee_id;
   const isDueSoon = (c: ComplianceEvent) => {
     if (c.status !== "pending" || c.overdue) return false;
-    const days = (Date.parse(`${c.due_date.slice(0, 10)}T00:00:00`) - Date.now()) / 86400000;
-    return days <= 7;
+    // The ORG's day, like `advance()` below and like the server, which computes `c.overdue` on it. A
+    // viewer-local midnight differenced against `Date.now()` is a different day for part of every day, so this
+    // tile and the overdue flag it defers to disagreed about the same statutory deadline.
+    return daysBetweenYmd(todayStr(), c.due_date.slice(0, 10)) <= 7;
   };
   const stats = useMemo(() => {
     const live = rows.filter((c) => !c.delete_time);

@@ -42,6 +42,21 @@ async function normalizeLines(deps: Deps, lines: StructureLineInput[]): Promise<
     seen.add(id);
     out.push({ component: id, rate: l.rate ?? null });
   }
+  // THE PERCENTAGE LINES MUST LEAVE SOMETHING OF BASIC. `percent_base` rates are taken of basic pay and the
+  // Special Allowance is the plug that takes up the slack, so at 100% or more there is no CTC this structure
+  // can split: it solves for nothing and every compensation revision that reaches for it fails, far from the
+  // form that created it. The SPA refuses to save one, and that refusal used to live only in a `disabled`
+  // attribute - which the dialog's Enter-to-submit path walked straight around, and an API-key writer never
+  // saw at all. The rule belongs where it is enforced.
+  const percentOfBasic = out.reduce((sum, l) => {
+    const c = byId.get(l.component);
+    if (c?.method !== "percent_base") return sum;
+    const rate = l.rate ?? c.rate ?? 0;
+    return sum + (Number.isFinite(rate) ? Number(rate) : 0);
+  }, 0);
+  if (percentOfBasic >= 100) {
+    throw invalidArgument(`the percentage lines claim ${Math.round(percentOfBasic)}% of basic; they must total under 100% so there is something left to split`);
+  }
   return out;
 }
 

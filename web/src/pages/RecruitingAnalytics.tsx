@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { BarChart3, Briefcase, Users, UserCheck, FileSignature, Timer, KanbanSquare } from "lucide-react";
-import { useCollection } from "@/hooks/useCollection";
+import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { idOf } from "@/lib/utils";
 import { navigate } from "@/router";
 import type { Me, Application, JobRequisition, Offer, Candidate } from "@/types";
@@ -21,10 +22,19 @@ const STALL_DAYS = 14;
 const pct = (n: number, d: number) => (d ? Math.round((n / d) * 100) : 0);
 
 export default function RecruitingAnalytics({ me: _me }: { me: Me }) {
-  const { rows: apps, state, error, reload } = useCollection<Application>("applications");
-  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions");
-  const { rows: offers } = useCollection<Offer>("offers");
-  const { rows: candidates } = useCollection<Candidate>("candidates");
+  // `all` on all four. An analytics page cannot be folded over a list page's window: these reads are
+  // keyset-ordered NEWEST FIRST, which is not a sample but a recency-biased slice - the worst possible shape
+  // for a funnel, a mean and two rates. The newest hundred applications are disproportionately the ones still
+  // in flight, so `hired` comes out small, `timeToHire` is a mean over a handful of recent hires, and
+  // `acceptRate` describes the newest hundred offers rather than the year's.
+  const { rows: apps, state, error, reload } = useCollection<Application>("applications", { all: true });
+  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { all: true });
+  const { rows: offers } = useCollection<Offer>("offers", { all: true });
+  const { rows: candidates } = useCollection<Candidate>("candidates", { all: true });
+  // ALL_CAP is 1000 and an ATS will pass it, so past the walk the RATES AND THE MEAN are withheld rather than
+  // stated: a count that is short reads as a count that is short, while a percentage or an average that is
+  // short reads as a fact about the business.
+  const truncated = useCollectionHasMore(["applications", "job-requisitions", "offers", "candidates"]);
   const cfg = useAtsConfig();
 
   const m = useMemo(() => {
@@ -70,6 +80,9 @@ export default function RecruitingAnalytics({ me: _me }: { me: Me }) {
     <div>
       {/* Read-only rollup of applications; the header icon manages read access to the underlying collection. */}
       <PageHeader accessCollection="applications" title="Recruiting analytics" description="Pipeline funnel, source effectiveness, and offer outcomes across your open jobs." />
+      {/* `accessCollection` above is the manage-access key, not a truncation affordance - this is the line that
+          admits a bound, and every number below depends on it. */}
+      <TruncationNotice collection={["applications", "job-requisitions", "offers", "candidates"]} what="recruiting records" className="mb-4" />
 
       <DataState state={state} error={error} onRetry={reload}>
         {apps.length === 0 && reqs.length === 0 && candidates.length === 0 ? (
@@ -86,13 +99,16 @@ export default function RecruitingAnalytics({ me: _me }: { me: Me }) {
               ...(m.stalled
                 ? [{ label: `Stalled over ${STALL_DAYS}d`, value: m.stalled, icon: Timer, tone: "warning" as const, hint: "no movement", onClick: () => navigate("pipeline?focus=stalled") }]
                 : []),
-              { label: "Hired", value: m.hired.length, icon: UserCheck, tone: m.hired.length ? "success" : "muted", hint: "in this window", onClick: () => navigate("pipeline?focus=hired") },
-              { label: "Offer acceptance", value: `${m.acceptRate}%`, icon: FileSignature, hint: `${m.accepted} of ${m.accepted + m.declined} accepted`, onClick: () => navigate("offers?focus=accepted") },
+              // No "in this window": there is no window control on this page, so the phrase named a period the
+              // reader thought they had chosen. The counts are the whole collection unless the walk hit its
+              // ceiling, which the notice above says.
+              { label: "Hired", value: `${m.hired.length}${truncated ? "+" : ""}`, icon: UserCheck, tone: m.hired.length ? "success" : "muted", hint: "hired applications", onClick: () => navigate("pipeline?focus=hired") },
+              { label: "Offer acceptance", value: truncated ? "-" : `${m.acceptRate}%`, icon: FileSignature, hint: truncated ? "too many offers to rate" : `${m.accepted} of ${m.accepted + m.declined} accepted`, onClick: () => navigate("offers?focus=accepted") },
               ...(m.extended
                 ? [{ label: "Awaiting a reply", value: m.extended, icon: FileSignature, tone: "warning" as const, hint: "extended, no answer", onClick: () => navigate("offers?focus=extended") }]
                 : []),
               // The average is computed over hired applications, so it opens exactly those.
-              { label: "Avg time to hire", value: m.timeToHire != null ? `${m.timeToHire}d` : "-", icon: Timer, hint: m.timeToHire == null ? "no hires yet" : `over ${m.hired.length} hire${m.hired.length === 1 ? "" : "s"}`, ...(m.hired.length ? { onClick: () => navigate("pipeline?focus=hired") } : {}) },
+              { label: "Avg time to hire", value: truncated || m.timeToHire == null ? "-" : `${m.timeToHire}d`, icon: Timer, hint: truncated ? "too many applications to average" : m.timeToHire == null ? "no hires yet" : `over ${m.hired.length} hire${m.hired.length === 1 ? "" : "s"}`, ...(m.hired.length ? { onClick: () => navigate("pipeline?focus=hired") } : {}) },
             ]}
           />
 

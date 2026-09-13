@@ -4,6 +4,7 @@ import { blobUrl, create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useLetterheads } from "@/lib/letterheads";
 import { cn, idOf } from "@/lib/utils";
+import { readLocal, writeLocal, userKey } from "@/lib/localPref";
 import type { Employee } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -21,7 +22,9 @@ import { useUnsavedTracker } from "@/components/common/UnsavedChanges";
 
 type Toast = (t: { title: string; description?: string; variant?: "success" | "destructive" }) => void;
 
-const RAIL_KEY = "hrms.letters.rail";
+// Per-browser AND per-person: the fold is a convenience rather than a synced preference, but a convenience is
+// still the reader's own, and an un-namespaced key hands it to whoever signs in next on a shared machine.
+const RAIL_KEY = () => userKey("hrms.letters.rail");
 
 // The one control that folds the letter-type rail away. It sits in the rail's own heading while the rail is
 // open, and hops into the editor heading once the rail is gone.
@@ -197,12 +200,14 @@ export default function LettersTab({ toast }: { toast: Toast }) {
   // The type rail folds away to give the block editor the full width - a per-browser convenience, so it is
   // remembered in localStorage rather than a synced preference (and a blocked/absent store just means open).
   const [railOpen, setRailOpen] = useState<boolean>(() => {
-    try { return localStorage.getItem(RAIL_KEY) !== "0"; } catch { return true; }
+    const key = RAIL_KEY();
+    return !key || readLocal(key) !== "0";
   });
   function toggleRail() {
     const next = !railOpen;
     setRailOpen(next);
-    try { localStorage.setItem(RAIL_KEY, next ? "1" : "0"); } catch { /* private mode: fold stays session-only */ }
+    const key = RAIL_KEY();
+    if (key) writeLocal(key, next ? "1" : "0");
   }
 
   const [previewEmp, setPreviewEmp] = useState("");

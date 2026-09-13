@@ -102,7 +102,7 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
   // Inline settings gears are org-scoped: gated on settings.write (a per-key perm hides just that one gear).
   const canSettings = usePermission("settings.write");
   const { emp, state, error, reload } = useEmployee(id);
-  const { rows: depts } = useCollection<Department>("departments");
+  const { rows: depts } = useCollection<Department>("departments", { all: true });
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: types } = useCollection<LeaveType>("leave-types");
   // This person's balances, narrowed server-side. Filtering a page of the whole collection in the browser was
@@ -120,7 +120,7 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
   }, [employees]);
   const typeName = useMemo(() => {
     const m = new Map(types.map((t) => [idOf(t.path), t.display_name]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown type" : "-");
   }, [types]);
   const myBalances = balances;
   // This employee's leave requests (scoped by the viewer's leave-requests access), newest first - narrowed to

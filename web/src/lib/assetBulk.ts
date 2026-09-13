@@ -82,6 +82,31 @@ export function appendSerial(text: string, serial: string): { text: string; adde
 }
 
 /**
+ * The lines still to be added, once some of the delivery has landed.
+ *
+ * A `batchCreate` call is atomic, so a run that fails halfway has created everything before the failure and
+ * nothing after it. The box must then hold the REMAINDER: leaving the whole list in it means pressing Add
+ * again re-sends the serials that already exist, `serial_number` carries no unique index, and the register
+ * ends up with two rows claiming one physical device - one of which can never be found by a scan, so every
+ * stocktake from then on reports it missing.
+ *
+ * Matched on the serial rather than the line, so a comment or a per-line name is preserved exactly as typed.
+ */
+export function remainingSerialText(text: string, createdSerials: Iterable<string>): string {
+  const done = new Set([...createdSerials].map((s) => s.trim().toLowerCase()).filter(Boolean));
+  if (!done.size) return text;
+  return text
+    .split(/\r?\n/)
+    .filter((raw) => {
+      const trimmed = raw.trim();
+      if (!trimmed || trimmed.startsWith("#")) return true;
+      const serial = (split(trimmed)[0] ?? "").trim().toLowerCase();
+      return !serial || !done.has(serial);
+    })
+    .join("\n");
+}
+
+/**
  * How to split a run of `total` assets into calls of at most `perCall`.
  *
  * The server takes a bounded delivery per call (services/assets.ts ASSET_BATCH_MAX), so a bigger paste is

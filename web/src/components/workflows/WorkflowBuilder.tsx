@@ -3,7 +3,7 @@ import { Code2, Wand2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Field } from "@/components/common/Field";
 import { ConditionBuilder } from "./ConditionBuilder";
 import { ActionList } from "./ActionList";
@@ -24,15 +24,27 @@ export function WorkflowBuilder({ draft, onChange, meta, nameError }: { draft: A
   const groups = [...new Set((meta?.events ?? []).map((e) => e.module))];
 
   const toJson = () => { setJsonText(JSON.stringify({ condition: draft.condition, actions: draft.actions }, null, 2)); setJsonErr(null); setJson(true); };
-  const fromJson = () => {
+
+  // THE JSON VIEW IS A VIEW, NOT A STAGING BUFFER. It used to commit to the draft only from "Back to
+  // builder", and the Save button belongs to the enclosing WriteDialog, which reads the draft - so rewriting
+  // the actions here and pressing "Save changes" wrote the OLD ones, said "Rule saved", and threw the
+  // textarea away. Nothing contradicted it either, because everything else reads the draft too: `dirty`
+  // believed nothing had changed, the unsaved-changes guard let the dialog close without asking, the preview
+  // kept describing the old actions, and on a NEW rule authored entirely here `canSubmit` stayed false with
+  // "Add at least one action" in front of a textarea plainly holding several. This is the escape hatch for
+  // the rules the guided form cannot express, so it was the power user, mid-way through the only editor that
+  // can do the job, who lost the work. Committing on every keystroke makes all of them see what the reader
+  // sees; an unparseable draft just holds the error and leaves the last good value in place.
+  const tryCommit = (text: string) => {
     try {
-      const parsed = JSON.parse(jsonText) as { condition: Condition | null; actions: Action[] };
+      const parsed = JSON.parse(text) as { condition: Condition | null; actions: Action[] };
       if (!Array.isArray(parsed.actions)) throw new Error("actions must be an array");
       set({ condition: parsed.condition ?? null, actions: parsed.actions });
-      setJson(false);
       setJsonErr(null);
-    } catch (e) { setJsonErr(String((e as Error).message)); }
+      return true;
+    } catch (e) { setJsonErr(String((e as Error).message)); return false; }
   };
+  const fromJson = () => { if (tryCommit(jsonText)) setJson(false); };
 
   return (
     <div className="space-y-5">
@@ -52,11 +64,15 @@ export function WorkflowBuilder({ draft, onChange, meta, nameError }: { draft: A
         >
           <SelectTrigger><SelectValue placeholder="Pick an event…" /></SelectTrigger>
           <SelectContent>
+            {/* `SelectGroup` + `SelectLabel`, which Radix wires together with `aria-labelledby` - not a bare
+                <div> with a styled heading, which is visual only. This is the app's longest Select, and a
+                screen-reader user was getting one flat list of every event with no sense of which module each
+                belonged to. GenerateLetterDialog uses the same pair for the same shape. */}
             {groups.map((g) => (
-              <div key={g}>
-                <div className="px-2 py-1 text-xs font-semibold uppercase text-muted-foreground">{g}</div>
+              <SelectGroup key={g}>
+                <SelectLabel className="px-2 py-1 text-xs font-semibold uppercase text-muted-foreground">{g}</SelectLabel>
                 {(meta?.events ?? []).filter((e) => e.module === g).map((e) => <SelectItem key={e.type} value={e.type}>{e.label}</SelectItem>)}
-              </div>
+              </SelectGroup>
             ))}
           </SelectContent>
         </Select>
@@ -74,7 +90,14 @@ export function WorkflowBuilder({ draft, onChange, meta, nameError }: { draft: A
               <Button type="button" variant="outline" size="sm" onClick={fromJson}><Wand2 className="mr-1 h-4 w-4" /> Back to builder</Button>
             </div>
           </div>
-          <Textarea rows={16} value={jsonText} onChange={(e) => setJsonText(e.target.value)} className="font-mono text-xs" />
+          <Textarea
+            rows={16}
+            value={jsonText}
+            onChange={(e) => { setJsonText(e.target.value); tryCommit(e.target.value); }}
+            className="font-mono text-xs"
+            aria-invalid={!!jsonErr || undefined}
+          />
+          <p className="text-xs text-muted-foreground">Applied as you type - Save writes what is in this box.</p>
         </div>
       ) : (
         <>

@@ -3,6 +3,7 @@ import { Lightbulb, Plus, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Arr
 import { create, get, invoke, remove } from "@/api";
 import { navigate, pagePath, recordUrl, setRouteRecord } from "@/router";
 import { useCollection, type LoadState } from "@/hooks/useCollection";
+import { useDebounced } from "@/hooks/useDebounced";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { formatDate, idOf, humanize, cn } from "@/lib/utils";
@@ -87,6 +88,11 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
   }, [soloId, soloTick]);
   const src = solo ? soloRows : rows;
   const setSrc = solo ? setSoloRows : setRows;
+  /** Apply a row transform to every source this page holds - the board entry AND the solo row. */
+  const foldBoth = (map: (r: Suggestion) => Suggestion) => {
+    setRows((prev) => prev.map(map));
+    setSoloRows((prev) => prev.map(map));
+  };
   const viewState = solo ? soloState : state;
   const viewError = solo ? soloError : error;
   const viewReload = solo ? () => setSoloTick((t) => t + 1) : reload;
@@ -123,20 +129,36 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
     [rows],
   );
 
-  // Duplicate guard: the closest existing suggestion by shared words in the title. Deliberately loose - the
-  // point is to surface "somebody already asked for this", not to be a search engine.
+  // Duplicate guard: the closest existing suggestion to what is being typed. Deliberately loose - the point is
+  // to surface "somebody already asked for this", not to be a search engine.
+  //
+  // ASKED OF THE SERVER, not of the loaded page. The duplicate somebody is about to re-file is by definition
+  // one filed BEFORE - usually weeks or months ago, and therefore outside a twenty-row feed window - so
+  // scanning `rows` fired reliably only for an idea posted in the last twenty posts, which is the case where
+  // the submitter had just scrolled past it anyway. Everywhere else it stayed silent, and silence reads as
+  // "no clash" rather than "not checked". `?q=` is FTS-backed over the whole collection and covers the body
+  // as well as the title, so it is also better at the job than the shared-word scan it replaces.
+  const dupQuery = useDebounced(form.title.trim(), 350);
+  const dupSearch = useCollection<Suggestion>("suggestions", { q: dupQuery, enabled: dupQuery.length >= 3 && open, max: 5 });
   const similar = useMemo(() => {
-    const words = form.title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3);
+    if (dupQuery.length < 3) return null;
+    const words = dupQuery.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3);
     if (!words.length) return null;
     let best: { s: Suggestion; score: number } | null = null;
-    for (const s of rows) {
+    for (const s of dupSearch.rows) {
       const t = s.title.toLowerCase();
       const score = words.filter((w) => t.includes(w)).length;
       if (score >= Math.min(2, words.length) && (!best || score > best.score)) best = { s, score };
     }
-    return best?.s ?? null;
-  }, [rows, form.title]);
+    // The FTS hit itself counts when the title alone does not: the index reads the body too, which is exactly
+    // the duplicate a title comparison misses.
+    return best?.s ?? dupSearch.rows[0] ?? null;
+  }, [dupSearch.rows, dupQuery]);
 
+  // Counts over the loaded window only, which is why they are WITHHELD while more rows exist (below): the
+  // board is ordered newest-first, so the terminal statuses age out of the window first and "Implemented"
+  // reads near zero on a board where most suggestions have been implemented - then climbs as the reader
+  // scrolls, which is not a behaviour a count chip has any way to explain.
   const statusCounts = useMemo(() => {
     const m = new Map<string, number>();
     for (const s of rows) m.set(s.status, (m.get(s.status) ?? 0) + 1);
@@ -166,12 +188,16 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
     setVoting(s.path);
     // Optimistic: the tally moves under the click; the server's reserialized row then reconciles it (or the
     // original row comes back on failure). No collection refetch either way (see resourceStore's verb map).
-    setSrc((prev) => prev.map((r) => (r.path === s.path ? applyVote(r, dir) : r)));
+    // Applied to BOTH sources, not just the active one. `suggestions:upvote` / `:downvote` are mapped to "no
+    // invalidation" on the strength of this fold being exact, which assumed one source - but `soloRows` is
+    // plain component state outside the store, so a vote cast on a suggestion's own page reached no cached
+    // entry at all and the board still showed the old tally until its next revalidation.
+    foldBoth((r) => (r.path === s.path ? applyVote(r, dir) : r));
     try {
       const updated = await invoke<Suggestion>(`suggestions/${idOf(s.path)}`, dir === 1 ? "upvote" : "downvote");
-      setSrc((prev) => prev.map((r) => (r.path === s.path ? { ...r, ...updated } : r)));
+      foldBoth((r) => (r.path === s.path ? { ...r, ...updated } : r));
     } catch (e) {
-      setSrc((prev) => prev.map((r) => (r.path === s.path ? s : r)));
+      foldBoth((r) => (r.path === s.path ? s : r));
       toast({ title: "Couldn't vote", description: (e as Error).message, variant: "destructive" });
     } finally {
       setVoting(null);
@@ -206,7 +232,8 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="flex flex-wrap items-center gap-1.5">
           {["", ...STATUSES].map((st) => {
-            const count = st ? statusCounts.get(st) ?? 0 : rows.length;
+            // No number while the board is still a window: "All 20" is a page size rendered as a board total.
+            const count = hasMore ? null : st ? statusCounts.get(st) ?? 0 : rows.length;
             return (
               <button
                 key={st || "all"}
@@ -217,7 +244,7 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
                   statusFilter === st ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent",
                 )}
               >
-                {st ? humanize(st) : "All"} <span className="tabular-nums opacity-70">{count}</span>
+                {st ? humanize(st) : "All"}{count != null && <span className="tabular-nums opacity-70"> {count}</span>}
               </button>
             );
           })}

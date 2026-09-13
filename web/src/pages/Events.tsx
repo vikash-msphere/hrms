@@ -7,7 +7,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf } from "@/lib/utils";
-import { todayStr } from "@/lib/orgDay";
+import { addDaysYmd, orgDayOf, todayStr } from "@/lib/orgDay";
 import { leaveColor } from "@/lib/leaveColors";
 import type { Employee, Department, Event, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -86,6 +86,8 @@ const EMPTY = {
   ...defaultTimed(), // used when timed
 };
 const DAY_MS = 86400000;
+/** The first day of the ORG's current month, as the UTC-anchored Date the month grid steps in. */
+const orgMonthStart = () => new Date(`${todayStr().slice(0, 7)}-01T00:00:00Z`);
 // Millisecond bounds of an event; an all-day event runs to the end of its end date.
 const startMs = (e: Event) => (e.all_day ? Date.parse(e.start_time.slice(0, 10)) : +new Date(e.start_time));
 const endMs = (e: Event) => (e.all_day ? Date.parse(e.end_time.slice(0, 10)) + DAY_MS - 1 : +new Date(e.end_time));
@@ -95,7 +97,7 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
   useDeepOpen(openId, rows, openEdit);
   // COMPLETE: the attendee picker invites from this list, so a window makes people un-invitable.
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   const { toast } = useToast();
   const sd = useSoftDelete("events", "event", reload);
   // List or calendar. Remembered, because which one somebody wants is about their job, not about this visit.
@@ -156,7 +158,7 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
 
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Someone" : "-");
   }, [employees]);
 
   const toggle = (ref: string) => setAttendees((a) => (a.includes(ref) ? a.filter((x) => x !== ref) : [...a, ref]));
@@ -612,16 +614,28 @@ function EventMonth({ events, me, onOpen, onAdd, onRsvp, rsvping }: {
   onRsvp: (e: Event, r: "going" | "maybe" | "declined") => void;
   rsvping: string | null;
 }) {
-  const [cursor, setCursor] = useState(() => { const n = new Date(); return new Date(Date.UTC(n.getFullYear(), n.getMonth(), 1)); });
+  // The month cursor starts on the ORG's month. Built from local `getFullYear()`/`getMonth()` anchored at UTC,
+  // "Today" could land on the wrong month either side of a boundary - and the grid it opens is compared against
+  // `todayStr()` below, which is the org's day.
+  const [cursor, setCursor] = useState(() => orgMonthStart());
   const live = useMemo(() => events.filter((e) => !e.delete_time), [events]);
   // An event occupies every day between its bounds, so a multi-day one appears on each of them.
+  // BUCKETED BY THE ORG'S DAY, which is what the cell labels and the "today" ring mean.
+  //
+  // The keys used to come from `getUTCFullYear/Month/Date` on the event's instant, i.e. its UTC calendar date,
+  // while the cells they are looked up by are compared against `todayStr()` - the org's day. Wherever the
+  // org's offset pushes its local date across UTC midnight the two part company and a TIMED event is drawn one
+  // cell away from the day it happens on: a 19:00 all-hands on 11 March in New York is `2026-03-12T00:00Z` and
+  // landed on the 12th, and evening events are the ordinary case for a company events calendar. All-day events
+  // were never affected - their `startMs` is already a date-only UTC midnight - which is what made this easy
+  // to miss. Stepping DAY STRINGS with `addDaysYmd` rather than adding DAY_MS to an instant is the shape
+  // lib/orgDay prescribes for day arithmetic.
   const byDay = useMemo(() => {
     const m = new Map<string, Event[]>();
     for (const e of live) {
-      const from = new Date(startMs(e));
-      const to = new Date(endMs(e));
-      for (let d = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()); d <= +to; d += DAY_MS) {
-        const k = new Date(d).toISOString().slice(0, 10);
+      const from = e.all_day ? e.start_time.slice(0, 10) : orgDayOf(e.start_time);
+      const to = e.all_day ? e.end_time.slice(0, 10) : orgDayOf(e.end_time);
+      for (let k = from; k <= to; k = addDaysYmd(k, 1)) {
         const arr = m.get(k);
         if (arr) arr.push(e); else m.set(k, [e]);
         if (m.size > 400) break; // a pathological range must not build a map of the decade
@@ -644,7 +658,7 @@ function EventMonth({ events, me, onOpen, onAdd, onRsvp, rsvping }: {
       <Card className="mb-4 overflow-hidden">
         <div className="flex flex-wrap items-center gap-2 border-b p-3">
           <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCursor((c) => new Date(Date.UTC(c.getUTCFullYear(), c.getUTCMonth() - 1, 1)))} aria-label="Previous month"><ChevronLeft className="h-4 w-4" /></Button>
-          <Button variant="outline" size="sm" className="h-8" onClick={() => { const n = new Date(); setCursor(new Date(Date.UTC(n.getFullYear(), n.getMonth(), 1))); }}>Today</Button>
+          <Button variant="outline" size="sm" className="h-8" onClick={() => setCursor(orgMonthStart())}>Today</Button>
           <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCursor((c) => new Date(Date.UTC(c.getUTCFullYear(), c.getUTCMonth() + 1, 1)))} aria-label="Next month"><ChevronRight className="h-4 w-4" /></Button>
           <span className="ml-1 flex items-center gap-2 text-base font-semibold"><CalendarRange className="h-4 w-4 text-primary" />{monthLabel}</span>
         </div>

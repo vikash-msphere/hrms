@@ -17,7 +17,17 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import type { Me } from "@/types";
 
 // Modifier hint for the search shortcut (⌘ on Mac, Ctrl elsewhere).
-const isMac = typeof navigator !== "undefined" && /Mac|iP(hone|ad|od)/.test(navigator.platform);
+//
+// `userAgentData.platform` first, `navigator.platform` as the fallback: the latter is deprecated and FROZEN -
+// Chrome reports "MacIntel" whatever the actual chip is - so it is a value that happens to still answer this
+// one question correctly rather than one that is maintained to. The fallback stays because `userAgentData` is
+// Chromium-only, and Safari and Firefox are exactly the browsers `navigator.platform` still answers for.
+const platformName = (): string => {
+  if (typeof navigator === "undefined") return "";
+  const ua = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData;
+  return ua?.platform || navigator.platform || "";
+};
+const isMac = /Mac|iP(hone|ad|od)/.test(platformName());
 
 // The sticky application top bar: breadcrumb context on the left; a quick-create "+" menu and global search
 // on the right. This gives every page consistent chrome and one-step access to the common create flows.

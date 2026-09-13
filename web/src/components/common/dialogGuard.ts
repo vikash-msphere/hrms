@@ -93,19 +93,38 @@ export function useDialogDraft<T>(key: string, open: boolean, value: T, apply: (
   // Restoring must happen once per opening, and only when there is something worth restoring.
   const applyRef = React.useRef(apply);
   applyRef.current = apply;
+  const valueRef = React.useRef(value);
+  valueRef.current = value;
+  // The value this opening started from, held until the reader actually changes something; null once they have
+  // (or once a stored draft was restored, which is already on disk and must stay current).
+  //
+  // Why it exists: the write effect below runs unconditionally in the same commit as the restore effect, so
+  // merely OPENING a dialog wrote the pristine form to sessionStorage. `clear()` only runs on a successful
+  // submit, never on a plain close - so opening "New claim", changing nothing and closing left a stored draft,
+  // and the next opening announced "picked up where you left off" with a Start over button over an empty form.
+  const pristine = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     if (!open || !enabled) {
       setRestored(false);
+      pristine.current = null;
       return;
     }
+    const current = JSON.stringify(valueRef.current) ?? "";
     try {
       const raw = sessionStorage.getItem(storageKey);
-      if (!raw) return;
+      // A stored draft identical to the form as it opens is not a draft - it is what an older build (or this
+      // same bug) left behind. Treat it as nothing to restore rather than claiming work was picked up.
+      if (!raw || raw === current) {
+        pristine.current = current;
+        return;
+      }
       applyRef.current(JSON.parse(raw) as T);
+      pristine.current = null;
       setRestored(true);
     } catch {
       /* a corrupt or unreadable draft is not worth a message - the form simply opens empty */
+      pristine.current = current;
     }
   }, [open, enabled, storageKey]);
 
@@ -113,8 +132,13 @@ export function useDialogDraft<T>(key: string, open: boolean, value: T, apply: (
   // strings), and the alternative - saving on close - is exactly the case that fails when the tab dies.
   React.useEffect(() => {
     if (!open || !enabled) return;
+    const serialized = JSON.stringify(value) ?? "";
+    if (pristine.current !== null) {
+      if (serialized === pristine.current) return; // nothing typed yet: there is no draft to keep
+      pristine.current = null;
+    }
     try {
-      sessionStorage.setItem(storageKey, JSON.stringify(value));
+      sessionStorage.setItem(storageKey, serialized);
     } catch {
       /* storage full or blocked: drafts are a convenience, never a requirement */
     }

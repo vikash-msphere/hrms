@@ -123,21 +123,28 @@ export function NotificationBell() {
         ) : (
           <div className="max-h-96 overflow-y-auto py-1">
             {recent.map((n) => (
+              // The row is a plain container with a childless button stretched over it, not a `role="button"`
+              // wrapping its own controls: ARIA flattens a button's children out of the accessibility tree
+              // (WAI-ARIA 1.2 §5.2.7), so nesting "Wake now" inside one made the ONLY route to un-snoozing
+              // from this bell unreachable to a screen reader - it was not a button any more, it was part of
+              // the row's name.
               <div
                 key={n.path}
-                role="button"
-                tabIndex={0}
-                onClick={() => rowClick(n)}
-                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); rowClick(n); } }}
                 className={cn(
-                  "group relative flex w-full cursor-pointer items-start gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                  "group relative flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-accent focus-within:bg-accent",
                   !isSnoozed && !n.read && "bg-primary/5",
                   !isSnoozed && !n.read && (n.priority === "urgent" || n.priority === "high") && priorityMeta[n.priority]?.ring,
                 )}
               >
+                <button
+                  type="button"
+                  onClick={() => rowClick(n)}
+                  aria-label={`Open: ${n.title}`}
+                  className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                />
                 {!isSnoozed && !n.read && <span className={cn("absolute left-0 top-0 h-full w-0.5", priorityMeta[n.priority]?.dot ?? "bg-primary")} />}
-                <NotificationLead n={n} size="sm" />
-                <span className="min-w-0 flex-1">
+                <span className="pointer-events-none relative"><NotificationLead n={n} size="sm" /></span>
+                <span className="pointer-events-none relative min-w-0 flex-1">
                   <span className="flex items-baseline justify-between gap-2">
                     <span className={cn("truncate text-sm", !isSnoozed && !n.read ? "font-semibold" : "font-normal")}>{n.title}</span>
                     {isSnoozed ? (
@@ -154,15 +161,16 @@ export function NotificationBell() {
                 </span>
                 {isSnoozed ? (
                   <button
-                    onClick={(e) => { e.stopPropagation(); void unsnooze(n); }}
+                    type="button"
+                    onClick={() => void unsnooze(n)}
                     title="Wake now"
-                    aria-label="Wake now"
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label={`Wake now: ${n.title}`}
+                    className="relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <BellRing className="h-4 w-4" />
                   </button>
                 ) : (
-                  <div className="opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                  <div className="relative z-10 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
                     <NotificationRowMenu n={n} />
                   </div>
                 )}

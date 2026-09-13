@@ -93,11 +93,16 @@ function entry(key: string): Entry {
   return e;
 }
 
-function settle(key: string, dataUri: string | null) {
+// `persist` distinguishes "the server said no photo" from "we could not ask". Only the first is a fact worth
+// keeping: a stored null is read back as a settled known-miss that needs no request at all, so persisting one
+// after a failed batch wrote a seven-day "this person has no photo" verdict to disk from a single 502, which no
+// later page load could correct. A failure settles in memory only - the wave stops spinning, and a reload asks
+// again.
+function settle(key: string, dataUri: string | null, persist = true) {
   const e = entry(key);
   e.dataUri = dataUri;
   e.settled = true;
-  writeDisk(key, dataUri);
+  if (persist) writeDisk(key, dataUri);
   e.subs.forEach((cb) => cb());
 }
 
@@ -122,7 +127,7 @@ async function flush() {
     // it isn't re-requested.
     batch.forEach(([key, id]) => settle(key, got.get(id) ?? null));
   } catch {
-    batch.forEach(([key]) => settle(key, null));
+    batch.forEach(([key]) => settle(key, null, false));
   }
   if (pending.size) schedule(); // ids enqueued past the cap, or while in flight
 }

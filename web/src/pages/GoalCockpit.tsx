@@ -44,7 +44,7 @@ const troubled = (g: Goal) => behind(g) || quiet(g);
 export default function GoalCockpit({ me }: { me: Me }) {
   const { rows: goals, state, error, reload } = useCollection<Goal>("goals");
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: cycles } = useCollection<ReviewCycle>("review-cycles");
+  const { rows: cycles } = useCollection<ReviewCycle>("review-cycles", { all: true });
   const { toast } = useToast();
   const [cycle, setCycle] = useState("all");
   const [only, setOnly] = useState<"trouble" | "unagreed" | "all">("trouble");
@@ -52,16 +52,26 @@ export default function GoalCockpit({ me }: { me: Me }) {
 
   // Other people's goals only: a manager reviewing their own alongside their reports' reads as a to-do list,
   // and the press this page offers (nudge, agree) is not one anybody applies to themselves.
-  const scoped = useMemo(() => {
-    return goals.filter((g) => {
+  // ONE base set, so the chips and the list cannot answer different questions. `counts` below used to apply
+  // the open / not-deleted / not-me filters and skip the CYCLE PICKER, and left `cycle` out of its dependency
+  // list as well - so picking Q3 collapsed the list to that cycle while the chips kept the org-wide,
+  // all-cycles totals: "Needs attention 14" above three goals, and the "nothing needs chasing" empty state
+  // printed beside a non-zero count. The same dependency-array defect the three predicates at the top of this
+  // file were hoisted to module scope to prevent.
+  const base = useMemo(
+    () => goals.filter((g) => {
       if (!isOpen(g) || g.delete_time) return false;
       if (g.employee && idOf(g.employee) === me.employee_id) return false;
       if (cycle !== "all" && idOf(g.cycle ?? "") !== idOf(cycle)) return false;
-      if (only === "trouble") return troubled(g);
-      if (only === "unagreed") return g.stage !== "AGREED";
       return true;
-    });
-  }, [goals, cycle, only, me.employee_id]);
+    }),
+    [goals, cycle, me.employee_id],
+  );
+  const scoped = useMemo(() => {
+    if (only === "trouble") return base.filter(troubled);
+    if (only === "unagreed") return base.filter((g) => g.stage !== "AGREED");
+    return base;
+  }, [base, only]);
 
   // One block per person, people with the most trouble first - the order the question is asked in.
   const byPerson = useMemo(() => {
@@ -82,14 +92,15 @@ export default function GoalCockpit({ me }: { me: Me }) {
         : b.goals.filter(troubled).length - a.goals.filter(troubled).length);
   }, [scoped, employees]);
 
-  const counts = useMemo(() => {
-    const mine = goals.filter((g) => isOpen(g) && !g.delete_time && g.employee && idOf(g.employee) !== me.employee_id);
-    return {
-      trouble: mine.filter(troubled).length,
-      unagreed: mine.filter((g) => g.stage !== "AGREED").length,
-      all: mine.length,
-    };
-  }, [goals, me.employee_id]);
+  // Derived from the same `base` the list is, so the chips describe what pressing them would show.
+  const counts = useMemo(
+    () => ({
+      trouble: base.filter(troubled).length,
+      unagreed: base.filter((g) => g.stage !== "AGREED").length,
+      all: base.length,
+    }),
+    [base],
+  );
 
   async function act(g: Goal, verb: "comment" | "approve", body?: Record<string, unknown>, okMsg?: string) {
     setBusy(g.path);

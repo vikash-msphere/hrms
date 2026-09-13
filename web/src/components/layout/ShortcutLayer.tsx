@@ -48,8 +48,15 @@ export function ShortcutLayer({ me, page }: { me: Me; page: string }) {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (isTypingTarget(e.target)) return;
-      // An open dialog/sheet owns the keyboard (its own Enter/Esc semantics).
-      if (document.querySelector('[role="dialog"][data-state="open"]')) return;
+      // An open OVERLAY owns the keyboard - a dialog or sheet for its Enter/Esc semantics, and a Select or a
+      // dropdown menu for its TYPEAHEAD. Radix implements typeahead on both: typing letters jumps to a matching
+      // option, and those keydowns bubble to `window` with a div as the target, so `isTypingTarget` misses them
+      // and the dialog selector did not match. With a department picker open, typing `g` then `e` to reach
+      // "General" armed the chord and fired `navigate("employees")` - the picker closed, the form was abandoned,
+      // and the app was on the directory. Every GO letter was reachable that way, as were `?` and `[` / `]`.
+      // (Combobox was already safe by accident: it is built on Popover, `role="dialog"`, and filters through a
+      // real `<input>`.)
+      if (document.querySelector('[role="dialog"][data-state="open"], [role="listbox"][data-state="open"], [role="menu"][data-state="open"]')) return;
 
       const now = Date.now();
       if (armed.current && now - armed.current < 1500) {

@@ -2,7 +2,7 @@
 // deployment; the SPA half is gated on VITE_VAPID_PUBLIC_KEY being baked into the build. Subscriptions are
 // stored server-side in the caller's own preferences row (key "push_subscriptions"), so the worker can reach
 // this user's browsers when a notification lands while no tab is open.
-import { readPref, writePref } from "@/lib/prefs";
+import { refetchPref, writePref } from "@/lib/prefs";
 
 const VAPID_PUBLIC = import.meta.env.VITE_VAPID_PUBLIC_KEY as string | undefined;
 const PREF_KEY = "push_subscriptions";
@@ -19,9 +19,22 @@ export type PushState = "unsupported" | "denied" | "off" | "on";
 export async function getPushState(): Promise<PushState> {
   if (!pushSupported()) return "unsupported";
   if (Notification.permission === "denied") return "denied";
-  const reg = await navigator.serviceWorker.getRegistration("/push-sw.js");
+  const reg = await pushRegistration();
   const sub = reg && (await reg.pushManager.getSubscription());
   return sub ? "on" : "off";
+}
+
+/**
+ * The push worker's own registration.
+ *
+ * `getRegistration(url)` takes a CLIENT URL and answers with whatever registration CONTROLS it - not the
+ * registration whose script is at that path. `getRegistration("/push-sw.js")` therefore resolves to whatever
+ * is registered at scope `/`, which happens to be the push worker today and would silently become a different
+ * worker the moment another one is registered at the root. Match on the script URL instead.
+ */
+async function pushRegistration(): Promise<ServiceWorkerRegistration | undefined> {
+  const regs = await navigator.serviceWorker.getRegistrations();
+  return regs.find((r) => (r.active ?? r.installing ?? r.waiting)?.scriptURL.endsWith("/push-sw.js"));
 }
 
 // applicationServerKey wants raw P-256 bytes; VAPID keys travel base64url.
@@ -31,8 +44,12 @@ function urlBase64ToUint8Array(base64: string): Uint8Array {
   return Uint8Array.from(raw, (c) => c.charCodeAt(0));
 }
 
+// RE-READ, not the snapshot. `readPref` answers from a map memoized for the whole page life, and this row is a
+// LIST several devices append to - so a tab open since before another device enrolled held a list without it,
+// and `writePref` below PATCHes the whole array back with no If-Match and no merge. Enabling or disabling push
+// here then deregistered the other device, which stopped receiving pushes with nothing anywhere saying so.
 async function readServerSubs(): Promise<StoredSub[]> {
-  const v = await readPref<{ subs?: StoredSub[] }>(PREF_KEY);
+  const v = await refetchPref<{ subs?: StoredSub[] }>(PREF_KEY);
   return Array.isArray(v?.subs) ? v.subs : []; // absent: nothing registered yet
 }
 
@@ -57,7 +74,7 @@ export async function enablePush(): Promise<void> {
 
 /** Unsubscribe this browser and drop it from the server-side registry. */
 export async function disablePush(): Promise<void> {
-  const reg = await navigator.serviceWorker.getRegistration("/push-sw.js");
+  const reg = await pushRegistration();
   const sub = reg && (await reg.pushManager.getSubscription());
   const endpoint = sub?.endpoint;
   if (sub) await sub.unsubscribe();

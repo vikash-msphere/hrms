@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Plus, Check, X, Ban } from "lucide-react";
 import { create, invoke } from "@/api";
+import { getSetting } from "@/lib/settingsStore";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { cn, formatMoney, idOf } from "@/lib/utils";
+import { thisYearStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Employee, LeaveType, LeaveBalance, LeaveEncashment, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -62,11 +64,11 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
 
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Someone" : "-");
   }, [employees]);
   const ltName = useMemo(() => {
     const m = new Map(leaveTypes.map((t) => [idOf(t.path), t.display_name]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown type" : "-");
   }, [leaveTypes]);
 
   const encashableTypes = useMemo(() => leaveTypes.filter((t) => t.encashable && !t.delete_time && !t.disabled), [leaveTypes]);
@@ -78,20 +80,48 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
   const selectedBalance = form.employee && form.leave_type ? balanceFor(form.employee, form.leave_type) : null;
   const selectedType = form.leave_type ? encashableTypes.find((t) => idOf(t.path) === idOf(form.leave_type)) : undefined;
 
-  const yearStart = `${new Date().getFullYear()}-01-01`;
+  // The ORG's year (lib/orgDay): this bounds the year-to-date encashment total a cap is checked against, and
+  // the browser's year is a different one for part of every New Year's Day.
+  const yearStart = `${thisYearStr()}-01-01`;
+
+  // THE ORG POLICY DECIDES WHICH CAP APPLIES, and it is read here rather than assumed. In cumulative mode
+  // there is ONE org cap measured across every leave type (services/leaveEncashments.ts `create`); reading the
+  // per-type field there offers a number that ignores every other type's usage, and the create call then
+  // fails a `failedPrecondition` the reader was told they were inside. A plain employee may not be able to
+  // read the settings row, so the catch leaves the mode unknown - see `capLeft` below.
+  const [caps, setCaps] = useState<{ mode: "per_type" | "cumulative"; cumulativeCapDays: number | null } | null>(null);
+  useEffect(() => {
+    getSetting<{ encashment_mode?: string; encashment_cumulative_cap_days?: number | null }>("leave_caps")
+      .then((s) => setCaps({
+        mode: s.value?.encashment_mode === "cumulative" ? "cumulative" : "per_type",
+        cumulativeCapDays: typeof s.value?.encashment_cumulative_cap_days === "number" ? s.value.encashment_cumulative_cap_days : null,
+      }))
+      .catch(() => setCaps(null));
+  }, []);
+  const cumulative = caps?.mode === "cumulative";
 
   // Eligibility guardrails, surfaced BEFORE submitting: the type's retained minimum and yearly cap
   // bound how many days can actually be encashed right now.
+  //
+  // APPROVED and PAID only, matching `encashedDaysThisYear` - "days already COMMITTED". Counting PENDING too
+  // shrank the remaining cap by days the server has not charged against it, and because the figure gates the
+  // button (`canSubmit` below), one un-decided request could leave an employee unable to file a second one the
+  // server would have accepted - with `whyNot` silent, because the blocker was inside `canSubmit`.
+  // In cumulative mode the running total is across every type, not just the selected one.
   const encashedThisYear = useMemo(() => {
     if (!form.employee || !form.leave_type) return 0;
     return rows
-      .filter((r) => r.employee && r.leave_type && idOf(r.employee) === idOf(form.employee) && idOf(r.leave_type) === idOf(form.leave_type))
-      .filter((r) => ["PENDING", "APPROVED", "PAID"].includes(upper(r.state)) && (r.create_time ?? "") >= yearStart)
+      .filter((r) => r.employee && r.leave_type && idOf(r.employee) === idOf(form.employee)
+        && (cumulative || idOf(r.leave_type) === idOf(form.leave_type)))
+      .filter((r) => ["APPROVED", "PAID"].includes(upper(r.state)) && (r.create_time ?? "") >= yearStart)
       .reduce((n, r) => n + (r.days || 0), 0);
-  }, [rows, form.employee, form.leave_type, yearStart]);
+  }, [rows, form.employee, form.leave_type, yearStart, cumulative]);
   const retained = selectedType?.min_balance_retained_days ?? 0;
-  const yearCap = selectedType?.encashment_cap_days_per_year ?? null;
-  const capLeft = yearCap != null ? Math.max(0, yearCap - encashedThisYear) : null;
+  const yearCap = cumulative ? caps?.cumulativeCapDays ?? null : selectedType?.encashment_cap_days_per_year ?? null;
+  // Until the policy is known, say nothing about the cap rather than mis-state it - the posture
+  // lib/leaveForecast.ts takes for the same choice - and let the server's `failedPrecondition` be the
+  // authority, rather than blocking on a number known to be for the wrong policy.
+  const capLeft = caps && yearCap != null ? Math.max(0, yearCap - encashedThisYear) : null;
   const maxEncashable = selectedBalance == null ? null : Math.max(0, Math.min(selectedBalance - retained, capLeft ?? Infinity));
 
   // Most recent known day-rate for the selected employee (from any prior encashment) - estimate only;
@@ -286,7 +316,7 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
                 ? [
                     `Balance: ${selectedBalance} day${selectedBalance === 1 ? "" : "s"}`,
                     ...(retained > 0 ? [`policy keeps ${retained} unencashed`] : []),
-                    ...(capLeft != null ? [`${capLeft} of the ${yearCap}/year cap left`] : []),
+                    ...(capLeft != null ? [`${capLeft} of the ${yearCap}/year ${cumulative ? "org-wide cap" : "cap"} left`] : []),
                     ...(retained > 0 || capLeft != null ? [`max now: ${maxEncashable}`] : []),
                   ].join(" · ")
                 : undefined

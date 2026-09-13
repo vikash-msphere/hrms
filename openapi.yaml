@@ -437,10 +437,12 @@ components:
       required: [path, fields]
       description: >-
         An employee's configured identity fields (singleton; PAN/UAN/Aadhaar etc.). Sensitive values are
-        encrypted and returned masked. Unversioned: the fields are the org's configuration filled in with this
-        person's values, not a row of its own, so there is no etag to concurrency-check against.
+        encrypted and returned masked. The fields are the org's configuration filled in with this person's
+        values, but the values themselves live in one blob on the employee row - so the etag is that row's,
+        and the PATCH is concurrency-checked against it like every other write.
       properties:
         path: { type: string, readOnly: true }
+        etag: { type: string, readOnly: true, description: "Version of the employee row the values are stored on. Send it back as If-Match on the PATCH." }
         fields:
           type: array
           readOnly: true
@@ -472,6 +474,7 @@ components:
       description: An employee's income-tax (TDS) projection for the financial year (new regime). Computed; only the prior-employer declarations are writable.
       properties:
         path: { type: string, readOnly: true }
+        etag: { type: string, readOnly: true, description: "Version of the employee row this projection is read from. Send it back as If-Match on the PATCH: verify stamps whatever is stored at the moment it runs, so without a version HR can approve one figure and verify another." }
         on_file: { type: boolean, readOnly: true }
         regime: { type: string, readOnly: true }
         regime_label: { type: string, readOnly: true }
@@ -552,6 +555,7 @@ components:
       description: A bank's bulk-payment Excel column mapping. The blank template .xlsx is stored separately (uploadTemplate).
       properties:
         path: { type: string, readOnly: true }
+        etag: { type: string, readOnly: true, description: "Version of THIS bank's entry. Send it as If-Match on PATCH: the mapping is written whole, so an unguarded write replaces another admin's layout entirely." }
         bank: { type: string, description: The bank name (one of the org's allowed banks). }
         template_name: { type: string, nullable: true, description: Original uploaded template filename (display only). }
         r2_key: { type: string, nullable: true, description: Object-storage key of the stored template. }
@@ -3205,9 +3209,16 @@ components:
         application: { type: string, description: "Resource path: applications/{application_id}" }
         base_comp: { type: number, description: Offered compensation (annual). }
         currency_code: { type: string }
-        offer_time: { type: string, format: date-time }
-        join_time: { type: string, format: date-time, description: Proposed start date; becomes the employee start date on accept. }
-        expiry_time: { type: string, format: date-time }
+        # Reads and writes use DIFFERENT names for the three dates. Responses carry the `_time` instants
+        # (serialize.ts); the route accepts only the `_date` calendar days, and it is `.strict()`, so sending a
+        # `_time` name on a write is a 400. Both spellings are declared here because this schema is the request
+        # body for POST and PATCH as well as the response shape.
+        offer_time: { type: string, format: date-time, readOnly: true }
+        join_time: { type: string, format: date-time, readOnly: true, description: Proposed start date; becomes the employee start date on accept. }
+        expiry_time: { type: string, format: date-time, readOnly: true }
+        offer_date: { type: string, format: date, writeOnly: true, description: "Write-side name for offer_time." }
+        join_date: { type: string, format: date, writeOnly: true, description: "Write-side name for join_time." }
+        expiry_date: { type: string, format: date, writeOnly: true, description: "Write-side name for expiry_time." }
         status: { type: string, description: State value draft/approved/extended/accepted/declined/rescinded. }
         approver: { type: string, readOnly: true, description: "Resource path: employees/{employee_id} (set on approve)." }
         notes: { type: string }
@@ -5840,6 +5851,7 @@ paths:
         - { in: query, name: status, schema: { type: string } }
         - { in: query, name: cycle, schema: { type: string }, description: "review-cycles/{cycle_id} to list one cycle's goals, or `none` for the goals set outside any cycle." }
         - { in: query, name: stage, schema: { type: string, enum: [DRAFT, PROPOSED, AGREED] }, description: "Narrow to one stage of the goal-setting handshake - `PROPOSED` is a manager's approval queue." }
+        - { in: query, name: employee, schema: { type: string }, description: "employees/{employee_id} to list one person's goals. Weight rebalancing needs the owner's WHOLE open set - a spread computed over part of it sums to 100 over a subset and inflates their attainment." }
         - { in: query, name: burnup, schema: { type: boolean }, description: "With `cycle`, also return that cycle's weighted attainment week by week (`burnup`), computed over the goals this caller may see." }
         - { in: query, name: show_deleted, schema: { type: boolean } }
       responses:
@@ -8930,6 +8942,7 @@ paths:
           name: q
           schema: { type: string }
           description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters."
+        - { in: query, name: kind, schema: { type: string, enum: [announcement, post, poll, kudos] }, description: "Narrow the board to one kind of post. The recognition rollups read `kudos` this way rather than folding the feed's current window, which would redraw as the reader scrolls." }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -9390,6 +9403,7 @@ paths:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: employee, schema: { type: string }, description: "Filter to assets assigned to one employee (resource path)." }
+        - { in: query, name: status, schema: { type: string, enum: [pending_verification, in_stock, pending_ack, assigned, repair, retired] }, description: "Filter to one custody status - what the assign-a-device picker asks for (in_stock)." }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -10497,6 +10511,7 @@ paths:
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: status, schema: { type: string } }
         - { in: query, name: category, schema: { type: string } }
+        - { in: query, name: q, schema: { type: string }, description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters." }
         - { in: query, name: show_deleted, schema: { type: boolean } }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }

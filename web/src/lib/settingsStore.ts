@@ -170,12 +170,16 @@ function load(): Promise<Map<string, unknown>> {
         // payroll's rounding. On a timeout the stored copy is served: a config one write behind, which is what
         // this branch served before the wait existed, rather than a page that never finishes. The refetch
         // keeps running and corrects `loaded` for whoever asks next.
+        const refetchGen = generation;
         const refetched = fetchAll();
         void refetched.then((all) => {
-          if (all.size) {
-            writeDisk(all);
-            loaded = Promise.resolve(all);
-          }
+          // Generation-guarded like the wait above, and for the same reason. A save that lands while this read
+          // is in flight bumps the generation and drops the snapshot; without the check this completion then
+          // re-stamped the pre-write values as current, in memory AND on disk, so the next `getSetting` - and
+          // the next page load - answered with the values the save had just replaced.
+          if (generation !== refetchGen || !all.size) return;
+          writeDisk(all);
+          loaded = Promise.resolve(all);
         });
         return (loaded = Promise.race([refetched, afterMs(RECONCILE_WAIT_MS).then(() => disk)]));
       });
@@ -185,8 +189,10 @@ function load(): Promise<Map<string, unknown>> {
     // No reconciliation to wait for (a first visit, or storage that has been cleared): serve the stored copy
     // now and refresh it in the background. Values are updated IN PLACE so a consumer that already read a key
     // keeps working against the same map.
+    const bgGen = generation;
     void fetchAll().then((fresh) => {
       if (!fresh.size) return; // a failed refresh says nothing about the config; keep what we have
+      if (generation !== bgGen) return; // a save landed while this was in flight: these values are the stale ones
       disk.clear();
       for (const [k, v] of fresh) disk.set(k, v);
       writeDisk(disk);
@@ -200,12 +206,14 @@ function load(): Promise<Map<string, unknown>> {
   // resolves this batch of waiters to "nothing configured yet" - the same answer an outright failed fetch
   // already gives (`fetchAll`'s own catch) - while the real fetch keeps running in the background and corrects
   // `loaded` for whoever asks next if it does eventually land.
+  const freshGen = generation;
   const fresh = fetchAll();
   void fresh.then((all) => {
-    if (all.size) {
-      writeDisk(all);
-      loaded = Promise.resolve(all);
-    }
+    // Generation-guarded: a save that lands before this first read completes has already dropped the snapshot,
+    // and adopting the pre-write values here would put them back as current for the rest of the page life.
+    if (generation !== freshGen || !all.size) return;
+    writeDisk(all);
+    loaded = Promise.resolve(all);
   });
   return (loaded = Promise.race([fresh, afterMs(RECONCILE_WAIT_MS).then(() => new Map<string, unknown>())]));
 }

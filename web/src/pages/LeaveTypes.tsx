@@ -73,11 +73,13 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
   async function submit() {
     const body = {
       display_name: form.name,
-      accrual_days_per_year: Number(form.accrual),
+      // `|| 0` on every bare Number(): an empty or non-numeric field is NaN, and `JSON.stringify(NaN)` is
+      // `null` - which is the same non-nullable-field contract violation as sending a literal null (api.ts).
+      accrual_days_per_year: Number(form.accrual) || 0,
       accrual_frequency: form.frequency as "monthly" | "semi_monthly",
       paid: form.paid,
       available_during_probation: form.probation,
-      probation_accrual_days_per_year: Number(form.probationAccrual),
+      probation_accrual_days_per_year: Number(form.probationAccrual) || 0,
       probation_cap_days: form.probationCap.trim() === "" ? null : Number(form.probationCap),
       encashable: form.encashable,
       encashment_cap_days_per_year: form.encashCap.trim() === "" ? null : Number(form.encashCap),

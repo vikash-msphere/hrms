@@ -241,8 +241,15 @@ export default function TaxDeclarations({ me, openId }: { me: Me; openId?: strin
         <DeclDialog
           declaration={dialog === "new" ? null : dialog}
           fy={fy}
+          // THE YEAR'S ROWS, not the current view. `items` is the KPI-FOCUSED list, so pressing any tile in
+          // the summary strip ("Rejected", say) narrowed the set this headroom is subtracted from while the
+          // "Add declaration" button stayed available - and with 1,20,000 already under 80C, focusing a single
+          // 10,000 rejected row made the dialog say 1,40,000 was left when 30,000 was. `overCap` went quiet
+          // for the same reason, so the "past the cap won't reduce your tax" warning did not fire either. The
+          // focus lives in the URL (`?focus=`), so the wrong figure was reachable from a bookmark, not just a
+          // stray click. This note exists to prevent exactly the error it was causing.
           sameSectionTotal={(section) =>
-            items
+            inYear
               .filter((d) => mine(d) && d.section === section && (dialog === "new" || d.path !== dialog.path))
               .reduce((s, d) => s + (d.status === "VERIFIED" ? d.verified_amount ?? d.declared_amount : d.declared_amount), 0)
           }

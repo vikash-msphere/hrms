@@ -756,8 +756,22 @@ export function CardCanvas({ reserve, children, className }: { reserve?: number;
   );
 }
 
-/** The artwork itself, sized by whatever placement holds it. */
-export function StickerImage({ url, onAspect }: { url: string; onAspect?: (a: number) => void }) {
+/** The artwork itself, sized by whatever placement holds it.
+ *
+ *  A FAILURE IS STATE, not a write into the DOM. `onError` used to set `style.display = "none"` on a node
+ *  React owns: React reuses the same `<img>` when `url` changes (it only patches `src`) and knows nothing
+ *  about the style it never set, so once any picture 404'd, every picture chosen afterwards was invisible
+ *  until the component unmounted - pick a different sticker in the composer, still nothing. Held as state and
+ *  cleared when the URL changes, a new picture is no longer the old one's failure.
+ *
+ *  `onBroken` lets the card lay out as a card with no picture. Everything around this keys off the URL being
+ *  truthy rather than the image having loaded, so a failed picture still reserved its height, still floated
+ *  the words around a box that drew nothing, and in the middle position still split the body into two columns
+ *  with an empty gutter - a card whose text has been broken in half around nothing. */
+export function StickerImage({ url, onAspect, onBroken }: { url: string; onAspect?: (a: number) => void; onBroken?: (broken: boolean) => void }) {
+  const [broken, setBroken] = useState(false);
+  useEffect(() => { setBroken(false); onBroken?.(false); }, [url]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (broken) return null;
   return (
     <img
       src={url}
@@ -769,7 +783,7 @@ export function StickerImage({ url, onAspect }: { url: string; onAspect?: (a: nu
         const { naturalWidth: w, naturalHeight: h } = e.currentTarget;
         if (w > 0 && h > 0) onAspect?.(w / h);
       }}
-      onError={(e) => { e.currentTarget.style.display = "none"; }}
+      onError={() => { setBroken(true); onBroken?.(true); }}
     />
   );
 }

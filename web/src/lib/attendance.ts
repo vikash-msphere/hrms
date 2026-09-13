@@ -193,7 +193,12 @@ export function enumerateDays(fromYmd: string, toYmd: string): string[] {
 // `half_day_leave` = approved leave covered ONE session of the day and nothing was worked in the other, which
 // is a day payroll charges 0.5 days of loss of pay for. It is deliberately distinct from `on_leave`: they are
 // the two sides of the drift this grid used to have with `lopDayUnits`.
-export type DayStatus = "open" | "present" | "late" | "left_early" | "late_early" | "half_day" | "insufficient" | "on_leave" | "half_day_leave" | "holiday" | "absent";
+// `worked_off_day` = punches on a day nobody was scheduled to work (a weekend, or a company holiday). The
+// server never measures those days at all - `lopDayUnits` and `workingDaysInRange` both skip them on their
+// first line - so judging one against the weekday shift window called voluntary Saturday work "Under hours",
+// "Half day" or "Late", which is a violation reported for work that earns nothing but goodwill. The minutes
+// still count; the day is simply not owed.
+export type DayStatus = "open" | "present" | "late" | "left_early" | "late_early" | "half_day" | "insufficient" | "on_leave" | "half_day_leave" | "holiday" | "worked_off_day" | "absent";
 export type AttendanceRow = { day: string; summary?: DaySummary; status: DayStatus };
 
 // Status of a day that has punches and/or event work credit. `total` is clocked + event-credited minutes;
@@ -237,10 +242,14 @@ export function buildAttendanceRows(opts: {
     if (joinedYmd && day < joinedYmd) continue; // before the employee joined -> not their attendance
     const s = byDay.get(day);
     const credit = workMinutesByDay.get(day) ?? 0; // worked-minutes credited by count-as-work events
+    // THE SCHEDULE DECIDES WHAT KIND OF DAY IT IS; the punches only decide how the day went. Tested the other
+    // way round, `work_days` and `holidays` gated the EMPTY days alone, so any day with a punch was judged
+    // against shift_start/grace/half_day_minutes whether or not anyone was meant to be working.
+    const offDay = !sched.work_days.includes(weekdayOf(day)) || holidays.has(day);
     if (s || credit > 0) {
       // Event credit adds to clocked minutes for the day's total; late/early flags come from real punches only.
       const total = (s?.workedMinutes ?? 0) + credit;
-      const status = dayStatus(s, total, sched);
+      const status = s?.open ? "open" : offDay ? "worked_off_day" : dayStatus(s, total, sched);
       const summary: DaySummary = s
         ? { ...s, workedMinutes: total }
         : { day, sessions: [], workedMinutes: total, open: false, late: false, leftEarly: false, lateByMin: 0, earlyByMin: 0 };
@@ -248,6 +257,7 @@ export function buildAttendanceRows(opts: {
     } else if (!sched.work_days.includes(weekdayOf(day))) {
       continue; // weekend / non-working day with no punch
     } else if (holidays.has(day)) {
+      // (a worked holiday took the `worked_off_day` branch above, so this is the unworked one)
       rows.push({ day, status: "holiday" });
     } else if (excusedOn(day) >= 1) {
       rows.push({ day, status: "on_leave" });
@@ -323,5 +333,8 @@ export const STATUS_UI: Record<DayStatus, StatusUi> = {
   on_leave: { label: "On leave", badge: "secondary", dot: "bg-teal-500", cell: "bg-teal-50 dark:bg-teal-950/40" },
   half_day_leave: { label: "Half day leave", badge: "warning", dot: "bg-amber-500", cell: "bg-amber-50 dark:bg-amber-950/40" },
   holiday: { label: "Holiday", badge: "muted", dot: "bg-violet-500", cell: "bg-violet-50 dark:bg-violet-950/40" },
+  // Not amber and not rose: this is not a shortfall. The violet end of the palette, beside "Holiday", because
+  // that is the kind of day it is.
+  worked_off_day: { label: "Worked - not a working day", badge: "secondary", dot: "bg-violet-500", cell: "bg-violet-50 dark:bg-violet-950/40" },
   absent: { label: "Absent", badge: "destructive", dot: "bg-rose-500", cell: "bg-rose-50 dark:bg-rose-950/40" },
 };

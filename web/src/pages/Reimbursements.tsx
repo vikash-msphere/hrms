@@ -88,13 +88,16 @@ export default function Reimbursements({ me }: { me: Me }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const uploadTarget = useRef<Reimbursement | null>(null);
 
+  // An unresolvable ref reads as a WORD, never as the raw wire id - lib/utils.ts `personName` is the rule.
+  // The list is scoped to what the caller may read, so a ref outside that slice is the ordinary case here,
+  // not a glitch: a 26-character uuid on screen in its place is an internal identifier leaked into the UI.
   const catName = useMemo(() => {
     const m = new Map(categories.map((c) => [idOf(c.path), c.display_name]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown category" : "-");
   }, [categories]);
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Someone" : "-");
   }, [employees]);
 
   const yearStart = `${thisYearStr()}-01-01`;
@@ -141,8 +144,20 @@ export default function Reimbursements({ me }: { me: Me }) {
         ...(form.incurred_on ? { incurred_on: form.incurred_on } : {}),
         description: form.description,
       });
-      if (file) await upload(`reimbursements/${idOf(claim.path)}`, file);
-      toast({ title: "Claim submitted", variant: "success" });
+      // THE CLAIM EXISTS FROM HERE ON, so the receipt is a follow-up, not part of the create. A throw here used
+      // to leave the claim filed and the dialog open over everything the person typed, and a second press made
+      // a second claim - the duplicate detector above catches an identical one, but not one they then edited.
+      let attached = true;
+      if (file) {
+        try {
+          await upload(`reimbursements/${idOf(claim.path)}`, file);
+        } catch {
+          attached = false;
+        }
+      }
+      toast(attached
+        ? { title: "Claim submitted", variant: "success" }
+        : { title: "Claim filed, but the receipt didn't attach", description: "It's in your claims list - use its attach button to add the receipt.", variant: "destructive" });
       // Filed, so the draft has served its purpose - leaving it would restore a claim that already exists.
       draft.clear();
       guard.markSaved();

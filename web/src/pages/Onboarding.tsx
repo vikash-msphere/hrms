@@ -11,6 +11,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field } from "@/components/common/Field";
 import { Card } from "@/components/ui/card";
@@ -42,8 +43,11 @@ const STATE: Record<Transition["state"], { label: string; variant: "secondary" |
 const STATE_ORDER: Record<Transition["state"], number> = { ACTIVE: 0, COMPLETED: 1, CANCELLED: 2 };
 
 export default function Onboarding({ me }: { me: Me }) {
-  const { rows: transitions, state, error, reload } = useCollection<Transition>("transitions");
-  const { rows: myTasks, reload: reloadTasks } = useCollection<TransitionTask>("transition-tasks");
+  // Both are sorted and filtered CLIENT-side (by state below, and to `status === "TODO"` for the task list),
+  // so a window is not a window on what the reader sees: an ACTIVE process or an open task past the first
+  // page is simply absent, and the section renders empty with nothing that reads as incomplete.
+  const { rows: transitions, state, error, reload } = useCollection<Transition>("transitions", { all: true });
+  const { rows: myTasks, reload: reloadTasks } = useCollection<TransitionTask>("transition-tasks", { all: true });
   const { rows: employees, state: empState } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -161,6 +165,9 @@ export default function Onboarding({ me }: { me: Me }) {
   return (
     <div>
       <PageHeader title="Onboarding & Offboarding" description="Run onboarding and offboarding checklists. Track each task to done." actions={<>{startBtn}<PageSettings me={me} host="transitions" /></>} />
+
+      {/* Both lists are filtered client-side, so a short read reads as "nothing to do" rather than as a gap. */}
+      <TruncationNotice collection={["transitions", "transition-tasks"]} what="processes" className="mb-3" />
 
       {openTasks.length > 0 && (
         <div className="mb-6">

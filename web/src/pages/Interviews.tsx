@@ -10,6 +10,7 @@ import { navigate, recordUrl, setRouteRecord } from "@/router";
 import type { Me, Interview, InterviewFeedback, Application, Candidate, JobRequisition, Employee, LeaveRequest, Event as EventRow } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field, FieldRow } from "@/components/common/Field";
 import { ActivitySection } from "@/components/common/ActivitySection";
@@ -63,9 +64,11 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
   // An empty schedule has nothing to label, so it reads none of them; the dialog needs all of them to offer a
   // choice, so opening it pulls them in. Nothing here is on screen before either is true.
   const labelled = rows.length > 0 || dialog !== null;
-  const { rows: apps } = useCollection<Application>("applications", { enabled: labelled });
-  const { rows: candidates } = useCollection<Candidate>("candidates", { enabled: labelled });
-  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { enabled: labelled });
+  // Complete, not the first page - the label chains through two of these maps, so an interview whose
+  // application is past a window resolves to no candidate AND no role: a slot scheduled with nobody.
+  const { rows: apps } = useCollection<Application>("applications", { enabled: labelled, all: true });
+  const { rows: candidates } = useCollection<Candidate>("candidates", { enabled: labelled, all: true });
+  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { enabled: labelled, all: true });
   const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: labelled });
   useDeepOpen(openId, rows, setDialog);
   // A slot being argued about over chat is pasteable; `useDeepOpen` above reads the id back in.
@@ -217,6 +220,10 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
   return (
     <div>
       <PageHeader title="Interviews" description="Scheduled interviews across your pipeline. Complete them and capture scorecards." actions={newBtn} />
+
+      {/* A card's label chains through applications and candidates, so a short read on either shows an
+          interview with nobody on it. */}
+      <TruncationNotice collection={["interviews", "applications", "candidates", "job-requisitions"]} what="interviews" className="mb-3" />
 
       <DataState state={state} error={error} onRetry={reload}>
         {rows.length > 0 && (
@@ -754,9 +761,23 @@ function ScorecardDialog({ interview, me, criteria, blind, empName, candName, jo
   });
   const overallError = form.overall !== "" && (Number(form.overall) < 1 || Number(form.overall) > 5) ? "Rate between 1 and 5." : undefined;
 
+  // A `live` latch, because this dialog is QUEUE-NAVIGABLE in place (`onOpen={setScorecardFor}`, no `key`), so
+  // walking from one interview's scorecard to the next leaves two fetches racing. When the stale one lands last
+  // it sets four things at once, and every one of them is wrong: `setAll` puts the OTHER PANELISTS' scorecards
+  // for a different interview on screen (which is what the blind-scoring toggle exists to control), `setForm`
+  // pre-fills this candidate's card with the reader's ratings and written comment from the previous one, and
+  // `setMine`/`setEtag` are what `submit()` writes to - so Save patched the previous interview's feedback
+  // record with a body naming the current interview. `Pipeline`'s ApplicationDrawer is the shape to copy.
   useEffect(() => {
+    let live = true;
+    // Cleared up front, so nothing from the previous interview is on screen while this one loads.
+    setAll([]);
+    setMine(null);
+    setEtag(undefined);
+    setForm({ ratings: {}, overall: "", rec: "", comment: "" });
     get<ListResponse<InterviewFeedback>>(`interview-feedback?interview=interviews/${idOf(interview.path)}&max_page_size=200`)
       .then((r) => {
+        if (!live) return;
         const list = r.results ?? [];
         setAll(list);
         const own = list.find((f) => f.author && idOf(f.author) === me.employee_id) ?? null;
@@ -772,6 +793,7 @@ function ScorecardDialog({ interview, me, criteria, blind, empName, candName, jo
         }
       })
       .catch(() => {});
+    return () => { live = false; };
   }, [interview, me.employee_id]);
 
   // Four owed scorecards used to mean four trips through the list. `‹ 2/4 ›` and j/k walk the rounds this
@@ -816,7 +838,10 @@ function ScorecardDialog({ interview, me, criteria, blind, empName, candName, jo
     const body = {
       interview: `interviews/${idOf(interview.path)}`,
       ratings: form.ratings,
-      overall_rating: form.overall ? Number(form.overall) : null,
+      // Omitted when blank rather than sent as `null`: `overall_rating` is `{ type: number }` in openapi.yaml,
+      // not nullable, and an overall score is optional on this form - so submitting feedback with only a
+      // recommendation sent a null the Prism proxy rejects with a 422 (see the rule in api.ts).
+      ...(form.overall ? { overall_rating: Number(form.overall) } : {}),
       recommendation: form.rec,
       comment: form.comment.trim(),
     };

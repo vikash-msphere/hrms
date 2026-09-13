@@ -74,6 +74,11 @@ export function KudosCardBody({
   placeholder?: string; // stand-in shown while the message is still empty (composer preview)
 }) {
   const [aspect, setAspect] = useState(1.4);
+  // THERE IS A PICTURE, not merely a URL - see the same note in PostCardBody. A kudos whose stored
+  // `illustration` names a file no longer in the bundle otherwise keeps every layout consequence of a picture
+  // (reserved height, floated text, a two-column split around an empty gutter) with nothing drawn in it.
+  const [artBroken, setArtBroken] = useState(false);
+  const hasArt = !!artUrl && !artBroken;
   const shown = message.trim();
   const artAt = stickerLayout ?? KUDOS_STICKER_LAYOUT;
   const heroAt = recipientLayout ?? KUDOS_RECIPIENT_LAYOUT;
@@ -82,8 +87,8 @@ export function KudosCardBody({
   // split columns, and only one can be a band in the paragraphs. When the art and the recipient both ask for the
   // same one, the art keeps it and the recipient falls back to its column - rather than the two of them landing on
   // top of each other, or the loser vanishing from the card altogether.
-  const artMiddle = !!artUrl && needsColumns(stickerLayout, KUDOS_STICKER_LAYOUT);
-  const artBanded = !!artUrl && artWrap === "top-bottom";
+  const artMiddle = hasArt && needsColumns(stickerLayout, KUDOS_STICKER_LAYOUT);
+  const artBanded = hasArt && artWrap === "top-bottom";
   const heroWants = heroAt.wrap ?? DEFAULT_WRAP;
   const heroClash =
     (heroWants === "top-bottom" && artBanded) ||
@@ -95,7 +100,7 @@ export function KudosCardBody({
   // A float has to sit among the words it displaces; everything else - a column, and the two floating modes -
   // shares the row slot, which is what lets a drag turn one into the other without React unmounting the element
   // mid-gesture.
-  const artFloated = !!artUrl && isWrapped(artWrap);
+  const artFloated = hasArt && isWrapped(artWrap);
   const heroFloated = isWrapped(heroWrap);
   // A band goes BETWEEN two paragraphs of the remark, placed by RichText - see PostCardBody for why.
   const heroBanded = heroWrap === "top-bottom";
@@ -150,7 +155,7 @@ export function KudosCardBody({
     >
       {/* ART_DIECUT (inside StickerImage) gives dark mode a solid white silhouette behind the art; without it
           the dark-navy slogans and near-black illustration ink vanish into the card. */}
-      <StickerImage url={artUrl} onAspect={setAspect} />
+      <StickerImage url={artUrl} onAspect={setAspect} onBroken={setArtBroken} />
     </PlacedElement>
   ) : null;
 
@@ -169,7 +174,7 @@ export function KudosCardBody({
   // Room for anything that sits outside the normal flow, so the card contains it instead of clipping it away.
   // The art's height follows its aspect; the recipient block is roughly square once the name sits under the photo.
   const reserve = Math.max(
-    artUrl ? reserveFor(stickerLayout, KUDOS_STICKER_LAYOUT, aspect) : 0,
+    hasArt ? reserveFor(stickerLayout, KUDOS_STICKER_LAYOUT, aspect) : 0,
     reserveFor(heroPlacement, KUDOS_RECIPIENT_LAYOUT),
   );
 

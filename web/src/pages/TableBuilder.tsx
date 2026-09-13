@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, Columns3, Lock, Plus, RefreshCw, Table2, Trash2, Pencil, Search, X } from "lucide-react";
 import { api, create, get, patch, remove } from "@/api";
 import { navigate, useRoute, setQueryParams } from "@/router";
-import { cn, formatDate, formatMoney, idOf } from "@/lib/utils";
+import { cn, formatDate, idOf } from "@/lib/utils";
+import { useMoney } from "@/lib/org";
 import { usePermission } from "@/lib/perm";
 import { useCollection } from "@/hooks/useCollection";
 import { useIntent } from "@/lib/intent";
@@ -409,6 +410,9 @@ function OneTable({ id }: { id: string }) {
     setDetails((d) => ({ ...d, base: next }));
   }
 
+  // The ORG's money formatter - symbol from `org.default_currency`, precision from `currencyDecimals` - which
+  // is how every other money surface in the app renders. See the note on `renderCell`.
+  const money = useMoney();
   const columns: Column<TableRunResult["rows"][number]>[] = useMemo(() => {
     if (!result) return [];
     return result.columns.map((col) => ({
@@ -418,11 +422,11 @@ function OneTable({ id }: { id: string }) {
       // The accessor is the RAW value: it is what sorts, filters and exports, so a money column exports as a
       // number rather than as "₹12,00,000" that no spreadsheet can add up.
       accessor: (row) => (row.denied?.includes(col.key) ? null : (row.cells[col.key] as string | number | boolean | null | undefined)),
-      cell: (row) => renderCell(col, row),
-      ...(col.kind === "money" ? { aggregate: "sum" as const, formatTotal: (n: number) => formatMoney(n) } : {}),
+      cell: (row) => renderCell(col, row, money),
+      ...(col.kind === "money" ? { aggregate: "sum" as const, formatTotal: (n: number) => money(n) } : {}),
       filter: col.kind === "enum" || col.kind === "bool" ? ("select" as const) : ("text" as const),
     }));
-  }, [result]);
+  }, [result, money]);
 
   const selected = useMemo(() => (view?.columns ?? []).map((c) => c.field), [view]);
   const usesMetrics = selected.some((f) => f.includes("@metric."));
@@ -556,7 +560,16 @@ function OneTable({ id }: { id: string }) {
 
 // ---- Cells ----------------------------------------------------------------------------------------------
 
-function renderCell(col: TableRunResult["columns"][number], row: TableRunResult["rows"][number]) {
+// `money` is the org's formatter (`useMoney`), passed in rather than reaching for `formatMoney` directly:
+// `formatMoney`'s signature is `(value, currency = "INR", decimals?)`, so a bare call renders ₹ whatever the
+// org's currency is, at Intl's default of two decimals. Table Builder is the one surface that puts money from
+// several collections side by side, which makes a wrong unit both hardest to notice and most likely to be
+// exported - and even in INR the bare call reads ₹1,800.00 where the Payroll page reads ₹1,800.
+function renderCell(
+  col: TableRunResult["columns"][number],
+  row: TableRunResult["rows"][number],
+  money: (n: number | null | undefined, code?: string) => string,
+) {
   // A denied cell is NOT an empty one. Rendering it as "-" would read as "this person has no PAN"; the lock
   // says the value exists and is not yours - the same choice the profile page makes for a redacted field.
   if (row.denied?.includes(col.key)) {
@@ -566,7 +579,7 @@ function renderCell(col: TableRunResult["columns"][number], row: TableRunResult[
   if (v === null || v === undefined || v === "") return <span className="text-muted-foreground">-</span>;
   switch (col.kind) {
     case "money":
-      return <span className="tabular-nums">{typeof v === "number" ? formatMoney(v) : String(v)}</span>;
+      return <span className="tabular-nums">{typeof v === "number" ? money(v) : String(v)}</span>;
     case "number":
       return <span className="tabular-nums">{typeof v === "number" ? v.toLocaleString() : String(v)}</span>;
     case "date":
@@ -590,7 +603,7 @@ function ParamBar({ params, showWindow, showPayPeriod, showDepartment }: {
   showDepartment: boolean;
 }) {
   // Read only what this bar actually offers - a table with no measure column never fetches pay periods.
-  const { rows: depts } = useCollection<Department>("departments", { enabled: showDepartment });
+  const { rows: depts } = useCollection<Department>("departments", { enabled: showDepartment, all: true });
   const { rows: periods } = useCollection<PayPeriod>("pay-periods", { enabled: showPayPeriod });
   if (!showWindow && !showPayPeriod && !showDepartment) return null;
   const set = (key: string, value: string) => setQueryParams({ [key]: value || null });

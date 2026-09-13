@@ -21,7 +21,7 @@ const source = (name: string): string => {
   return hit[1];
 };
 
-// Every one of these opens a dialog over an employee's pay, identity or bank data.
+// Every one of these opens a dialog over an employee's pay, identity, medical or bank data.
 const SENSITIVE_DIALOGS = [
   "EmployeeBankDetails", // account number, IFSC
   "EmployeeCompensation", // CTC, salary structure
@@ -30,6 +30,8 @@ const SENSITIVE_DIALOGS = [
   "EmployeeBonuses", // amounts
   "EmployeeIdentityDetails", // Aadhaar, UAN, passport
   "EmployeePersonalDetails", // date of birth, address, personal contact
+  "EmergencyQuickView", // blood group, allergies, medical notes - the only medical fields in the app
+  "SignDocumentDialog", // the document body and the signer's legal name, at the moment they sign
 ];
 
 const instrumentSource = (): string =>
@@ -40,9 +42,9 @@ const instrumentSource = (): string =>
 describe("session replay: sensitive dialogs are masked", () => {
   it.each(SENSITIVE_DIALOGS)("%s tags its dialog with sentry-mask", (name) => {
     const src = source(name);
-    // Either shape counts: a raw <DialogContent className="sentry-mask">, or WriteDialog's className, which it
-    // forwards to DialogContent.
-    expect(src).toMatch(/className="sentry-mask"/);
+    // Any of the three shapes counts: a raw <DialogContent className="sentry-mask">, WriteDialog's className
+    // (forwarded to DialogContent), or a cn() that composes the class with a conditional width.
+    expect(src).toMatch(/className="sentry-mask"|className=\{cn\("sentry-mask"/);
   });
 
   it("does not mask every dialog on a sensitive route", () => {
@@ -127,5 +129,37 @@ describe("session replay: the confidential fields on ordinary pages", () => {
     const src = page("Benefits");
     expect(src).toMatch(/id="benefit-dependents" data-sentry-mask/); // the list on the page
     expect(src).toMatch(/<DialogContent className="sentry-mask"/); // and the portalled edit form
+  });
+
+  it("an employee's personal documents, on the two routes the Documents mask does not cover", () => {
+    // The Documents ROUTE is masked whole ("scanned identity documents, contracts, insurance cards"), but this
+    // panel reads the same `personal-documents` collection onto #/profile and #/employees/<id>, which are not
+    // in SENSITIVE_PAGES. It is the eighth panel on that page; the other seven are in SENSITIVE_DIALOGS above.
+    expect(source("EmployeeDocuments")).toMatch(/<Card className="[^"]*\bsentry-mask\b/);
+  });
+
+  it("a handwritten signature - BLOCKED, in both places it renders", () => {
+    // The signature is fetched as a data: URL and rendered as a plain <img>, so the bytes themselves travel in
+    // the DOM snapshot rrweb serialises - and `img` is not in the block list (the `canvas` entry there covers
+    // the signature PAD, not the stored image). Blocked rather than masked, because masking is a text
+    // operation: a leaked signature bitmap is the whole input to forging the letters this app e-signs with it.
+    const src = source("SignatureField");
+    expect(src.match(/<img[^>]*data-sentry-block/g) ?? []).toHaveLength(2);
+    expect(instrumentSource()).toContain('"[data-sentry-block]"');
+  });
+
+  it("the emergency panel's medical free text does not record keystrokes", () => {
+    // The dialog carries `sentry-mask` (SENSITIVE_DIALOGS above); these two boxes are typed into, and
+    // keystroke recording is the separate channel - same pairing as a leave reason.
+    const src = source("EmergencyQuickView");
+    expect(src.match(/<Textarea[^>]*data-sentry-ignore/g) ?? []).toHaveLength(2);
+  });
+
+  it("a leave reason in the calendar's hover card", () => {
+    // The same field Leaves.tsx masks in two places, rendered by EntryCard on #/leave-calendar - a route that
+    // is deliberately NOT masked whole (who is off when is exactly what a replay of it is wanted for).
+    const files = import.meta.glob("../web/src/components/calendar/*.tsx", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+    const shared = Object.entries(files).find(([path]) => path.endsWith("/shared.tsx"))![1];
+    expect(shared).toMatch(/data-sentry-mask[^>]*>[^<]*\{en\.reason|\{en\.reason && <p [^>]*data-sentry-mask/);
   });
 });

@@ -14,21 +14,30 @@ export function NotificationRow({ n, when, indent }: { n: Notification; when: st
     void markRead(n);
     if (n.link) navigate(n.link);
   };
+  // THE ROW IS A CONTAINER; the button is the overlay that covers it.
+  //
+  // ARIA gives `button` presentational children (WAI-ARIA 1.2 §5.2.7): the roles of everything inside one are
+  // removed from the accessibility tree and its content is flattened into the button's name. So a card wearing
+  // `role="button"` with a menu nested in it is, to a screen reader, a single button named by the whole card -
+  // and the menu is not a control at all. The overlay below has no children, so nothing is flattened; the body
+  // is inert to the pointer, and the menu sits above it with its own role intact.
   return (
     <div
-      role="button"
-      tabIndex={0}
-      onClick={open}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}
       className={cn(
-        "group relative flex w-full cursor-pointer items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+        "group relative flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-accent focus-within:bg-accent",
         !n.read && "bg-primary/5",
         indent && "pl-12",
       )}
     >
+      <button
+        type="button"
+        onClick={open}
+        aria-label={`Open: ${n.title}`}
+        className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      />
       {!n.read && <span className={cn("absolute left-0 top-0 h-full w-0.5", priorityMeta[n.priority]?.dot ?? "bg-primary")} />}
-      {!indent && <NotificationLead n={n} />}
-      <span className="min-w-0 flex-1">
+      {!indent && <span className="pointer-events-none relative"><NotificationLead n={n} /></span>}
+      <span className="pointer-events-none relative min-w-0 flex-1">
         <span className="flex items-baseline justify-between gap-3">
           <span className="flex flex-wrap items-center gap-2">
             <span className={cn("text-sm", n.read ? "font-normal" : "font-semibold")}>{n.title}</span>
@@ -46,7 +55,7 @@ export function NotificationRow({ n, when, indent }: { n: Notification; when: st
           <span className="mt-1.5 inline-block rounded bg-primary px-2 py-0.5 text-xs font-semibold text-primary-foreground">{actionLabel(n.action)} →</span>
         )}
       </span>
-      <div className="opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+      <div className="relative z-10 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
         <NotificationRowMenu n={n} />
       </div>
     </div>

@@ -128,7 +128,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
   }, [view, cursor, cells]);
 
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   // `all: true`, not `max: 500`: the server caps a page at 100 whatever is asked for, so a busy month's
   // calendar silently drew only part of itself. The read is already narrowed to the grid's own window.
   const { rows: leaves, state: leavesState, reload: reloadLeaves } = useCollection<LeaveRequest>("leave-requests", {
@@ -136,7 +136,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
     params: { from: range.from, to: range.to },
   });
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
-  const { rows: holidays } = useCollection<Holiday>("holidays");
+  const { rows: holidays } = useCollection<Holiday>("holidays", { all: true });
   // Org events show in the SELECTED day's panel and nowhere else on the calendar, so a month nobody has
   // clicked into reads none of them.
   const { rows: events } = useCollection<Event>("events", { enabled: !!selected });
@@ -342,7 +342,11 @@ export default function LeaveCalendar({ me }: { me: Me }) {
           start: en.start,
           end: en.end,
           summary: `${en.name} - ${en.type}${halfLabel(en) ? ` (${halfLabel(en)})` : ""}`,
-          description: [en.deptId ? deptName(en.deptId) : "", en.pending ? "Pending approval" : "Approved", en.reason ?? ""].filter(Boolean).join(" · "),
+          // The department and the state, NOT the reason. The exporter can already read the reasons on screen,
+          // so this is not an access question - but an .ics is imported into Outlook or Google Calendar, which
+          // would put a colleague's "hospital appointment" on a calendar the org does not control. The type and
+          // the dates are what a calendar entry needs.
+          description: [en.deptId ? deptName(en.deptId) : "", en.pending ? "Pending approval" : "Approved"].filter(Boolean).join(" · "),
           tentative: en.pending,
         })),
         `Leave · ${windowLabel}`,
@@ -559,7 +563,8 @@ export default function LeaveCalendar({ me }: { me: Me }) {
               {/* Legend */}
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t p-3 text-xs text-muted-foreground">
                 <span className="flex items-center gap-1.5">
-                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[9px] font-semibold tabular-nums text-primary-foreground">{new Date().getDate()}</span> Today
+                  {/* The ORG's day number, like the ring it explains - `new Date().getDate()` is the viewer's. */}
+                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[9px] font-semibold tabular-nums text-primary-foreground">{Number(todayStr().slice(8, 10))}</span> Today
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="h-3 w-3 rounded bg-violet-100 ring-1 ring-inset ring-violet-300 dark:bg-violet-950/40 dark:ring-violet-800" /> Holiday

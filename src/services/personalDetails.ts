@@ -4,6 +4,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
+import { etagOf } from "../http/serialize";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Personal contact + emergency info. Stored as an encrypted JSON blob; returned in full to the
@@ -50,10 +51,14 @@ async function read(deps: Deps, enc: string | null): Promise<PersonalDetails> {
   }
 }
 
-export async function getPersonalDetails(deps: Deps, _actor: AppUser, employeeId: string): Promise<PersonalDetails> {
+export async function getPersonalDetails(deps: Deps, _actor: AppUser, employeeId: string): Promise<PersonalDetails & { etag: string }> {
   // Access (owner / super by default) is enforced by the middleware on employees/<code>/personal-info.
   const emp = await loadEmployee(deps, employeeId);
-  return read(deps, emp.personalDetailsEnc);
+  // The VERSION rides the view. `setPersonalDetails` is version-guarded, but the guard is inert unless the
+  // caller can send an If-Match, and a caller can only send one if a read gave it to them - which is why all
+  // three SPA callers of this record were doing full-blob writes with no version at all. The etag is the
+  // employee row's, the same one the collection serializer emits, so client and server agree by construction.
+  return { ...(await read(deps, emp.personalDetailsEnc)), etag: etagOf(+new Date(emp.updatedAt)) };
 }
 
 /**
@@ -67,7 +72,7 @@ export async function getPersonalDetails(deps: Deps, _actor: AppUser, employeeId
  * contact - so saving one after opening the other wiped the fields the other one had just written, and the
  * loser only found out by reloading. Merging is also what the route says it does: it is a PATCH.
  */
-export async function setPersonalDetails(deps: Deps, actor: AppUser, employeeId: string, input: PersonalDetails, ifMatch?: string): Promise<PersonalDetails> {
+export async function setPersonalDetails(deps: Deps, actor: AppUser, employeeId: string, input: PersonalDetails, ifMatch?: string): Promise<PersonalDetails & { etag: string }> {
   const emp = await loadEmployee(deps, employeeId);
   checkEtag(emp, ifMatch);
   const next: PersonalDetails = { ...(await read(deps, emp.personalDetailsEnc)) };
@@ -93,8 +98,10 @@ export async function setPersonalDetails(deps: Deps, actor: AppUser, employeeId:
   // The merge above fixes two dialogs fighting WITHIN one read; the version in the WHERE is what stops two
   // reads fighting (services/versionGuard.ts). Both are needed - merging a stale blob still discards whatever
   // landed after it was read.
-  await updateAtVersion(deps, schema.employees, "employee", emp, { personalDetailsEnc: enc, updatedAt: new Date() });
+  const updated = await updateAtVersion(deps, schema.employees, "employee", emp, { personalDetailsEnc: enc, updatedAt: new Date() });
   // Field names only, never the values (see bankDetails): a home address and a date of birth are the record.
   await audit(deps, actor, "employee.personal_details.update", "employees", emp.uuid, fieldsMeta(next), emp);
-  return next;
+  // The version this write produced, so the dialog that stays open holds a current one rather than the one it
+  // read - the same reason the card dialogs take the etag off their own responses.
+  return { ...next, etag: etagOf(+new Date(updated.updatedAt)) };
 }

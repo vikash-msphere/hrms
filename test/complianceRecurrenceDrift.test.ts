@@ -11,8 +11,10 @@ const WINDOW_MS = 1300 * 86_400_000;
 const ymd = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
 describe("the rule preview mirrors the server's recurrence", () => {
-  const from = new Date("2026-02-10T09:30:00Z"); // mid-month, so "next" skips the current month's past date
-  const fromMs = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());
+  // A DAY, not an instant: `nextDueDates` takes "YYYY-MM-DD" now, so that a preview is anchored on the org's
+  // day rather than on the viewer's local calendar read off a Date.
+  const from = "2026-02-10"; // mid-month, so "next" skips the current month's past date
+  const fromMs = Date.parse(`${from}T00:00:00Z`);
 
   const cases = [
     { frequency: "monthly" as const, dueDay: 15, anchorMonth: null },

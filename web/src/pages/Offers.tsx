@@ -11,6 +11,7 @@ import { navigate, recordUrl, setRouteRecord } from "@/router";
 import type { Me, Offer, Application, Candidate, JobRequisition, PayGrade } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field, FieldRow } from "@/components/common/Field";
 import { ActivitySection } from "@/components/common/ActivitySection";
@@ -70,9 +71,11 @@ export default function Offers({ me: _me, openId }: { me: Me; openId?: string })
   // Who the offer is for, and for which role: label lists, read only when there is an offer to label or a
   // dialog offering the choice. Same rule as the interview schedule.
   const labelled = rows.length > 0 || dialog !== null;
-  const { rows: apps } = useCollection<Application>("applications", { enabled: labelled });
-  const { rows: candidates } = useCollection<Candidate>("candidates", { enabled: labelled });
-  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { enabled: labelled });
+  // Complete, not the first page: these are lookups, and a page is the hundred newest rows - so an offer made
+  // against an older application would render with no candidate name and no role.
+  const { rows: apps } = useCollection<Application>("applications", { enabled: labelled, all: true });
+  const { rows: candidates } = useCollection<Candidate>("candidates", { enabled: labelled, all: true });
+  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { enabled: labelled, all: true });
   useDeepOpen(openId, rows, setDialog);
   // An offer being negotiated over chat is pasteable; `useDeepOpen` above reads the id back in.
   function openDialog(d: Offer | "new") { setDialog(d); setRouteRecord(d === "new" ? null : idOf(d.path)); }
@@ -184,6 +187,9 @@ export default function Offers({ me: _me, openId }: { me: Me; openId?: string })
   return (
     <div>
       <PageHeader title="Offers" description="Take offers from draft through approval to a signed-on hire." actions={newBtn} />
+
+      {/* Not a table, and assembled from three more collections than the one it lists. */}
+      <TruncationNotice collection={["offers", "applications", "candidates", "job-requisitions"]} what="offers" className="mb-3" />
 
       <DataState state={state} error={error} onRetry={reload}>
         {items.length > 0 && (
@@ -388,7 +394,11 @@ function OfferDialog({ offer, defaultApplication, apps, label, candFor, onClose,
 
   async function submit() {
     const body: Record<string, unknown> = {
-      base_comp: form.comp ? Number(form.comp) : null,
+      // OMITTED when blank, never `null`: `base_comp` is `{ type: number }` in openapi.yaml - not nullable - and
+      // the offer schema is the request body for both POST and PATCH, so a null fails contract validation at the
+      // Prism proxy with a 422 the worker never sees. Drafting an offer with the compensation left blank is
+      // allowed (`canSubmit` doesn't require it), so this is the ordinary path, not a corner.
+      ...(form.comp ? { base_comp: Number(form.comp) } : {}),
       currency_code: currency,
       // Dates are `format: date-time` in the contract, and "" is not one - an empty date is left out.
       ...(form.offerDate ? { offer_date: form.offerDate } : {}),

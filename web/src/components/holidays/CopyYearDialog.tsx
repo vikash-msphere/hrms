@@ -20,7 +20,12 @@ import type { Holiday } from "@/types";
 // all. So this copies with the dates EDITABLE and flags every row that landed on a non-working day or already
 // exists, rather than quietly writing twelve rows the admin then has to hunt through.
 
-type Row = CopyRow & { take: boolean };
+// `landed` is what makes a retry safe. The dialog stays open when anything failed, so the operator can press
+// Copy again - and `holidays` has no unique key of any kind (src/db/schema.ts: one paging index, no constraint
+// on date/location) and the service does no duplicate check, so a second run over the whole plan would create
+// every holiday that already succeeded a SECOND time: two "Diwali" rows on one date, which then show twice on
+// the list, twice in the year grid, and feed the holiday lookups leave charging and the attendance grid read.
+type Row = CopyRow & { take: boolean; landed?: boolean };
 
 export function CopyYearDialog({ open, onOpenChange, holidays, years, workDays, defaultFrom, onDone }: {
   open: boolean;
@@ -78,19 +83,29 @@ export function CopyYearDialog({ open, onOpenChange, holidays, years, workDays, 
   async function submit() {
     setBusy(true);
     setProgress(0);
+    // Rows are addressed by INDEX, not by name: two holidays can share a name and a plan can hold the same
+    // one twice, so a key built out of the fields would mark the wrong row done.
+    const indexed = rows.map((r, i) => ({ r, i })).filter(({ r }) => r.take && !r.landed);
+    const landedIdx: number[] = [];
     let failed = 0;
-    for (const r of taking) {
+    for (const { r, i } of indexed) {
       try {
         await create("holidays", { display_name: r.name, date: r.date, kind: r.kind, half_day: r.half_day, location: r.location });
+        landedIdx.push(i);
       } catch {
         failed++;
       }
       setProgress((n) => n + 1);
     }
+    // What landed is marked landed and unticked, so the plan left in front of the operator is exactly what
+    // still has to be written and pressing Copy again cannot duplicate anything.
+    const done = new Set(landedIdx);
+    setRows((rs) => rs.map((r, i) => (done.has(i) ? { ...r, landed: true, take: false } : r)));
     setBusy(false);
-    const added = taking.length - failed;
+    const added = indexed.length - failed;
     toast({
       title: failed ? `${added} copied, ${failed} failed` : `Copied ${added} holiday${added === 1 ? "" : "s"} into ${to}`,
+      description: failed ? "The ones that landed are ticked off below - press Copy again to retry only the rest." : undefined,
       variant: failed ? "destructive" : "success",
     });
     onDone();
@@ -149,7 +164,7 @@ export function CopyYearDialog({ open, onOpenChange, holidays, years, workDays, 
                 {rows.map((r, i) => (
                   <tr key={`${r.sourceDate}-${i}`} className={cn(!r.take && "opacity-50", r.wasted && r.take && "bg-warning/5")}>
                     <td className="w-8 px-2 py-1.5">
-                      <Checkbox checked={r.take} onCheckedChange={(v) => setRow(i, { take: v === true })} aria-label={`Copy ${r.name}`} />
+                      <Checkbox checked={r.take} disabled={r.landed} onCheckedChange={(v) => setRow(i, { take: v === true })} aria-label={`Copy ${r.name}`} />
                     </td>
                     <td className="px-2 py-1.5">
                       <span className="font-medium">{r.name}</span>
@@ -171,6 +186,7 @@ export function CopyYearDialog({ open, onOpenChange, holidays, years, workDays, 
                       <span className="inline-flex flex-wrap justify-end gap-1">
                         <Badge variant="muted">{DOW[r.landsOn]}</Badge>
                         {r.wasted && <Badge variant="warning"><Sun className="h-3 w-3" /> Not a working day</Badge>}
+                        {r.landed && <Badge variant="success">Copied</Badge>}
                         {r.duplicate && <Badge variant="secondary">Already in {to}</Badge>}
                       </span>
                     </td>

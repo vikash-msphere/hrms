@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Ban, Paperclip, Download, Wallet, Check, X, Send, Repeat, Zap, Pencil, ClipboardCheck, Banknote, CalendarClock, ChevronDown, ChevronUp, Eye, Pause, Play, TriangleAlert, BarChart3, Camera } from "lucide-react";
 import { create, patch, invoke, upload, download, get } from "@/api";
+import { describeError } from "@/lib/formError";
+import { sentence } from "@/lib/problemText";
 import { useCollection } from "@/hooks/useCollection";
 import { useDebounced } from "@/hooks/useDebounced";
 import { useMedia } from "@/hooks/useMedia";
@@ -112,11 +114,13 @@ export default function Expenses({ me }: { me: Me }) {
   const debouncedQ = useDebounced(search.trim(), 250);
   const searching = debouncedQ.length >= 2;
   const { rows: searchRows, hasMore: searchHasMore, loadMore: loadMoreSearch } = useCollection<Expense>("expenses", { q: debouncedQ, enabled: searching });
-  const { rows: categories } = useCollection<ExpenseCategory>("expense-categories");
-  const { rows: vendors } = useCollection<Vendor>("vendors"); // empty for callers without vendors.read (403 isolated)
+  // Both are lookups and pickers, not list windows: a category or vendor past the first page would render as
+  // a bare wire id on every expense that names it, and could not be chosen for a new one.
+  const { rows: categories } = useCollection<ExpenseCategory>("expense-categories", { all: true });
+  const { rows: vendors } = useCollection<Vendor>("vendors", { all: true }); // empty for callers without vendors.read (403 isolated)
   const { rows: budgets } = useCollection<ExpenseBudget>("expense-budgets"); // finance-only; empty otherwise
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   const { org } = useOrg();
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -224,14 +228,34 @@ export default function Expenses({ me }: { me: Me }) {
         incurred_on: todayStr(),
         description: quick.description,
       });
-      if (quickFile) await upload(`expenses/${idOf(row.path)}`, quickFile);
-      await invoke("expenses/" + idOf(row.path), "submit", row.etag);
-      toast({ title: "Expense added", variant: "success" });
+      // THE ROW EXISTS FROM HERE ON, so neither follow-up may fail as though nothing happened. Before this, an
+      // upload or submit that threw left the expense filed as a DRAFT - real to the server, invisible in the
+      // reviewer's queue - while the person saw only an error over a form that still had everything they typed,
+      // and pressing the button again created a second row (unlike Reimbursements, this sheet has no duplicate
+      // detector). Each follow-up now reports itself and the sheet still closes.
+      const missed: string[] = [];
+      if (quickFile) {
+        try {
+          await upload(`expenses/${idOf(row.path)}`, quickFile);
+        } catch {
+          missed.push("the receipt didn't attach");
+        }
+      }
+      try {
+        await invoke("expenses/" + idOf(row.path), "submit", row.etag);
+      } catch {
+        missed.push("it was filed as a draft rather than submitted");
+      }
+      toast(
+        missed.length
+          ? { title: "Expense added, with something left to do", description: `${sentence(missed.join(", "))} Finish it from the Expenses list.`, variant: "destructive" }
+          : { title: "Expense added", variant: "success" },
+      );
       quickDraft.clear();
       setQuickOpen(false);
       reload();
     } catch (e) {
-      setQuickErr((e as Error).message);
+      setQuickErr(describeError(e));
     } finally {
       setQuickBusy(false);
     }
@@ -240,14 +264,18 @@ export default function Expenses({ me }: { me: Me }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const uploadTarget = useRef<Expense | null>(null);
 
-  const nameOf = (list: { path: string; display_name?: string; first_name?: string; last_name?: string }[]) => {
+  // `unknown` is a WORD, never the raw wire id - the rule lib/utils.ts `personName` states. Each of these
+  // lists is scoped to what the caller may read, so a ref outside that slice (an expense submitted by
+  // somebody in another department, most often) is ordinary, and a 26-character uuid in place of the name
+  // is an internal identifier leaked onto the screen.
+  const nameOf = (list: { path: string; display_name?: string; first_name?: string; last_name?: string }[], unknown: string) => {
     const m = new Map(list.map((x) => [idOf(x.path), x.display_name ?? `${x.first_name ?? ""} ${x.last_name ?? ""}`.trim()]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? unknown : "-");
   };
-  const catName = useMemo(() => nameOf(categories as any), [categories]);
-  const vendorName = useMemo(() => nameOf(vendors as any), [vendors]);
-  const deptName = useMemo(() => nameOf(departments as any), [departments]);
-  const empName = useMemo(() => nameOf(employees as any), [employees]);
+  const catName = useMemo(() => nameOf(categories as any, "Unknown category"), [categories]);
+  const vendorName = useMemo(() => nameOf(vendors as any, "Unknown vendor"), [vendors]);
+  const deptName = useMemo(() => nameOf(departments as any, "Unknown department"), [departments]);
+  const empName = useMemo(() => nameOf(employees as any, "Someone"), [employees]);
   const payeeName = (r: Expense) => (r.vendor ? vendorName(r.vendor) : empName(r.employee));
   // The category's accounting code, carried onto the expense so a finance export reconciles without a lookup.
   const catGl = useMemo(() => {
@@ -460,22 +488,45 @@ export default function Expenses({ me }: { me: Me }) {
       };
       // Who fronted it: only settable at create, and only by someone recording on another's behalf.
       if (!editing && form.employee) body.employee = form.employee;
+      // Same rule as the quick sheet: once the record is written, the attachment and the submit are FOLLOW-UPS.
+      // A throw from either used to look like a save that did not happen, over a form that still held
+      // everything - so pressing the button again wrote a second row (or, on an edit, re-patched a row that was
+      // already correct).
+      const missed: string[] = [];
+      const attach = async (path: string) => {
+        if (!file) return;
+        try {
+          await upload(`expenses/${idOf(path)}`, file);
+        } catch {
+          missed.push("the receipt didn't attach");
+        }
+      };
       if (editing) {
         await patch("expenses/" + idOf(editing.path), body, editing.etag);
-        if (file) await upload(`expenses/${idOf(editing.path)}`, file);
-        toast({ title: "Expense updated", variant: "success" });
+        await attach(editing.path);
+        toast(missed.length
+          ? { title: "Saved, but the receipt didn't attach", description: "Use the expense's attach button on the list to add it.", variant: "destructive" }
+          : { title: "Expense updated", variant: "success" });
       } else {
         const row = await create<Expense>("expenses", body);
-        if (file) await upload(`expenses/${idOf(row.path)}`, file);
-        if (submitNow && !form.recurring) await invoke("expenses/" + idOf(row.path), "submit", row.etag);
-        toast({ title: form.recurring ? "Recurring expense created" : submitNow ? "Expense submitted" : "Draft saved", variant: "success" });
+        await attach(row.path);
+        if (submitNow && !form.recurring) {
+          try {
+            await invoke("expenses/" + idOf(row.path), "submit", row.etag);
+          } catch {
+            missed.push("it was filed as a draft rather than submitted");
+          }
+        }
+        toast(missed.length
+          ? { title: "Filed, with something left to do", description: `${sentence(missed.join(", "))} Finish it from the Expenses list.`, variant: "destructive" }
+          : { title: form.recurring ? "Recurring expense created" : submitNow ? "Expense submitted" : "Draft saved", variant: "success" });
       }
       draft.clear();
       guard.markSaved();
       setOpen(false);
       reloadAll();
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(describeError(e));
     } finally {
       setBusy(false);
     }
@@ -822,7 +873,11 @@ export default function Expenses({ me }: { me: Me }) {
     const r = await bulkInvoke("expenses", verb, sel, body);
     toast(bulkSummary(past, r));
     reloadAll();
-    if (r.failed > 0) throw new Error("partial"); // keep the failed rows selected for a retry
+    // Only the FAILED rows stay selected. Keeping all of them (which is what throwing did) was a dead end on
+    // this queue: after `reloadAll` the approved ones are APPROVED, each action's `disabled` guard requires
+    // EVERY selected row to be SUBMITTED, so the button greyed out over a selection nothing on screen
+    // explained - and the only way forward was to deselect the successes by hand.
+    return r.failedRows;
   };
   const approveBulk: BulkAction<Expense> = {
     label: "Approve",
@@ -1207,7 +1262,7 @@ export default function Expenses({ me }: { me: Me }) {
                     }}
                     searchPlaceholder="Search vendors…"
                     placeholder="Select…"
-                    options={[{ value: "none", label: "No vendor" }, ...vendors.filter((v) => !v.disabled).map((v) => ({ value: `vendors/${idOf(v.path)}`, label: v.display_name ?? idOf(v.path) }))]}
+                    options={[{ value: "none", label: "No vendor" }, ...vendors.filter((v) => !v.disabled).map((v) => ({ value: `vendors/${idOf(v.path)}`, label: v.display_name ?? "Unnamed vendor" }))]}
                   />
                 </Field>
               )}

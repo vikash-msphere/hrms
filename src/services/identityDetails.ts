@@ -6,6 +6,7 @@ import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
 import { getSettingValue } from "./settings";
 import { getAttachmentsFor } from "./attachments";
+import { etagOf } from "../http/serialize";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // A field can optionally carry a supporting document (e.g. a scan of the PAN card): none / allowed / required.
@@ -97,7 +98,8 @@ export async function getIdentityDetails(deps: Deps, _actor: AppUser, employeeId
   // Access (owner / super by default) is enforced by the middleware on employees/<code>/identity.
   const emp = await loadEmployee(deps, employeeId);
   const [defs, values, slots] = [await getFieldDefs(deps), await readValues(deps, emp.identityDetailsEnc), await attachedSlots(deps, employeeId)];
-  return toView(defs, values, slots);
+  // The employee row's version, so the caller of the version-guarded PATCH below has one to send back.
+  return { ...toView(defs, values, slots), etag: etagOf(+new Date(emp.updatedAt)) };
 }
 
 export async function setIdentityDetails(deps: Deps, actor: AppUser, employeeId: string, input: Record<string, string>, ifMatch?: string) {
@@ -127,8 +129,8 @@ export async function setIdentityDetails(deps: Deps, actor: AppUser, employeeId:
   const enc = await deps.encryptor.encrypt(JSON.stringify(next));
   // Version-guarded: this column is one blob merged over a read, so without it two overlapping edits both
   // return 200 and the earlier one's change is simply gone (see setBankDetails, and services/versionGuard.ts).
-  await updateAtVersion(deps, schema.employees, "employee", emp, { identityDetailsEnc: enc, updatedAt: new Date() });
+  const updated = await updateAtVersion(deps, schema.employees, "employee", emp, { identityDetailsEnc: enc, updatedAt: new Date() });
   // Field names only - an Aadhaar or passport number must not be copied into the audit table (see bankDetails).
   await audit(deps, actor, "employee.identity_details.update", "employees", emp.uuid, fieldsMeta(next), emp);
-  return toView(defs, next, await attachedSlots(deps, emp.uuid));
+  return { ...toView(defs, next, await attachedSlots(deps, emp.uuid)), etag: etagOf(+new Date(updated.updatedAt)) };
 }

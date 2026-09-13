@@ -300,6 +300,10 @@ export function useCodeScanner(onScan: (raw: string, scan: Scan) => void, opts?:
   const wantedCameraRef = useRef<string | null>(savedCamera);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // Which camera-open attempt is the current one. Bumped by every `startCamera` and `selectCamera`, so an
+  // attempt that resolves after a newer one started knows to stop the stream it was handed instead of
+  // claiming `streamRef` (which orphaned the other one, tracks still live).
+  const startGen = useRef(0);
   const detectorRef = useRef<NativeDetector | null>(null);
   const zxingRef = useRef<GrayDecoder | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -401,6 +405,14 @@ export function useCodeScanner(onScan: (raw: string, scan: Scan) => void, opts?:
   }, []);
 
   const startCamera = useCallback(async () => {
+    // GENERATION-GUARDED. Two overlapping starts both reach `getUserMedia`, both resolve, and whichever
+    // assigned last owned `streamRef` - the other stream was left with its tracks LIVE, and the unmount
+    // cleanup only stops `streamRef.current`, so the orphan outlived the dialog: recording indicator still
+    // lit, sensor still held, and the next scan refused ("a phone refuses a second camera while the first
+    // still holds the sensor", below). StrictMode makes this the default path in development (mount, no
+    // cleanup, mount again); in production it is a double-press of "Start camera" or a `selectCamera` racing
+    // a start.
+    const gen = ++startGen.current;
     setFrozenBoth(false);
     setCameraState("starting");
     // Restarting without stopping first leaves the previous stream running (and the recording light on).
@@ -408,11 +420,17 @@ export function useCodeScanner(onScan: (raw: string, scan: Scan) => void, opts?:
     streamRef.current = null;
     try {
       const { stream, opened } = await openCamera(wantedCameraRef.current);
+      if (gen !== startGen.current) {
+        // Superseded while the permission prompt / sensor open was in flight. Stop what we were handed rather
+        // than assigning it over a newer stream, which is what stranded it.
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       streamRef.current = stream;
       setCameraState("on");
       void noteOpenedCamera(stream, opened);
     } catch {
-      setCameraState("unavailable");
+      if (gen === startGen.current) setCameraState("unavailable");
     }
   }, [noteOpenedCamera, setFrozenBoth]);
 
@@ -453,6 +471,7 @@ export function useCodeScanner(onScan: (raw: string, scan: Scan) => void, opts?:
    *  guards. `cameraState` stays "on" across the swap, so the preview element is never torn down. */
   const selectCamera = useCallback(
     async (deviceId: string) => {
+      const previous = wantedCameraRef.current;
       wantedCameraRef.current = deviceId;
       saveCamera(deviceId);
       if (deviceId === cameraId) return; // already live - the pick only made the default explicit
@@ -460,12 +479,19 @@ export function useCodeScanner(onScan: (raw: string, scan: Scan) => void, opts?:
         setCameraId(deviceId); // camera is off: the pick applies at the next start
         return;
       }
+      // Same generation guard as `startCamera`: this and a start can be in flight at once, and the loser must
+      // stop the stream it was handed rather than assign it over the winner's.
+      const gen = ++startGen.current;
       setSwitchingCamera(true);
       setFrozenBoth(false);
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
       try {
         const { stream, opened } = await openCamera(deviceId);
+        if (gen !== startGen.current) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
         streamRef.current = stream;
         const video = videoRef.current;
         if (video) {
@@ -476,6 +502,12 @@ export function useCodeScanner(onScan: (raw: string, scan: Scan) => void, opts?:
         }
         await noteOpenedCamera(stream, opened);
       } catch {
+        if (gen !== startGen.current) return;
+        // The wanted lens goes BACK to the one that was working. Leaving it pointing at the lens that just
+        // failed meant the next "Start camera" retried the broken one, so the scanner could not be recovered
+        // without re-picking by hand.
+        wantedCameraRef.current = previous;
+        if (previous) saveCamera(previous);
         setCameraState("unavailable");
       } finally {
         setSwitchingCamera(false);

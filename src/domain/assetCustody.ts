@@ -5,7 +5,8 @@
 // claim into `in_stock` / `assigned`. Everything here is pure so the transition table and the scan matcher
 // are unit-testable without a database - the service does the I/O around it.
 
-export type AssetStatus = "pending_verification" | "in_stock" | "pending_ack" | "assigned" | "repair" | "retired";
+export const ASSET_STATUSES = ["pending_verification", "in_stock", "pending_ack", "assigned", "repair", "retired"] as const;
+export type AssetStatus = (typeof ASSET_STATUSES)[number];
 
 /** Condition the holder reports when confirming receipt (or the stock-taker when checking one in). */
 export type AssetCondition = "good" | "damaged" | "missing_parts";

@@ -5,7 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { cn, formatDate, idOf, personName } from "@/lib/utils";
-import { todayStr } from "@/lib/orgDay";
+import { addDaysYmd, orgDayFromToday, todayStr, weekStartYmd } from "@/lib/orgDay";
 import { navigate, navigateTab } from "@/router";
 import { Card } from "@/components/ui/card";
 import type { ApprovalDelegation, RemoteWorkRequest, Employee, Me } from "@/types";
@@ -32,13 +32,18 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 
-// Local date, not UTC: the "today"/"this month" summaries should follow the viewer's clock.
-// `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
-// local parts, which is a different day for part of every day and a different day again from the one the
-// server validates against.
-const ymdIn = (days: number) => { const d = new Date(); d.setDate(d.getDate() + days); return d.toLocaleDateString("en-CA"); };
+// The ORG's day throughout - the clock the server validates against, and the one `todayStr()` seeds the form
+// with three lines below. The comment above these two used to say the browser-day helpers had been removed
+// from this file, immediately above two that had not: both built a date from `new Date()` and formatted it
+// `en-CA`, so for a viewer west of the org the quick picks wrote a day the form's own `min` forbade.
+const ymdIn = (days: number) => orgDayFromToday(days);
 // Friday of the current week (or today, if the week is already past it) - the "rest of the week" pick.
-const endOfWeek = () => { const d = new Date(); const add = Math.max(0, 5 - (d.getDay() || 7)); d.setDate(d.getDate() + add); return d.toLocaleDateString("en-CA"); };
+// Built from the week the ORG is in: Monday + 4, floored at today.
+const endOfWeek = () => {
+  const today = todayStr();
+  const friday = addDaysYmd(weekStartYmd(today), 4);
+  return friday < today ? today : friday;
+};
 const upper = (s?: string) => (s ?? "").toUpperCase();
 
 export default function RemoteWork({ me }: { me: Me }) {

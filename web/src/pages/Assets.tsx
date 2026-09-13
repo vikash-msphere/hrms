@@ -93,7 +93,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
   // A deep link WITH a tag secret is a scan, not a request to edit the row - the custody dialog below claims it.
   useDeepOpen(route.query.s ? undefined : openId, rows, openEdit);
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: categories } = useCollection<AssetCategory>("asset-categories");
+  const { rows: categories } = useCollection<AssetCategory>("asset-categories", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
 
@@ -128,12 +128,23 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
     if (mode) setCustody({ asset, mode, scan: `${window.location.origin}/#/assets/${route.id}?s=${secret}` });
     // Scanning a tag should never look like nothing happened: say what was scanned and why there is no action.
     else toast({ title: `Scanned ${asset.name}`, description: asset.status === "pending_ack" ? "It is waiting on the person it was assigned to." : "Nothing to confirm on this one right now." });
+    // The SECRET COMES OUT OF THE ADDRESS BAR once it has been taken into state - the same thing the stocktake
+    // param gets further down this file, and for a much stronger reason. The tag secret is sighting-grade proof
+    // (`requireProof` in src/services/assets.ts accepts a secret-tier scan on its own), and it is meant to live
+    // "on the physical label and nowhere a normal reader of the app can see". Left in the hash it stayed in the
+    // address bar for the rest of the visit, was rebuilt into every `replaceState` the page makes, went into
+    // browser history on a shared machine, and reached session replay intact - ten characters of base32 matches
+    // none of instrument.ts's last-resort scrubs, and "Report a problem" attaches that recording to a ticket.
+    // Nothing downstream needs the URL copy: the scan string is already in `custody`.
+    setQueryParam("s", null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.id, route.query.s, rows, myId]);
 
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
-    return (p?: string | null) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    // A word, never the wire id: assets are cross-departmental, so a holder outside the caller's slice of
+    // the directory is the ordinary case (lib/utils.ts `personName`).
+    return (p?: string | null) => (p ? m.get(idOf(p)) ?? "Someone" : "-");
   }, [employees]);
 
   // The category the form currently names, for the serial-number hint (the server enforces it either way).
@@ -141,7 +152,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
 
   const catName = useMemo(() => {
     const m = new Map(categories.map((c) => [idOf(c.path), c.display_name ?? ""]));
-    return (p?: string | null) => (p ? m.get(idOf(p)) ?? idOf(p) : "");
+    return (p?: string | null) => (p ? m.get(idOf(p)) ?? "Unknown category" : "");
   }, [categories]);
 
   // Inventory summary across the assets the caller can see (server-scoped). "Awaiting scan" leads because it

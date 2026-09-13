@@ -19,7 +19,7 @@ import {
   type AssetInput,
   type CustodyScanInput,
 } from "../services/assets";
-import { ASSET_CONDITIONS } from "../domain/assetCustody";
+import { ASSET_CONDITIONS, ASSET_STATUSES, type AssetStatus } from "../domain/assetCustody";
 import { toAssetResource } from "../http/serialize";
 import { accessHint, withAccess } from "../http/accessHint";
 
@@ -115,8 +115,12 @@ export const assets = collectionRoutes<AssetInput, typeof schema.assets>({
   list: (c, page) => {
     // The inbound edge (decodeWireIds) already decoded the query ref to its internal id; just take the id.
     const emp = c.req.query("employee");
+    // `status` is the picker's filter ("what can I hand over?"), taken only when it names a real status so a
+    // typo narrows to nothing rather than being ignored and answering a wider question than was asked.
+    const status = c.req.query("status");
     return listAssets(c.get("deps"), c.get("scope"), {
       employeeId: emp ? emp.split("/").pop()! : undefined,
+      status: status && (ASSET_STATUSES as readonly string[]).includes(status) ? (status as AssetStatus) : undefined,
       maxPageSize: page.maxPageSize,
       pageToken: page.pageToken,
     });

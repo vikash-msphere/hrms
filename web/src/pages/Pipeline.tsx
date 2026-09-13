@@ -14,6 +14,7 @@ import type { Me, Application, Candidate, Employee, Interview, InterviewFeedback
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { EmptyState } from "@/components/common/EmptyState";
 import { LinesSkeleton } from "@/components/common/Skeletons";
 import { Field, FieldRow } from "@/components/common/Field";
@@ -42,17 +43,19 @@ const CLOSED = "__closed"; // synthetic column: rejected / withdrawn application
 const STALL_DAYS = 14;
 
 export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
-  const { rows: apps, state, error, reload } = useCollection<Application>("applications");
+  const { rows: apps, state, error, reload } = useCollection<Application>("applications", { all: true });
   // The two lists every card is LABELLED from (who applied, for which role). An empty pipeline has no cards to
-  // label, so it reads neither - the same rule the offers read below already follows.
-  const { rows: candidates } = useCollection<Candidate>("candidates", { enabled: apps.length > 0 });
-  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { enabled: apps.length > 0 });
+  // label, so it reads neither - the same rule the offers read below already follows. COMPLETE, not the first
+  // page: pages are the hundred NEWEST rows, so a card whose candidate applied a few months ago would label
+  // itself "Candidate" with no role - a record that reads as missing a name rather than as unloaded.
+  const { rows: candidates } = useCollection<Candidate>("candidates", { enabled: apps.length > 0, all: true });
+  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { enabled: apps.length > 0, all: true });
   const cfg = useAtsConfig();
   // Offers are read only once a card is actually at the offer stage or past it: on a board of early-stage
   // candidates there is nothing to say, and an unconditional read would spend a D1 page for nothing. When they
   // are read, the card can show what the "draft the offer" rule produced without anyone opening the drawer.
   const anyAtOffer = useMemo(() => apps.some((a) => a.status === "active" && cfg.stages.findIndex((s) => s.key === a.stage) >= cfg.stages.findIndex((s) => s.key === "offer") && cfg.stages.some((s) => s.key === "offer")), [apps, cfg]);
-  const { rows: boardOffers, reload: reloadOffers } = useCollection<Offer>("offers", { enabled: anyAtOffer });
+  const { rows: boardOffers, reload: reloadOffers } = useCollection<Offer>("offers", { enabled: anyAtOffer, all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const [reqFilter, setReqFilter] = useState("all");
@@ -289,6 +292,10 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
         description="Applications by stage. Advance or reject candidates as they move through hiring."
         actions={<>{newBtn}<PageSettings me={me} host="pipeline" /></>}
       />
+
+      {/* The board is assembled from four collections and is not a table, so nothing else here would admit a
+          short read. `all: true` narrows the window rather than closing it, so the notice is its complement. */}
+      <TruncationNotice collection={["applications", "candidates", "job-requisitions", "offers"]} what="applications" className="mb-3" />
 
       {onJob.length > 0 && (
         <SummaryStrip

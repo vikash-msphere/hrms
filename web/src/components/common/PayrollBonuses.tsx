@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { Plus, Gift } from "lucide-react";
 import { invoke } from "@/api";
-import { useCollection } from "@/hooks/useCollection";
+import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf } from "@/lib/utils";
 import { todayStr as todayYmd } from "@/lib/orgDay";
@@ -32,9 +33,18 @@ const KINDS = ["Performance Bonus", "Joining Bonus", "Retention Bonus", "Festiva
 // materialized one row per employee (so they show on each profile); here they're collapsed back into a single
 // line per award. Bonuses are paid - as a taxable earning - by the next payroll run.
 export function PayrollBonuses() {
-  const { rows, state, error, reload } = useCollection<Bonus>("bonuses");
+  // `all`, like the two reads below it. `bonuses` is ONE ROW PER RECIPIENT - a company-wide award of 200
+  // people is 200 rows, created in one go and therefore contiguous in a newest-first page - so a single page
+  // holds half of it and the line reports half the headcount, half the money and a "Paid" badge that is
+  // complete only over the half it can see. The duplicate guard below searches the same rows, and an absent
+  // warning reads as "no clash", not as "not checked" - at its weakest right after the group award it names as
+  // the dangerous case.
+  const { rows, state, error, reload } = useCollection<Bonus>("bonuses", { all: true });
+  // The walk stops at ALL_CAP, so the per-batch total and the paid count below are suppressed while more rows
+  // exist: a partial sum printed as a total is worse than no sum.
+  const truncated = useCollectionHasMore("bonuses");
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
   const money = useMoney();
@@ -42,11 +52,11 @@ export function PayrollBonuses() {
 
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
-    return (ref?: string) => (ref ? m.get(idOf(ref)) ?? idOf(ref) : "-");
+    return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Someone" : "-");
   }, [employees]);
   const deptName = useMemo(() => {
     const m = new Map(departments.map((d) => [idOf(d.path), d.display_name]));
-    return (ref?: string) => (ref ? m.get(idOf(ref)) ?? idOf(ref) : "-");
+    return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Unknown department" : "-");
   }, [departments]);
 
   // Collapse group awards (shared batch_id) into one line; keep individual bonuses as their own line.
@@ -149,6 +159,7 @@ export function PayrollBonuses() {
         description="All bonuses - individual and company/department awards. Paid as a taxable earning by the next payroll run."
         actions={awardBtn}
       />
+      <TruncationNotice collection="bonuses" what="bonuses" className="mb-3" />
       <DataState state={state} error={error} onRetry={reload}>
         {entries.length === 0 ? (
           <EmptyState icon={Gift} title="No bonuses yet" description="Award a company-wide, department, or individual bonus." action={awardBtn} />
@@ -164,17 +175,23 @@ export function PayrollBonuses() {
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                       <span className="font-medium">{e.who}</span>
-                      {e.scope !== "individual" && <Badge variant="secondary">{e.rows.length} {e.rows.length === 1 ? "person" : "people"}</Badge>}
+                      {e.scope !== "individual" && <Badge variant="secondary">{e.rows.length}{truncated ? "+" : ""} {e.rows.length === 1 ? "person" : "people"}</Badge>}
                       {b.kind && <span className="text-xs text-muted-foreground">{b.kind}</span>}
                     </div>
                     <div className="text-xs text-muted-foreground">{formatDate(b.award_date)}{b.reason ? ` · ${b.reason}` : ""}</div>
                   </div>
                   <div className="text-right">
                     <div className="font-medium tabular-nums">{money(b.amount, b.currency_code)}{e.scope !== "individual" ? " ea" : ""}</div>
-                    {e.scope !== "individual" && <div className="text-xs tabular-nums text-muted-foreground">{money(total, b.currency_code)} total</div>}
+                    {e.scope !== "individual" && !truncated && <div className="text-xs tabular-nums text-muted-foreground">{money(total, b.currency_code)} total</div>}
                   </div>
-                  <Badge variant={paidCount === e.rows.length ? "secondary" : "muted"} className="shrink-0">
-                    {paidCount === 0 ? "Pending" : paidCount === e.rows.length ? "Paid" : `${paidCount}/${e.rows.length} paid`}
+                  <Badge variant={!truncated && paidCount === e.rows.length ? "secondary" : "muted"} className="shrink-0">
+                    {truncated
+                      ? `${paidCount}+ paid`
+                      : paidCount === 0
+                        ? "Pending"
+                        : paidCount === e.rows.length
+                          ? "Paid"
+                          : `${paidCount}/${e.rows.length} paid`}
                   </Badge>
                 </div>
               );

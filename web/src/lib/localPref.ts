@@ -14,6 +14,28 @@
 // NOT for anything that must actually persist, be shared between devices, or be read back by the server -
 // those go through lib/prefs.ts (a server preferences row) or lib/clientStore.ts (IndexedDB). See
 // client-storage.md.
+import { storedIdentity } from "@/lib/clientStore";
+
+/**
+ * `key` namespaced to the signed-in caller, or null before the identity is known.
+ *
+ * WHY EVERY PER-PERSON KEY NEEDS IT. localStorage is per BROWSER, not per person, and an ordinary session end
+ * does not clear it (`clientStore.purgeCachedData` deliberately leaves localStorage alone; only the sign-out
+ * menu's `purgeAll` calls `localStorage.clear()`). So a key holding one person's choices is handed to whoever
+ * signs in next on a shared machine - which for a board filter pinned to a named colleague, a remembered letter
+ * template or a dismissed enrolment prompt is somebody else's state presented as yours. `tab_seen:`, `dt:`,
+ * `draft:`, `nav:collapsed:` and `palette:frecent:` already do this, and three separate modules document the
+ * shared-machine failure that made them.
+ *
+ * Returns null rather than an "anon" fallback: a record written before identity lands is never read back under
+ * the real key, so it would be silently lost - and worse, adopted by the next caller.
+ *
+ * Not for a genuinely per-DEVICE choice (the theme, the scanner's camera): those are correct as bare keys.
+ */
+export function userKey(key: string): string | null {
+  const id = storedIdentity();
+  return id ? `${key}:${id}` : null;
+}
 
 /** The stored string for `key`, or null when there is none - or when storage is unreadable. Never throws. */
 export function readLocal(key: string): string | null {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Landmark } from "lucide-react";
 import { get, patch } from "@/api";
+import { describeError, isConflict } from "@/lib/formError";
 import type { BankDetails } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -70,13 +71,21 @@ export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details
     setSaving(true);
     setErr(null);
     try {
-      const updated = await patch<BankDetails>(`employees/${employeeId}/bank-account`, form);
+      // The version this dialog read. The blob is merged over a read on the server, so two overlapping edits
+      // without a version both return 200 and the earlier one's change is simply gone - on the fields a salary
+      // payment is built from. The server's 409 is what the recovery below is for.
+      const updated = await patch<BankDetails>(`employees/${employeeId}/bank-account`, form, data?.etag);
       setData(updated);
       toast({ title: "Bank details saved", variant: "success" });
       onSaved?.();
       setOpen(false);
     } catch (e) {
-      setErr((e as Error).message);
+      if (isConflict(e)) {
+        await load();
+        setErr("Somebody else changed these bank details while you had them open. They have been reloaded - check them and save again.");
+        return;
+      }
+      setErr(describeError(e));
     } finally {
       setSaving(false);
     }

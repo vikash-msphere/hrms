@@ -41,6 +41,7 @@ export const suggestions = collectionRoutes<SuggestionInput, typeof schema.sugge
       pageToken: page.pageToken,
       status: c.req.query("status"),
       category: c.req.query("category"),
+      q: c.req.query("q"),
       showDeleted: page.showDeleted,
     }),
   verbs: {

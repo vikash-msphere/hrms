@@ -536,8 +536,14 @@ function RuleDialog({ rule, rules, seed, onClose, onReload }: { rule: Automation
       submitAccess={isNew ? (b) => <AccessAction collection="automations" create label="New automation">{b}</AccessAction> : undefined}
       footerStart={
         <div className="flex min-w-0 items-center gap-2">
+          {/* The success toast is tied to the copy actually happening. `void` + an immediate "Link copied"
+              reported success for a rejected write (non-secure context, unfocused document, denied permission)
+              and the reader pasted whatever was on the clipboard before. */}
           {cur && (
-            <Button type="button" variant="ghost" size="sm" onClick={() => { void navigator.clipboard.writeText(recordUrl("workflows", idOf(cur.path))); toast({ title: "Link copied", variant: "success" }); }}>
+            <Button type="button" variant="ghost" size="sm" onClick={() => navigator.clipboard.writeText(recordUrl("workflows", idOf(cur.path))).then(
+              () => toast({ title: "Link copied", variant: "success" }),
+              () => toast({ title: "Couldn't copy the link", variant: "destructive" }),
+            )}>
               <Link2 className="h-4 w-4" /> Copy link
             </Button>
           )}

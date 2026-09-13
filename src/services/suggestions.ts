@@ -2,6 +2,7 @@ import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
+import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import { byIdChunks } from "../lib/dbBatch";
@@ -68,8 +69,14 @@ export async function decorate(deps: Deps, actor: AppUser | undefined, rows: any
   return rows.map((r) => ({ ...r, upCount: up.get(r.uuid) ?? 0, downCount: down.get(r.uuid) ?? 0, myVote: mine.get(r.uuid) ?? 0, own: !!actor?.employeeId && r.submitterId === actor.employeeId }));
 }
 
-export async function listSuggestions(deps: Deps, scope: ListScope, maxPageSize: number, opts: { pageToken?: string; status?: string; category?: string; showDeleted?: boolean } = {}) {
+export async function listSuggestions(deps: Deps, scope: ListScope, maxPageSize: number, opts: { pageToken?: string; status?: string; category?: string; showDeleted?: boolean; q?: string } = {}) {
   const conds = [applyScope(scope, schema.suggestions.code, schema.suggestions.submitterId)];
+  // Server-side text filter over the whole collection (FTS, the same index global search uses). It only ever
+  // narrows the caller's scope. This is what makes the composer's duplicate guard worth anything: the
+  // suggestion somebody is about to re-file was filed BEFORE, which is precisely what a twenty-row feed
+  // window does not contain - and an absent warning reads as "no clash", not as "not checked".
+  const textMatch = await searchFilter(deps, "suggestions", opts.q, schema.suggestions.uuid);
+  if (textMatch) conds.push(textMatch);
   if (opts.status) conds.push(eq(schema.suggestions.status, opts.status as Status));
   if (opts.category) conds.push(eq(schema.suggestions.category, opts.category));
   if (!opts.showDeleted) conds.push(isNull(schema.suggestions.deleteTime)); // soft-delete filter, now in SQL

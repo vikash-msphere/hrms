@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Boxes, Camera, CameraOff, ImageUp, ListPlus, Minus, Plus, ScanLine } from "lucide-react";
 import { invoke } from "@/api";
 import { cn } from "@/lib/utils";
-import { parseSerialLines, usableSerials, appendSerial, batchSizes } from "@/lib/assetBulk";
+import { parseSerialLines, usableSerials, appendSerial, batchSizes, remainingSerialText } from "@/lib/assetBulk";
 import { cleanScannedSerial, parseScanPayload } from "@/lib/assetTags";
 import { SERIAL_FORMATS, useCodeScanner, hasNativeDetector } from "@/lib/scanner";
 import { ScanPreview, ScanPauseButton } from "@/components/assets/ScanPreview";
@@ -105,9 +105,20 @@ export function BulkAddAssets({ categories, assets, onClose, onCreated }: {
     } catch (e) {
       // Whatever landed before the failure is real and already tagged, so say so instead of implying nothing
       // happened - and let WriteDialog show the error with the rest of the list still in the box.
+      //
+      // THE BOX HOLDS THE REMAINDER, not the whole delivery. Each call is atomic (services/assets.ts: "the
+      // insert is one atomic batch, which is what makes retrying it safe"), so the boundary is exactly at
+      // chunk granularity - the calls before the failure landed in full, the failing one landed not at all.
+      // Leaving the full list here made the toast's own instruction wrong: pressing Add again re-sent the
+      // successes, and 120 adapters became 200 assets with 200 printed tags, or two rows claiming one laptop.
       if (created.length) {
         onCreated(created);
-        toast({ variant: "destructive", title: `${created.length} of ${total} added`, description: "The rest were not created - fix the message below and add them." });
+        setForm((f) =>
+          mode === "quantity"
+            ? { ...f, quantity: Math.max(1, f.quantity - created.length) }
+            : { ...f, text: remainingSerialText(f.text, created.map((a) => a.serial_number ?? "")) },
+        );
+        toast({ variant: "destructive", title: `${created.length} of ${total} added`, description: "The rest were not created - fix the message below and add them; only what is left is still in the form." });
       }
       throw e;
     } finally {
@@ -260,10 +271,13 @@ function SerialList({ text, onText, scanning, onScanning, parsed, serialOwner }:
   }, { formats: SERIAL_FORMATS });
   const { cameraState, startCamera, stopCamera, decodeFiles } = scanner;
 
-  // The camera belongs to the scanning state, both ways: closing the panel must release it.
+  // The camera belongs to the scanning state, both ways: closing the panel must release it - and so must
+  // unmounting, which the effect had no cleanup for (StrictMode's mount/unmount/mount otherwise leaves one
+  // stream running with nothing holding a reference to stop it).
   useEffect(() => {
     if (scanning) void startCamera();
     else stopCamera();
+    return () => stopCamera();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanning]);
 

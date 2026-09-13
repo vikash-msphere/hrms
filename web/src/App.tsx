@@ -1,4 +1,5 @@
 import { Suspense, useEffect, useRef, useState } from "react";
+import { useMedia } from "@/hooks/useMedia";
 // lazyPage, not React.lazy: a failed import must stay retryable (see lib/lazyPage.tsx and the crash boundary).
 import { lazyPage as lazy } from "./lib/lazyPage";
 import { Skeleton } from "./components/ui/skeleton";
@@ -37,7 +38,7 @@ import { Workspace } from "./components/layout/Workspace";
 import { ApprovalsProvider, APPROVAL_COLLECTIONS, TAX_VERIFICATIONS_QUEUE } from "./lib/approvals";
 import { ClockProvider } from "./lib/clock";
 import { NotificationsProvider, NotificationClearOnLeave } from "./lib/notifications";
-import { workspaceForKey, navPerm, pageGate, pageVisible, APPROVAL_CAPS, navBreadcrumb } from "./nav";
+import { workspaceForKey, navPerm, pageGate, pageVisible, APPROVAL_CAPS, pageLabel } from "./nav";
 import { NoAccess } from "./components/common/NoAccess";
 import { Building } from "lucide-react";
 import { APP_NAME } from "./lib/brand";
@@ -280,8 +281,9 @@ function SessionExpiredDialog({ open, onSignedIn }: { open: boolean; onSignedIn:
 // whereas the landmark is always there and reads its own label first. `preventScroll` because the scroll
 // position for this navigation was just decided in router.ts and must not be re-litigated here.
 function useRouteAnnounce(page: string, sub: string | undefined, mainRef: React.RefObject<HTMLElement>) {
-  const crumb = navBreadcrumb(page, sub);
-  const label = crumb ? [crumb.label, crumb.sub].filter(Boolean).join(" · ") : undefined;
+  // `pageLabel`, not `navBreadcrumb`: the breadcrumb only knows keys that are in NAV, and nine routes are not
+  // (the Settings deep-link aliases, Tickets and Notifications) - those had no tab title and announced nothing.
+  const label = pageLabel(page, sub);
   const [announced, setAnnounced] = useState("");
   const first = useRef(true);
   useEffect(() => {
@@ -313,6 +315,16 @@ export default function App() {
   const viewAs = useViewAs();
   const realMe = useRealMe(); // the signed-in admin (= `me` unless a simulation is running)
   const [mobileOpen, setMobileOpen] = useState(false);
+  // The drawer has no meaning once the sidebar docks, and every way out of it is `md:hidden` - the scrim, the
+  // drawer's own close X, the BottomNav button that opened it - while `drawerOpen` goes false so Escape stops
+  // closing it too. So opening the menu at phone width and then crossing 768px (rotating a tablet, dragging a
+  // desktop window) left `mobileOpen` true with nothing on screen able to clear it, and the `inert` below took
+  // the entire main column out of hit-testing, focus and the accessibility tree: a page that looks completely
+  // normal and is completely dead.
+  const sidebarDocked = useMedia("(min-width: 768px)");
+  useEffect(() => {
+    if (sidebarDocked) setMobileOpen(false);
+  }, [sidebarDocked]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
   const [chunkReady, setChunkReady] = useState(false);
@@ -686,7 +698,10 @@ export default function App() {
             drawer (a modal surface has to trap focus) and stops a stray tap landing on a control under the
             scrim. Paired with the drawer's own `inert` when closed, exactly one of the two is ever reachable.
             React 18's typings predate the attribute, hence the cast - the DOM and browsers accept it. */}
-        <div className="flex min-w-0 flex-1 flex-col" {...(mobileOpen ? ({ inert: "" } as React.HTMLAttributes<HTMLDivElement>) : {})}>
+        {/* Gated on the breakpoint as well as the flag: `inert` is only correct while the drawer is a MODAL
+            OVERLAY, and belt-and-braces with the effect above - the effect clears the flag, this makes a frame
+            in which both are true impossible to get stuck in. */}
+        <div className="flex min-w-0 flex-1 flex-col" {...(mobileOpen && !sidebarDocked ? ({ inert: "" } as React.HTMLAttributes<HTMLDivElement>) : {})}>
           <TopBar me={gme} page={route.page} sub={route.id ?? undefined} onOpenSearch={() => setPaletteOpen(true)} />
           {/* Renders nothing while the connection is up. */}
           <OfflineBar />
@@ -702,8 +717,14 @@ export default function App() {
             aria-label="Main content"
             // The route key, for session replay's per-page masking (SENSITIVE_PAGES in instrument.ts). Replay
             // records text by default, and a selector on this attribute is what hides a whole sensitive route -
-            // payslips, the profile, documents - subtree and all. Kept here rather than on each page because
-            // the point is that a panel added to one of those routes is covered without anyone opting it in.
+            // payslips, payroll runs, documents, reviews, suggestions, check-ins, tax declarations, background
+            // checks - subtree and all. A panel added to one of THOSE routes is covered without opting in.
+            //
+            // `profile` and `employees` are deliberately NOT on that list (instrument.ts says why: masking them
+            // hid the headings, statuses and dates that make a replay readable while the values that matter are
+            // in a handful of panels). So a panel added to the profile is recorded unless it says otherwise:
+            // give it `sentry-mask`, or `data-sentry-block` for an image, the way the compensation, bank, tax,
+            // identity, personal, emergency, documents and signature panels each do for themselves.
             data-page={route.page}
             className="mx-auto w-full max-w-screen-2xl flex-1 px-4 pb-[calc(5rem+env(safe-area-inset-bottom))] pt-5 outline-none sm:px-6 sm:pt-8 md:pb-8 lg:px-8"
           >

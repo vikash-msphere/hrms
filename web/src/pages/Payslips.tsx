@@ -4,6 +4,7 @@ import { RupeeCircle } from "@/components/icons/RupeeCircle";
 import { download } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, formatMoney, idOf } from "@/lib/utils";
+import { orgDayOf, thisYearStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Me, Payslip } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -32,10 +33,20 @@ export default function Payslips({ me }: { me: Me }) {
     [raw],
   );
   const latest = rows[0];
+  // WHICH YEAR A PAYSLIP BELONGS TO, on the org's clock. One definition, used by the YTD figures, the year
+  // chips, the table filter and the chart labels, so the four cannot disagree about the same slip.
+  //
+  // `create_time` is a UTC instant, so its first four characters are the UTC year - comparing that against the
+  // org's year (thisYearStr) mixed the two clocks this page was already trying not to mix. In an IST org a
+  // payslip published at 02:00 on 1 January carries `2025-12-31T20:30:00Z`: it was excluded from the year it
+  // was issued in, there was no "2026" chip to find it under, and "Net paid in 2026" read zero next to a
+  // clickable tile that filtered the table to nothing. West of UTC it runs the other way and lasts all evening.
+  // `orgDayOf` (lib/orgDay) is the instant-to-org-day conversion that already existed for exactly this.
+  const yearOf = (s: Payslip) => (s.create_time ? orgDayOf(s.create_time).slice(0, 4) : "");
   // Net paid so far this calendar year (across however many slips the caller can see of their own).
   const ytd = useMemo(() => {
-    const year = new Date().getFullYear().toString();
-    const slips = rows.filter((s) => (s.create_time ?? "").startsWith(year));
+    const year = thisYearStr();
+    const slips = rows.filter((s) => yearOf(s) === year);
     const net = slips.reduce((sum, s) => sum + (s.net ?? 0), 0);
     return {
       net,
@@ -45,10 +56,10 @@ export default function Payslips({ me }: { me: Me }) {
       avgNet: slips.length ? Math.round(net / slips.length) : 0,
     };
   }, [rows]);
-  const thisYear = new Date().getFullYear().toString();
+  const thisYear = thisYearStr();
   // Year filter chips - only shown once the history spans more than one calendar year.
   const years = useMemo(
-    () => [...new Set(rows.map((s) => (s.create_time ?? "").slice(0, 4)).filter(Boolean))].sort().reverse(),
+    () => [...new Set(rows.map(yearOf).filter(Boolean))].sort().reverse(),
     [rows],
   );
   // The last two years at most: a pay history chart is read for the trend, and thirty labels on a phone is
@@ -56,7 +67,9 @@ export default function Payslips({ me }: { me: Me }) {
   const payChart = useMemo(() => {
     const recent = [...rows].reverse().slice(-24);
     return {
-      labels: recent.map((s) => (s.create_time ? new Date(s.create_time).toLocaleDateString(undefined, { month: "short", year: "2-digit" }) : "")),
+      // Labelled on the ORG's calendar too, via the same day conversion the buckets use - drawn through the
+      // viewer's local clock, the slip the YTD filter files under one year could be plotted as the next.
+      labels: recent.map((s) => (s.create_time ? new Date(`${orgDayOf(s.create_time)}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", year: "2-digit", timeZone: "UTC" }) : "")),
       gross: recent.map((s) => Math.round(s.gross ?? 0)),
       net: recent.map((s) => Math.round(s.net ?? 0)),
     };
@@ -64,7 +77,7 @@ export default function Payslips({ me }: { me: Me }) {
 
   const [year, setYear] = useState<string>("all");
   const visible = useMemo(
-    () => (year === "all" ? rows : rows.filter((s) => (s.create_time ?? "").startsWith(year))),
+    () => (year === "all" ? rows : rows.filter((s) => yearOf(s) === year)),
     [rows, year],
   );
 

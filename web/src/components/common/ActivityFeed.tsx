@@ -299,6 +299,9 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
   const [story, setStory] = useState<string | null>(null); // the whole case one entry belongs to (root ref)
   const [refNames, setRefNames] = useState<Record<string, string>>({}); // `<collection>/<token>` -> record name
   const [nextToken, setNextToken] = useState<string | undefined>();
+  // Page tokens this walk has already followed - see `loadMore`. Cleared whenever the feed is re-read from the
+  // top, since that is a new walk.
+  const seenTokens = useRef(new Set<string>());
   const [paginated, setPaginated] = useState(false); // true once the unfiltered log is known to have >1 page
   const [loadingMore, setLoadingMore] = useState(false);
   const [pageSize, setPageSize] = useState(25);
@@ -327,7 +330,7 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
     setState("loading"); setRows(null); setNextToken(undefined); setPaginated(false); setQ(""); setSubmittedQ(""); setTone("all"); setEntity(initialEntity ?? "all"); setActor("all");
     fetchKey.current = `${scope}||all|all|all|`;
     get<ActivityPage>(params({ max_page_size: String(pageSize) }))
-      .then((p) => { if (!live) return; setRows(p.results); setNextToken(p.next_page_token); setPaginated(!!p.next_page_token); fetchKey.current = `${scope}||all|all|all|${!!p.next_page_token}`; setState("ready"); })
+      .then((p) => { if (!live) return; setRows(p.results); seenTokens.current.clear(); setNextToken(p.next_page_token); setPaginated(!!p.next_page_token); fetchKey.current = `${scope}||all|all|all|${!!p.next_page_token}`; setState("ready"); })
       .catch(() => { if (live) setState("error"); });
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reset-on-scope-change; see the note above
@@ -343,7 +346,7 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
       fetchKey.current = key;
       setState("loading");
       get<ActivityPage>(params({ max_page_size: String(pageSize), ...filterQuery() }))
-        .then((p) => { if (!live) return; setRows(p.results); setNextToken(p.next_page_token); setState("ready"); })
+        .then((p) => { if (!live) return; setRows(p.results); seenTokens.current.clear(); setNextToken(p.next_page_token); setState("ready"); })
         .catch(() => { if (live) setState("error"); });
     }, 300);
     return () => { live = false; clearTimeout(h); };
@@ -359,7 +362,7 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
     let live = true;
     setState("loading");
     get<ActivityPage>(params({ max_page_size: String(pageSize), ...filterQuery() }))
-      .then((p) => { if (!live) return; setRows(p.results); setNextToken(p.next_page_token); setPaginated(!!p.next_page_token); fetchKey.current = `${scope}|${submittedQ.trim()}|${tone}|${entity}|${actor}|${!!p.next_page_token}`; setState("ready"); })
+      .then((p) => { if (!live) return; setRows(p.results); seenTokens.current.clear(); setNextToken(p.next_page_token); setPaginated(!!p.next_page_token); fetchKey.current = `${scope}|${submittedQ.trim()}|${tone}|${entity}|${actor}|${!!p.next_page_token}`; setState("ready"); })
       .catch(() => { if (live) setState("error"); });
     return () => { live = false; };
     // Page size ONLY: the current filters are read inside so the reload preserves them, and depending on them
@@ -373,7 +376,11 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
     try {
       const p = await get<ActivityPage>(params({ page_token: nextToken, max_page_size: String(pageSize), ...(paginated ? filterQuery() : {}) }));
       setRows((r) => [...(r ?? []), ...p.results]);
-      setNextToken(p.next_page_token);
+      // A cursor that fails to advance is the failure `api.ts#listAll` and `#getAllPages` keep a `seen` set
+      // for; this walk is user-driven, so the worst case was a pile of duplicated rows (with duplicate `path`
+      // keys in the list) rather than a hang - but a token we have already followed is the end of the walk.
+      seenTokens.current.add(nextToken);
+      setNextToken(p.next_page_token && !seenTokens.current.has(p.next_page_token) ? p.next_page_token : undefined);
     } catch { /* leave what we have */ }
     finally { setLoadingMore(false); }
   }

@@ -2,7 +2,8 @@ import { KeyRound, LogOut, ShieldCheck, ChevronDown, Sun, Moon, Monitor, Check }
 import { cn } from "@/lib/utils";
 import { roleLabel } from "@/lib/roles";
 import { useTheme, type Theme } from "@/lib/theme";
-import { purgeAll } from "@/lib/clientStore";
+import { purgeAll, draftCount } from "@/lib/clientStore";
+import { useConfirm, type ConfirmFn } from "@/components/common/confirm";
 import { useEmployee } from "@/hooks/useEmployee";
 import { useAccessMode } from "@/components/access/AccessModeProvider";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
@@ -21,7 +22,26 @@ import type { Me } from "@/types";
 // behind: the cached rows of every collection they had opened, their colleagues' faces, the org's configuration,
 // their drafts - all of it still on disk, under their identity, indefinitely, on what may well be a shared
 // computer. So the purge is part of signing out, and it is awaited: navigating first would abandon it.
-async function signOut() {
+//
+// It ASKS FIRST when there is unsaved writing on the device, and only then - a confirm on every sign-out is
+// noise, and noise is what teaches people to click through the dialogs that matter. The `draft` class holds
+// real work (a review write-up and its ratings grid, an announcement being composed, an unsent bulk delivery)
+// that exists nowhere else, and every other place this data can be lost asks before dropping it: the
+// composer's discard prompt, `useDialogGuard`, PhotoAvatar's crop. Sign-out was the one door with no sign on
+// it, sitting directly under "View my profile".
+async function signOut(confirm: ConfirmFn) {
+  const drafts = draftCount();
+  if (
+    drafts > 0 &&
+    !(await confirm({
+      title: "Sign out?",
+      description: `${drafts} unsaved draft${drafts === 1 ? "" : "s"} on this device ${drafts === 1 ? "is" : "are"} deleted when you sign out - ${drafts === 1 ? "it is" : "they are"} not saved on the server.`,
+      confirmLabel: "Sign out",
+      destructive: true,
+    }))
+  ) {
+    return;
+  }
   await purgeAll();
   try {
     const res = await fetch("/auth/logout", { method: "POST", headers: { "X-Requested-By": "hrms-spa" } });
@@ -40,6 +60,7 @@ const THEMES: { value: Theme; label: string; icon: typeof Sun }[] = [
 
 export function UserMenu({ me }: { me: Me }) {
   const am = useAccessMode();
+  const confirm = useConfirm();
   const { theme, setTheme } = useTheme();
   // Prefer the real employee name + photo over the raw email handle ("write2vkas"); fall back to a tidied
   // handle for accounts with no employee record.
@@ -116,7 +137,7 @@ export function UserMenu({ me }: { me: Me }) {
           ))}
         </div>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={signOut}>
+        <DropdownMenuItem onClick={() => void signOut(confirm)}>
           <LogOut className="h-4 w-4" />
           Sign out
         </DropdownMenuItem>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CalendarClock, Landmark, Pencil, ShieldCheck } from "lucide-react";
 import { get, patch } from "@/api";
+import { describeError, isConflict } from "@/lib/formError";
 import type { TaxDetails } from "@/types";
 import { cn } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,16 +16,26 @@ import { AccessScope } from "@/components/access/AccessScope";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
-import { useOrg } from "@/lib/org";
-
-const inr = (n?: number | null) => (n == null ? "-" : `₹${Math.round(n).toLocaleString("en-IN")}`);
+import { useConfirm } from "@/components/common/confirm";
+import { confirmDecision } from "@/lib/confirmDecision";
+import { useOrg, useMoney } from "@/lib/org";
 
 /** Per-employee India income-tax (TDS) projection for the financial year. Tax is computed server-side from
  *  compensation + declarations; only prior-employer income/TDS (mid-year joiners) is editable here.
  *  Access: owner, HR, payroll, super_admin. */
 export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: { employeeId: string; canEdit: boolean; canVerify?: boolean }) {
   const { toast } = useToast();
+  const confirm = useConfirm();
   const { org } = useOrg();
+  // Every figure on this panel goes through the ORG's formatter. It used to be a local
+  // `₹${Math.round(n).toLocaleString("en-IN")}` at fifteen call sites - monthly TDS, prior-employer income,
+  // projected gross, each §80 deduction, every slab band, the rebate, surcharge and cess - which froze two
+  // things the org owns: the symbol (₹ regardless of `org.default_currency`, which this file already has in
+  // scope) and the grouping ("en-IN" lakh/crore, so 120000 read ₹1,20,000 here and 120,000 wherever `useMoney`
+  // rendered it). `Math.round` is kept: whole units is what `currencyDecimals` already expresses for INR, and
+  // a tax projection is not quoted in paise.
+  const money = useMoney();
+  const inr = (n?: number | null) => (n == null ? "-" : money(Math.round(n)));
   const [data, setData] = useState<TaxDetails | null>(null);
   const [denied, setDenied] = useState(false);
   const [open, setOpen] = useState(false);
@@ -63,11 +74,19 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
         prior_employer_income: form.prior_employer_income ? Number(form.prior_employer_income) : 0,
         prior_employer_tds: form.prior_employer_tds ? Number(form.prior_employer_tds) : 0,
       };
-      setData(await patch<TaxDetails>(`employees/${employeeId}/tax`, { values }));
+      // The version this panel read. The whole declaration is one encrypted blob rewritten from a read, so a
+      // write that carries no version does not merely lose a race - it silently overwrites whatever landed
+      // after the read, verification state included.
+      setData(await patch<TaxDetails>(`employees/${employeeId}/tax`, { values }, data?.etag));
       toast({ title: "Tax declarations saved", description: "Awaiting HR/payroll verification before they affect withholding.", variant: "success" });
       setOpen(false);
     } catch (e) {
-      setErr((e as Error).message);
+      if (isConflict(e)) {
+        await load();
+        setErr("Somebody else changed this declaration while you had it open. It has been reloaded - check the figures and save again.");
+        return;
+      }
+      setErr(describeError(e));
     } finally {
       setSaving(false);
     }
@@ -75,12 +94,27 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
 
   // HR/payroll verify or reject the declared figures (maker-checker: the server rejects verifying your own).
   async function decide(action: "verify" | "reject") {
+    // Rejecting un-applies the declared prior-employer income and TDS from this person's projection, which
+    // changes their withholding on the next run, and notifies them. Same weight as the reimbursement reject
+    // two files over, so it asks the same way (lib/confirmDecision.ts).
+    if (action === "reject" && !(await confirmDecision(confirm, "reject", "this prior-employer tax declaration"))) return;
     setDeciding(true);
     try {
-      setData(await patch<TaxDetails>(`employees/${employeeId}/tax`, { values: { action } }));
+      // Version AND figures: verify re-reads the blob and stamps whatever it now says, so a re-declaration
+      // between this panel loading and the click would otherwise be verified by somebody who never saw it.
+      const values =
+        action === "verify"
+          ? { action, verified_income: data?.prior_employer_income ?? 0, verified_tds: data?.prior_employer_tds ?? 0 }
+          : { action };
+      setData(await patch<TaxDetails>(`employees/${employeeId}/tax`, { values }, data?.etag));
       toast({ title: action === "verify" ? "Previous employer details verified" : "Declaration rejected", variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" });
+      if (isConflict(e)) {
+        await load();
+        toast({ title: "This declaration changed", description: "It was re-declared while this page was open. The figures have been reloaded - check them and decide again.", variant: "destructive" });
+      } else {
+        toast({ title: "Couldn't update", description: describeError(e), variant: "destructive" });
+      }
     } finally {
       setDeciding(false);
     }

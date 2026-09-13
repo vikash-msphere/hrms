@@ -3,7 +3,7 @@ import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 import type { AppEnv } from "../env";
 import { customMethod } from "../http/customMethod";
-import { listBankFormats, getBankFormat, saveBankFormat, storeBankTemplate, type BankFormat } from "../services/bankFormats";
+import { listBankFormats, getBankFormat, saveBankFormat, storeBankTemplate, bankFormatEtag, type BankFormat } from "../services/bankFormats";
 import { requireCappedBody } from "../services/documentsCommon";
 import { notFound } from "../lib/errors";
 
@@ -21,7 +21,12 @@ const patchSchema = z
   })
   .strict();
 
-const toResource = (f: BankFormat & { bank: string }) => ({ path: `bank-formats/${f.bank}`, ...f });
+// `etag` is per BANK, off that entry's own `updated_at` - see `bankFormatEtag`. `updated_at` itself stays off
+// the wire: the version is what a client needs, and the raw stamp is storage detail.
+const toResource = (f: BankFormat & { bank: string }) => {
+  const { updated_at: _stamp, ...rest } = f;
+  return { path: `bank-formats/${f.bank}`, etag: bankFormatEtag(f), ...rest };
+};
 
 export const bankFormats = new Hono<AppEnv>()
   .get("/", async (c) => c.json({ results: (await listBankFormats(c.get("deps"))).map(toResource), next_page_token: undefined }))
@@ -30,8 +35,14 @@ export const bankFormats = new Hono<AppEnv>()
     if (!f) throw notFound("bank format not found");
     return c.json(toResource(f));
   })
+  // `If-Match` is honoured when sent (the column mapping is a whole-blob write - see saveBankFormat). Absent, the
+  // write goes in unguarded, which is what every existing caller did.
   .patch("/:bank", zValidator("json", patchSchema), async (c) =>
-    c.json(toResource(await saveBankFormat(c.get("deps"), c.get("user"), c.req.param("bank"), c.req.valid("json") as Partial<BankFormat>))),
+    c.json(
+      toResource(
+        await saveBankFormat(c.get("deps"), c.get("user"), c.req.param("bank"), c.req.valid("json") as Partial<BankFormat>, c.req.header("If-Match")),
+      ),
+    ),
   )
   // `bank-formats/<bank>:uploadTemplate` stores the bank's blank template .xlsx in R2.
   .post("/:bank", async (c) => {

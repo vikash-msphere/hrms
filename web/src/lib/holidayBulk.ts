@@ -48,9 +48,15 @@ const FLAG_HALF = /^half([ -]?day)?$/i;
  *     26/01/2026 | Republic Day | optional | half day | Mumbai
  *     2026-03-04  Holi  optional
  *
- * Fields split on tab, pipe or comma; with none of those, the first whitespace-delimited token is the date and
- * the rest is the name. Blank lines and `#` comments are skipped. Later duplicates of a date already seen in
- * the paste are reported rather than silently created twice.
+ * Fields split on tab, pipe or comma; with none of those, the first whitespace-delimited token is the date,
+ * any FLAG WORDS at the end of the line are read as flags, and what is left in between is the name. That last
+ * part is what the third example needs and used not to have: the whitespace form collapsed everything after
+ * the date into one field, so no flag could ever match it and the paste created a fixed holiday literally
+ * named "Holi optional" - a closure where an elective day was meant. A location still needs a separator,
+ * because "Republic Day Mumbai" cannot be split from the name without guessing.
+ *
+ * Blank lines and `#` comments are skipped. Later duplicates of a date already seen in the paste are reported
+ * rather than silently created twice.
  */
 export function parseHolidayLines(text: string): ParsedLine[] {
   const out: ParsedLine[] = [];
@@ -63,7 +69,18 @@ export function parseHolidayLines(text: string): ParsedLine[] {
       ? trimmed.split(/\s*[\t|,]\s*/)
       : (() => {
           const [first, ...rest] = trimmed.split(/\s+/);
-          return [first ?? "", rest.join(" ")];
+          // Peel the flag words off the END of the line; whatever is left is the name. Only the tail is
+          // examined, so a holiday whose NAME contains one of these words ("Optional Holiday Fund day") keeps
+          // it - it is only a flag where a flag can be written.
+          let name = rest.join(" ");
+          const flags: string[] = [];
+          for (;;) {
+            const m = /\s+(opt|optional|half|half[ -]?day)$/i.exec(name);
+            if (!m) break;
+            flags.unshift(m[1]!);
+            name = name.slice(0, m.index);
+          }
+          return [first ?? "", name.trim(), ...flags];
         })();
     const date = parseLooseDate(parts[0] ?? "");
     if (!date) {
@@ -91,6 +108,15 @@ export function parseHolidayLines(text: string): ParsedLine[] {
     out.push({ line, raw: trimmed, draft: { date, name, kind, half_day: half, location: rest.join(", ") || null } });
   });
   return out;
+}
+
+/**
+ * A draft written back as a line this parser reads whole. The inverse of `parseHolidayLines` for one draft,
+ * used when a partly-failed bulk add rewrites the box to the rows that still have to be created: the comma
+ * form is the one that carries flags AND a location, so nothing on the line is lost on the retry.
+ */
+export function toLine(d: HolidayDraft): string {
+  return [d.date, d.name, ...(d.kind === "optional" ? ["optional"] : []), ...(d.half_day ? ["half day"] : []), ...(d.location ? [d.location] : [])].join(", ");
 }
 
 /** One row of a year-copy plan. `landsOn` is the weekday (0=Sun) the copied date falls on. */

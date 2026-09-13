@@ -67,18 +67,34 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const urlRef = useRef<string | null>(null);
+  // ONE RENDER IN FLIGHT, and it is the current one.
+  //
+  // The debounce cancels the TIMER; it never touched a render that had already left, and each of these is a
+  // full server-side PDF render, so overlap was the normal case rather than a narrow race. If an older render
+  // landed second it revoked the URL the iframe was streaming (blanking a live preview), installed a render of
+  // an older draft, and erased whichever error or "Rendering…" state the newer one owned. The manual Refresh
+  // button has no debounce at all, so a click plus one more edit produced that state deterministically.
+  //
+  // Same treatment as the sibling designer (components/settings/LetterheadDesigner.tsx), including the revoke
+  // ORDER its comment warns about: the old URL goes only once the new one is on screen, never before.
+  const renderRef = useRef<AbortController | null>(null);
   const renderPreview = useCallback(async (t: PayslipTemplate) => {
+    renderRef.current?.abort(); // supersede whatever is still running, and stop it spending the render budget
+    const controller = new AbortController();
+    renderRef.current = controller;
     setPreviewing(true);
     try {
-      const url = await blobUrl("payslips", { verb: "previewTemplate", body: { template: t } });
-      if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+      const url = await blobUrl("payslips", { verb: "previewTemplate", body: { template: t }, signal: controller.signal });
+      if (controller.signal.aborted) { URL.revokeObjectURL(url); return; }
+      const old = urlRef.current;
       urlRef.current = url;
       setPreviewUrl(url);
+      if (old) URL.revokeObjectURL(old); // the iframe has the new one now
       setPreviewError(null);
     } catch (e) {
-      setPreviewError((e as Error).message);
+      if (!controller.signal.aborted) setPreviewError((e as Error).message);
     } finally {
-      setPreviewing(false);
+      if (!controller.signal.aborted) setPreviewing(false);
     }
   }, []);
   // Re-render shortly after edits settle, so typing a label doesn't fire a PDF render per keystroke.
@@ -87,7 +103,10 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
     const id = setTimeout(() => renderPreview(template), 600);
     return () => clearTimeout(id);
   }, [template, renderPreview]);
-  useEffect(() => () => { if (urlRef.current) URL.revokeObjectURL(urlRef.current); }, []);
+  // On unmount: abort the render in flight as well as revoking what is on screen. Without the abort its
+  // promise resolved on a dead component, assigned `urlRef.current` and leaked that blob for the life of the
+  // document - navigating away from Settings mid-render was enough.
+  useEffect(() => () => { renderRef.current?.abort(); if (urlRef.current) URL.revokeObjectURL(urlRef.current); }, []);
 
   async function save() {
     if (!template) return;

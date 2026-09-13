@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Target, Plus, Pencil, Trash2, CheckCircle2, CalendarDays, ClipboardCheck, Clock3, Eye, Hourglass, MessageSquareDashed, Network, Sparkles, TrendingDown, Users, Search, Link2, X, ChevronLeft, ChevronRight } from "lucide-react";
-import { create, patch, invoke, remove, get } from "@/api";
+import { create, patch, invoke, remove, get, getAllPages } from "@/api";
 import { navigate, setRouteRecord, recordUrl } from "@/router";
 import { describeError, isConflict } from "@/lib/formError";
 import { measuredPct, measureLabel, numOrNone, weightedProgress } from "@/lib/goalMeasure";
@@ -13,7 +13,7 @@ import { Chart, ChartCard } from "@/components/common/Chart";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { fireIntent, useIntent } from "@/lib/intent";
-import { readLocal, writeLocal } from "@/lib/localPref";
+import { readLocal, writeLocal, userKey } from "@/lib/localPref";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { DataState } from "@/components/common/DataState";
@@ -76,7 +76,8 @@ const matchesFilter = (g: Goal, f: Filter) =>
   // manager. One filter for both halves, because "not agreed yet" is the state anyone is chasing.
   : f === "unagreed" ? g.stage !== "AGREED"
   : g.status === f;
-const FILTER_KEY = "goals:filter";
+// Namespaced to the caller: a chip filter is the reader's own, and a shared key opened B's Goals page on A's.
+const FILTER_KEY = () => userKey("goals:filter");
 
 const EMPTY = {
   title: "", description: "", weight: "", status: "not_started" as GoalStatus, kind: "objective" as GoalKind, due_date: "", employee: "me", parent: "none", cycle: "none", blockedBy: "none", department: "none",
@@ -132,9 +133,9 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   // Review cycles: a small, flat catalogue used to attach a goal to the cycle whose review will score it, and
   // to name that cycle on the card. Empty for anyone who can't read them, which just hides the field.
-  const { rows: reviewCycles } = useCollection<ReviewCycle>("review-cycles");
+  const { rows: reviewCycles } = useCollection<ReviewCycle>("review-cycles", { all: true });
   // For the department-owned chip and its picker; empty for anybody who cannot read departments.
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   const deptName = (ref?: string | null) => departments.find((d) => idOf(d.path) === idOf(ref ?? ""))?.display_name;
   const cycleName = (ref?: string | null) => reviewCycles.find((c) => idOf(c.path) === idOf(ref ?? ""))?.name;
   // Which goal's drawer is open. Declared up here because it also decides whether the board tasks are read.
@@ -156,12 +157,14 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
   const [etag, setEtag] = useState<string | undefined>(undefined);
   // The chip filter persists across visits (Boards does the same for its chip filters); search doesn't.
   const [filter, setFilterState] = useState<Filter>(() => {
-    const v = readLocal(FILTER_KEY) as Filter | null;
+    const key = FILTER_KEY();
+    const v = (key ? readLocal(key) : null) as Filter | null;
     return v && FILTERS.includes(v) ? v : "all";
   });
   const setFilter = (f: Filter) => {
     setFilterState(f);
-    writeLocal(FILTER_KEY, f);
+    const key = FILTER_KEY();
+    if (key) writeLocal(key, f);
   };
   const [q, setQ] = useState("");
   const [view, setViewState] = useState<GoalView>(() => {
@@ -255,6 +258,23 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
   }, [myGoals]);
 
   const [rebalanceFor, setRebalanceFor] = useState<string | null>(null);
+  // The owner's open goals, read as the owner's - not filtered out of this page's window.
+  //
+  // A spread is arithmetic over a SET: `even`/`normalise` share 100 across the rows they are handed, so a row
+  // that was missing keeps its old weight and the real total goes over 100. For an employee the page's window
+  // is their own handful of goals and the two coincide; for a manager or HR it is a page of the department's
+  // or the org's, which a single cycle passes - and rebalancing a report is the ordinary path. Goal weights
+  // drive weighted attainment in a review, which is what variable pay is computed from, so "correct only if
+  // nothing was missing" is not a usable guarantee. The route takes `?employee=`; this asks it.
+  const [rebalanceSet, setRebalanceSet] = useState<{ owner: string; goals: Goal[]; complete: boolean } | null>(null);
+  useEffect(() => {
+    if (!rebalanceFor) { setRebalanceSet(null); return; }
+    let live = true;
+    void getAllPages<Goal>(`goals?employee=${encodeURIComponent(`employees/${rebalanceFor}`)}&max_page_size=100`, 500)
+      .then(({ results, truncated }) => { if (live) setRebalanceSet({ owner: rebalanceFor, goals: results.filter(isOpen), complete: !truncated }); })
+      .catch(() => { if (live) setRebalanceSet({ owner: rebalanceFor, goals: [], complete: false }); });
+    return () => { live = false; };
+  }, [rebalanceFor]);
 
   // Weight-sum feedback: what an owner's OPEN goals' weights add up to (completed/cancelled don't count).
   const openWeightSum = (ownerId: string, excludePath?: string) =>
@@ -1115,16 +1135,21 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
           {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
       </WriteDialog>
 
-      <RebalanceDialog
-        // Keyed on the owner so the weights seed at mount rather than in an effect (see the dialog).
-        key={rebalanceFor ?? "none"}
-        ownerId={rebalanceFor}
-        goals={rebalanceFor ? sortGoals(rows.filter((g) => g.employee && idOf(g.employee) === rebalanceFor && isOpen(g))) : []}
-        ownerName={rebalanceFor === me.employee_id ? "your" : `${empName(`employees/${rebalanceFor}`)}'s`}
-        onClose={() => setRebalanceFor(null)}
-        onSaved={() => { setRebalanceFor(null); reload(); }}
-        onRefresh={reload}
-      />
+      {/* Mounted only once the owner's own goals have been read, so the weights still seed at mount rather
+          than in an effect (see the dialog) - and `complete` tells it whether it may claim to hold the whole
+          open set, which is the precondition for offering a spread at all. */}
+      {rebalanceSet && rebalanceSet.owner === rebalanceFor && (
+        <RebalanceDialog
+          key={rebalanceFor ?? "none"}
+          ownerId={rebalanceFor}
+          goals={sortGoals(rebalanceSet.goals)}
+          complete={rebalanceSet.complete}
+          ownerName={rebalanceFor === me.employee_id ? "your" : `${empName(`employees/${rebalanceFor}`)}'s`}
+          onClose={() => setRebalanceFor(null)}
+          onSaved={() => { setRebalanceFor(null); reload(); }}
+          onRefresh={reload}
+        />
+      )}
 
       <Sheet open={!!detailGoal} onOpenChange={(o) => { if (!o) closeDetail(); }}>
         {detailGoal && (
@@ -1286,9 +1311,13 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
 
 // One owner's open goals with inline weight inputs and a live total - fix an over-100 spread in one place
 // instead of reopening each goal. Saves one PATCH per changed goal (writes are rare and user-initiated).
-function RebalanceDialog({ ownerId, goals, ownerName, onClose, onSaved, onRefresh }: {
+function RebalanceDialog({ ownerId, goals, complete, ownerName, onClose, onSaved, onRefresh }: {
   ownerId: string | null;
   goals: Goal[];
+  /** Whether `goals` is known to be the owner's WHOLE open set. A spread over part of one sums to 100 across a
+   *  subset while the rest keep their weights, so the two spread buttons are withheld when this is false
+   *  rather than writing a total that is only right if nothing was missing. */
+  complete: boolean;
   ownerName: string;
   onClose: () => void;
   onSaved: () => void;
@@ -1356,7 +1385,11 @@ function RebalanceDialog({ ownerId, goals, ownerName, onClose, onSaved, onRefres
       open={!!ownerId}
       onClose={onClose}
       title={<span className="flex items-center gap-2"><Target className="h-4 w-4 text-primary" /> Rebalance weights</span>}
-      description={`Spread ${ownerName} open goals' weights; 100 total is the convention. Completed and cancelled goals don't count.`}
+      description={
+        complete
+          ? `Spread ${ownerName} open goals' weights; 100 total is the convention. Completed and cancelled goals don't count.`
+          : `Showing part of ${ownerName} open goals - more exist than could be loaded, so the total below is not their whole spread. Individual weights can still be corrected.`
+      }
       collection="goals"
       guardLabel="weights"
       form={weights}
@@ -1374,7 +1407,7 @@ function RebalanceDialog({ ownerId, goals, ownerName, onClose, onSaved, onRefres
       {/* Hitting 100 across seven goals is arithmetic, and doing arithmetic in seven number inputs is how
           weights end up at 105 and stay there. Two spreads and an undo cover every real case: they weigh the
           same, or they keep their relative sizes. Only editable rows move; the rest are somebody else's. */}
-      {editable.length > 1 && (
+      {editable.length > 1 && complete && (
         <div className="flex flex-wrap items-center gap-1.5">
           <Button type="button" variant="outline" size="sm" onClick={even}>Split evenly</Button>
           <Button type="button" variant="outline" size="sm" disabled={editableTotal === 0} onClick={normalise}>Scale to 100</Button>

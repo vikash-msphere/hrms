@@ -41,6 +41,13 @@ export function Combobox({
   const [query, setQuery] = React.useState("");
   const [active, setActive] = React.useState(0);
   const listRef = React.useRef<HTMLDivElement>(null);
+  // The combobox pattern's wiring. `active` is real state - arrow keys move it, `bg-accent` highlights it and
+  // Enter commits it - so a sighted reader watches the highlight travel while a screen-reader user got nothing
+  // at all: focus never leaves the search box, and without `aria-activedescendant` there is nothing to
+  // announce. This control exists to REPLACE ui/select (Radix, fully ARIA-correct) on exactly the lists too
+  // long to scan, so the lists that most need announcing were the ones that had none.
+  const listId = React.useId();
+  const optionId = (idx: number) => `${listId}-opt-${idx}`;
   const selected = options.find((o) => o.value === value);
 
   const filtered = React.useMemo(() => {
@@ -68,6 +75,10 @@ export function Combobox({
         <button
           type="button"
           id={id}
+          role="combobox"
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          aria-controls={open ? listId : undefined}
           disabled={disabled}
           autoFocus={autoFocus}
           className={cn(
@@ -88,6 +99,14 @@ export function Combobox({
           <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
           <input
             autoFocus
+            role="combobox"
+            aria-expanded
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-label={searchPlaceholder}
+            // The highlight, spoken. Without this the reader is told nothing as ↑/↓ move `active`, and Enter
+            // picks an option they were never told about.
+            aria-activedescendant={filtered[active] ? optionId(active) : undefined}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
@@ -114,14 +133,18 @@ export function Combobox({
         </div>
         {/* Bounded by the room Radix measured, so on a phone the list ends above the screen edge instead of
             being clipped by it (a 20-name list otherwise runs off the bottom with no way to reach the tail). */}
-        <div ref={listRef} className="max-h-[min(15rem,var(--radix-popover-content-available-height,15rem))] overflow-y-auto overscroll-contain p-1">
+        <div ref={listRef} id={listId} role="listbox" className="max-h-[min(15rem,var(--radix-popover-content-available-height,15rem))] overflow-y-auto overscroll-contain p-1">
           {filtered.length === 0 ? (
-            <p className="px-2 py-6 text-center text-sm text-muted-foreground">{emptyText}</p>
+            // Announced: filtering to nothing is a state change with no other signal - the list simply empties.
+            <p role="status" aria-live="polite" className="px-2 py-6 text-center text-sm text-muted-foreground">{emptyText}</p>
           ) : (
             filtered.map((o, idx) => (
               <button
                 key={o.value}
                 type="button"
+                id={optionId(idx)}
+                role="option"
+                aria-selected={o.value === value}
                 data-idx={idx}
                 onMouseMove={() => setActive(idx)}
                 onClick={() => choose(o)}

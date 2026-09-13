@@ -8,6 +8,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { useDebounced } from "@/hooks/useDebounced";
 import { useIntent } from "@/lib/intent";
 import { cn, formatBytes, formatDate, humanize, idOf, initials } from "@/lib/utils";
+import { useRowKeys } from "@/lib/rowKeys";
 import { setRouteRecord, recordUrl } from "@/router";
 import { timeAgo } from "@/lib/activity";
 import { RichText } from "@/lib/richText";
@@ -161,7 +162,7 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
   // Also the @-mention picker's source (useMentions): on one page you could only mention the first hundred
   // people, and a colleague the menu cannot offer is indistinguishable from one who does not exist.
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
 
@@ -176,7 +177,7 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
   }, []);
   // Predefined checklists the caller can see (the collection list is scoped by the access middleware, so the
   // pickers only ever show checklists this user has been granted read on).
-  const { rows: checklists } = useCollection<TicketChecklist>("ticket-checklists");
+  const { rows: checklists } = useCollection<TicketChecklist>("ticket-checklists", { all: true });
 
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
@@ -222,11 +223,13 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
   }, [categories]);
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "Unassigned");
+    // Tickets are cross-departmental by nature, so an assignee outside the caller's slice of the directory is
+    // ordinary - and reads as a word, never as the raw wire id (lib/utils.ts `personName`).
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Someone" : "Unassigned");
   }, [employees]);
   const deptName = useMemo(() => {
     const m = new Map(departments.map((d) => [idOf(d.path), d.display_name]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown department" : "-");
   }, [departments]);
 
   // `useCallback` so the queues below depend on the predicates they filter with, not on a restatement of the
@@ -425,7 +428,10 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
         const r = await bulkInvoke("tickets", "resolve", sel);
         toast(bulkSummary("Resolved", r));
         reload();
-        if (r.failed > 0) throw new Error("partial"); // keep the failed rows selected for a retry
+        // Only the FAILED rows stay selected. Throwing kept them all, and after the reload the resolved ones
+        // no longer satisfy this action's own `disabled` guard - so the retry button went grey over a
+        // selection the reader then had to unpick by hand.
+        return r.failedRows;
       },
     },
     {
@@ -440,7 +446,7 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
         const r = await bulkInvoke("tickets", "close", sel);
         toast(bulkSummary("Closed", r));
         reload();
-        if (r.failed > 0) throw new Error("partial");
+        return r.failedRows; // keep only what failed - see the note on "Resolve" above
       },
     },
   ];
@@ -588,6 +594,11 @@ function NewTicketDialog({ open, onOpenChange, form, setForm, files, setFiles, c
   useEffect(() => { if (!open) setItem(""); }, [open]);
   const addItem = () => { const v = item.trim(); if (!v) return; setForm({ ...form, todos: [...form.todos, v] }); setItem(""); };
   const removeItem = (i: number) => setForm({ ...form, todos: form.todos.filter((_, j) => j !== i) });
+  // Keyed by row identity rather than position: both of these lists are removable in place, and an index key
+  // makes React reuse the DOM node for the slot rather than for the row, so the removed row's state (focus, a
+  // hover-revealed button, a running transition) is inherited by whatever slides up into it.
+  const fileKeys = useRowKeys(files);
+  const todoKeys = useRowKeys(form.todos);
   const applyChecklist = (path: string) => {
     const cl = checklists.find((c) => c.path === path);
     if (cl) setForm({ ...form, todos: [...form.todos, ...cl.items] });
@@ -673,7 +684,7 @@ function NewTicketDialog({ open, onOpenChange, form, setForm, files, setFiles, c
         <Field label="Attachments (optional)" hint={`Screenshots, logs, a PDF. Up to ${MAX_ATTACHMENTS} files.`}>
           <div className="space-y-1.5">
             {files.map((f, i) => (
-              <div key={i} className="flex items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5 text-sm">
+              <div key={fileKeys[i]} className="flex items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5 text-sm">
                 <Paperclip className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1 truncate">{f.name}</span>
                 <span className="shrink-0 text-xs text-muted-foreground">{formatBytes(f.size)}</span>
@@ -714,7 +725,7 @@ function NewTicketDialog({ open, onOpenChange, form, setForm, files, setFiles, c
           {form.todos.length > 0 && (
             <div className="space-y-1.5">
               {form.todos.map((it, i) => (
-                <div key={i} className="group flex items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5 text-sm">
+                <div key={todoKeys[i]} className="group flex items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5 text-sm">
                   <Check className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <span className="flex-1">{it}</span>
                   <Button type="button" variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 coarse:h-9 coarse:w-9" onClick={() => removeItem(i)} aria-label="Remove"><Trash2 className="h-3.5 w-3.5" /></Button>
@@ -794,7 +805,24 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
     setReply("");
     setNewTodo("");
     setError(null);
-    get<Ticket>(`tickets/${idOf(ticketPath)}`).then(setFull).catch(() => setFull(latestTicket.current ?? null));
+    // A `live` latch, because the drawer is QUEUE-NAVIGABLE and carries no `key`: "next" changes `ticketPath`
+    // in place rather than remounting, so three presses on a slow connection is three fetches in flight with
+    // nothing to say which belongs to the ticket on screen - and the last to land won.
+    //
+    // That is not a display swap. `const t = full ?? ticket` is what the whole drawer renders AND ACTS on, so a
+    // stale `full` meant replying, changing state, reassigning, adding a to-do or attaching a screen recording
+    // was applied to a ticket the reader was not looking at, under the header of the one they were.
+    // `App.tsx:522` describes the same failure on the employee profile; `Pipeline`'s ApplicationDrawer is the
+    // in-repo implementation of this fix.
+    //
+    // `setFull(null)` first, so the drawer falls back to the row in hand rather than showing the PREVIOUS
+    // ticket's full record for as long as the fetch takes.
+    let live = true;
+    setFull(null);
+    get<Ticket>(`tickets/${idOf(ticketPath)}`)
+      .then((t) => { if (live) setFull(t); })
+      .catch(() => { if (live) setFull(latestTicket.current ?? null); });
+    return () => { live = false; };
   }, [ticketPath]);
 
   // Keep the thread pinned to the latest reply (new replies append at the bottom of a scrolling region).

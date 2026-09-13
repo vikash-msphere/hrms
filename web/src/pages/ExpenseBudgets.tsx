@@ -5,6 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { idOf, formatMoney, formatDate, round2, cn } from "@/lib/utils";
+import { thisYearStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { navigate } from "@/router";
 import type { Expense, ExpenseBudget, ExpenseCategory, Department, Me } from "@/types";
@@ -156,8 +157,8 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
   const { rows, state, error, reload, hasMore, loadMore, meta } = useCollection<ExpenseBudget>("expense-budgets", { deletedOnly, params });
   const summary = meta?.summary as { count: number; amount: number; spent: number; pending: number; over: number; at_risk: number } | undefined;
   const phaseCounts = (meta?.phase_counts ?? { current: 0, upcoming: 0, past: 0 }) as { current: number; upcoming: number; past: number };
-  const { rows: categories } = useCollection<ExpenseCategory>("expense-categories");
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: categories } = useCollection<ExpenseCategory>("expense-categories", { all: true });
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   const { org } = useOrg();
   const { toast } = useToast();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
@@ -175,7 +176,10 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
   const guard = useDialogGuard(open, form, () => setOpen(false), { label: "budget" });
   const [amountTouched, setAmountTouched] = useState(false);
   const [view, setView] = useState<"table" | "rollup" | "matrix">("table");
-  const [year, setYear] = useState(new Date().getUTCFullYear());
+  // The ORG's year. The period BOUNDARIES in this file are UTC-anchored and internally consistent, but "which
+  // year is it" is a question lib/orgDay answers for the whole app, and a UTC year is neither the viewer's nor
+  // the org's for part of every New Year's Day.
+  const [year, setYear] = useState(Number(thisYearStr()));
   const [groupBy, setGroupBy] = useState<"department" | "category">("department");
   const [detailPath, setDetail] = useState<string | null>(null);
   // A deep link (#/expense-budgets/<id>) opens that cap's detail panel.
@@ -194,8 +198,9 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
       .catch(() => {});
   }, []);
 
-  const catName = useMemo(() => { const m = new Map(categories.map((c) => [idOf(c.path), c.display_name])); return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "All categories"); }, [categories]);
-  const deptName = useMemo(() => { const m = new Map(departments.map((d) => [idOf(d.path), d.display_name])); return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "Org-wide"); }, [departments]);
+  // Unresolvable reads as a word, never as the raw wire id (lib/utils.ts `personName` states the rule).
+  const catName = useMemo(() => { const m = new Map(categories.map((c) => [idOf(c.path), c.display_name])); return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown category" : "All categories"); }, [categories]);
+  const deptName = useMemo(() => { const m = new Map(departments.map((d) => [idOf(d.path), d.display_name])); return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown department" : "Org-wide"); }, [departments]);
 
   const now = Date.now();
   const pctOf = (b: ExpenseBudget) => Math.round((b.utilization ?? 0) * 100);
@@ -358,7 +363,10 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
   }, [open, editing, amountTouched, priorCap]);
 
   async function submit() {
-    if (!valid) return;
+    // Both halves of the button's condition, here rather than restated on the Enter path: Enter fires from any
+    // <input> in the dialog, and its handler carried only the `busy` half, so pressing it saved a budget the
+    // disabled button refuses.
+    if (busy || !valid) return;
     setBusy(true);
     setErr(null);
     try {
@@ -886,7 +894,7 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
       </Dialog>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent scrollBody onEnterSubmit={() => { if (!busy) void submit(); }}>
+        <DialogContent scrollBody onEnterSubmit={() => void submit()}>
           <AccessScope collection="expense-budgets" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit budget" : "New budget"}</DialogTitle>
@@ -1156,7 +1164,7 @@ function YearMatrix({
   onOpen: (b: ExpenseBudget) => void;
   onRoll?: (caps: ExpenseBudget[]) => void;
 }) {
-  const thisYear = new Date().getUTCFullYear();
+  const thisYear = Number(thisYearStr()); // the org's year, like the selector above
   const years = Array.from({ length: 7 }, (_, i) => thisYear - 4 + i);
 
   const scopes = useMemo(() => {
@@ -1470,7 +1478,7 @@ function ScopeSpendSoFar({ open, category, department, periodType, periodKey, am
 // year. It emits exactly the key format the server validates ("2026-07" | "2026-Q3" | "2026"), so nobody has
 // to learn that format to author a budget.
 function PeriodPicker({ type, value, onChange }: { type: PeriodType; value: string; onChange: (key: string) => void }) {
-  const thisYear = new Date().getUTCFullYear();
+  const thisYear = Number(thisYearStr()); // the org's year, like the selector above
   const years = Array.from({ length: 7 }, (_, i) => thisYear - 2 + i);
   const parsed = periodRange(type, value);
   const year = parsed ? new Date(parsed.start).getUTCFullYear() : thisYear;

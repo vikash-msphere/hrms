@@ -1,11 +1,12 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { UserCheck, Plus, Check, Link2, Pencil, Trash2, RotateCcw, ShieldX, Play, AlertTriangle } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf, personName } from "@/lib/utils";
-import { todayStr } from "@/lib/orgDay";
+import { describeError } from "@/lib/formError";
+import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
 import type { BackgroundCheck, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
@@ -54,8 +55,11 @@ const STANDARD_SET = ["identity", "address", "education", "employment"];
 // A check still with the vendor. Past this many days open it is the one to chase - the table flags the same age.
 const STALE_DAYS = 14;
 const isOpenCheck = (c: BackgroundCheck) => !c.delete_time && (c.status === "pending" || c.status === "in_progress");
+// Days on the ORG's calendar: `initiated_date` is date-only, so `new Date(...)` reads it at UTC midnight and
+// differencing that against `Date.now()` is a third clock - neither the viewer's nor the org's - which moves
+// the chase list by a day for part of every day.
 const isStaleCheck = (c: BackgroundCheck) =>
-  isOpenCheck(c) && !!c.initiated_date && (Date.now() - new Date(c.initiated_date).getTime()) / 86400000 > STALE_DAYS;
+  isOpenCheck(c) && !!c.initiated_date && daysBetweenYmd(c.initiated_date.slice(0, 10), todayStr()) > STALE_DAYS;
 
 function StatusBadge({ s }: { s: string }) {
   if (s === "clear") return <Badge variant="success" className="gap-1"><Check className="h-3 w-3" /> Clear</Badge>;
@@ -86,6 +90,9 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
   const [proof, setProof] = useState<File | null>(null);
   // Order the whole standard set for a new joiner rather than one check at a time.
   const [standardSet, setStandardSet] = useState(false);
+  // Which of the standard-set checks this dialog has already created, so a retry after a partial run resumes
+  // rather than restarting (see `submit`). Cleared when the dialog closes.
+  const filedThisDialog = useRef(new Set<string>());
 
   const empById = useMemo(() => new Map(employees.map((e) => [idOf(e.path), e])), [employees]);
   const emp = (p?: string) => (p ? empById.get(idOf(p)) : undefined);
@@ -128,7 +135,7 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
     // A check under discussion gets pasted into a thread; `useDeepOpen` above reads this back.
     setRouteRecord(idOf(c.path));
   }
-  function closeDialog() { setOpen(false); setRouteRecord(null); }
+  function closeDialog() { setOpen(false); setRouteRecord(null); filedThisDialog.current = new Set(); }
   function copyLink(c: BackgroundCheck) {
     navigator.clipboard.writeText(recordUrl("background-checks", idOf(c.path))).then(
       () => toast({ title: "Link copied", description: "Anyone who can see this check can open it." }),
@@ -160,7 +167,21 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
       toast({ title: "Check updated", variant: "success" });
     } else if (standardSet) {
       // One vendor, one initiation date, four checks: what actually gets ordered for a new joiner.
-      for (const t of STANDARD_SET) await create("background-checks", bodyFromForm(t, t === form.check_type ? document : ""));
+      //
+      // RESUMABLE. A throw reaches WriteDialog, which keeps the form exactly as typed, so pressing Save again
+      // re-ran the loop from the start and created duplicates of whatever had already landed - and a duplicate
+      // background check is not cosmetic, it is a second open order with a vendor about a named person.
+      // `filedThisDialog` survives between attempts, so a retry picks up at the type that failed.
+      for (const t of STANDARD_SET) {
+        if (filedThisDialog.current.has(t)) continue;
+        try {
+          await create("background-checks", bodyFromForm(t, t === form.check_type ? document : ""));
+        } catch (e) {
+          reload(); // the ones that landed are real, and belong on screen
+          throw new Error(`Added ${filedThisDialog.current.size} of ${STANDARD_SET.length}. ${describeError(e)} Press Save again to carry on from the ${humanize(t).toLowerCase()} check.`);
+        }
+        filedThisDialog.current.add(t);
+      }
       toast({ title: `${STANDARD_SET.length} checks added`, description: STANDARD_SET.map(humanize).join(", "), variant: "success" });
     } else {
       await create("background-checks", bodyFromForm(form.check_type, document));
@@ -210,7 +231,7 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
       cell: (c) => {
         if (!c.initiated_date) return <span className="text-muted-foreground">-</span>;
         const isOpen = !c.delete_time && (c.status === "pending" || c.status === "in_progress");
-        const age = isOpen ? Math.max(0, Math.floor((Date.now() - new Date(c.initiated_date).getTime()) / 86400000)) : null;
+        const age = isOpen ? Math.max(0, daysBetweenYmd(c.initiated_date.slice(0, 10), todayStr())) : null;
         return (
           <span>
             {formatDate(c.initiated_date)}

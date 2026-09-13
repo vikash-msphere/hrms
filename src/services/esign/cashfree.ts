@@ -256,7 +256,14 @@ export const cashfreeProvider: EsignProvider = {
     if (!res.ok) throw new Error(`esign: Cashfree createRequest failed ${await failDetail(res)}`);
     const j = (await res.json()) as { reference_id?: number; signing_link?: string; status?: string };
     if (j.reference_id == null) throw new Error("esign: Cashfree did not return a reference_id");
-    return { providerRef: String(j.reference_id), signUrl: j.signing_link, status: mapStatus(j.status) };
+    // The signing link is a third party's JSON field that ends up in `window.open` on a page of ours, so it is
+    // checked where it ENTERS the system rather than trusted all the way down: a `javascript:` URL opened from
+    // a same-origin document runs in this origin, which makes an unvalidated value an XSS sink and not merely
+    // a navigation. `https` only, not `https?` - a signing session has no business on plain HTTP. Same rule
+    // the app already applies to a link an employee types into a post (web/src/lib/richText.tsx#safeHref) and
+    // to outbound webhook targets (src/lib/urlGuard.ts).
+    const signUrl = typeof j.signing_link === "string" && /^https:\/\//i.test(j.signing_link) ? j.signing_link : undefined;
+    return { providerRef: String(j.reference_id), signUrl, status: mapStatus(j.status) };
   },
 
   async parseWebhook(i: WebhookInput): Promise<WebhookResult> {

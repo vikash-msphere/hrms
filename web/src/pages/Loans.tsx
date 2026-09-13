@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { HandCoins, Plus, Check, X, Banknote, Trash2 } from "lucide-react";
 import { create, invoke, remove, type ApiError } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { cn, formatMoney, idOf } from "@/lib/utils";
+import { cn, formatMoney, idOf, round2 } from "@/lib/utils";
+import { thisMonthStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Employee, Loan, LoanStatus, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -244,11 +245,16 @@ function RequestDialog({ onClose, onCreated }: {
   // typing counts as work worth protecting.
   const guard = useDialogGuard(true, { kind, principal, installments, reason }, onClose, { label: "request" });
   const months = Number(installments);
-  const emi = valid ? Math.round((amount / months) * 100) / 100 : 0;
+  // `round2` (lib/utils), never an inline `Math.round(n * 100) / 100`: the inline form multiplies in float, so
+  // a decimal half-case rounds the WRONG way (₹100,050 over 100 months is 1000.5, and `1000.5 * 100` is
+  // `100049.99…`). The server derives the deduction with `round2` (src/domain/loans.ts), and this dialog is the
+  // single screen that tells a borrower what will come out of their salary each month - the two must agree.
+  const emi = valid ? round2(amount / months) : 0;
   // When the recovery ends, in months a borrower can picture: payroll takes one EMI per calendar month from
-  // the first run after disbursal, so the schedule is knowable the moment the two numbers are typed.
+  // the first run after disbursal, so the schedule is knowable the moment the two numbers are typed. Stepped
+  // from the ORG's month, not the viewer's - lib/orgDay exists to give one answer to "what month is it".
   const lastMonth = valid
-    ? new Date(new Date().getFullYear(), new Date().getMonth() + months, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" })
+    ? new Date(Date.UTC(Number(thisMonthStr().slice(0, 4)), Number(thisMonthStr().slice(5, 7)) - 1 + months, 1)).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" })
     : "";
 
   async function submit() {

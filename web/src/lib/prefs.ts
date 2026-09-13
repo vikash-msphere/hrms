@@ -1,4 +1,5 @@
-import { listAll, patch } from "@/api";
+import { get, listAll, patch } from "@/api";
+import { storedIdentity } from "@/lib/clientStore";
 import { publish, subscribeTopic } from "@/lib/crossTabBus";
 
 // One read of the caller's OWN preferences, shared by every consumer of them.
@@ -32,6 +33,29 @@ export async function readPref<T>(key: string): Promise<T | undefined> {
   const all = await load();
   const v = all.get(key);
   return v === undefined || v === null ? undefined : (v as T);
+}
+
+/**
+ * Re-read ONE preference from the server, bypassing the page-life snapshot, and refresh the snapshot with it.
+ *
+ * For the read-modify-write case, which the memoized snapshot is wrong for. A preference whose value is a LIST
+ * that several writers append to - `push_subscriptions`, one entry per device - is read here, edited, and
+ * PATCHed back whole, with no `If-Match` and no server-side merge. A tab open since before another device
+ * enrolled holds that device's absence in the snapshot, so enabling (or disabling) push in this browser wrote
+ * the stale list back and silently dropped the other device's subscription.
+ *
+ * Falls back to the snapshot when the row cannot be read (never written yet, or offline): that is the same
+ * answer as before, not a reason to refuse the write.
+ */
+export async function refetchPref<T>(key: string): Promise<T | undefined> {
+  try {
+    const row = await get<{ value?: unknown }>(`preferences/${key}`);
+    const v = row?.value;
+    apply(key, v);
+    return v === undefined || v === null ? undefined : (v as T);
+  } catch {
+    return readPref<T>(key);
+  }
 }
 
 /** Persist a preference and keep the shared snapshot in step. Fire-and-forget: a failed save is not fatal. */
@@ -74,6 +98,16 @@ const pending = new Map<string, { value: unknown; timer: ReturnType<typeof setTi
 export function stagePref(key: string, value: unknown): void {
   apply(key, value);
   publish(TOPIC_SET, { key, value } satisfies SetMsg);
+  // "Rides along" has to be implemented, not just promised. `flushPref` sends `pending.get(key).value`, which
+  // is the value CAPTURED when the timer was armed - so a stage in between was applied here and to sibling tabs
+  // and then dropped on the floor. `tabActivity` hit this on an ordinary pair of navigations: visit a badged
+  // tab (deferred, 30 s), visit an unbadged one inside the window (staged only), and the flush sent the first
+  // map - the second tab's stamp never reached the server, `clearUnconfirmed` removed the local record, and the
+  // tab badged again on another device for activity the reader had already looked at.
+  const p = pending.get(key);
+  if (!p) return;
+  p.value = value;
+  markUnconfirmed(key, value); // the outstanding record must describe what will actually be sent
 }
 
 export function writePrefDeferred(key: string, value: unknown, delayMs: number): void {
@@ -95,11 +129,28 @@ export function writePrefDeferred(key: string, value: unknown, delayMs: number):
 // page that starts while one is outstanding believes the local copy over the row it fetched, and re-sends it.
 // This device therefore never forgets what it was told; another device sees it as soon as one of the sends
 // lands. It is one small object, so it is stored whole rather than a key at a time.
-const UNCONFIRMED_LS = "prefs.unconfirmed";
+//
+// NAMESPACED TO THE CALLER, like every other per-user key in the app (`draft:`, `tab_seen:`, `dt:`,
+// `nav:collapsed:`, `palette:frecent:`). What lands in here is not incidental - it is every saved table view
+// with its filters and search text, the dashboard layout, the tab-seen map - and `adoptUnconfirmed` does not
+// merely read it back, it PATCHes it onto `preferences/*` AS WHOEVER IS SIGNED IN NOW. Under one global key
+// that meant: A saves a view, their session lapses inside the 5 s window (an ordinary exit leaves localStorage
+// alone - only the sign-out menu clears it), B signs in on the same browser, and A's layouts become B's, on the
+// server, following B to their other devices. `lib/tablePrefs.ts` states the invariant this defeated in as many
+// words, then routed the identical payload through a shared key one layer down.
+//
+// Null until the identity is known: an "anon" record would be written by whoever writes before identity lands
+// and then adopted by the first real caller, which is the same leak with an extra step.
+const unconfirmedKey = () => {
+  const id = storedIdentity();
+  return id ? `prefs.unconfirmed:${id}` : null;
+};
 
 function readUnconfirmed(): Record<string, unknown> {
+  const key = unconfirmedKey();
+  if (!key) return {};
   try {
-    const raw = localStorage.getItem(UNCONFIRMED_LS);
+    const raw = localStorage.getItem(key);
     const v = raw ? (JSON.parse(raw) as unknown) : null;
     return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
   } catch {
@@ -108,9 +159,11 @@ function readUnconfirmed(): Record<string, unknown> {
 }
 
 function saveUnconfirmed(map: Record<string, unknown>) {
+  const key = unconfirmedKey();
+  if (!key) return;
   try {
-    if (Object.keys(map).length) localStorage.setItem(UNCONFIRMED_LS, JSON.stringify(map));
-    else localStorage.removeItem(UNCONFIRMED_LS);
+    if (Object.keys(map).length) localStorage.setItem(key, JSON.stringify(map));
+    else localStorage.removeItem(key);
   } catch {
     /* private mode: the write still goes out, it just cannot survive this page */
   }

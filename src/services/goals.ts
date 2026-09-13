@@ -267,7 +267,7 @@ export async function lastCommentAtFor(deps: Deps, goalIds: string[]): Promise<M
   return out;
 }
 
-export async function listGoals(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false, cycleFilter?: string, withBurnup = false, stageFilter?: string) {
+export async function listGoals(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false, cycleFilter?: string, withBurnup = false, stageFilter?: string, employeeFilter?: string) {
   // Visibility was decided in the middleware (scopeFor over the grant); here we only bind it to columns.
   const conds = [applyScope(scope, schema.goals.code, schema.goals.employeeId)];
   if (statusFilter) conds.push(eq(schema.goals.status, statusFilter as Status));
@@ -277,6 +277,11 @@ export async function listGoals(deps: Deps, scope: ListScope, maxPageSize: numbe
   else if (cycleFilter) conds.push(eq(schema.goals.cycleId, idFromPath(cycleFilter)!));
   // `?stage=PROPOSED` is the manager's approval queue: the goals waiting on them, without reading everyone's.
   if (stageFilter) conds.push(eq(schema.goals.stage, stageFilter as Stage));
+  // `?employee=employees/{id}` narrows to one person's goals. The scope above still applies, so this can only
+  // ever be a narrowing of what the caller could already see - it is for the readers that need somebody's
+  // WHOLE set rather than a page of the org's: rebalancing weights across the owner's open goals is arithmetic
+  // whose answer is wrong, not merely short, if a goal is missing from it.
+  if (employeeFilter) conds.push(eq(schema.goals.employeeId, idFromPath(employeeFilter)!));
   if (!showDeleted) conds.push(isNull(schema.goals.deleteTime));
   const page = await keysetPage(deps, schema.goals, "goals", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
   // `?cycle=<path>&burnup=true` adds the cycle's attainment curve to the answer. It rides the list rather than

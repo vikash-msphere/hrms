@@ -13,6 +13,7 @@ import { DataTable, type BulkAction, type Column } from "@/components/common/Dat
 import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from "@/components/ui/dropdown-menu";
 import { idOf, cn, initials } from "@/lib/utils";
+import { useRowKeys } from "@/lib/rowKeys";
 import { todayStr, addDaysYmd, weekdayOf, daysBetweenYmd } from "@/lib/orgDay";
 import { useCanSeeActivity } from "@/lib/perm";
 import type { Me, Board, BoardMode, Card as CardT, CardComment, CardTodo, TicketChecklist, BoardColumn, WipScope, SwimlaneMode, Employee, Goal, Department, BoardMetrics, Sprint } from "@/types";
@@ -50,7 +51,7 @@ import { AccessTarget } from "@/components/access/AccessTarget";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { isConflict } from "@/lib/formError";
 import { timeAgo } from "@/lib/activity";
-import { readLocal, writeLocal, readLocalJson, writeLocalJson } from "@/lib/localPref";
+import { readLocal, writeLocal, readLocalJson, writeLocalJson, userKey } from "@/lib/localPref";
 import { useMentions } from "@/components/common/MentionPicker";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
@@ -362,7 +363,9 @@ function BoardToolbar({ filter, board, cards, empName, deptName }: { filter: Car
   );
 }
 
-const LAST_BOARD_KEY = "boards:last";
+// Namespaced to the caller, like every other per-person key. Under a shared key B landed on the board A was
+// last looking at (degraded to the first board by `valid()`, but still not theirs).
+const LAST_BOARD_KEY = () => userKey("boards:last");
 const CARD_FETCH_CAP = 500; // follow the cards cursor up to here; past it the TruncationNotice takes over
 
 export default function Boards({ me, openId }: { me: Me; openId?: string }) {
@@ -389,14 +392,19 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
     const fromUrl = valid(route.query.board);
     if (fromUrl && fromUrl !== selectedId) { setSelectedId(fromUrl); return; }
     if (valid(selectedId)) return;
-    setSelectedId(fromUrl ?? valid(readLocal(LAST_BOARD_KEY)) ?? idOf(boards[0]!.path));
+    const lastKey = LAST_BOARD_KEY();
+    // The id here is a SELECTION, not a label: it picks which board to show and never reaches the screen, so
+    // the "a ref reads as a word" rule is not the one that applies.
+    // eslint-disable-next-line no-restricted-syntax
+    setSelectedId(fromUrl ?? valid(lastKey ? readLocal(lastKey) : null) ?? idOf(boards[0]!.path));
   }, [boards, selectedId, route.query.board]);
 
   // Remember the selection and keep the URL shareable. Query-only hash writes don't add history entries here
   // (setQueryParam preserves the path), and the unsaved-changes guard ignores them.
   function selectBoard(id: string) {
     setSelectedId(id);
-    writeLocal(LAST_BOARD_KEY, id);
+    const lastKey = LAST_BOARD_KEY();
+    if (lastKey) writeLocal(lastKey, id);
     setQueryParam("board", id);
   }
 
@@ -491,11 +499,15 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
     return new Set(readLocalJson<string[]>(`boards:collapsed:${boardId}`, []));
   });
-  const toggleCollapse = (k: string) => setCollapsed((s) => {
-    const n = toggleSet(s, k);
+  // The write is OUTSIDE the updater: an updater must be pure, React re-runs it whenever it likes, and
+  // StrictMode (web/src/main.tsx) deliberately invokes it twice - so the localStorage write happened twice per
+  // click. Derived from the current state rather than from `prev`, which is the same value here (one toggle per
+  // click, and React has already flushed the previous one).
+  const toggleCollapse = (k: string) => {
+    const n = toggleSet(collapsed, k);
+    setCollapsed(n);
     writeLocalJson(`boards:collapsed:${boardId}`, [...n]);
-    return n;
-  });
+  };
 
   const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
   const { editing, openCard, closeCard } = useOpenCard(openId, cards);
@@ -508,7 +520,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   // @-mention menu, and each of those is wrong rather than short when the directory runs past one page.
   const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: composing || board.swimlane_mode === "assignee" || cards.some((c) => c.assignee) });
   const { rows: goals } = useCollection<Goal>("goals", { enabled: composing || board.swimlane_mode === "goal" || cards.some((c) => c.goal) });
-  const { rows: departments } = useCollection<Department>("departments", { enabled: composing || board.swimlane_mode === "department" || cards.some((c) => c.department) });
+  const { rows: departments } = useCollection<Department>("departments", { enabled: composing || board.swimlane_mode === "department" || cards.some((c) => c.department), all: true });
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Someone" : "");
@@ -616,10 +628,19 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
       else if (board.swimlane_mode === "priority" && laneVal) { move.to_priority = laneVal; patch.priority = laneVal as CardT["priority"]; }
       else if (board.swimlane_mode === "department") { move.to_department = laneVal ? `departments/${laneVal}` : null; patch.department = laneVal ? `departments/${laneVal}` : undefined; }
     }
-    // Optimistic move.
+    // Optimistic move, then the row the server actually wrote.
+    //
+    // TAKE THE RETURNED CARD. The optimistic patch carries the changed fields only, so the row in the store
+    // keeps the PRE-WRITE etag, and nothing corrects it until the invalidation refetch lands - a full round
+    // trip. Inside that window a second write on the same card sends the stale etag and the server refuses it,
+    // so nudging a card into a column and then adjusting its position in that column - an ordinary kanban
+    // gesture - produced "Couldn't move - etag mismatch" and a card snapping back. The dialog's verbs already
+    // do this (see the note on `act`/`submit` below); the board's own writes were not in that pass. The
+    // response is also authoritative about `rank`, which the server may have adjusted.
     setRows((prev) => prev.map((c) => (idOf(c.path) === id ? { ...c, ...patch } : c)));
     try {
-      await invoke<CardT>(`cards/${id}`, "move", card.etag, move);
+      const res = await invoke<CardT>(`cards/${id}`, "move", card.etag, move);
+      setRows((prev) => prev.map((c) => (c.path === res.path ? res : c)));
     } catch (e) {
       reload();
       toast({ title: "Couldn't move", description: (e as Error).message, variant: "destructive" });
@@ -631,12 +652,13 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     const dest = cardsIn(toCol, laneKeyOf(card));
     const rank = (dest.length ? Math.max(...dest.map((c) => c.rank ?? 0)) : 0) + RANK_STEP;
     setRows((prev) => prev.map((c) => (c.path === card.path ? { ...c, column_key: toCol, rank } : c)));
-    try { await invoke<CardT>(`cards/${idOf(card.path)}`, "move", card.etag, { to_column: toCol, rank }); }
+    // The returned row replaces the optimistic one, so its etag is current for the next write (see moveCard).
+    try { const res = await invoke<CardT>(`cards/${idOf(card.path)}`, "move", card.etag, { to_column: toCol, rank }); setRows((prev) => prev.map((c) => (c.path === res.path ? res : c))); }
     catch (e) { reload(); toast({ title: "Couldn't move", description: (e as Error).message, variant: "destructive" }); }
   }
   async function menuPatch(card: CardT, body: Partial<CardT>) {
     setRows((prev) => prev.map((c) => (c.path === card.path ? { ...c, ...body } : c)));
-    try { await patch<CardT>(`cards/${idOf(card.path)}`, body as Record<string, unknown>, card.etag); }
+    try { const res = await patch<CardT>(`cards/${idOf(card.path)}`, body as Record<string, unknown>, card.etag); setRows((prev) => prev.map((c) => (c.path === res.path ? res : c))); }
     catch (e) { reload(); toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" }); }
   }
   const tileMenu = (c: CardT) => (
@@ -808,23 +830,25 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, me
   return (
     // Opening a card is the board's primary action and was pointer-only: the tile was a plain draggable div,
     // so a keyboard could not reach a single card on the board. `role="button"` + a tab stop + Enter/Space
-    // gives it the same route in that the drag has always had a menu path for. The key handler ignores
-    // events from inside the tile so the row-actions menu and the access key keep their own keys.
+    // gives it the same route the drag has always had a menu path for.
+    //
+    // THE MENU IS A SIBLING OF THAT BUTTON, NOT A CHILD. ARIA makes a button's children presentational
+    // (WAI-ARIA 1.2 §5.2.7): their roles are dropped from the accessibility tree and their content is
+    // flattened into the button's name. Nested, the tile's actions menu - the keyboard and touch path to move,
+    // assign, block and delete a card, i.e. exactly what making the tile focusable was for - stopped being a
+    // control at all. Lifting it one level out fixes that without changing a pixel or a pointer behaviour.
+    <div className="group relative">
     <div
       draggable
       role="button"
       tabIndex={0}
       aria-label={`Open ${card.title}`}
       onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", card.path); onDragStart(); }}
-      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onClick(); } }}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } }}
       onClick={onClick}
-      className="group relative cursor-grab overflow-hidden rounded-lg border bg-card p-2.5 shadow-sm transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
+      className="relative cursor-grab overflow-hidden rounded-lg border bg-card p-2.5 shadow-sm transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
     >
       {card.blocked && <span className="absolute inset-y-0 left-0 w-1 bg-destructive" aria-hidden />}
-      <div className="absolute right-1 top-1 z-10 flex items-center" onClick={(e) => e.stopPropagation()}>
-        {menu}
-        <AccessTarget target={{ collection: "cards", objectPath: card.path, can: card.access?.can, label: "Manage task access" }} />
-      </div>
       {card.labels?.length ? <div className="mb-1.5 flex flex-wrap gap-1"><LabelChips keys={card.labels} catalog={catalog} max={3} /></div> : null}
       <p className="text-sm font-medium leading-snug">{card.title}</p>
       <div className="mt-2 flex items-center gap-1.5">
@@ -861,6 +885,13 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, me
             <span className="block h-6 w-6 rounded-full border border-dashed border-muted-foreground/40" title="Unassigned" />
           )}
         </span>
+      </div>
+    </div>
+      {/* Outside the tile's own button, above it in the stack: its controls keep their roles (see the note
+          above), and sitting in the wrapper rather than the tile is what lets them do that. */}
+      <div className="absolute right-1 top-1 z-10 flex items-center">
+        {menu}
+        <AccessTarget target={{ collection: "cards", objectPath: card.path, can: card.access?.can, label: "Manage task access" }} />
       </div>
     </div>
   );
@@ -1027,8 +1058,11 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   const [todos, setTodos] = useState<CardTodo[]>(card?.todos ?? []);
   const [newTodo, setNewTodo] = useState("");
   const [initialTodos, setInitialTodos] = useState<string[]>([]); // staged checklist for a NEW card (no id yet)
+  // Keyed by row identity, not position: these rows are removable in place, and an index key hands the removed
+  // row's DOM node (its hover state, its focus) to whichever row slides up into that slot.
+  const initialTodoKeys = useRowKeys(initialTodos);
   // Predefined checklist templates (shared catalog); the picker only shows those the caller can read.
-  const { rows: checklists } = useCollection<TicketChecklist>("ticket-checklists");
+  const { rows: checklists } = useCollection<TicketChecklist>("ticket-checklists", { all: true });
   const [labels, setLabels] = useState<string[]>(card?.labels ?? []);
   // Linked documents: org-document ids (link-only). Fetched lazily - the list loads only while a dialog is
   // open, and only for callers who can read org-documents at all (useCollection's capability gate).
@@ -1345,13 +1379,27 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
     const from = curColumn;
     setBusy(true);
     try {
-      await invoke(`cards/${idOf(card!.path)}`, "move", undefined, { to_column: toCol });
+      // The etag goes OUT and the new one comes back, the rule `act` above states and every sibling write in
+      // this dialog follows. Without it this move was unguarded in both directions: it silently overwrote a
+      // concurrent move that a drag on the board (which does pass `card.etag`) would have refused, and it
+      // left this dialog holding a pre-move etag - so the next Save reported a conflict with "somebody else"
+      // who was in fact the same person, seconds earlier, with a diff banner showing their own change.
+      const res = await invoke<CardT>(`cards/${idOf(card!.path)}`, "move", etag, { to_column: toCol });
+      setEtag(res.etag);
       setCurColumn(toCol);
       toast({
         title: undoing ? `Back in ${colLabel(toCol)}` : `Moved to ${colLabel(toCol)}`,
         ...(undoing || !from ? {} : { action: { label: "Undo", onClick: () => void moveStatus(from, true) }, duration: 8000 }),
       });
     } catch (e) {
+      // A genuine lost race says so, and hands over the version that won, rather than moving the card anyway
+      // or leaving the reader to decode "etag mismatch". Same recovery the Save path already has.
+      if (isConflict(e)) {
+        const fresh = await get<CardT>(`cards/${idOf(card!.path)}`).catch(() => null);
+        if (fresh) { setEtag(fresh.etag); setConflict(fresh); if (fresh.column_key) setCurColumn(fresh.column_key); }
+        toast({ title: "Somebody else moved this task", description: "It is now shown where they put it - move it again if you still want to.", variant: "destructive" });
+        return;
+      }
       toast({ title: "Couldn't move", description: (e as Error).message, variant: "destructive" });
     } finally {
       setBusy(false);
@@ -1729,7 +1777,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
             {initialTodos.length > 0 && (
               <div className="space-y-1.5">
                 {initialTodos.map((t, i) => (
-                  <div key={i} className="group flex items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5 text-sm">
+                  <div key={initialTodoKeys[i]} className="group flex items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5 text-sm">
                     <span className="flex-1">{t}</span>
                     <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 coarse:h-9 coarse:w-9" onClick={() => setInitialTodos((s) => s.filter((_, j) => j !== i))} aria-label="Remove"><Trash2 className="h-3.5 w-3.5" /></Button>
                   </div>
@@ -2044,7 +2092,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
   // are read when a row is actually opened. Same rule as the board grid.
   const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: !!editing || cards.some((c) => c.assignee) });
   const { rows: goals } = useCollection<Goal>("goals", { enabled: !!editing });
-  const { rows: departments } = useCollection<Department>("departments", { enabled: !!editing });
+  const { rows: departments } = useCollection<Department>("departments", { enabled: !!editing, all: true });
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Someone" : "");
@@ -2088,7 +2136,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
               const r = await bulkInvoke("cards", "move", sel, { to_column: lastColumn.key });
               toast(bulkSummary("Moved", r));
               reload();
-              if (r.failed > 0) throw new Error("partial"); // keep the failures selected for a retry
+              return r.failedRows; // only what failed stays selected, so the retry acts on exactly those
             },
           },
           {
@@ -2100,7 +2148,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
               const r = await bulkInvoke("cards", "move", sel, { to_column: firstColumn.key });
               toast(bulkSummary("Moved", r));
               reload();
-              if (r.failed > 0) throw new Error("partial");
+              return r.failedRows;
             },
           },
         ]
@@ -2113,7 +2161,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
           const r = await bulkInvoke("cards", "assign", sel, { assignee: `employees/${me.employee_id}` });
           toast(bulkSummary("Assigned", r));
           reload();
-          if (r.failed > 0) throw new Error("partial");
+          return r.failedRows;
         },
       },
       {
@@ -2126,7 +2174,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
           const r = await bulkInvoke("cards", "assign", sel, { assignee: "" });
           toast(bulkSummary("Unassigned", r));
           reload();
-          if (r.failed > 0) throw new Error("partial");
+          return r.failedRows;
         },
       },
       {
@@ -2137,7 +2185,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
           const r = await bulkInvoke("cards", "prioritize", sel, { priority: "urgent" });
           toast(bulkSummary("Prioritized", r));
           reload();
-          if (r.failed > 0) throw new Error("partial");
+          return r.failedRows;
         },
       },
       {
@@ -2147,7 +2195,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
         run: async (sel: CardT[]) => {
           const r = await bulkInvoke("cards", "watch", sel);
           toast(bulkSummary("Now following", r));
-          if (r.failed > 0) throw new Error("partial");
+          return r.failedRows;
         },
       },
     ];
@@ -2201,7 +2249,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const composing = addBacklog || !!editing;
   const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: composing || cards.some((c) => c.assignee) });
   const { rows: goals } = useCollection<Goal>("goals", { enabled: composing || cards.some((c) => c.goal) });
-  const { rows: departments } = useCollection<Department>("departments", { enabled: composing || cards.some((c) => c.department) });
+  const { rows: departments } = useCollection<Department>("departments", { enabled: composing || cards.some((c) => c.department), all: true });
   const sprints = useMemo(
     () => allSprints.filter((s) => s.board && idOf(s.board) === boardId && !s.delete_time).sort((a, b) => (a.create_time ?? "").localeCompare(b.create_time ?? "")),
     [allSprints, boardId],
@@ -2247,8 +2295,10 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     const rank = (dest.length ? Math.max(...dest.map((c) => c.rank ?? 0)) : 0) + RANK_STEP;
     setRows((prev) => prev.map((c) => (idOf(c.path) === id ? { ...c, sprint: sprint.path, column_key: colKey, rank } : c)));
     try {
-      // One atomic op: the move verb also reassigns the sprint (no separate PATCH, one event).
-      await invoke<CardT>(`cards/${id}`, "move", card.etag, { to_column: colKey, rank, ...(inSprint ? {} : { to_sprint: sprint.path }) });
+      // One atomic op: the move verb also reassigns the sprint (no separate PATCH, one event). The returned
+      // row goes back into the store so the next drag holds a current etag (see moveCard on the board).
+      const res = await invoke<CardT>(`cards/${id}`, "move", card.etag, { to_column: colKey, rank, ...(inSprint ? {} : { to_sprint: sprint.path }) });
+      setRows((prev) => prev.map((c) => (c.path === res.path ? res : c)));
     } catch (e) {
       reload();
       toast({ title: "Couldn't move", description: (e as Error).message, variant: "destructive" });
@@ -2265,7 +2315,8 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     if (!card.sprint && rank == null) return; // already in the backlog, dropped on no particular gap
     setRows((prev) => prev.map((c) => (idOf(c.path) === id ? { ...c, sprint: undefined, ...(rank != null ? { rank } : {}) } : c)));
     try {
-      await invoke<CardT>(`cards/${id}`, "move", card.etag, { to_column: card.column_key, to_sprint: null, ...(rank != null ? { rank } : {}) });
+      const res = await invoke<CardT>(`cards/${id}`, "move", card.etag, { to_column: card.column_key, to_sprint: null, ...(rank != null ? { rank } : {}) });
+      setRows((prev) => prev.map((c) => (c.path === res.path ? res : c)));
     } catch (e) {
       reload();
       toast({ title: "Couldn't move to backlog", description: (e as Error).message, variant: "destructive" });
@@ -2275,12 +2326,12 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   // Menu-driven moves (the touch path). `menuAct` = move verb with optimistic apply; `menuPatch` = field edit.
   async function menuAct(card: CardT, body: Record<string, unknown>, optimistic: Partial<CardT>) {
     setRows((prev) => prev.map((c) => (c.path === card.path ? { ...c, ...optimistic } : c)));
-    try { await invoke<CardT>(`cards/${idOf(card.path)}`, "move", card.etag, body); }
+    try { const res = await invoke<CardT>(`cards/${idOf(card.path)}`, "move", card.etag, body); setRows((prev) => prev.map((c) => (c.path === res.path ? res : c))); }
     catch (e) { reload(); toast({ title: "Couldn't move", description: (e as Error).message, variant: "destructive" }); }
   }
   async function menuPatch(card: CardT, body: Partial<CardT>) {
     setRows((prev) => prev.map((c) => (c.path === card.path ? { ...c, ...body } : c)));
-    try { await patch<CardT>(`cards/${idOf(card.path)}`, body as Record<string, unknown>, card.etag); }
+    try { const res = await patch<CardT>(`cards/${idOf(card.path)}`, body as Record<string, unknown>, card.etag); setRows((prev) => prev.map((c) => (c.path === res.path ? res : c))); }
     catch (e) { reload(); toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" }); }
   }
   const tileMenu = (c: CardT) => {
@@ -2356,8 +2407,11 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
         const total = pts(sprintCards);
         const done = pts(sprintCards.filter((c) => c.deliver_time));
         // Days remaining, counting the end date itself as a working day. Only meaningful mid-sprint.
+        // A calendar-day difference on the ORG's clock, like the card due dates above: building an instant at
+        // the VIEWER's end-of-day and differencing it against `Date.now()` gives a different countdown per
+        // viewer, and a different one again from the due-date column in this same file.
         const daysLeft = sprint.state === "active" && sprint.end_date
-          ? Math.floor((new Date(sprint.end_date + "T23:59:59").getTime() - Date.now()) / 86400e3)
+          ? daysBetweenYmd(todayStr(), sprint.end_date.slice(0, 10))
           : null;
         return (
           <p className="mb-3 flex flex-wrap items-center gap-x-1.5 text-sm text-muted-foreground">

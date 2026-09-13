@@ -19,6 +19,9 @@ import { LetterheadDesigner } from "@/components/settings/LetterheadDesigner";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
 import { cn, idOf, formatMoney } from "@/lib/utils";
+import { useRowKeys } from "@/lib/rowKeys";
+import { describeError, isConflict } from "@/lib/formError";
+import { thisYearStr } from "@/lib/orgDay";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { EmployeeFieldDef, Employee, Department, TicketCategory, TicketChecklist, Letterhead, Me, AtsConfig, AtsStage, Automation } from "@/types";
 import { DEFAULT_ATS_CONFIG } from "@/types";
@@ -87,6 +90,76 @@ import { useConfirm } from "@/components/common/confirm";
 import { getSetting, saveSetting } from "@/lib/settingsStore";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+
+/**
+ * The failure toast every settings panel's Save runs through.
+ *
+ * `saveSetting` is the one write path in the app that sends an `If-Match`, so these panels are where a lost
+ * race is actually DETECTED - and the only place that did nothing with it. The panels toasted the generic
+ * "someone else changed this, reload the page" line and left Save live over the losing version; pressing it
+ * again SUCCEEDS, because the 409 made `saveSetting` drop the snapshot and the retry picks up the winner's
+ * fresh etag - writing this panel's whole blob over theirs, which for a ticket-category list or a kudos ladder
+ * is a section of config replaced with no sign anything was lost.
+ *
+ * A settings blob has no field-level merge to offer, so the overwrite stays available. What changes is that it
+ * is stated: press Save again and you replace their version, or reload and see what they changed first.
+ */
+/**
+ * Several independent settings keys under one Save, with a resume point.
+ *
+ * A panel that writes four keys in sequence under one try/catch fails halfway SILENTLY: the first two are
+ * committed and in force while the toast says the save did not happen. On the leave panel that is a live policy
+ * split down the middle - carry-forward caps and the encashment rate basis applying, accrual rounding and
+ * back-dating not - with the admin told nothing changed.
+ *
+ * So: report which keys landed, and remember them keyed by the exact value that landed, so pressing Save again
+ * finishes the job instead of rewriting what is already in force (and re-running the If-Match risk on a key
+ * that is already correct). A key whose value has since been edited is written again, because its stored copy
+ * is no longer what the panel is asking for.
+ */
+type SettingWrite = { key: string; label: string; value: unknown };
+type BatchResult = { ok: true } | { ok: false; error: unknown; written: string[] };
+
+function useSettingsBatch(): (writes: SettingWrite[]) => Promise<BatchResult> {
+  const landed = useRef(new Map<string, string>());
+  return async (writes: SettingWrite[]) => {
+    const written: string[] = [];
+    for (const w of writes) {
+      const json = JSON.stringify(w.value) ?? "";
+      if (landed.current.get(w.key) === json) continue; // already written, unchanged since
+      try {
+        await saveSetting(w.key, { value: w.value });
+      } catch (error) {
+        return { ok: false, error, written };
+      }
+      landed.current.set(w.key, json);
+      written.push(w.label);
+    }
+    return { ok: true };
+  };
+}
+
+/** The partial-save toast: the failure, plus what did land and what pressing Save again will do. */
+function batchError(r: { error: unknown; written: string[] }): { variant: "destructive"; title: string; description: string } {
+  const base = saveSettingError(r.error);
+  if (!r.written.length) return base;
+  const list = r.written.join(", ");
+  return {
+    ...base,
+    title: "Saved in part",
+    description: `${base.description} ${list} ${r.written.length === 1 ? "was" : "were"} saved and ${r.written.length === 1 ? "is" : "are"} already in force; press Save again to finish the rest.`,
+  };
+}
+
+function saveSettingError(e: unknown): { variant: "destructive"; title: string; description: string } {
+  return isConflict(e)
+    ? {
+        variant: "destructive",
+        title: "Somebody else changed this",
+        description: "Another admin saved this section while you had it open. Your version is still on screen: press Save again to replace theirs, or reload the page to see what they changed first.",
+      }
+    : { variant: "destructive", title: "Couldn't save", description: describeError(e) };
+}
 const DEFAULT_FIELDS: EmployeeFieldDef[] = [
   { key: "pan", label: "PAN", mandatory: false, sensitive: true },
   { key: "aadhaar", label: "Aadhaar", mandatory: false, sensitive: true },
@@ -153,7 +226,7 @@ function NotificationsTab({ toast }: { toast: Toast }) {
       markSaved();
       toast({ title: "Notification settings saved" });
     } catch (e) {
-      toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
+      toast(saveSettingError(e));
     } finally { setSaving(false); }
   }
   if (!ready) return <Card><CardContent className="pt-6"><RowsSkeleton rows={7} /></CardContent></Card>;
@@ -588,7 +661,7 @@ function EsignTab({ toast }: { toast: Toast }) {
     getSetting<Partial<EsignCfg>>("esign").then((s) => { if (s.value) setCfg((p) => ({ ...p, ...s.value, providers: s.value!.providers ?? {} })); }).catch(() => {}).finally(() => setReady(true));
     get<{ providers: ProviderMeta[] }>("esign-providers").then((r) => setProviders(r.providers ?? [])).catch(() => {});
   }, []);
-  const save = async () => { try { await saveSetting("esign", { value: cfg }); markSaved(); toast({ title: "E-signature settings saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const save = async () => { try { await saveSetting("esign", { value: cfg }); markSaved(); toast({ title: "E-signature settings saved" }); } catch (e) { toast(saveSettingError(e)); } };
   const { markSaved } = useUnsaved(cfg, ready, save);
   // Vendor config only for providers that HAVE config (Aadhaar/Cashfree); the in-app "internal" method has none.
   const vendors = providers.filter((p) => p.configFields.length > 0);
@@ -628,6 +701,12 @@ function EsignTab({ toast }: { toast: Toast }) {
 
 // Attendance schedule (settings/attendance): the shift window, grace, working days and timezone used to flag
 // late arrivals, early departures and absences across the Attendance feature.
+// PT slabs in the order this editor and the server's resolver both assume: ascending by wage bound, with the
+// open-ended band (`up_to: null`) last. Neither the settings validator nor the stored blob enforces it.
+type PtSlab = { up_to: number | null; amount: number };
+const sortSlabs = (slabs: PtSlab[]): PtSlab[] =>
+  [...slabs].sort((a, b) => (a.up_to == null ? 1 : b.up_to == null ? -1 : a.up_to - b.up_to));
+
 // Payroll policy: the CTC split + PF wage basis, overtime pricing, Professional Tax slabs, statutory gratuity at
 // exit, and the loan-interest perquisite. Each is an independent settings blob (settings/ctc, settings/overtime,
 // settings/professional-tax, settings/gratuity, settings/loan-perquisite).
@@ -647,7 +726,13 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
       getSetting<Partial<typeof approval>>("payroll-approval").then((s) => { if (s.value) setApproval((p) => ({ ...p, ...s.value })); }),
       getSetting<Partial<typeof ctc>>("ctc").then((s) => { if (s.value) setCtc((p) => ({ ...p, ...s.value })); }),
       getSetting<Partial<typeof ot>>("overtime").then((s) => { if (s.value) setOt((p) => ({ ...p, ...s.value, rate_per_hour: s.value!.rate_per_hour ?? 0 })); }),
-      getSetting<{ slabs?: { up_to: number | null; amount: number }[]; annual_cap?: number | null }>("professional-tax").then((s) => { if (s.value?.slabs?.length) setPt({ slabs: s.value.slabs, annual_cap: s.value.annual_cap ?? null }); }),
+      // SORTED on the way in, ascending with the open-ended band last - the same thing the server's resolver
+      // does ("the table is HR-editable settings data, so sort rather than trust the stored order",
+      // src/domain/statutory.ts). This editor renders the LAST row as the open-ended top bracket and forces its
+      // bound to null on save; for a stored table whose null band was not last - written by an API key, an
+      // import, a seed - that silently turned the real top band into `up_to: 0` (a bracket that matches nothing)
+      // and promoted whatever happened to be last, changing every payslip's PT line with no diff and no warning.
+      getSetting<{ slabs?: { up_to: number | null; amount: number }[]; annual_cap?: number | null }>("professional-tax").then((s) => { if (s.value?.slabs?.length) setPt({ slabs: sortSlabs(s.value.slabs), annual_cap: s.value.annual_cap ?? null }); }),
       getSetting<Partial<typeof gratuity>>("gratuity").then((s) => { if (s.value) setGratuity((p) => ({ ...p, ...s.value })); }),
       getSetting<Partial<typeof perq>>("loan-perquisite").then((s) => { if (s.value) setPerq((p) => ({ ...p, ...s.value })); }),
     ]).then(() => setReady(true));
@@ -662,18 +747,21 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
       toast({ title: "CTC provisions saved" });
       await promptReapply();
     } catch (e) {
-      toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
+      toast(saveSettingError(e));
     }
   };
-  const saveOt = async () => { try { await saveSetting("overtime", { value: { ...ot, rate_per_hour: ot.rate_per_hour > 0 ? ot.rate_per_hour : null } }); markOtSaved(); toast({ title: "Overtime policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const saveOt = async () => { try { await saveSetting("overtime", { value: { ...ot, rate_per_hour: ot.rate_per_hour > 0 ? ot.rate_per_hour : null } }); markOtSaved(); toast({ title: "Overtime policy saved" }); } catch (e) { toast(saveSettingError(e)); } };
   const savePt = async () => {
-    const slabs = pt.slabs.map((s, i) => ({ up_to: i === pt.slabs.length - 1 ? null : Number(s.up_to) || 0, amount: Number(s.amount) || 0 }));
+    // Sorted again before the positional rewrite below, so the row the editor treats as the top band is the one
+    // with the highest bound (or the null one) rather than whichever happens to sit last in the array.
+    const ordered = sortSlabs(pt.slabs);
+    const slabs = ordered.map((s, i) => ({ up_to: i === ordered.length - 1 ? null : Number(s.up_to) || 0, amount: Number(s.amount) || 0 }));
     const annual_cap = pt.annual_cap == null || !Number.isFinite(pt.annual_cap) ? null : Math.max(0, Number(pt.annual_cap));
-    try { await saveSetting("professional-tax", { value: { slabs, annual_cap } }); markPtSaved(); toast({ title: "Professional Tax slabs saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); }
+    try { await saveSetting("professional-tax", { value: { slabs, annual_cap } }); markPtSaved(); toast({ title: "Professional Tax slabs saved" }); } catch (e) { toast(saveSettingError(e)); }
   };
-  const saveGratuity = async () => { try { await saveSetting("gratuity", { value: gratuity }); markGratuitySaved(); toast({ title: "Gratuity policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
-  const savePerq = async () => { try { await saveSetting("loan-perquisite", { value: perq }); markPerqSaved(); toast({ title: "Loan perquisite policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
-  const saveApproval = async () => { try { await saveSetting("payroll-approval", { value: approval }); markApprovalSaved(); toast({ title: approval.enabled ? "Payroll runs now need a second approver" : "Payroll runs can be approved by the submitter again" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const saveGratuity = async () => { try { await saveSetting("gratuity", { value: gratuity }); markGratuitySaved(); toast({ title: "Gratuity policy saved" }); } catch (e) { toast(saveSettingError(e)); } };
+  const savePerq = async () => { try { await saveSetting("loan-perquisite", { value: perq }); markPerqSaved(); toast({ title: "Loan perquisite policy saved" }); } catch (e) { toast(saveSettingError(e)); } };
+  const saveApproval = async () => { try { await saveSetting("payroll-approval", { value: approval }); markApprovalSaved(); toast({ title: approval.enabled ? "Payroll runs now need a second approver" : "Payroll runs can be approved by the submitter again" }); } catch (e) { toast(saveSettingError(e)); } };
   const { markSaved: markApprovalSaved } = useUnsaved(approval, ready, saveApproval);
   const { markSaved: markGratuitySaved } = useUnsaved(gratuity, ready, saveGratuity);
   const { markSaved: markPerqSaved } = useUnsaved(perq, ready, savePerq);
@@ -681,6 +769,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
   const { markSaved: markOtSaved } = useUnsaved(ot, ready, saveOt);
   const { markSaved: markPtSaved } = useUnsaved(pt, ready, savePt);
   const setSlab = (i: number, patchSlab: Partial<{ up_to: number | null; amount: number }>) => setPt((p) => ({ ...p, slabs: p.slabs.map((s, j) => (j === i ? { ...s, ...patchSlab } : s)) }));
+  const slabKeys = useRowKeys(pt.slabs);
 
   return (
     <Tabs defaultValue="ctc">
@@ -755,7 +844,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
                 // "Up to [amount] → deduct [amount] [x]" is ~400px of stated width plus prose, so on a
                 // phone the row wraps after the arrow rather than running off the card.
                 return (
-                  <div key={i} className="flex flex-wrap items-center gap-2">
+                  <div key={slabKeys[i]} className="flex flex-wrap items-center gap-2">
                     <span className="text-sm text-muted-foreground">Up to</span>
                     {last ? <span className="w-32 text-sm font-medium">and above</span>
                       : <Input type="number" className="w-32" value={s.up_to ?? ""} onChange={(e) => setSlab(i, { up_to: Number(e.target.value) })} />}
@@ -847,6 +936,7 @@ function ReferralsTab({ toast }: { toast: Toast }) {
   const setTier = (i: number, p: Partial<JoinTier>) => setTiers((t) => t.map((x, j) => (j === i ? { ...x, ...p } : x)));
   const addTier = () => setTiers((t) => [...t, { max_days: 30, amount: Number(amount) || 0 }]);
   const removeTier = (i: number) => setTiers((t) => t.filter((_, j) => j !== i));
+  const tierKeys = useRowKeys(tiers);
   const [saving, setSaving] = useState(false);
   const { markSaved } = useUnsaved({ trigger, amount, tiers }, ready, save);
   async function save() {
@@ -858,7 +948,7 @@ function ReferralsTab({ toast }: { toast: Toast }) {
       markSaved();
       toast({ title: "Referral settings saved" });
     } catch (e) {
-      toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
+      toast(saveSettingError(e));
     } finally { setSaving(false); }
   }
   return (
@@ -881,7 +971,7 @@ function ReferralsTab({ toast }: { toast: Toast }) {
           {/* "Joins within [n] days → [amount] [x]" - same shape as the PT slab row above, same reason
               it has to be allowed to break on a phone. */}
           {tiers.map((t, i) => (
-            <div key={i} className="flex flex-wrap items-center gap-2">
+            <div key={tierKeys[i]} className="flex flex-wrap items-center gap-2">
               <span className="text-sm text-muted-foreground">Joins within</span>
               <Input type="number" min={0} className="w-24" value={t.max_days ?? ""} placeholder="any" onChange={(e) => setTier(i, { max_days: e.target.value === "" ? null : Number(e.target.value) })} />
               <span className="text-sm text-muted-foreground">days &rarr;</span>
@@ -930,6 +1020,9 @@ function AtsTab({ toast }: { toast: Toast }) {
     const j = i + dir; if (j < 0 || j >= c.stages.length) return c;
     const st = [...c.stages]; [st[i], st[j]] = [st[j]!, st[i]!]; return { ...c, stages: st };
   });
+  // Keyed by row identity, not position: a stage row carries a focused text input and a ↑/↓ pair on the same
+  // line, so an index key left the caret sitting on whichever row slid into that slot.
+  const stageKeys = useRowKeys(cfg.stages);
 
   const [saving, setSaving] = useState(false);
   const { markSaved } = useUnsaved(cfg, ready, save);
@@ -945,7 +1038,22 @@ function AtsTab({ toast }: { toast: Toast }) {
       taken.add(key);
       return { ...s, key, label: s.label.trim() || key };
     });
-    if (!stages.some((s) => s.kind === "hired")) { toast({ variant: "destructive", title: "Add a Hired stage", description: "One stage must have kind Hired (the success terminal)." }); return; }
+    // COUNTED, not tested for existence. The panel's own rule is "exactly one", and a second Hired stage is the
+    // terminal-shaped version of the duplicate-key failure the loop above guards against: the board renders two
+    // terminal columns, a recruiter can drag a candidate into the second, and the server's `:hire` /
+    // `offers:accept` resolve `stages.find(kind === "hired")` - the FIRST one - so the record lands at the end
+    // nobody chose.
+    const hired = stages.filter((s) => s.kind === "hired").length;
+    if (hired !== 1) {
+      toast({
+        variant: "destructive",
+        title: hired === 0 ? "Add a Hired stage" : "Only one stage can be Hired",
+        description: hired === 0
+          ? "One stage must have kind Hired (the success terminal)."
+          : `${hired} stages are marked Hired. Reaching any of them should mean the same thing, so exactly one may be the success terminal.`,
+      });
+      return;
+    }
     setSaving(true);
     try {
       await saveSetting("ats", { value: {
@@ -961,7 +1069,7 @@ function AtsTab({ toast }: { toast: Toast }) {
       markSaved();
       toast({ title: "Recruiting settings saved" });
     } catch (e) {
-      toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
+      toast(saveSettingError(e));
     } finally { setSaving(false); }
   }
 
@@ -984,7 +1092,7 @@ function AtsTab({ toast }: { toast: Toast }) {
             <p className="text-xs text-muted-foreground">The ordered columns of the hiring board. Mark exactly one stage as <b>Hired</b> (reaching it marks the candidate hired).</p>
             <div className="space-y-2">
               {cfg.stages.map((s, i) => (
-                <div key={i} className="editor-row">
+                <div key={stageKeys[i]} className="editor-row">
                   <Input className="editor-row-main" value={s.label} onChange={(e) => setStage(i, { label: e.target.value })} placeholder="Stage name" />
                   <Select value={s.kind} onValueChange={(v) => setStage(i, { kind: v as AtsStage["kind"] })}>
                     <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
@@ -1135,6 +1243,8 @@ function AttendanceTab({ toast }: { toast: Toast }) {
   }, []);
   const toggleDay = (d: number) =>
     setCfg((c) => ({ ...c, work_days: c.work_days.includes(d) ? c.work_days.filter((x) => x !== d) : [...c.work_days, d].sort((a, b) => a - b) }));
+  const graceRows = cfg.grace_exceptions ?? [];
+  const graceKeys = useRowKeys(graceRows);
   const [saving, setSaving] = useState(false);
   const { markSaved } = useUnsaved(cfg, ready, save);
   async function save() {
@@ -1144,7 +1254,7 @@ function AttendanceTab({ toast }: { toast: Toast }) {
       markSaved();
       toast({ title: "Attendance schedule saved" });
     } catch (e) {
-      toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
+      toast(saveSettingError(e));
     } finally { setSaving(false); }
   }
   return (
@@ -1200,8 +1310,8 @@ function AttendanceTab({ toast }: { toast: Toast }) {
             </Field>
             <Field label="Grace exceptions" hint="On a listed date lateness/early departure is forgiven for everyone (bad weather, transit strike). Leave extra minutes blank to waive entirely, or add minutes on top of the daily grace.">
               <div className="space-y-2">
-                {(cfg.grace_exceptions ?? []).map((ex, idx) => (
-                  <div key={idx} className="flex flex-wrap items-center gap-2">
+                {graceRows.map((ex, idx) => (
+                  <div key={graceKeys[idx]} className="flex flex-wrap items-center gap-2">
                     <Input type="date" className="w-40" value={ex.date} onChange={(e) => setCfg((c) => ({ ...c, grace_exceptions: (c.grace_exceptions ?? []).map((x, i) => i === idx ? { ...x, date: e.target.value } : x) }))} />
                     <Input className="flex-1 min-w-[10rem]" placeholder="Reason (optional)" value={ex.reason ?? ""} onChange={(e) => setCfg((c) => ({ ...c, grace_exceptions: (c.grace_exceptions ?? []).map((x, i) => i === idx ? { ...x, reason: e.target.value } : x) }))} />
                     <Input type="number" min={0} className="w-32" placeholder="Waive all" value={ex.extra_grace_minutes ?? ""} onChange={(e) => setCfg((c) => ({ ...c, grace_exceptions: (c.grace_exceptions ?? []).map((x, i) => i === idx ? { ...x, extra_grace_minutes: e.target.value === "" ? undefined : Number(e.target.value) } : x) }))} />
@@ -1306,13 +1416,19 @@ function ReimbursementsPanel({ toast, openId }: { toast: Toast; openId?: string 
   }, []);
 
   async function save(next: "payroll" | "separate") {
+    const before = mode;
     setMode(next);
     setSaving(true);
     try {
       await saveSetting("reimbursements", { value: { payout_mode: next } });
       toast({ title: "Payout mode saved", variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      // PUT BACK on failure. This panel auto-saves on click and has no `useUnsaved` marker, so a failed save
+      // used to leave the switch - and the paragraph under it - describing a mode the server rejected: the page
+      // read "Approved claims are paid out-of-band" while payroll was still quietly adding claims to the next
+      // run, until a reload silently flipped it back.
+      setMode(before);
+      toast(saveSettingError(e));
     } finally {
       setSaving(false);
     }
@@ -1386,7 +1502,7 @@ function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
       markSaved();
       toast({ title: "Expense settings saved", variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      toast(saveSettingError(e));
     } finally {
       setSaving(false);
     }
@@ -1440,7 +1556,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
 
   useEffect(() => {
     getSetting<{ categories?: TicketCategory[] }>("ticket-categories")
@@ -1452,6 +1568,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
   const update = (i: number, patch: Partial<TicketCategory>) => setCats((cs) => cs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
   const add = () => setCats((cs) => [...cs, { key: "", name: "", assignee: null, members: [], department: null }]);
   const remove = (i: number) => setCats((cs) => cs.filter((_, j) => j !== i));
+  const catKeys = useRowKeys(cats);
   const empName = (ref: string) => { const e = employees.find((x) => idOf(x.path) === idOf(ref)); return e ? `${e.first_name} ${e.last_name}` : idOf(ref); };
   const addMember = (i: number, ref: string) => setCats((cs) => cs.map((c, j) => (j === i && !(c.members ?? []).includes(ref) ? { ...c, members: [...(c.members ?? []), ref] } : c)));
   const removeMember = (i: number, ref: string) => setCats((cs) => cs.map((c, j) => (j === i ? { ...c, members: (c.members ?? []).filter((m) => m !== ref) } : c)));
@@ -1476,7 +1593,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
       markSaved();
       toast({ title: "Ticket categories saved", variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      toast(saveSettingError(e));
     } finally {
       setSaving(false);
     }
@@ -1491,7 +1608,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
         <p className="text-sm text-muted-foreground">Each category routes new tickets to a default assignee and servicing department (changeable per ticket). Members and the department's managers see every ticket in the category.</p>
         <div className="space-y-2">
           {cats.map((c, i) => (
-            <div key={i} className="space-y-3 rounded-lg border p-3">
+            <div key={catKeys[i]} className="space-y-3 rounded-lg border p-3">
               {/* Three fields plus a remove button: side by side there is room for a name and two pickers on
                   a laptop, and about 100px each on a phone. Stacked below `sm`, with the remove button pulled
                   up onto the first row so it stays next to the name it removes. */}
@@ -1617,7 +1734,9 @@ function ChecklistRow({ checklist, reload, toast }: { checklist: TicketChecklist
       reload();
       toast({ title: "Checklist saved", variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      // A record write with its own etag, not a settings blob - so this keeps the plain message rather than
+      // the settings panels' conflict copy, which is about a snapshot that re-reads on the next press.
+      toast({ title: "Couldn't save", description: describeError(e), variant: "destructive" });
     } finally {
       setBusy(false);
     }
@@ -1833,7 +1952,7 @@ function useOrgBlob(toast: Toast) {
       toast({ title: savedTitle, variant: "success" });
       return true;
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      toast(saveSettingError(e));
       return false;
     } finally {
       setSaving(false);
@@ -2073,7 +2192,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
   const [primaryColor, setPrimaryColor] = useState("#1D4C91"); // brand accent (email header/buttons; hex)
   const [emailLogoUrl, setEmailLogoUrl] = useState(""); // public https logo for email headers (the app logo is a data URL, which email clients strip)
   const [docLogos, setDocLogos] = useState<Record<string, string>>({}); // document kind -> letterhead ref; absent = the square mark
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   const letterheads = useLetterheads();
 
   const [ready, setReady] = useState(false);
@@ -2597,7 +2716,7 @@ function DashboardTab({ toast }: { toast: Toast }) {
       markSaved();
       toast({ title: savedMsg, variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      toast(saveSettingError(e));
     } finally {
       setSaving(false);
     }
@@ -2846,6 +2965,7 @@ function DefaultsTab({ toast }: { toast: Toast }) {
   const [compOff, setCompOff] = useState(false);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
+  const writeSettings = useSettingsBatch();
 
   useEffect(() => {
     void Promise.allSettled([
@@ -2866,20 +2986,30 @@ function DefaultsTab({ toast }: { toast: Toast }) {
   async function save() {
     setSaving(true);
     try {
-      await saveSetting("probation", { value: { default_months: Number(probation) } });
-      await saveSetting("holidays", {
-        value: {
-          max_optional: Number(maxOptional),
-          pick_by: pickBy || null,
-          pick_reminder_days: Number(reminderDays) || 0,
-          feed_enabled: feedEnabled,
-          comp_off_on_holiday_work: compOff,
+      // Two independent keys: a failure on the second used to commit the first and then report that nothing
+      // was saved. `writeSettings` says what landed and lets the retry pick up where it stopped.
+      const r = await writeSettings([
+        { key: "probation", label: "The probation default", value: { default_months: Number(probation) } },
+        {
+          key: "holidays",
+          label: "The holiday policy",
+          value: {
+            max_optional: Number(maxOptional),
+            pick_by: pickBy || null,
+            pick_reminder_days: Number(reminderDays) || 0,
+            feed_enabled: feedEnabled,
+            comp_off_on_holiday_work: compOff,
+          },
         },
-      });
+      ]);
+      if (!r.ok) {
+        toast(batchError(r));
+        return;
+      }
       markSaved();
       toast({ title: "Policies saved", variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      toast(saveSettingError(e));
     } finally {
       setSaving(false);
     }
@@ -2937,10 +3067,13 @@ function DefaultsTab({ toast }: { toast: Toast }) {
 // future auto-assignments; existing IDs are untouched.
 type NumCfg = { prefix: string; separator: string; width: number; include_year: boolean; year_format: "YYYY" | "YY"; start: number };
 const DEFAULT_NUM_CFG: NumCfg = { prefix: "EMP", separator: "-", width: 4, include_year: false, year_format: "YYYY", start: 1 };
+// The ORG's year (lib/orgDay), as everywhere else. The server's `formatEmployeeNumber(cfg, seq, year)` takes
+// the year as a parameter and stamps the JOINING year, so this preview is describing a different rule either
+// way - but it should at least not describe a third one, read off the viewer's calendar.
 function formatNum(c: NumCfg, seq: number): string {
   const parts: string[] = [];
   if (c.prefix) parts.push(c.prefix);
-  if (c.include_year) parts.push(c.year_format === "YY" ? String(new Date().getFullYear()).slice(-2) : String(new Date().getFullYear()));
+  if (c.include_year) parts.push(c.year_format === "YY" ? thisYearStr().slice(-2) : thisYearStr());
   parts.push(String(Math.max(0, seq)).padStart(Math.max(1, Math.min(12, c.width)), "0"));
   return parts.join(c.separator ?? "");
 }
@@ -2965,7 +3098,7 @@ function EmployeeIdsTab({ toast }: { toast: Toast }) {
       markSaved();
       toast({ title: "Employee ID format saved", variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      toast(saveSettingError(e));
     } finally {
       setSaving(false);
     }
@@ -3003,8 +3136,8 @@ function EmployeeIdsTab({ toast }: { toast: Toast }) {
             <Select value={cfg.year_format} onValueChange={(v) => set({ year_format: v as "YYYY" | "YY" })}>
               <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="YYYY">{String(new Date().getFullYear())} (YYYY)</SelectItem>
-                <SelectItem value="YY">{String(new Date().getFullYear()).slice(-2)} (YY)</SelectItem>
+                <SelectItem value="YYYY">{thisYearStr()} (YYYY)</SelectItem>
+                <SelectItem value="YY">{thisYearStr().slice(-2)} (YY)</SelectItem>
               </SelectContent>
             </Select>
           </Field>
@@ -3053,7 +3186,7 @@ function AssetTagsTab({ toast, openId }: { toast: Toast; openId?: string }) {
       markSaved();
       toast({ title: "Asset tag settings saved", variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      toast(saveSettingError(e));
     } finally {
       setSaving(false);
     }
@@ -3063,6 +3196,7 @@ function AssetTagsTab({ toast, openId }: { toast: Toast; openId?: string }) {
   const customs = cfg.custom_formats ?? [];
   const label = { ...DEFAULT_TAG_SETTINGS.label, ...(cfg.label ?? {}) };
   const setCustom = (i: number, p: Partial<SheetFormat>) => set({ custom_formats: customs.map((f, j) => (j === i ? { ...f, ...p } : f)) });
+  const customKeys = useRowKeys(customs);
   // Custody rides in the same blob; an absent block means "all defaults", which are the enforcing ones.
   const custody = cfg.custody ?? {};
   const setCustody = (p: Partial<AssetCustodySettings>) => set({ custody: { ...custody, ...p } });
@@ -3165,7 +3299,7 @@ function AssetTagsTab({ toast, openId }: { toast: Toast; openId?: string }) {
                 </p>
                 <div className="space-y-3">
                   {customs.map((f, i) => (
-                    <div key={i} className="rounded-md border p-3">
+                    <div key={customKeys[i]} className="rounded-md border p-3">
                       <div className="editor-row mb-2">
                         <Input className="w-24 font-mono sm:w-32" value={f.id} placeholder="id" onChange={(e) => setCustom(i, { id: e.target.value })} />
                         <Input className="editor-row-main" value={f.label} placeholder="Shown in the format picker" onChange={(e) => setCustom(i, { label: e.target.value })} />
@@ -3277,6 +3411,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
   const [allowBackdated, setAllowBackdated] = useState(true);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
+  const writeSettings = useSettingsBatch();
 
   useEffect(() => {
     void Promise.allSettled([
@@ -3306,22 +3441,34 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
   async function save() {
     setSaving(true);
     try {
-      await saveSetting("leave_caps", {
-        value: {
-          carry_forward_excess: excess,
-          carry_forward_mode: cfMode,
-          carry_forward_cumulative_cap_days: cfCap.trim() === "" ? null : Number(cfCap),
-          encashment_mode: encMode,
-          encashment_cumulative_cap_days: encCap.trim() === "" ? null : Number(encCap),
+      // FOUR independent keys, all of which feed payroll and the leave engine. A failure on the third left the
+      // first two in force under a toast saying the save did not happen - carry-forward caps and the encashment
+      // rate basis applying, accrual rounding and back-dating not, with nothing on screen to tell that apart
+      // from a save that did nothing at all.
+      const r = await writeSettings([
+        {
+          key: "leave_caps",
+          label: "Carry-forward caps",
+          value: {
+            carry_forward_excess: excess,
+            carry_forward_mode: cfMode,
+            carry_forward_cumulative_cap_days: cfCap.trim() === "" ? null : Number(cfCap),
+            encashment_mode: encMode,
+            encashment_cumulative_cap_days: encCap.trim() === "" ? null : Number(encCap),
+          },
         },
-      });
-      await saveSetting("leave_encashment", { value: { rate_basis: encRateBasis, per_day_divisor: encDivisor.trim() === "" ? 30 : Number(encDivisor) } });
-      await saveSetting("leave_accrual", { value: { rounding } });
-      await saveSetting("leave-requests", { value: { allow_backdated: allowBackdated } });
+        { key: "leave_encashment", label: "the encashment rate", value: { rate_basis: encRateBasis, per_day_divisor: encDivisor.trim() === "" ? 30 : Number(encDivisor) } },
+        { key: "leave_accrual", label: "accrual rounding", value: { rounding } },
+        { key: "leave-requests", label: "back-dating", value: { allow_backdated: allowBackdated } },
+      ]);
+      if (!r.ok) {
+        toast(batchError(r));
+        return;
+      }
       markSaved();
       toast({ title: "Leave policy saved", variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      toast(saveSettingError(e));
     } finally {
       setSaving(false);
     }
@@ -3438,6 +3585,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
   const update = (i: number, patch: Partial<EmployeeFieldDef>) =>
     setFields((fs) => fs.map((f, idx) => (idx === i ? { ...f, ...patch } : f)));
   const remove = (i: number) => setFields((fs) => fs.filter((_, idx) => idx !== i));
+  const fieldKeys = useRowKeys(fields);
   const add = () => setFields((fs) => [...fs, { key: "", label: "", mandatory: false, sensitive: false, document: "none" }]);
 
   const { markSaved } = useUnsaved(fields, loaded, save);
@@ -3457,7 +3605,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
       markSaved();
       toast({ title: "Employee fields saved", variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      toast(saveSettingError(e));
     } finally {
       setSaving(false);
     }
@@ -3490,7 +3638,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
                 // (the column headers they belonged to are hidden at this width, so unlabelled boxes would be
                 // a guess), then the document setting. The grid returns unchanged from `sm` up.
                 <div
-                  key={i}
+                  key={fieldKeys[i]}
                   className="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-2 p-2 sm:grid-cols-[1fr_auto_auto_auto_auto]"
                 >
                   <Input value={f.label} placeholder="e.g. Passport number" onChange={(e) => update(i, { label: e.target.value })} />

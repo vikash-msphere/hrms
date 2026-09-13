@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { useIntent } from "@/lib/intent";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field, FieldRow } from "@/components/common/Field";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
@@ -48,7 +49,7 @@ export default function Candidates({ me }: { me: Me }) {
   const [dialog, setDialog] = useState<Candidate | "new" | null>(null);
   // Applications put a "where are they in the pipeline" line on each candidate, and the dialog lists that
   // person's own applications - so an empty pool with no dialog open needs none of them.
-  const { rows: apps } = useCollection<Application>("applications", { enabled: rows.length > 0 || dialog !== null });
+  const { rows: apps } = useCollection<Application>("applications", { enabled: rows.length > 0 || dialog !== null, all: true });
   const [q, setQ] = useState("");
   const [uploading, setUploading] = useState<string | null>(null);
   const uploadFor = useRef<Candidate | null>(null);
@@ -124,6 +125,8 @@ export default function Candidates({ me }: { me: Me }) {
   return (
     <div>
       <PageHeader title="Candidates" description="People in your talent pool." actions={<>{newBtn}<PageSettings me={me} host="candidates" /></>} />
+
+      <TruncationNotice collection={["candidates", "applications"]} what="candidates" className="mb-3" />
 
       <input ref={fileInput} type="file" className="hidden" onChange={onFile} />
 

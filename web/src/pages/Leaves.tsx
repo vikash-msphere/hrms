@@ -90,13 +90,21 @@ export default function Leaves({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<LeaveRequest>("leave-requests");
   const { rows: types } = useCollection<LeaveType>("leave-types");
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
+  // Two reads, deliberately. The unfiltered one backs the APPROVER view below (a manager's team, HR's org),
+  // where a window costs a short table and the page's notice says so.
   const { rows: balances } = useCollection<LeaveBalance>("leave-balances");
+  // This one is the caller's own, narrowed server-side, because the balance CARDS are about this person and
+  // their row can be anywhere in an org-scoped collection - one row per employee per leave type, so a
+  // 60-person org with five types has 300 of them. Filtering the newest hundred down to yourself finds
+  // nothing and the cards then read as a balance of nothing, which a card has nowhere to qualify.
+  const mineParams = me.employee_id ? { employee: `employees/${me.employee_id}` } : undefined;
+  const { rows: myBalanceRows } = useCollection<LeaveBalance>("leave-balances", { params: mineParams, enabled: !!mineParams });
   const { toast } = useToast();
   const confirm = useConfirm();
   const canDecide = usePermission("leave-requests.approve");
   const canEncash = usePermission("leave-encashments.read");
   const canRequest = usePermission("leave-requests.write");
-  const { rows: holidays } = useCollection<Holiday>("holidays");
+  const { rows: holidays } = useCollection<Holiday>("holidays", { all: true });
   const { rows: encashments } = useCollection<LeaveEncashment>("leave-encashments", { enabled: canEncash });
   // Delegations are private by default; the hook returns [] (and fires no request) without read access, so
   // this only ever sharpens the "who decides" line for callers who can already see the cover arrangement. That
@@ -161,7 +169,7 @@ export default function Leaves({ me }: { me: Me }) {
   // a helper rebuilt every render is a dependency that changes every render, so listing it honestly would
   // defeat the memo and leaving it out is the stale-closure bug the rule exists to catch. Wrapped, each one's
   // identity moves with what it actually reads, which is what the dependency arrays used to restate by hand.
-  const typeName = useCallback((p?: string) => (p ? typeOf(p)?.display_name ?? idOf(p) : "-"), [typeOf]);
+  const typeName = useCallback((p?: string) => (p ? typeOf(p)?.display_name ?? "Unknown type" : "-"), [typeOf]);
   // Each type's calendar colour (configured or a stable palette pick), so a type reads the same here, on the
   // leave calendar and on the dashboard timeline.
   const typeColor = useCallback((p?: string) => leaveColor(typeOf(p)?.color, p ? idOf(p) : ""), [typeOf]);
@@ -240,8 +248,8 @@ export default function Leaves({ me }: { me: Me }) {
   }, [rows, types, today, yearStart, typeName, typeColor]);
 
   const myBalances = useMemo(
-    () => balances.filter((b) => me.employee_id && b.employee && idOf(b.employee) === me.employee_id),
-    [balances, me.employee_id],
+    () => myBalanceRows.filter((b) => me.employee_id && b.employee && idOf(b.employee) === me.employee_id),
+    [myBalanceRows, me.employee_id],
   );
   // Everyone else's balances the caller can read (a manager's team, HR's whole org) - the "does this person
   // have the days" question an approver asks before deciding. Empty for a plain employee, which is what hides

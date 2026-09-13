@@ -38,7 +38,12 @@ function useSignatureUrl(employeeId: string, signature?: string, version = 0) {
 export function SignatureImage({ employeeId, signature, className }: { employeeId: string; signature?: string; className?: string }) {
   const src = useSignatureUrl(employeeId, signature);
   if (!signature || !src) return null;
-  return <img src={src} alt="Signature" className={className ?? "h-12 object-contain"} />;
+  // BLOCKED, not masked: masking is a text operation and would not touch an image, and this `src` is a data:
+  // URL, so the signature's own bytes are serialised into the replay rather than a link needing a session to
+  // fetch. A clean PNG of somebody's signature is the whole input to forging the letters this app e-signs
+  // with it, and "Report a problem" attaches the current replay to a helpdesk ticket. A blocked image leaves a
+  // placeholder box, which is all a replay needs from it.
+  return <img src={src} alt="Signature" data-sentry-block className={className ?? "h-12 object-contain"} />;
 }
 
 const ACCEPT = "image/png,image/jpeg";
@@ -109,7 +114,9 @@ export function SignatureField({ employeeId, signature, canEdit, onChanged }: { 
 
         <div className="flex min-h-[96px] items-center justify-center rounded-lg border bg-white p-4 dark:bg-brand-neutral-100">
           {src ? (
-            <img src={src} alt="Your signature" className="max-h-24 max-w-full object-contain" />
+            /* `data-sentry-block` for the reason SignatureImage states: a data-URL signature is recorded whole
+               by replay, and this route is not masked. */
+            <img src={src} alt="Your signature" data-sentry-block className="max-h-24 max-w-full object-contain" />
           ) : (
             <span className="text-sm text-muted-foreground dark:text-brand-neutral-500">No signature uploaded yet.</span>
           )}

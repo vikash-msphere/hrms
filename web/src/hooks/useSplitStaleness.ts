@@ -43,7 +43,16 @@ export function useSplitStaleness({ auto = true }: { auto?: boolean } = {}) {
 
   useEffect(() => { if (auto) void refresh(); }, [auto, refresh]);
 
-  const reapply = useCallback(async () => {
+  /**
+   * Re-solve every employee's split from their stored CTC.
+   *
+   * RETURNS WHETHER IT WORKED. It still swallows the failure into a toast (callers that only offer the
+   * re-apply have nothing better to do with it), but a caller that SEQUENCES something after it has to be able
+   * to stop: `PayrollRuns#reapplyAndRebuild` ran the rebuild regardless, re-pricing the run off exactly the
+   * drifted rows the button exists to correct, and the operator saw a red "Couldn't re-apply" followed by a
+   * green "Run rebuilt" with the drift banner cleared over figures that were never fixed.
+   */
+  const reapply = useCallback(async (): Promise<boolean> => {
     setReapplying(true);
     try {
       const r = await invoke<ReapplyResult>("compensation", "reapplySplit");
@@ -53,8 +62,10 @@ export function useSplitStaleness({ auto = true }: { auto?: boolean } = {}) {
         variant: r.skipped ? "destructive" : "success",
       });
       await refresh();
+      return true;
     } catch (e) {
       toast({ title: "Couldn't re-apply", description: (e as Error).message, variant: "destructive" });
+      return false;
     } finally {
       setReapplying(false);
     }

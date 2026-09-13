@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Laptop, Plus, HandHeart, PackagePlus, X } from "lucide-react";
-import { get, patch, invoke, create } from "@/api";
+import { get, getAllPages, patch, invoke, create } from "@/api";
 import { cn, formatDate, idOf } from "@/lib/utils";
 import { todayStr as today } from "@/lib/orgDay";
 import { useCollection } from "@/hooks/useCollection";
@@ -54,7 +54,7 @@ export function EmployeeAssets({
   const [loaded, setLoaded] = useState(false);
   const [confirming, setConfirming] = useState<Asset | null>(null);
   // An asset names its category by reference; the catalog is small and cached, so the name costs nothing here.
-  const { rows: categories } = useCollection<AssetCategory>("asset-categories");
+  const { rows: categories } = useCollection<AssetCategory>("asset-categories", { all: true });
   const catName = useCallback((p?: string | null) => (p ? categories.find((c) => idOf(c.path) === idOf(p))?.display_name ?? "" : ""), [categories]);
 
   const empRef = `employees/${employeeId}`;
@@ -82,19 +82,35 @@ export function EmployeeAssets({
   // --- assign an in-stock asset to this employee (optionally as the hand-over that closes a request) ---
   const [open, setOpen] = useState(false);
   const [pool, setPool] = useState<Asset[] | null>(null); // in-stock items, lazily fetched when the dialog opens
+  const [poolCropped, setPoolCropped] = useState(false); // the walk hit its ceiling: the picker is a window
+  const [loadFailed, setLoadFailed] = useState(false); // the read failed: an empty picker is NOT an empty store
+  // The stock walk is several sequential round-trips, and the dialog can be reopened against a different
+  // request before the first finishes - so only the newest walk may write the pool (test/staleResponseDrift).
+  const reqSeq = useRef(0);
   const [pick, setPick] = useState("");
   const [on, setOn] = useState(today());
   const [issuing, setIssuing] = useState<AssetRequest | null>(null);
 
   function openAssign(request?: AssetRequest) {
-    setPick(""); setOn(today()); setPool(null); setIssuing(request ?? null); setOpen(true);
-    get<{ results: Asset[] }>("assets")
+    setPick(""); setOn(today()); setPool(null); setPoolCropped(false); setLoadFailed(false); setIssuing(request ?? null); setOpen(true);
+    // ASKED OF THE SERVER, and walked to the end. Filtering `assets` in the browser answered "what is in
+    // stock?" with "whichever of the 50 newest assets are in stock" - and recently-added kit is the kit most
+    // likely to have been handed out, so a register holding plenty of spare hardware routinely told HR
+    // "Nothing in stock. Add stock on the Assets page", which sends them to buy what they already own.
+    const seq = ++reqSeq.current;
+    getAllPages<Asset>("assets?status=in_stock", 500)
       .then((r) => {
-        const stock = (r.results ?? []).filter((a) => a.status === "in_stock");
+        if (seq !== reqSeq.current) return; // a later open already answered; this walk is the old one
+        const stock = r.results.filter((a) => a.status === "in_stock");
+        setPoolCropped(r.truncated);
         // Handing over against a request: offer that category first, since it is what was asked for.
         setPool(request?.category ? [...stock].sort((a, b) => Number(b.category === request.category) - Number(a.category === request.category)) : stock);
       })
-      .catch((e) => { setPool([]); toast({ variant: "destructive", title: "Couldn't load stock", description: (e as Error).message }); });
+      .catch((e) => {
+        if (seq !== reqSeq.current) return;
+        setPool([]); setPoolCropped(false); setLoadFailed(true);
+        toast({ variant: "destructive", title: "Couldn't load stock", description: (e as Error).message });
+      });
   }
 
   async function assign() {
@@ -257,7 +273,14 @@ export function EmployeeAssets({
             options={(pool ?? []).map((a) => ({ value: a.path, label: `${a.asset_tag ? a.asset_tag + " · " : ""}${a.name}${catName(a.category) ? ` · ${catName(a.category)}` : ""}` }))}
           />
         </Field>
-        {pool !== null && pool.length === 0 && <p className="text-sm text-muted-foreground">Nothing in stock. Add stock on the Assets page.</p>}
+        {/* "Nothing is in stock" and "nothing in stock was loaded" are different facts, and only one of them
+            is a reason to go and buy hardware. */}
+        {pool !== null && pool.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            {loadFailed ? "Stock couldn't be loaded, so there is nothing to choose from here - try again." : "Nothing in stock. Add stock on the Assets page."}
+          </p>
+        )}
+        {poolCropped && <p className="text-xs text-muted-foreground">Showing the first 500 in-stock items - search narrows the list.</p>}
         {/* The hand-over date is the request's own `issued_time`, so it is not asked for twice. */}
         {!issuing && <Field label="Assigned on" field="assigned_on"><Input type="date" value={on} onChange={(e) => setOn(e.target.value)} /></Field>}
       </WriteDialog>

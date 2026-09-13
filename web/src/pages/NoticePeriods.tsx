@@ -7,7 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf, humanize, personName } from "@/lib/utils";
-import { todayStr } from "@/lib/orgDay";
+import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
 import type { NoticePeriod, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
@@ -47,16 +47,25 @@ function StatusBadge({ n }: { n: NoticePeriod }) {
 // notice date → last working day reads as a timeline at a glance.
 function RemainingBadge({ n }: { n: NoticePeriod }) {
   if (n.status !== "serving") return <span className="text-muted-foreground">-</span>;
+  // `days_remaining` IS FLOOR-CLAMPED, not a countdown: the serializer returns `Math.max(0, ...)`, so a last
+  // working day three days ago and one three months ago both arrive as 0, indistinguishable from a last day
+  // that is genuinely today. Read as a date it painted a full bar and a destructive "Last day" over everybody
+  // who had already left - an HR admin scanning this table was told somebody who went in March leaves today.
+  // The dates on the row answer it exactly, which is what `isPastExit` below already does.
+  const over = n.last_working_day < todayStr();
   const d = n.days_remaining ?? 0;
+  const daysOver = over ? daysBetweenYmd(n.last_working_day, todayStr()) : 0;
   const total = n.total_days ?? 0;
   const pct = total > 0 ? Math.min(100, Math.max(0, Math.round(((total - Math.max(0, d)) / total) * 100))) : 0;
-  const variant = d <= 0 ? "destructive" : d <= 7 ? "warning" : "secondary";
+  const variant = over ? "destructive" : d <= 0 ? "destructive" : d <= 7 ? "warning" : "secondary";
   return (
     <span className="inline-flex items-center gap-2">
-      <span className="h-1.5 w-16 overflow-hidden rounded-full bg-muted" title={`${pct}% of the notice served`}>
-        <span className={cn("block h-full rounded-full", d <= 7 ? "bg-warning" : "bg-primary")} style={{ width: `${pct}%` }} />
+      <span className="h-1.5 w-16 overflow-hidden rounded-full bg-muted" title={over ? "Notice period is over" : `${pct}% of the notice served`}>
+        <span className={cn("block h-full rounded-full", over ? "bg-destructive" : d <= 7 ? "bg-warning" : "bg-primary")} style={{ width: `${over ? 100 : pct}%` }} />
       </span>
-      <Badge variant={variant} className="tabular-nums">{d <= 0 ? "Last day" : `${d}d left`}</Badge>
+      <Badge variant={variant} className="tabular-nums">
+        {over ? `Overdue ${daysOver}d` : d <= 0 ? "Last day" : `${d}d left`}
+      </Badge>
     </span>
   );
 }
@@ -89,9 +98,13 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
 
   const isServing = (n: NoticePeriod) => !n.delete_time && n.status === "serving";
   const isThisMonth = (n: NoticePeriod) => isServing(n) && n.last_working_day.slice(0, 7) === todayStr().slice(0, 7);
-  const isLeavingSoon = (n: NoticePeriod) => isServing(n) && (n.days_remaining ?? 0) >= 0 && (n.days_remaining ?? 0) <= 7;
   // Still marked serving after their own last working day: the record nobody closed, which leaves a login alive.
   const isPastExit = (n: NoticePeriod) => isServing(n) && n.last_working_day < todayStr();
+  // `!isPastExit` rather than `days_remaining >= 0`, which cannot exclude anything: the server clamps that
+  // value at zero (serialize.ts), so every overdue record satisfied it and landed in the "Last week of notice"
+  // tile - diluting the hand-over window with people who left months ago, and double-counting them against the
+  // "Past last working day" tile right beside it, which is the page's security-relevant queue.
+  const isLeavingSoon = (n: NoticePeriod) => isServing(n) && !isPastExit(n) && (n.days_remaining ?? 0) <= 7;
   // On notice with no offboarding checklist started - the exit tasks nobody has kicked off.
   const isNoOffboarding = (n: NoticePeriod) => isServing(n) && !n.transition;
   const stats = useMemo(() => {

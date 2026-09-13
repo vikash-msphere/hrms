@@ -1,6 +1,7 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { dateFormat, numberFormat } from "./intl";
+import { daysBetweenYmd, todayStr } from "./orgDay";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -58,12 +59,20 @@ const DATE_OPTS: Intl.DateTimeFormatOptions = { year: "numeric", month: "short",
 // left to its own locale, a US-configured reader saw "Aug 4, 2026" in the table and "4 Aug 2026" in the
 // letter, activity line and payslip beside it. One organization reads one date format.
 const DATE_LOCALE = "en-GB";
+// A DATE-ONLY value is a calendar day, not an instant. `new Date("2026-12-25")` is UTC midnight by spec, so
+// formatting it in the viewer's zone renders the day before for everyone west of UTC - "Fri, 24 Dec 2026" for a
+// holiday stored as 2026-12-25, beside a weekday label that pins UTC and disagrees with it. Parse and format
+// date-only values both in UTC so the calendar day survives; a full timestamp is a real instant and keeps the
+// viewer's zone, which is the right one for it.
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DATE_OPTS_UTC: Intl.DateTimeFormatOptions = { ...DATE_OPTS, timeZone: "UTC" };
 
 export function formatDate(value?: string | null): string {
   if (!value) return "-";
-  const d = new Date(value);
+  const dateOnly = DATE_ONLY_RE.test(value);
+  const d = new Date(dateOnly ? `${value}T00:00:00Z` : value);
   if (isNaN(d.getTime())) return value;
-  return dateFormat(DATE_LOCALE, DATE_OPTS).format(d);
+  return dateFormat(DATE_LOCALE, dateOnly ? DATE_OPTS_UTC : DATE_OPTS).format(d);
 }
 
 /** A file size a person can read: "812 B", "44 KB", "2.1 MB". Null for nothing/zero, so callers can skip it. */
@@ -86,21 +95,36 @@ export function relativeFuture(iso: string): string {
   return `on ${formatDate(iso)}`;
 }
 
+// Same pinned locale and cached-formatter rule as `formatDate`: "One organization reads one date format", and a
+// per-call `toLocaleDateString` both builds a formatter every time and follows the VIEWER's locale, which put
+// "Mar 2023" on the profile header beside "4 Aug 2026" everywhere else.
+const MONTH_YEAR_OPTS: Intl.DateTimeFormatOptions = { month: "short", year: "numeric", timeZone: "UTC" };
+
 /** "Joined Mar 2023 · 2y 4m" - tenure at a glance for profile headers. */
 export function tenureLabel(startDate: string): string {
-  const start = new Date(startDate);
+  const start = new Date(DATE_ONLY_RE.test(startDate) ? `${startDate}T00:00:00Z` : startDate);
   if (isNaN(+start)) return "";
-  const joined = start.toLocaleDateString(undefined, { month: "short", year: "numeric" });
-  const now = new Date();
-  const months = Math.max(0, (now.getFullYear() - start.getFullYear()) * 12 + now.getMonth() - start.getMonth());
+  const joined = dateFormat(DATE_LOCALE, MONTH_YEAR_OPTS).format(start);
+  // Months between two CALENDAR days on the org's clock: `new Date()`'s UTC month is a different month from
+  // the org's for part of every month boundary, which slipped the tenure by a month on those days.
+  const today = todayStr();
+  const months = Math.max(
+    0,
+    (Number(today.slice(0, 4)) - start.getUTCFullYear()) * 12 + (Number(today.slice(5, 7)) - 1) - start.getUTCMonth(),
+  );
   const dur = months < 1 ? "new joiner" : months < 12 ? `${months}m` : `${Math.floor(months / 12)}y ${months % 12}m`;
   return `Joined ${joined} · ${dur}`;
 }
 
 /** "On probation · 12d left" (or "· ends today") for an end date that's today or later; "" once past. */
 export function probationLabel(endDate: string): string {
-  const days = Math.ceil((Date.parse(endDate) - Date.now()) / 86400000);
-  if (isNaN(days) || days < 0) return "";
+  // A calendar-day difference on the ORG's clock, not an instant one. `Date.parse` on a date-only string is
+  // UTC midnight, and comparing that against `Date.now()` made this label a day out for the first 5.5 hours of
+  // the last day of probation in an IST org ("1d left" on the day it ends) and again for the first 5.5 hours
+  // of the day after ("ends today" about a probation that ended yesterday).
+  if (!DATE_ONLY_RE.test(endDate.slice(0, 10))) return "";
+  const days = daysBetweenYmd(todayStr(), endDate.slice(0, 10));
+  if (!Number.isFinite(days) || days < 0) return "";
   return days === 0 ? "On probation · ends today" : `On probation · ${days}d left`;
 }
 

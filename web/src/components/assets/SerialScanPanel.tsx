@@ -69,9 +69,13 @@ export function SerialScanPanel({
   const scanner = useCodeScanner(take, { formats: SERIAL_FORMATS });
   const { cameraState, startCamera, stopCamera, decodeFiles } = scanner;
 
-  // The panel only exists because somebody pressed Scan, so open the camera without a second press.
+  // The panel only exists because somebody pressed Scan, so open the camera without a second press - and
+  // release it on the way out. Without the cleanup, StrictMode's mount/unmount/mount (web/src/main.tsx) ran two
+  // `getUserMedia` calls with nothing stopping the first, and any unmount that did not go through `close()`
+  // left the sensor held.
   useEffect(() => {
     void startCamera();
+    return () => stopCamera();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -108,7 +112,10 @@ export function SerialScanPanel({
             </div>
           )}
           <div className="flex gap-2">
-            <Button type="button" size="sm" variant="outline" className="flex-1" onClick={() => { setHit(null); setDuplicate(undefined); void startCamera(); }}>
+            {/* Disabled while a start is in flight: a double-press is two `getUserMedia` calls racing, which is
+                the production route into the orphaned-stream failure the generation guard in lib/scanner.ts
+                now catches. */}
+            <Button type="button" size="sm" variant="outline" className="flex-1" disabled={cameraState === "starting"} onClick={() => { setHit(null); setDuplicate(undefined); void startCamera(); }}>
               <Camera className="h-4 w-4" /> Scan another
             </Button>
             <Button type="button" size="sm" variant="outline" className="flex-1" onClick={close}>Done</Button>

@@ -75,10 +75,23 @@ function covers(a: AccessRule, b: AccessRule): boolean {
   return true;
 }
 
-// Same target dimension: same collection, same field, and both about the standard ladder or both about the
-// same custom method (a deny on `approve` says nothing about read).
-function sameTarget(a: AccessRule, b: AccessRule): boolean {
-  return a.collection === b.collection && (a.field ?? "") === (b.field ?? "") && (a.verb ?? "") === (b.verb ?? "");
+/** The wildcard verb: one rule standing for EVERY custom method on a collection. */
+export const ALL_VERBS = "*";
+
+// Does `o` speak about the same target as `r` - same collection, same field, and both about the standard
+// ladder or both about the same custom method (a deny on `approve` says nothing about read)?
+//
+// DIRECTIONAL, because of the wildcard. A rule with `verb: "*"` covers every custom method, so it speaks
+// about `approve`; a rule on `approve` does not speak about every method. Compared literally, a broad "all
+// custom methods" rule matched nothing and so silenced nothing - neither the author-time lint nor the
+// `denied` badge - while being exactly the rule most likely to be the one in the way. Every caller asks the
+// same question, "does o cover r", so the argument order is the answer's order.
+function targetCovers(o: AccessRule, r: AccessRule): boolean {
+  if (o.collection !== r.collection || (o.field ?? "") !== (r.field ?? "")) return false;
+  const ov = o.verb ?? "", rv = r.verb ?? "";
+  if (ov === rv) return true;
+  if (!ov || !rv) return false; // the standard ladder and a custom method are different dimensions
+  return ov === ALL_VERBS;
 }
 
 // Rules the same subject holds. A ROLE rule is also affected by the `everyone` pseudo-role, which the engine
@@ -104,7 +117,7 @@ export function ruleFlags(r: AccessRule, all: AccessRule[]): RuleFlag[] {
   if (exp) flags.push({ kind: "expiring", note: exp === "expired" ? "Expired - no longer in force." : `Temporary access: ${exp}.` });
 
   if (r.effect === "allow") {
-    const deny = all.find((o) => o.path !== r.path && o.effect === "deny" && appliesToSameSubject(r, o) && sameTarget(r, o) && covers(o, r) && o.status !== "pending");
+    const deny = all.find((o) => o.path !== r.path && o.effect === "deny" && appliesToSameSubject(r, o) && targetCovers(o, r) && covers(o, r) && o.status !== "pending");
     if (deny) {
       flags.push({
         kind: "denied",
@@ -112,13 +125,18 @@ export function ruleFlags(r: AccessRule, all: AccessRule[]): RuleFlag[] {
       });
     }
     const mine = LEVEL_RANK[r.level ?? ""] ?? 0;
+    // `appliesToSameSubject`, like the deny check above - not a direct subject comparison. The engine unions
+    // the `everyone` pseudo-role into every caller BY CONSTRUCTION, so an `everyone` allow that already grants
+    // read on the whole collection really does make every per-role read allow redundant, exactly as an
+    // `everyone` deny really does kill a role's allow. Using it here is not a loosening; it is the same rule
+    // the deny side already applies, on the side that was still comparing subjects literally and staying silent
+    // while admins kept and maintained rules that change nothing.
     const broader = all.find(
       (o) =>
         o.path !== r.path &&
         o.effect === "allow" &&
-        o.subject_kind === r.subject_kind &&
-        o.subject === r.subject &&
-        sameTarget(r, o) &&
+        appliesToSameSubject(r, o) &&
+        targetCovers(o, r) &&
         o.status === "active" &&
         !o.expire_time &&
         covers(o, r) &&
@@ -140,5 +158,5 @@ export function denyBlocking(
   all: AccessRule[],
 ): AccessRule | undefined {
   const probe = { ...candidate, path: "", effect: "allow" } as AccessRule;
-  return all.find((o) => o.effect === "deny" && appliesToSameSubject(probe, o) && sameTarget(probe, o) && covers(o, probe) && o.status !== "pending");
+  return all.find((o) => o.effect === "deny" && appliesToSameSubject(probe, o) && targetCovers(o, probe) && covers(o, probe) && o.status !== "pending");
 }

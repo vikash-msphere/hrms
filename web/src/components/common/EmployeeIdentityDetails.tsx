@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { IdCard, Paperclip, Download } from "lucide-react";
 import { IconEdit } from "@/components/common/IconEdit";
 import { get, patch, upload, download } from "@/api";
+import { isConflict } from "@/lib/formError";
 import type { IdentityDetails } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -66,10 +67,20 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
   }
 
   async function save() {
-    const updated = await patch<IdentityDetails>(`employees/${employeeId}/identity`, { values: form });
-    setData(updated);
-    toast({ title: "Identity details saved", variant: "success" });
-    onSaved?.();
+    try {
+      // The version this panel read: these values are one blob merged over a server-side read, so an
+      // unversioned write does not lose a race, it overwrites the other editor's field with the old value.
+      const updated = await patch<IdentityDetails>(`employees/${employeeId}/identity`, { values: form }, data?.etag);
+      setData(updated);
+      toast({ title: "Identity details saved", variant: "success" });
+      onSaved?.();
+    } catch (e) {
+      if (isConflict(e)) {
+        await load();
+        throw new Error("Somebody else changed these details while you had them open. They have been reloaded - check them and save again.");
+      }
+      throw e;
+    }
   }
 
   if (denied) return null;

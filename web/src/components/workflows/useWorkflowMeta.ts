@@ -12,7 +12,17 @@ export function useWorkflowMeta(): { meta: WorkflowMeta | null; error: string | 
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     if (cached) { setMeta(cached); return; }
-    inflight ??= get<WorkflowMeta>("workflow-meta").then((m) => (cached = m));
+    // The slot is cleared HOWEVER the request ends - the same shape lib/resourceStore.ts and lib/getCoalescer.ts
+    // both use. Left set, a rejected promise stayed in the module variable forever: `cached` is still null, so
+    // every later mount fell to `inflight ??=`, found the settled rejection already there, skipped the request
+    // and re-rendered the same error. One transient 5xx on the first visit to Workflows left the builder
+    // metadata-less for the whole SPA session - no trigger list (so no rule could be created or retargeted),
+    // no resource or verb lists, a `{{ }}` picker down to five generic tokens and a condition field list down
+    // to three, most of which degrade SILENTLY: a shorter dropdown does not look like a broken one, so a rule
+    // could be authored and saved against a half-empty catalogue with `metaErr` never on screen.
+    inflight ??= get<WorkflowMeta>("workflow-meta")
+      .then((m) => (cached = m))
+      .finally(() => { inflight = null; });
     inflight.then(setMeta).catch((e) => setError(String((e as Error).message)));
   }, []);
   return { meta, error };

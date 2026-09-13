@@ -74,7 +74,6 @@ export const APPROVAL_CAPS = [
   "loans.approve",
   "time-entries.approve",
   "expenses.approve",
-  "expenses.approve",
   "tax-verifications.read", // prior-employer tax declarations to verify (super by default; HR/payroll via ACL)
 ];
 
@@ -250,6 +249,10 @@ const ALIAS_GATE: Record<string, { perm?: string; anyPerm?: string[] }> = {
   "pay-periods": { perm: "payroll-runs.read" }, // merged into Payroll Runs, which is where it renders
   kudos: { perm: "announcements.read" }, // the board, opened on its kudos filter
   tickets: { perm: "tickets.read" },
+  // The bell. Named in this map's own header and missing from it, so `pageGate("notifications")` was undefined
+  // and `#/notifications` rendered for a caller with no `notifications.read` - an empty feed (useCollection
+  // gates the read) rather than a wall, which is a "hide, never disable" miss.
+  notifications: { perm: "notifications.read" },
 };
 
 // What a ROUTE requires, so a page is never rendered to someone the nav hides it from. Deep-linking (or
@@ -292,6 +295,29 @@ export const PAGE_TAB_LABELS: Record<string, Record<string, string>> = {
 // Breadcrumb for the top bar: group › workspace-label › active-tab (sub). Workspace tabs are their own route
 // `key`, so `sub` is derived from the page. Standalone tabbed pages (Payroll Runs, Settings) carry the active
 // tab in the second route segment, passed here as `sub`. Returns undefined for keys not in the nav.
+/**
+ * The human name of a route, for the tab title and the navigation announcement.
+ *
+ * `navBreadcrumb` only knows keys that are in NAV, and nine of App's route cases are not: seven Settings
+ * deep-link aliases (`#/departments` renders the same screen the titled `#/settings/departments` does) plus the
+ * two pages reached from the chrome rather than the sidebar - Tickets, from the top bar's Support menu, and
+ * Notifications, from the bell. For those the tab read a bare app name and the live region was set to "" -
+ * which announces NOTHING - the two failures `useRouteAnnounce` exists to fix.
+ */
+const OFF_NAV_LABELS: Record<string, string> = {
+  ...Object.fromEntries(SETTINGS_REGISTRY.map((e) => [e.key, e.title])),
+  notifications: "Notifications",
+  tickets: "Support tickets",
+  kudos: "Kudos",
+  "pay-periods": "Pay periods",
+};
+
+export function pageLabel(key: string, sub?: string): string | undefined {
+  const crumb = navBreadcrumb(key, sub);
+  if (crumb) return [crumb.label, crumb.sub].filter(Boolean).join(" · ");
+  return OFF_NAV_LABELS[key];
+}
+
 export function navBreadcrumb(key: string, sub?: string): { group: string; label: string; sub?: string } | undefined {
   for (const g of NAV) {
     for (const it of g.items) {

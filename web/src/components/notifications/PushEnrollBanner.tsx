@@ -3,6 +3,7 @@ import { BellRing, X } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import { pushSupported, getPushState, enablePush } from "@/lib/webPush";
+import { readLocal, writeLocal, userKey } from "@/lib/localPref";
 
 // An invitation to turn on browser push, shown on the Notifications page itself. The toggle in
 // Settings -> Notifications remains the place to manage it; this exists purely because nobody discovers a
@@ -18,14 +19,15 @@ import { pushSupported, getPushState, enablePush } from "@/lib/webPush";
 // subscription belongs to one browser on one device, so someone who enables it on their laptop is still
 // un-enrolled on their phone and should still be asked there. Syncing the dismissal would hide the prompt
 // exactly where it still applies.
-const DISMISS_KEY = "push-enroll-dismissed";
+//
+// It is also PER-PERSON, which is what that argument actually asks for: the subscription belongs to a browser
+// AND to whoever is signed in on it, so under a shared key A's dismissal hid the prompt from B - who has no
+// subscription and is exactly who should be asked.
+const DISMISS_KEY = () => userKey("push-enroll-dismissed");
 
 const readDismissed = (): boolean => {
-  try {
-    return localStorage.getItem(DISMISS_KEY) === "1";
-  } catch {
-    return false; // private mode / blocked storage: show the banner rather than crash
-  }
+  const key = DISMISS_KEY();
+  return !!key && readLocal(key) === "1";
 };
 
 export function PushEnrollBanner() {
@@ -56,7 +58,7 @@ export function PushEnrollBanner() {
       return;
     }
     if (readDismissed()) {
-      if (dev) console.info(`[push] prompt hidden - dismissed on this browser. localStorage.removeItem("${DISMISS_KEY}") to bring it back.`);
+      if (dev) console.info(`[push] prompt hidden - dismissed on this browser. localStorage.removeItem("${DISMISS_KEY()}") to bring it back.`);
       return;
     }
     let cancelled = false;
@@ -78,7 +80,8 @@ export function PushEnrollBanner() {
 
   function dismiss() {
     setShow(false);
-    try { localStorage.setItem(DISMISS_KEY, "1"); } catch { /* nothing to persist to; hidden for this session */ }
+    const key = DISMISS_KEY();
+    if (key) writeLocal(key, "1");
   }
 
   async function enable() {

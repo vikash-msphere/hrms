@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseHolidayLines, parseLooseDate, planYearCopy } from "../web/src/lib/holidayBulk";
+import { parseHolidayLines, parseLooseDate, planYearCopy, toLine } from "../web/src/lib/holidayBulk";
 
 // Bulk entry is where an HR admin seeds a whole year in one go, so a silently mis-parsed line is a wrong
 // holiday for the whole company. These pin the forgiving-but-strict parsing and the year-copy warnings.
@@ -32,6 +32,22 @@ describe("parseHolidayLines", () => {
     const [a, b] = parseHolidayLines("26/01/2026 | Republic Day | optional | half day | Mumbai\n2026-03-04, Holi, half, opt");
     expect(a?.draft).toEqual({ date: "2026-01-26", name: "Republic Day", kind: "optional", half_day: true, location: "Mumbai" });
     expect(b?.draft).toEqual({ date: "2026-03-04", name: "Holi", kind: "optional", half_day: true, location: null });
+  });
+
+  // The whitespace form is what an ordinary paste looks like, and it used to collapse everything after the
+  // date into the name - so "Holi optional" created a FIXED holiday called "Holi optional": a company-wide
+  // closure where an elective day was meant.
+  it("reads trailing flags in the whitespace form", () => {
+    const [a, b, c] = parseHolidayLines("2026-03-04  Holi  optional\n2026-03-05 Holi second half day\n2026-01-26 Republic Day");
+    expect(a?.draft).toEqual({ date: "2026-03-04", name: "Holi", kind: "optional", half_day: false, location: null });
+    expect(b?.draft).toEqual({ date: "2026-03-05", name: "Holi second", kind: "fixed", half_day: true, location: null });
+    // A name is still a name: nothing here looks like a flag, so nothing is peeled off it.
+    expect(c?.draft).toEqual({ date: "2026-01-26", name: "Republic Day", kind: "fixed", half_day: false, location: null });
+  });
+
+  it("round-trips a draft through toLine without losing a flag or a location", () => {
+    const draft = { date: "2026-03-04", name: "Holi", kind: "optional" as const, half_day: true, location: "Mumbai" };
+    expect(parseHolidayLines(toLine(draft))[0]?.draft).toEqual(draft);
   });
 
   it("skips blanks and comments, and reports unusable lines", () => {

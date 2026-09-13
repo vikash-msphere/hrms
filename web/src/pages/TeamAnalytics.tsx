@@ -46,7 +46,7 @@ const DAY_MS = 86_400_000;
 export default function TeamAnalytics({ me }: { me: Me }) {
   const route = useRoute();
   const canExport = usePermission("export.read");
-  const { rows: depts } = useCollection<Department>("departments");
+  const { rows: depts } = useCollection<Department>("departments", { all: true });
 
   // The window and the department live in the URL, so a narrowed report is a link somebody can send.
   const rangeKey = (route.query.range as RangeKey) ?? "this_month";

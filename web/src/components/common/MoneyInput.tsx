@@ -33,13 +33,16 @@ function compact(n: number, currency: string): string | null {
 // keep digits, one decimal point and a leading minus, drop the rest.
 // Commas are grouping marks, not decimal points: this app writes amounts in en-IN/en-US style, where "1,20,000"
 // means a lakh and twenty thousand. A dot is the decimal point, and only the first one counts.
+// A leading bare "." keeps its place by seeding a zero: ".75" is three quarters, and dropping the point
+// because nothing precedes it turned a pasted ".75" into "75" - the same digits, ten times the money, with
+// nothing on screen to notice.
 function sanitize(raw: string): string {
   let out = "";
   let dot = false;
   for (const ch of raw) {
     if (ch >= "0" && ch <= "9") out += ch;
-    else if (ch === "." && !dot && out !== "" && out !== "-") {
-      out += ".";
+    else if (ch === "." && !dot) {
+      out += out === "" || out === "-" ? "0." : ".";
       dot = true;
     } else if (ch === "-" && out === "") out += "-";
   }
@@ -78,11 +81,22 @@ export function MoneyInput({
   const code = currency || org.default_currency || "INR";
   const symbol = React.useMemo(() => symbolOf(code), [code]);
   const n = Number(value);
-  const show = readback && value.trim() !== "" && Number.isFinite(n) && Math.abs(n) >= 1000;
-  const short = show ? compact(n, code) : null;
+  const short = compact(n, code);
   // `min`/`max` still mean what they mean on a number field; they just have to be enforced here now that the
   // control is text. Kept out of the DOM so a browser doesn't apply them to a string.
+  //
+  // AND THEY ARE ENFORCED, which the sentence above used to claim while nothing read them except the grouped
+  // readback - a line that only renders from a thousand up. So a field declared `min={0}` accepted -250 (the
+  // sanitizer keeps a leading minus by design) and said nothing at all, and the only thing standing between a
+  // caller who trusted these props and a stored negative amount was whether its own form happened to re-check
+  // the bound. Out of range is now a real invalid state at any magnitude: `aria-invalid` on the control, and
+  // the reason in the readback, which renders for that reason alone when it otherwise would not.
   const { min, max, ...inputProps } = rest;
+  const typed = value.trim() !== "" && Number.isFinite(n);
+  const belowMin = typed && min != null && n < Number(min);
+  const overMax = typed && max != null && n > Number(max);
+  const outOfRange = belowMin || overMax;
+  const show = readback && typed && (Math.abs(n) >= 1000 || outOfRange);
 
   return (
     <div className="space-y-1">
@@ -95,17 +109,18 @@ export function MoneyInput({
           value={value}
           onChange={(e) => onChange(sanitize(e.target.value))}
           aria-describedby={show ? `${inputProps.id ?? "money"}-readback` : undefined}
+          aria-invalid={outOfRange || inputProps["aria-invalid"] === true || undefined}
           className={cn("tabular-nums", symbol.length > 1 ? "pl-12" : "pl-7", className)}
           {...inputProps}
         />
       </div>
       {show && (
-        <p id={`${inputProps.id ?? "money"}-readback`} aria-live="polite" className="text-xs tabular-nums text-muted-foreground">
+        <p id={`${inputProps.id ?? "money"}-readback`} aria-live="polite" className={cn("text-xs tabular-nums", outOfRange ? "text-destructive" : "text-muted-foreground")}>
           {formatMoney(n, code, currencyDecimals(code, org))}
           {short ? ` · ${short}` : ""}
           {suffix ? ` ${suffix}` : ""}
-          {min != null && Number(value) < Number(min) ? ` · below the ${formatMoney(Number(min), code, currencyDecimals(code, org))} minimum` : ""}
-          {max != null && Number(value) > Number(max) ? ` · over the ${formatMoney(Number(max), code, currencyDecimals(code, org))} maximum` : ""}
+          {belowMin ? ` · below the ${formatMoney(Number(min), code, currencyDecimals(code, org))} minimum` : ""}
+          {overMax ? ` · over the ${formatMoney(Number(max), code, currencyDecimals(code, org))} maximum` : ""}
         </p>
       )}
     </div>

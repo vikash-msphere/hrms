@@ -17,15 +17,19 @@ import { Combobox } from "@/components/ui/combobox";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { readLocal, writeLocal, userKey } from "@/lib/localPref";
 import type { Department, DocumentResource, Employee } from "@/types";
 
-// The letter type last generated on this device, so the picker opens where the work is.
-const LAST_KEY = "letterTemplate:last";
+// The letter type last generated on this device BY THIS PERSON, so the picker opens where their work is - an
+// un-namespaced key defaulted B's dialog to whatever A generated last on a shared machine.
+const LAST_KEY = () => userKey("letterTemplate:last");
 const lastTemplate = (): string | null => {
-  try { return localStorage.getItem(LAST_KEY); } catch { return null; }
+  const key = LAST_KEY();
+  return key ? readLocal(key) : null;
 };
 const rememberTemplate = (path: string) => {
-  try { localStorage.setItem(LAST_KEY, path); } catch { /* private mode: the default just doesn't stick */ }
+  const key = LAST_KEY();
+  if (key) writeLocal(key, path);
 };
 
 // The one letter-generation dialog, used from the Documents page (pick anyone) and from an employee's profile
@@ -114,13 +118,22 @@ export function GenerateLetterDialog({
     const e = employees?.find((x) => idOf(x.path) === idOf(path));
     return e ? `${e.first_name} ${e.last_name}` : "";
   };
-  const empNameOr = (path: string) => empName(path) || idOf(path);
+  const empNameOr = (path: string) => empName(path) || "Someone"; // a word, never a wire id (lib/utils.ts personName)
   const subject = employees ? empName(subjectPath) : "";
   // Everyone this run writes a letter for: the primary recipient plus any added, de-duplicated.
   const recipients = React.useMemo(
     () => [...new Set([subjectPath, ...form.more].filter(Boolean))],
     [subjectPath, form.more],
   );
+  // WHO THE NEXT ATTEMPT IS FOR. A partly-failed batch leaves the dialog open holding the whole list, and
+  // pressing Generate again re-ran all of it: for forty people with three failures that files thirty-seven
+  // DUPLICATE letters - each a real document on that employee's record, and, where the template carries an
+  // `esignature` block, each asking them to sign a second copy. `runSequential` already returns who was
+  // missed; this is the half that acts on it.
+  const [retryOnly, setRetryOnly] = React.useState<string[] | null>(null);
+  const targets = retryOnly ?? recipients;
+  // Editing the form is a new run, not a retry of the old one.
+  React.useEffect(() => { setRetryOnly(null); }, [subjectPath, form.more, typePath]);
 
   // A letter of this kind already made for this person in the last month. Warn, never block: a corrected offer
   // or a re-issued certificate is legitimate - what isn't is finding out afterwards that there are now two.
@@ -177,15 +190,23 @@ export function GenerateLetterDialog({
     });
 
   async function submit() {
-    if (recipients.length > 1) {
+    if (targets.length > 1 || retryOnly) {
       // A batch is a list of renders, one per person, walked sequentially and reported honestly: forty
       // downloads would be hostile, so nothing is downloaded - each letter is filed under its own employee.
-      const result = await runSequential(recipients, empNameOr, generateFor, setProgress);
+      const missed: string[] = [];
+      const result = await runSequential(
+        targets,
+        empNameOr,
+        async (path) => { try { return await generateFor(path); } catch (e) { missed.push(path); throw e; } },
+        setProgress,
+      );
       setProgress(null);
       onGenerated?.();
+      setRetryOnly(missed.length ? missed : null);
       if (result.failures.length) {
-        // Thrown, not toasted: the dialog stays open with the list of who was missed.
-        throw new Error(`${batchSummary(result, "letter")} Not done: ${result.failures.map((f) => `${f.label} (${f.message})`).join("; ")}`);
+        // Thrown, not toasted: the dialog stays open with the list of who was missed - and the next press is
+        // now over exactly those people, so nobody who already has their letter gets a second one.
+        throw new Error(`${batchSummary(result, "letter")} Not done: ${result.failures.map((f) => `${f.label} (${f.message})`).join("; ")}. Generate again to retry just those ${missed.length === 1 ? "one" : missed.length}.`);
       }
       toast({ title: batchSummary(result, "letter"), description: "Each one is filed under its employee's documents.", variant: "success" });
       return;
@@ -201,9 +222,11 @@ export function GenerateLetterDialog({
     <WriteDialog
       open={open}
       onClose={onClose}
-      title={recipients.length > 1 ? `Generate ${recipients.length} letters` : "Generate letter"}
+      title={retryOnly ? `Retry ${retryOnly.length} letter${retryOnly.length === 1 ? "" : "s"}` : recipients.length > 1 ? `Generate ${recipients.length} letters` : "Generate letter"}
       description={
-        recipients.length > 1
+        retryOnly
+          ? `Only the ${retryOnly.length === 1 ? "one" : retryOnly.length} that could not be filed: ${retryOnly.map(empNameOr).join(", ")}. Everyone else already has theirs.`
+          : recipients.length > 1
           ? `One letter each, filed under their own documents.${esign ? " Each recipient is asked to e-sign theirs." : ""} Nothing is downloaded - there would be ${recipients.length} files.`
           : esign
             ? `Filed under ${subject || "the employee"}'s documents and downloaded now. They are asked to e-sign it, and it locks once signed.`
@@ -212,7 +235,7 @@ export function GenerateLetterDialog({
       collection="personal-documents"
       guardLabel="letter"
       form={form}
-      submitLabel={recipients.length > 1 ? `Generate ${recipients.length}` : "Generate"}
+      submitLabel={retryOnly ? `Retry ${retryOnly.length}` : recipients.length > 1 ? `Generate ${recipients.length}` : "Generate"}
       canSubmit={canSubmit}
       whyNot={whyNot}
       onSubmit={submit}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Gift, Plus } from "lucide-react";
 import { get, create } from "@/api";
-import { formatMoney } from "@/lib/utils";
+import { formatMoney, round2 } from "@/lib/utils";
 import { todayStr as todayYmd } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Bonus } from "@/types";
@@ -59,7 +59,10 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
     try {
       await create("bonuses", {
         employee: "employees/" + employeeId,
-        amount: Math.round(Number(form.amount) * 100) / 100,
+        // `round2`, not the inline float form: this is the amount that gets STORED and then paid, and the
+        // inline `Math.round(n * 100) / 100` rounds a decimal half-case the opposite way from the server's
+        // round2 (see the note on lib/utils#round2).
+        amount: round2(Number(form.amount)),
         kind: form.kind.trim(),
         award_date: form.award_date,
         reason: form.reason.trim(),

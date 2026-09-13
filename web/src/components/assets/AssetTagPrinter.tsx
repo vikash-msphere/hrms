@@ -273,7 +273,7 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetIds, tagSettin
   const confirm = useConfirm();
   // Category names for the label/filter: an asset carries a reference, and the tag it already has carries the
   // category's code, so nothing here needs to compute a tag - only to say what kind of thing this is.
-  const { rows: assetCategories } = useCollection<AssetCategory>("asset-categories");
+  const { rows: assetCategories } = useCollection<AssetCategory>("asset-categories", { all: true });
   const catName = useMemo(() => {
     const m = new Map(assetCategories.map((c) => [idOf(c.path), c.display_name ?? ""]));
     return (p?: string | null) => (p ? m.get(idOf(p)) ?? "" : "");

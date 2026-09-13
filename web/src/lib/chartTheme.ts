@@ -93,7 +93,9 @@ export function monthlyTotals(rows: { date: string; value: number }[], months: n
   }
   return {
     labels: keys.map((k) => new Date(`${k}-01T00:00:00Z`).toLocaleDateString(undefined, { month: "short", year: "2-digit", timeZone: "UTC" })),
-    values: keys.map((k) => Math.round((totals.get(k) ?? 0) * 100) / 100),
+    // `round2`, for the reason `topSlices` states sixteen lines below and this builder was not following: two
+    // chart builders in one module must not round the same money total in opposite directions.
+    values: keys.map((k) => round2(totals.get(k) ?? 0)),
   };
 }
 

@@ -104,12 +104,12 @@ const REPLAY_PRIVACY = {
     ...SENSITIVE_PAGES.map((p) => `[data-page="${p}"]`),
     // A dialog renders through a PORTAL, as a child of <body>, so it sits outside `<main data-page="…">` and
     // the route mask above cannot reach it - the "edit bank details" form was recorded in full while the page
-    // behind it was masked. The fix is the `.sentry-mask` convention on the SEVEN dialogs that actually edit
-    // pay, identity or bank data (EmployeeBankDetails, EmployeeCompensation, EmployeeTaxDetails,
-    // EmployeeSettlement, EmployeeBonuses, EmployeeIdentityDetails, EmployeePersonalDetails), not a blanket
-    // rule on every overlay: masking every dialog on a sensitive route also took the confirm prompts, the
-    // pickers and the report form itself, which is the over-masking this whole list exists to avoid.
-    // test/replayMaskCoverage.test.ts holds those seven to it.
+    // behind it was masked. The fix is the `.sentry-mask` convention on the dialogs that actually show pay,
+    // identity, medical or bank data (EmployeeBankDetails, EmployeeCompensation, EmployeeTaxDetails,
+    // EmployeeSettlement, EmployeeBonuses, EmployeeIdentityDetails, EmployeePersonalDetails,
+    // EmergencyQuickView, SignDocumentDialog), not a blanket rule on every overlay: masking every dialog on a
+    // sensitive route also took the confirm prompts, the pickers and the report form itself, which is the
+    // over-masking this whole list exists to avoid. test/replayMaskCoverage.test.ts holds them to it.
     // Fields that are sensitive wherever they appear, matched on what the BROWSER already knows about them
     // rather than on app markup: autocomplete hints and input types are set for the password manager's
     // benefit and are therefore both present and stable.
@@ -170,6 +170,8 @@ const REPLAY_PRIVACY = {
 
   // Replaced entirely rather than masked: these are not text, so masking would not touch them. An iframe here
   // is always a rendered PDF (payslip, letter, Form 16) and a canvas is a chart, a barcode or a signature pad.
+  // A stored signature is neither - it is an <img> whose src is a data: URL, so its bytes ride inside the DOM
+  // snapshot; both of its render sites carry `data-sentry-block` themselves (SignatureField).
   block: [".sentry-block", "[data-sentry-block]", "iframe", "canvas"],
 
   // Keystrokes are never recorded for these, even where the field itself is visible - what somebody TYPES into

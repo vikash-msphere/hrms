@@ -96,7 +96,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
   // every render, which is either a lie in the dependency array or a memo that never holds. Its identity moves
   // with the org's currency settings, which is the only thing it reads.
   const money = useCallback((n: number, cc?: string) => formatMoney(n, cc || org.default_currency, currencyDecimals(cc, org)), [org]);
-  const { rows: payComponents } = useCollection<PayComponent>("pay-components");
+  const { rows: payComponents } = useCollection<PayComponent>("pay-components", { all: true });
   const { rows: payGrades } = useCollection<PayGrade>("pay-grades");
   const { rows: structures } = useCollection<SalaryStructure>("salary-structures");
   // Re-apply machinery (payroll/super only) so the stale-split warning below can be acted on from here, rather
@@ -348,7 +348,13 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
       // correction sends the same fields to the row's own path, and the server re-solves the split (and the
       // arrears, unless they have already been paid out).
       const body = {
-        annual_ctc: Math.round(Number(form.ctc) * 100) / 100,
+        // `r2` (= round2), never the inline `Math.round(n * 100) / 100` this file's own header argues against:
+        // the inline form multiplies in float, so `Number("1234.565") * 100` is `123456.49…` and floors to
+        // 1234.56 where the server's round2 gives 1234.57. This is the one number the file actually STORES -
+        // every derived line (basic, Special Allowance, employer contributions, monthly gross) is solved from
+        // it, and `staleSplit` compares against the split it produced - while `r2` was already used throughout
+        // for the previews.
+        annual_ctc: r2(Number(form.ctc)),
         effective_from: form.effective_from,
         pay_grade: form.pay_grade.trim(),
         salary_structure: form.salary_structure.trim(),
@@ -486,9 +492,20 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
                   <Row label="Gross salary" amount={breakdown.grossEarnings} />
                   {breakdown.employerContribs.filter((l) => !l.aboveCtc).map((l) => <Row key={l.name} label={l.name} amount={l.amount} kind="earning" />)}
                   <div className="mt-1 flex items-baseline justify-between border-t pt-2">
-                    <span className="font-semibold">Cost to company</span>
+                    <span className="font-semibold">Cost to company <span className="font-normal text-muted-foreground">(as priced)</span></span>
                     <span className="text-lg font-bold tabular-nums">{money(breakdown.ctcMonthly * mult, cc)}</span>
                   </div>
+                  {/* The priced split and the CONTRACTED target are two different quantities and are named as
+                      two here, rather than being read as one number that disagrees with itself. Some targets
+                      are not reachable at all - ESI rounds up to the next rupee, so the CTC curve climbs in
+                      one-rupee steps and a target can land in the gap (`CTC_TOL` in domain/payroll.ts) - and
+                      in annual mode that sub-rupee monthly residual shows as up to twelve rupees against the
+                      history table below. */}
+                  {current && Math.abs(breakdown.ctcMonthly * 12 - current.annual_ctc) >= 0.5 && (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Contracted CTC is {money(unit === "annual" ? current.annual_ctc : current.annual_ctc / 12, cc)} - the closest split reachable in whole rupees is the figure above.
+                    </p>
+                  )}
                   {/* Over-and-above-CTC lines (employer PF when the org excludes it from CTC): shown for the full
                       cost-to-employer picture, but sit outside the CTC figure above - so they get their own
                       all-in total rather than being folded into the CTC the employee was promised. */}
@@ -569,7 +586,12 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
                   return (
                     <tr key={r.path} className={cn("border-b last:border-0", r.current && "bg-muted/30")}>
                       <td data-label="Effective" className="py-2 pr-3 font-medium"><span className="inline-block text-right sm:text-left">{r.effective_from}{r.arrears_amount ? <Badge variant={r.arrears_paid ? "success" : "warning"} className="ml-1.5 align-middle">{r.arrears_paid ? "arrears paid" : `arrears ${money(r.arrears_amount, r.currency_code)}`}</Badge> : null}</span></td>
-                      <td data-label={`CTC (${unit})`} className="py-2 pr-3 tabular-nums">{money(r.annual_ctc / (unit === "annual" ? 1 : 12), r.currency_code)}</td>
+                      {/* One number per revision. The build-up above totals the PRICED monthly cost, and
+                          `annual_ctc` is the target as typed - a sub-rupee residual by design (`CTC_TOL` in
+                          domain/payroll.ts), which in annual mode was rendered as a difference of up to
+                          twelve rupees between the CTC in the build-up and the CTC in the table under it, on
+                          the card used to check a revision before approving it. */}
+                      <td data-label={`CTC (${unit})`} className="py-2 pr-3 tabular-nums">{money(unit === "annual" ? r.annual_ctc : r.ctc_monthly ?? r.annual_ctc / 12, r.currency_code)}</td>
                       <td data-label="Change" className="py-2 pr-3">
                         {delta == null ? <span className="text-muted-foreground">-</span> : (
                           <span className={cn("inline-flex items-center gap-0.5 tabular-nums", delta >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-destructive")}>

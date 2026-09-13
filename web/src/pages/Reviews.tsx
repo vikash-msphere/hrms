@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { ClipboardCheck, ChevronRight, Check, SkipForward, UserPlus, MessageSquareQuote, CircleAlert, Hourglass, CheckCircle2, AlarmClock, ChevronsDownUp, ChevronsUpDown, BellRing, FileDown, Target } from "lucide-react";
 import { create, get, invoke } from "@/api";
 import { useRoute, setQueryParams } from "@/router";
-import { useCollection } from "@/hooks/useCollection";
+import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
 import { todayStr } from "@/lib/orgDay";
 import { useHasPrintVersion } from "@/lib/letterheads";
@@ -18,6 +18,7 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { AccessItem } from "@/components/access/AccessItem";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { EmptyState } from "@/components/common/EmptyState";
 import { EmployeePicker } from "@/components/common/EmployeePicker";
 import { Card } from "@/components/ui/card";
@@ -79,13 +80,23 @@ function StageTrail({ state }: { state: ReviewState }) {
 }
 
 export default function Reviews({ me }: { me: Me }) {
-  const { rows: reviews, state, error, reload } = useCollection<Review>("reviews");
-  const { rows: cycles } = useCollection<ReviewCycle>("review-cycles");
+  // `all`: this page is not only a list. `prevRatingFor` below answers "up or down from last cycle" out of
+  // these rows, and `reviews` is one row per employee per cycle ordered newest-first - so the rows that fall
+  // out of a window are, by construction, the older cycle, which is exactly the one a trend is measured
+  // against. The wrong answer is worse than none: an employee rated 4 -> 3 -> 4 whose middle cycle aged off
+  // the page reads as "up from 3", in green, on the document a pay decision is argued from. `cycleOptions`
+  // is built by walking these rows too, so a cycle whose reviews all fell off the page was not in the filter
+  // dropdown either - the reader could not even go and look.
+  const { rows: reviews, state, error, reload } = useCollection<Review>("reviews", { all: true });
+  // The walk stops at ALL_CAP. Past that the history is still partial, so the trend is withheld rather than
+  // computed from whatever was loaded - a missing arrow is a non-statement, a wrong one is a false statement.
+  const reviewsTruncated = useCollectionHasMore("reviews");
+  const { rows: cycles } = useCollection<ReviewCycle>("review-cycles", { all: true });
   // COMPLETE: this list is what EmployeePicker offers (reviewers, 360 feedback givers) and what the name map
   // resolves. On a window, everyone past the first page is unpickable and renders as "Employee".
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
-  const { rows: feedbackReqs, reload: reloadFb } = useCollection<ReviewFeedback>("review-feedback");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
+  const { rows: feedbackReqs, reload: reloadFb } = useCollection<ReviewFeedback>("review-feedback", { all: true });
   // `cards` and `goals` are read-only EVIDENCE inside an expanded review (what this person delivered, which
   // goals fell in the cycle). A folded list of review headers shows none of it, so both are read further down,
   // gated on a card actually being open.
@@ -308,13 +319,14 @@ export default function Reviews({ me }: { me: Me }) {
       (byEmp.get(eid) ?? byEmp.set(eid, []).get(eid)!).push({ start, rating: r.overall_rating, path: r.path });
     }
     return (r: Review): number | undefined => {
+      if (reviewsTruncated) return undefined; // an incomplete history can name the wrong cycle as "last time"
       if (!r.employee) return undefined;
       const start = cycleOf(r.cycle)?.period_start;
       if (!start) return undefined;
       const prior = (byEmp.get(idOf(r.employee)) ?? []).filter((x) => x.path !== r.path && x.start < start);
       return prior.sort((a, b) => b.start.localeCompare(a.start))[0]?.rating;
     };
-  }, [reviews, cycleOf]);
+  }, [reviews, cycleOf, reviewsTruncated]);
 
   // Open/folded state lives up here so expand/collapse-all and ?review= deep links can drive it; a card
   // with no explicit entry falls back to its default (open when it needs the caller).
@@ -385,6 +397,8 @@ export default function Reviews({ me }: { me: Me }) {
         description={reviews.some((r) => !mine(r)) ? "Performance reviews you own or oversee." : "Your performance reviews and self-assessments."}
         actions={<PageSettings me={me} host="reviews" />}
       />
+
+      <TruncationNotice collection={["reviews", "review-cycles", "review-feedback"]} what="reviews" className="mb-3" />
 
       {/* Two questions a cycle is run to answer, neither of which a list of reviews shows: how far along is
           it, and what did it conclude. The distribution is the honest form for the second - an average

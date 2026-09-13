@@ -5,6 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { navigate } from "@/router";
 import { useApprovals, APPROVAL_COLLECTIONS } from "@/lib/approvals";
 import { invoke, patch } from "@/api";
+import { describeError, isConflict } from "@/lib/formError";
 import { idOf, formatDate, formatMoney, cn } from "@/lib/utils";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -23,6 +24,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useConfirm } from "@/components/common/confirm";
+import { confirmDecision } from "@/lib/confirmDecision";
 import { bulkInvoke, mergeBulkResults, bulkSummary } from "@/lib/bulk";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
@@ -55,14 +57,36 @@ function TaxVerificationsCard({ rows, money, onDone }: { rows: TaxVerification[]
   // deciding on it are separate grants: a reader who cannot write the sub-resource gets the list without the
   // two buttons, rather than buttons that can only 403.
   const canDecide = usePermission("employees.tax.write");
+  const confirm = useConfirm();
   async function decide(v: TaxVerification, action: "verify" | "reject") {
+    // A rejection un-applies the declared prior-employer income and TDS from this person's tax projection -
+    // it changes their withholding on the next run and notifies them - so it gets the same beat of friction
+    // as every other reject in the app. It is a `patch` rather than an `invoke`, which is the only reason it
+    // did not look like a decision to anything scanning for one (lib/confirmDecision.ts).
+    if (action === "reject" && !(await confirmDecision(confirm, "reject", `${v.employee_name}'s prior-employer tax declaration`))) return;
     setBusy(v.employee + action);
     try {
-      await patch(`employees/${idOf(v.employee)}/tax`, { values: { action } });
+      // The version the card was drawn from, and the figures that were on it. Either alone closes the gap the
+      // server's guard describes; both together mean a decision can only ever land on what the reviewer saw -
+      // a re-declaration in between is a 409 they can re-read, not a silent verify of a number nobody read.
+      await patch(
+        `employees/${idOf(v.employee)}/tax`,
+        action === "verify"
+          ? { values: { action, verified_income: v.prior_employer_income, verified_tds: v.prior_employer_tds } }
+          : { values: { action } },
+        v.etag,
+      );
       toast({ title: action === "verify" ? "Previous employer details verified" : "Declaration rejected", variant: "success" });
       onDone();
     } catch (e) {
-      toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" });
+      // A conflict here is the guard doing its job: the declaration moved after this card was drawn, so the
+      // queue is reloaded and the reviewer decides on the figures that are actually on file now.
+      if (isConflict(e)) {
+        toast({ title: "This declaration changed", description: "It was re-declared while this queue was open. The figures have been reloaded - check them and decide again.", variant: "destructive" });
+        onDone();
+      } else {
+        toast({ title: "Couldn't update", description: describeError(e), variant: "destructive" });
+      }
     } finally {
       setBusy(null);
     }
@@ -87,7 +111,11 @@ function TaxVerificationsCard({ rows, money, onDone }: { rows: TaxVerification[]
                   <AccessAction collection="employees" objectPath={v.employee} field="tax" label="Verify prior-employer tax">
                     <Button size="sm" variant="outline" loading={busy === v.employee + "verify"} disabled={!!busy} onClick={() => decide(v, "verify")}><Check className="h-4 w-4" /> Verify</Button>
                   </AccessAction>
-                  <Button size="sm" variant="ghost" className="text-destructive" disabled={!!busy} onClick={() => decide(v, "reject")}><X className="h-4 w-4" /> Reject</Button>
+                  {/* Same AccessAction as its neighbour: both are behind one gate, so showing the manage-access
+                      key on only half the pair reads as an authorization difference that isn't there. */}
+                  <AccessAction collection="employees" objectPath={v.employee} field="tax" label="Reject prior-employer tax">
+                    <Button size="sm" variant="ghost" className="text-destructive" loading={busy === v.employee + "reject"} disabled={!!busy} onClick={() => decide(v, "reject")}><X className="h-4 w-4" /> Reject</Button>
+                  </AccessAction>
                 </div>
               )}
             </div>
@@ -118,8 +146,8 @@ export default function Approvals({ me }: { me: Me }) {
   const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: total > 0 || Object.values(history).some((b) => b.length > 0) });
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types", { enabled: hasLeave || encashments.length > 0 || anyOf("encashments") });
   const { rows: categories } = useCollection<ReimbursementCategory>("reimbursement-categories", { enabled: reimbs.length > 0 || anyOf("reimbs") });
-  const { rows: projects } = useCollection<Project>("projects", { enabled: timeEntries.length > 0 || anyOf("timeEntries") });
-  const { rows: assetCategories } = useCollection<AssetCategory>("asset-categories", { enabled: assetRequests.length > 0 || anyOf("assetRequests") });
+  const { rows: projects } = useCollection<Project>("projects", { enabled: timeEntries.length > 0 || anyOf("timeEntries"), all: true });
+  const { rows: assetCategories } = useCollection<AssetCategory>("asset-categories", { enabled: assetRequests.length > 0 || anyOf("assetRequests"), all: true });
   // Decision context for leave: the requester's remaining balance and who else is already off in that window.
   // Both are served scoped to what the caller may read, so these quietly stay blank for approvers without
   // access - and are read only when there is a leave decision to make.

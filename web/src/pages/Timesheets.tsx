@@ -57,7 +57,10 @@ const LEGEND: { status: TimeEntryStatus; label: string; swatch: string }[] = [
 ];
 
 export default function Timesheets({ me }: { me: Me }) {
-  const { rows: projects, state: projectsState } = useCollection<Project>("projects");
+  // Every project the caller can see, not the newest page: `projectById` is both the grid's row list and the
+  // name lookup, and `gridProjects` drops any entry whose project is missing from the map - so a project past
+  // the page cap takes its logged hours off the grid while `weekTotal` still counts them.
+  const { rows: projects, state: projectsState } = useCollection<Project>("projects", { all: true });
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -245,6 +248,7 @@ export default function Timesheets({ me }: { me: Me }) {
   async function copyLastWeek() {
     if (!meRef) return;
     setCopying(true);
+    let made = 0;
     try {
       const from = addDaysYmd(weekStart, -7);
       const to = addDaysYmd(weekStart, -1);
@@ -257,13 +261,30 @@ export default function Timesheets({ me }: { me: Me }) {
         toast({ title: source.length ? "Nothing to copy" : "Last week is empty", description: source.length ? "Every day last week already has an entry here." : undefined });
         return;
       }
-      for (const { e, date } of todo) {
-        await create("time-entries", { project: e.project, date, hours: e.hours, description: e.description || undefined, billable: e.billable });
+      // Same shape as submitWeek above: count what landed, report it on the failure path too, and reload
+      // whenever anything was written. The "safe to run twice" guard is `byCell`, which is derived from the
+      // loaded week - so a partial failure that skipped the reload would leave the guard describing the grid
+      // as it was BEFORE the copy, and the next press would create the landed entries a second time.
+      try {
+        for (const { e, date } of todo) {
+          await create("time-entries", { project: e.project, date, hours: e.hours, description: e.description || undefined, billable: e.billable });
+          made++;
+        }
+        toast({ title: `Copied ${made} ${made === 1 ? "entry" : "entries"}`, variant: "success" });
+      } catch (e) {
+        toast({
+          title: made ? `Copied ${made} of ${todo.length}` : "Couldn't copy last week",
+          description: (e as Error).message,
+          variant: "destructive",
+        });
       }
-      toast({ title: `Copied ${todo.length} ${todo.length === 1 ? "entry" : "entries"}`, variant: "success" });
-      void loadWeek();
     } catch (e) { toast({ title: "Couldn't copy last week", description: (e as Error).message, variant: "destructive" }); }
-    finally { setCopying(false); }
+    finally {
+      // After a partial run the grid and the server disagree about exactly the cells the next attempt would
+      // skip, so the reload is what makes a retry correct rather than a duplicate.
+      if (made) await loadWeek();
+      setCopying(false);
+    }
   }
   async function decide(e: TimeEntry, verb: "approve" | "reject") {
     if (!(await confirmDecision(confirm, verb, `${e.hours}h logged on ${formatDate(e.date)}`))) return;

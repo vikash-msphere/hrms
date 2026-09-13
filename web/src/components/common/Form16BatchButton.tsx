@@ -38,33 +38,48 @@ export function Form16BatchButton({ employees, departments, loading = false, onG
   const [picked, setPicked] = React.useState<string[]>([]);
   const [picking, setPicking] = React.useState(false);
   const [progress, setProgress] = React.useState<BatchProgress | null>(null);
+  const [retryOnly, setRetryOnly] = React.useState<string[]>([]); // employee paths a partial run could not do
+  // Changing the year or the selection is a new run, not a retry of the old one.
+  React.useEffect(() => { setRetryOnly([]); }, [fy, scope, picked]);
 
   if (!canGenerate) return null;
 
   const active = employees.filter((e) => !e.disabled && !e.delete_time);
   // Rows already in hand answer even while the store revalidates; only an empty, unread roster is "counting".
   const counting = loading && employees.length === 0;
-  const targets = scope === "everyone" ? active : active.filter((e) => picked.some((p) => idOf(p) === idOf(e.path)));
+  const chosen = scope === "everyone" ? active : active.filter((e) => picked.some((p) => idOf(p) === idOf(e.path)));
+  // A retry is for the people it could not do, and nobody else. The common failure here is benign - no
+  // finalized payroll for the year yet - which is exactly why a retry is the expected next step once payroll
+  // closes for them; re-running the whole list would file a SECOND Form 16 for everyone who already has one,
+  // and `personal-documents` has no dedupe on (employee, financial_year, document_type). Two copies of a
+  // statutory document for one year is a real problem for whoever later has to say which is authoritative.
+  const targets = retryOnly.length ? chosen.filter((e) => retryOnly.includes(e.path)) : chosen;
   const empName = (e: Employee) => `${e.first_name} ${e.last_name}`;
 
   async function run() {
+    const missed: string[] = [];
     const result = await runSequential(
       targets,
       empName,
       // Through `invoke`, not the raw `api` helper: each call files a document, and only the write helpers
       // refresh the shared cache the lists of somebody's documents read from.
-      (e) => invoke<DocumentResource>("personal-documents", "generateForm16", undefined, {
-        employee: `employees/${idOf(e.path)}`,
-        financial_year: fy,
-      }),
+      async (e) => {
+        try {
+          return await invoke<DocumentResource>("personal-documents", "generateForm16", undefined, {
+            employee: `employees/${idOf(e.path)}`,
+            financial_year: fy,
+          });
+        } catch (err) { missed.push(e.path); throw err; }
+      },
       setProgress,
     );
     setProgress(null);
     onGenerated?.();
+    setRetryOnly(missed);
     if (result.failures.length) {
       // Thrown so the dialog stays open holding the list: usually a handful of people with no finalized payroll
-      // for the year, which is a real answer, not a glitch.
-      throw new Error(`${batchSummary(result, "Form 16")} Not done: ${result.failures.map((f) => `${f.label} (${f.message})`).join("; ")}`);
+      // for the year, which is a real answer, not a glitch. The next press is over exactly those people.
+      throw new Error(`${batchSummary(result, "Form 16")} Not done: ${result.failures.map((f) => `${f.label} (${f.message})`).join("; ")}. Generate again to retry just ${missed.length === 1 ? "that one" : `those ${missed.length}`}.`);
     }
     toast({ title: batchSummary(result, "Form 16"), description: `FY ${fy}, filed under each employee's documents.`, variant: "success" });
   }
@@ -84,7 +99,7 @@ export function Form16BatchButton({ employees, departments, loading = false, onG
         collection="personal-documents"
         guardLabel="Form 16 run"
         form={{ fy, scope, picked }}
-        submitLabel={counting ? "Generate" : `Generate ${targets.length}`}
+        submitLabel={counting ? "Generate" : retryOnly.length ? `Retry ${targets.length}` : `Generate ${targets.length}`}
         canSubmit={targets.length > 0 && !counting}
         whyNot={counting ? "Still counting the roster." : "Nobody is selected."}
         onSubmit={run}
@@ -98,9 +113,11 @@ export function Form16BatchButton({ employees, departments, loading = false, onG
         <Field
           label="Who"
           hint={
-            scope === "everyone"
-              ? counting ? "Counting the roster…" : `${active.length} active ${active.length === 1 ? "employee" : "employees"}.`
-              : `${picked.length} selected.`
+            retryOnly.length
+              ? `Retrying the ${targets.length} this run could not do - everyone else already has theirs for FY ${fy}.`
+              : scope === "everyone"
+                ? counting ? "Counting the roster…" : `${active.length} active ${active.length === 1 ? "employee" : "employees"}.`
+                : `${picked.length} selected.`
           }
         >
           <div className="flex items-center gap-2">

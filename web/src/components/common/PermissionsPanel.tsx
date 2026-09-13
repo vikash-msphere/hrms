@@ -1,7 +1,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { Download, Upload, GitCompareArrows, KeyRound } from "lucide-react";
-import { list, listAll, create, remove, get, invoke } from "@/api";
+import { listAll, create, remove, get, invoke } from "@/api";
 import { ruleSentence, expiryLabel } from "@/components/access/ruleLogic";
 import { Checkbox } from "@/components/ui/checkbox";
 import { usePermission } from "@/lib/perm";
@@ -14,6 +14,7 @@ import { cloneAccessRules, restoreAccessRules, ruleBody } from "@/components/acc
 import { useAccessMode } from "@/components/access/AccessModeProvider";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
+import { confirmDecision } from "@/lib/confirmDecision";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { FineRulesEditor } from "@/components/access/FineRulesEditor";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -71,6 +72,11 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   }
 
   async function decide(r: AccessRule, decision: "approve" | "reject") {
+    // Approving is what makes the grant live, and it cannot be taken back from this button - the same beat of
+    // friction every other decision verb in the app gets (lib/confirmDecision), with the rule as the subject
+    // so the dialog can't be mistaken for the row above or below.
+    const subject = ruleSentence(r, r.subject_kind === "role" ? roleLabel(r.subject) : (users.find((u) => u.path === r.subject)?.email ?? "This person"));
+    if (!(await confirmDecision(confirm, decision, subject))) return;
     setBusy(true);
     try {
       await invoke("access-rules", decision, undefined, { rule: r.path });
@@ -93,12 +99,15 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   const reload = React.useCallback(async () => {
     setBusy(true);
     try {
-      // Every role, not the first page: a rule whose subject is a role past the cap would otherwise render
-      // as a bare machine name here and be missing from the copy-permissions picker entirely.
-      const [ro, us] = await Promise.all([listAll<Role>("roles"), list<User>("users")]);
+      // Every role AND every user, not the first page. For roles: a rule whose subject is a role past the cap
+      // would otherwise render as a bare machine name here and be missing from the copy-permissions picker
+      // entirely. For users it is worse - each row IS the editor for that person's per-user rules, so a login
+      // outside the window has no row, their existing rules are invisible, and the matrix presents itself as
+      // the whole access model while missing people from it.
+      const [ro, us] = await Promise.all([listAll<Role>("roles"), listAll<User>("users")]);
       registerRoleLabels(ro);
       setRoles(ro);
-      setUsers(us.results.map((u) => ({ path: u.path, email: u.email })));
+      setUsers(us.map((u) => ({ path: u.path, email: u.email })));
       setRules(await fetchAllAccessRules());
     } catch (e) {
       toast({ variant: "destructive", title: "Could not load permissions", description: String((e as Error).message) });
@@ -238,7 +247,9 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     );
   };
 
-  // Users matrix: one row per user (DataTable paginates them), one column per collection.
+  // Users matrix: one row per user, one column per collection. The rows come from a cursor walk (`listAll`
+  // in reload) rather than a page, because DataTable paginates the rows it is HANDED - it cannot page a
+  // collection that was never fetched, and a person with no row here has no editable per-user access at all.
   const userMatrixCols: Column<{ path: string; email: string }>[] = [
     { id: "user", header: "User", filter: "text", accessor: (u) => u.email, cell: (u) => <CopyEmail email={u.email} className="font-medium" /> },
     ...collections.map((c) => ({ id: c, header: labelOf(c), sortable: false, filter: "none", accessor: (u: { path: string; email: string }) => valueOf("user", u.path, c), cell: (u: { path: string; email: string }) => levelCell("user", u.path, c, u.email) } as Column<{ path: string; email: string }>)),
@@ -480,10 +491,12 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
             <FineRulesEditor rules={rules.filter((r) => r.subject_kind === "role")} reload={reload} roleOptions={roles.map((r) => ({ name: r.name, label: r.label || roleLabel(r.name) }))} canWrite={canManage} controlsSlot={controlsSlot} />
           )
         ) : subjectKind === "user" ? (
-          // Users x collections: a row per user (paginated by DataTable), a column per collection.
+          // Users x collections: a row per user, a column per collection. The walk stops at listAll's own page
+          // ceiling, so `accessCollection` is passed for the residual case - the table then admits the window
+          // rather than presenting whatever it holds as every login account.
           <div className="space-y-3">
             {matrixNote}
-            <DataTable columns={userMatrixCols} rows={users} getRowId={(u) => u.path} tableId="user-perms-matrix" emptyTitle="No users" controlsSlot={controlsSlot} />
+            <DataTable columns={userMatrixCols} rows={users} getRowId={(u) => u.path} tableId="user-perms-matrix" accessCollection="users" emptyTitle="No users" controlsSlot={controlsSlot} />
           </div>
         ) : (
           // Roles x collections: a row per collection, a column per role, grouped by module and filterable -

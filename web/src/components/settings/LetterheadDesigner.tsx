@@ -242,12 +242,18 @@ export function LetterheadDesigner({
   React.useEffect(() => {
     if (!open) return;
     let dropped = false;
+    // ABORTED on cleanup, not merely ignored - the same treatment the thumbnail effect below already gives its
+    // own fetch, and this is the more expensive of the two: each call is a full PDF render, and those are the
+    // requests the dedicated `render` budget (40/min, middleware/rateLimit.ts) exists to bound. Without this a
+    // designer session - drag an element, type a heading, nudge a margin - fired one render per 600 ms quiet
+    // window and let every superseded one run to completion against that budget.
+    const controller = new AbortController();
     const t = setTimeout(() => {
       setRendering(true);
       // `variant` matters even though the draft design is sent inline: it tells the server whose IMAGES to
       // draw. Without it every preview used the screen version's images, so a print version with its own
       // stationery previewed with the screen one's - the leak this whole pair exists to prevent.
-      void blobUrl(path, { verb: "preview", body: { design, variant: shownVariant } })
+      void blobUrl(path, { verb: "preview", body: { design, variant: shownVariant }, signal: controller.signal })
         .then((u) => {
           if (dropped) { URL.revokeObjectURL(u); return; }
           const old = previewUrl.current;
@@ -259,7 +265,7 @@ export function LetterheadDesigner({
         .catch((e: unknown) => { if (!dropped) setPreviewError((e as Error).message); })
         .finally(() => { if (!dropped) setRendering(false); });
     }, 600);
-    return () => { dropped = true; clearTimeout(t); };
+    return () => { dropped = true; clearTimeout(t); controller.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snap, open, path, artNonce]);
 

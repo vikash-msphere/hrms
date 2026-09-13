@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { DOW, coverOf, gridCells, monthLabelOf, weekdayOrder, ymdUtc, COVER_BAR } from "@/lib/leaveCalendar";
+import { DOW, coverOf, gridCells, longDate, monthLabelOf, weekdayOrder, ymdUtc, COVER_BAR } from "@/lib/leaveCalendar";
 import { DayCard, Tip, type ViewProps } from "./shared";
 
 // Three months at once, as a heat map rather than a bar chart: at this zoom the question is no longer "who is
@@ -32,7 +32,9 @@ export function QuarterGrid({
                     <button
                       type="button"
                       onClick={() => onSelect(selected === ymd ? null : ymd)}
-                      aria-label={`${ymd}, ${away} of ${total} away`}
+                      // A spoken date, not an ISO string: a screen reader reads "2026-09-13" as digits. Same
+                      // as MonthGrid and YearGrid.
+                      aria-label={`${longDate(ymd)}, ${away} of ${total} away`}
                       className={cn(
                         "relative flex h-7 items-center justify-center rounded-[3px] text-[11px] tabular-nums transition-colors",
                         !inMonth && "opacity-25",
@@ -41,11 +43,17 @@ export function QuarterGrid({
                         selected === ymd && "ring-2 ring-primary",
                       )}
                     >
-                      {/* Cover as a fill from the bottom: the fuller the day, the taller the shade. */}
+                      {/* Cover as a fill from the bottom: the fuller the day, the taller the shade.
+                          FLOORED at 12%, the way TeamGrid floors the same computation. `coverOf` returns
+                          "some" for any away >= 1, so the fill renders whenever anybody is out - but the raw
+                          percentage on a 28px cell is sub-pixel below about 4%, and at opacity-60 over a cell
+                          that already carries a muted/holiday/weekend tint it is invisible. On any org-wide
+                          or large-department view that drew a day with one to three people out exactly like a
+                          day with nobody out, which is the one thing this view exists to say. */}
                       {cover !== "none" && (
                         <span
                           className={cn("absolute inset-x-0 bottom-0 rounded-[3px] opacity-60", COVER_BAR[cover])}
-                          style={{ height: `${Math.min(100, Math.round((away / Math.max(1, total)) * 100))}%` }}
+                          style={{ height: `${Math.max(12, Math.min(100, Math.round((away / Math.max(1, total)) * 100)))}%` }}
                           aria-hidden
                         />
                       )}

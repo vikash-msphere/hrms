@@ -8,6 +8,7 @@ import {
   RefreshCw, ExternalLink, ShieldCheck, Copy, CalendarClock, BellRing, Eye,
 } from "lucide-react";
 import { api, get, getAllPages, upload, patch, invoke, blobOf, download as downloadFile } from "@/api";
+import { describeError } from "@/lib/formError";
 import { documentDownloadItems, useDocumentDownload } from "@/components/common/DocumentDownload";
 import { useDocuments, createDocument, docCollection, documentFileName } from "@/lib/documents";
 import { useCollection } from "@/hooks/useCollection";
@@ -15,6 +16,7 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission, useCapabilities, canSeeActivity, useCanSeeActivity } from "@/lib/perm";
 import { cn, formatBytes, formatDate, humanize, idOf } from "@/lib/utils";
+import { isExternalUrl, openExternal } from "@/lib/openExternal";
 import { todayStr, addDaysYmd } from "@/lib/orgDay";
 import { Checkbox } from "@/components/ui/checkbox";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
@@ -138,7 +140,7 @@ export default function Documents({ me }: { me: Me }) {
   // COMPLETE: this one list feeds the letter/Form-16 pickers AND the acknowledgement dialog's "who is still
   // pending" roster, which is a compliance answer - on a window it names people who have already signed.
   const { rows: employees, state: employeesState } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   const [pickAudience, setPickAudience] = useState(false);
   // The acknowledging user's own record (for their signature image + name on the acknowledge dialog).
   const myEmp = useMemo(() => employees.find((e) => idOf(e.path) === me.employee_id), [employees, me.employee_id]);
@@ -171,7 +173,9 @@ export default function Documents({ me }: { me: Me }) {
 
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "");
+    // A word, never the wire id (lib/utils.ts `personName`): the list is scoped to what the caller may read,
+    // so a document issued to somebody outside that slice must not print a uuid as its owner.
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Someone" : "");
   }, [employees]);
 
   const [dialog, setDialog] = useState<Mode | null>(null);
@@ -179,6 +183,9 @@ export default function Documents({ me }: { me: Me }) {
   // Files staged for a create. A shelf is loaded from a folder of scans, so the dialog takes a list and files
   // one document per file, sharing the type, scope and expiry that were set once.
   const [files, setFiles] = useState<File[]>([]);
+  // Which of the staged files this dialog has already filed, so a retry after a partial batch resumes rather
+  // than restarting (see `submit`). Cleared when the dialog closes, below.
+  const filedThisDialog = useRef(new Set<File>());
   const file = files[0] ?? null;
   const [dragOver, setDragOver] = useState(false);
   // Acknowledgement: the doc an employee is signing, and (HR) the doc whose progress is open.
@@ -319,14 +326,44 @@ export default function Documents({ me }: { me: Me }) {
     if (files.length > 1) {
       // A batch: one document per file, each titled from its own file name, everything else shared. Sequential
       // on purpose - the upload path is one subrequest per file and a burst of them is what trips the free tier.
+      //
+      // RESUMABLE. A throw reaches WriteDialog, which turns it into an in-form message and keeps every one of
+      // the staged files - so pressing Submit again re-ran the loop from the start and created a SECOND copy of
+      // everything that had already landed, multiplying on every retry. `filed` survives between attempts (it
+      // is a ref on the dialog), so a retry resumes at the file that failed. Same shape as Attendance's
+      // `submitCorrection` and ExpenseBudgets' `commitRoll`.
+      let made = 0;
       for (const f of files) {
-        const doc = await createDocument({ ...bodyFromForm(stripExt(f.name)), published: form.published });
-        await upload(doc.path, f);
+        if (filedThisDialog.current.has(f)) continue;
+        try {
+          const doc = await createDocument({ ...bodyFromForm(stripExt(f.name)), published: form.published });
+          await upload(doc.path, f);
+        } catch (e) {
+          reload(); // whatever did land is real, and belongs on screen
+          throw new Error(`Uploaded ${made} of ${files.length}. ${describeError(e)} Press Submit again to carry on from "${f.name}".`);
+        }
+        filedThisDialog.current.add(f);
+        made++;
       }
       toast({ title: `${files.length} documents uploaded`, variant: "success" });
     } else {
       const doc = await createDocument({ ...bodyFromForm(), published: form.published });
-      if (file) await upload(doc.path, file);
+      // The document EXISTS from here on, so a failed upload must not read as a failed save. Keep the record,
+      // close the dialog, and say what is missing - every route to this page has an attach-to-existing path
+      // (the replace/upload button on the row).
+      if (file) {
+        try {
+          await upload(doc.path, file);
+        } catch (e) {
+          reload();
+          toast({
+            variant: "destructive",
+            title: "Added, but the file didn't attach",
+            description: `${describeError(e)} The document is on the list - use its upload button to attach the file.`,
+          });
+          return;
+        }
+      }
       toast({ title: file ? "Document uploaded" : "Document added", variant: "success" });
     }
     reload();
@@ -530,7 +567,9 @@ export default function Documents({ me }: { me: Me }) {
           // Sign your own generated letter/contract (owner-only). Internal provider = in-app image signing; an
           // external vendor (e.g. SignYu) = open the vendor's hosted Aadhaar signing page.
           if (d.requires_signature && !d.signed_time && isMine(d)) {
-            if (d.esign_uri) items.push({ label: "Open to sign", icon: <ExternalLink className="h-4 w-4" />, onClick: () => window.open(d.esign_uri, "_blank", "noopener") });
+            // `openExternal` rather than a bare window.open: `esign_uri` is the vendor's own JSON field,
+            // stored verbatim, and a `javascript:` URL opened from here would run in this origin.
+            if (isExternalUrl(d.esign_uri)) items.push({ label: "Open to sign", icon: <ExternalLink className="h-4 w-4" />, onClick: () => openExternal(d.esign_uri) });
             else if (!d.esign_provider || d.esign_provider === "internal") items.push({ label: "Sign", icon: <PenLine className="h-4 w-4" />, onClick: () => setSignDoc(d) });
           }
           // HR: reconcile a pending external e-sign with the vendor (fallback to the webhook).
@@ -569,8 +608,8 @@ export default function Documents({ me }: { me: Me }) {
         const needsSign = !d.delete_time && d.requires_signature && !d.signed_time && isMine(d);
         const onSign = needsAck
           ? () => setAckDoc(d)
-          : d.esign_uri
-            ? () => window.open(d.esign_uri, "_blank", "noopener")
+          : isExternalUrl(d.esign_uri)
+            ? () => openExternal(d.esign_uri)
             : (!d.esign_provider || d.esign_provider === "internal")
               ? () => setSignDoc(d)
               : null;
@@ -802,7 +841,7 @@ export default function Documents({ me }: { me: Me }) {
 
       <WriteDialog
         open={!!dialog}
-        onClose={() => setDialog(null)}
+        onClose={() => { setDialog(null); filedThisDialog.current = new Set(); }}
         title={isCreate ? "Upload document" : "Edit document"}
         description={
           form.employee === ORG

@@ -22,7 +22,7 @@ const NONE = "__none__";
 // closed, and the employee's current designation/department are synced server-side. HR + super only.
 export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: string; canEdit: boolean }) {
   const { toast } = useToast();
-  const { rows: departments } = useCollection<Department>("departments");
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
   const [rows, setRows] = useState<Position[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [open, setOpen] = useState(false);
@@ -30,7 +30,7 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
 
   const deptName = useMemo(() => {
     const m = new Map(departments.map((d) => [idOf(d.path), d.display_name]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown department" : "-");
   }, [departments]);
 
   // The loader is the effect's dependency (see the note in EmployeeBankDetails).

@@ -4,6 +4,7 @@ import { blobOf, invoke } from "@/api";
 import { navigate } from "@/router";
 import { describeError } from "@/lib/formError";
 import { cn, idOf } from "@/lib/utils";
+import { isExternalUrl, openExternal } from "@/lib/openExternal";
 import { SignatureImage } from "@/components/common/SignatureField";
 import { PdfReader } from "@/components/common/PdfReader";
 import { FormError } from "@/components/common/FormError";
@@ -116,9 +117,11 @@ export function SignDocumentDialog({
     const after = next ?? list.find((d) => d.path !== doc.path);
     try {
       const res = await invoke<DocumentResource>(doc.path, mode === "acknowledge" ? "acknowledge" : "sign");
-      if (res.esign_uri) {
-        // Aadhaar (Cashfree): the ack stays pending until the employee finishes the vendor journey.
-        window.open(res.esign_uri, "_blank", "noopener");
+      if (isExternalUrl(res.esign_uri)) {
+        // Aadhaar (Cashfree): the ack stays pending until the employee finishes the vendor journey. Opened
+        // through `openExternal`, which insists on https - this value is the vendor's JSON, and a
+        // `javascript:` URL opened from a same-origin page runs in this origin.
+        openExternal(res.esign_uri);
         toast({ title: "Complete your Aadhaar e-sign", description: "Finish signing in the new tab; this document updates once done.", variant: "success" });
       } else {
         toast({ title: mode === "acknowledge" ? "Acknowledged" : "Signed", description: doc.display_name, variant: "success" });
@@ -151,7 +154,11 @@ export function SignDocumentDialog({
 
   return (
     <Dialog open={!!doc} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent scrollBody className={viewable ? "sm:max-w-3xl" : undefined}>
+      {/* `sentry-mask`: this dialog renders through a portal, outside `<main data-page="documents">`, so the
+          Documents route mask cannot reach it - and it shows the document body and the signer's legal name at
+          the moment they press Sign. (The signature image itself is `data-sentry-block`ed in SignatureField;
+          masking is a text operation and would not touch it.) */}
+      <DialogContent scrollBody className={cn("sentry-mask", viewable && "sm:max-w-3xl")}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <span>{mode === "acknowledge" ? "Acknowledge document" : "Sign document"}</span>

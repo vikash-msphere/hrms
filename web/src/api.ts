@@ -121,6 +121,19 @@ export type ApiInit = RequestInit & {
    * data rather than a moment's delay.
    */
   safeToRepeat?: boolean;
+  /**
+   * Do not refresh the affected collections after this write - the caller will, once, for the whole batch.
+   *
+   * For the one shape where per-write invalidation is the cost rather than the correctness: a handler that
+   * issues N writes to the SAME collection in a loop. Each one otherwise forces a re-read of every cached key
+   * with a live subscriber, plus a disk drop and a bus broadcast - and, because `patchRows` stamps
+   * `patchedAt`, a forced read already in flight when the next write lands is discarded and RE-SCHEDULED
+   * rather than adopted. Leaving a page with ten unread notifications for it cost ten PATCHes and more than
+   * ten list reads, on an app whose stated primary constraint is request count.
+   *
+   * A caller that sets this owes the collection ONE `invalidateCollections` when the batch settles.
+   */
+  skipInvalidation?: boolean;
 };
 
 function viewAsHeader(path: string, init: ApiInit): Record<string, string> {
@@ -330,7 +343,7 @@ async function withInvalidation<T>(path: string, verb: string | undefined, p: Pr
 // services test `hasOwnProperty`, so an omitted key leaves the stored value alone and `""` empties it. Do not
 // "tidy" an empty string into an omitted field, or an edit that clears a note will silently keep the old one.
 export function patch<T>(path: string, body: Record<string, unknown>, etag?: string, init?: ApiInit) {
-  return withInvalidation(path, undefined, api<T>(`/${path}`, {
+  const send = () => api<T>(`/${path}`, {
     ...init,
     method: "PATCH",
     // The caller's own headers are kept, not replaced: spreading `init` and then assigning `headers` dropped
@@ -338,7 +351,8 @@ export function patch<T>(path: string, body: Record<string, unknown>, etag?: str
     // here. Ours go first so the content type and the validator still win, which is what this helper is for.
     headers: { ...(init?.headers ?? {}), "Content-Type": "application/merge-patch+json", ...(etag ? { "If-Match": etag } : {}) },
     body: JSON.stringify(body),
-  }));
+  });
+  return init?.skipInvalidation ? send() : withInvalidation(path, undefined, send());
 }
 
 import { coalescedGet, coalescedGetDetailed, NOT_MODIFIED } from "@/lib/getCoalescer";

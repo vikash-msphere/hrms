@@ -87,7 +87,12 @@ function statsOf(rows: AttendanceRow[], tz: string, fullDayMinutes: number, toda
   let worked = 0, late = 0, absent = 0, minutes = 0, workingDays = 0, judged = 0, punctual = 0;
   let arrSum = 0, arrN = 0, depSum = 0, depN = 0, doneMinutes = 0, expectedDays = 0;
   for (const r of rows) {
-    const counts = r.status !== "holiday" && r.status !== "on_leave";
+    // A day nobody was rostered on is not a working day, whether it was worked or not: `worked_off_day` joins
+    // holiday and on_leave here. Counted, it added a whole `full_day_minutes` of EXPECTATION for voluntary
+    // work - so coming in on a Saturday moved the "done vs expected" bar backwards - and put that day's
+    // arrival into the punctuality score for a shift window that did not apply to it. The minutes it earned
+    // still count below; the day was simply not owed. (`workingDaysInRange` on the server skips it too.)
+    const counts = r.status !== "holiday" && r.status !== "on_leave" && r.status !== "worked_off_day";
     if (counts) workingDays++;
     if (counts && r.day < todayYmd) expectedDays++;
     const s = r.summary;
@@ -97,7 +102,7 @@ function statsOf(rows: AttendanceRow[], tz: string, fullDayMinutes: number, toda
       if (r.day < todayYmd) doneMinutes += s.workedMinutes;
       if (s.arrival) { arrSum += localMinutes(s.arrival, tz); arrN++; }
       if (s.departure) { depSum += localMinutes(s.departure, tz); depN++; }
-      if (!s.open) { judged++; if (!s.late) punctual++; } // a still-open day hasn't earned a verdict yet
+      if (counts && !s.open) { judged++; if (!s.late) punctual++; } // a still-open day hasn't earned a verdict yet
     }
     if (r.status === "late" || r.status === "late_early") late++;
     else if (r.status === "absent") absent++;
@@ -146,8 +151,8 @@ export default function Attendance({ me }: { me: Me }) {
   // `all: true` on the roster: this is the grid's list of PEOPLE, one row each, with no "load more" for a
   // reader to press - the shape `all` exists for. On one page, an org past a hundred simply had rows missing.
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
-  const { rows: departments } = useCollection<Department>("departments", { enabled: canApprove });
-  const { rows: holidays } = useCollection<Holiday>("holidays");
+  const { rows: departments } = useCollection<Department>("departments", { enabled: canApprove, all: true });
+  const { rows: holidays } = useCollection<Holiday>("holidays", { all: true });
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
   const { rows: regularizations, reload: reloadRegs } = useCollection<AttendanceRegularization>("attendance-regularizations");
   const rosterTruncated = useCollectionHasMore(["employees", "leave-requests"]);
@@ -358,29 +363,51 @@ export default function Attendance({ me }: { me: Me }) {
     : !sched.work_days.includes(weekdayOf(orgToday)) ? "Not a working day"
     : null;
 
+  // Both loaders latch on a generation counter, and each resolves to whether it was still the current walk.
+  // `listAllSessions` follows the server cursor with up to TEN sequential requests, so two windows in flight at
+  // once is not a tight race - it is the ordinary shape of pressing "previous" twice. Without the latch the
+  // slower walk won whenever it landed last, leaving `pageSessions` holding one window while `fromYmd`/`toYmd`
+  // and everything derived from them described another, with the skeleton already taken down over it.
+  //
+  // A counter rather than the effect-local `let live` the comparison window below uses: these two are also
+  // called directly (after a punch, and by the refresh button), where there is no cleanup to hang a flag on.
+  const recentGen = useRef(0);
+  const pageGen = useRef(0);
   // Recent punches (a couple of days) drive today's totals and the team's standing right now.
   const loadRecent = useCallback(async () => {
+    const gen = ++recentGen.current;
     try {
-      setRecentSessions(await listAllSessions(`attendance?from=${encodeURIComponent(new Date(Date.now() - 2 * DAY_MS).toISOString())}`));
+      const sessions = await listAllSessions(`attendance?from=${encodeURIComponent(new Date(Date.now() - 2 * DAY_MS).toISOString())}`);
+      if (gen !== recentGen.current) return false;
+      setRecentSessions(sessions);
     } catch (e) {
+      if (gen !== recentGen.current) return false;
       toast({ title: "Couldn't load attendance", description: (e as Error).message, variant: "destructive" });
     }
+    return true;
   }, [toast]);
   // The history window's sessions (re-fetched when the window changes).
   const loadPage = useCallback(async () => {
+    const gen = ++pageGen.current;
     try {
-      setPageSessions(await listAllSessions(`attendance?from=${encodeURIComponent(`${fromYmd}T00:00:00.000Z`)}&to=${encodeURIComponent(`${toYmd}T23:59:59.999Z`)}`));
+      const sessions = await listAllSessions(`attendance?from=${encodeURIComponent(`${fromYmd}T00:00:00.000Z`)}&to=${encodeURIComponent(`${toYmd}T23:59:59.999Z`)}`);
+      if (gen !== pageGen.current) return false;
+      setPageSessions(sessions);
     } catch (e) {
+      if (gen !== pageGen.current) return false;
       setPageSessions([]);
       toast({ title: "Couldn't load attendance history", description: (e as Error).message, variant: "destructive" });
     }
+    return true;
   }, [fromYmd, toYmd, toast]);
 
   useEffect(() => { void loadRecent(); }, [loadRecent]);
-  // Skeleton only when the window changes; the silent refresh after a clock action goes through loadPage directly.
+  // Skeleton only when the window changes; the silent refresh after a clock action goes through loadPage
+  // directly. A superseded walk leaves the skeleton up - the walk that replaced it is the one that takes it
+  // down, over its own data.
   useEffect(() => {
     setPageLoading(true);
-    void loadPage().finally(() => setPageLoading(false));
+    void loadPage().then((current) => { if (current) setPageLoading(false); });
   }, [loadPage]);
   // Everything on screen is minute-grained, so a 15s tick keeps the live figures honest without re-rendering
   // (and re-deriving the team's standing) once a second.
@@ -431,12 +458,16 @@ export default function Attendance({ me }: { me: Me }) {
     for (const day of days) {
       // A retry after a partial failure must not re-file the days that already went through.
       if (filedThisDialog.current.has(day)) continue;
+      // CLAIMED BEFORE THE AWAIT, released only if the write fails. Recording it afterwards made this ledger a
+      // guard against a retry and not against a concurrent submit: two calls in flight both passed the
+      // `has(day)` test above and both filed the same day.
+      filedThisDialog.current.add(day);
       try {
         const sessions = perDay[day].map((p) => ({ clock_in: zonedInstant(day, p.in, tz), clock_out: zonedInstant(day, p.out, tz) }));
         await create("attendance-regularizations", { date: day, sessions, reason: reason || undefined });
-        filedThisDialog.current.add(day);
         filed.push(day);
       } catch (e) {
+        filedThisDialog.current.delete(day); // nothing was filed for this day, so it stays retryable
         // One rejected day (already corrected, outside the window, …) shouldn't silently swallow the rest -
         // stop and report exactly which days were filed.
         failure = `${formatDate(day)}: ${(e as Error).message}`;
@@ -1813,7 +1844,11 @@ function CorrectionDialog({ rows, tz, sched, pendingDays, busy, onClose, onSubmi
   const splitDays = () => setPerDay(Object.fromEntries(rows.map((r) => [r.day, punches.map((p) => ({ ...p }))])));
   const close = () => guardClose(dirty, onClose)(false);
   const submit = async () => {
-    if (!canSubmit) return;
+    // `busy` as well as validity: Enter fires from any input in this dialog, and the dedupe ledger one file
+    // over records a day only AFTER its write resolves - so two Enters in flight both passed its `has(day)`
+    // test and both filed the same day, leaving duplicate correction requests to be approved or rejected
+    // individually. The ledger stops a retry; this stops a concurrent one.
+    if (!canSubmit || busy) return;
     setError(null);
     const failure = await onSubmit(
       Object.fromEntries(Object.entries(targets).map(([day, p]) => [day, keptPunches(p)])),

@@ -40,7 +40,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 import { cn, formatDate, formatMoney, idOf } from "@/lib/utils";
-import { todayStr, weekStartYmd } from "@/lib/orgDay";
+import { addDaysYmd, orgDayFromToday, todayStr, weekStartYmd } from "@/lib/orgDay";
 import { useApprovals } from "@/lib/approvals";
 import { boardTime } from "@/lib/boardOrder";
 import { useNotifications, timeAgo } from "@/lib/notifications";
@@ -195,7 +195,7 @@ export default function Dashboard({ me }: { me: Me }) {
   // section listed here fetches the collection the moment it is on screen, so no widget can render a number
   // computed from rows it never asked for.
   //  holidays    - the holidays card, "is today a holiday" (not-clocked-in), timeline day shading, my-day.
-  const { rows: holidays, state: holidaysState } = useCollection<Holiday>("holidays", { enabled: wantCalendar || wantKpis || wantTimeline || wantMyDay });
+  const { rows: holidays, state: holidaysState } = useCollection<Holiday>("holidays", { enabled: wantCalendar || wantKpis || wantTimeline || wantMyDay, all: true });
   const { rows: announcements, state: announcementsState } = useCollection<Announcement>("announcements", { enabled: wantBoard });
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types", { enabled: wantMyDay || wantTimeline });
   // Org events (private-by-default; yields [] for callers without events.read). Marked as bands on the timeline.
@@ -365,8 +365,7 @@ export default function Dashboard({ me }: { me: Me }) {
   // show the caller's own checklist even when no transition KPI is shared with them.
   const recentJoiner = useMemo(() => {
     if (!selfEmp?.start_date) return false;
-    const cutoff = new Date(Date.now() - 60 * 86_400_000).toISOString().slice(0, 10);
-    return selfEmp.start_date >= cutoff;
+    return selfEmp.start_date >= orgDayFromToday(-60);
   }, [selfEmp?.start_date]);
 
   // ---- Module KPIs (one collection each). Private by default, and read only as a LAST resort: `wantRows`
@@ -433,9 +432,10 @@ export default function Dashboard({ me }: { me: Me }) {
   // already loaded, so this KPI costs no extra read. Instants compare on the date part, so an all-day event
   // counts for its whole day (and a running multi-day event still counts as "this week").
   const upcomingEvents = useMemo(() => {
-    const in7 = new Date(`${today}T00:00:00`);
-    in7.setDate(in7.getDate() + 7);
-    const in7Str = in7.toISOString().slice(0, 10);
+    // `addDaysYmd`, not a local-parse/UTC-serialize round trip: building a Date from `${today}T00:00:00` parses
+    // at LOCAL midnight, stepping it is local arithmetic, and `toISOString()` serializes UTC - so the window was
+    // six days east of UTC and eight days west of it.
+    const in7Str = addDaysYmd(today, 7);
     const day = (v: string | undefined) => (v ?? "").slice(0, 10);
     return events
       .filter((e) => !e.delete_time && day(e.end_time) >= today && day(e.start_time) <= in7Str)
@@ -525,6 +525,9 @@ export default function Dashboard({ me }: { me: Me }) {
     const t = approvalItems[0]?.when;
     return t ? Math.max(0, Math.floor((Date.now() - new Date(t).getTime()) / 86_400_000)) : 0;
   }, [approvalItems]);
+  // The server count covers queues this page doesn't read, so it can exceed what the card holds - never the
+  // other way round. Taking the larger of the two keeps the badge honest while a queue is still arriving.
+  const approvalsAwaiting = Math.max(approvals.total, approvalItems.length);
 
   // Inline decision state for the approvals card. Approve is one click; reject confirms via a small dialog
   // (with an optional note where the collection's :reject accepts one), exactly like the Approvals inbox.
@@ -577,12 +580,16 @@ export default function Dashboard({ me }: { me: Me }) {
 
   // New joiners in the last 30 days (by start date).
   const newJoiners = useMemo(() => {
-    const cutoff = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10);
+    const cutoff = addDaysYmd(today, -30);
     return employees.filter((e) => e.start_date && e.start_date >= cutoff && e.start_date <= today).length;
   }, [employees, today]);
 
-  // The date 30 days out, used by the several "next 30 days" KPIs below.
-  const in30 = useMemo(() => new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10), []);
+  // The date 30 days out, used by the several "next 30 days" KPIs below. Both ends of every window below come
+  // from the ORG's day: a UTC bound compared against an org-local `today` is a 29- or 31-day window depending on
+  // which side of UTC the org sits, which is the failure the celebration window's note describes. Keyed on
+  // `today` rather than `[]` so a tab left open overnight follows the org day instead of holding yesterday's
+  // bound while `today` moves.
+  const in30 = useMemo(() => addDaysYmd(today, 30), [today]);
   // Probations ending within the next 30 days - the window HR watches for confirm/extend decisions.
   const probationEnding = useMemo(
     () => employees.filter((e) => e.probation_end_date && e.probation_end_date >= today && e.probation_end_date <= in30).length,
@@ -690,7 +697,7 @@ export default function Dashboard({ me }: { me: Me }) {
 
   // ---- Proactive / leading KPIs: due-soon windows and pending self-service actions, so you act ahead of the
   // deadline rather than after it. The date 7 days out bounds the "this week" windows.
-  const in7 = useMemo(() => new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10), []);
+  const in7 = useMemo(() => addDaysYmd(today, 7), [today]);
   // Open cards falling due within the next 7 days (not already overdue - that's a separate card).
   const cardsDueWeek = useMemo(() => openCards.filter((c) => c.due_date && c.due_date >= today && c.due_date <= in7).length, [openCards, today, in7]);
   // Statutory filings due within the next 7 days and not yet filed (not overdue).
@@ -837,7 +844,10 @@ export default function Dashboard({ me }: { me: Me }) {
     // --- Needs attention ---
     pending: isApprover
       // Approvers: the full cross-type approvals queue (same number as the sidebar badge), not just leave.
-      ? { label: "Pending approvals", value: approvals.total, tone: approvals.total > 0 ? "warning" : "muted", hint: approvals.total === 0 ? "All clear" : `Oldest waiting ${oldestPendingDays}d`, target: { collection: "leave-requests", label: "Leave requests" }, onClick: () => navigate("approvals") }
+      // "Oldest waiting" reads `approvalItems[0]`, which only holds the queues this page fetches - so with a
+      // non-zero total and no loaded rows (a count made up of expenses or asset requests, or a queue still in
+      // flight) it rendered "Oldest waiting 0d". Say where the items are instead.
+      ? { label: "Pending approvals", value: approvals.total, tone: approvals.total > 0 ? "warning" : "muted", hint: approvals.total === 0 ? "All clear" : approvalItems.length === 0 ? "In the approvals inbox" : `Oldest waiting ${oldestPendingDays}d`, target: { collection: "leave-requests", label: "Leave requests" }, onClick: () => navigate("approvals") }
       : { label: "My pending leave", value: pending.length, tone: pending.length > 0 ? "warning" : "muted", hint: pending.length === 0 ? "All clear" : "Awaiting decision", target: { collection: "leave-requests", label: "Leave requests" }, onClick: () => navigate("leave-requests") },
     open_tickets: { label: "Open tickets", value: openTicketsV, tone: openTicketsV > 0 ? "warning" : "muted", hint: openTicketsV === 0 ? "All clear" : "Awaiting resolution", target: { collection: "tickets", label: "Support tickets" }, onClick: () => navigate("tickets") },
     expenses_pending: { value: expensesPendingV, tone: expensesPendingV > 0 ? "warning" : "muted", hint: expensesPendingV === 0 ? "All clear" : money(expensesPendingAmountV), target: { collection: "expenses", label: "Expenses" }, onClick: () => navigateFiltered("expenses", "expenses", { state: "SUBMITTED" }) },
@@ -1258,12 +1268,18 @@ export default function Dashboard({ me }: { me: Me }) {
       {/* Awaiting-your-decision rows come from the shared approvals provider (count first, then rows only for
           the queues the count says are non-empty), so this card has nothing of its own to defer. Its probe is
           here for the sake of the NAMES on those rows, which come from the directory. */}
-      {showSection("approvals") && approvals.total > 0 && (
+      {/* Gated on the rows this card actually HAS, not on `approvals.total`. The total is the server count
+          across every queue the caller may decide in, including the three the dashboard deliberately does not
+          read (company expenses, asset requests, tax verifications - decided on their own pages). Gating on it
+          gave a manager whose only pending items were expenses a card headed "Awaiting your approval · 3" with
+          no rows under it and nothing to explain the emptiness. The total still appears, as the badge and as
+          the "more in the inbox" line, which is where a number the card cannot show belongs. */}
+      {showSection("approvals") && approvalItems.length > 0 && (
         <Card ref={regionRef("approvals")} style={sectionStyle("approvals")} className="mb-6 border-warning/40">
           <CardHeader className="flex-row items-center justify-between space-y-0">
             <CardTitle className="flex items-center gap-2 text-base">
               <CalendarCheck className="h-4 w-4 text-warning" /> Awaiting your approval
-              <span className="rounded-full bg-warning px-2 py-0.5 text-xs font-medium text-warning-foreground">{approvals.total}</span>
+              <span className="rounded-full bg-warning px-2 py-0.5 text-xs font-medium text-warning-foreground">{approvalsAwaiting}</span>
             </CardTitle>
             <Button variant="ghost" size="sm" onClick={() => navigate("approvals")}>
               Review all <ArrowRight className="h-4 w-4" />
@@ -1311,8 +1327,10 @@ export default function Dashboard({ me }: { me: Me }) {
                 );
               })}
             </div>
-            {approvals.total > 5 && (
-              <p className="mt-2 text-xs text-muted-foreground">And {approvals.total - 5} more in the approvals inbox.</p>
+            {approvalsAwaiting > Math.min(5, approvalItems.length) && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                And {approvalsAwaiting - Math.min(5, approvalItems.length)} more in the approvals inbox.
+              </p>
             )}
           </CardContent>
         </Card>
@@ -1511,6 +1529,12 @@ export default function Dashboard({ me }: { me: Me }) {
                         so a post is recognisable here before its title is read. */}
                     {a.illustration && (
                       <img
+                        // Keyed by the PICTURE, not by the row: the hide below is a write into a node React
+                        // owns, and React knows nothing about it - so on a row keyed by the announcement, one
+                        // picture that 404s left every later picture in that slot invisible under a
+                        // `display: none` nothing would ever clear. A new file is a new node here, exactly as
+                        // in the two picker grids (StickerField, KudosArtPicker).
+                        key={a.illustration}
                         src={kudosCardArtUrl(a.illustration)}
                         alt=""
                         aria-hidden
