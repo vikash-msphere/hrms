@@ -9,7 +9,7 @@ import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { fireIntent } from "@/lib/intent";
 import { runSequential, batchSummary } from "@/lib/batchRun";
 import { describeError } from "@/lib/formError";
-import { navigate, recordUrl, setRouteRecord } from "@/router";
+import { navigate, recordUrl, setRouteRecord, setQueryParam, useRoute } from "@/router";
 import type { Me, Application, Candidate, Employee, Interview, InterviewFeedback, JobRequisition, Offer } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -19,6 +19,7 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { LinesSkeleton } from "@/components/common/Skeletons";
 import { Field, FieldRow } from "@/components/common/Field";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { ChartFilterNote } from "@/components/common/ChartFilterNote";
 import { useKpiFocus } from "@/lib/kpiFocus";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -43,6 +44,7 @@ const CLOSED = "__closed"; // synthetic column: rejected / withdrawn application
 const STALL_DAYS = 14;
 
 export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
+  const route = useRoute();
   const { rows: apps, state, error, reload } = useCollection<Application>("applications", { all: true });
   // The two lists every card is LABELLED from (who applied, for which role). An empty pipeline has no cards to
   // label, so it reads neither - the same rule the offers read below already follows. COMPLETE, not the first
@@ -118,20 +120,29 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
   const visible = useMemo(() => kf.apply(onJob), [onJob, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Columns: the configured active stages, the hired stage, then a synthetic Closed column.
-  const columns = useMemo(() => {
+  const allColumns = useMemo(() => {
     const cols = cfg.stages.map((s) => ({ key: s.key, label: s.label, kind: s.kind }));
     return [...cols, { key: CLOSED, label: "Closed", kind: "rejected" as const }];
   }, [cfg]);
+  // `?stage=` brings the board down to one column. It is how the recruiting funnel drills through: a stage
+  // band on that page is exactly this column, and a board that opened on all eight would make the reader
+  // find it again by eye. Unknown stage keys are ignored rather than emptying the board.
+  const stageParam = route.query.stage ?? null;
+  const stageFocus = stageParam && allColumns.some((c) => c.key === stageParam) ? stageParam : null;
+  const columns = useMemo(() => (stageFocus ? allColumns.filter((c) => c.key === stageFocus) : allColumns), [allColumns, stageFocus]);
 
+  // Bucketed over ALL the columns, not the ones being rendered: the fallback below puts a card whose stage
+  // no longer exists into Closed, and with the board narrowed to one stage that bucket would not be here to
+  // catch it.
   const byColumn = useMemo(() => {
     const m = new Map<string, Application[]>();
-    for (const col of columns) m.set(col.key, []);
+    for (const col of allColumns) m.set(col.key, []);
     for (const a of visible) {
       const key = a.status === "rejected" || a.status === "withdrawn" ? CLOSED : a.stage;
       (m.get(key) ?? m.get(CLOSED)!).push(a);
     }
     return m;
-  }, [visible, columns]);
+  }, [visible, allColumns]);
 
   // Label of the stage `advance` moves this application into, so the button says where it's going.
   const nextStageLabel = useMemo(() => {
@@ -322,6 +333,14 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
       </div>
 
       <DataState state={state} error={error} onRetry={reload}>
+        {stageFocus && (
+          <ChartFilterNote
+            label={allColumns.find((c) => c.key === stageFocus)?.label ?? stageFocus}
+            shown={byColumn.get(stageFocus)?.length ?? 0}
+            total={visible.length}
+            onClear={() => setQueryParam("stage", null)}
+          />
+        )}
         {visible.length === 0 ? (
           kf.activeLabel ? (
             <EmptyState icon={KanbanSquare} title={`No ${kf.activeLabel}`} description="Nothing on the board matches that metric right now." action={<Button variant="outline" onClick={kf.clear}>Show the whole board</Button>} />

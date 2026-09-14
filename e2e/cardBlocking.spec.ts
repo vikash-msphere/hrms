@@ -37,7 +37,7 @@ test("blocking a card names the blocker, links to it, and shows the reverse edge
     // `placeholder` attribute on it to match, so it is reached by its name.
     await cardB.getByRole("button", { name: "Blocked by a task…" }).click();
     await page.getByPlaceholder(/Search/).last().fill(titleA);
-    await page.getByRole("button", { name: new RegExp(titleA) }).click();
+    await page.getByRole("option", { name: new RegExp(titleA) }).click();
     await cardB.getByPlaceholder("Note (optional)…").fill(reason);
     await cardB.getByRole("button", { name: "Block", exact: true }).click();
     // "Unblock" is the unambiguous proof it took: that button exists only while the card is blocked, where

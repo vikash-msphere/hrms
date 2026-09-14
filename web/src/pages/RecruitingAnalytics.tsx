@@ -6,6 +6,8 @@ import { idOf } from "@/lib/utils";
 import { navigate } from "@/router";
 import type { Me, Application, JobRequisition, Offer, Candidate } from "@/types";
 import { Chart } from "@/components/common/Chart";
+import { ChartFilterNote } from "@/components/common/ChartFilterNote";
+import { useChartFocus } from "@/lib/chartFocus";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -44,7 +46,7 @@ export default function RecruitingAnalytics({ me: _me }: { me: Me }) {
     const openReqs = reqs.filter((r) => r.status === "open");
 
     // Funnel: active applications by stage (in the configured order).
-    const funnel = cfg.stages.map((s) => ({ label: s.label, count: apps.filter((a) => a.stage === s.key && a.status === "active").length }));
+    const funnel = cfg.stages.map((s) => ({ key: s.key, label: s.label, count: apps.filter((a) => a.stage === s.key && a.status === "active").length }));
 
     // Source effectiveness: applications + hires grouped by source.
     const bySource = new Map<string, { total: number; hired: number }>();
@@ -73,6 +75,17 @@ export default function RecruitingAnalytics({ me: _me }: { me: Me }) {
 
     return { active, hired, rejected, openReqs, funnel, sources, accepted, declined, extended, acceptRate, timeToHire, stalled };
   }, [apps, reqs, offers, cfg]);
+
+  // The source bars narrow the source table beneath them. Drawn from `m.sources`, which is every source -
+  // narrowing it by its own dimension would leave one bar and no way back.
+  const cf = useChartFocus<(typeof m.sources)[number], "source">({
+    source: {
+      keys: m.sources.map((s) => s.source),
+      label: (k) => candSource(k),
+      match: (s, k) => s.source === k,
+    },
+  });
+  const shownSources = cf.apply(m.sources);
 
   const candSource = (key: string) => (key === "unknown" ? "Unknown" : sourceLabel(key));
 
@@ -125,6 +138,9 @@ export default function RecruitingAnalytics({ me: _me }: { me: Me }) {
                 datasets={[{ name: "Applications", values: m.funnel.map((f) => f.count) }]}
                 ariaLabel="Active applications by pipeline stage"
                 emptyText="No active applications right now. New applications land here as they enter the pipeline."
+                // The applications themselves live on the pipeline board, not here, so a band opens that
+                // board on the one column it counted - the same drill-through the metric tiles above use.
+                onSelect={(i) => { const f = m.funnel[i]; if (f) navigate(`pipeline?stage=${encodeURIComponent(f.key)}`); }}
               />
             </div>
 
@@ -139,6 +155,8 @@ export default function RecruitingAnalytics({ me: _me }: { me: Me }) {
                 colors={[OFFER_COLORS.accepted, OFFER_COLORS.declined, OFFER_COLORS.pending]}
                 ariaLabel="Offers by outcome"
                 emptyText="No offers yet."
+                // Same journey as the tiles: the offers are on the Offers page, narrowed to this outcome.
+                onSelect={(i) => navigate(`offers?focus=${["accepted", "declined", "extended"][i] ?? "accepted"}`)}
               />
             </div>
           </div>
@@ -158,8 +176,12 @@ export default function RecruitingAnalytics({ me: _me }: { me: Me }) {
                   { name: "Hired", values: m.sources.map((s) => s.hired) },
                 ]}
                 ariaLabel="Applications and hires by source"
+                // The table right under this one IS the list behind the bars, so a bar narrows it to its
+                // own row - on twenty channels that is the difference between reading a row and hunting it.
+                {...cf.chart("source")}
               />
             )}
+            <ChartFilterNote label={cf.activeLabel} shown={shownSources.length} total={m.sources.length} onClear={cf.clear} />
             {m.sources.length === 0 ? (
               <p className="text-sm text-muted-foreground">No applications yet.</p>
             ) : (
@@ -173,7 +195,7 @@ export default function RecruitingAnalytics({ me: _me }: { me: Me }) {
                   <th className="py-1 font-medium text-right">Conversion</th>
                 </tr></thead>
                 <tbody>
-                  {m.sources.map((s) => (
+                  {shownSources.map((s) => (
                     <tr key={s.source} className="border-b last:border-0">
                       <td className="py-1.5">{candSource(s.source)}</td>
                       <td data-label="Applications" className="py-1.5 text-right tabular-nums">{s.total}</td>

@@ -482,6 +482,9 @@ components:
         employee_number: { type: string, description: "Human-facing employee ID (e.g. EMP-0042). Auto-assigned from the org format (settings/employee-number) on create when omitted; HR-overridable (unique). A protected field: not self-writable. Distinct from the opaque wire id." }
         work_email: { type: string, format: email }
         job_title: { type: string }
+        employment_type: { type: string, readOnly: true, enum: [full_time, part_time, contract, intern, temporary], description: "Mirrored from the employee's current positions row - set by recording a role change, not by writing this record." }
+        work_mode: { type: string, readOnly: true, enum: [on_site, hybrid, remote], description: "Mirrored from the employee's current positions row - set by recording a role change, not by writing this record." }
+        location: { type: string, readOnly: true, description: "Where they work from. Mirrored from the employee's current positions row - set by recording a role change, not by writing this record." }
         bio: { type: string, readOnly: true, maxLength: 280, description: "Short public 'about me' (plain text). Readable by anyone who can read the employee record; written via the owner-writable employees/{employee_id}/bio sub-resource, not this record." }
         department: { type: string, description: "Resource path: departments/{department_id}" }
         manager: { type: string, description: "Resource path: employees/{employee_id}" }
@@ -822,6 +825,22 @@ components:
         patterns:
           - 'employees/{employee_id}/bio'
         type: hrms.example.com/bio
+    presence:
+      type: object
+      description: "Whether an employee is reachable right now (singleton, read-only). DERIVED from approved leave and open attendance sessions - nobody sets it, so it cannot go stale. Read lazily by the profile header; never part of the employee record, since it costs indexed reads that a list would pay per row. The leave TYPE is deliberately never returned."
+      properties:
+        path: { type: string, readOnly: true }
+        state: { type: string, readOnly: true, enum: [on_leave, in, out], description: "on_leave outranks in: an approved absence is a fact about the whole day, a forgotten open session is not." }
+        until: { type: string, format: date, readOnly: true, description: "Last covered day of the current leave. Only on state=on_leave." }
+        since_time: { type: string, format: date-time, readOnly: true, description: "When the open attendance session started. Only on state=in." }
+        covered_by: { type: string, readOnly: true, description: "Resource path of whoever holds this person's approvals while they are away: employees/{employee_id}. Only on state=on_leave, and only when a delegation spans today." }
+      x-aep-resource:
+        singular: presence
+        plural: presence
+        singleton: true
+        patterns:
+          - 'employees/{employee_id}/presence'
+        type: hrms.example.com/presence
     notification-prefs:
       type: object
       description: An employee's self-service in-app notification preferences (singleton). Layered over the org-level settings/notifications config; muting a category stops those notifications being created for this employee.
@@ -1355,6 +1374,10 @@ components:
         job_title: { type: string, description: Designation. }
         department: { type: string, description: "Resource path: departments/{department_id}" }
         location: { type: string, description: Work location. }
+        # `nullable`, and the enum carries null with it: omitted means "carry the current row's value
+        # forward", so explicit null is the only way to say "clear this".
+        employment_type: { type: string, nullable: true, enum: [full_time, part_time, contract, intern, temporary], description: "Carried forward from the current row when omitted; null clears it." }
+        work_mode: { type: string, nullable: true, enum: [on_site, hybrid, remote], description: "Carried forward from the current row when omitted; null clears it." }
         note: { type: string, description: Optional note (reason for the change). }
         effective_from: { type: string, format: date }
         effective_to: { type: string, format: date, readOnly: true, description: When this row was superseded (absent = current). }
@@ -14866,6 +14889,19 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/bio' } } } }
         '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/employees/{employee_id}/presence:
+    parameters: [ { in: path, name: employee_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for presence. Derived read-only; there is no write.
+      operationId: GetPresence
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/presence' } } } }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/employees/{employee_id}/notification-prefs:
     parameters: [ { in: path, name: employee_id, required: true, schema: { type: string } } ]

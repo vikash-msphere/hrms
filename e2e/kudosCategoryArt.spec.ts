@@ -20,7 +20,7 @@ test("picking a kudos category seeds the card with one of its own stickers, unpr
 
   await form.getByRole("button", { name: "Select a colleague…" }).click();
   await giver.getByPlaceholder("Search colleagues…").fill("Eve");
-  await expect(giver.getByRole("button", { name: /Eve Employee/ })).toBeVisible();
+  await expect(giver.getByRole("option", { name: /Eve Employee/ })).toBeVisible();
   await giver.keyboard.press("Enter");
 
   // Nothing to tune yet - no category has been picked, so nothing has put art on the card.

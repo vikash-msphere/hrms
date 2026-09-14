@@ -50,10 +50,17 @@ async function mockPush(page: import("@playwright/test").Page) {
         return wrap(sub);
       }
     }
-    const registration = { pushManager: new FakePushManager() };
+    // `active.scriptURL` is load-bearing: lib/webPush.ts enumerates registrations and keeps the one whose
+    // SCRIPT is push-sw.js, rather than asking which registration controls a URL (see its comment). A double
+    // without a script URL is a registration the module correctly declines to recognise.
+    const registration = { pushManager: new FakePushManager(), active: { scriptURL: `${location.origin}/push-sw.js` } };
     Object.defineProperty(window.navigator, "serviceWorker", {
       configurable: true,
-      value: { register: async () => registration, getRegistration: async () => registration },
+      value: {
+        register: async () => registration,
+        getRegistration: async () => registration,
+        getRegistrations: async () => [registration],
+      },
     });
     class FakeNotification {
       static permission: NotificationPermission = "default";

@@ -29,7 +29,7 @@ test("checking Start offboarding when recording a notice creates and links a rea
 
     await form.getByLabel("Employee").click();
     await page.getByPlaceholder(/Search|Select/).last().fill(fullName);
-    await expect(page.getByRole("button", { name: new RegExp(fullName) })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("option", { name: new RegExp(fullName) })).toBeVisible({ timeout: 15_000 });
     await page.keyboard.press("Enter");
 
     const noticeDate = await form.getByLabel("Notice given").inputValue();

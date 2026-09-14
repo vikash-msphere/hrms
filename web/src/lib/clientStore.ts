@@ -264,20 +264,34 @@ async function hydrate(id: string): Promise<void> {
     }
     const now = Date.now();
     const byClass = new Map<StoreClass, StoredRecord[]>();
+    // ONE request for the payloads, not one per record. This used to `await t.data.get(m.k)` inside the loop,
+    // so boot cost a round trip through the database per stored key - and awaiting between requests inside a
+    // live transaction is the shape that ends as `TransactionInactiveError` on a slower engine, which would
+    // present as a cache that silently never hydrates. The payloads are strings this module already budgets,
+    // so reading them together costs the memory it was going to hold anyway.
+    //
+    // Filtered to this identity's keys as it is read, so no other namespace's bytes are ever held in memory -
+    // the deletes above are queued on the same transaction and requests within one run in order, so they are
+    // already gone from what comes back, and this is the belt to that pair of braces.
+    const wanted = new Set(mine.map((m) => m.k));
+    const payloads = new Map<string, string>();
+    for (const rec of (await wrap(t.data.getAll())) as { k: string; v: string }[]) {
+      if (rec && typeof rec.v === "string" && wanted.has(rec.k)) payloads.set(rec.k, rec.v);
+    }
     for (const m of mine) {
       if (now - m.ts > MAX_AGE_MS[m.cls]) {
         t.meta.delete(m.k);
         t.data.delete(m.k);
         continue;
       }
-      const rec = (await wrap(t.data.get(m.k))) as { k: string; v: string } | undefined;
-      if (!rec || typeof rec.v !== "string") {
+      const value = payloads.get(m.k);
+      if (value === undefined) {
         t.meta.delete(m.k); // metadata without a payload: nothing to hand anyone
         continue;
       }
       track(m);
       const list = byClass.get(m.cls) ?? [];
-      list.push({ key: m.key, value: rec.v, ts: m.ts, collection: m.collection, etag: m.etag });
+      list.push({ key: m.key, value, ts: m.ts, collection: m.collection, etag: m.etag });
       byClass.set(m.cls, list);
     }
     for (const [cls, records] of byClass) notifyRecords(cls, records);

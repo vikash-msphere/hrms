@@ -10,6 +10,8 @@ import type { ComplianceEvent, ComplianceRule, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Chart, ChartCard } from "@/components/common/Chart";
+import { ChartFilterNote } from "@/components/common/ChartFilterNote";
+import { useChartFocus } from "@/lib/chartFocus";
 import { topSlices } from "@/lib/chartTheme";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -144,6 +146,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
         labels: keys.map((k) => new Date(`${k}-01T00:00:00Z`).toLocaleDateString(undefined, { month: "short", timeZone: "UTC" })),
         filed: keys.map((k) => live.filter((c) => inMonth(c, k) && c.status === "filed").length),
         pending: keys.map((k) => live.filter((c) => inMonth(c, k) && c.status !== "filed" && c.status !== "waived").length),
+        keys,
       },
       categories: topSlices(live.filter((c) => c.status !== "filed" && c.status !== "waived"), (c) => c.category || "Uncategorised", () => 1, 7),
     };
@@ -157,7 +160,22 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
     mine: { label: "filings assigned to you", match: (c) => isMine(c) && c.status === "pending" },
     unassigned: { label: "unassigned filings", match: (c) => c.status === "pending" && !c.assignee },
   });
-  const shownEvents = useMemo(() => kf.apply(rows), [rows, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A month column and an obligation slice both narrow the table below. A stacked month is one bar whichever
+  // band was pressed - "filed in June" and "still to file in June" are the same column - so the filed/pending
+  // split stays the strip's job and the chart's own dimension is the month.
+  const cf = useChartFocus<ComplianceEvent, "month" | "category">({
+    month: {
+      keys: complianceCharts.months.keys,
+      label: (k) => complianceCharts.months.labels[complianceCharts.months.keys.indexOf(k)] ?? k,
+      match: (c, k) => (c.due_date ?? "").slice(0, 7) === k,
+    },
+    category: {
+      keys: complianceCharts.categories.keys,
+      label: (k) => k,
+      match: (c, k) => (c.category || "Uncategorised") === k,
+    },
+  });
+  const shownEvents = useMemo(() => cf.apply(kf.apply(rows)), [rows, kf.focus, cf.picked?.dim, cf.picked?.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Occurrence (event) handlers ──
   function openCreate(dueDate = todayStr()) { setEditing(null); setForm({ ...EMPTY, due_date: dueDate }); setProof(null); setOpen(true); }
@@ -386,6 +404,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
                   stacked
                   format={(v) => `${v} filing${v === 1 ? "" : "s"}`}
                   ariaLabel="Compliance filings due in each of the next six months, filed and outstanding"
+                  {...cf.chart("month")}
                 />
               </ChartCard>
               <ChartCard title="By obligation" description="Which authority the outstanding work belongs to.">
@@ -396,6 +415,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
                   datasets={[{ name: "Filings", values: complianceCharts.categories.values }]}
                   ariaLabel="Outstanding compliance filings by category"
                   emptyText="Nothing outstanding."
+                  {...cf.chart("category")}
                 />
               </ChartCard>
             </div>
@@ -417,7 +437,10 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
             {rows.length === 0 ? (
               <EmptyState icon={CalendarCheck} title="No compliance items" description="Add statutory due dates, or set up recurring rules to auto-generate them." action={addBtn} />
             ) : (
-              <DataTable columns={eventColumns} tableId="compliance-events" rows={shownEvents} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : "No items match"} accessCollection="compliance-events" accessTargetOf={(c) => ({ objectPath: c.path, label: c.title, can: c.access?.can })} />
+              <>
+                <ChartFilterNote label={cf.activeLabel} shown={shownEvents.length} total={rows.length} onClear={cf.clear} />
+                <DataTable columns={eventColumns} tableId="compliance-events" rows={shownEvents} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle={cf.activeLabel ? `Nothing in ${cf.activeLabel}` : kf.activeLabel ? `No ${kf.activeLabel}` : "No items match"} accessCollection="compliance-events" accessTargetOf={(c) => ({ objectPath: c.path, label: c.title, can: c.access?.can })} />
+              </>
             )}
           </DataState>
         </>

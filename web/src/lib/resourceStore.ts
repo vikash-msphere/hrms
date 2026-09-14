@@ -579,7 +579,14 @@ export function ensureFetch(collection: string, opts: ListOpts, force = false): 
 // pages ride the same snapshot, so every subscriber (and the truncation flag) updates together.
 export function loadMoreRows(collection: string, opts: ListOpts): Promise<void> {
   const e = getEntry(collection, opts);
-  if (e.inflight) return e.inflight;
+  // A read already on the wire is WAITED FOR, not treated as this one. Returning it handed the caller a
+  // promise for somebody else's request and fetched no page at all - and `useCollection`'s `all: true` walk
+  // only re-fires when `hasMore` or the row count moves, neither of which a swallowed page changes. So an
+  // ordinary revalidation landing between two pages stopped the walk where it stood, on the readers whose
+  // answer is WRONG rather than short when it does (a picker that cannot offer the hundred-and-first
+  // employee, a name map that renders "Employee"). Chaining terminates: each hop waits on a real round trip,
+  // and the cursor is re-read afterwards so the page asked for is the one that comes next.
+  if (e.inflight) return e.inflight.catch(() => {}).then(() => loadMoreRows(collection, opts));
   const token = (e.snap.meta as { next_page_token?: string } | undefined)?.next_page_token;
   if (!token) return Promise.resolve();
   e.inflight = list<unknown>(collection, { ...e.opts, pageToken: token })

@@ -17,6 +17,12 @@ import { Input } from "@/components/ui/input";
 // Mirrors MAX_TEMPLATE_BYTES in src/services/bankFormats.ts - the client parses the template before it
 // uploads, so the same ceiling has to hold on both sides of the wire.
 const MAX_TEMPLATE_BYTES = 5 * 1024 * 1024; // 5 MB - bank templates are tiny
+
+/** A 1-based sheet row from a number input: anything unusable (an emptied box reads as `0`) keeps `fallback`. */
+const rowNumber = (raw: string, fallback: number): number => {
+  const n = Math.trunc(Number(raw));
+  return Number.isFinite(n) && n >= 1 ? n : fallback;
+};
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { useToast } from "@/components/ui/use-toast";
 import { useUnsavedTracker } from "@/components/common/UnsavedChanges";
@@ -317,10 +323,13 @@ export default function BankFormats({ toast }: { toast: Toast }) {
                 {/* Both fields carry a sentence of hint text, which does not read in a 160px column. */}
                 <div className="grid gap-4 sm:max-w-md sm:grid-cols-2">
                   <Field label="Header row" hint="1-based row with the column titles.">
-                    <Input type="number" min={1} value={draft.header_row ?? 1} onChange={(e) => setDraft((d) => ({ ...d, header_row: Number(e.target.value) }))} />
+                    {/* Clamped, because `min` on the element is not a constraint on the VALUE: clearing the
+                        box makes `Number("")` zero, and row zero is not a row - the format then describes a
+                        sheet whose titles sit above its first line. Both fields are 1-based by definition. */}
+                    <Input type="number" min={1} value={draft.header_row ?? 1} onChange={(e) => setDraft((d) => ({ ...d, header_row: rowNumber(e.target.value, 1) }))} />
                   </Field>
                   <Field label="Data starts on row" hint="First row the export writes to.">
-                    <Input type="number" min={1} value={draft.data_start_row ?? 2} onChange={(e) => setDraft((d) => ({ ...d, data_start_row: Number(e.target.value) }))} />
+                    <Input type="number" min={1} value={draft.data_start_row ?? 2} onChange={(e) => setDraft((d) => ({ ...d, data_start_row: rowNumber(e.target.value, 2) }))} />
                   </Field>
                 </div>
                 <div className="scroll-shadow-x [--scroll-ground:hsl(var(--card))] overflow-x-auto rounded-lg border">

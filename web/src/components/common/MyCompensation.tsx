@@ -66,7 +66,7 @@ export function MyCompensation({ employeeId }: { employeeId: string }) {
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0">
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">
           <AccessAction collection="compensation" label="Compensation">
             <span className="flex items-center gap-2"><TrendingUp className="h-4 w-4 text-primary" /> My compensation</span>

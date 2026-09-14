@@ -134,7 +134,7 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
 
   return (
     <Card className="sentry-mask">
-      <CardHeader className="flex flex-row items-center justify-between space-y-0">
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">
           <AccessAction collection="employees" objectPath={`employees/${employeeId}`} field="tax" label="Tax">
             <span className="flex items-center gap-2">

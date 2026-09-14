@@ -17,7 +17,7 @@ test("a delegation states what it will do, and warns when the days are already c
 
   await form.getByLabel("Covered by").click();
   await page.getByPlaceholder(/Search|Pick/).last().fill("Hank");
-  await expect(page.getByRole("button", { name: /Hank Hr/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Hank Hr/ })).toBeVisible();
   await page.keyboard.press("Enter");
 
   await form.getByLabel("From").fill(inDays(30));
@@ -36,7 +36,7 @@ test("a delegation states what it will do, and warns when the days are already c
   const second = page.getByRole("dialog");
   await second.getByLabel("Covered by").click();
   await page.getByPlaceholder(/Search|Pick/).last().fill("Hank");
-  await expect(page.getByRole("button", { name: /Hank Hr/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Hank Hr/ })).toBeVisible();
   await page.keyboard.press("Enter");
   await second.getByLabel("From").fill(inDays(31));
   await second.getByLabel("To", { exact: true }).fill(inDays(33));

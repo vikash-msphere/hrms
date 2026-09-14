@@ -90,7 +90,7 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
 
   return (
     <Card className="sentry-mask">
-      <CardHeader className="flex-row items-center justify-between space-y-0">
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">
           <AccessAction collection="bonuses" label="Bonuses & incentives">
             <span className="flex items-center gap-2"><Gift className="h-4 w-4 text-primary" /> Bonuses & incentives</span>

@@ -22,7 +22,7 @@ test("the notice-period form computes notice length, warns on same-day exits, an
 
   await form.getByLabel("Employee").click();
   await page.getByPlaceholder(/Search|Select/).last().fill("Ethan Martin");
-  await expect(page.getByRole("button", { name: /Ethan Martin/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Ethan Martin/ })).toBeVisible();
   await page.keyboard.press("Enter");
 
   const submit = form.getByRole("button", { name: "Record", exact: true });

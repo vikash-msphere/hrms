@@ -2,7 +2,7 @@ import * as React from "react";
 import type { FrappeChartType, FrappeData, FrappeOptions, Chart as FrappeChart } from "frappe-charts";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/lib/theme";
-import { chartColors, heatmapColors } from "@/lib/chartTheme";
+import { chartColors, heatmapColors, heatmapDays, heatmapPoints } from "@/lib/chartTheme";
 import { Skeleton } from "@/components/ui/skeleton";
 
 // The app's one chart primitive: line, bar, mixed axis, pie, donut, percentage bar and calendar heatmap, all
@@ -28,9 +28,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 // after ours and wins any tie. See the CHARTS block there before touching a chart colour.
 //
 // ACCESSIBILITY. An SVG of coloured paths is nothing to a screen reader, so every chart also emits its own
-// numbers as a table in the accessibility tree, and the figure carries a caption naming what it shows. Charts
-// with an axis are keyboard-navigable (frappe's `isNavigable` moves a highlight along the series with the
-// arrow keys). Charts do not animate at all - see the ANIMATION block above `guardNavOverlay`.
+// numbers as a table in the accessibility tree, and the figure carries a caption naming what it shows. That
+// table is also where a chart is operated from without a pointer: a chart that filters the list below it
+// renders each of its rows' headers as a button, and the table lifts out of `sr-only` while it holds focus,
+// so a sighted keyboard user can see where they are. The library's own keyboard navigation is NOT used - see
+// the CLICKING block below for why it could not be. Charts do not animate at all - see ANIMATION.
 
 export type ChartSeries = {
   /** Series name - shown in the legend and the tooltip. Required whenever there is more than one. */
@@ -93,12 +95,148 @@ export type ChartProps = {
   maxSlices?: number;
   /** Heatmap: what one unit is, in the tooltip ("hours", "punches"). */
   countLabel?: string;
-  /** Row/slice clicks, by index into `labels` - for a chart that drills through to the rows behind it. */
+  /** Bar/point/slice clicks, by index into `labels` - for a chart that filters the rows behind it. Fires for
+   *  every type but the heatmap, which has no labels to index and uses `onSelectDay`. */
   onSelect?: (index: number) => void;
+  /** Heatmap: the day that was clicked, "YYYY-MM-DD". */
+  onSelectDay?: (ymd: string) => void;
+  /** The `labels` index the page is currently narrowed by: that mark keeps its colour and the rest are
+   *  dimmed, so the picture says what it is filtered by. Null when nothing is picked. */
+  selected?: number | null;
   /** Shown instead of the chart when there is nothing to draw. */
   emptyText?: string;
   className?: string;
 };
+
+// CLICKING A CHART. frappe has no click API. What it has is `data-select`, and that event is a by-product of
+// its KEYBOARD NAVIGATION (`isNavigable`) rather than a way to be told what was pressed. Every part of that
+// is wrong for a chart that filters the list under it:
+//
+// * Only `AxisChart` fires it (`setCurrentDataPoint`). Pie, donut, percentage and heatmap never do, so a
+//   click handler on those types was silently dead - and those are most of the app's charts.
+// * It refuses to fire twice for the same point (`if(index === s.currentIndex) return;`), so a filter could
+//   never be toggled back OFF from the picture. Its index also starts at the last point, so the first click
+//   on the last bar was dead too.
+// * The `document` keydown listener that drives it is added per chart and removed by nothing - `destroy()`
+//   takes off the resize listeners and leaves this one. Every rebuild (a theme flip, a resize, a shape
+//   change) left another behind, bound to a dead instance whose `parent` is the host div the LIVE chart now
+//   occupies, and a detached container measures as on-screen - so arrow keys anywhere on the page had stale
+//   charts firing `data-select` at the live one with their own stale index.
+// * Its unit binding also reads `data-point-index` off the tooltip, which never carries one: clicking the
+//   tooltip set the current index to `NaN`.
+//
+// So navigation is off and the click is ours: one listener on the host, resolving the press out of the SVG.
+// It is resolved per type because the library marks its units differently, and one of those ways is a trap:
+//
+// * Bars and dots carry `data-point-index`, which IS the index into the data as given. A press that lands
+//   between them - the gap above a short bar, the space beside a line - falls back to the nearest x
+//   position, the same mapping the library's own tooltip uses, so a column is a target and not just its bar.
+//
+// * Pie, donut and percentage slices carry nothing, so a slice is found by its place in the component's own
+//   store. That place is NOT the caller's label index: `AggregationChart.calc` drops every negative total
+//   and, past `maxSlices`, sorts what is left descending and pools the tail into one `Rest` slice. The store
+//   position is therefore read back through the library's `state.labels` and matched to the caller's labels
+//   by name. A slice that resolves to nothing - `Rest` - is not a filter, and does nothing.
+//
+// * Heatmap squares carry `data-date` ("YYYY-MM-DD"), which is a day rather than an index into anything.
+//   Hence its own callback.
+
+/** Where each aggregation type keeps its slices. Axis charts are not here - their units carry an index. */
+const SLICE_STORE: Record<string, string> = {
+  pie: "pieSlices",
+  donut: "donutSlices",
+  percentage: "percentageBars",
+};
+
+type ChartInternals = {
+  state?: { labels?: string[]; xAxis?: { positions?: number[] } };
+  components?: Map<string, { store?: Element[] }>;
+  measures?: { margins?: { left?: number }; paddings?: { left?: number } };
+  container?: HTMLElement;
+};
+
+/** The slices a pie/donut/percentage chart actually drew, if it drew any. */
+function sliceStore(chart: FrappeChart | null, type: FrappeChartType): Element[] | null {
+  const key = SLICE_STORE[type];
+  if (!key) return null;
+  const store = (chart as unknown as ChartInternals | null)?.components?.get(key)?.store;
+  return Array.isArray(store) ? store : null;
+}
+
+/** The caller's label index for a drawn slice, through the library's own label list - see CLICKING. */
+function labelIndexOfSlice(chart: FrappeChart | null, labels: string[], at: number): number | null {
+  const drawn = (chart as unknown as ChartInternals | null)?.state?.labels?.[at];
+  if (drawn == null) return null;
+  const i = labels.indexOf(drawn);
+  return i < 0 ? null : i;
+}
+
+/** Which label index a press landed on, or null when it landed on nothing that means one. */
+function hitIndex(host: HTMLElement, chart: FrappeChart | null, type: FrappeChartType, labels: string[], e: MouseEvent): number | null {
+  const target = e.target as Element | null;
+  if (!target) return null;
+
+  const slices = sliceStore(chart, type);
+  if (slices) {
+    const at = slices.indexOf(target);
+    return at < 0 ? null : labelIndexOfSlice(chart, labels, at);
+  }
+
+  const unit = target.closest?.("[data-point-index]");
+  if (unit) {
+    const i = Number(unit.getAttribute("data-point-index"));
+    return Number.isInteger(i) && i >= 0 && i < labels.length ? i : null;
+  }
+
+  // Nothing under the pointer, so the nearest column takes it. The library measures from its own container
+  // and past the left margin and padding; anything else is off by the width of the y axis.
+  const inst = chart as unknown as ChartInternals | null;
+  const positions = inst?.state?.xAxis?.positions;
+  const box = inst?.container?.getBoundingClientRect();
+  if (!positions?.length || !box) return null;
+  const relX = e.clientX - box.left - ((inst?.measures?.margins?.left ?? 0) + (inst?.measures?.paddings?.left ?? 0));
+  let best = 0;
+  for (let i = 1; i < positions.length; i++) {
+    if (Math.abs((positions[i] ?? 0) - relX) < Math.abs((positions[best] ?? 0) - relX)) best = i;
+  }
+  return best < labels.length ? best : null;
+}
+
+/**
+ * Dim everything that is not the picked mark, so the picture says what the list below it is filtered by.
+ *
+ * Only DATA marks are touched - bars, dots, slices - never the axis, the legend or the gridlines: a filter
+ * greys out the numbers it excluded, not the frame they are read against. A line chart drawn with its dots
+ * hidden therefore has nothing here to dim, which is why every page that makes one clickable also says what
+ * it is showing in words above the list.
+ */
+function paintSelection(host: HTMLElement, chart: FrappeChart | null, type: FrappeChartType, labels: string[], selected: number | null): void {
+  const slices = sliceStore(chart, type);
+  const units = slices ?? [...host.querySelectorAll("[data-point-index]")];
+  units.forEach((unit, at) => {
+    const i = slices ? labelIndexOfSlice(chart, labels, at) : Number(unit.getAttribute("data-point-index"));
+    (unit as SVGElement).style.opacity = selected != null && i !== selected ? "0.3" : "";
+  });
+}
+
+/**
+ * Re-paint the selection after every draw the library makes for ITSELF.
+ *
+ * Not every draw comes from a call of ours. `setup()` ends with a deferred `update(this.data)` that lands
+ * hundreds of milliseconds later, and it re-makes every unit - which throws away the opacity that says which
+ * mark is picked. Wrapping `render` (which both paths end in) is the only place that catches all of them. The
+ * teardown below replaces this wrapper with a no-op, so a draw that lands after unmount paints nothing.
+ */
+function repaintOnRender(chart: FrappeChart | null, paint: () => void): void {
+  const inst = chart as unknown as Record<string, unknown> | null;
+  const original = inst?.["render"];
+  if (!inst || typeof original !== "function") return;
+  inst["render"] = function (this: unknown, ...args: unknown[]) {
+    const out = (original as (...a: unknown[]) => unknown).apply(this, args);
+    paint();
+    return out;
+  };
+}
 
 // ANIMATION IS OFF, for every reader, not only the ones who asked for reduced motion.
 //
@@ -113,48 +251,29 @@ export type ChartProps = {
 // lands in the same frame as the mount and the SVG the reader first sees is gone milliseconds later.
 //
 // The same animation is where the rest of this file's scar tissue comes from: `runSMILAnimation`'s swap-back
-// timer, the `CHART_POST_ANIMATE_TIMEOUT` that re-makes components and moves the navigation overlay, and the
-// deferred init update all fire from timers no caller can await - see `guardNavOverlay`, the shadowed methods
-// in the teardown below, and the try/catch around `update`. A draw-in that costs the picture its identity is
-// not worth any of that, so the numbers simply appear.
+// timer, the `CHART_POST_ANIMATE_TIMEOUT` that re-makes components, and the deferred init update all fire
+// from timers no caller can await - see `repaintOnRender`, the shadowed methods in the teardown below, and
+// the try/catch around `update`. A draw-in that costs the picture its identity is not worth any of that, so
+// the numbers simply appear.
 
-/**
- * Keep frappe's keyboard-navigation overlay from taking the page down with it.
- *
- * A navigable chart (every line/bar/axis-mixed one here) draws a highlight over the point at
- * `state.currentIndex`, and it re-makes that highlight from a timer after each animated draw. The index is
- * carried over from the previous draw, so any draw that ends up with fewer data units than the last one -
- * fewer points after a filter, a redraw that raced a rebuild - has it read `units[currentIndex]` off the end:
- * `makeOverlay` then throws on `nodeName` of the missing unit, leaves `overlay` unset, and the next call
- * throws again on `parentNode` of the overlay that was never made. Both come from a timer, so no try/catch
- * around our own calls can see them, and what the reader loses is the highlight - not a number on the chart.
- *
- * So the two methods that touch the overlay are wrapped on the instance. Everything else in the library is
- * left exactly as it is.
- */
-function guardNavOverlay(chart: FrappeChart | null): void {
-  const inst = chart as unknown as Record<string, unknown> | null;
-  if (!inst) return;
-  for (const name of ["makeOverlay", "updateOverlayGuides"]) {
-    const original = inst[name];
-    if (typeof original !== "function") continue;
-    inst[name] = function (this: unknown, ...args: unknown[]) {
-      try {
-        return (original as (...a: unknown[]) => unknown).apply(this, args);
-      } catch {
-        return undefined; // a highlight that could not be drawn over a point that is no longer there
-      }
-    };
-  }
+/** A row header in the accessible table, when the chart it belongs to is a filter: the keyboard's way in.
+ *  `picked` is only passed where the press is a TOGGLE - a heatmap day opens something and stays unpressed,
+ *  and `aria-pressed="false"` on a button that never latches is a lie about what it does. */
+function RowPick({ label, picked, onPick }: { label: string; picked?: boolean; onPick: () => void }) {
+  return (
+    <button type="button" onClick={onPick} {...(picked === undefined ? {} : { "aria-pressed": picked })} className="underline underline-offset-2">
+      {label}
+    </button>
+  );
 }
 
 const isEmpty = (p: ChartProps) =>
   p.type === "heatmap"
-    ? Object.keys(p.points ?? {}).length === 0
+    ? Object.keys(heatmapDays(p.points ?? {})).length === 0
     : (p.labels?.length ?? 0) === 0 || (p.datasets ?? []).every((d) => d.values.every((v) => !v));
 
 export function Chart(props: ChartProps) {
-  const { labels, datasets, points, start, end, ariaLabel, height = 240, colors, format, markers, stacked, areaFill, spline, hideDots, maxSlices, countLabel, onSelect, emptyText, className } = props;
+  const { labels, datasets, points, start, end, ariaLabel, height = 240, colors, format, markers, stacked, areaFill, spline, hideDots, maxSlices, countLabel, onSelect, onSelectDay, selected = null, emptyText, className } = props;
   // ONE POINT IS NOT A LINE. frappe cannot draw a line series through a single x: it emits
   // `d="Mundefined,undefined"` for the path and `cx="undefined"` for the dots, which the browser rejects
   // outright - so the series is absent from the picture and the console fills with SVG parse errors. It is
@@ -164,6 +283,11 @@ export function Chart(props: ChartProps) {
   // A line through one point has nothing to say anyway - there is no slope to read - so a one-point chart is
   // drawn as columns instead, which is the same numbers in the shape that survives. The accessible table
   // below is unaffected either way.
+  // The days the heatmap draws, and those same days in the timestamp shape frappe reads. Encoding here and
+  // never decoding is what keeps the table's day labels honest: a timestamp read back with local date parts
+  // names a different day either side of midnight, and there is no need to read one back at all.
+  const days = React.useMemo(() => heatmapDays(points ?? {}), [points]);
+  const dayPoints = React.useMemo(() => heatmapPoints(days), [days]);
   const onePoint = props.type !== "heatmap" && (labels?.length ?? 0) === 1;
   const type = onePoint && props.type === "line" ? "bar" : props.type;
   const drawDatasets = React.useMemo(
@@ -173,6 +297,17 @@ export function Chart(props: ChartProps) {
   const { resolved } = useTheme();
   const host = React.useRef<HTMLDivElement>(null);
   const chart = React.useRef<FrappeChart | null>(null);
+  // What the click listener and the selection paint read. Both of them run OUTSIDE a render - one from a DOM
+  // event, one from a library timer - and both must see what is on screen now, not what was there when the
+  // chart was built. Going through a ref is also what keeps all four out of the build effect's deps: a
+  // callback that only appears on a later render (a page that decides late that a chart is clickable) would
+  // otherwise never be attached, and a chart would rebuild itself every time the page picked a new slice.
+  const live = React.useRef({ onSelect, onSelectDay, selected, labels: labels ?? [], type });
+  live.current = { onSelect, onSelectDay, selected, labels: labels ?? [], type };
+  const clickable = !!(type === "heatmap" ? onSelectDay : onSelect);
+  const paint = React.useCallback(() => {
+    if (host.current && chart.current) paintSelection(host.current, chart.current, live.current.type, live.current.labels, live.current.selected);
+  }, []);
   const [lib, setLib] = React.useState<typeof import("frappe-charts") | null>(null);
   const [failed, setFailed] = React.useState(false);
   // Bumped when the data changes shape (see the update effect); a build dep, so the chart is rebuilt rather
@@ -186,7 +321,7 @@ export function Chart(props: ChartProps) {
   const empty = isEmpty(props);
   const shape =
     props.type === "heatmap"
-      ? `h${Object.keys(props.points ?? {}).length}`
+      ? `h${Object.keys(days).length}`
       : `${(props.labels ?? []).length}x${(props.datasets ?? []).length}`;
 
   // Fetch the engine the first time a chart is actually on screen. A failure is not fatal: the data table
@@ -205,13 +340,13 @@ export function Chart(props: ChartProps) {
   const data: FrappeData = React.useMemo(
     () =>
       type === "heatmap"
-        ? { dataPoints: points ?? {}, start, end }
+        ? { dataPoints: dayPoints, start, end }
         : {
             labels: labels ?? [],
             datasets: (drawDatasets ?? []).map((d) => ({ name: d.name, values: d.values, ...(d.chartType ? { chartType: d.chartType } : {}) })),
             ...(markers?.length ? { yMarkers: markers.map((m) => ({ label: m.label, value: m.value, options: { labelPos: "left" as const } })) } : {}),
           },
-    [type, labels, drawDatasets, points, start, end, markers],
+    [type, labels, drawDatasets, dayPoints, start, end, markers],
   );
 
   // Build (and rebuild on a theme flip, a type change or a resize of the box).
@@ -238,9 +373,12 @@ export function Chart(props: ChartProps) {
       type,
       height,
       colors: palette,
-      animate: 0, // never - see the ANIMATION block above `guardNavOverlay`
+      animate: 0, // never - see the ANIMATION block above `isEmpty`
       truncateLegends: true,
-      isNavigable: type === "line" || type === "bar" || type === "axis-mixed",
+      // Never. Its highlight overlay is the source of most of this file's crash guards, its keydown listener
+      // outlives the chart that added it, and the click event it exists to fire is unusable as a click - see
+      // the CLICKING block above. Pressing a chart is handled here instead.
+      isNavigable: false,
       ...(maxSlices ? { maxSlices } : {}),
       ...(countLabel ? { countLabel } : {}),
       ...(type === "heatmap" ? { discreteDomains: 1 as const } : {}),
@@ -255,23 +393,24 @@ export function Chart(props: ChartProps) {
       tooltipOptions: format ? { formatTooltipY: (v: number) => format(v) } : undefined,
     };
     chart.current = new lib.Chart(el, options);
-    guardNavOverlay(chart.current);
+    // The first draw happens inside the constructor, so it is painted by hand; every later one - including
+    // the deferred init update the library sets a timer for - goes through the wrapper.
+    repaintOnRender(chart.current, paint);
+    paint();
     // The numbers this chart was BUILT with. The update effect below compares against it and does nothing when
     // they are the same object, which is the case on the render that built the chart: frappe is still inside
-    // its init animation there, its data units and navigable overlays are not drawn yet, and an `update()`
-    // landing in that window throws inside the library (`nodeName` of the missing unit, then `parentNode` of a
-    // detached overlay) and leaves the picture half drawn.
+    // its init animation there and its data units are not drawn yet, and an `update()` landing in that window
+    // throws inside the library (`nodeName` of the missing unit) and leaves the picture half drawn.
     builtData.current = data;
     shapeRef.current = shape;
 
-    // frappe redraws itself on a resize, and that redraw is broken for a navigable chart (which is every
-    // line/bar/axis-mixed chart here): `draw(true)` re-makes the data units and then asks its overlay code for
-    // `units[state.currentIndex]`, an index carried over from the previous draw, so on a resize it reads past
-    // the end and throws `Cannot read properties of undefined (reading 'nodeName')` from inside the library.
-    // The stack is entirely frappe's - our only way in is to take the redraw off it.
+    // frappe redraws itself on a resize, and its own redraw is the wrong one: `draw(true)` re-enters the
+    // whole setup path on a container it has already drawn into, which is how a resize ended up throwing
+    // from inside the library. The stack is entirely frappe's - our only way in is to take the redraw off it.
     //
     // So its observer and window listeners come off here, and the box is watched below instead: a real width
-    // change rebuilds the chart, which is what `draw(true)` was trying to do and gets right.
+    // change rebuilds the chart, which is what `draw(true)` was trying to do and gets right. It is also what
+    // keeps the selection painted, since a rebuild goes back through `paint` above.
     const inst = chart.current as unknown as { resizeObserver?: { disconnect(): void }; boundDrawFn?: () => void };
     inst.resizeObserver?.disconnect();
     if (inst.boundDrawFn) {
@@ -291,13 +430,8 @@ export function Chart(props: ChartProps) {
     });
     ro.observe(el);
 
-    // Frappe announces a click on an axis point as a DOM event on its own container; a page that wants to
-    // drill through subscribes through `onSelect` rather than reaching into the SVG.
-    const onEvent = (e: Event) => onSelect?.((e as CustomEvent<{ index: number }>).detail?.index ?? 0);
-    if (onSelect) el.addEventListener("data-select", onEvent);
     return () => {
       ro.disconnect();
-      if (onSelect) el.removeEventListener("data-select", onEvent);
       // frappe watches this container with its own ResizeObserver and two window listeners, so emptying the
       // node is not a teardown: the old chart keeps being asked to redraw, into a container that is no longer
       // in the document, and throws inside the library on the next resize (`nodeName` of undefined). Every
@@ -309,9 +443,9 @@ export function Chart(props: ChartProps) {
       // `render()` queues `components.forEach(c => c.make()); this.updateNav()` for when the animation ends.
       // A reader who switches tab, flips the theme or leaves the page inside that window has those timers
       // fire over nodes this cleanup already removed, and they throw from inside the library - `nodeName` of
-      // a data unit that is gone, then `parentNode` of a detached overlay - where no try/catch of ours can
-      // reach them. So the methods those timers call are shadowed with no-ops first: the timers still fire,
-      // and find nothing to do.
+      // a data unit that is gone - where no try/catch of ours can reach them. So the methods those timers
+      // call are shadowed with no-ops first: the timers still fire, and find nothing to do. Shadowing
+      // `render` also drops the repaint wrapper, so a late draw cannot paint into a host we have emptied.
       const pending = chart.current as unknown as { update?: () => void; render?: () => void; updateNav?: () => void } | null;
       if (pending) {
         pending.update = () => {};
@@ -324,7 +458,29 @@ export function Chart(props: ChartProps) {
     };
     // `data` is deliberately absent: new numbers UPDATE the chart (below) rather than rebuilding it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lib, empty, type, resolved, height, colors, stacked, areaFill, spline, hideDots, maxSlices, countLabel, rebuild]);
+  }, [lib, empty, type, resolved, height, colors, stacked, areaFill, spline, hideDots, maxSlices, countLabel, rebuild, paint]);
+
+  // One click listener for the life of the host, resolving what was pressed out of the SVG - see CLICKING.
+  // It outlives every rebuild (the host div is ours; only its contents are frappe's) and reads the current
+  // callbacks off `live`, so a page that starts or stops being clickable needs no new listener and no
+  // rebuild. `empty` is a dep only because the host is not rendered at all when there is nothing to draw.
+  React.useEffect(() => {
+    const el = host.current;
+    if (!el) return;
+    const onClick = (e: MouseEvent) => {
+      const { onSelect: select, onSelectDay: selectDay, labels: ls, type: drawn } = live.current;
+      if (drawn === "heatmap") {
+        const ymd = selectDay ? (e.target as Element | null)?.closest?.("[data-date]")?.getAttribute("data-date") : null;
+        if (ymd) selectDay!(ymd);
+        return;
+      }
+      if (!select) return;
+      const i = hitIndex(el, chart.current, drawn, ls, e);
+      if (i != null) select(i);
+    };
+    el.addEventListener("click", onClick);
+    return () => el.removeEventListener("click", onClick);
+  }, [empty]);
 
   // New numbers into the chart that is already there, so a filter change animates rather than flashing.
   //
@@ -358,6 +514,11 @@ export function Chart(props: ChartProps) {
     }
   }, [data, shape]);
 
+  // The picked mark, after every draw this component asked for. Declared AFTER the update effect so it runs
+  // over the units that update just made, and keyed on `data` as well as `selected` because an update
+  // re-makes every unit and with it the opacity that says which one is picked.
+  React.useEffect(() => { paint(); }, [selected, data, rebuild, paint]);
+
   const fmt = format ?? ((v: number) => String(v));
 
   if (empty) {
@@ -369,11 +530,11 @@ export function Chart(props: ChartProps) {
   }
 
   return (
-    <figure className={cn("m-0", className)}>
+    <figure className={cn("relative m-0", className)}>
       {/* The picture is decoration over the table below it: the table IS the chart's content for anything
           that cannot see the SVG, so the figure itself is hidden from the accessibility tree rather than
           announced as an unlabelled graphic. */}
-      <div ref={host} aria-hidden="true" style={{ minHeight: height }}>
+      <div ref={host} aria-hidden="true" className={cn(clickable && "chart-drillable cursor-pointer")} style={{ minHeight: height }}>
         {!lib && !failed && <Skeleton className="w-full rounded-lg" style={{ height }} />}
       </div>
       <figcaption className="sr-only">{ariaLabel}</figcaption>
@@ -383,8 +544,14 @@ export function Chart(props: ChartProps) {
           painted there, and it still made the document wider than the screen on every page with a chart -
           which on a browser without `overflow-x: clip` is a page that pans sideways over nothing at all.
           A plain block DOES take the 1px, and its own `overflow: hidden` then contains the wide table
-          inside it, so the row of numbers stays exactly as available to a screen reader as it was. */}
-      <div className="sr-only">
+          inside it, so the row of numbers stays exactly as available to a screen reader as it was.
+
+          A CLICKABLE chart's rows are buttons, which means a keyboard can reach inside this box - and a
+          focus ring nobody can see is worse than none. So while it holds focus the wrapper comes out of
+          `sr-only` as a panel: absolutely positioned over the picture rather than in the flow, capped at the
+          figure's width, and scrolling its own overflow. That is what keeps the ~450px table from doing to
+          the page on focus exactly what `sr-only` was hiding it from doing all along. */}
+      <div className={cn("sr-only", clickable && "focus-within:not-sr-only focus-within:absolute focus-within:inset-x-0 focus-within:top-0 focus-within:z-10 focus-within:max-h-full focus-within:overflow-auto focus-within:rounded-lg focus-within:border focus-within:bg-popover focus-within:p-2 focus-within:text-xs focus-within:shadow-md")}>
       <table>
         <caption>{ariaLabel}</caption>
         <thead>
@@ -397,15 +564,15 @@ export function Chart(props: ChartProps) {
         </thead>
         <tbody>
           {type === "heatmap"
-            ? Object.entries(points ?? {}).map(([ts, v]) => (
-                <tr key={ts}>
-                  <th scope="row">{new Date(Number(ts) * 1000).toISOString().slice(0, 10)}</th>
+            ? Object.entries(days).map(([ymd, v]) => (
+                <tr key={ymd}>
+                  <th scope="row">{onSelectDay ? <RowPick label={ymd} onPick={() => onSelectDay(ymd)} /> : ymd}</th>
                   <td>{fmt(v)}</td>
                 </tr>
               ))
             : (labels ?? []).map((label, i) => (
                 <tr key={`${label}-${i}`}>
-                  <th scope="row">{label}</th>
+                  <th scope="row">{onSelect ? <RowPick label={label} picked={selected === i} onPick={() => onSelect(i)} /> : label}</th>
                   {(datasets ?? []).map((d, j) => <td key={j}>{fmt(d.values[i] ?? 0)}</td>)}
                 </tr>
               ))}

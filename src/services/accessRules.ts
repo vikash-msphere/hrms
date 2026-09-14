@@ -392,7 +392,13 @@ export async function cloneAccessRules(deps: Deps, actor: AppUser, body: unknown
     source_total: source.length,
     sentence: `${added} rule${added === 1 ? "" : "s"} copied from ${String(fromWords.subject_label ?? from.subject)}`,
     ...(firstError ? { first_error: firstError } : {}),
-  });
+  }, null,
+  // The entity NAME, which `q` searches and `meta` is not. Anchored on no row, this entry was the one
+  // access-rule entry in the trail with no name at all: an auditor who searched the subject that GAINED the
+  // access found each per-rule create and not the copy that authored them - the only row that says it was a
+  // copy and where it came from. The subject is the label; there is no single collection here, which is
+  // exactly what makes this the summary.
+  String(toWords.subject_label ?? to.subject));
 
   // ONE notification for the whole copy, in place of the per-rule cards the creates would have sent.
   if (added) {

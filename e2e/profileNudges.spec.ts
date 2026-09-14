@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, personId, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, personId, test, expect } from "./fixtures";
 
 // The completeness meter, and the one record that exists for the worst day.
 //
@@ -14,6 +14,11 @@ import { SPA_HEADERS, gotoRoute, personId, test, expect } from "./fixtures";
 test("a missing section is nudged, jumped to, filled in, and the nudge goes away", async ({ as }) => {
   test.setTimeout(240_000);
   const page = await as("employee");
+  // The 409 the save below retries through is a REFUSAL the app is supposed to make, but the browser logs
+  // every non-2xx fetch as a console error regardless, so answering the conflict correctly still failed the
+  // console fixture. Matched on the status because the tolerance patterns are tested against the console
+  // message alone (fixtures.ts) and a failed-resource message names no url.
+  allowConsoleErrors(page, /status of 409 \(Conflict\)/);
   const id = await personId(page, "employee");
   const stamp = Date.now() % 100000;
   const contact = `E2E Kin ${stamp}`;
@@ -32,7 +37,7 @@ test("a missing section is nudged, jumped to, filled in, and the nudge goes away
     if (!(await meter.count())) await page.reload();
     await expect(meter).toBeVisible({ timeout: 15_000 });
   }).toPass({ timeout: 90_000 });
-  await expect(page.getByText("Complete your profile")).toBeVisible();
+  await expect(page.getByText("Finish your profile")).toBeVisible();
   const scored = Number((await meter.getAttribute("aria-valuenow")) ?? "-1");
   expect(scored).toBeGreaterThanOrEqual(0);
 
@@ -62,7 +67,17 @@ test("a missing section is nudged, jumped to, filled in, and the nudge goes away
   // that the save landed - it is the contact itself, come back from the server.
   // Back to the read view in place - the same dialog is both, because "who to call" is read far more often
   // than it is edited.
-  await expect(dialog.getByText(contact)).toBeVisible({ timeout: 30_000 });
+  //
+  // Retried through the CONFLICT, because this save is a compare-and-swap over the whole personal-info blob
+  // and the specs sharing this employee write that same row. Losing that race is the app being right: it
+  // re-reads the record, keeps what was typed, and says "check them and save again" - so this does what the
+  // message asks. Left alone it read as a 30s hang, because the read view correctly never arrived and this
+  // spec deliberately asserts no toast (see above), so the one thing that said what happened went unwatched.
+  const conflict = dialog.getByText(/Somebody else changed these details/);
+  await expect(async () => {
+    if (await conflict.count()) await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(dialog.getByText(contact)).toBeVisible({ timeout: 10_000 });
+  }).toPass({ timeout: 60_000 });
   await expect(dialog.getByText("Spouse")).toBeVisible();
 
   // The e-card is filed here too: a personal document typed INSURANCE, which is what a paramedic's question
@@ -72,16 +87,18 @@ test("a missing section is nudged, jumped to, filled in, and the nudge goes away
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
 
-  // And the nudge shrank, without a reload: saving re-reads the employee row the flags ride on, so the chip
-  // for the section that was just filled is gone and the score has moved up.
-  await expect(page.getByRole("button", { name: "Emergency contact" })).toHaveCount(0, { timeout: 30_000 });
+  // And the nudge moved, without a reload: saving re-reads the employee row the flags ride on. The tile for
+  // the section that was just filled stays on the checklist and flips to "Added" - a checklist that deletes
+  // what you finish makes it impossible to see that you are nearly done - so what proves the save landed is
+  // the tile's own state and the score, not the tile disappearing.
+  await expect(page.getByRole("button", { name: "Emergency contact" }).getByText("Added")).toBeVisible({ timeout: 30_000 });
   const after = page.getByRole("progressbar", { name: "Profile completeness" });
   if (await after.count()) {
     expect(Number((await after.getAttribute("aria-valuenow")) ?? "-1")).toBeGreaterThan(scored);
   } else {
     // Nothing left to nudge about: the meter hides itself rather than sitting at 100%, which is the other
     // correct answer here.
-    await expect(page.getByText("Complete your profile")).toHaveCount(0);
+    await expect(page.getByText("Finish your profile")).toHaveCount(0);
   }
 });
 

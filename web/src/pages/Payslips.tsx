@@ -67,6 +67,8 @@ export default function Payslips({ me }: { me: Me }) {
   const payChart = useMemo(() => {
     const recent = [...rows].reverse().slice(-24);
     return {
+      // Each point IS a payslip, so pressing one opens that slip rather than filtering a list down to it.
+      slips: recent,
       // Labelled on the ORG's calendar too, via the same day conversion the buckets use - drawn through the
       // viewer's local clock, the slip the YTD filter files under one year could be plotted as the next.
       labels: recent.map((s) => (s.create_time ? new Date(`${orgDayOf(s.create_time)}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", year: "2-digit", timeZone: "UTC" }) : "")),
@@ -188,6 +190,7 @@ export default function Payslips({ me }: { me: Me }) {
                 ]}
                 format={(v) => money(v)}
                 ariaLabel="Gross pay and take-home pay on each payslip"
+                onSelect={(i) => { const s = payChart.slips[i]; if (s) onPreview(s); }}
               />
             </ChartCard>
           )}

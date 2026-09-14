@@ -13,6 +13,7 @@ import { getIdentityDetails, setIdentityDetails } from "../services/identityDeta
 import { getPersonalDetails, setPersonalDetails } from "../services/personalDetails";
 import { getTaxDetails, setTaxDetails } from "../services/taxDetails";
 import { getNotificationPrefs, setNotificationPrefs } from "../services/notificationPrefs";
+import { getPresence } from "../services/presence";
 import { computeProfileCompleteness } from "../services/profileCompleteness";
 import { uploadPhoto, clearPhoto, getPhoto, uploadSignature, clearSignature, getSignature } from "../services/employeePhoto";
 import { putAttachment, downloadAttachment, deleteAttachment, attachmentDisposition } from "../services/attachments";
@@ -239,6 +240,12 @@ export const employees = new Hono<AppEnv>()
     const body = await jsonBody<Parameters<typeof setPersonalDetails>[3]>(c);
     const view = await setPersonalDetails(c.get("deps"), c.get("user"), id, body ?? {}, c.req.header("If-Match"));
     return c.json({ path: `employees/${id}/personal-info`, ...redactedSub(c, "personal-info", view) });
+  })
+  // Derived, so there is nothing to PATCH: see services/presence.ts for why it is read lazily and why the
+  // leave type never leaves the server.
+  .get("/:employee_id/presence", async (c) => {
+    const id = c.req.param("employee_id")!;
+    return c.json({ path: `employees/${id}/presence`, ...(await getPresence(c.get("deps"), id)) });
   })
   .get("/:employee_id/notification-prefs", async (c) => {
     const id = c.req.param("employee_id")!;

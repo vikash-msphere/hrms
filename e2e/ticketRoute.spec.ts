@@ -32,10 +32,10 @@ test("a ticket is routed to a different department, and the change is saved", as
 
     // `Field label="Department" htmlFor="ticket-department"` names the combobox by id, not by DOM proximity -
     // getByLabel is what that pairing is for.
-    const deptTrigger = detail.getByLabel("Department");
+    const deptTrigger = detail.getByLabel("Department", { exact: true });
     await deptTrigger.click();
     await hr.getByPlaceholder("Search departments…").fill(deptLabel);
-    await hr.getByRole("button", { name: new RegExp(`^${escapeRe(deptLabel)}`) }).click();
+    await hr.getByRole("option", { name: new RegExp(`^${escapeRe(deptLabel)}`) }).click();
 
     await expect(toast(hr, "Department updated")).toBeVisible({ timeout: 30_000 });
     await expect(deptTrigger).toContainText(deptLabel);

@@ -66,7 +66,7 @@ test("an encashment's hint, Max button and cap refusal match the balance/retaine
 
     await form.getByLabel("Employee").click();
     await page.getByPlaceholder(/Search|Select/).last().fill(empName);
-    await expect(page.getByRole("button", { name: new RegExp(empName) })).toBeVisible();
+    await expect(page.getByRole("option", { name: new RegExp(empName) })).toBeVisible();
     await page.keyboard.press("Enter");
 
     await form.getByLabel("Leave type").click();

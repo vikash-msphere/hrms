@@ -56,6 +56,13 @@ export function Combobox({
   }, [options, query]);
 
   React.useEffect(() => setActive(0), [query]);
+  // The highlight has to stay inside the list it points at. `active` was reset on a typed query and on nothing
+  // else, so a list that shrinks for any OTHER reason (the caller's options narrowing as its own data loads,
+  // an excluded name being picked elsewhere) left it past the end: `aria-activedescendant` dropped off, the
+  // reader was told nothing, and Enter picked `undefined` and silently did nothing.
+  React.useEffect(() => {
+    setActive((a) => (a < filtered.length ? a : Math.max(0, filtered.length - 1)));
+  }, [filtered.length]);
   React.useEffect(() => {
     if (!open) setQuery("");
   }, [open]);
@@ -75,10 +82,11 @@ export function Combobox({
         <button
           type="button"
           id={id}
-          role="combobox"
-          aria-expanded={open}
-          aria-haspopup="listbox"
-          aria-controls={open ? listId : undefined}
+          // No role/aria-* of its own. The combobox in this control is the SEARCH INPUT inside the popup (APG's
+          // editable-combobox pattern); the trigger is only the disclosure that opens it. Naming the trigger a
+          // second `combobox` over the same listbox is invalid ARIA - and it also strips the element of its
+          // button role, which is the only thing a label, a test or a screen reader had to call it by. Radix's
+          // PopoverTrigger already supplies aria-haspopup="dialog", aria-expanded and aria-controls.
           disabled={disabled}
           autoFocus={autoFocus}
           className={cn(

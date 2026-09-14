@@ -18,7 +18,7 @@ test("a process is started for someone and its tasks are ticked off", async ({ a
   // Who it is for: the picker HR uses. Eve already exists, so the process lands on a real person's file.
   await form.getByLabel("Employee").click();
   await page.getByPlaceholder(/Search/).last().fill("Eve");
-  await expect(page.getByRole("button", { name: /Eve Employee/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Eve Employee/ })).toBeVisible();
   await page.keyboard.press("Enter");
   await form.getByRole("button", { name: "Start", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);

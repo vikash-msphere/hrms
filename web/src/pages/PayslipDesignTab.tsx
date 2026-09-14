@@ -327,7 +327,7 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
         {/* The A4 aspect ratio keeps the page shape honest at any panel width, so what you judge here is what prints. */}
         <TabsContent value="preview">
           <Card>
-            <CardHeader className="flex-row items-center justify-between gap-2 pb-2">
+            <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 pb-2">
               <CardTitle className="text-sm">Preview <span className="ml-1 font-normal text-muted-foreground">sample data</span></CardTitle>
               {previewing && <span className="text-xs text-muted-foreground">Rendering…</span>}
             </CardHeader>

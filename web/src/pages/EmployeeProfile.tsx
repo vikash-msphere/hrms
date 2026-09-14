@@ -1,18 +1,23 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, ChevronLeft, ChevronRight, Network, Hash, UserCog, Users,
+  ArrowLeft, CalendarPlus, ChevronLeft, ChevronRight, HeartPulse, Network, Pencil, Sparkles,
   UserRound, Contact, Briefcase, CalendarDays, IdCard, Landmark, ShieldCheck, Wallet, Package, FileText, History,
 } from "lucide-react";
 import { useEmployee } from "@/hooks/useEmployee";
 import { useCollection } from "@/hooks/useCollection";
-import { patch } from "@/api";
-import { formatDate, idOf, probationLabel, tenureLabel } from "@/lib/utils";
+import { usePresence } from "@/hooks/usePresence";
+import { get, patch } from "@/api";
+import { formatDate, formatMonthYear, humanize, idOf, probationLabel, tenureDuration } from "@/lib/utils";
 import { navigate } from "@/router";
+import { fireIntent } from "@/lib/intent";
 import { usePermission, useCanSeeActivity, useIsSuperAdmin } from "@/lib/perm";
-import type { Department, Employee, LeaveBalance, LeaveRequest, LeaveType, Me } from "@/types";
+import type { Department, Employee, LeaveBalance, LeaveRequest, LeaveType, Me, PersonalDetails } from "@/types";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { DataState } from "@/components/common/DataState";
-import { ProfileView, ProfileDetails } from "@/components/common/ProfileView";
+import { ProfileView, ProfileFact, HEADER_BTN, HEADER_BTN_PRIMARY } from "@/components/common/ProfileView";
+import { PresencePill, PresenceNote } from "@/components/common/PresencePill";
+import { PeopleList } from "@/components/common/PeopleList";
+import { ProfileStickyBar } from "@/components/common/ProfileStickyBar";
 import { EditBioDialog } from "@/components/common/EditBioDialog";
 import { EmployeeDocuments } from "@/components/common/EmployeeDocuments";
 import { GenerateLetterButton } from "@/components/common/GenerateLetterButton";
@@ -49,9 +54,6 @@ import { useToast } from "@/components/ui/use-toast";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 
 const NONE = "__none__";
-
-// Small linkable chip in the header meta row (employee ID / reports-to / direct reports).
-const CHIP = "inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground";
 
 // Which org-settings panels surface as inline gears on each profile tab. The gear opens the SAME panel as the
 // central Settings hub (org singletons, not per-employee config) - it just puts the relevant knob where HR is
@@ -151,15 +153,38 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
   const prevEmp = empIdx > 0 ? liveEmployees[empIdx - 1] : undefined;
   const nextEmp = empIdx >= 0 ? liveEmployees[empIdx + 1] : undefined;
   const directReports = useMemo(() => liveEmployees.filter((e) => e.manager && idOf(e.manager) === id), [liveEmployees, id]);
+  // The same team, in the shape the hover panel takes. Memoized so hovering the cell
+  // does not rebuild the array (and with it every avatar) on each render.
+  const reportPeople = useMemo(
+    () => directReports.map((e) => ({ id: idOf(e.path), name: `${e.first_name} ${e.last_name}`, photo: e.photo })),
+    [directReports],
+  );
 
-  const copyText = (text: string, done: string) =>
-    navigator.clipboard.writeText(text).then(() => toast({ title: done, variant: "success" })).catch(() => {});
 
   // --- edit: core profile fields ---
   const [docsKey, setDocsKey] = useState(0); // bump to refetch the documents tab after generating a letter
   const [bioOpen, setBioOpen] = useState(false);
   const [photoOpen, setPhotoOpen] = useState(false);
   const [emergencyOpen, setEmergencyOpen] = useState(false);
+  // What the sticky bar watches: while this header is off screen, the bar carries the identity instead.
+  const headerRef = useRef<HTMLDivElement | null>(null);
+  // Derived reachability for the status pill and the on-leave note. Lazy and failure-silent: see
+  // hooks/usePresence.ts for why it is not a field on the record.
+  const presence = usePresence(id);
+  // The phone for the facts band. Only fetched when the viewer may see it at all (`canBank` is owner-or-
+  // super, the same gate the server gives the encrypted blob), so a colleague's profile makes no request
+  // that could only come back redacted. Failure-silent for the same reason presence is: the cell is a
+  // convenience on a page that has already loaded.
+  const [personal, setPersonal] = useState<PersonalDetails | null>(null);
+  useEffect(() => {
+    setPersonal(null);
+    if (!canBank) return;
+    let active = true;
+    get<PersonalDetails>(`employees/${id}/personal-info`)
+      .then((p) => active && setPersonal(p))
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [id, canBank]);
   // Completeness chips jump to the section where the data is filled in (mirrors /profile's gotoItem).
   function gotoRecordItem(key: CompletenessKey) {
     if (key === "photo") setPhotoOpen(true);
@@ -232,11 +257,13 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
   };
 
   // Right-aligned gear row for a tab's inline settings; nothing renders when the caller can't configure.
+  // `ml-auto` rather than a `justify-between` on the parent: below `sm` the parent's row wraps and the strip
+  // takes the whole first line, where `justify-between` would have nothing to push against (see the tab band).
   const tabGears = (tab: string) => {
     const keys = TAB_SETTINGS[tab];
     if (!canSettings || !keys?.length) return null;
     return (
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="order-1 ml-auto flex shrink-0 items-center gap-2 sm:order-2">
         {keys.map((k) => <SettingsButton key={k} me={me} settingKey={k} />)}
       </div>
     );
@@ -277,81 +304,188 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
                 </div>
               )}
             </div>
+            {/* `Tabs` wraps the header card, because the tab strip is now the card's last band and
+                `TabsList` needs the context. The panels stay where they were, below it. */}
+            {/* The gap between the card and whichever panel is open. It lived on the tab list's `mb-6`,
+                which no longer exists here (the list is inside the card now), so it is set once on every
+                panel instead of eleven times. 14px, tight enough that the panel reads as hanging from the
+                tab that names it rather than as the next thing down the page. */}
+            <Tabs value={tab} onValueChange={setTab} className="[&>[role=tabpanel]]:mt-3.5">
+            <ProfileStickyBar
+              watch={headerRef}
+              employeeId={id}
+              name={`${emp.first_name} ${emp.last_name}`}
+              subtitle={[emp.job_title, deptName(emp.department)].filter(Boolean).join(" · ")}
+              photo={emp.photo}
+              presence={presence}
+              actions={
+                <button type="button" className={HEADER_BTN} onClick={() => navigate(`org-chart/${id}`)}>
+                  <Network className="h-[15px] w-[15px]" /> Org chart
+                </button>
+              }
+            />
             <ProfileView
+              identityRef={headerRef}
               // The person's name IS this page's title - there is no PageHeader above it - so it carries the
               // page's only `h1`.
               heading="h1"
               name={`${emp.first_name} ${emp.last_name}`}
-              email={emp.work_email}
               jobTitle={emp.job_title}
               department={deptName(emp.department)}
+              // Mirrored from the current position row, so a transfer or a contract-to-permanent conversion
+              // updates the line without anything here re-reading the history.
+              employmentType={emp.employment_type ? humanize(emp.employment_type) : undefined}
+              workMode={emp.work_mode ? humanize(emp.work_mode) : undefined}
+              location={emp.location}
               bio={emp.bio}
               // Bio is personal: the "Add a short bio" prompt is owner-only. HR still gets the edit
               // pencil once a bio EXISTS (moderation), just not the empty-state nudge.
               onEditBio={me.employee_id === id || (canManage && !!emp.bio) ? () => setBioOpen(true) : undefined}
-              avatar={<PhotoAvatar className="h-16 w-16 sm:h-[72px] sm:w-[72px]" employeeId={id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable={canBank} onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
-              meta={
-                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                  {emp.employee_number && (
-                    <button type="button" className={CHIP} title="Copy employee ID" onClick={() => copyText(emp.employee_number!, "Employee ID copied")}>
-                      <Hash className="h-3 w-3" /> <span className="font-mono">{emp.employee_number}</span>
-                    </button>
+              avatar={<PhotoAvatar className="h-[68px] w-[68px] rounded-[14px] sm:h-[92px] sm:w-[92px] sm:rounded-[18px]" employeeId={id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable={canBank} onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
+              /* Where they sit, as the only two chips - both go somewhere. The pill shape is the promise
+                 that pressing it does something, so facts with nothing behind them are cells in the band
+                 below instead. The manager's field-access icon rides along here, since this chip is the
+                 only place the manager appears. */
+              /* Who is covering while they are away. Only renders on an actual absence. */
+              note={<PresenceNote presence={presence} coveredByName={presence?.covered_by ? empName(presence.covered_by) : undefined} />}
+              /* The record, labelled. This band is what the Profile tab used to draw as a six-card grid a
+                 hundred pixels below the header - both on screen at once, saying the same things twice.
+                 Reports-to and direct reports are cells here rather than chips: with a face beside each one
+                 they say who, not just how many, and they still navigate. */
+              facts={
+                <>
+                  <ProfileFact label="Work email" value={emp.work_email} copy={emp.work_email} />
+                  {/* Phone lives in the encrypted personal-info blob and is gated to the owner and HR, so a
+                      colleague never sees this cell at all - it is not rendered empty, it is not rendered. */}
+                  {canBank && personal?.personal_phone && (
+                    <ProfileFact label="Phone" value={personal.personal_phone} copy={personal.personal_phone} field="personal-info" />
                   )}
-                  {emp.manager && empName(emp.manager) && (
-                    <button type="button" className={CHIP} title="Open their profile" onClick={() => navigate(`employees/${idOf(emp.manager!)}`)}>
-                      <UserCog className="h-3 w-3" /> Reports to {empName(emp.manager)}
-                    </button>
-                  )}
-                  {directReports.length > 0 && (
-                    <button type="button" className={CHIP} title="View team in the org chart" onClick={() => navigate(`org-chart/${id}`)}>
-                      <Users className="h-3 w-3" /> {directReports.length} direct report{directReports.length === 1 ? "" : "s"}
-                    </button>
-                  )}
-                </div>
+                  <ProfileFact
+                    label="Reports to"
+                    value={emp.manager ? empName(emp.manager) : undefined}
+                    field="manager"
+                    onClick={emp.manager ? () => navigate(`employees/${idOf(emp.manager!)}`) : undefined}
+                  />
+                  <ProfileFact
+                    label="Direct reports"
+                    // The cell stays a plain count; the faces and names live in the hover panel, where each
+                    // row is a way to that person. "5 people" answers how many, and the panel answers who.
+                    hoverContent={<PeopleList people={reportPeople} />}
+                    value={directReports.length > 0 ? `${directReports.length} ${directReports.length === 1 ? "person" : "people"}` : undefined}
+                    onClick={directReports.length > 0 ? () => navigate(`org-chart/${id}`) : undefined}
+                  />
+                  <ProfileFact
+                    label="Employee ID"
+                    value={emp.employee_number}
+                    copy={emp.employee_number}
+                    field="employee_number"
+                    mono
+                    addLabel="Add ID"
+                    onAdd={canManage ? openCore : undefined}
+                  />
+                  {/* Joined and tenure in one cell: "Mar 2022" alone makes the reader do the subtraction, and
+                      the duration alone loses the date HR is actually looking up. */}
+                  <ProfileFact
+                    label="Joined"
+                    value={emp.start_date ? formatMonthYear(emp.start_date) : undefined}
+                    hint={emp.start_date ? tenureDuration(emp.start_date) : undefined}
+                  />
+                </>
+              }
+              factsAction={
+                canManage ? (
+                  <AccessAction collection="employees" objectPath={`employees/${id}`} label="Profile">
+                    <IconEdit onClick={openCore} />
+                  </AccessAction>
+                ) : undefined
+              }
+              /* Surfaced here so HR doesn't have to open the Employment tab to learn the person is on
+                 their way out or not started yet. Only exception states earn badge chrome. */
+              status={
+                <>
+                  {/* Derived reachability, and the record's own exception states. Different questions, so
+                      both can be true at once: someone on probation can also be on leave today. */}
+                  <PresencePill presence={presence} />
+                  {emp.disabled && <Badge variant="secondary">Inactive</Badge>}
+                  {!emp.disabled && onProbation && <Badge variant="warning">{probationLabel(emp.probation_end_date!) || "On probation"}</Badge>}
+                </>
               }
               actions={
-                /* Stacked, right-aligned: status badges on top, action buttons underneath - buttons
-                   inline with badges read oddly. */
-                /* Kept quiet on purpose - the identity (left) side should out-rank this stack. Tenure is
-                   plain muted text; only exception states (inactive/probation) earn badge chrome. */
-                <div className="flex flex-col items-end gap-1.5">
-                  <div className="flex flex-wrap items-center justify-end gap-2">
-                    {/* Surface the employment status up top so HR doesn't have to open the Employment tab for it. */}
-                    {!!emp.start_date && <span className="text-xs text-muted-foreground">{tenureLabel(emp.start_date)}</span>}
-                    {emp.disabled && <Badge variant="secondary">Inactive</Badge>}
-                    {!emp.disabled && onProbation && <Badge variant="warning">{probationLabel(emp.probation_end_date!) || "On probation"}</Badge>}
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="sm" className="text-muted-foreground" title="View in org chart" onClick={() => navigate(`org-chart/${id}`)}>
-                      <Network className="h-3.5 w-3.5" /> Org chart
-                    </Button>
-                    {canBank && <EmergencyQuickView employeeId={id} canEdit={canBank} open={emergencyOpen} onOpenChange={setEmergencyOpen} onSaved={reload} />}
-                  </div>
+                /* Every action visible and every one labelled. The row used to mix a labelled button, a
+                   second labelled button and a bare red icon; the fix is one weight, not fewer actions -
+                   emergency details in particular is the last thing to hide behind a menu. */
+                <>
+                  {/* Recognition is person-shaped: the top bar's global button lands on the board with an
+                      empty recipient picker, so the praise you meant to give starts with finding the person
+                      again. Here they are already in hand - the intent carries them, and the composer opens
+                      filled in. Same route the "say well done" button on a completed goal takes. Hidden on
+                      your own profile: there is no self-kudos flow. */}
+                  {me.employee_id !== id && (
+                    <AccessAction collection="announcements" verb="giveKudos" label="Give kudos">
+                      <button type="button" className={HEADER_BTN} title={`Give kudos to ${emp.first_name}`} onClick={() => { navigate("announcements"); fireIntent("give-kudos", `employees/${id}`); }}>
+                        <Sparkles className="h-[15px] w-[15px] text-amber-500" /> Kudos
+                      </button>
+                    </AccessAction>
+                  )}
+                  {canBank && (
+                    <button type="button" className={HEADER_BTN} onClick={() => setEmergencyOpen(true)}>
+                      <HeartPulse className="h-[15px] w-[15px] text-destructive" /> Emergency
+                    </button>
+                  )}
+                  <button type="button" className={HEADER_BTN} onClick={() => navigate(`org-chart/${id}`)}>
+                    <Network className="h-[15px] w-[15px]" /> Org chart
+                  </button>
+                  {/* The mock's one filled action. "Schedule a 1:1" is the check-ins module, which is what a
+                      1:1 already is here - not a new meeting feature. On your own record the equivalent is
+                      editing it, which is the same dialog the facts band's pencil opens. */}
+                  {me.employee_id === id ? (
+                    canManage && (
+                      <button type="button" className={HEADER_BTN_PRIMARY} onClick={openCore}>
+                        <Pencil className="h-[15px] w-[15px]" /> Edit profile
+                      </button>
+                    )
+                  ) : (
+                    <AccessAction collection="check-ins" create>
+                      <button type="button" className={HEADER_BTN_PRIMARY} onClick={() => { navigate("check-ins"); fireIntent("new-checkin", `employees/${id}`); }}>
+                        <CalendarPlus className="h-[15px] w-[15px]" /> Schedule 1:1
+                      </button>
+                    </AccessAction>
+                  )}
+                </>
+              }
+              /* The record's sections, as the card's last band. They describe this record, so they belong to
+                 its card rather than floating underneath it as a detached strip. */
+              tabs={
+                /* Below `sm` the gear cannot share the line. Eleven tabs are already wider than a phone, so
+                   the strip is scrolling at that width, and a `shrink-0` button beside it takes its width out
+                   of the strip rather than out of the empty space there isn't any of - the last tab ends up
+                   under the gear's edge. So the row WRAPS below `sm`: the gear takes a line of its own
+                   (`order-1`, right-aligned) and the strip takes the full width under it (`order-2`), which
+                   also keeps the strip's baseline directly above the panel it names. From `sm` up both are
+                   back on one line, strip left and gear right, unchanged. */
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  {/* `mb-0 border-b-0`: inside the card the bottom edge is this strip's baseline. */}
+                  <TabsList variant="underline" className="order-2 mb-0 w-full min-w-0 border-b-0 sm:order-1 sm:w-auto">
+                    <AccessTab value="profile" target={{ collection: "employees", objectPath: empPath, label: "Profile" }}><UserRound className="h-4 w-4" /> Profile</AccessTab>
+                    {canBank && <AccessTab value="contact" target={{ collection: "employees", objectPath: empPath, field: "personal-info", label: "Contact" }}><Contact className="h-4 w-4" /> Contact</AccessTab>}
+                    <AccessTab value="employment" target={{ collection: "employees", objectPath: empPath, label: "Employment" }}><Briefcase className="h-4 w-4" /> Employment</AccessTab>
+                    {(myBalances.length > 0 || myLeaves.length > 0) && <AccessTab value="leave" target={{ collection: "leave-requests", label: "Leave" }}><CalendarDays className="h-4 w-4" /> Leave</AccessTab>}
+                    {canBank && <AccessTab value="identity" target={{ collection: "employees", objectPath: empPath, field: "identity", label: "Identity" }}><IdCard className="h-4 w-4" /> Identity</AccessTab>}
+                    {canBank && <AccessTab value="bank" target={{ collection: "employees", objectPath: empPath, field: "bank-account", label: "Bank details" }}><Landmark className="h-4 w-4" /> Bank details</AccessTab>}
+                    {canTax && <AccessTab value="tax" target={{ collection: "employees", objectPath: empPath, field: "tax", label: "Tax" }}><ShieldCheck className="h-4 w-4" /> Tax</AccessTab>}
+                    {(canComp || canBonuses || canSettlement) && <AccessTab value="compensation" target={{ collection: "compensation", label: "Compensation" }}><Wallet className="h-4 w-4" /> Compensation</AccessTab>}
+                    {canAssets && <AccessTab value="assets" target={{ collection: "assets", label: "Assets" }}><Package className="h-4 w-4" /> Assets</AccessTab>}
+                    <AccessTab value="documents" target={{ collection: "personal-documents", label: "Documents" }}><FileText className="h-4 w-4" /> Documents</AccessTab>
+                    {canActivity && <AccessTab value="activity" target={{ collection: "employees", objectPath: empPath, label: "Activity" }}><History className="h-4 w-4" /> Activity</AccessTab>}
+                  </TabsList>
+                  {tabGears(tab)}
                 </div>
               }
             />
+            {/* Triggerless: the labelled button above is this dialog's affordance now. Mounted out here
+                beside the other header dialogs rather than inside `actions`, which holds controls only. */}
+            {canBank && <EmergencyQuickView employeeId={id} canEdit={canBank} open={emergencyOpen} onOpenChange={setEmergencyOpen} onSaved={reload} triggerless />}
             <EditBioDialog employeeId={id} current={emp.bio} open={bioOpen} onOpenChange={setBioOpen} onSaved={reload} />
-
-            <Tabs value={tab} onValueChange={setTab} className="mt-6">
-              {/* Each tab carries the access key for the section/sub-resource it manages, scoped to this
-                  employee record - the affordance lives on the tab bar. The active tab's inline settings gears
-                  sit at the right end of the same bar, so no tab spends a whole row on them. */}
-              <div className="flex items-center justify-between gap-2">
-              <TabsList variant="underline">
-                <AccessTab value="profile" target={{ collection: "employees", objectPath: empPath, label: "Profile" }}><UserRound className="h-4 w-4" /> Profile</AccessTab>
-                {canBank && <AccessTab value="contact" target={{ collection: "employees", objectPath: empPath, field: "personal-info", label: "Contact" }}><Contact className="h-4 w-4" /> Contact</AccessTab>}
-                <AccessTab value="employment" target={{ collection: "employees", objectPath: empPath, label: "Employment" }}><Briefcase className="h-4 w-4" /> Employment</AccessTab>
-                {(myBalances.length > 0 || myLeaves.length > 0) && <AccessTab value="leave" target={{ collection: "leave-requests", label: "Leave" }}><CalendarDays className="h-4 w-4" /> Leave</AccessTab>}
-                {canBank && <AccessTab value="identity" target={{ collection: "employees", objectPath: empPath, field: "identity", label: "Identity" }}><IdCard className="h-4 w-4" /> Identity</AccessTab>}
-                {canBank && <AccessTab value="bank" target={{ collection: "employees", objectPath: empPath, field: "bank-account", label: "Bank details" }}><Landmark className="h-4 w-4" /> Bank details</AccessTab>}
-                {canTax && <AccessTab value="tax" target={{ collection: "employees", objectPath: empPath, field: "tax", label: "Tax" }}><ShieldCheck className="h-4 w-4" /> Tax</AccessTab>}
-                {(canComp || canBonuses || canSettlement) && <AccessTab value="compensation" target={{ collection: "compensation", label: "Compensation" }}><Wallet className="h-4 w-4" /> Compensation</AccessTab>}
-                {canAssets && <AccessTab value="assets" target={{ collection: "assets", label: "Assets" }}><Package className="h-4 w-4" /> Assets</AccessTab>}
-                <AccessTab value="documents" target={{ collection: "personal-documents", label: "Documents" }}><FileText className="h-4 w-4" /> Documents</AccessTab>
-                {canActivity && <AccessTab value="activity" target={{ collection: "employees", objectPath: empPath, label: "Activity" }}><History className="h-4 w-4" /> Activity</AccessTab>}
-              </TabsList>
-                {tabGears(tab)}
-              </div>
 
               <TabsContent value="profile" className="space-y-4">
                 {/* Server sends the flags to the owner + HR only. Signature is stripped client-side too:
@@ -359,25 +493,8 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
                 {emp.profile_completeness && (
                   <ProfileCompleteness variant="record" flags={{ ...emp.profile_completeness, signature: undefined }} onItem={gotoRecordItem} />
                 )}
-                <Card>
-                  <CardHeader className="flex flex-row items-center justify-between">
-                    <CardTitle className="text-base">Profile</CardTitle>
-                    {canManage && (
-                      <AccessAction collection="employees" objectPath={`employees/${id}`} label="Profile">
-                        <IconEdit onClick={openCore} />
-                      </AccessAction>
-                    )}
-                  </CardHeader>
-                  <CardContent>
-                    <ProfileDetails
-                      employeeNumber={emp.employee_number}
-                      email={emp.work_email}
-                      jobTitle={emp.job_title}
-                      department={deptName(emp.department)}
-                      manager={empName(emp.manager)}
-                    />
-                  </CardContent>
-                </Card>
+                {/* No "Profile" card here: the header's facts band is that card, one screen higher and
+                    without the second copy of every value. Its edit pencil moved up with it. */}
                 {canBank && <EmployeeProfilePersonal employeeId={id} canEdit={canBank} />}
               </TabsContent>
 
@@ -389,7 +506,7 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
 
               <TabsContent value="employment" className="space-y-4">
                 <Card>
-                  <CardHeader className="flex flex-row items-center justify-between">
+                  <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
                     <CardTitle className="text-base">
                       <AccessAction collection="employees" objectPath={`employees/${id}`} label="Employment">Employment</AccessAction>
                     </CardTitle>

@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 // lazyPage, not React.lazy: a failed import must stay retryable (see lib/lazyPage.tsx and the crash boundary).
 import { lazyPage as lazy } from "@/lib/lazyPage";
-import { navigate } from "@/router";
+import { navigate, setQueryParam, useRoute } from "@/router";
 import { Plus, Trash2, Save, Building, X, ChevronDown, Users, User, Search, ArrowLeft, ArrowUp, ArrowDown, Check, Globe, Palette, Type, Image as ImageIcon } from "lucide-react";
 import { get, patch, create, remove, list, dataUrl } from "@/api";
 import { SETTINGS_REGISTRY, SETTINGS_GROUPS, SETTINGS_LEGACY, settingsEntry, entryScope, type SettingsEntry } from "@/settings/registry";
@@ -17,6 +17,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { useLetterheads } from "@/lib/letterheads";
 import { LetterheadDesigner } from "@/components/settings/LetterheadDesigner";
 import { RestrictionsEditor } from "@/components/leave/RestrictionsEditor";
+import { storedLeaves } from "../../../src/domain/leaveRestrictions";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
 import { cn, idOf, formatMoney } from "@/lib/utils";
@@ -1696,7 +1697,7 @@ function TicketChecklistsTab({ toast }: { toast: Toast }) {
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0">
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0">
         <CardTitle><AccessAction collection="ticket-checklists" label="Ticket checklists"><span>Checklists</span></AccessAction></CardTitle>
         <AccessAction collection="ticket-checklists" create label="New checklist">
           <Button variant="outline" onClick={addNew} disabled={creating}><Plus className="h-4 w-4" /> Add checklist</Button>
@@ -1820,7 +1821,7 @@ function LetterheadsPanel({ toast }: { toast: Toast }) {
 
   return (
     <Card className="mt-5">
-      <CardHeader className="flex-row items-center justify-between space-y-0">
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">
           <AccessAction collection="letterheads" label="Letterheads"><span>Letterheads</span></AccessAction>
         </CardTitle>
@@ -3427,13 +3428,43 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
   // The org-wide restrictions baseline, edited as the blob it is stored as (see RestrictionsEditor).
   const [restrictions, setRestrictions] = useState<Record<string, unknown> | null>(null);
   // Which tab is showing, so the read below can wait for the one that needs it.
-  const [tab, setTab] = useState("carry-forward");
+  //
+  // DEEP-LINKED through `?tab=`, the way the inline settings sheet deep-links `?setting=` (router.ts
+  // setQueryParam: the hash path and every other param are preserved, and the back button steps out of it).
+  // Without it, a link that means "the org's restrictions" lands on Carry-forward and the reader has to know
+  // which of five tabs was meant - which is most of what made the two halves of a leave policy feel unrelated.
+  const route = useRoute();
+  const tab = route.query.tab ?? "carry-forward";
+  const setTab = (next: string) => setQueryParam("tab", next === "carry-forward" ? null : next);
   // For the "can't be combined with" picker, which names other leave types. Behind the tab that draws it:
   // this card is four other panels as well, and none of them has anything to say about leave types.
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types", { enabled: tab === "restrictions" });
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Why the baseline can't be saved, as the editor sees it - the same refusal the server would give.
+  const [policyProblem, setPolicyProblem] = useState<string | null>(null);
   const writeSettings = useSettingsBatch();
+
+  // Which types state their own version of each section's rules, for the line under each section header. Read
+  // off the rows this tab already fetches, through the same `storedLeaves` the server's merge is written from
+  // - so "overridden" here means exactly what it means when a leave request is evaluated.
+  const overriddenBy = useMemo(() => {
+    const out: Record<string, { label: string; href: string }[]> = {};
+    for (const lt of leaveTypes) {
+      // Each name is a LINK to that type's own editor - `useDeepOpen` turns `#/settings/leave-types/<id>` into
+      // the open dialog, which is the same route the record's own deep link uses. Naming a type you then have
+      // to go and find by hand is most of the way to not naming it.
+      const entry = { label: lt.display_name, href: `#/settings/leave-types/${idOf(lt.path)}` };
+      for (const key of storedLeaves(lt.restrictions)) {
+        const group = key.split(".")[0]!;
+        if (group === "soft_rules") continue;
+        (out[group] ??= []).push(entry);
+      }
+    }
+    // A type that overrides three leaves of one section is still one name in that section's list.
+    for (const g of Object.keys(out)) out[g] = out[g]!.filter((e, i, all) => all.findIndex((x) => x.href === e.href) === i);
+    return out;
+  }, [leaveTypes]);
 
   useEffect(() => {
     void Promise.allSettled([
@@ -3462,6 +3493,23 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
     ready,
     save,
   );
+
+  // WHICH TAB IS CARRYING THE UNSAVED EDIT. Five settings keys save as one batch behind one button, so a
+  // reader who changed the accrual rounding and then moved to Restrictions had nothing on screen saying the
+  // Save was still holding that earlier change - and nothing to tell them which tab to check before pressing
+  // it. Captured once, on the render where the loads have landed (a ref assigned during render, the sanctioned
+  // "compute this once" shape), and reset after each successful save.
+  const snapshot: Record<string, string> = {
+    "carry-forward": JSON.stringify([excess, cfMode, cfCap]),
+    encashment: JSON.stringify([encMode, encCap, encRateBasis, encDivisor]),
+    accrual: JSON.stringify([rounding]),
+    requests: JSON.stringify([allowBackdated]),
+    restrictions: JSON.stringify(restrictions ?? {}),
+  };
+  const loaded = useRef<Record<string, string> | null>(null);
+  if (ready && !loaded.current) loaded.current = snapshot;
+  const dirty = (key: string) => !!loaded.current && loaded.current[key] !== snapshot[key];
+
   async function save() {
     setSaving(true);
     try {
@@ -3491,6 +3539,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
         return;
       }
       markSaved();
+      loaded.current = snapshot;
       toast({ title: "Leave policy saved", variant: "success" });
     } catch (e) {
       toast(saveSettingError(e));
@@ -3505,11 +3554,18 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
       <CardContent className="space-y-4">
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList variant="segmented">
-            <TabsTrigger value="carry-forward">Carry-forward</TabsTrigger>
-            <TabsTrigger value="encashment">Encashment</TabsTrigger>
-            <TabsTrigger value="accrual">Accrual</TabsTrigger>
-            <TabsTrigger value="requests">Requests</TabsTrigger>
-            <TabsTrigger value="restrictions">Restrictions</TabsTrigger>
+            {([
+              ["carry-forward", "Carry-forward"],
+              ["encashment", "Encashment"],
+              ["accrual", "Accrual"],
+              ["requests", "Requests"],
+              ["restrictions", "Restrictions"],
+            ] as const).map(([value, label]) => (
+              <TabsTrigger key={value} value={value}>
+                {label}
+                {dirty(value) && <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-primary align-middle" title="Unsaved changes on this tab" />}
+              </TabsTrigger>
+            ))}
           </TabsList>
 
           <TabsContent value="carry-forward" className="space-y-3">
@@ -3588,6 +3644,11 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
               <Checkbox checked={allowBackdated} onCheckedChange={(v) => setAllowBackdated(v === true)} className="mt-0.5" />
               <span>Allow back-dated requests<span className="block text-xs text-muted-foreground">When off, employees can only request today or future dates. HR applying leave on someone's behalf can still back-date.</span></span>
             </label>
+            {/* The two back-dating controls live on different tabs and one silently beats the other, which is
+                the sort of thing an admin finds out from a refusal rather than from the screen. */}
+            <p className="mt-2 text-xs text-muted-foreground">
+              A leave type can set its own window under Restrictions → Request shape → "Back-dating allowed", and where it does, that replaces this toggle for that type.
+            </p>
           </TabsContent>
 
           <TabsContent value="restrictions" className="space-y-3">
@@ -3596,10 +3657,22 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
               the sandwich rule, exit-process limits, joining-month cutoffs. A leave type can override any of
               these for itself, or opt out of one, in Leave Types.
             </p>
-            <RestrictionsEditor scope="org" value={restrictions} onChange={(v) => setRestrictions(v as Record<string, unknown> | null)} leaveTypes={leaveTypes} />
+            <RestrictionsEditor
+              scope="org"
+              value={restrictions}
+              onChange={(v) => setRestrictions(v as Record<string, unknown> | null)}
+              leaveTypes={leaveTypes}
+              overriddenBy={overriddenBy}
+              onValidityChange={setPolicyProblem}
+            />
           </TabsContent>
         </Tabs>
-        <Button onClick={save} loading={saving}>{!saving && <Save className="h-4 w-4" />} Save leave policy</Button>
+        {/* STICKY, because the Restrictions tab is nine sections tall when they are open and the one button
+            that saves all five tabs used to sit past the bottom of them. */}
+        <div className="sticky bottom-0 -mx-6 flex flex-wrap items-center gap-3 border-t bg-card px-6 py-3">
+          <Button onClick={save} loading={saving} disabled={!!policyProblem}>{!saving && <Save className="h-4 w-4" />} Save leave policy</Button>
+          {policyProblem && <span role="alert" className="text-xs font-medium text-destructive">{policyProblem}</span>}
+        </div>
       </CardContent>
     </Card>
   );

@@ -14,6 +14,7 @@ import { todayStr, thisMonthStr } from "@/lib/orgDay";
 import type { Announcement, Department, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { Chart, ChartCard } from "@/components/common/Chart";
+import { useChartFocus } from "@/lib/chartFocus";
 import { monthlyTotals, topSlices } from "@/lib/chartTheme";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
@@ -437,6 +438,47 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     // that isn't there and a feed that looks broken.
     return { kind: raw.kind && raw.kind in KIND_LABELS ? raw.kind : undefined, author: raw.author };
   });
+  // The kudos the recognition charts and the podium are drawn from.
+  //
+  // OFF ITS OWN READ, not off the feed. Choosing `rows` over `source` stopped the podium shrinking while you
+  // type in the search box and left the real instability in place: `rows` is the FEED WINDOW, twenty posts on
+  // a cold open and another twenty per scroll, so a medalled ranking of named colleagues reordered as the
+  // reader reached the foot of the page - and on a busy board those twenty mixed posts might hold three
+  // kudos. A leaderboard is the one aggregate a window suits least: it is ordinal, it is about people, and the
+  // window is biased towards the newest posts, which is exactly the bias a month rollup must not have.
+  //
+  // Read up here, above the board's own filters, because those filters are what its charts narrow: a chart
+  // drawn from the narrowed feed would answer a different question after every press.
+  const { rows: kudosRows } = useCollection<Announcement>("announcements", { enabled: !solo, all: true, params: { kind: "kudos" } });
+  // The two shapes behind the podium: who is being recognized (six months, so a good month does not read as
+  // a reputation) and how often recognition happens at all. Off the same kudos read as the leaderboard - on
+  // the feed window the twelve-month chart answered its own "a culture, or a campaign?" with "a campaign" for
+  // any board busier than twenty posts a month, because `monthlyTotals` pads the months it cannot see with
+  // zeros and absence then looks like data.
+  const kudosCharts = useMemo(() => {
+    const kudos = kudosRows.filter((a) => a.create_time ?? "");
+    const sixMonthsAgo = new Date(Date.now() - 182 * 86_400_000).toISOString().slice(0, 10);
+    const recent = kudos.filter((a) => (a.create_time ?? "") >= sixMonthsAgo && a.recipient);
+    return {
+      total: kudos.length,
+      people: topSlices(recent, (a) => empName(a.recipient), (a) => a.points || 1, 8),
+      months: monthlyTotals(kudos.map((a) => ({ date: (a.create_time ?? "").slice(0, 10), value: 1 })), 12, todayStr()),
+    };
+  }, [kudosRows, empName]);
+  // Pressing either chart narrows the board to the kudos it counted: one person's, or one month's.
+  const cf = useChartFocus<Announcement, "recipient" | "month">({
+    recipient: {
+      keys: kudosCharts.people.keys,
+      label: (k) => `kudos for ${k}`,
+      match: (a, k) => !!a.recipient && empName(a.recipient) === k,
+    },
+    month: {
+      keys: kudosCharts.months.keys,
+      label: (k) => `kudos in ${kudosCharts.months.labels[kudosCharts.months.keys.indexOf(k)] ?? k}`,
+      match: (a, k) => (a.create_time ?? "").slice(0, 7) === k,
+    },
+  });
+
   // Feed filter: by kind, plus "Unread" (receipt-backed only - posts without read tracking never count) and
   // "Drafts" (only ever non-empty for someone who can post).
   const [filter, setFilter] = useState<"all" | "unread" | "drafts" | Kind>(saved.kind ?? "all");
@@ -459,13 +501,17 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   const needle = q.trim().toLowerCase();
   const narrow = useMemo(() => {
     return (list: Announcement[]) => {
-      const byAuthor = authorFilter ? list.filter((a) => a.author === authorFilter) : list;
+      // The chart pick applies here with the rest, so the chips below count what it left rather than
+      // promising posts a picked month has already excluded.
+      const bySlice = cf.apply(list);
+      const byAuthor = authorFilter ? bySlice.filter((a) => a.author === authorFilter) : bySlice;
       // Once the server is doing the matching, do NOT re-filter its rows here: this pass matches different
       // fields (it knows names, the index knows `category` and `kind`), so it would silently drop real hits.
       if (searching) return byAuthor;
       return needle ? byAuthor.filter((a) => matchesText(a, needle, empName, deptName)) : byAuthor;
     };
-  }, [authorFilter, needle, searching, empName, deptName]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authorFilter, needle, searching, empName, deptName, cf.picked?.dim, cf.picked?.key]);
   const shownFeed = useMemo(() => narrow(feed), [feed, narrow]);
   const shownDrafts = useMemo(() => narrow(drafts), [drafts, narrow]);
   const unreadCount = useMemo(() => shownFeed.filter((a) => a.read === false && !readHere.has(a.path)).length, [shownFeed, readHere]);
@@ -486,7 +532,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     return shownFeed.filter((a) => kindOf(a) === filter);
   }, [solo, source, shownFeed, shownDrafts, filter, readHere]);
   // Any narrowing at all is on - what the "clear" affordances offer to undo.
-  const filtered = filter !== "all" || !!authorFilter || !!needle;
+  const filtered = filter !== "all" || !!authorFilter || !!needle || !!cf.picked;
   // The board is an infinite feed: reaching the foot of what is loaded pulls the next page, so a reader who
   // keeps scrolling keeps reading. Drafts are a local slice of the loaded rows rather than a server list, so
   // that chip does no paging (as before).
@@ -499,6 +545,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     setFilter("all");
     setAuthorFilter(null);
     setQ("");
+    cf.clear();
   }
   // The text index builds from columns, so it matches title / body / category / kind and knows nothing about the
   // author and recipient NAMES the cards show - those are FK ids on the row. Unioning server hits with client
@@ -600,15 +647,6 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unreadKey]);
 
-  // Most-recognized people this month (top 3 by points; a kudos with no level still counts as 1).
-  //
-  // OFF ITS OWN READ, not off the feed. Choosing `rows` over `source` stopped the podium shrinking while you
-  // type in the search box and left the real instability in place: `rows` is the FEED WINDOW, twenty posts on
-  // a cold open and another twenty per scroll, so a medalled ranking of named colleagues reordered as the
-  // reader reached the foot of the page - and on a busy board those twenty mixed posts might hold three
-  // kudos. A leaderboard is the one aggregate a window suits least: it is ordinal, it is about people, and the
-  // window is biased towards the newest posts, which is exactly the bias a month rollup must not have.
-  const { rows: kudosRows } = useCollection<Announcement>("announcements", { enabled: !solo, all: true, params: { kind: "kudos" } });
   const leaderboard = useMemo(() => {
     const m = thisMonth();
     const by = new Map<string, number>();
@@ -616,21 +654,6 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     return [...by.entries()].map(([e, n]) => ({ employee: e, count: n })).sort((a, b) => b.count - a.count).slice(0, 3);
   }, [kudosRows]);
 
-  // The two shapes behind the podium: who is being recognized (six months, so a good month does not read as
-  // a reputation) and how often recognition happens at all. Off the same kudos read as the leaderboard - on
-  // the feed window the twelve-month chart answered its own "a culture, or a campaign?" with "a campaign" for
-  // any board busier than twenty posts a month, because `monthlyTotals` pads the months it cannot see with
-  // zeros and absence then looks like data.
-  const kudosCharts = useMemo(() => {
-    const kudos = kudosRows.filter((a) => a.create_time ?? "");
-    const sixMonthsAgo = new Date(Date.now() - 182 * 86_400_000).toISOString().slice(0, 10);
-    const recent = kudos.filter((a) => (a.create_time ?? "") >= sixMonthsAgo && a.recipient);
-    return {
-      total: kudos.length,
-      people: topSlices(recent, (a) => empName(a.recipient), (a) => a.points || 1, 8),
-      months: monthlyTotals(kudos.map((a) => ({ date: (a.create_time ?? "").slice(0, 10), value: 1 })), 12, todayStr()),
-    };
-  }, [kudosRows, empName]);
 
   // What a fresh composer opens on when nobody said: HR defaults to an announcement (they can switch to a post);
   // a plain poster posts; kudos-only -> kudos.
@@ -829,6 +852,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
               labels={kudosCharts.people.labels}
               datasets={[{ name: "Points", values: kudosCharts.people.values }]}
               ariaLabel="Kudos points received per person over the last six months"
+              {...cf.chart("recipient")}
             />
           </ChartCard>
           <ChartCard title="Recognition over time" description="Kudos given each month - a culture, or a campaign.">
@@ -840,6 +864,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
               areaFill
               format={(v) => `${v} kudo${v === 1 ? "" : "s"}`}
               ariaLabel="Kudos given in each of the last twelve months"
+              {...cf.chart("month")}
             />
           </ChartCard>
         </div>
@@ -912,6 +937,15 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
                   title="Clear the author filter"
                 >
                   by {empName(authorFilter)} <X className="h-3 w-3" />
+                </button>
+              )}
+              {cf.activeLabel && (
+                <button
+                  onClick={cf.clear}
+                  className="flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/15"
+                  title="Clear the recognition filter"
+                >
+                  {cf.activeLabel} <X className="h-3 w-3" />
                 </button>
               )}
               {/* One way out of every narrowing at once, so a reader who stacked a kind, an author and a

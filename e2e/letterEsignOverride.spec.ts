@@ -16,7 +16,7 @@ test("the e-signature checkbox defaults to the template's own setting, and says 
 
   await dialog.getByRole("button", { name: /Select an employee/ }).click();
   await page.getByPlaceholder("Search employees…").fill("Eve");
-  await page.getByRole("button", { name: "Eve Employee", exact: true }).click();
+  await page.getByRole("option", { name: "Eve Employee", exact: true }).click();
 
   await dialog.getByRole("combobox").first().click();
   await page.getByRole("option", { name: "Confidentiality & IP Assignment Agreement" }).click();

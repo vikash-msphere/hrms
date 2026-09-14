@@ -19,6 +19,8 @@ import type { ApprovalDelegation, Employee, Holiday, LeaveBalance, LeaveEncashme
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { Chart, ChartCard } from "@/components/common/Chart";
+import { ChartFilterNote } from "@/components/common/ChartFilterNote";
+import { useChartFocus } from "@/lib/chartFocus";
 import { monthlyTotals, topSlices } from "@/lib/chartTheme";
 import { RequestsHistoryTabs, type RequestsHistorySearch } from "@/components/common/RequestsHistoryTabs";
 import { SummaryStrip, type SummaryItem } from "@/components/common/SummaryStrip";
@@ -243,9 +245,24 @@ export default function Leaves({ me }: { me: Me }) {
       // Each type keeps the colour it wears everywhere else on the page (the dot beside its name, its balance
       // card, its blocks on the calendar); a leave type that is teal in one place and orange in another is a
       // different leave type as far as the reader is concerned.
-      byType: { ...byType, colors: byType.labels.map((label) => typeColor(types.find((t) => t.display_name === label)?.path)) },
+      // `keys` carries the leave-type PATH behind each slice, because that is what the type filter is keyed
+      // on (and what the server's `leave_type` param wants) - the slice's own key is the display name.
+      byType: {
+        ...byType,
+        colors: byType.labels.map((label) => typeColor(types.find((t) => t.display_name === label)?.path)),
+        paths: byType.labels.map((label) => types.find((t) => t.display_name === label)?.path ?? null),
+      },
     };
   }, [rows, types, today, yearStart, typeName, typeColor]);
+  // The month bar narrows the tables to the leave that STARTED in it. Client-side, unlike the type filter
+  // beside it: a month is a slice of what is already on the page, not a reason to ask the server again.
+  const cf = useChartFocus<LeaveRequest, "month">({
+    month: {
+      keys: leaveCharts.months.keys,
+      label: (k) => leaveCharts.months.labels[leaveCharts.months.keys.indexOf(k)] ?? k,
+      match: (r, k) => r.start_date.slice(0, 7) === k,
+    },
+  });
 
   const myBalances = useMemo(
     () => myBalanceRows.filter((b) => me.employee_id && b.employee && idOf(b.employee) === me.employee_id),
@@ -720,6 +737,7 @@ export default function Leaves({ me }: { me: Me }) {
               datasets={[{ name: "Days", values: leaveCharts.months.values }]}
               format={(v) => fmtDays(v)}
               ariaLabel="Approved leave days taken in each of the last twelve months"
+              {...cf.chart("month")}
             />
           </ChartCard>
           <ChartCard title="By leave type" description="How the year's approved days divide between types.">
@@ -731,6 +749,10 @@ export default function Leaves({ me }: { me: Me }) {
               colors={leaveCharts.byType.colors}
               format={(v) => fmtDays(v)}
               ariaLabel="Approved leave days by leave type this year"
+              // Straight onto the page's own type filter rather than a second one beside it: it is already
+              // in the URL, already fetched from the server, and already has the badge that clears it.
+              onSelect={(i) => { const p = leaveCharts.byType.paths[i]; if (p) setTypeFilter((f) => (f === p ? null : p)); }}
+              selected={typeFilter && leaveCharts.byType.paths.indexOf(typeFilter) >= 0 ? leaveCharts.byType.paths.indexOf(typeFilter) : null}
             />
           </ChartCard>
         </div>
@@ -936,9 +958,11 @@ export default function Leaves({ me }: { me: Me }) {
         </div>
       )}
 
+      <ChartFilterNote label={cf.activeLabel && `Starting ${cf.activeLabel}`} shown={cf.count(tabRows)} total={tabRows.length} onClear={cf.clear} />
+
       <RequestsHistoryTabs
         collection="leave-requests"
-        rows={tabRows}
+        rows={cf.apply(tabRows)}
         state={tabState}
         error={tabError}
         reload={reloadAll}

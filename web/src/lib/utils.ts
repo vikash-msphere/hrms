@@ -100,11 +100,16 @@ export function relativeFuture(iso: string): string {
 // "Mar 2023" on the profile header beside "4 Aug 2026" everywhere else.
 const MONTH_YEAR_OPTS: Intl.DateTimeFormatOptions = { month: "short", year: "numeric", timeZone: "UTC" };
 
-/** "Joined Mar 2023 · 2y 4m" - tenure at a glance for profile headers. */
-export function tenureLabel(startDate: string): string {
+/** "Mar 2023" - the joining month, for a labelled "Joined" cell that supplies its own caption. */
+export function formatMonthYear(date: string): string {
+  const d = new Date(DATE_ONLY_RE.test(date) ? `${date}T00:00:00Z` : date);
+  return isNaN(+d) ? "" : dateFormat(DATE_LOCALE, MONTH_YEAR_OPTS).format(d);
+}
+
+/** "2y 4m" / "7 months" / "new joiner" - how long they have been here, without the date. */
+export function tenureDuration(startDate: string): string {
   const start = new Date(DATE_ONLY_RE.test(startDate) ? `${startDate}T00:00:00Z` : startDate);
   if (isNaN(+start)) return "";
-  const joined = dateFormat(DATE_LOCALE, MONTH_YEAR_OPTS).format(start);
   // Months between two CALENDAR days on the org's clock: `new Date()`'s UTC month is a different month from
   // the org's for part of every month boundary, which slipped the tenure by a month on those days.
   const today = todayStr();
@@ -112,8 +117,17 @@ export function tenureLabel(startDate: string): string {
     0,
     (Number(today.slice(0, 4)) - start.getUTCFullYear()) * 12 + (Number(today.slice(5, 7)) - 1) - start.getUTCMonth(),
   );
-  const dur = months < 1 ? "new joiner" : months < 12 ? `${months}m` : `${Math.floor(months / 12)}y ${months % 12}m`;
-  return `Joined ${joined} · ${dur}`;
+  if (months < 1) return "new joiner";
+  if (months < 12) return `${months} month${months === 1 ? "" : "s"}`;
+  const years = Math.floor(months / 12);
+  const rest = months % 12;
+  return rest ? `${years}y ${rest}m` : `${years}y`;
+}
+
+/** "Joined Mar 2023 · 2y 4m" - tenure as one line, where there is no label to carry the "Joined". */
+export function tenureLabel(startDate: string): string {
+  const joined = formatMonthYear(startDate);
+  return joined ? `Joined ${joined} · ${tenureDuration(startDate)}` : "";
 }
 
 /** "On probation · 12d left" (or "· ends today") for an end date that's today or later; "" once past. */

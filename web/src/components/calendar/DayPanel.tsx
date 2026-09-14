@@ -10,9 +10,19 @@ import type { Celebration, Event, Holiday } from "@/types";
 // The selected day in full: holiday, availability, who's out (with their half-day edge), who's remote, what
 // else lands on it, and the one action a day view owes you - book this date.
 
-export function DayPanel({ ymd, holiday, entries, events, celebrations, away, total, canRequest, onRequest, onClose }: {
+export function DayPanel({ ymd, holiday, closed, entries, events, celebrations, away, total, canRequest, onRequest, onClose }: {
   ymd: string;
   holiday?: Holiday;
+  /**
+   * The org-wide closed period covering this day, if any. Shown as a badge, and it withdraws the Request
+   * button below - that button prefills this exact date, which on a closed day is a form opened in violation.
+   *
+   * ORG-WIDE is the limit of what this panel can know: a leave type that exempts itself from the closure
+   * (`timing.blackouts: null`) really is bookable on these days, and this hides the shortcut for it too. That
+   * is the deliberate trade - the shortcut is a convenience and the ordinary request flow still reaches it,
+   * where leaving the button up prefills a refusal for everybody to save a rare case a click.
+   */
+  closed?: string;
   entries: CalEntry[];
   events: Event[];
   celebrations: Celebration[];
@@ -38,6 +48,9 @@ export function DayPanel({ ymd, holiday, entries, events, celebrations, away, to
             {holiday && (
               <Badge variant="secondary" className="mt-1.5 bg-violet-100 text-violet-700 dark:bg-violet-950/40 dark:text-violet-300">{holiday.display_name}</Badge>
             )}
+            {closed && (
+              <Badge variant="secondary" className="mt-1.5 bg-warning/15 text-warning-foreground dark:text-warning">Closed · {closed}</Badge>
+            )}
           </div>
           <button type="button" onClick={onClose} aria-label="Close the day panel" className="rounded p-1 text-muted-foreground hover:bg-accent" data-print-hide>
             <X className="h-4 w-4" />
@@ -48,7 +61,12 @@ export function DayPanel({ ymd, holiday, entries, events, celebrations, away, to
           <span className={cn("flex items-center gap-1.5 text-sm", cover === "critical" ? "font-medium text-destructive" : cover === "heavy" ? "font-medium text-warning" : "text-muted-foreground")}>
             <Users className="h-4 w-4" /> {available} of {total} available
           </span>
-          {canRequest && <Button size="sm" variant="outline" onClick={onRequest} data-print-hide><Plus className="h-4 w-4" /> Request</Button>}
+          {/* Not offered on a closed day. This button prefills the request form with THIS date as both start
+              and end, so on a closed day it opened a form already in violation, on a date the picker beside it
+              refuses to select - a misleading prefill and a wasted press. Hidden rather than disabled, per the
+              house rule that nothing the caller can't use should render; the badge above carries the reason
+              the button would otherwise have to imply. */}
+          {canRequest && !closed && <Button size="sm" variant="outline" onClick={onRequest} data-print-hide><Plus className="h-4 w-4" /> Request</Button>}
         </div>
 
         {sorted.length === 0 ? (

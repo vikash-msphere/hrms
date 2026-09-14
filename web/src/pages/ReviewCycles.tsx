@@ -639,6 +639,8 @@ function CalibrationPanel({ cycle, employees, departments }: { cycle: ReviewCycl
             format={(v) => `${v}%`}
             hideDots
             ariaLabel="Weighted goal attainment across the cycle, against the straight line the cycle should follow"
+            // Deliberately not a filter: a point is the cycle's weighted attainment on one past date - a
+            // percentage, not a set of reviews. See `everyChart.spec.ts`'s exemption list.
           />
         </div>
       )}

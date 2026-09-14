@@ -247,6 +247,14 @@ export const employees = sqliteTable("employees", {
   legalName: text("legal_name"),
   workEmail: text("work_email").notNull().unique(),
   jobTitle: text("job_title"),
+  // How and where they work, mirrored from the CURRENT `positions` row the same way `jobTitle` and
+  // `departmentId` above are - a transfer, a relocation or a contract-to-permanent conversion is a role
+  // change, so the history lives on `positions` and these are the current value. Mirrored rather than
+  // joined because the profile header and the directory both read them per row: a join would put an extra
+  // read on every employee in every list to render one line of text.
+  employmentType: text("employment_type", { enum: ["full_time", "part_time", "contract", "intern", "temporary"] }),
+  workMode: text("work_mode", { enum: ["on_site", "hybrid", "remote"] }),
+  location: text("location"),
   // Short public "about me" (plain text, self-written via employees/<id>/bio). Not PII - readable by
   // anyone who can read the employee record; shown on profile heroes and the directory.
   bio: text("bio"),
@@ -1803,6 +1811,10 @@ export const positions = sqliteTable("positions", {
   jobTitle: text("job_title"),
   departmentId: text("department_id").references((): AnySQLiteColumn => departments.uuid),
   location: text("location"),
+  // Same enums the requisition uses (job_requisitions below), so a hire converts into a position without a
+  // vocabulary of its own. Null on the rows that predate them - the header simply omits what it has not got.
+  employmentType: text("employment_type", { enum: ["full_time", "part_time", "contract", "intern", "temporary"] }),
+  workMode: text("work_mode", { enum: ["on_site", "hybrid", "remote"] }),
   note: text("note"),
   effectiveFrom: integer("effective_from", { mode: "timestamp_ms" }).notNull(),
   effectiveTo: integer("effective_to", { mode: "timestamp_ms" }), // null = current

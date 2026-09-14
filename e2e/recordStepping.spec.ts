@@ -24,6 +24,11 @@ test("the record pager steps to the neighbour, and the way back is the directory
   await expect(counter).toBeVisible({ timeout: 30_000 });
   const [at, total] = (await counter.innerText()).split(" of ").map(Number) as [number, number];
   expect(total, "a pager needs a list to page through").toBeGreaterThan(1);
+  // Only the POSITION is pinned below, never the total. The pager counts the whole directory, and the specs
+  // running alongside this one hire people - so a total read at the top of the test is a number that has
+  // already moved by the time the arrow is pressed ("8 of 100" became "8 of 105" mid-run). What this is
+  // about is the step, not the size of the list.
+  const at1 = (text: string) => new RegExp(`^${text} of \\d+$`);
 
   const next = page.getByRole("button", { name: "Next employee" });
   const previous = page.getByRole("button", { name: "Previous employee" });
@@ -38,12 +43,12 @@ test("the record pager steps to the neighbour, and the way back is the directory
   // one counter rather than matched as text, because the pager's wrapper carries the same words as the span
   // inside it and both would match.
   await expect.poll(() => page.url()).not.toContain(`#/employees/${id}`);
-  await expect(counter).toHaveText(`${at + (forward ? 1 : -1)} of ${total}`, { timeout: 30_000 });
+  await expect(counter).toHaveText(at1(String(at + (forward ? 1 : -1))), { timeout: 30_000 });
 
   // And back, which is the same arrow the other way round.
   await (forward ? previous : next).click();
   await expect.poll(() => page.url()).toContain(`#/employees/${id}`);
-  await expect(counter).toHaveText(`${at} of ${total}`, { timeout: 30_000 });
+  await expect(counter).toHaveText(at1(String(at)), { timeout: 30_000 });
 
   // The pager is a detour, not a dead end: the record says how to get back to the list it came from.
   await page.getByRole("button", { name: "Back to directory" }).click();

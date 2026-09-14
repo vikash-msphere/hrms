@@ -47,8 +47,18 @@ test("a recurring expense previews its next three occurrences and lands on its o
   await expect(form.getByText(`Generates on ${expected}, and so on.`)).toBeVisible();
 
   // Quarterly instead: the same three-date preview follows the rule change, not just the start date.
-  await form.getByLabel("Repeats").click();
-  await page.getByRole("option", { name: "Quarterly" }).click();
+  // Retried, and guarded so the retry cannot undo itself. The form re-renders as its category and vendor
+  // lists resolve (see the open above), so the trigger can still be shifting when the click runs its
+  // stability check - and on a lane with sixteen browsers those re-renders land between animation frames, so
+  // "element is not stable" is the whole timeout spent watching it twitch rather than any real refusal.
+  // Pressing again once it settles is what a person does; the `count()` guard is because a second press on an
+  // OPEN listbox closes it, which would leave the retry cycling forever.
+  const repeats = form.getByLabel("Repeats");
+  const quarterly = page.getByRole("option", { name: "Quarterly" });
+  await expect(async () => {
+    if (!(await quarterly.count())) await repeats.click({ timeout: 8_000 });
+    await quarterly.click({ timeout: 8_000 });
+  }).toPass({ timeout: 60_000 });
   const expectedQuarterly = ["2027-01-15", "2027-04-15", "2027-07-15"].map((d) => formatDate(d)).join(", ");
   await expect(form.getByText(`Generates on ${expectedQuarterly}, and so on.`)).toBeVisible();
 

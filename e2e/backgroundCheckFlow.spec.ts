@@ -91,7 +91,7 @@ async function pickEmployee(page: Page, name: string) {
   const form = page.getByRole("dialog");
   await form.getByLabel("Employee").click();
   await page.getByPlaceholder(/Search|Select/).last().fill(name);
-  await expect(page.getByRole("button", { name })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("option", { name })).toBeVisible({ timeout: 30_000 });
   await page.keyboard.press("Enter");
 }
 
@@ -103,8 +103,13 @@ async function pickEmployee(page: Page, name: string) {
  */
 async function abandonDialog(page: Page) {
   await expect(async () => {
-    if (!(await page.getByRole("dialog").count())) return;
-    await page.keyboard.press("Escape");
+    const dialog = page.getByRole("dialog").first();
+    if (!(await dialog.count())) return;
+    // By the BUTTON, not by Escape. A toast is a dismissable layer of its own and it is in front: the "Check
+    // added" toast from the row this form is warning about is still on screen here, so Escape closed the
+    // TOAST and left the dialog exactly where it was - then the guard never armed, there was nothing to
+    // discard, and the loop spent its whole budget dismissing toasts.
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     const discard = page.getByRole("dialog").getByRole("button", { name: /Discard|Leave/ });
     if (await discard.count()) await discard.first().click();
     await expect(page.getByRole("dialog")).toHaveCount(0);

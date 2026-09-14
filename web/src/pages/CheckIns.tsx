@@ -215,13 +215,18 @@ export default function CheckIns({ me }: { me: Me }) {
     toast({ title: `Brought ${moved} item${moved === 1 ? "" : "s"} forward`, variant: "success" });
   }
 
+  // GUARDED, like the notes below it. A 1:1 is a document two people share, and the two writes that decide
+  // WHEN it happens are the ones a race is worth catching on: two people moving the same meeting silently
+  // leaves it on whichever request landed second, with a green toast on both screens. The file states this
+  // rule for the notes and states the exemption for the pulse and the action items; these two said nothing
+  // and behaved like the exemption.
   async function reschedule(c: CheckIn, date: string) {
-    try { await patch(`check-ins/${idOf(c.path)}`, { meeting_date: date }); reload(); toast({ title: `Moved to ${formatDate(date)}`, variant: "success" }); }
+    try { await patch(`check-ins/${idOf(c.path)}`, { meeting_date: date }, c.etag); reload(); toast({ title: `Moved to ${formatDate(date)}`, variant: "success" }); }
     catch (e) { toast({ title: "Couldn't reschedule", description: (e as Error).message, variant: "destructive" }); }
   }
 
   async function setCadence(c: CheckIn, cadence: CheckIn["cadence"] | null) {
-    try { await patch(`check-ins/${idOf(c.path)}`, { cadence }); reload(); toast({ title: cadence ? `Repeats ${CADENCE_LABEL[cadence].toLowerCase()}` : "No longer repeats", variant: "success" }); }
+    try { await patch(`check-ins/${idOf(c.path)}`, { cadence }, c.etag); reload(); toast({ title: cadence ? `Repeats ${CADENCE_LABEL[cadence].toLowerCase()}` : "No longer repeats", variant: "success" }); }
     catch (e) { toast({ title: "Couldn't update the cadence", description: (e as Error).message, variant: "destructive" }); }
   }
 
@@ -242,6 +247,11 @@ export default function CheckIns({ me }: { me: Me }) {
   }
   // Action items save the moment they change (no etag: quick successive toggles would race the
   // store's async refresh and trip the If-Match check for no user benefit on this tiny list).
+  //
+  // WHAT THAT COSTS, said plainly, because the trade is not only about the refresh: the body replaces the
+  // WHOLE array, so a manager ticking an item while the report adds one loses whichever landed first, and
+  // both see a success. It is the right call for a list this size edited a line at a time in a meeting the
+  // two people are in together; it would not be for a list edited apart.
   async function saveItems(c: CheckIn, items: CheckInActionItem[]) {
     try { await patch(`check-ins/${idOf(c.path)}`, { action_items: items }); reload(); }
     catch (e) { toast({ title: "Couldn't update action items", description: (e as Error).message, variant: "destructive" }); reload(); }
@@ -252,7 +262,10 @@ export default function CheckIns({ me }: { me: Me }) {
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
   }
 
-  useIntent("new-checkin", () => setCreating({}));
+  // The quick-create menu fires this with nothing; a person's profile fires it carrying WHO ("Schedule 1:1"),
+  // so the form opens on them rather than on a picker you have to find them in again. Same shape the "say
+  // well done" button on a goal uses for kudos.
+  useIntent("new-checkin", (arg) => setCreating(typeof arg === "string" && arg ? { counterpart: arg } : {}));
 
   const newBtn = (
     <AccessAction collection="check-ins" create label="New 1:1">

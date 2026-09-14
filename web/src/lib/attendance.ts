@@ -141,7 +141,13 @@ function summarizeDay(day: string, ss: AttendanceSession[], shift: ShiftWindow):
   const arrMin = arrival ? localMinutes(arrival, shift.tz) : 0;
   const depMin = departure ? localMinutes(departure, shift.tz) : 0;
   const late = !!arrival && arrMin > shift.startMin + shift.grace;
-  const leftEarly = !!departure && depMin < shift.endMin - shift.grace;
+  // NOT WHILE A SESSION IS STILL OPEN. `departure` is the last CLOSED punch, so somebody who clocked out for
+  // lunch and back in again has a "departure" in the middle of their day - and judging it against the shift
+  // end called a person sitting at their desk "left 4h 30m early". Every consumer happens to check `open`
+  // first today (the status ladder returns "open" before it reaches punctuality, the timeline returns early),
+  // so nothing on screen shows it; the CSV export's "early by" column does, and the next reader of this field
+  // would have to know to check. A day that has not finished cannot be left early.
+  const leftEarly = !open && !!departure && depMin < shift.endMin - shift.grace;
   return {
     day,
     sessions: sorted,

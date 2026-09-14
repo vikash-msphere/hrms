@@ -29,6 +29,8 @@ import { RowActions, type RowAction } from "@/components/common/RowActions";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Chart, ChartCard } from "@/components/common/Chart";
+import { ChartFilterNote } from "@/components/common/ChartFilterNote";
+import { useChartFocus } from "@/lib/chartFocus";
 import { monthlyTotals, topSlices } from "@/lib/chartTheme";
 import { useKpiFocus } from "@/lib/kpiFocus";
 import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreviewDialog";
@@ -334,6 +336,24 @@ export default function Expenses({ me }: { me: Me }) {
   const ledgerKpi = (key: "viaPayroll" | "paidThisMonth" | "noInvoice") => {
     const base = kf.kpi(key);
     return { ...base, onClick: () => { setTab("all"); base.onClick(); } };
+  };
+  // Both spend charts narrow the ledger, so pressing one lands on the ledger the way a metric tile does -
+  // a filter applied to a tab the reader is not on is a filter they cannot see working.
+  const cf = useChartFocus<Expense, "month" | "category">({
+    month: {
+      keys: spendCharts.months.keys,
+      label: (k) => spendCharts.months.labels[spendCharts.months.keys.indexOf(k)] ?? k,
+      match: (r, k) => (r.incurred_on ?? "").slice(0, 7) === k,
+    },
+    category: {
+      keys: spendCharts.categories.keys,
+      label: (k) => k,
+      match: (r, k) => (r.category ? catName(r.category) : "Uncategorised") === k,
+    },
+  });
+  const ledgerChart = (dim: "month" | "category") => {
+    const base = cf.chart(dim);
+    return { ...base, onSelect: (i: number) => { setTab("all"); base.onSelect(i); } };
   };
   // A metric belongs to the ledger, which is the only tab that applies it. Leaving the ledger drops it rather
   // than parking a narrowing nothing on screen reflects - not the tab counts, not the queue tables.
@@ -1015,6 +1035,7 @@ export default function Expenses({ me }: { me: Me }) {
               format={(v) => money(v)}
               areaFill
               ariaLabel="Approved expense spend in each of the last twelve months"
+              {...ledgerChart("month")}
             />
           </ChartCard>
           <ChartCard title="Where it goes" description="The same spend, by category.">
@@ -1025,6 +1046,7 @@ export default function Expenses({ me }: { me: Me }) {
               datasets={[{ name: "Spend", values: spendCharts.categories.values }]}
               format={(v) => money(v)}
               ariaLabel="Approved expense spend by category"
+              {...ledgerChart("category")}
             />
           </ChartCard>
         </div>
@@ -1175,7 +1197,8 @@ export default function Expenses({ me }: { me: Me }) {
                   <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={kf.clear}>Show the whole ledger</button>
                 </p>
               )}
-              {renderTable(kf.apply(ledger), ledgerColumns, "expenses", kf.activeLabel ? `No ${kf.activeLabel}` : "No expenses match", "Adjust the filters to see the ledger.", {
+              <ChartFilterNote label={cf.activeLabel} shown={cf.count(kf.apply(ledger))} total={ledger.length} onClear={cf.clear} />
+              {renderTable(cf.apply(kf.apply(ledger)), ledgerColumns, "expenses", cf.activeLabel ? `Nothing in ${cf.activeLabel}` : kf.activeLabel ? `No ${kf.activeLabel}` : "No expenses match", "Adjust the filters to see the ledger.", {
                 bulk: "all",
                 costCentre: true,
                 ...(deptFilter ? { more: { hasMore: deptQ.hasMore, loadMore: deptQ.loadMore } } : {}),

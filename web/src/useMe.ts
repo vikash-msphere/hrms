@@ -50,7 +50,14 @@ function fetchRealMe(): Promise<Me | null> {
   })).then(toMe);
 }
 
-/** The signed-in admin behind the shell: the same person as `useMe()` unless a simulation is running. */
+/**
+ * The signed-in admin behind the shell: the same person as `useMe()` unless a simulation is running.
+ *
+ * Read ONCE, on mount, and that is load-bearing rather than an oversight: `getViewAs()` is sampled inside
+ * `fetchRealMe`, so this answers for whichever simulation state the page booted in. It stays correct because
+ * starting or stopping one RELOADS the page (lib/viewAsStore.ts) - the whole module graph, this memo with it.
+ * If that ever stops being true, this hook has to subscribe rather than run on an empty dependency list.
+ */
 export function useRealMe(): Me | null {
   const [real, setReal] = useState<Me | null>(null);
   useEffect(() => {

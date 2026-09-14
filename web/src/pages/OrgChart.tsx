@@ -49,7 +49,8 @@ function JoinPill({ label }: { label: string }) {
   return <span className="rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">{label}</span>;
 }
 
-// `focusId` deep-links straight to one person's subtree (the directory's "view in org chart").
+// `focusId` deep-links straight to one person (the directory's "view in org chart"), and the chart then draws
+// their whole chain: the reporting line from the top of the org down to them, and their team below.
 export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focusId?: string }) {
   const { rows: employees, state: empState, error: empErr, reload: reloadEmp } = useCollection<Employee>("employees", { all: true });
   const { rows: departments, state: deptState, reload: reloadDept } = useCollection<Department>("departments", { all: true });
@@ -339,7 +340,9 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     const trail: string[] = [];
     let p = nodes.get(id)?.parentId ?? null;
     while (p && !trail.includes(p)) { trail.push(p); p = nodes.get(p)?.parentId ?? null; }
-    if (focusId && focusId !== id && !trail.includes(focusId)) setFocusId(null);
+    // Drop the focus only if it actually hides the target: a focus renders its own line UP to the top as well
+    // as its subtree, so a node that is one of the focused person's managers is already on screen.
+    if (focusId && focusId !== id && !trail.includes(focusId) && !focusTrail.includes(id)) setFocusId(null);
     setCollapsed((s) => { const n = new Set(s); for (const a of trail) n.delete(a); return n; });
     window.setTimeout(() => document.querySelector(`[data-org-id="${CSS.escape(id)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" }), 80);
     setFlashId(id);
@@ -358,9 +361,26 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
   const focusTrail = useMemo(() => {
     if (!focusId) return [];
     const trail: string[] = []; let id: string | null = focusId;
-    while (id) { trail.unshift(id); id = nodes.get(id)?.parentId ?? null; }
+    while (id && !trail.includes(id)) { trail.unshift(id); id = nodes.get(id)?.parentId ?? null; }
     return trail;
   }, [focusId, nodes]);
+
+  // A focus shows the WHOLE chain for that person, not only their subtree: the reporting line from the top of
+  // the org down to them renders above the card, and their own team expands below it as usual. `spineChild`
+  // maps each ancestor on that line to the one child that continues it - an ancestor draws only that child,
+  // so the chain stays a single column instead of dragging every uncle's branch back onto the page.
+  const spineChild = useMemo(() => {
+    const m = new Map<string, string>();
+    for (let i = 0; i < focusTrail.length - 1; i++) m.set(focusTrail[i], focusTrail[i + 1]);
+    return m;
+  }, [focusTrail]);
+  const focusLabel = focusId ? nodes.get(focusId)?.label ?? "" : "";
+  // Focusing someone who happened to be collapsed opens them: the point of the focus is their team, and a
+  // chart that answered it with a single card would read as "no reports". Their own caret works from there.
+  useEffect(() => {
+    if (!focusId) return;
+    setCollapsed((s) => { if (!s.has(focusId)) return s; const n = new Set(s); n.delete(focusId); return n; });
+  }, [focusId]);
 
   // Apply a reparent: people -> set manager; departments -> set parent. null = make top-level. Cycle-guarded.
   async function applyMove(id: string, targetId: string | null, opts: { confirm?: boolean } = {}) {
@@ -415,7 +435,9 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     if (id && validDrop(targetId)) void applyMove(id, targetId);
   };
 
-  const displayRoots = focusId && nodes.has(focusId) ? [focusId] : roots;
+  // Focused: draw from the TOP of that person's line, not from the person - `spineChild` keeps everything
+  // between the two down to a single column, and the focused card is the first one that fans out.
+  const displayRoots = focusId && nodes.has(focusId) ? [focusTrail[0] ?? focusId] : roots;
 
   // Quick profile peek. Everything shown is already in the cached employees collection - zero extra reads.
   function peekBody(id: string, e: Employee, n: TreeNode, total: number) {
@@ -445,7 +467,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
         </dl>
         <div className="flex gap-1.5 pt-0.5">
           <Button size="sm" className="h-7 flex-1" onClick={() => navigate(`employees/${id}`)}>Open profile</Button>
-          <Button size="sm" variant="outline" className="h-7" onClick={() => { setPeekId(null); setFocusId(id); }} title="Focus on this subtree"><Crosshair className="h-3.5 w-3.5" /></Button>
+          <Button size="sm" variant="outline" className="h-7" onClick={() => { setPeekId(null); setFocusId(id); }} title="Focus on this chain - managers above, team below"><Crosshair className="h-3.5 w-3.5" /></Button>
           {canEdit && <Button size="sm" variant="outline" className="h-7" onClick={() => { setPeekId(null); setMoveFrom(id); }} title="Move…"><CornerDownRight className="h-3.5 w-3.5" /></Button>}
         </div>
       </div>
@@ -456,8 +478,13 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     const n = nodes.get(id);
     if (!n || seen.has(id)) return null;
     const next = new Set(seen).add(id);
+    // On the chain above the focused card only the one child that continues the line is drawn, and it is
+    // drawn whatever the collapse state says - collapsing a manager you are only passing through would hide
+    // the person you asked to look at. Everything from the focused card down behaves normally.
+    const spine = spineChild.get(id);
+    const kids = spine ? [spine] : n.childIds;
     const hasKids = n.childIds.length > 0;
-    const open = isOpen(id);
+    const open = spine ? true : isOpen(id);
     const matched = matches.has(id);
     const e = view === "people" ? empById.get(id) : undefined;
     const accent = view === "people" ? deptColor(e?.department) : deptColor(`departments/${id}`);
@@ -466,7 +493,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     const accessCol = view === "people" ? "employees" : "departments";
     const accessRow = view === "people" ? e : deptById.get(id);
     const accessCan = accessRow?.access?.can;
-    const vac = view === "people" ? vacByMgr.get(id) ?? [] : [];
+    const vac = spine ? [] : view === "people" ? vacByMgr.get(id) ?? [] : [];
     return (
       <li key={id}>
         <AccessItem collection={accessCol} objectPath={`${accessCol}/${id}`} can={accessCan} why={accessRow?.access?.why} label={n.label} iconClassName="absolute left-1 top-1 z-20 bg-card">
@@ -481,6 +508,8 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
           style={{ borderLeftColor: accent, borderLeftWidth: accent ? 3 : undefined }}
           className={cn(
             "group/card relative w-[176px] rounded-xl border bg-card px-3 py-2.5 shadow-sm transition-all hover:shadow-md",
+            // The focused card is the one the chain was drawn for: managers sit above it, the team below.
+            id === focusId && "ring-2 ring-primary/60",
             matched && (id === currentMatch ? "ring-2 ring-primary" : "ring-1 ring-primary/50"), q && !matched && "opacity-60",
             dimmedByDept(e) && "opacity-35",
             flashId === id && "ring-2 ring-primary animate-pulse",
@@ -492,7 +521,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
         >
           <div data-chrome className="absolute right-1 top-1 flex">
             {canEdit && <button type="button" onClick={() => setMoveFrom(id)} title="Move…" className="rounded p-1 text-muted-foreground/60 hover:bg-accent hover:text-foreground"><CornerDownRight className="h-3.5 w-3.5" /></button>}
-            <button type="button" onClick={() => setFocusId(id)} title="Focus on this subtree" className="rounded p-1 text-muted-foreground/60 hover:bg-accent hover:text-foreground"><Crosshair className="h-3.5 w-3.5" /></button>
+            <button type="button" onClick={() => setFocusId(id)} title="Focus on this chain - managers above, team below" className="rounded p-1 text-muted-foreground/60 hover:bg-accent hover:text-foreground"><Crosshair className="h-3.5 w-3.5" /></button>
           </div>
           {canEdit && (
             <span data-chrome title="Drag onto another card to move" className="absolute left-1 top-1/2 -translate-y-1/2 cursor-grab text-muted-foreground/30 transition-colors group-hover/card:text-muted-foreground/80">
@@ -526,17 +555,23 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
             </div>
           )}
 
-          {hasKids && (
+          {hasKids && (spine ? (
+            // Passing through: the caret would be a dead control here (the line below is always drawn), so the
+            // count is a plain label that says how much of this manager's team the chain is leaving out.
+            <span title={`Showing only the reporting line down to ${focusLabel} - ${n.childIds.length} direct report${n.childIds.length === 1 ? "" : "s"} in all`} className="mx-auto mt-1.5 flex w-fit items-center gap-1 rounded-full border border-dashed bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+              <Users className="h-3 w-3" /> 1 of {n.childIds.length}
+            </span>
+          ) : (
             <button type="button" onClick={() => toggle(id)} className="mx-auto mt-1.5 flex items-center gap-1 rounded-full border bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-accent">
               {open ? <ChevronDown data-chrome className="h-3 w-3" /> : <ChevronRight data-chrome className="h-3 w-3" />}
               <Users className="h-3 w-3" /> {n.childIds.length}{total !== n.childIds.length ? ` · ${total}` : ""}
             </button>
-          )}
+          ))}
         </div>
         </AccessItem>
-        {(hasKids || vac.length > 0) && open && (
+        {(kids.length > 0 || vac.length > 0) && open && (
           <ul>
-            {n.childIds.map((c) => renderNode(c, next))}
+            {kids.map((c) => renderNode(c, next))}
             {vac.map((r) => (
               <li key={r.path}>
                 <button
@@ -563,8 +598,10 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     const n = nodes.get(id);
     if (!n || seen.has(id)) return null;
     const next = new Set(seen).add(id);
+    const spine = spineChild.get(id); // see renderNode: an ancestor of the focused node draws only the line
+    const kids = spine ? [spine] : n.childIds;
     const hasKids = n.childIds.length > 0;
-    const open = isOpen(id);
+    const open = spine ? true : isOpen(id);
     const matched = matches.has(id);
     const e = view === "people" ? empById.get(id) : undefined;
     const accent = view === "people" ? deptColor(e?.department) : deptColor(`departments/${id}`);
@@ -573,7 +610,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     const accessCol = view === "people" ? "employees" : "departments";
     const accessRow = view === "people" ? e : deptById.get(id);
     const badge = e ? joinBadge(e) : null;
-    const vac = view === "people" ? vacByMgr.get(id) ?? [] : [];
+    const vac = spine ? [] : view === "people" ? vacByMgr.get(id) ?? [] : [];
     return (
       <div key={id}>
         <AccessItem collection={accessCol} objectPath={`${accessCol}/${id}`} can={accessRow?.access?.can} why={accessRow?.access?.why} label={n.label} iconClassName="absolute left-1 top-1/2 z-20 -translate-y-1/2 bg-card">
@@ -588,6 +625,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
             style={{ paddingLeft: depth * 20 + 4 }}
             className={cn(
               "group/row flex items-center gap-2 rounded-md py-1 pr-2 transition-colors hover:bg-accent/50",
+              id === focusId && "ring-2 ring-primary/60",
               matched && (id === currentMatch ? "ring-2 ring-primary" : "ring-1 ring-primary/50"), q && !matched && "opacity-60",
               dimmedByDept(e) && "opacity-35",
               flashId === id && "ring-2 ring-primary animate-pulse",
@@ -595,7 +633,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
               isDropOk && "ring-2 ring-emerald-500",
             )}
           >
-            {hasKids ? (
+            {hasKids && !spine ? (
               <button type="button" onClick={() => toggle(id)} className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground">
                 {open ? <ChevronDown data-chrome className="h-3.5 w-3.5" /> : <ChevronRight data-chrome className="h-3.5 w-3.5" />}
               </button>
@@ -629,13 +667,17 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
                   {deptHeadcount.get(id) ?? 0} direct{(subtreeMembers.get(id) ?? 0) !== (deptHeadcount.get(id) ?? 0) ? ` · ${subtreeMembers.get(id) ?? 0} total` : ""}
                 </span>
               )}
-              {view === "people" && hasKids && <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground"><Users className="mr-0.5 inline h-3 w-3" />{n.childIds.length}{total !== n.childIds.length ? ` · ${total}` : ""}</span>}
+              {view === "people" && hasKids && (
+                spine
+                  ? <span title={`Showing only the reporting line down to ${focusLabel} - ${n.childIds.length} direct report${n.childIds.length === 1 ? "" : "s"} in all`} className="rounded-full border border-dashed px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground"><Users className="mr-0.5 inline h-3 w-3" />1 of {n.childIds.length}</span>
+                  : <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground"><Users className="mr-0.5 inline h-3 w-3" />{n.childIds.length}{total !== n.childIds.length ? ` · ${total}` : ""}</span>
+              )}
               {canEdit && <button data-chrome type="button" onClick={() => setMoveFrom(id)} title="Move…" className="rounded p-1 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover/row:opacity-100"><CornerDownRight className="h-3.5 w-3.5" /></button>}
-              <button data-chrome type="button" onClick={() => setFocusId(id)} title="Focus on this subtree" className="rounded p-1 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover/row:opacity-100"><Crosshair className="h-3.5 w-3.5" /></button>
+              <button data-chrome type="button" onClick={() => setFocusId(id)} title="Focus on this chain - managers above, team below" className="rounded p-1 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover/row:opacity-100"><Crosshair className="h-3.5 w-3.5" /></button>
             </span>
           </div>
         </AccessItem>
-        {hasKids && open && n.childIds.map((c) => renderRow(c, depth + 1, next))}
+        {kids.length > 0 && open && kids.map((c) => renderRow(c, depth + 1, next))}
         {open && vac.map((r) => (
           <div key={r.path} style={{ paddingLeft: (depth + 1) * 20 + 4 }} className="flex items-center gap-2 py-1 pr-2">
             <span className="h-5 w-5 shrink-0" />

@@ -222,6 +222,8 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
   const capChart = useMemo(() => {
     const top = [...live].filter((b) => (b.amount || 0) > 0).sort((a, b) => (b.amount || 0) - (a.amount || 0)).slice(0, 8);
     return {
+      // Each bar IS a budget, so pressing one opens that budget's panel rather than filtering the list to it.
+      budgets: top,
       labels: top.map((b) => catName(b.category) || deptName(b.department) || "Unscoped"),
       spent: top.map((b) => Math.round(b.spent ?? 0)),
       caps: top.map((b) => Math.round(b.amount || 0)),
@@ -717,6 +719,7 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
                   ]}
                   format={(v) => money(v)}
                   ariaLabel="Spend against the cap, for the largest budgets in view"
+                  onSelect={(i) => { const b = capChart.budgets[i]; if (b) setDetail(b.path); }}
                 />
               </div>
             )}

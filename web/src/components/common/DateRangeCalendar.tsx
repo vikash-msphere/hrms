@@ -19,6 +19,17 @@ export type DayInfo = {
   halfHoliday?: boolean;
   /** Teammates already away that day (approved or pending), for the "can we all be off at once" question. */
   away?: string[];
+  /**
+   * Why the leave policy forbids this day, or absent when it is bookable. A barred day is not selectable,
+   * for the same reason a back-dated one isn't - the server would refuse it.
+   *
+   * `kind` decides how it is DRAWN, and the distinction is the point. A closed period is one thing covering
+   * a span - marking its fourteen days identically, each explaining itself only on hover, says "fourteen
+   * problems" about what is actually one shutdown with a name. A blocked weekday or day of the month really
+   * is per-day: each occurrence stands alone and recurs. So spans are tinted as a continuous block and named
+   * once beneath the grid; per-day rules keep their own mark on the day.
+   */
+  barred?: { reason: string; kind: "window" | "day"; label?: string };
 };
 
 const MS_DAY = 86_400_000;
@@ -88,7 +99,33 @@ export function DateRangeCalendar({
     return start && end ? { start, end } : null;
   }, [anchor, hover, start, end]);
 
-  const disabled = (ymd: string) => !!minDate && ymd < minDate;
+  const disabled = (ymd: string) => (!!minDate && ymd < minDate) || !!dayInfo?.(ymd)?.barred;
+
+  // What policy says about the months on screen: whether any per-day mark is drawn (so its legend entry is
+  // worth showing), and the closed periods themselves - collected as SPANS, named once each, rather than left
+  // for the reader to infer from a run of identical cells. Memoized because `dayInfo` is already called once
+  // per cell and this would otherwise repeat sixty lookups on every hover.
+  const policyOnScreen = useMemo(() => {
+    const closures: { from: string; to: string; reason: string }[] = [];
+    let perDay = false;
+    if (!dayInfo) return { closures, perDay };
+    for (let m = 0; m < months; m++) {
+      const first = startOfMonth(addMonths(view, m));
+      for (let i = 0; i < 31; i++) {
+        const ymd = addDays(first, i);
+        if (ymd.slice(0, 7) !== first.slice(0, 7)) break;
+        const bar = dayInfo(ymd)?.barred;
+        if (!bar) continue;
+        if (bar.kind === "day") { perDay = true; continue; }
+        // Contiguous days of the same closure are one entry: the run is extended rather than restarted, so a
+        // fortnight's shutdown is named once however many cells it happens to cover.
+        const last = closures[closures.length - 1];
+        if (last && last.reason === bar.reason && addDays(last.to, 1) === ymd) last.to = ymd;
+        else closures.push({ from: ymd, to: ymd, reason: bar.reason });
+      }
+    }
+    return { closures, perDay };
+  }, [dayInfo, view, months]);
 
   const orient = (a: string, b: string) => (a <= b ? { start: a, end: b } : { start: b, end: a });
 
@@ -234,7 +271,31 @@ export function DateRangeCalendar({
         <span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-warning" /> Holiday</span>
         <span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-primary/70" /> Someone away</span>
         <span className="flex items-center gap-1.5"><span className="text-muted-foreground/50">15</span> Not a working day</span>
+        {/* Only when there is one to explain: a legend entry for a mark the month does not carry is a rule the
+            reader goes looking for and cannot find. */}
+        {policyOnScreen.perDay && (
+          <span className="flex items-center gap-1.5">
+            <span className="relative text-muted-foreground/50">15<span aria-hidden className="absolute left-0 top-1/2 h-px w-full rotate-[-20deg] bg-current" /></span> Closed by policy
+          </span>
+        )}
       </div>
+
+      {/* THE CLOSURES, NAMED ONCE EACH. The tint on the grid says which days; this says what they are and
+          why - so the reason is readable without hovering a cell, and a fortnight's shutdown is one line
+          rather than a fortnight of identical tooltips. */}
+      {policyOnScreen.closures.length > 0 && (
+        <ul className="mt-2 flex flex-col gap-1 border-t pt-2 text-[11px] text-warning-foreground dark:text-warning">
+          {policyOnScreen.closures.map((c) => (
+            <li key={`${c.from}-${c.reason}`} className="flex items-baseline gap-1.5">
+              <span aria-hidden className="mt-[3px] h-2 w-2 shrink-0 rounded-sm bg-warning/40" />
+              <span>
+                <b className="font-medium">{c.reason}</b>
+                <span className="text-muted-foreground"> · {longDate(c.from)}{c.to !== c.from ? ` to ${longDate(c.to)}` : ""}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -286,6 +347,9 @@ function Month({
           const dis = disabled(ymd);
           const away = info?.away ?? [];
           const title = [
+            // The policy reason leads: it is the one that explains why the day cannot be picked at all, where
+            // the other two are context about a day that still can be.
+            info?.barred?.reason ?? "",
             info?.holiday ? `${info.holiday}${info.halfHoliday ? " (half day)" : ""}` : "",
             away.length ? `Away: ${away.slice(0, 4).join(", ")}${away.length > 4 ? ` +${away.length - 4}` : ""}` : "",
           ].filter(Boolean).join(" · ");
@@ -307,6 +371,10 @@ function Month({
                 title={title || undefined}
                 // A spoken date, not the ISO string a screen reader reads out as digits.
                 aria-label={`${longDate(ymd)}${title ? ` - ${title}` : ""}`}
+                // The day a cell IS, in the one spelling that does not move: the name above is formatted for
+                // whoever is reading it, so it changes with the viewer's locale and cannot also serve as the
+                // grid's machine handle. Same job `data-idx` does for the combobox rows.
+                data-ymd={ymd}
                 aria-pressed={inRange}
                 onFocus={() => onFocusDay(ymd)}
                 onClick={() => onPick(ymd)}
@@ -324,9 +392,16 @@ function Month({
                   isEdge && "bg-primary font-medium text-primary-foreground",
                   ymd === today && !isEdge && "font-semibold text-primary ring-1 ring-inset ring-primary/40",
                   dis && "cursor-not-allowed opacity-40 hover:bg-transparent",
+                  // A closed period reads as one continuous block: square corners so consecutive days join up
+                  // into the span they are, rather than a row of separate discs each dimmed on its own.
+                  info?.barred?.kind === "window" && "rounded-none bg-warning/15 text-warning-foreground opacity-100 dark:text-warning",
                 )}
               >
                 {Number(ymd.slice(8, 10))}
+                {/* Struck only for a PER-DAY rule. A closed period is tinted instead (below), because a strike
+                    on each of its days says "fourteen problems" about one shutdown - and a strike is what a
+                    recurring rule like "never a Monday" genuinely is: this day, on its own, every week. */}
+                {info?.barred?.kind === "day" && <span aria-hidden className="absolute h-px w-5 rotate-[-20deg] bg-current opacity-70" />}
                 {(info?.holiday || away.length > 0) && (
                   <span aria-hidden className="absolute inset-x-0 bottom-1 flex items-center justify-center gap-0.5">
                     {info?.holiday && <span className={cn("h-1 w-1 rounded-full", isEdge ? "bg-primary-foreground/80" : "bg-warning")} />}

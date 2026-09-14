@@ -10,6 +10,8 @@ import { cn, formatDate, idOf } from "@/lib/utils";
 import { todayStr, addDaysYmd, daysBetweenYmd } from "@/lib/orgDay";
 import type { Department, Employee, Goal, GoalConfidence, GoalKind, GoalStage, GoalStatus, Me, ReviewCycle, Card as KanbanCard } from "@/types";
 import { Chart, ChartCard } from "@/components/common/Chart";
+import { ChartFilterNote } from "@/components/common/ChartFilterNote";
+import { useChartFocus } from "@/lib/chartFocus";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { fireIntent, useIntent } from "@/lib/intent";
@@ -217,9 +219,6 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
   const teamShown = teamGoals.filter(
     (g) => matchesFilter(g, filter) && matchesQuery(g) && (!ownerFilter || (g.employee && idOf(g.employee) === ownerFilter)),
   );
-  // What the drawer walks with ‹ › and j/k: the goals on screen, in the order they are on screen. A review pass
-  // over eight team goals is then one drawer rather than eight round trips through the grid.
-  const drawerQueue = [...myShown, ...teamShown];
 
   // Per-owner rollup over team goals: who's on track, who's slipping - sorted so trouble floats up.
   const rollup = useMemo(() => {
@@ -324,12 +323,28 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
     return {
       total: countable.length,
       // A goal state is the same state the cards, chips and rings show, so it keeps that meaning's colour.
-      states: { labels: states.map((s) => s.label), values: states.map((s) => s.n), colors: states.map((s) => s.color) },
+      states: { labels: states.map((s) => s.label), values: states.map((s) => s.n), colors: states.map((s) => s.color), keys: states.map((s) => s.key), names: new Map(states.map((s) => [s.key, s.label])) },
       owners: { labels: owners.map((r) => ownerName(r.id)), values: owners.map((r) => r.avg) },
       ownerIds: owners.map((r) => r.id),
       ownerAvg: owners.length ? Math.round(owners.reduce((s, r) => s + r.avg, 0) / owners.length) : 0,
     };
   }, [countable, rollup, empById]);
+  // The state donut narrows both grids to that status. It is a finer cut than the chips beside it - those
+  // group work by what needs doing (overdue, at risk, unagreed), which crosses two of these states - so the
+  // two filters compose rather than overwrite each other. The owner bar drives `ownerFilter`, which already
+  // has its own visible control in the team overview below.
+  const cf = useChartFocus<Goal, "state">({
+    state: {
+      keys: goalCharts.states.keys,
+      label: (k) => goalCharts.states.names.get(k) ?? k,
+      match: (g, k) => g.status === k,
+    },
+  });
+  const myPicked = cf.apply(myShown);
+  const teamPicked = cf.apply(teamShown);
+  // What the drawer walks with ‹ › and j/k: the goals on screen, in the order they are on screen. A review pass
+  // over eight team goals is then one drawer rather than eight round trips through the grid.
+  const drawerQueue = [...myPicked, ...teamPicked];
 
   function openCreate() {
     setEditing(null);
@@ -743,6 +758,7 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
                     datasets={[{ name: "Goals", values: goalCharts.states.values }]}
                     colors={goalCharts.states.colors}
                     ariaLabel="Goals by state"
+                    {...cf.chart("state")}
                   />
                 </ChartCard>
                 {goalCharts.owners.labels.length > 1 && (
@@ -756,6 +772,7 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
                       format={(v) => `${v}%`}
                       ariaLabel="Average progress on goals in flight, by owner"
                       onSelect={(i) => { const id = goalCharts.ownerIds[i]; setOwnerFilter((f) => (f === id ? null : id ?? null)); }}
+                      selected={ownerFilter && goalCharts.ownerIds.indexOf(ownerFilter) >= 0 ? goalCharts.ownerIds.indexOf(ownerFilter) : null}
                     />
                   </ChartCard>
                 )}
@@ -781,7 +798,7 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
             )}
 
             {filter === "overdue" && (() => {
-              const carryable = [...myShown, ...teamShown].filter(canCarry);
+              const carryable = [...myPicked, ...teamPicked].filter(canCarry);
               if (!carryable.length) return null;
               return (
                 <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300/60 bg-amber-50/50 px-3 py-2 text-sm dark:border-amber-900/50 dark:bg-amber-950/20">
@@ -844,12 +861,14 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
               </div>
             </div>
 
+            <ChartFilterNote label={cf.activeLabel} shown={myPicked.length + teamPicked.length} total={myShown.length + teamShown.length} onClear={cf.clear} />
+
             {/* The cascade replaces the two owner sections rather than sitting beside them: its whole point is
                 that it does NOT split the goals by whose they are - it splits them by what they roll up into,
                 which is a different question and the one alignment is for. */}
             {view === "tree" && (
               <AlignmentTree
-                goals={[...myShown, ...teamShown]}
+                goals={[...myPicked, ...teamPicked]}
                 all={rows}
                 empName={empName}
                 meId={me.employee_id}
@@ -857,20 +876,20 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
               />
             )}
 
-            {view !== "tree" && myShown.length > 0 && (
+            {view !== "tree" && myPicked.length > 0 && (
               <section className="space-y-3">
-                {teamShown.length > 0 && (
+                {teamPicked.length > 0 && (
                   <h2 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    <Target className="h-3.5 w-3.5" /> My goals <span className="font-normal tabular-nums text-muted-foreground/70">{myShown.length}</span>
+                    <Target className="h-3.5 w-3.5" /> My goals <span className="font-normal tabular-nums text-muted-foreground/70">{myPicked.length}</span>
                   </h2>
                 )}
-                {gridView(myShown)}
+                {gridView(myPicked)}
               </section>
             )}
-            {view !== "tree" && (teamShown.length > 0 || ownerFilter) && (
+            {view !== "tree" && (teamPicked.length > 0 || ownerFilter) && (
               <section className="space-y-3">
                 <h2 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  <Users className="h-3.5 w-3.5" /> Team goals <span className="font-normal tabular-nums text-muted-foreground/70">{teamShown.length}</span>
+                  <Users className="h-3.5 w-3.5" /> Team goals <span className="font-normal tabular-nums text-muted-foreground/70">{teamPicked.length}</span>
                   {rollup.length >= 2 && (
                     <button type="button" className="ml-auto font-medium normal-case tracking-normal text-primary hover:underline" onClick={toggleRollup}>
                       {rollupOpen ? "Hide overview" : "Team overview"}
@@ -907,12 +926,12 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
                     })}
                   </div>
                 )}
-                {teamShown.length > 0
-                  ? gridView(teamShown, true)
+                {teamPicked.length > 0
+                  ? gridView(teamPicked, true)
                   : <p className="text-sm text-muted-foreground">No goals match for this person. <button type="button" className="font-medium text-primary hover:underline" onClick={() => setOwnerFilter(null)}>Show whole team</button></p>}
               </section>
             )}
-            {myShown.length === 0 && teamShown.length === 0 && !ownerFilter && (
+            {myPicked.length === 0 && teamPicked.length === 0 && !ownerFilter && !cf.picked && (
               <p className="py-8 text-center text-sm text-muted-foreground">
                 {q.trim() ? "Nothing matches this search." : "Nothing matches this filter."}{" "}
                 <button type="button" className="font-medium text-primary hover:underline" onClick={() => { setFilter("all"); setQ(""); }}>Show all</button>

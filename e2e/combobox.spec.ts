@@ -27,7 +27,7 @@ test("the shared picker filters as you type, and Enter takes the highlighted row
   // Type a few letters and take the match with the keyboard alone.
   await picker.click();
   await dialog.getByPlaceholder("Search…").fill(person.first_name);
-  await expect(dialog.getByRole("button", { name: person.name })).toBeVisible();
+  await expect(dialog.getByRole("option", { name: person.name })).toBeVisible();
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("ArrowUp"); // back to the top of the filtered list
   await page.keyboard.press("Enter");

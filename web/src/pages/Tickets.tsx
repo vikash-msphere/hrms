@@ -31,6 +31,8 @@ import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Chart, ChartCard } from "@/components/common/Chart";
 import { topSlices } from "@/lib/chartTheme";
 import { useKpiFocus } from "@/lib/kpiFocus";
+import { useChartFocus } from "@/lib/chartFocus";
+import { ChartFilterNote } from "@/components/common/ChartFilterNote";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field, FieldRow } from "@/components/common/Field";
 import { useConfirm } from "@/components/common/confirm";
@@ -294,10 +296,24 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
     return {
       // A state's colour is its meaning here, not its position in a palette: resolved is green wherever it
       // appears in the app, and a chart that recoloured it by index would fight every badge on the page.
-      states: { labels: counts.map((s) => s.label), values: counts.map((s) => s.n), colors: counts.map((s) => s.color) },
+      states: { labels: counts.map((s) => s.label), values: counts.map((s) => s.n), colors: counts.map((s) => s.color), keys: counts.map((s) => s.key), names: new Map(counts.map((s) => [s.key, s.label])) },
       categories: topSlices(rows.filter(isActive), (t) => catName(t.category), () => 1, 7),
     };
   }, [rows, catName]);
+  // Both charts filter the tables below them. Drawn from `rows` - the whole visible queue - not from the
+  // narrowed set, so picking a slice never takes its own slice off the picture.
+  const cf = useChartFocus<Ticket, "state" | "category">({
+    state: {
+      keys: ticketCharts.states.keys,
+      label: (k) => ticketCharts.states.names.get(k) ?? k,
+      match: (t, k) => upper(t.state) === k,
+    },
+    category: {
+      keys: ticketCharts.categories.keys,
+      label: (k) => k,
+      match: (t, k) => catName(t.category) === k,
+    },
+  });
   // A metric narrows whichever tab it lands on, so the number and the list below it always agree.
   const kf = useKpiFocus<Ticket, "needsAction" | "open" | "unassigned" | "urgent">({
     needsAction: { label: "tickets waiting on you", match: (t) => { const s = upper(t.state); return (isAssignee(t) && (s === "OPEN" || s === "IN_PROGRESS")) || (isRequester(t) && s === "RESOLVED"); } },
@@ -314,8 +330,8 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
   // than a total the narrowed list below contradicts. A narrowed tab keeps its zero: an absent count would
   // read as "nothing here at all" when the metric is what emptied it.
   const tabCount = (list: Ticket[]) => {
-    const n = kf.count(list);
-    return n || kf.focus ? ` (${n})` : "";
+    const n = kf.count(cf.apply(list));
+    return n || kf.focus || cf.picked ? ` (${n})` : "";
   };
   // Viewing a tab clears its "new" badge and advances the reference the next visit measures from.
   useEffect(() => { markTabSeen(`tickets:${ticketTab}`); }, [ticketTab]);
@@ -455,15 +471,15 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
     <DataTable
       tableId={tableId}
       columns={columns}
-      // A clicked metric narrows whichever tab is showing to the rows it counted.
-      rows={kf.apply(data)}
+      // A clicked metric or chart slice narrows whichever tab is showing to the rows it counted.
+      rows={cf.apply(kf.apply(data))}
       search={{ value: search, onChange: setSearch, placeholder: "Search all tickets…" }}
       hasMore={searching ? searchHasMore : undefined}
       onLoadMore={searching ? loadMoreSearch : loadMore}
       getRowId={(t) => t.path}
       onRowClick={(t) => openTicket(t)}
-      emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : emptyTitle}
-      emptyDescription={kf.activeLabel ? "Click the metric again to show everything." : emptyDescription}
+      emptyTitle={cf.activeLabel ? `No ${cf.activeLabel} tickets here` : kf.activeLabel ? `No ${kf.activeLabel}` : emptyTitle}
+      emptyDescription={cf.activeLabel ? "Press the same slice again, or Show all." : kf.activeLabel ? "Click the metric again to show everything." : emptyDescription}
       accessCollection="tickets"
       accessTargetOf={(t) => ({ objectPath: t.path, label: t.subject, can: t.access?.can })}
       bulkActions={withBulk ? ticketBulkActions : undefined}
@@ -491,6 +507,7 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
                 datasets={[{ name: "Tickets", values: ticketCharts.states.values }]}
                 colors={ticketCharts.states.colors}
                 ariaLabel="Visible tickets by state"
+                {...cf.chart("state")}
               />
             </ChartCard>
             <ChartCard title="What people ask for" description="Open tickets by category - where the desk's time goes.">
@@ -501,6 +518,7 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
                 datasets={[{ name: "Open", values: ticketCharts.categories.values }]}
                 ariaLabel="Open tickets by category"
                 emptyText="Nothing open right now."
+                {...cf.chart("category")}
               />
             </ChartCard>
           </div>
@@ -528,6 +546,8 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
             ]}
           />
         )}
+
+        <ChartFilterNote label={cf.activeLabel} shown={cf.count(rows)} total={rows.length} onClear={cf.clear} />
 
         {/* Land assignees on their queue when something is open there; everyone else starts on their own tickets. */}
         <Tabs value={ticketTab} onValueChange={setTicketTab}>

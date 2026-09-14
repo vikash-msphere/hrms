@@ -1,37 +1,77 @@
 import * as React from "react";
-import { Mail, Briefcase, Building2, UserCog, Hash, CalendarDays, Pencil, Plus } from "lucide-react";
-import { colorFromString, initials } from "@/lib/utils";
+import { Copy, Pencil, Plus } from "lucide-react";
+import { cn, initials } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Card } from "@/components/ui/card";
+import { useToast } from "@/components/ui/use-toast";
+import { HoverPanel } from "@/components/common/HoverPanel";
 import { FieldAccess } from "@/components/access/FieldAccess";
-import { CopyEmail } from "@/components/common/CopyEmail";
+import { useAccessMode } from "@/components/access/AccessModeProvider";
 
-// Identity header: no cover art. The avatar sits INSIDE the card next to the name, and the
-// person's own colour (the one the avatar fallback already uses) is the only accent - a soft ring
-// around the photo. A decorative gradient band read as chrome and pushed the identity itself down
-// the card; the name is what this header is for. Shared by the self profile and employee pages.
+// Identity header, to the Profile Header design. Three bands inside one card:
+//   1. identity  - avatar, name, `status`, the role line, `bio`, `actions`
+//   2. facts     - the record as labelled cells (`facts`)
+//   3. tabs      - the record's sections (`tabs`), inside the same card rather than floating under it
+//
+// The design is deliberately NEUTRAL: no per-person accent hue, no gradient rail, no halo, no dot texture.
+// Those were three decorative layers competing with the one thing a profile header is for, which is the
+// person's name. What remains is hierarchy doing the work - 31px name, a role line, quiet labels.
+//
+// Colours are TOKENS, not the mock's hex. The mock is a light-mode artboard; this app ships light and dark,
+// so every value here resolves through the theme (see web/src/index.css) and the card stays legible in both.
+// Sizes, weights, tracking and spacing are the mock's.
+
+// The header's buttons. One weight for every action, labelled, never an unexplained icon.
+//
+// `coarse:min-h-11` on both: at 13.5px with 9px of padding these are ~32px tall, and the 44px touch floor
+// (docs/06-responsive-ui.md rule 1) is applied centrally only to small SQUARE icon controls and Radix rows -
+// a bespoke labelled button has to say it itself.
+export const HEADER_BTN =
+  "inline-flex items-center justify-center gap-[7px] rounded-[10px] border bg-card px-[13px] py-[9px] text-[13.5px] font-semibold leading-none text-muted-foreground shadow-sm transition-colors hover:border-muted-foreground/40 hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50 coarse:min-h-11";
+/** The one filled action per view. */
+export const HEADER_BTN_PRIMARY =
+  "inline-flex items-center justify-center gap-2 rounded-[10px] bg-primary px-4 py-[10px] text-[13.5px] font-semibold leading-none text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50 coarse:min-h-11";
+
 export function ProfileView({
   name,
-  email,
   jobTitle,
   department,
+  employmentType,
+  workMode,
+  location,
   bio,
   onEditBio,
   avatar,
   actions,
+  status,
+  note,
   meta,
+  facts,
+  factsAction,
+  tabs,
+  identityRef,
   heading = "h2",
 }: {
   name: string;
-  email?: string;
   jobTitle?: string;
   department?: string;
+  /** "Full-time", "Contract"… - already humanized by the caller. */
+  employmentType?: string;
+  /** "Hybrid", "Remote"… */
+  workMode?: string;
+  location?: string;
   // Public "about me" one-liner off the employee record; onEditBio adds the edit/add affordance
   // (owner on /profile, HR on the employee page).
   bio?: string;
   onEditBio?: () => void;
   avatar?: React.ReactNode;
+  // The action row: labelled buttons, every one of them visible. No overflow menu.
   actions?: React.ReactNode;
+  // What the person currently is - on leave, inactive, on probation. Sits next to the name.
+  status?: React.ReactNode;
+  // A full-width callout under the bio, for something the reader has to know before they write to this
+  // person: who is covering while they are away.
+  note?: React.ReactNode;
   /**
    * Which heading level the name is. `h2` by default, because on /profile this card sits UNDER the page's
    * own "My Profile" heading. On an employee's page the name IS the page title, and that page has no other
@@ -39,107 +79,241 @@ export function ProfileView({
    * reader cannot find the top of.
    */
   heading?: "h1" | "h2";
-  // Chip row under the email line (employee ID, reports-to, direct reports…).
+  // Chips that GO somewhere, beside the role line. A fact with nothing behind it belongs in `facts`.
   meta?: React.ReactNode;
+  // The facts band: `<ProfileFact>` cells. Omitted, the band does not render.
+  facts?: React.ReactNode;
+  // One affordance for the band as a whole (the record's edit pencil), right-aligned.
+  factsAction?: React.ReactNode;
+  // The record's tab strip, rendered as the card's last band so the sections read as part of the record
+  // rather than as a separate control floating underneath it. Pass the `TabsList` with `mb-0 border-b-0`:
+  // the card's own bottom edge is the strip's baseline here, so the list must not draw a second one.
+  tabs?: React.ReactNode;
+  /**
+   * Attached to the IDENTITY row - the name and the actions beside it. What a sticky identity bar has to
+   * watch: it earns its place the moment the name is gone, not once the whole card including the facts band
+   * and the tab strip has left, which on a page that scrolls less than a card's height is never.
+   */
+  identityRef?: React.Ref<HTMLDivElement>;
 }) {
-  const seed = name || email || "?";
-  const accent = colorFromString(seed);
+  const seed = name || "?";
+  // job title · department · full-time · hybrid · Berlin - one line, dot-separated, in that order: what they
+  // do, then where they sit, then the shape of the arrangement. Everything is optional and the line simply
+  // closes up, so a record with only a title still reads as a sentence rather than a row of orphan separators.
+  const roleParts = [jobTitle, department, employmentType, [workMode, location].filter(Boolean).join(" · ")].filter(Boolean) as string[];
   return (
-    <Card className="relative overflow-hidden">
-      {/* Three stacked decorative layers, all derived from ONE value - the person's own hue, the same one
-          their avatar has always used. Nothing here is a brand surface, so nothing competes with the name:
-          a left rail that gives the colour a structural job, a halo behind the avatar, and a dot texture
-          that only inks the empty right side of the card. */}
-      <span
-        aria-hidden
-        className="absolute inset-y-0 left-0 w-[3px]"
-        style={{ backgroundImage: `linear-gradient(to bottom, ${colorFromString(seed, 0.85)}, ${colorFromString(seed, 0.18)} 65%, transparent)` }}
-      />
-      {/* Sized in px, not %, so it stays the same soft halo whatever the card's width is - a % radius
-          would stretch into a full-width band on a wide screen, which is what the old cover got wrong. */}
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-0"
-        style={{ backgroundImage: `radial-gradient(440px 260px at 52px -24px, ${colorFromString(seed, 0.13)}, transparent 70%)` }}
-      />
-      {/* currentColor = the card's own foreground, so the texture is ink in light mode and light in dark;
-          the mask fades it out before it reaches the name. */}
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-[0.055] dark:opacity-[0.09]"
-        style={{
-          backgroundImage: "radial-gradient(currentColor 1px, transparent 1.2px)",
-          backgroundSize: "14px 14px",
-          maskImage: "linear-gradient(to left, black, transparent 58%)",
-          WebkitMaskImage: "linear-gradient(to left, black, transparent 58%)",
-        }}
-      />
-      <div className="relative flex flex-wrap items-start gap-x-4 gap-y-4 p-4 pl-5 sm:gap-x-5 sm:p-6 sm:pl-7">
-        {/* Double ring: the person's hue as the outer pad, a hairline highlight inside it, so a photo
-            reads as seated in the card rather than pasted onto it. */}
-        <div
-          className="shrink-0 rounded-full p-[3px] shadow-[0_1px_3px_rgba(7,19,38,0.12)] ring-1 ring-inset ring-white/50 dark:ring-white/10"
-          style={{ backgroundColor: colorFromString(seed, 0.18) }}
-        >
-          {avatar ?? (
-            <Avatar className="h-16 w-16 sm:h-[72px] sm:w-[72px]">
-              <AvatarFallback className="text-xl font-semibold text-white" style={{ backgroundColor: accent }}>
-                {initials(seed)}
-              </AvatarFallback>
-            </Avatar>
-          )}
-        </div>
-        <div className="min-w-0 flex-1">
-          {React.createElement(
-            heading,
-            // Tight tracking at display size: at 26px the default letter-spacing reads loose and webby.
-            { className: "truncate text-xl font-semibold leading-tight tracking-[-0.015em] sm:text-[1.625rem]" },
-            name || email,
-          )}
-          {/* One line of identity facts, dot-separated, rather than a title line plus an email line: the
-              header then costs two lines instead of three and the chips sit closer to the name. */}
-          {(jobTitle || department || (email && name)) && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm text-muted-foreground">
-              {jobTitle && <span className="font-medium text-foreground/85">{jobTitle}</span>}
-              {jobTitle && department && <Dot />}
-              {department && (
-                <span className="inline-flex min-w-0 items-center gap-1.5">
-                  <Building2 className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">{department}</span>
-                </span>
+    <Card className="overflow-hidden rounded-2xl">
+      {/* Two blocks that share a line when both fit and stack when they don't - decided by the CONTENT, not
+          by a breakpoint, because what has to fit is a name of unknown length beside a button row whose
+          width depends on which actions this viewer holds.
+          The identity's `flex-[1_1_440px]` is what makes that work: 440px is its hypothetical size when the
+          browser decides where to break, so the actions move to their own line rather than squeezing the
+          name. (Breaking is settled on those sizes BEFORE any shrinking, so the identity is never compressed
+          below 440 while sharing.) `flex-1` alone would be `flex: 1 1 0%` - a zero basis, which never forces
+          a break and is exactly how the buttons ended up wedged in beside the face.
+          When they do share, the identity's `grow` eats the slack and pushes the actions to the right edge on
+          its own; when they wrap, the actions are alone on their line and sit left, under the person. */}
+      <div ref={identityRef} className="flex flex-wrap items-start gap-4 p-5 sm:gap-5 sm:px-7 sm:pb-[22px] sm:pt-[26px]">
+        <div className="flex min-w-0 flex-[1_1_440px] items-start gap-4 sm:gap-5">
+          {/* A rounded SQUARE, not a circle: a square holds more of a face at the same footprint, and it
+              sits with the rest of the card's geometry instead of being the one round thing on it. Smaller
+              on a phone, where 92px is a quarter of the width and the name has to live beside it. */}
+          <div className="shrink-0 overflow-hidden rounded-[14px] shadow-[inset_0_0_0_1px_hsl(var(--border))] sm:rounded-[18px]">
+            {avatar ?? (
+              <Avatar className="h-[68px] w-[68px] rounded-[14px] sm:h-[92px] sm:w-[92px] sm:rounded-[18px]">
+                <AvatarFallback className="rounded-[14px] bg-muted text-2xl font-semibold text-muted-foreground sm:rounded-[18px]">
+                  {initials(seed)}
+                </AvatarFallback>
+              </Avatar>
+            )}
+          </div>
+
+          <div className="flex min-w-0 flex-1 flex-col gap-[9px]">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+              {React.createElement(
+                heading,
+                // 31px at -0.025em. Tight tracking at display size: at this size the default letter-spacing
+                // reads loose and webby. `min-w-0` so the name is what gives way when the row is tight.
+                { className: "m-0 min-w-0 truncate text-2xl font-bold leading-[1.1] tracking-[-0.025em] sm:text-[1.9375rem]" },
+                name,
               )}
-              {(jobTitle || department) && email && name && <Dot />}
-              {email && name && (
-                <span className="inline-flex min-w-0 items-center gap-1.5">
-                  <Mail className="h-3.5 w-3.5 shrink-0" />
-                  <CopyEmail email={email} />
-                </span>
-              )}
+              {status}
             </div>
-          )}
-          {meta}
+
+            {roleParts.length > 0 && (
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[15px] text-muted-foreground">
+                {roleParts.map((part, i) => (
+                  <React.Fragment key={part}>
+                    {i > 0 && <Dot />}
+                    <span className={cn("min-w-0 truncate", i === 0 && "font-semibold text-foreground")}>{part}</span>
+                  </React.Fragment>
+                ))}
+              </div>
+            )}
+
+            <Bio bio={bio} onEdit={onEditBio} />
+            {meta}
+            {note}
+          </div>
         </div>
-        {/* `ml-auto` so the action stack hugs the right edge; on a narrow screen it wraps under the
-            identity block (full width) and stays right-aligned there. */}
-        {actions && <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2 sm:pl-2">{actions}</div>}
+
+        {/* `shrink-0` so the group keeps its natural width in the break calculation: a shrinkable one would
+            be squeezed onto the line instead of moving off it, which is the whole thing being avoided. */}
+        {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
       </div>
-      {(bio || onEditBio) && <BioBlock bio={bio} onEdit={onEditBio} />}
+
+      {facts && <FactsBand action={factsAction}>{facts}</FactsBand>}
+      {/* No padding under the strip, and the strip itself draws no bottom rule (see the `tabs` prop): the
+          CARD'S bottom edge is the tab bar's baseline, so the active tab's underline lands on it. Otherwise a
+          tab is separated from the panel it names by three lines in a row - its own border-b, the list's
+          margin, then the card closing - and the underline ends up pointing at a border rather than at
+          anything the tab owns. */}
+      {tabs && <div className="border-t px-4 pt-1 sm:px-7">{tabs}</div>}
     </Card>
   );
 }
 
-/** The public "about me" text, as its OWN band under the identity row rather than a sentence wedged
- *  into the column between the avatar and the action stack - which is where it was, and why a bio of
- *  any length shoved the header around. Line breaks the author typed are kept (`whitespace-pre-line`;
- *  the old markup collapsed them into one run-on line), and the band clamps to three lines with a
- *  Show more toggle so a 280-character bio cannot outgrow the header it belongs to. */
-function BioBlock({ bio, onEdit }: { bio?: string; onEdit?: () => void }) {
+/** The record itself, as a band of labelled cells. On the card's own ground with a hairline over it - the
+ *  band is part of the card, not a panel stuck to the bottom of one. */
+function FactsBand({ action, children }: { action?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="border-t px-5 py-[18px] sm:px-7">
+      <div className="flex items-start justify-between gap-3">
+        {/* `auto-fit` at a 186px floor: the cells tile to whatever the card is wide, so the same band is four
+            across on a desktop and two on a phone without a breakpoint naming either number. */}
+        <dl className="grid min-w-0 flex-1 gap-x-[26px] gap-y-5 [grid-template-columns:repeat(auto-fit,minmax(186px,1fr))]">{children}</dl>
+        {action && <div className="-mr-1 -mt-1 shrink-0">{action}</div>}
+      </div>
+    </div>
+  );
+}
+
+/** One cell of the facts band: a small-caps label over its value, with the field's own manage-access icon.
+ *  `field` is set only for the PROTECTED fields (employee_number / department / manager) - the body-field
+ *  gate only runs on those, so a field grant anywhere else would be inert and its icon a lie. */
+export function ProfileFact({
+  label,
+  value,
+  hoverContent,
+  hint,
+  field,
+  mono,
+  copy,
+  onClick,
+  addLabel,
+  onAdd,
+}: {
+  label: string;
+  value?: React.ReactNode;
+  /**
+   * A panel shown on hover over the value. Its contents may be interactive - it is a Popover, not a tooltip
+   * (see HoverPanel). The cell keeps its own `onClick`; the panel offers the finer-grained destinations.
+   */
+  hoverContent?: React.ReactNode;
+  /** A quieter second value on the same line: the tenure beside the joining date, an extension beside a number. */
+  hint?: React.ReactNode;
+  field?: string;
+  mono?: boolean;
+  /** Text to put on the clipboard. Turns the value into a button with a COPY hint, per the mock. */
+  copy?: string;
+  /** Makes the value a link/button (reports-to opens their profile). */
+  onClick?: () => void;
+  /** Offered in place of an empty value, to a caller who may fill it in. */
+  addLabel?: string;
+  onAdd?: () => void;
+}) {
+  const { toast } = useToast();
+  const [copied, setCopied] = React.useState(false);
+  // The mock's COPY -> COPIED swap in place, rather than only a toast: the hint sits on the value you just
+  // clicked, so the confirmation is where the eye already is.
+  React.useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1600);
+    return () => clearTimeout(t);
+  }, [copied]);
+
+  const body = (
+    <span className="flex min-w-0 items-baseline gap-[7px]">
+      <span className={cn("min-w-0 truncate text-[14.5px] font-medium text-foreground", mono && "font-mono")}>{value}</span>
+      {hint && <span className="shrink-0 text-[12.5px] text-muted-foreground">{hint}</span>}
+    </span>
+  );
+
+  // Whatever the value ends up being - a copy button, a link, or plain text - gets wrapped once, so the
+  // hover surface is the entire value rather than one element inside it.
+  const withHover = (el: React.ReactNode) =>
+    hoverContent && value ? <HoverPanel content={hoverContent}>{el}</HoverPanel> : el;
+
+  return (
+    <div className="group/fact flex min-w-0 flex-col gap-1.5">
+      <dt className="flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-[0.09em] text-muted-foreground">
+        <span className="truncate">{label}</span>
+        <FieldAccess field={field} label={label} />
+      </dt>
+      <dd className="m-0 min-w-0">
+        {withHover(
+          value ? (
+            copy ? (
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard
+                    .writeText(copy)
+                    .then(() => {
+                      setCopied(true);
+                      toast({ title: `${label} copied`, variant: "success" });
+                    })
+                    .catch(() => {});
+                }}
+                className="flex min-w-0 max-w-full items-baseline gap-[7px] text-left transition-colors hover:text-primary"
+              >
+                {body}
+                <span className="shrink-0 text-[11px] font-bold tracking-wide text-muted-foreground opacity-0 transition-opacity group-hover/fact:opacity-100 focus-visible:opacity-100">
+                  {copied ? "COPIED" : "COPY"}
+                </span>
+                <Copy className="h-3 w-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/fact:opacity-100 sm:hidden" />
+              </button>
+            ) : onClick ? (
+              <button type="button" onClick={onClick} className="flex min-w-0 max-w-full text-left transition-colors hover:text-primary">
+                {body}
+              </button>
+            ) : (
+              body
+            )
+          ) : onAdd && addLabel ? (
+            // The mock's inline "Add ID" - the empty cell offers the fix to whoever can apply it, instead of
+            // spending a row on a dash.
+            <button
+              type="button"
+              onClick={onAdd}
+              className="inline-flex items-center gap-1.5 text-[14.5px] font-semibold text-primary transition-colors hover:text-primary/80"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              {addLabel}
+            </button>
+          ) : (
+            <span className="text-[14.5px] text-muted-foreground/70">Not on file</span>
+          ),
+        )}
+      </dd>
+    </div>
+  );
+}
+
+/** The public "about me" line, in the identity column under the role it elaborates - not a band of its own
+ *  with a heading. One sentence does not need a section announcing it.
+ *
+ *  Typographically it must not read as a third metadata row: prose leading, a prose measure, and a darker ink
+ *  than the muted role line above it. Line breaks the author typed are kept (`whitespace-pre-line`), and it
+ *  clamps to two lines with a toggle so a 280-character bio cannot push the facts band off the fold. */
+function Bio({ bio, onEdit }: { bio?: string; onEdit?: () => void }) {
+  const am = useAccessMode();
   const ref = React.useRef<HTMLParagraphElement | null>(null);
   const [expanded, setExpanded] = React.useState(false);
   const [clipped, setClipped] = React.useState(false);
-  // Measured, not guessed from length: whether three lines is enough depends on the card's width and on
-  // where the author's own line breaks fall. Skipped while expanded, since the clamp is off then and the
-  // element would measure as fitting - which would drop the toggle the reader needs to collapse it again.
+  // Measured, not guessed from length: whether two lines is enough depends on the card's width and on where
+  // the author's own line breaks fall. Skipped while expanded, since the clamp is off then and the element
+  // would measure as fitting - which would drop the toggle the reader needs to collapse it again.
   React.useEffect(() => {
     const el = ref.current;
     if (!el || expanded) return;
@@ -150,105 +324,67 @@ function BioBlock({ bio, onEdit }: { bio?: string; onEdit?: () => void }) {
     return () => ro.disconnect();
   }, [bio, expanded]);
 
+  if (!bio) {
+    // Owner-only prompt (the page decides), so an empty bio costs a colleague's profile nothing at all.
+    return onEdit ? (
+      <button
+        type="button"
+        onClick={onEdit}
+        className="inline-flex items-center gap-1.5 self-start text-[15px] text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <Plus className="h-3.5 w-3.5" />
+        <span className="border-b border-dashed border-current pb-px">Add a short bio</span>
+        <FieldAccess field="bio" label="Bio" />
+      </button>
+    ) : null;
+  }
+
+  // The footer row exists only when it has something to hold: a toggle, an edit pencil, or - in access mode -
+  // the field's manage icon, which would otherwise have nowhere to live now the label is gone.
+  const footer = clipped || expanded || !!onEdit || am.enabled;
   return (
-    <div className="relative border-t bg-muted/25 px-4 py-3 pl-5 sm:px-6 sm:pl-7">
-      <div className="flex items-center justify-between gap-2">
-        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          About
-          <FieldAccess field="bio" label="Bio" />
-        </span>
-        {bio && onEdit && (
-          <button
-            type="button"
-            onClick={onEdit}
-            aria-label="Edit bio"
-            className="-mr-1 -mt-1 inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            <Pencil className="h-3.5 w-3.5" />
-          </button>
-        )}
-      </div>
-      {bio ? (
-        <>
-          <p
-            ref={ref}
-            className={`mt-1 max-w-prose whitespace-pre-line text-sm leading-relaxed text-foreground/80 ${expanded ? "" : "line-clamp-3"}`}
-          >
-            {bio}
-          </p>
-          {clipped && (
+    // 620px, the mock's measure: the identity column is the full width of a wide page, and one sentence set
+    // that wide is the single thing that most reads as unprofessional.
+    <div className="group/bio max-w-[620px]">
+      <p
+        ref={ref}
+        className={cn("whitespace-pre-line text-[15px] leading-[1.55] text-muted-foreground", !expanded && "line-clamp-2")}
+      >
+        {bio}
+      </p>
+      {footer && (
+        <div className="mt-1 flex items-center gap-2">
+          {(clipped || expanded) && (
             <button
               type="button"
               onClick={() => setExpanded((v) => !v)}
-              className="mt-1 text-xs font-medium text-primary hover:underline"
+              className="text-xs font-semibold text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
             >
               {expanded ? "Show less" : "Show more"}
             </button>
           )}
-        </>
-      ) : (
-        <button
-          type="button"
-          onClick={onEdit}
-          className="mt-1 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          <span className="border-b border-dashed border-current pb-px">Add a short bio</span>
-        </button>
+          {/* Hover-revealed, like every other secondary icon affordance in the app (CopyEmail, the row
+              menus): visible on focus too, so it is reachable without a pointer. */}
+          {onEdit && (
+            <button
+              type="button"
+              onClick={onEdit}
+              aria-label="Edit bio"
+              title="Edit bio"
+              className="ml-auto shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/bio:opacity-100"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+          )}
+          <FieldAccess field="bio" label="Bio" />
+        </div>
       )}
     </div>
   );
 }
 
-// Separator for the identity fact line. A dot, not a "·" glyph in the text: it centres on the line
-// regardless of font and never gets picked up when the line is copied.
+// Separator for the role line. A dot, not a "·" glyph in the text: it centres on the line regardless of font
+// and never gets picked up when the line is copied.
 function Dot() {
   return <span aria-hidden className="h-1 w-1 shrink-0 rounded-full bg-muted-foreground/40" />;
-}
-
-// The contact/org detail rows, shown in the Profile tab.
-export function ProfileDetails({
-  employeeNumber,
-  email,
-  jobTitle,
-  department,
-  manager,
-  joined,
-}: {
-  employeeNumber?: string;
-  email?: string;
-  jobTitle?: string;
-  department?: string;
-  manager?: string;
-  joined?: string;
-}) {
-  return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      {/* Only protected fields (employee_number/department/manager) get FIELD-scope management; the rest manage
-          at object scope (the body-field gate only runs on protected fields, so a field grant elsewhere is inert). */}
-      <Detail icon={Hash} label="Employee ID" value={employeeNumber} field="employee_number" mono />
-      <Detail icon={Mail} label="Work email" value={email ? <CopyEmail email={email} /> : undefined} />
-      <Detail icon={Briefcase} label="Job title" value={jobTitle} />
-      <Detail icon={Building2} label="Department" value={department} field="department" />
-      <Detail icon={UserCog} label="Manager" value={manager} field="manager" />
-      {joined !== undefined && <Detail icon={CalendarDays} label="Joined" value={joined} />}
-    </div>
-  );
-}
-
-function Detail({ icon: Icon, label, value, field, mono }: { icon: typeof Mail; label: string; value?: React.ReactNode; field?: string; mono?: boolean }) {
-  return (
-    <div className="flex items-start gap-3 rounded-xl border bg-card p-4 transition-colors hover:bg-muted/40">
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-        <Icon className="h-4 w-4" />
-      </div>
-      <div className="min-w-0">
-        <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          {label}
-          <FieldAccess field={field} label={label} />
-        </p>
-        <p className={`truncate text-sm font-medium ${mono ? "font-mono" : ""}`}>{value || "-"}</p>
-      </div>
-    </div>
-  );
 }

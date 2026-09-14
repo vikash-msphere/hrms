@@ -26,7 +26,7 @@ test("assigning an asset moves it out of stock and waits for the holder to confi
   // two fields consistent so an asset can never be both assigned and in stock.
   await form.getByLabel("Assigned to").click();
   await it.getByPlaceholder(/Search/).last().fill("Eve");
-  await expect(it.getByRole("button", { name: /Eve Employee/ })).toBeVisible();
+  await expect(it.getByRole("option", { name: /Eve Employee/ })).toBeVisible();
   await it.keyboard.press("Enter");
   await form.getByRole("button", { name: /^(Add asset|Save|Add)/ }).last().click();
   await expect(it.getByRole("dialog")).toHaveCount(0);

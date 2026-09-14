@@ -96,7 +96,7 @@ async function pickDelegation(
   const form = dialog ?? page.getByRole("dialog");
   await form.getByLabel("Covered by").click();
   await page.getByPlaceholder(/Search|Pick/).last().fill(colleagueNeedle);
-  const option = page.getByRole("button", { name: new RegExp(colleagueNeedle) });
+  const option = page.getByRole("option", { name: new RegExp(colleagueNeedle) });
   await expect(option).toBeVisible();
   await page.keyboard.press("Enter");
   await form.getByLabel("From").fill(from);

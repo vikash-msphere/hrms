@@ -32,7 +32,7 @@ test("a simulation hides what it may not press, and the server refuses the write
   await expect(picker).toBeVisible();
   await picker.click();
   await page.getByPlaceholder("Search…").fill(ROLES.employee);
-  await expect(page.getByRole("button", { name: /Eve Employee/ }).first()).toBeVisible();
+  await expect(page.getByRole("option", { name: /Eve Employee/ }).first()).toBeVisible();
   await page.keyboard.press("Enter");
   await expect(page.getByText(/Viewing as/)).toBeVisible({ timeout: 30_000 });
 

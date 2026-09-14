@@ -898,3 +898,18 @@
 .graph-svg-tip.graph-svg-tip .svg-pointer {
   border-top-color: hsl(var(--foreground));
 }
+/* A CHART THAT FILTERS THE LIST BELOW IT says so under the pointer. The host carries `cursor: pointer`
+   and this class (Chart.tsx); these selectors name the library's own marks, so they need the doubled
+   class like everything else down here. Pie and donut already lighten their own slice on hover - these
+   are the three kinds that do not. A mark the current filter has DIMMED keeps its inline opacity, which
+   beats this rule, so the excluded stay excluded while the pointer crosses them. */
+.chart-drillable .chart-container.chart-container [data-point-index],
+.chart-drillable .chart-container.chart-container .percentage-bar,
+.chart-drillable .chart-container.chart-container .day {
+  cursor: pointer;
+}
+.chart-drillable .chart-container.chart-container [data-point-index]:hover,
+.chart-drillable .chart-container.chart-container .percentage-bar:hover,
+.chart-drillable .chart-container.chart-container .day:hover {
+  opacity: 0.75;
+}

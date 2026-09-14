@@ -77,15 +77,28 @@ test("the form refuses short notice before it is filed, and says what the rule i
     const form = await openRequest(employee, name, day);
 
     // The refusal is on screen, naming the rule and the shortfall - not a 400 after a press.
-    await expect(form.getByText(`This doesn't meet the ${name} policy`)).toBeVisible({ timeout: 15_000 });
+    await expect(form.getByText("1 rule not met", { exact: true })).toBeVisible({ timeout: 15_000 });
     await expect(form.getByText(/needs 60 days/)).toBeVisible();
+
+    // ONE SURFACE STATES THIS RULE, and this is the assertion that keeps it that way.
+    //
+    // The dialog used to say the notice rule twice - a hint on the Start date field and a panel below it -
+    // and nothing caught it, because both sentences were true and neither was wrong on its own. It surfaced
+    // only as a strict-mode violation when a matcher found two elements. The policy checklist gives each rule
+    // one row; this fails the moment something starts stating one of them a second time.
+    // `exact` is load-bearing: these matchers are case-insensitive SUBSTRING by default, so a loose
+    // count-of-one assertion passes on almost anything.
+    await expect(form.getByText(`${name} policy`, { exact: true })).toHaveCount(1);
+
     // And the button is not offering to file it.
     await expect(form.getByRole("button", { name: "Request leave" })).toBeDisabled();
 
-    // Moving the dates past the notice period answers the rule, and the form says so by letting go.
+    // Moving the dates past the notice period answers the rule, and the form says so - the same row turns
+    // from unmet to met rather than a panel disappearing.
     await form.getByLabel("Start date").fill(nextWeekday(75));
     await form.getByLabel("End date").fill(nextWeekday(75));
-    await expect(form.getByText(`This doesn't meet the ${name} policy`)).toHaveCount(0, { timeout: 15_000 });
+    await expect(form.getByText("All rules met", { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(form.getByText("1 rule not met", { exact: true })).toHaveCount(0);
     await expect(form.getByRole("button", { name: "Request leave" })).toBeEnabled();
 
     await abandon(employee);
@@ -149,9 +162,13 @@ test("a waived rule files anyway, and the approver is told what it broke", async
     const day = nextWeekday(3);
     const form = await openRequest(employee, name, day);
 
-    // Warned, not blocked: the panel says who will be told, and the button still files.
-    await expect(form.getByText(/Outside the usual policy - your approver will be told/)).toBeVisible({ timeout: 15_000 });
+    // Warned, not blocked: the rule's own row carries the waiver, and the button still files. A waived rule
+    // is a third state of the same row rather than a second panel - which is what stops "met", "not met" and
+    // "waived" drifting into three places that each know about some of the policy.
+    await expect(form.getByText("Your approver will be told", { exact: true })).toBeVisible({ timeout: 15_000 });
     await expect(form.getByText(/needs 60 days/)).toBeVisible();
+    await expect(form.getByText(/waived, your approver decides/)).toBeVisible();
+    await expect(form.getByText(`${name} policy`, { exact: true })).toHaveCount(1);
     const submit = form.getByRole("button", { name: "Request leave" });
     await expect(submit).toBeEnabled();
     await submit.click();

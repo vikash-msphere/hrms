@@ -2089,6 +2089,9 @@ function CfdChart({ metrics }: { metrics: BoardMetrics }) {
       hideDots
       ariaLabel="Cumulative flow: how many tasks sat in each column on each day"
       emptyText="No flow data yet - create and move some tasks."
+      // Deliberately not a filter. A point here is a COUNT on a past day, not a set of cards: the board
+      // holds where tasks are now, and there is no list of "the cards that were in Doing three Tuesdays
+      // ago" for a press to open. See `everyChart.spec.ts`'s exemption list.
     />
   );
 }
@@ -2570,7 +2573,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
           </div>
           <div className="rounded-lg border p-4">
             <h4 className="mb-3 text-sm font-semibold">Velocity</h4>
-            <VelocityChart sprints={sprints} cards={cards} />
+            <VelocityChart sprints={sprints} cards={cards} selectedId={selId} onPick={setSelId} />
           </div>
         </div>
       )}
@@ -2726,12 +2729,20 @@ function BurndownChart({ sprint, cards }: { sprint: Sprint; cards: CardT[] }) {
       format={(v) => `${v} pts`}
       hideDots
       ariaLabel="Sprint burndown: story points still to deliver on each day, against the ideal line"
+      // Deliberately not a filter, for the reason the CFD gives: a point is the points still open on a past
+      // day, which is a number and not a set of cards anything can be narrowed to.
     />
   );
 }
 
 // Velocity: story points delivered per completed sprint (bars).
-function VelocityChart({ sprints, cards }: { sprints: Sprint[]; cards: CardT[] }) {
+function VelocityChart({ sprints, cards, selectedId, onPick }: {
+  sprints: Sprint[];
+  cards: CardT[];
+  /** The sprint the view is on, so its bar stays lit. */
+  selectedId: string | null;
+  onPick: (id: string) => void;
+}) {
   const done = sprints.filter((s) => s.state === "completed");
   const data = done.map((s) => ({ name: s.name, points: cards.filter((c) => c.sprint && idOf(c.sprint) === idOf(s.path)).reduce((x, c) => x + (c.size ?? 0), 0) }));
   // The average is the point of a velocity chart - it is what the next sprint gets planned against - so it
@@ -2747,6 +2758,11 @@ function VelocityChart({ sprints, cards }: { sprints: Sprint[]; cards: CardT[] }
       format={(v) => `${v} pts`}
       ariaLabel="Story points delivered in each completed sprint"
       emptyText="Complete a sprint to start tracking velocity."
+      // A bar is a whole sprint, so pressing one opens it: the board above and the burndown beside this
+      // chart both re-read against the sprint that was picked. "Why was that one slow" is the question this
+      // chart provokes, and it was the one thing it could not answer.
+      onSelect={(i) => { const s = done[i]; if (s) onPick(idOf(s.path)); }}
+      selected={selectedId && done.findIndex((s) => idOf(s.path) === selectedId) >= 0 ? done.findIndex((s) => idOf(s.path) === selectedId) : null}
     />
   );
 }

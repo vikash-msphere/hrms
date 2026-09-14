@@ -999,6 +999,9 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
                   }]}
                   format={(v) => money(v)}
                   ariaLabel="How this payroll run's cost divides between take-home pay, tax, other deductions and employer contributions"
+                  // Deliberately not a filter. Each slice is a COMPONENT of every line's cost, not a group
+                  // of lines: every payslip in the run contributes to all four, so "show me the take-home
+                  // slice" is the whole table. See `everyChart.spec.ts`'s exemption list.
                 />
               </div>
             )}

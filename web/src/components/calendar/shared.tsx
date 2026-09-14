@@ -14,6 +14,14 @@ export type ViewProps = {
   byDay: Map<string, CalEntry[]>;
   awayOn: (ymd: string) => number;
   holidayOn: (ymd: string) => Holiday | undefined;
+  /**
+   * The org-wide closed period covering this day, if any - "Year-end close".
+   *
+   * Here because the picker learned about policy and this calendar had not: the two then disagreed on the
+   * same screen, one refusing a day the other drew as free, and a reader believes whichever agrees with the
+   * plan they already had. Two views contradicting each other is worse than neither of them knowing.
+   */
+  closedOn: (ymd: string) => string | undefined;
   celebrationsOn: (ymd: string) => Celebration[];
   workDays: number[];
   weekStart: number;

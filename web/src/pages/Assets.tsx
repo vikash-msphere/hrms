@@ -9,6 +9,8 @@ import type { Asset, AssetCategory, Employee, Me, Stocktake as StocktakeRecord }
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Chart, ChartCard } from "@/components/common/Chart";
+import { ChartFilterNote } from "@/components/common/ChartFilterNote";
+import { useChartFocus } from "@/lib/chartFocus";
 import { topSlices } from "@/lib/chartTheme";
 import { DataState } from "@/components/common/DataState";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -171,11 +173,27 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
     states: topSlices(rows, (a) => ASSET_STATUS_LABEL[a.status] ?? a.status, () => 1, 7),
     categories: topSlices(rows, (a) => catName(a.category) || "Uncategorised", () => 1, 7),
   }), [rows, catName]);
+  // Both charts filter the table under them. A state slice is one raw `status`, which is a finer cut than the
+  // strip's bands (a band pools the two "somebody owes a scan" statuses), so the two narrow independently and
+  // compose rather than fighting over the same control. Drawn from `rows`, never from the narrowed set.
+  const cf = useChartFocus<Asset, "state" | "category">({
+    state: {
+      keys: assetCharts.states.keys,
+      label: (k) => k,
+      match: (a, k) => (ASSET_STATUS_LABEL[a.status] ?? a.status) === k,
+    },
+    category: {
+      keys: assetCharts.categories.keys,
+      label: (k) => k,
+      match: (a, k) => (catName(a.category) || "Uncategorised") === k,
+    },
+  });
   const [band, setBand] = useState<AssetBand | null>(null);
   const shown = useMemo(() => {
     const match = BANDS.find((b) => b.id === band)?.match;
-    return match ? rows.filter(match) : rows;
-  }, [rows, band]);
+    return cf.apply(match ? rows.filter(match) : rows);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, band, cf.picked?.dim, cf.picked?.key]);
 
   // The assets THIS viewer personally owes a scan for - the one thing on this page they cannot delegate. Held
   // to rows they may actually `acknowledge`, so the banner and its tile never offer a scan the server refuses.
@@ -444,6 +462,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
               labels={assetCharts.states.labels}
               datasets={[{ name: "Assets", values: assetCharts.states.values }]}
               ariaLabel="Assets by state"
+              {...cf.chart("state")}
             />
           </ChartCard>
           <ChartCard title="What the fleet is made of" description="Assets by category, biggest first.">
@@ -453,6 +472,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
               labels={assetCharts.categories.labels}
               datasets={[{ name: "Assets", values: assetCharts.categories.values }]}
               ariaLabel="Assets by category"
+              {...cf.chart("category")}
             />
           </ChartCard>
         </div>
@@ -493,6 +513,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
         </div>
       )}
       <DataState state={state} error={error} onRetry={reload}>
+        <ChartFilterNote label={cf.activeLabel} shown={shown.length} total={rows.length} onClear={cf.clear} />
         <DataTable
           tableId="assets"
           // The heading says which band is showing and how to leave it - a table quietly holding a subset is

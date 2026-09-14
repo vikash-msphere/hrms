@@ -23,7 +23,7 @@ test("an offer is created, approved and extended, one step at a time", async ({ 
 
   await form.getByLabel("Application").click();
   await page.getByPlaceholder(/Search/).last().fill(candidate);
-  await expect(page.getByRole("button", { name: new RegExp(candidate) })).toBeVisible();
+  await expect(page.getByRole("option", { name: new RegExp(candidate) })).toBeVisible();
   await page.keyboard.press("Enter");
 
   // The money: an annual figure, read back as a monthly one, because that is the number the candidate hears.

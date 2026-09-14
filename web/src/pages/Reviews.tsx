@@ -11,6 +11,8 @@ import type { Department, Employee, Review, ReviewCycle, ReviewState, ReviewFeed
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Chart, ChartCard } from "@/components/common/Chart";
+import { ChartFilterNote } from "@/components/common/ChartFilterNote";
+import { useChartFocus } from "@/lib/chartFocus";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -253,7 +255,7 @@ export default function Reviews({ me }: { me: Me }) {
   // The cycle's shape: where its reviews are, and where its ratings landed. Both over `inScope` - the same
   // reviews the chips count and the list shows, so a filtered page's numbers agree with its pictures.
   const reviewCharts = useMemo(() => {
-    const stages = STAGES.map((s) => ({ label: s.label, n: inScope.filter((r) => r.state === s.key).length })).filter((s) => s.n > 0);
+    const stages = STAGES.map((s) => ({ key: s.key, label: s.label, n: inScope.filter((r) => r.state === s.key).length })).filter((s) => s.n > 0);
     // A rating scale is ordered: the bars run 1..5 whether or not anybody landed on a 2, because a gap in
     // the middle of a distribution is itself the finding.
     const shared = inScope.filter((r) => (r.state === "SHARED" || r.state === "ACKNOWLEDGED") && r.overall_rating != null);
@@ -261,10 +263,25 @@ export default function Reviews({ me }: { me: Me }) {
     const scale = Array.from({ length: max }, (_, i) => i + 1);
     return {
       total: inScope.length,
-      stages: { labels: stages.map((s) => s.label), values: stages.map((s) => s.n) },
-      ratings: { labels: scale.map(String), values: scale.map((n) => shared.filter((r) => r.overall_rating === n).length) },
+      stages: { labels: stages.map((s) => s.label), values: stages.map((s) => s.n), keys: stages.map((s) => String(s.key)), names: new Map<string, string>(stages.map((s) => [String(s.key), s.label])) },
+      ratings: { labels: scale.map(String), values: scale.map((n) => shared.filter((r) => r.overall_rating === n).length), keys: scale.map(String) },
     };
   }, [inScope]);
+  // Both pictures narrow the list. A stage is the review's `state`, which crosses the chips above it (those
+  // ask whose move it is, not where the review has got to); a rating is only ever on a shared review, so
+  // picking one implies that scope rather than needing a second filter for it.
+  const cf = useChartFocus<Review, "stage" | "rating">({
+    stage: {
+      keys: reviewCharts.stages.keys,
+      label: (k) => reviewCharts.stages.names.get(k) ?? k,
+      match: (r, k) => (r.state as string) === k,
+    },
+    rating: {
+      keys: reviewCharts.ratings.keys,
+      label: (k) => `rated ${k}`,
+      match: (r, k) => r.overall_rating === Number(k) && (r.state === "SHARED" || r.state === "ACKNOWLEDGED"),
+    },
+  });
 
   const cycleOptions = useMemo(() => {
     const seen = new Map<string, string>();
@@ -275,7 +292,7 @@ export default function Reviews({ me }: { me: Me }) {
     }
     return [...seen].sort((a, b) => b[1].localeCompare(a[1]));
   }, [reviews, cycleOf]);
-  const visible = sorted.filter(
+  const visible = cf.apply(sorted.filter(
     (r) =>
       inCycle(r) &&
       (filter === "all" ||
@@ -283,7 +300,7 @@ export default function Reviews({ me }: { me: Me }) {
           : filter === "done" ? r.state === "ACKNOWLEDGED"
           : filter === "overdue" ? isOverdue(r)
           : waitingOnOthers(r))),
-  );
+  ));
   // The deep-link effect below asks ONE question of this list - "is the review I was sent to on screen?" - at
   // the moment a link is followed. Read through a ref, because the list itself is rebuilt on every render:
   // depending on it would re-run the effect (and re-scroll the page) on every keystroke and refetch, and
@@ -412,6 +429,7 @@ export default function Reviews({ me }: { me: Me }) {
               labels={reviewCharts.stages.labels}
               datasets={[{ name: "Reviews", values: reviewCharts.stages.values }]}
               ariaLabel="Reviews by stage"
+              {...cf.chart("stage")}
             />
           </ChartCard>
           <ChartCard title="Rating distribution" description="Shared and acknowledged reviews only - a rating nobody has seen yet is not a result.">
@@ -423,6 +441,7 @@ export default function Reviews({ me }: { me: Me }) {
               format={(v) => `${v} review${v === 1 ? "" : "s"}`}
               ariaLabel="How many shared reviews landed on each overall rating"
               emptyText="No ratings shared yet."
+              {...cf.chart("rating")}
             />
           </ChartCard>
         </div>
@@ -488,6 +507,7 @@ export default function Reviews({ me }: { me: Me }) {
             </span>
           </div>
         )}
+        <ChartFilterNote label={cf.activeLabel} shown={visible.length} total={inScope.length} onClear={cf.clear} />
         {sorted.length === 0 ? (
           myRequests.length === 0 && <EmptyState icon={ClipboardCheck} title="No reviews yet" description="When HR launches a review cycle that includes you, your review will appear here." />
         ) : visible.length === 0 ? (
@@ -495,7 +515,7 @@ export default function Reviews({ me }: { me: Me }) {
             icon={ClipboardCheck}
             title="No reviews match"
             description="Nothing matches the current filters."
-            action={<Button variant="outline" size="sm" onClick={() => { applyFilter("all"); applyCycle("all"); }}>Clear filters</Button>}
+            action={<Button variant="outline" size="sm" onClick={() => { applyFilter("all"); applyCycle("all"); cf.clear(); }}>Clear filters</Button>}
           />
         ) : (
           <div className="space-y-6">
@@ -841,13 +861,21 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
             90%, and every review used to be read on its own. Present on the item read only. */}
         {(review.attainment_trend?.length ?? 0) > 1 && (
           <Section label="Attainment across cycles">
+            {/* Each bar's title names the CYCLE and nothing else. `maskAttributes: []` (web/src/instrument.ts)
+                means a title attribute is never masked - not by this route being in SENSITIVE_PAGES, and not
+                by a `data-sentry-mask` on the element - so a value in one leaves the building whatever the
+                page policy says. The attainment and the rating are rendered as TEXT instead, where the route
+                mask covers them; `test/replayMaskCoverage.test.ts` states the same rule for the offered
+                salary on the pipeline board. */}
             <span className="flex flex-wrap items-end gap-3">
               {review.attainment_trend!.map((p) => (
-                <span key={p.cycle} className="flex flex-col items-center gap-1" title={`${p.name}: ${p.attainment}%${p.rating != null ? ` · rated ${p.rating}` : ""}`}>
+                <span key={p.cycle} className="flex flex-col items-center gap-1" title={p.name}>
                   <span className="flex h-16 w-8 items-end">
                     <span className="w-full rounded-t-sm bg-primary" style={{ height: `${Math.max(4, p.attainment)}%` }} />
                   </span>
-                  <span className="text-[10px] tabular-nums text-muted-foreground">{p.attainment}%</span>
+                  <span className="text-[10px] tabular-nums text-muted-foreground">
+                    {p.attainment}%{p.rating != null ? ` · ${p.rating}` : ""}
+                  </span>
                   <span className="max-w-[4.5rem] truncate text-[10px] text-muted-foreground">{p.name}</span>
                 </span>
               ))}
@@ -1267,9 +1295,11 @@ function GoalsPanel({ goals, attainment, frozen, verdicts, framework, editable, 
               {/* A goal nobody agreed is still scored - it is what the person worked on - but the review says
                   so on its face rather than presenting it as an objective both sides signed up to. */}
               {/* A share of somebody else's goal: the weight is already scaled, but whose work it was still
-                  belongs on the line. */}
+                  belongs on the line. The title says WHOSE, not what share of it - the figure is already
+                  beside it as text the route mask covers, and a title attribute is never masked (see the
+                  trend chart above). */}
               {g.contribution && (
-                <span className="shrink-0 text-xs text-muted-foreground" title={`${g.contribution.share}% share of ${empName(g.contribution.owner)}'s goal`}>
+                <span className="shrink-0 text-xs text-muted-foreground" title={`Share of ${empName(g.contribution.owner)}'s goal`}>
                   {g.contribution.share}% share
                 </span>
               )}

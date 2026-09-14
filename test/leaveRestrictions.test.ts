@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   checkLeaveRestrictions,
+  dayBar,
+  dayBarReason,
   describeRestrictions,
   hasAnyRestriction,
   historyWindow,
@@ -521,6 +523,54 @@ describe("sandwich counting", () => {
 
   it("splits the charge by month for the quota rules", () => {
     expect(daysByMonth(ms("2026-03-30"), ms("2026-04-02"), 1, 2, workDays)).toEqual({ "2026-03": 2, "2026-04": 2 });
+  });
+});
+
+// The per-day bars are what the CALENDAR greys a cell with and what the evaluator refuses a request over -
+// one set of predicates, so a day the grid strikes out and a day the server refuses cannot come apart. These
+// pin the predicates themselves; the refusal messages they feed are covered by the checkLeaveRestrictions
+// cases above.
+describe("dayBar", () => {
+  const rules = parseRestrictions({
+    request: { blocked_weekdays: [1] }, // no Mondays
+    timing: {
+      blackouts: [{ from: "2026-12-20", to: "2027-01-02", label: "Year-end close" }],
+      blackout_days_of_month: [28, 29, 30, 31],
+    },
+  });
+
+  it("names each kind of bar, and nothing for a day the policy allows", () => {
+    // 2026-09-14 is a Monday.
+    expect(dayBar(rules, "2026-09-14")).toEqual({ kind: "weekday", code: "blocked_weekday", weekday: 1 });
+    expect(dayBar(rules, "2026-12-22")).toEqual({
+      kind: "window",
+      code: "blackout",
+      window: { from: "2026-12-20", to: "2027-01-02", label: "Year-end close" },
+    });
+    expect(dayBar(rules, "2026-09-29")).toEqual({ kind: "day_of_month", code: "blackout", dayOfMonth: 29 });
+    // A Tuesday, outside every window and not a blocked day of the month.
+    expect(dayBar(rules, "2026-09-15")).toBeNull();
+  });
+
+  it("covers both ends of a closed period - the window is inclusive, as the refusal says it is", () => {
+    expect(dayBar(rules, "2026-12-20")).not.toBeNull();
+    expect(dayBar(rules, "2027-01-02")).not.toBeNull();
+    expect(dayBar(rules, "2026-12-19")).toBeNull();
+    expect(dayBar(rules, "2027-01-03")).toBeNull();
+  });
+
+  it("bars nothing when the policy configures nothing", () => {
+    const none = parseRestrictions({});
+    for (const d of ["2026-09-14", "2026-12-22", "2026-09-29"]) expect(dayBar(none, d)).toBeNull();
+  });
+
+  it("says why, in words a calendar cell can carry", () => {
+    expect(dayBarReason(dayBar(rules, "2026-09-14")!)).toBe("No leave on a Monday");
+    expect(dayBarReason(dayBar(rules, "2026-12-22")!)).toBe("Closed: Year-end close");
+    expect(dayBarReason(dayBar(rules, "2026-09-29")!)).toBe("No leave on the 29th of the month");
+    // An unlabelled window still has to say something, so it states its own dates.
+    const unlabelled = parseRestrictions({ timing: { blackouts: [{ from: "2026-03-01", to: "2026-03-03" }] } });
+    expect(dayBarReason(dayBar(unlabelled, "2026-03-02")!)).toBe("Closed 2026-03-01 to 2026-03-03");
   });
 });
 

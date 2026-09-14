@@ -34,13 +34,13 @@ test("a ticket is assigned, routed and prioritised from its own drawer", async (
     // Owner. The picker is the shared combobox, so the person is searched for rather than scrolled to.
     await drawer.getByLabel("Assignee").click();
     await page.getByPlaceholder("Search people…").fill("Eve");
-    await page.getByRole("button", { name: "Eve Employee" }).first().click();
+    await page.getByRole("option", { name: "Eve Employee" }).first().click();
     await expect.poll(() => field(page, path, "assignee"), { timeout: 30_000 }).toBeTruthy();
 
     // Queue. Routing is the one that decides who ever looks at this again.
-    await drawer.getByLabel("Department").click();
+    await drawer.getByLabel("Department", { exact: true }).click();
     await page.getByPlaceholder("Search departments…").fill(department.name);
-    await page.getByRole("button", { name: department.name }).first().click();
+    await page.getByRole("option", { name: department.name }).first().click();
     await expect.poll(() => field(page, path, "department"), { timeout: 30_000 }).toBe(department.path);
 
     // How much it matters, which is a different grant again.
@@ -53,7 +53,7 @@ test("a ticket is assigned, routed and prioritised from its own drawer", async (
     const reopened = page.getByRole("dialog").filter({ hasText: subject });
     await expect(reopened).toBeVisible({ timeout: 30_000 });
     await expect(reopened.getByLabel("Assignee")).toContainText("Eve Employee");
-    await expect(reopened.getByLabel("Department")).toContainText(department.name);
+    await expect(reopened.getByLabel("Department", { exact: true })).toContainText(department.name);
   } finally {
     await purge(admin, path);
   }

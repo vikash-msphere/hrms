@@ -70,7 +70,7 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
 
   return (
     <Card className="sentry-mask">
-      <CardHeader className="flex-row items-center justify-between space-y-0">
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">
           <AccessAction collection="settlements" label="Full & final settlement">
             <span className="flex items-center gap-2"><Calculator className="h-4 w-4 text-primary" /> Full & final settlement</span>

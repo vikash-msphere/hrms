@@ -435,8 +435,13 @@ export function mergeRestrictions(orgBaseline: unknown, typeOverride: unknown): 
 }
 
 /** Which leaves the stored blob actually mentions - "group.leaf" keys, plus "soft_rules". A leaf mentioned
- *  with an explicit null is present (that is the exemption), a leaf never written is absent. */
-function storedLeaves(raw: unknown): Set<string> {
+ *  with an explicit null is present (that is the exemption), a leaf never written is absent.
+ *
+ *  Exported because it is the same question the policy EDITOR has to answer on every row - is this rule the
+ *  org's or this type's own - and the merge above is written from it. A second reading of "what does this blob
+ *  mention" in the UI would be the place the screen and the merge start disagreeing about what a type
+ *  overrides. */
+export function storedLeaves(raw: unknown): Set<string> {
   const src: Record<string, unknown> = isObj(raw) ? raw : typeof raw === "string" ? safeJson(raw) : {};
   const out = new Set<string>();
   for (const [group, v] of Object.entries(src)) {
@@ -537,6 +542,63 @@ export function noticeBandLabel(b: NoticeBand): string {
   if (b.upTo === null) return b.moreThan === null ? "any length" : `over ${d(b.moreThan)}`;
   if (b.moreThan === null) return `up to ${d(b.upTo)}`;
   return `over ${d(b.moreThan)}, up to ${d(b.upTo)}`;
+}
+
+// ---- Per-day bars -------------------------------------------------------------------------------------
+//
+// THE RULES THAT CAN BE DECIDED FOR ONE DATE, on their own, without knowing the rest of the request.
+//
+// They exist as their own functions because two places need them and must not disagree: the evaluator, which
+// refuses a request that covers a barred day, and the CALENDAR, which has to grey that day out before anybody
+// picks it. Until this existed the calendar knew nothing - a closed period, a blocked weekday and a blocked
+// day of the month all rendered as ordinary selectable days, and the only way to discover one was to be
+// refused after picking it.
+//
+// Notice requirements are deliberately NOT here: what notice a day needs depends on how long the request is,
+// so it cannot be decided for a date on its own. That rule belongs in the standing policy list, not on a cell.
+
+/** Why one day is barred. Carries the specifics, so each caller words it for its own surface. */
+export type DayBar =
+  | { kind: "weekday"; code: "blocked_weekday"; weekday: number }
+  | { kind: "window"; code: "blackout"; window: Blackout }
+  | { kind: "day_of_month"; code: "blackout"; dayOfMonth: number };
+
+const barWeekday = (r: LeaveRestrictions, ymd: string): DayBar | null => {
+  const dows = r.request.blocked_weekdays;
+  if (!dows?.length) return null;
+  const weekday = new Date(Date.parse(ymd + "T00:00:00Z")).getUTCDay();
+  return dows.includes(weekday) ? { kind: "weekday", code: "blocked_weekday", weekday } : null;
+};
+const barWindow = (r: LeaveRestrictions, ymd: string): DayBar | null => {
+  const window = (r.timing.blackouts ?? []).find((b) => ymd >= b.from && ymd <= b.to);
+  return window ? { kind: "window", code: "blackout", window } : null;
+};
+const barDayOfMonth = (r: LeaveRestrictions, ymd: string): DayBar | null => {
+  const dom = r.timing.blackout_days_of_month;
+  if (!dom?.length) return null;
+  const dayOfMonth = new Date(Date.parse(ymd + "T00:00:00Z")).getUTCDate();
+  return dom.includes(dayOfMonth) ? { kind: "day_of_month", code: "blackout", dayOfMonth } : null;
+};
+
+/**
+ * Is this day barred by policy, and why? Null when it is bookable.
+ *
+ * For a CALENDAR CELL, which shows one reason or none. The evaluator scans each rule separately, because a
+ * day can break more than one and a request refused for two reasons should say both.
+ *
+ * Only meaningful for the person the leave is for: every rule here is a planning courtesy that HR filing on
+ * somebody's behalf is exempt from (the same `onBehalf` exemption the evaluator applies), so a caller filing
+ * for someone else must not pass these to the calendar.
+ */
+export function dayBar(r: LeaveRestrictions, ymd: string): DayBar | null {
+  return barWeekday(r, ymd) ?? barWindow(r, ymd) ?? barDayOfMonth(r, ymd);
+}
+
+/** A bar as a few words, for a calendar cell's tooltip or a legend. */
+export function dayBarReason(b: DayBar): string {
+  if (b.kind === "weekday") return `No leave on a ${WEEKDAYS[b.weekday]}`;
+  if (b.kind === "day_of_month") return `No leave on the ${ordinal(b.dayOfMonth)} of the month`;
+  return b.window.label ? `Closed: ${b.window.label}` : `Closed ${b.window.from} to ${b.window.to}`;
 }
 
 /** The sandwich rule to charge days with (absent policy = charge nothing for days off, as before). */
@@ -746,7 +808,8 @@ export function checkLeaveRestrictions(f: RestrictionFacts): Violation[] {
   }
   const blockedDows = r.request.blocked_weekdays;
   if (blockedDows?.length && !f.onBehalf) {
-    const hit = charged().find((ms) => blockedDows.includes(new Date(ms).getUTCDay()));
+    // Through the same predicate the calendar greys the cell with - see the per-day bars above.
+    const hit = charged().find((ms) => barWeekday(r, ymdUtc(ms)));
     if (hit !== undefined) add("blocked_weekday", `${type} can't be taken on a ${WEEKDAYS[new Date(hit).getUTCDay()]} (${ymdUtc(hit)}).`);
   }
   if (r.request.reason_required && (f.reason ?? "").trim().length < Math.max(1, r.request.reason_min_length ?? 1)) {
@@ -788,11 +851,15 @@ export function checkLeaveRestrictions(f: RestrictionFacts): Violation[] {
     add("max_advance", `${type} can't be booked more than ${plural(r.timing.max_advance_days)} ahead.`);
   }
   if (!f.onBehalf) {
-    const window = (r.timing.blackouts ?? []).find((b) => charged().some((ms) => { const d = ymdUtc(ms); return d >= b.from && d <= b.to; }));
+    // Both blackout kinds go through the per-day predicates the calendar uses, so a day the grid greys out and
+    // a day the server refuses are the same set by construction. Iterating the WINDOWS (rather than the days)
+    // is kept: it reports the earliest-declared window covering the request, which is the one an admin
+    // recognises, where scanning days would report whichever window happened to cover the earliest day.
+    const window = (r.timing.blackouts ?? []).find((b) => charged().some((ms) => barWindow({ ...r, timing: { ...r.timing, blackouts: [b] } }, ymdUtc(ms))));
     if (window) add("blackout", `${type} is closed from ${window.from} to ${window.to}${window.label ? ` (${window.label})` : ""}.`);
     const dom = r.timing.blackout_days_of_month;
     if (dom?.length) {
-      const hit = charged().find((ms) => dom.includes(new Date(ms).getUTCDate()));
+      const hit = charged().find((ms) => barDayOfMonth(r, ymdUtc(ms)));
       if (hit !== undefined) add("blackout", `${type} can't be taken on the ${dom.map(ordinal).join(", ")} of a month (${ymdUtc(hit)}).`);
     }
   }
@@ -978,56 +1045,158 @@ function monthTotals(f: RestrictionFacts, sameType: readonly LeaveNeighbour[], s
 // ---- Description ----------------------------------------------------------------------------------------
 
 /**
+ * One sentence of the policy, and the leaf it came from.
+ *
+ * The LEAF is the point. A screen that prints the policy has to say where each clause came from - the org's
+ * baseline or this type's own override - and matching sentences against each other to work that out is
+ * guesswork over text we then can't reword. So the clause carries its own provenance, which the editor reads
+ * against `storedLeaves` (below) to badge it.
+ */
+export type RestrictionClause = { group: RestrictionGroup | "soft_rules"; leaf: string; text: string };
+
+/**
  * The policy as sentences, for the leave-type editor's summary and the request dialog's hints. One list, so
  * the screen and the enforcement cannot describe different rules.
+ *
+ * `describeRestrictions` is this, flattened - the two must not drift, so it maps over this rather than
+ * repeating any of the wording.
  */
-export function describeRestrictions(r: LeaveRestrictions): string[] {
-  const out: string[] = [];
+export function describeRestrictionsByGroup(r: LeaveRestrictions): RestrictionClause[] {
+  const out: RestrictionClause[] = [];
+  const say = (group: RestrictionGroup | "soft_rules", leaf: string, text: string) => out.push({ group, leaf, text });
   const d = (n: number) => `${fmt(n)} day${n === 1 ? "" : "s"}`;
   const e = r.eligibility, q = r.quota, t = r.timing, rq = r.request;
-  if (e.min_tenure_days !== null) out.push(`available after ${d(e.min_tenure_days)} of service`);
-  if (e.max_occurrences_lifetime !== null) out.push(`at most ${e.max_occurrences_lifetime} time${e.max_occurrences_lifetime === 1 ? "" : "s"} in total`);
-  if (e.max_lifetime_days !== null) out.push(`at most ${d(e.max_lifetime_days)} in total`);
-  if (rq.min_days !== null) out.push(`at least ${d(rq.min_days)} at a time`);
-  if (rq.max_days !== null) out.push(`at most ${d(rq.max_days)} per request`);
-  if (rq.max_consecutive_days !== null) out.push(`at most ${d(rq.max_consecutive_days)} in a row`);
-  if (rq.half_day_allowed === false) out.push("whole days only");
-  if (rq.must_be_single_block) out.push("taken as one block");
-  if (rq.blocked_weekdays?.length) out.push(`not on a ${rq.blocked_weekdays.map((n) => WEEKDAYS[n]).join(" or ")}`);
-  if (rq.reason_required) out.push("a reason is required");
-  if (rq.document_required_over_days !== null) out.push(`a document is required over ${d(rq.document_required_over_days)}`);
-  if (rq.backdate_days !== null) out.push(rq.backdate_days === 0 ? "no back-dating" : `back-dated up to ${d(rq.backdate_days)}`);
+  if (e.min_tenure_days !== null) say("eligibility", "min_tenure_days", `available after ${d(e.min_tenure_days)} of service`);
+  if (e.max_occurrences_lifetime !== null) say("eligibility", "max_occurrences_lifetime", `at most ${e.max_occurrences_lifetime} time${e.max_occurrences_lifetime === 1 ? "" : "s"} in total`);
+  if (e.max_lifetime_days !== null) say("eligibility", "max_lifetime_days", `at most ${d(e.max_lifetime_days)} in total`);
+  if (rq.min_days !== null) say("request", "min_days", `at least ${d(rq.min_days)} at a time`);
+  if (rq.max_days !== null) say("request", "max_days", `at most ${d(rq.max_days)} per request`);
+  if (rq.max_consecutive_days !== null) say("request", "max_consecutive_days", `at most ${d(rq.max_consecutive_days)} in a row`);
+  if (rq.half_day_allowed === false) say("request", "half_day_allowed", "whole days only");
+  if (rq.must_be_single_block) say("request", "must_be_single_block", "taken as one block");
+  if (rq.blocked_weekdays?.length) say("request", "blocked_weekdays", `not on a ${rq.blocked_weekdays.map((n) => WEEKDAYS[n]).join(" or ")}`);
+  if (rq.reason_required) say("request", "reason_required", "a reason is required");
+  if (rq.document_required_over_days !== null) say("request", "document_required_over_days", `a document is required over ${d(rq.document_required_over_days)}`);
+  if (rq.backdate_days !== null) say("request", "backdate_days", rq.backdate_days === 0 ? "no back-dating" : `back-dated up to ${d(rq.backdate_days)}`);
   // Said as the BANDS it enforces, not as the tiers it is stored as - "2 days for up to 1 day" leaves a
   // reader to work out for themselves what a 3-day request needs.
   const bands = noticeBands(t.advance_notice);
   if (bands.length) {
-    out.push(`notice: ${bands.map((b) => `${noticeBandLabel(b)} needs ${b.noticeDays === null ? "none" : d(b.noticeDays)}`).join("; ")}`);
+    say("timing", "advance_notice", `notice: ${bands.map((b) => `${noticeBandLabel(b)} needs ${b.noticeDays === null ? "none" : d(b.noticeDays)}`).join("; ")}`);
   }
-  if (t.max_advance_days !== null) out.push(`booked at most ${d(t.max_advance_days)} ahead`);
-  if (t.blackouts?.length) out.push(`closed ${t.blackouts.map((b) => b.label || `${b.from}-${b.to}`).join(", ")}`);
-  if (t.blackout_days_of_month?.length) out.push(`not on the ${t.blackout_days_of_month.map(ordinal).join(", ")} of a month`);
-  if (t.block_adjacent_to_holiday) out.push("not next to a public holiday");
-  if (q.max_days_per_month !== null) out.push(`at most ${d(q.max_days_per_month)} a month`);
-  if (q.max_days_per_year !== null) out.push(`at most ${d(q.max_days_per_year)} a ${q.year_basis === "anniversary" ? "year from your joining date" : q.year_basis === "fiscal" ? "financial year" : "calendar year"}`);
-  if (q.max_requests_per_month !== null) out.push(`at most ${q.max_requests_per_month} request${q.max_requests_per_month === 1 ? "" : "s"} a month`);
-  if (q.max_requests_per_year !== null) out.push(`at most ${q.max_requests_per_year} request${q.max_requests_per_year === 1 ? "" : "s"} a year`);
-  if (q.min_gap_days !== null) out.push(`${d(q.min_gap_days)} between requests`);
+  if (t.max_advance_days !== null) say("timing", "max_advance_days", `booked at most ${d(t.max_advance_days)} ahead`);
+  if (t.blackouts?.length) say("timing", "blackouts", `closed ${t.blackouts.map((b) => b.label || `${b.from}-${b.to}`).join(", ")}`);
+  if (t.blackout_days_of_month?.length) say("timing", "blackout_days_of_month", `not on the ${t.blackout_days_of_month.map(ordinal).join(", ")} of a month`);
+  if (t.block_adjacent_to_holiday) say("timing", "block_adjacent_to_holiday", "not next to a public holiday");
+  if (q.max_days_per_month !== null) say("quota", "max_days_per_month", `at most ${d(q.max_days_per_month)} a month`);
+  if (q.max_days_per_year !== null) say("quota", "max_days_per_year", `at most ${d(q.max_days_per_year)} a ${q.year_basis === "anniversary" ? "year from your joining date" : q.year_basis === "fiscal" ? "financial year" : "calendar year"}`);
+  if (q.max_requests_per_month !== null) say("quota", "max_requests_per_month", `at most ${q.max_requests_per_month} request${q.max_requests_per_month === 1 ? "" : "s"} a month`);
+  if (q.max_requests_per_year !== null) say("quota", "max_requests_per_year", `at most ${q.max_requests_per_year} request${q.max_requests_per_year === 1 ? "" : "s"} a year`);
+  if (q.min_gap_days !== null) say("quota", "min_gap_days", `${d(q.min_gap_days)} between requests`);
   if (r.combinations.no_combination_with?.length) {
-    out.push(`not combined with ${r.combinations.no_combination_with.length} other type${r.combinations.no_combination_with.length === 1 ? "" : "s"}`);
+    say("combinations", "no_combination_with", `not combined with ${r.combinations.no_combination_with.length} other type${r.combinations.no_combination_with.length === 1 ? "" : "s"}`);
   }
   const s = r.counting.sandwich;
   if (s && (s.weekends !== "exclude" || s.holidays !== "exclude")) {
     const parts: string[] = [];
     if (s.weekends !== "exclude") parts.push(`weekends (${s.weekends})`);
     if (s.holidays !== "exclude") parts.push(`holidays (${s.holidays})`);
-    out.push(`sandwich rule charges ${parts.join(" and ")}`);
+    say("counting", "sandwich", `sandwich rule charges ${parts.join(" and ")}`);
   }
-  if (r.exit.during_notice === "blocked") out.push("not during notice period");
-  if (r.exit.during_notice === "capped" && r.exit.notice_cap_days !== null) out.push(`at most ${d(r.exit.notice_cap_days)} during notice period`);
+  if (r.exit.during_notice === "blocked") say("exit", "during_notice", "not during notice period");
+  if (r.exit.during_notice === "capped" && r.exit.notice_cap_days !== null) say("exit", "during_notice", `at most ${d(r.exit.notice_cap_days)} during notice period`);
   const jr = r.accrual.joining_rule;
   if (jr) {
-    out.push(`joining month: ${jr.if_on_or_before === "full" ? "credited in full" : "prorated"} if joined by the ${ordinal(jr.cutoff_day)}, ${jr.if_after === "none" ? "not credited" : "prorated"} after`);
+    say("accrual", "joining_rule", `joining month: ${jr.if_on_or_before === "full" ? "credited in full" : "prorated"} if joined by the ${ordinal(jr.cutoff_day)}, ${jr.if_after === "none" ? "not credited" : "prorated"} after`);
   }
-  if (r.soft_rules?.length) out.push(`${r.soft_rules.length} rule${r.soft_rules.length === 1 ? "" : "s"} warn instead of blocking`);
+  if (r.soft_rules?.length) say("soft_rules", "soft_rules", `${r.soft_rules.length} rule${r.soft_rules.length === 1 ? "" : "s"} warn instead of blocking`);
   return out;
+}
+
+/** The policy as a flat list of sentences, in the same order and the same words. */
+export function describeRestrictions(r: LeaveRestrictions): string[] {
+  return describeRestrictionsByGroup(r).map((c) => c.text);
+}
+
+/**
+ * What each rule code is called on screen.
+ *
+ * Beside the codes rather than in the editor, because the code is what a refusal and a waiver are both written
+ * in: the words a waiver chip shows and the words a violation message uses have to be the same words, or the
+ * approver reading "advance_notice was waived" is left matching it to a rule by eye.
+ */
+export const RESTRICTION_LABELS: Record<RestrictionCode, string> = {
+  min_tenure: "Service required",
+  max_occurrences: "Times in total",
+  max_lifetime_days: "Days in total",
+  min_days: "Minimum per request",
+  max_days: "Maximum per request",
+  max_consecutive: "Maximum in a row",
+  half_day: "Half days",
+  blocked_weekday: "Blocked weekdays",
+  single_block: "One block only",
+  reason_required: "Reason required",
+  document_required: "Document required",
+  backdated: "Back-dating",
+  advance_notice: "Advance notice",
+  max_advance: "Booked ahead",
+  blackout: "Closed periods",
+  holiday_adjacent: "Next to a holiday",
+  max_days_per_month: "Days a month",
+  max_days_per_year: "Days a year",
+  max_requests_per_month: "Requests a month",
+  max_requests_per_year: "Requests a year",
+  min_gap: "Gap between requests",
+  combination: "Combinations",
+  exit_notice: "During notice period",
+  joining_month: "Joining month",
+};
+
+/**
+ * The leaves a rule code is decided by - so a screen can say whether waiving it would do anything.
+ *
+ * A waiver names a CODE and the policy is written in LEAVES, and the two are not one to one: `blackout` is
+ * decided by two separate leaves, `combination` by a list and the gap that qualifies it. Waiving a code whose
+ * leaves are all unset waives nothing at all, which on screen looks identical to a waiver that works.
+ */
+/**
+ * The rule code a leaf is judged by - the inverse of `RESTRICTION_CODE_LEAVES`, built once.
+ *
+ * What it is for: a screen that lists the policy has a CLAUSE per leaf (`describeRestrictionsByGroup`),
+ * and the evaluator answers in CODES. Showing "this rule is met / this rule is not" means joining the two,
+ * and a screen that derived the join itself would be a second opinion about which rule a refusal belongs to.
+ */
+export const LEAF_CODES: Record<string, RestrictionCode> = {};
+
+export const RESTRICTION_CODE_LEAVES: Record<RestrictionCode, readonly string[]> = {
+  min_tenure: ["eligibility.min_tenure_days"],
+  max_occurrences: ["eligibility.max_occurrences_lifetime"],
+  max_lifetime_days: ["eligibility.max_lifetime_days"],
+  min_days: ["request.min_days"],
+  max_days: ["request.max_days"],
+  max_consecutive: ["request.max_consecutive_days"],
+  half_day: ["request.half_day_allowed"],
+  blocked_weekday: ["request.blocked_weekdays"],
+  single_block: ["request.must_be_single_block"],
+  reason_required: ["request.reason_required", "request.reason_min_length"],
+  document_required: ["request.document_required_over_days"],
+  backdated: ["request.backdate_days"],
+  advance_notice: ["timing.advance_notice"],
+  max_advance: ["timing.max_advance_days"],
+  blackout: ["timing.blackouts", "timing.blackout_days_of_month"],
+  holiday_adjacent: ["timing.block_adjacent_to_holiday"],
+  max_days_per_month: ["quota.max_days_per_month"],
+  max_days_per_year: ["quota.max_days_per_year"],
+  max_requests_per_month: ["quota.max_requests_per_month"],
+  max_requests_per_year: ["quota.max_requests_per_year"],
+  min_gap: ["quota.min_gap_days"],
+  combination: ["combinations.no_combination_with"],
+  exit_notice: ["exit.during_notice"],
+  joining_month: ["accrual.joining_rule"],
+};
+
+for (const code of RESTRICTION_CODES) {
+  // First writer wins, so a leaf shared by two codes keeps the one that owns it in the catalogue order -
+  // today no leaf is shared, and this stops a later addition silently re-pointing an existing one.
+  for (const leaf of RESTRICTION_CODE_LEAVES[code]) LEAF_CODES[leaf] ??= code;
 }

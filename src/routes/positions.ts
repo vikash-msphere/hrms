@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
-import { positionSpec, listPositions, changeRole } from "../services/positions";
+import { positionSpec, listPositions, changeRole, EMPLOYMENT_TYPES, WORK_MODES } from "../services/positions";
 import { toPositionResource } from "../http/serialize";
 
 // Effective-dated role history. POST records a promotion/transfer (closes the current row, opens a new one),
@@ -12,6 +12,8 @@ const changeSchema = z
     job_title: z.string().nullable().optional(),
     department: z.string().nullable().optional(),
     location: z.string().nullable().optional(),
+    employment_type: z.enum(EMPLOYMENT_TYPES).nullable().optional(),
+    work_mode: z.enum(WORK_MODES).nullable().optional(),
     note: z.string().nullable().optional(),
     effective_from: z.string(),
   })

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Briefcase, Plus } from "lucide-react";
 import { getAllPages, create } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { idOf } from "@/lib/utils";
+import { humanize, idOf } from "@/lib/utils";
 import { todayStr as todayYmd } from "@/lib/orgDay";
 import type { Department, Position } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,6 +16,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/components/ui/use-toast";
 
 const NONE = "__none__";
+// Mirrors the enums the column and the requisition both use (src/services/positions.ts).
+const EMPLOYMENT_TYPES = ["full_time", "part_time", "contract", "intern", "temporary"] as const;
+const WORK_MODES = ["on_site", "hybrid", "remote"] as const;
 
 // Role history (designation / department / location) + a "Change role" action - the promotion/transfer
 // analog of the compensation "Revise". A change is a new effective-dated row; the previously-current row is
@@ -28,7 +31,7 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
   const reqSeq = useRef(0); // only the newest walk may write the rows (see `load`)
   const [loaded, setLoaded] = useState(false);
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ job_title: "", department: NONE, location: "", effective_from: todayYmd(), note: "" });
+  const [form, setForm] = useState({ job_title: "", department: NONE, location: "", employment_type: NONE, work_mode: NONE, effective_from: todayYmd(), note: "" });
 
   const deptName = useMemo(() => {
     const m = new Map(departments.map((d) => [idOf(d.path), d.display_name]));
@@ -65,6 +68,8 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
       job_title: current?.job_title ?? "",
       department: current?.department ? `departments/${idOf(current.department)}` : NONE,
       location: current?.location ?? "",
+      employment_type: current?.employment_type ?? NONE,
+      work_mode: current?.work_mode ?? NONE,
       effective_from: todayYmd(),
       note: "",
     });
@@ -77,6 +82,11 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
       job_title: form.job_title.trim(),
       department: form.department === NONE ? "" : form.department,
       location: form.location.trim(),
+      // `null` clears the column, NOT "": the route validates these against the enum, so an empty string is
+      // rejected outright. `undefined` would mean something different again - carry the current value
+      // forward - which is not what an explicitly emptied select means.
+      employment_type: form.employment_type === NONE ? null : form.employment_type,
+      work_mode: form.work_mode === NONE ? null : form.work_mode,
       effective_from: form.effective_from,
       note: form.note.trim(),
     });
@@ -91,13 +101,15 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
   if ((form.job_title.trim() || "-") !== (current?.job_title ?? "-")) deltas.push({ label: "Designation", from: current?.job_title ?? "-", to: form.job_title.trim() || "-" });
   if (form.department !== currentDept) deltas.push({ label: "Department", from: deptName(current?.department), to: form.department === NONE ? "-" : deptName(form.department) });
   if ((form.location.trim() || "-") !== (current?.location ?? "-")) deltas.push({ label: "Location", from: current?.location ?? "-", to: form.location.trim() || "-" });
+  if (form.employment_type !== (current?.employment_type ?? NONE)) deltas.push({ label: "Employment type", from: humanize(current?.employment_type ?? "-"), to: form.employment_type === NONE ? "-" : humanize(form.employment_type) });
+  if (form.work_mode !== (current?.work_mode ?? NONE)) deltas.push({ label: "Work mode", from: humanize(current?.work_mode ?? "-"), to: form.work_mode === NONE ? "-" : humanize(form.work_mode) });
   // Effective before the row it would supersede: the history would read out of order, and "current" would be
   // decided by the wrong row. Worth blocking rather than warning.
   const backdated = !!current && !!form.effective_from && form.effective_from <= current.effective_from;
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0">
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">
           <AccessAction collection="positions" label="Role history">
             <span className="flex items-center gap-2"><Briefcase className="h-4 w-4 text-primary" /> Role history</span>
@@ -181,6 +193,28 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
               </Select>
             </Field>
             <Field label="Location (optional)"><Input value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} placeholder="e.g. office city" /></Field>
+          </FieldRow>
+          {/* Effective-dated with the rest of the role: converting a contract to permanent, or moving someone
+              to hybrid, is a change with a date - not an attribute to overwrite in place. */}
+          <FieldRow>
+            <Field label="Employment type (optional)">
+              <Select value={form.employment_type} onValueChange={(v) => setForm({ ...form, employment_type: v })}>
+                <SelectTrigger><SelectValue placeholder="Not set" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NONE}>Not set</SelectItem>
+                  {EMPLOYMENT_TYPES.map((t) => <SelectItem key={t} value={t}>{humanize(t)}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="Work mode (optional)">
+              <Select value={form.work_mode} onValueChange={(v) => setForm({ ...form, work_mode: v })}>
+                <SelectTrigger><SelectValue placeholder="Not set" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NONE}>Not set</SelectItem>
+                  {WORK_MODES.map((m) => <SelectItem key={m} value={m}>{humanize(m)}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
           </FieldRow>
           <Field label="Note (optional)" hint="Reason for the change, e.g. Promotion, Transfer."><Input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></Field>
           {current && (

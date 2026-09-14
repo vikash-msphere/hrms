@@ -39,7 +39,9 @@ test("HR adds an employee, and a person captures their own bank details", async 
   await expect(row).toHaveCount(1);
   await row.click();
   await expect(hr.getByRole("heading", { level: 1, name: new RegExp(last) })).toBeVisible();
-  await expect(hr.getByRole("button", { name: /^EMP-\d+/ })).toBeVisible();
+  // The header's facts band, where the assigned number is a labelled value (its copy affordance is a
+  // hover icon named for the label, so the number itself is text rather than a button).
+  await expect(hr.getByText(/^EMP-\d+$/)).toBeVisible();
 
   // A bank is picked from the org's list, not typed - so an admin puts one on the list. An empty list is a
   // dead end the panel has to name rather than showing an empty picker, and that is what the bank editor

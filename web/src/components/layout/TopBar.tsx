@@ -52,6 +52,8 @@ export function TopBar({
   const { org } = useOrg();
   const groups = resolveQuickMenu(me, org.quick_actions);
   // "Give kudos" gets its own always-visible top-bar item (not buried in the "+" menu); the rest stay there.
+  // Icon-only, like Support beside it: this is the recognise-someone-from-anywhere entry point, and the
+  // pre-filled path is the button on a person's profile, which already knows who is being praised.
   const kudos = visibleQuickActions(me).find((a) => a.id === KUDOS_ACTION_ID);
   // "Support" gets its own icon-only top-bar affordance: a get-unstuck-anywhere entry point. The dropdown
   // raises a ticket (reusing the new-ticket quick action) or jumps to the full Support page. Gated on the
@@ -148,10 +150,9 @@ export function TopBar({
             onClick={() => runQuickAction(kudos)}
             aria-label="Give kudos"
             title="Give kudos"
-            className="hidden h-9 items-center gap-2 rounded-lg border bg-card px-2.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground md:flex"
+            className="hidden h-9 w-9 items-center justify-center rounded-lg border bg-card text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground md:flex"
           >
             <Sparkles className="h-4 w-4 shrink-0 text-amber-500" />
-            <span className="hidden lg:inline">Kudos</span>
           </button>
         )}
 

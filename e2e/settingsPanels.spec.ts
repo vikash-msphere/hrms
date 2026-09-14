@@ -10,9 +10,16 @@ import { gotoRoute, test, expect, toast } from "./fixtures";
 //
 // So: change ONE toggle, save, reload the panel from cold, and require the new value to be what the panel
 // draws. Then put it back, because these settings change how the whole app behaves for every other spec.
-const PANELS: { key: string; title: string }[] = [
+// `checkbox` picks WHICH toggle to flip, for the panels whose first one belongs to another spec. Default 0.
+const PANELS: { key: string; title: string; checkbox?: number }[] = [
   { key: "identity", title: "Name & branding" },
-  { key: "defaults", title: "Probation & holiday defaults" },
+  // Not the first checkbox. That one is `settings/holidays.feed_enabled`, which `calendarFeed.spec.ts` turns
+  // ON for its own run - so this flipped it, saved it (200), and read back the other spec's value a moment
+  // later, reporting a panel that saves perfectly well as one that "did not keep the change". The second,
+  // `comp_off_on_holiday_work`, is on the same blob and the same Save, so the round trip this is here to
+  // prove is unchanged - it just belongs to nobody else. Skipping the panel outright (as `attendance` and
+  // `dashboard` are) would have given that up for no reason.
+  { key: "defaults", title: "Probation & holiday defaults", checkbox: 1 },
   { key: "employee-ids", title: "Employee IDs" },
   { key: "employee-fields", title: "Employee identity fields" },
   { key: "leave-policy", title: "Leave policy" },
@@ -63,11 +70,20 @@ test("every settings panel offers a save, and the one that takes a toggle keeps 
       // the stored blob to prove the round trip - which is more than the flip below would have shown.
       if (panel.key === "attendance" || panel.key === "dashboard") continue;
 
-      const toggle = page.getByRole("checkbox").first();
+      const toggle = page.getByRole("checkbox").nth(panel.checkbox ?? 0);
       // Waited for, not counted immediately: these panels fetch their blob after mount, so a count taken on
       // the first paint is 0 and the round trip would be skipped silently.
       const hasToggle = await toggle.waitFor({ state: "visible", timeout: 10_000 }).then(() => true).catch(() => false);
       if (!hasToggle) continue;
+      // Waited until the value HOLDS STILL before touching it. These panels paint their defaults and fill
+      // them in from the stored blob a moment later - the restore block below already polls for exactly that
+      // - so a flip landing inside that window is a click the refill then overwrites, and the assertion right
+      // after it fails on a panel that takes the change perfectly well.
+      await expect.poll(async () => {
+        const first = await toggle.isChecked();
+        await page.waitForTimeout(400);
+        return first === (await toggle.isChecked());
+      }, { timeout: 15_000 }).toBe(true);
       const before = await toggle.isChecked();
       await toggle.click();
       await expect(toggle).toBeChecked({ checked: !before });
@@ -78,7 +94,7 @@ test("every settings panel offers a save, and the one that takes a toggle keeps 
 
       await page.reload();
       await expect(page.locator("h1").first()).toHaveText(panel.title, { timeout: 15_000 });
-      await expect(page.getByRole("checkbox").first(), `${panel.key} did not keep the change`).toBeChecked({ checked: !before, timeout: 15_000 });
+      await expect(page.getByRole("checkbox").nth(panel.checkbox ?? 0), `${panel.key} did not keep the change`).toBeChecked({ checked: !before, timeout: 15_000 });
     } catch (e) {
       failures.push(`${panel.key}: ${(e as Error).message.split("\n")[0]}`);
     } finally {
@@ -88,7 +104,7 @@ test("every settings panel offers a save, and the one that takes a toggle keeps 
       if (flipped !== null) {
         try {
           await gotoRoute(page, `settings/${panel.key}`);
-          const box = page.getByRole("checkbox").first();
+          const box = page.getByRole("checkbox").nth(panel.checkbox ?? 0);
           await expect(box).toBeVisible({ timeout: 15_000 });
           // Polled rather than read once: the panel paints its defaults and fills them in from the stored blob
           // a moment later, so an immediate read sees the default and "puts back" the wrong value.
@@ -96,7 +112,7 @@ test("every settings panel offers a save, and the one that takes a toggle keeps 
           await box.click();
           await Promise.all([writeLanded(page), page.getByRole("button", { name: /^Save/ }).first().click()]);
           await page.reload();
-          await expect(page.getByRole("checkbox").first(), `${panel.key} could not be put back`).toBeChecked({ checked: flipped, timeout: 15_000 });
+          await expect(page.getByRole("checkbox").nth(panel.checkbox ?? 0), `${panel.key} could not be put back`).toBeChecked({ checked: flipped, timeout: 15_000 });
         } catch (e) {
           failures.push(`${panel.key} (restore): ${(e as Error).message.split("\n")[0]}`);
         }

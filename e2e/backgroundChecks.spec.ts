@@ -20,7 +20,7 @@ test("the standard set of checks is added for one employee in a single press", a
 
   await form.getByLabel("Employee").click();
   await page.getByPlaceholder(/Search|Select/).last().fill("Eve");
-  await expect(page.getByRole("button", { name: /Eve Employee/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Eve Employee/ })).toBeVisible();
   await page.keyboard.press("Enter");
   await form.getByLabel("Vendor / agency").fill(vendor);
 

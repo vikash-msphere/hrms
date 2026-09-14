@@ -20,7 +20,7 @@ test("emailing the candidate their interview slot confirms first and reports who
   const form = page.getByRole("dialog");
   await form.getByLabel("Application").click();
   await page.getByPlaceholder(/Search/).last().fill(candidate);
-  await expect(page.getByRole("button", { name: new RegExp(candidate) })).toBeVisible();
+  await expect(page.getByRole("option", { name: new RegExp(candidate) })).toBeVisible();
   await page.keyboard.press("Enter");
   await form.getByLabel("Round").fill("Screening call");
   await form.getByLabel("Date", { exact: true }).fill(inDays(3));

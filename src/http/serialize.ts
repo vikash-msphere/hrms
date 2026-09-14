@@ -21,6 +21,17 @@ import { todayMsOf } from "../domain/attendance";
 // the activity endpoint itself, …) that would fail the target-resolve gate and audit a bogus denial.
 const RESOLVABLE_ENTITIES = new Set(RESOURCE_COLLECTIONS);
 
+// KNOWN FALSE CONFLICT on the employee SUB-resources. `bank-account`, `personal-info`, `identity` and `tax`
+// are separate encrypted blobs on the employee row, but each one's etag is this function over the SAME
+// `employees.updated_at`. So a write to any one of them bumps the version every other one is holding, and the
+// next If-Match PATCH gets a 409 naming a conflict that does not exist: HR filling in an emergency contact
+// invalidates the bank form the employee has open, on fields neither of them touched. The only remedy the UI
+// offers is "reload and reapply" for a change nobody actually collided on.
+//
+// The real fix is a version per sub-resource rather than one per row, which is a schema change plus every
+// reader and writer of those four blobs - too big to slip into unrelated work. Until then, expect the e2e
+// suite to surface it as an intermittent 409 in employeeRecord.spec.ts whenever a spec that writes the shared
+// fixture person's personal-info (profileNudges.spec.ts) runs alongside it.
 export const etagOf = (updateTimeMs: number) => `W/"${updateTimeMs}"`;
 const iso = (d: Date | number) => new Date(d).toISOString();
 
@@ -161,6 +172,10 @@ export function toEmployeeResource(r: any): Wire<"employee"> {
     employee_number: r.employeeNumber ?? undefined,
     work_email: r.workEmail,
     job_title: r.jobTitle ?? undefined,
+    // Mirrored from the current `positions` row (db/schema.ts): how and where they work today.
+    employment_type: r.employmentType ?? undefined,
+    work_mode: r.workMode ?? undefined,
+    location: r.location ?? undefined,
     bio: r.bio ?? undefined,
     department: ref("departments", r.departmentId),
     manager: ref("employees", r.managerId),
@@ -1249,6 +1264,8 @@ export function toPositionResource(r: any): Wire<"position"> {
     job_title: r.jobTitle ?? undefined,
     department: r.departmentId ? ref("departments", r.departmentId) : undefined,
     location: r.location ?? undefined,
+    employment_type: r.employmentType ?? undefined,
+    work_mode: r.workMode ?? undefined,
     note: r.note ?? undefined,
     effective_from: iso(r.effectiveFrom).slice(0, 10),
     effective_to: r.effectiveTo ? iso(r.effectiveTo).slice(0, 10) : undefined,

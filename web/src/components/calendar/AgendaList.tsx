@@ -10,11 +10,14 @@ import type { Event } from "@/types";
 // by default - a seven-column grid at 360px is a puzzle, a list is a list.
 
 export function AgendaList({
-  monthDays, byDay, awayOn, holidayOn, celebrationsOn, eventsOn, total, today, selected, onSelect, monthLabel,
+  monthDays, byDay, awayOn, holidayOn, closedOn, celebrationsOn, eventsOn, total, today, selected, onSelect, monthLabel,
 }: ViewProps & { monthDays: string[]; eventsOn: (ymd: string) => Event[]; monthLabel: string }) {
+  // A closed day earns a row on its own, even with nothing booked on it. This list exists to answer "what is
+  // happening this month", and a fortnight the org is shut is exactly that - filtering it out because nobody
+  // has booked leave in it would hide the reason nobody has.
   const days = monthDays
-    .map((ymd) => ({ ymd, leaves: byDay.get(ymd) ?? [], hol: holidayOn(ymd), celebs: celebrationsOn(ymd), events: eventsOn(ymd) }))
-    .filter((d) => d.leaves.length > 0 || d.hol || d.celebs.length > 0 || d.events.length > 0);
+    .map((ymd) => ({ ymd, leaves: byDay.get(ymd) ?? [], hol: holidayOn(ymd), closed: closedOn(ymd), celebs: celebrationsOn(ymd), events: eventsOn(ymd) }))
+    .filter((d) => d.leaves.length > 0 || d.hol || d.closed || d.celebs.length > 0 || d.events.length > 0);
 
   if (days.length === 0) {
     return (
@@ -26,7 +29,7 @@ export function AgendaList({
 
   return (
     <div className="divide-y">
-      {days.map(({ ymd, leaves, hol, celebs, events }) => {
+      {days.map(({ ymd, leaves, hol, closed, celebs, events }) => {
         const d = new Date(parseYmd(ymd));
         const away = awayOn(ymd);
         return (
@@ -44,6 +47,7 @@ export function AgendaList({
                 <span className="text-sm font-semibold tabular-nums">{d.getUTCDate()}</span>
               </span>
               {hol && <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700 dark:bg-violet-950/40 dark:text-violet-300">{hol.display_name}</span>}
+              {closed && <span className="rounded-full bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning-foreground dark:text-warning">Closed · {closed}</span>}
               {away > 0 && (
                 <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   <Users className="h-3.5 w-3.5" /> {Math.max(0, total - away)} of {total} available

@@ -28,7 +28,7 @@ test("an interview is scheduled against an application and appears on the page",
   // Who: the application picker, which is how an interview is attached to a person on a job.
   await form.getByLabel("Application").click();
   await page.getByPlaceholder(/Search/).last().fill(candidate);
-  await expect(page.getByRole("button", { name: new RegExp(candidate) })).toBeVisible();
+  await expect(page.getByRole("option", { name: new RegExp(candidate) })).toBeVisible();
   await page.keyboard.press("Enter");
 
   await form.getByLabel("Round").fill("Screening call");

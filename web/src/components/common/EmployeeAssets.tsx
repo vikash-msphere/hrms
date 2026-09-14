@@ -172,7 +172,7 @@ export function EmployeeAssets({
 
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
         <CardTitle className="text-base">
           <AccessAction collection="assets" label={title}>
             <span className="flex items-center gap-2"><Laptop className="h-4 w-4 text-primary" /> {title}</span>

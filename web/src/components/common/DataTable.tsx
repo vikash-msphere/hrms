@@ -11,7 +11,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetBody, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
-import { loadLocalPrefs, fetchServerPrefs, savePrefs, type SavedView } from "@/lib/tablePrefs";
+import { loadLocalPrefs, fetchServerPrefs, savePrefs, type SavedView, type TablePrefs } from "@/lib/tablePrefs";
 import { useConfirm } from "@/components/common/confirm";
 import { useAccessMode, type AccessTargetRef } from "@/components/access/AccessModeProvider";
 import { AccessTarget } from "@/components/access/AccessTarget";
@@ -219,15 +219,21 @@ export function DataTable<T>({
   const trailing = React.useMemo(() => columns.filter((c) => c.header === ""), [columns]);
   const managedIds = React.useMemo(() => managed.map((c) => c.id), [managed]);
 
-  const initial = React.useRef(loadLocalPrefs(tableId));
-  const [order, setOrder] = React.useState<string[]>(initial.current.order ?? managedIds);
+  // READ ONCE, not once per render. `useRef(loadLocalPrefs(tableId))` evaluates its argument on every render
+  // and keeps only the first result, so this was a synchronous `localStorage.getItem` plus a `JSON.parse` per
+  // render of every table on the page - one per keystroke in a column filter, and this is the component the
+  // whole app lists through. It is also exactly the cost lib/clientStore.ts exists to keep out of render.
+  const initialRef = React.useRef<TablePrefs | null>(null);
+  if (!initialRef.current) initialRef.current = loadLocalPrefs(tableId);
+  const initial = initialRef.current;
+  const [order, setOrder] = React.useState<string[]>(initial.order ?? managedIds);
   const [hidden, setHidden] = React.useState<Set<string>>(
-    () => computeHidden(initial.current.hidden, initial.current.order, managed)
+    () => computeHidden(initial.hidden, initial.order, managed)
   );
-  const [widths, setWidths] = React.useState<Record<string, number>>(initial.current.widths ?? {});
-  const [pageSize, setPageSize] = React.useState<number>(initial.current.pageSize ?? 25);
-  const [density, setDensity] = React.useState<"comfortable" | "compact">(initial.current.density ?? "comfortable");
-  const [views, setViews] = React.useState<SavedView[]>(initial.current.views ?? []);
+  const [widths, setWidths] = React.useState<Record<string, number>>(initial.widths ?? {});
+  const [pageSize, setPageSize] = React.useState<number>(initial.pageSize ?? 25);
+  const [density, setDensity] = React.useState<"comfortable" | "compact">(initial.density ?? "comfortable");
+  const [views, setViews] = React.useState<SavedView[]>(initial.views ?? []);
   const [pickedView, setPickedView] = React.useState<string | null>(null); // saved view the user last applied, by name
   const [page, setPage] = React.useState(0);
   const [hydrated, setHydrated] = React.useState(false);
@@ -843,7 +849,11 @@ export function DataTable<T>({
     setFilters(v ? { ...v.filters } : base.filters);
     // Legacy views saved before column visibility was captured leave the current layout alone.
     setHidden(v ? (v.hidden ? new Set(v.hidden) : hidden) : base.hidden);
-    search?.onChange(v?.search ?? "");
+    // Legacy views saved before the search box was captured carry no `search`, and clearing on their behalf is
+    // a claim they never made: applying one - which happens unprompted on mount, for a pinned default - wiped
+    // whatever the page had seeded into its own search box. `undefined` means "this view says nothing about
+    // search"; an empty string means "this view searched for nothing", and only that clears it.
+    if (v === null || v.search !== undefined) search?.onChange(v?.search ?? "");
   };
   const toggleDefaultView = (name: string) =>
     setViews((vs) => vs.map((v) => (v.name === name ? { ...v, isDefault: !v.isDefault } : { ...v, isDefault: false })));

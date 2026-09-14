@@ -44,6 +44,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { getSetting } from "@/lib/settingsStore";
+import { parseRestrictions } from "../../../src/domain/leaveRestrictions";
 
 // Who is away, when, and what that leaves the team with. Four views over one set of rows: the month grid
 // (bars, drag-to-request), the team rows (overlap), the quarter heat map (planning), the agenda (phones).
@@ -260,6 +261,24 @@ export default function LeaveCalendar({ me }: { me: Me }) {
   const holidayOn = useCallback((ymd: string) => holidayMap.get(ymd), [holidayMap]);
   const holidaySet = useMemo(() => new Set(holidayMap.keys()), [holidayMap]);
 
+  // The org-wide closed periods, so this calendar and the request picker agree about which days are bookable.
+  // The ORG baseline rather than any one type's overrides: this grid shows the whole team's leave of every
+  // kind, so the honest thing for it to draw is what the org closes for everybody. A type that opts out of a
+  // closure still says so in the request form, which is where a specific type is actually chosen.
+  const [orgClosures, setOrgClosures] = useState<{ from: string; to: string; label?: string }[]>([]);
+  useEffect(() => {
+    getSetting<Record<string, unknown>>("leave_restrictions")
+      .then((s) => setOrgClosures(parseRestrictions(s.value).timing.blackouts ?? []))
+      .catch(() => {});
+  }, []);
+  const closedOn = useCallback(
+    (ymd: string) => {
+      const w = orgClosures.find((b) => ymd >= b.from && ymd <= b.to);
+      return w ? w.label || "Closed period" : undefined;
+    },
+    [orgClosures],
+  );
+
   // Celebrations recur every year, so a month/day pair places one on any month the page is showing.
   const celebrationsByMd = useMemo(() => {
     const m = new Map<string, Celebration[]>();
@@ -370,7 +389,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
   const loading = leavesState === "loading" && leaves.length === 0;
   const onLeaveToday = awayOn(today);
 
-  const viewProps = { byDay, awayOn, holidayOn, celebrationsOn, workDays, weekStart, total, today, selected, onSelect: selectDay };
+  const viewProps = { byDay, awayOn, holidayOn, closedOn, celebrationsOn, workDays, weekStart, total, today, selected, onSelect: selectDay };
 
   return (
     <TooltipProvider delayDuration={250}>
@@ -672,6 +691,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
             <DayPanel
               ymd={selected}
               holiday={holidayOn(selected)}
+              closed={closedOn(selected)}
               entries={byDay.get(selected) ?? []}
               events={eventsOn(selected)}
               celebrations={celebrationsOn(selected)}

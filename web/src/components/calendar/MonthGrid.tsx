@@ -16,7 +16,7 @@ const LANE_H = 20;
 const LANES_TOP = 26; // px below the date header where lane 0 starts
 
 export function MonthGrid({
-  cells, month, byDay, awayOn, holidayOn, celebrationsOn, workDays, weekStart, total, today, selected, onSelect,
+  cells, month, byDay, awayOn, holidayOn, closedOn, celebrationsOn, workDays, weekStart, total, today, selected, onSelect,
   canRequest, onRange, onMonth, holidaySet,
 }: ViewProps & {
   cells: Date[];
@@ -120,6 +120,7 @@ export function MonthGrid({
                 const isToday = ymd === today;
                 const nonWorking = !workDays.includes(d.getUTCDay());
                 const hol = holidayOn(ymd);
+                const closed = closedOn(ymd);
                 const celebs = celebrationsOn(ymd);
                 const entries = byDay.get(ymd) ?? [];
                 const away = awayOn(ymd);
@@ -133,7 +134,7 @@ export function MonthGrid({
                         ref={(el) => { if (el) dayRefs.current.set(ymd, el); else dayRefs.current.delete(ymd); }}
                         type="button"
                         tabIndex={ymd === focusYmd ? 0 : -1}
-                        aria-label={`${longDate(ymd)}${hol ? `, ${hol.display_name}` : ""}, ${away} of ${total} away`}
+                        aria-label={`${longDate(ymd)}${hol ? `, ${hol.display_name}` : ""}${closed ? `, closed: ${closed}` : ""}, ${away} of ${total} away`}
                         title={canRequest ? "Click a day for detail · drag across days to request leave" : undefined}
                         onMouseDown={() => { suppressClick.current = false; if (canRequest) setDrag({ a: ymd, b: ymd }); }}
                         onMouseEnter={() => setDrag((cur) => (cur ? { ...cur, b: ymd } : cur))}
@@ -146,6 +147,10 @@ export function MonthGrid({
                           i === 6 && "border-r-0",
                           !inMonth && "bg-muted/20 text-muted-foreground/50",
                           hol ? "bg-violet-100/60 dark:bg-violet-950/30" : nonWorking && inMonth && "bg-brand-neutral-100/60 dark:bg-brand-neutral-800/30",
+                          // A closed period outranks the weekend/holiday wash: it is the one of the three that
+                          // changes whether leave can be booked, and it reads across consecutive days as the
+                          // single span it is.
+                          closed && inMonth && "bg-warning/10",
                           inDrag && "bg-primary/10",
                           isSel && "ring-2 ring-inset ring-primary",
                         )}
@@ -153,6 +158,9 @@ export function MonthGrid({
                         <div className="flex items-center gap-1">
                           <span className={cn("flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-xs tabular-nums sm:h-6 sm:w-6 sm:text-sm", isToday && "bg-primary font-semibold text-primary-foreground")}>{d.getUTCDate()}</span>
                           {hol && <span className="truncate text-[10px] font-medium text-violet-700 dark:text-violet-300">{hol.display_name}</span>}
+                          {/* Named on the day rather than only in a tooltip: on a month grid the label has
+                              room, and a tint nobody can account for is worse than no tint. */}
+                          {closed && !hol && <span className="truncate text-[10px] font-medium text-warning-foreground dark:text-warning">{closed}</span>}
                           {celebs.length > 0 && <PartyPopper className="h-3 w-3 shrink-0 text-warning" aria-hidden />}
                           {remote && <Laptop className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />}
                           {away > 0 && (

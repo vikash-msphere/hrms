@@ -89,7 +89,7 @@ export function EmployeeProfilePersonal({ employeeId, canEdit, onSaved }: { empl
 
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
         <CardTitle className="text-base">
           <AccessAction collection="employees" objectPath={`employees/${employeeId}`} field="personal-info" label="Personal details">
             <span className="flex items-center gap-2"><UserRound className="h-4 w-4 text-primary" /> Personal</span>

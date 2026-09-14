@@ -65,7 +65,7 @@ test("a department is reparented by dragging it onto its new parent", async ({ a
   await expect(page.getByRole("main")).toBeVisible();
   await page.locator('button:has-text("Departments")').click();
   await page.getByRole("button", { name: "Outline layout" }).click();
-  await row(page, parent).getByTitle("Focus on this subtree").click();
+  await row(page, parent).getByTitle(/^Focus on this chain/).click();
   await expect(row(page, child)).toBeVisible();
 
   await purge(page, child);

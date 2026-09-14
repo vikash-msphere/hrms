@@ -61,7 +61,7 @@ test("a ticket's checklist item is promoted to a board task, and stays on the ti
   // The list is a portal at the page root, not a child of the dialog - so it is reached from the page.
   await form.getByLabel("Board").click();
   await page.getByPlaceholder("Search boards…").fill(board.name);
-  await page.getByRole("button", { name: board.name }).click();
+  await page.getByRole("option", { name: board.name }).click();
   await form.getByRole("button", { name: "Create task" }).click();
   // The write dialog closes on a successful write and pins the reason on a failed one, so a dialog still
   // open here IS the failure.

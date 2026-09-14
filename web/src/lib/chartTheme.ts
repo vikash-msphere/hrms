@@ -51,16 +51,40 @@ export function stackSeries(series: number[][]): number[][] {
 }
 
 /**
- * A heatmap's points: `{ "<seconds since epoch>": value }` for every day that has one, which is the shape
- * frappe's calendar heatmap reads. Days with no value are left out (an absent key draws as the empty step),
- * because a zero and "nothing happened" look the same on a calendar and only one of them is a fact.
+ * The days a heatmap actually draws: `{ "YYYY-MM-DD": value }`, with the days that have nothing to say
+ * dropped - a zero and "nothing happened" look the same on a calendar and only one of them is a fact - and
+ * anything that is not a day string ignored.
+ *
+ * Separate from `heatmapPoints` so the picture and the data table below it are built from ONE list of days.
+ * The table reads these keys as they are; nothing turns a timestamp back into a day.
  */
-export function heatmapPoints(byDay: Map<string, number> | Record<string, number>): Record<string, number> {
+export function heatmapDays(byDay: Map<string, number> | Record<string, number>): Record<string, number> {
   const entries = byDay instanceof Map ? [...byDay.entries()] : Object.entries(byDay);
   const out: Record<string, number> = {};
   for (const [ymd, value] of entries) {
     if (!value) continue;
-    const ts = Date.parse(`${ymd}T00:00:00Z`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) continue;
+    out[ymd] = value;
+  }
+  return out;
+}
+
+/**
+ * A heatmap's points: `{ "<seconds since epoch>": value }` for every day that has one, which is the shape
+ * frappe's calendar heatmap reads. Days with no value are left out (an absent key draws as the empty step),
+ * because a zero and "nothing happened" look the same on a calendar and only one of them is a fact.
+ *
+ * LOCAL midnight, not UTC. frappe turns each timestamp back into a day with LOCAL date parts
+ * (`getYyyyMmDd`: `date.getFullYear()` / `getMonth()` / `getDate()`), and that day is both the square it
+ * paints and the `data-date` a click reports. A UTC-midnight timestamp read with local parts is the PREVIOUS
+ * day anywhere west of Greenwich, so the whole calendar shifts a square and a clicked day comes back wrong.
+ * Parsing the parts by hand rather than `Date.parse(ymd)`, which is specified as UTC for a bare date.
+ */
+export function heatmapPoints(byDay: Map<string, number> | Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [ymd, value] of Object.entries(heatmapDays(byDay))) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd)!;
+    const ts = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
     if (Number.isNaN(ts)) continue;
     out[String(Math.floor(ts / 1000))] = value;
   }
@@ -78,8 +102,11 @@ export function shareOf(values: number[]): number[] {
 /**
  * Bucket dated values into months ("2026-06" -> total), oldest first, filling the months in between so a
  * quiet month is a gap in the line rather than a missing step on the axis.
+ *
+ * `keys` is the "2026-06" the bar was built from, parallel to `labels`: a click gives an index, and a label
+ * is a display string ("Jun 26") that no row can be matched against. See `lib/chartFocus.ts`.
  */
-export function monthlyTotals(rows: { date: string; value: number }[], months: number, endYmd: string): { labels: string[]; values: number[] } {
+export function monthlyTotals(rows: { date: string; value: number }[], months: number, endYmd: string): { labels: string[]; values: number[]; keys: string[] } {
   const end = new Date(`${endYmd.slice(0, 7)}-01T00:00:00Z`);
   const keys: string[] = [];
   for (let i = months - 1; i >= 0; i--) {
@@ -96,12 +123,18 @@ export function monthlyTotals(rows: { date: string; value: number }[], months: n
     // `round2`, for the reason `topSlices` states sixteen lines below and this builder was not following: two
     // chart builders in one module must not round the same money total in opposite directions.
     values: keys.map((k) => round2(totals.get(k) ?? 0)),
+    keys,
   };
 }
 
 /** Group rows by a key and total a number over them, biggest first, with a "Other" bucket past `top`.
- *  A chart with forty slices communicates nothing; the tail is honest as one named slice. */
-export function topSlices<T>(rows: T[], keyOf: (row: T) => string, valueOf: (row: T) => number, top = 7): { labels: string[]; values: number[] } {
+ *  A chart with forty slices communicates nothing; the tail is honest as one named slice.
+ *
+ *  `keys` is the grouping key each slice was built from, parallel to `labels`, so a click on a slice can be
+ *  turned back into the rows it counted - `null` on the pooled "Other" slice, which is not one key but the
+ *  `otherKeys` behind it. A caller that makes the chart clickable matches on `keys[i]` and, for the pool,
+ *  on "not in the head" (see `lib/chartFocus.ts`); a display label cannot do either job. */
+export function topSlices<T>(rows: T[], keyOf: (row: T) => string, valueOf: (row: T) => number, top = 7): { labels: string[]; values: number[]; keys: (string | null)[]; otherKeys: string[] } {
   const totals = new Map<string, number>();
   for (const r of rows) {
     const k = keyOf(r) || "Unspecified";
@@ -114,9 +147,12 @@ export function topSlices<T>(rows: T[], keyOf: (row: T) => string, valueOf: (row
   // `round2` (lib/utils), never an inline `Math.round(v * 100) / 100`: these are money totals, and a chart
   // sitting beside the table that lists the same rows must not round a half-case the other way from it.
   const values = head.map(([, v]) => round2(v));
+  const keys: (string | null)[] = head.map(([k]) => k);
+  const otherKeys = tail.map(([k]) => k);
   if (tail.length) {
     labels.push(`Other (${tail.length})`);
     values.push(round2(tail.reduce((s, [, v]) => s + v, 0)));
+    keys.push(null);
   }
-  return { labels, values };
+  return { labels, values, keys, otherKeys };
 }

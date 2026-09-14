@@ -36,7 +36,7 @@ test("disabling a vendor drops it from the expense form's vendor picker, and re-
       const dialog = page.getByRole("dialog");
       await vendorField(dialog).getByRole("button").click({ timeout: 10_000 });
       await page.getByPlaceholder("Search vendors…").fill(name);
-      const option = page.getByRole("button", { name: new RegExp(`^${escapeRe(name)}`) });
+      const option = page.getByRole("option", { name: new RegExp(`^${escapeRe(name)}`) });
       if (expectOffered) await expect(option).toBeVisible({ timeout: 15_000 });
       else await expect(option).toHaveCount(0, { timeout: 15_000 });
 

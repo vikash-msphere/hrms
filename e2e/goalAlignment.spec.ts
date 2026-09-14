@@ -37,10 +37,10 @@ test("the alignment picker will not offer a goal its own descendant", async ({ a
     // Searched for by name rather than eyeballed down a list: the picker filters, and the assertion has to be
     // "this goal is not offered", not "it wasn't in the first ten rows".
     await form.getByPlaceholder("Search goals…").fill(childTitle);
-    await expect(form.getByRole("button", { name: childTitle })).toHaveCount(0);
+    await expect(form.getByRole("option", { name: childTitle })).toHaveCount(0);
     // The goal itself is excluded for the same reason, and by the same rule.
     await form.getByPlaceholder("Search goals…").fill(parentTitle);
-    await expect(form.getByRole("button", { name: parentTitle })).toHaveCount(0);
+    await expect(form.getByRole("option", { name: parentTitle })).toHaveCount(0);
     // Out of the picker, then out of the dialog. The second step is the dialog's own Cancel rather than a
     // second Escape: the two presses land in the same frame, the popover is still unmounting when the second
     // arrives, and the dialog under it never sees it - which leaves this spec waiting on a dialog that is
@@ -57,7 +57,7 @@ test("the alignment picker will not offer a goal its own descendant", async ({ a
     await expect(childForm.getByRole("heading", { name: "Edit goal" })).toBeVisible();
     await childForm.getByLabel("Aligns to").click();
     await childForm.getByPlaceholder("Search goals…").fill(parentTitle);
-    await expect(childForm.getByRole("button", { name: parentTitle })).toBeVisible({ timeout: 30_000 });
+    await expect(childForm.getByRole("option", { name: parentTitle })).toBeVisible({ timeout: 30_000 });
   } finally {
     await purge(admin, child);
     await purge(admin, parent);

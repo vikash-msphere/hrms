@@ -418,13 +418,13 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
 
   return (
     <Card className="sentry-mask">
-      <CardHeader className="flex-row items-center justify-between space-y-0">
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">
           <AccessAction collection="compensation" label="Compensation">
             <span className="flex items-center gap-2"><TrendingUp className="h-4 w-4 text-primary" /> Compensation</span>
           </AccessAction>
         </CardTitle>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="flex gap-0.5 rounded-md border p-0.5">
             <Button size="sm" variant={unit === "monthly" ? "default" : "ghost"} className="h-7" onClick={() => setUnit("monthly")}>Monthly</Button>
             <Button size="sm" variant={unit === "annual" ? "default" : "ghost"} className="h-7" onClick={() => setUnit("annual")}>Annual</Button>
@@ -731,7 +731,13 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
             <p className="text-sm">
               <span className={cn("font-medium tabular-nums", Number(form.ctc) > current.annual_ctc ? "text-success" : "text-destructive")}>
                 {Number(form.ctc) > current.annual_ctc ? "+" : "−"}{money(Math.abs(Number(form.ctc) - current.annual_ctc))}
-                {" "}({Number(form.ctc) > current.annual_ctc ? "+" : "−"}{Math.abs(((Number(form.ctc) - current.annual_ctc) / current.annual_ctc) * 100).toFixed(1)}%)
+                {/* The percentage needs a base to be a percentage OF. A current CTC of zero - an unpaid
+                    placement, or a row seeded before the structure was set - divided to Infinity and printed
+                    "+Infinity%" beside a real rupee figure, on the card a raise is approved from. The rupee
+                    delta is the honest number there, so the parenthetical is what goes. */}
+                {current.annual_ctc > 0 && (
+                  <>{" "}({Number(form.ctc) > current.annual_ctc ? "+" : "−"}{Math.abs(((Number(form.ctc) - current.annual_ctc) / current.annual_ctc) * 100).toFixed(1)}%)</>
+                )}
               </span>
               <span className="text-muted-foreground"> against the current {money(current.annual_ctc)}.</span>
             </p>

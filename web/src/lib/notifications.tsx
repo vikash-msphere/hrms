@@ -137,6 +137,27 @@ type BusMsg =
   | { op: "markAllRead" }
   | { op: "reminded"; path: string };
 
+/**
+ * Mark a reminder as already toasted, without letting the mark set climb for the life of the tab.
+ *
+ * Marks leave on a re-snooze and on a sibling tab's message, so what accumulates is reminders nobody snoozed
+ * again - which is most of them, in a tab left open all week. A Set keeps insertion order, so the oldest go
+ * first, and a mark old enough to be dropped describes a reminder that came due hundreds of notifications
+ * ago: re-toasting one of those costs a toast, while an unbounded set costs memory nothing reclaims.
+ *
+ * Module scope so its identity is stable - it is called from inside a `useCallback` (the bus handler), and a
+ * per-render closure there would have to join that callback's dependency list.
+ */
+const MAX_REMINDED = 500;
+function markReminded(set: Set<string>, path: string): void {
+  set.add(path);
+  while (set.size > MAX_REMINDED) {
+    const oldest = set.values().next().value;
+    if (oldest === undefined) break;
+    set.delete(oldest);
+  }
+}
+
 const noop = async () => {};
 const EMPTY: NotificationsState = {
   // "ready" outside a provider: there is nothing loading, so a consumer of the default should render its
@@ -256,6 +277,11 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   // Toast on state changes across refetches: snooze reminders coming due, and fresh high/urgent arrivals.
   const seen = useRef<Set<string> | null>(null);
+  // "Already toasted this one." Entries leave on a re-snooze and on a sibling tab's message, so the only ones
+  // that accumulate are reminders nobody snoozed again - which is most of them, in a tab left open all week.
+  // BOUNDED for that reason: a Set keeps insertion order, so the oldest marks go first, and a mark old enough
+  // to be dropped describes a reminder that came due hundreds of notifications ago. Re-toasting one of those
+  // costs a toast; letting the set climb for the life of the tab costs memory nothing ever reclaims.
   const reminded = useRef<Set<string>>(new Set());
   useEffect(() => {
     const now = Date.now();
@@ -264,7 +290,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     // explicitly asked to be reminded), then (C) clear the stamp server-side so it settles into a normal unread
     // row and can be re-snoozed. Runs even on the first load, so opening the app surfaces anything already due.
     const woken = rows.filter((n) => n.snooze_until_time && +new Date(n.snooze_until_time) <= now && !reminded.current.has(n.path));
-    for (const n of woken) reminded.current.add(n.path);
+    for (const n of woken) markReminded(reminded.current, n.path);
     if (woken.length === 1) toast({ title: `Reminder: ${woken[0]!.title}`, description: woken[0]!.body || undefined });
     else if (woken.length > 1) toast({ title: `${woken.length} snoozed reminders`, description: "Open the bell to review them." });
     if (woken.length) {
@@ -320,7 +346,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       case "reminded":
         // A sibling already alerted for this wake - suppress our toast + skip our redundant clear-patch, and drop
         // the stale snooze stamp locally.
-        reminded.current.add(msg.path);
+        markReminded(reminded.current, msg.path);
         setRows((prev) => prev.map((r) => (r.path === msg.path ? { ...r, snooze_until_time: undefined } : r)));
         break;
     }

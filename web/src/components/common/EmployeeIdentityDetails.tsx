@@ -91,7 +91,7 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
 
   return (
     <Card className="sentry-mask">
-      <CardHeader className="flex flex-row items-center justify-between">
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
         <CardTitle className="text-base">
           <AccessAction collection="employees" objectPath={`employees/${employeeId}`} field="identity" label="Identity">
             <span className="flex items-center gap-2"><IdCard className="h-4 w-4 text-primary" /> {title}</span>

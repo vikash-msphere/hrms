@@ -41,7 +41,15 @@ test("a card moves column through the actions menu and stays moved", async ({ as
   const column = (label: string) => page.getByRole("group", { name: label, exact: true });
   await expect(column("Backlog").getByText(title)).toBeVisible();
 
-  const card = page.locator("div").filter({ hasText: title }).last();
+  // Filtered by the CONTROL as well as the text: the tile itself is the `role="button"` that opens the card,
+  // and the actions menu deliberately sits OUTSIDE it (Boards.tsx - a menu nested inside a button is not a
+  // control at all), so the innermost div holding the title no longer holds the menu. The wrapper that holds
+  // both is the one this wants.
+  const card = page
+    .locator("div")
+    .filter({ hasText: title })
+    .filter({ has: page.getByRole("button", { name: "Task actions" }) })
+    .last();
   await card.getByRole("button", { name: "Task actions" }).click();
   await page.getByRole("menuitem", { name: "Move to" }).click();
   await page.getByRole("menuitem", { name: "In progress", exact: true }).click();

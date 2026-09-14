@@ -17,7 +17,7 @@ const NAME_COL = "10rem";
 type Row = { empId: string; name: string; photo?: string; mine: boolean; deptId: string; segs: CalEntry[]; days: number };
 
 export function TeamGrid({
-  monthDays, entries, employees, awayOn, holidayOn, workDays, total, today, selected, onSelect, monthLabel,
+  monthDays, entries, employees, awayOn, holidayOn, closedOn, workDays, total, today, selected, onSelect, monthLabel,
   compact, deptName,
 }: ViewProps & {
   monthDays: string[];
@@ -66,9 +66,13 @@ export function TeamGrid({
 
   const shown = showAll ? rows.length : ROW_BUDGET;
   const cols = { gridTemplateColumns: `${NAME_COL} repeat(${days.length}, minmax(0, 1fr))` } as const;
+  // A closed period outranks both the holiday and the weekend wash: of the three it is the only one that
+  // changes whether leave can be booked, and this grid is read to decide exactly that. One function, so the
+  // header, the cover row and every person's row agree about which columns are shut.
   const dayTint = (ymd: string) =>
-    holidayOn(ymd) ? "bg-violet-100/60 dark:bg-violet-950/30"
-      : !workDays.includes(new Date(parseYmd(ymd)).getUTCDay()) ? "bg-brand-neutral-100/60 dark:bg-brand-neutral-800/30" : "";
+    closedOn(ymd) ? "bg-warning/15"
+      : holidayOn(ymd) ? "bg-violet-100/60 dark:bg-violet-950/30"
+        : !workDays.includes(new Date(parseYmd(ymd)).getUTCDay()) ? "bg-brand-neutral-100/60 dark:bg-brand-neutral-800/30" : "";
 
   if (rows.length === 0) {
     return (
@@ -114,7 +118,7 @@ export function TeamGrid({
                 key={ymd}
                 type="button"
                 onClick={() => onSelect(selected === ymd ? null : ymd)}
-                title={longDate(ymd)}
+                title={closedOn(ymd) ? `${longDate(ymd)} · Closed: ${closedOn(ymd)}` : longDate(ymd)}
                 className={cn("flex flex-col items-center py-1 text-[10px] leading-tight transition-colors hover:bg-accent/50", dayTint(ymd), selected === ymd && "ring-1 ring-inset ring-primary")}
               >
                 <span className="text-muted-foreground">{DOW[d.getUTCDay()][0]}</span>

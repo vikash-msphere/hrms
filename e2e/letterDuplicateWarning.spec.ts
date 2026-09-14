@@ -14,7 +14,7 @@ test("generating the same letter type for the same person twice is flagged, not 
   let dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: /Select an employee/ }).click();
   await page.getByPlaceholder("Search employees…").fill("Leo Moore");
-  await page.getByRole("button", { name: "Leo Moore", exact: true }).click();
+  await page.getByRole("option", { name: "Leo Moore", exact: true }).click();
   await dialog.getByRole("combobox").first().click();
   await page.getByRole("option", { name: "Employment Verification" }).click();
   await expect(dialog.getByText(/already filed for/)).toHaveCount(0);
@@ -32,7 +32,7 @@ test("generating the same letter type for the same person twice is flagged, not 
     dialog = page.getByRole("dialog");
     await dialog.getByRole("button", { name: /Select an employee/ }).click();
     await page.getByPlaceholder("Search employees…").fill("Leo Moore");
-    await page.getByRole("button", { name: "Leo Moore", exact: true }).click();
+    await page.getByRole("option", { name: "Leo Moore", exact: true }).click();
     await dialog.getByRole("combobox").first().click();
     await page.getByRole("option", { name: "Employment Verification" }).click();
 

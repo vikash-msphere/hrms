@@ -22,7 +22,7 @@ test.describe("time off admin", () => {
     // Re-typed on a miss, and given room: the picker's search is debounced and answered by a fetch, which on
     // a lane with sixteen browsers on it takes longer than the 5s a bare expect allows - and a keystroke that
     // landed while the list was still mounting is swallowed, leaving nothing to wait for at all.
-    const eve = page.getByRole("button", { name: /Eve Employee/ });
+    const eve = page.getByRole("option", { name: /Eve Employee/ });
     await expect(async () => {
       if (!(await eve.count())) {
         await form.getByLabel("Employee").click({ timeout: 8_000 }).catch(() => undefined);

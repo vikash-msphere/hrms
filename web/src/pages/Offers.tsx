@@ -124,11 +124,14 @@ export default function Offers({ me: _me, openId }: { me: Me; openId?: string })
     return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth();
   };
   const needsMyApproval = (o: Offer) => o.status === "draft" && (o.access?.can ?? []).includes("approve");
-  const kf = useKpiFocus<Offer, "extended" | "pipeline" | "accepted" | "closed" | "silent" | "joining" | "approve">({
+  const kf = useKpiFocus<Offer, "extended" | "pipeline" | "accepted" | "closed" | "declined" | "silent" | "joining" | "approve">({
     extended: { label: "offers awaiting a reply", match: (o) => o.status === "extended" },
     pipeline: { label: "offers in draft or approval", match: (o) => o.status === "draft" || o.status === "approved" },
     accepted: { label: "accepted offers", match: (o) => o.status === "accepted" },
     closed: { label: "declined or rescinded offers", match: (o) => o.status === "declined" || o.status === "rescinded" },
+    // Declined alone, without the rescinded ones `closed` pools in: recruiting analytics charts the two
+    // apart, and a slice labelled "Declined" that opens a longer list than it counted is not the same slice.
+    declined: { label: "declined offers", match: (o) => o.status === "declined" },
     silent: { label: `offers unanswered for over ${SILENT_DAYS} days`, match: isSilent },
     joining: { label: "hires joining this month", match: isJoiningThisMonth },
     approve: { label: "offers awaiting your approval", match: needsMyApproval },

@@ -50,14 +50,14 @@ test("linked tasks score the goal by their delivered points", async ({ as }) => 
   // The offer is the app's shared Combobox: a trigger, then a search box in a portal at the page root.
   await drawer.getByRole("button", { name: "Select…" }).click();
   await page.getByPlaceholder("Search tasks…").fill(openTask);
-  await page.getByRole("button", { name: openTask }).click();
+  await page.getByRole("option", { name: openTask }).click();
   // The linked list is the assertion, not the toast: it names the task, its points, and the delivered share.
   await expect(drawer.getByText("Linked tasks · 0/5 pts")).toBeVisible({ timeout: 30_000 });
 
   await drawer.getByRole("button", { name: "Link tasks" }).click();
   await drawer.getByRole("button", { name: "Select…" }).click();
   await page.getByPlaceholder("Search tasks…").fill(doneTask);
-  await page.getByRole("button", { name: doneTask }).click();
+  await page.getByRole("option", { name: doneTask }).click();
   // Both linked, neither delivered: eight points of work and nothing done.
   await expect(drawer.getByText("Linked tasks · 0/8 pts")).toBeVisible({ timeout: 30_000 });
   await expect.poll(() => goalProgress(page, goal.path), { timeout: 30_000 }).toBe(0);
@@ -65,8 +65,13 @@ test("linked tasks score the goal by their delivered points", async ({ as }) => 
   // Delivering one is what moves the goal - "reached the delivery column" is the move verb's business, not a
   // flag, and the server re-derives the goal from it. Done over the wire because dragging a card across a
   // board is `kanban.spec.ts`'s subject.
+  // Re-read for the etag rather than reusing the one the create answered with: linking the task to the goal
+  // WROTE to this card, so the version held since it was made is two edits old and the move is correctly
+  // refused as a lost update.
+  const fresh = await page.request.get(`/v1/${delivered.path}`, { headers: SPA_HEADERS });
+  expect(fresh.status(), await fresh.text()).toBe(200);
   const moved = await page.request.post(`/v1/${delivered.path}:move`, {
-    headers: { ...SPA_HEADERS, "If-Match": delivered.etag },
+    headers: { ...SPA_HEADERS, "If-Match": fresh.headers()["etag"]! },
     data: { to_column: lastColumn },
   });
   expect(moved.status(), await moved.text()).toBe(200);

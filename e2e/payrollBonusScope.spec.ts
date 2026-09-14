@@ -55,7 +55,7 @@ test("switching a bonus's scope recomputes who it reaches and what it costs, bef
   // Narrowed to one department: a smaller, different number, recomputed live off the same amount.
   await form.getByLabel("Who").click();
   await page.getByRole("option", { name: "A department" }).click();
-  await form.getByLabel("Department").click();
+  await form.getByLabel("Department", { exact: true }).click();
   await page.getByRole("option", { name: dept!.display_name, exact: true }).click();
   // Read back the same way, and for the same reason: a department gains and loses people while this runs
   // too - hiring specs file into one. What is asserted is the RECOMPUTE, which is what the control does:

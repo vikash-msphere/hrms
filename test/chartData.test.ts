@@ -28,16 +28,23 @@ describe("stackSeries", () => {
 });
 
 describe("heatmapPoints", () => {
-  it("keys each day by its UTC midnight in seconds, which is what the calendar reads", () => {
+  // The calendar turns each key back into a day with LOCAL date parts, and that day is both the square it
+  // paints and the one a press reports. Asserted by round-tripping the way the library does, so this holds
+  // in every timezone a run happens in - a UTC-midnight key fails it anywhere west of Greenwich.
+  const localDayOf = (seconds: string) => {
+    const d = new Date(Number(seconds) * 1000);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+
+  it("keys each day by its own local midnight, so the day reads back as the day that went in", () => {
     const out = heatmapPoints(new Map([["2026-06-01", 8], ["2026-06-02", 4]]));
-    expect(out[String(Date.parse("2026-06-01T00:00:00Z") / 1000)]).toBe(8);
-    expect(out[String(Date.parse("2026-06-02T00:00:00Z") / 1000)]).toBe(4);
+    const byDay = Object.fromEntries(Object.entries(out).map(([ts, v]) => [localDayOf(ts), v]));
+    expect(byDay).toEqual({ "2026-06-01": 8, "2026-06-02": 4 });
   });
 
   it("drops zero days and unparseable keys: a blank square and a zero say different things", () => {
-    expect(heatmapPoints({ "2026-06-01": 0, "not-a-day": 5, "2026-06-03": 2 })).toEqual({
-      [String(Date.parse("2026-06-03T00:00:00Z") / 1000)]: 2,
-    });
+    const out = heatmapPoints({ "2026-06-01": 0, "not-a-day": 5, "2026-06-03": 2 });
+    expect(Object.fromEntries(Object.entries(out).map(([ts, v]) => [localDayOf(ts), v]))).toEqual({ "2026-06-03": 2 });
   });
 });
 
@@ -68,6 +75,12 @@ describe("monthlyTotals", () => {
     expect(out.values).toEqual([15, 0, 2]); // June, July (quiet), August
     expect(out.labels).toHaveLength(3);
   });
+
+  it("carries the month each bar was built from, which is what a press has to filter by", () => {
+    const out = monthlyTotals([{ date: "2026-06-04", value: 1 }], 3, "2026-08-26");
+    expect(out.keys).toEqual(["2026-06", "2026-07", "2026-08"]);
+    expect(out.keys).toHaveLength(out.labels.length); // parallel, or an index means a different month
+  });
 });
 
 describe("topSlices", () => {
@@ -79,6 +92,21 @@ describe("topSlices", () => {
     const out = topSlices(rows, (r) => r.k, (r) => r.v, 3);
     expect(out.labels).toEqual(["a", "b", "c", "Other (2)"]);
     expect(out.values).toEqual([5, 4, 3, 3]);
+  });
+
+  it("carries each slice's key, and names the pool rather than pretending it is one", () => {
+    const rows = [{ k: "a", v: 5 }, { k: "b", v: 4 }, { k: "c", v: 3 }, { k: "d", v: 2 }];
+    const out = topSlices(rows, (r) => r.k, (r) => r.v, 2);
+    // `null` on the pooled slice: it stands for two keys, so it is not a filter - `otherKeys` is what it is.
+    expect(out.keys).toEqual(["a", "b", null]);
+    expect(out.otherKeys).toEqual(["c", "d"]);
+    expect(out.keys).toHaveLength(out.labels.length);
+  });
+
+  it("leaves the pool out entirely when nothing was pooled", () => {
+    const out = topSlices([{ k: "a", v: 1 }], (r) => r.k, (r) => r.v, 7);
+    expect(out.keys).toEqual(["a"]);
+    expect(out.otherKeys).toEqual([]);
   });
 
   it("names a missing key rather than dropping the rows under it, and skips empty totals", () => {

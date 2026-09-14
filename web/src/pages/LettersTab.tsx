@@ -350,7 +350,7 @@ export default function LettersTab({ toast }: { toast: Toast }) {
         {/* Template list */}
         {railOpen && (
         <Card className="h-fit">
-          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+          <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0 pb-2">
             <CardTitle className="text-sm">Letter types</CardTitle>
             <RailToggle open onClick={toggleRail} />
           </CardHeader>
@@ -388,8 +388,8 @@ export default function LettersTab({ toast }: { toast: Toast }) {
         {selected ? (
           <div className="space-y-4">
             <Card>
-              <CardHeader className="flex flex-row items-center justify-between pb-3">
-                <CardTitle className="flex items-center gap-2 text-sm">
+              <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 pb-3">
+                <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
                   {!railOpen && <RailToggle open={false} onClick={toggleRail} />}
                   {selected.label}
                   <AccessTarget target={{ collection: "letter-templates", objectPath: selected.id, can: selected.access?.can, label: selected.label }} />

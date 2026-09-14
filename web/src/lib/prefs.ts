@@ -17,6 +17,24 @@ type Row = { key: string; value?: unknown };
 
 let loaded: Promise<Map<string, unknown>> | null = null;
 
+// Values written BEFORE the snapshot was ever read.
+//
+// `apply` used to answer that case by claiming the memo itself - `loaded = Promise.resolve(new Map([[key,
+// value]]))` - which silently cancelled the read: `load()`'s `??=` then found a snapshot already there, and
+// `GET /v1/preferences` was never issued for the rest of the page life. Every other key read as absent, which
+// is indistinguishable from unset, so the theme sync overwrote the cross-device row with this browser's value,
+// `tab_seen` lost its cross-device merge, every table's saved views and column layout read as empty and were
+// saved back that way, and `adoptUnconfirmed` never ran at all.
+//
+// It was reachable on an ordinary cold load, not by any unusual sequence: effects run child-before-parent, so
+// `Workspace`'s tab-activity seeding and `markTabSeen` (both `stagePref`) fire before App's own effect, which
+// is where the first `readPref` callers live. A route whose page happens to mount a table with a `tableId` was
+// saved by that table's prefs read getting in first - which is to say the whole thing hung on render order.
+//
+// Staged instead, and overlaid onto the fetched rows: a value written here is NEWER than anything the server
+// can hand back, so it wins, and the read still happens.
+const staged = new Map<string, unknown>();
+
 // Follows the cursor rather than asking for a page size the server will not grant: `max: 200` was clamped to
 // 100 silently (api.ts#listPath), and a preference that fell past the page read as ABSENT - i.e. as the
 // default - which is indistinguishable from never having been set. One request in practice; a caller with
@@ -25,7 +43,14 @@ function load(): Promise<Map<string, unknown>> {
   return (loaded ??= listAll<Row>("preferences")
     .then((rows) => new Map(rows.map((p) => [p.key, p.value])))
     .catch(() => new Map<string, unknown>()) // no rows / offline: every key reads as absent
-    .then(adoptUnconfirmed));
+    .then(adoptUnconfirmed)
+    .then((all) => {
+      // After `adoptUnconfirmed`, not before: what a previous page life failed to confirm is older than what
+      // this one has already written.
+      for (const [k, v] of staged) all.set(k, v);
+      staged.clear();
+      return all;
+    }));
 }
 
 /** The caller's stored value for `key`, or undefined if they have no row for it yet. */
@@ -61,6 +86,15 @@ export async function refetchPref<T>(key: string): Promise<T | undefined> {
 /** Persist a preference and keep the shared snapshot in step. Fire-and-forget: a failed save is not fatal. */
 export function writePref(key: string, value: unknown): Promise<void> {
   apply(key, value);
+  // An immediate write supersedes whatever a deferred one left armed for the same key. `flushPref` sends the
+  // value CAPTURED when its timer was set, so a timer left running lands the OLDER value on top of this one,
+  // minutes later, with nothing on screen to say the save was undone. No key uses both paths today - which is
+  // precisely why the first one that does would not have this caught for it.
+  const deferred = pending.get(key);
+  if (deferred) {
+    clearTimeout(deferred.timer);
+    pending.delete(key);
+  }
   // This value is newer than anything a deferred write left outstanding for the key, so that record must not
   // outlive it and overlay a stale value on the next page life.
   clearUnconfirmed(key);
@@ -75,7 +109,7 @@ export function writePref(key: string, value: unknown): Promise<void> {
 
 function apply(key: string, value: unknown) {
   if (loaded) void loaded.then((all) => all.set(key, value));
-  else loaded = Promise.resolve(new Map([[key, value]]));
+  else staged.set(key, value); // see `staged`: never claim the memo, or the snapshot is never read at all
 }
 
 // ---- Deferred writes ----------------------------------------------------------------------------------------

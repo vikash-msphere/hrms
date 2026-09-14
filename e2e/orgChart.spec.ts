@@ -39,16 +39,18 @@ test.describe("the org chart", () => {
     // The picker moves without a second confirmation - it IS the confirmation - so the toast is the receipt.
     await expect(toast(page, "Reporting line updated")).toBeVisible();
 
-    // "Under the parent" as the tree itself understands it: focusing the parent's subtree keeps the child on
-    // screen and takes every other top-level department off it.
-    await row(page, parent).getByTitle("Focus on this subtree").click();
+    // "Under the parent" as the tree itself understands it: focusing the parent keeps the child on screen and
+    // takes every other top-level department off it. Matched by prefix, like the move affordance above - the
+    // rest of the title describes what a focus draws (the chain above the node as well as its subtree), which
+    // is presentation and free to be reworded.
+    await row(page, parent).getByTitle(/^Focus on this chain/).click();
     await expect(page.getByText("Focused:")).toBeVisible();
     await expect(row(page, child)).toBeVisible();
 
     // Written, not just re-rendered: a reload rebuilds the tree from the server's `parent` refs.
     await page.reload();
     await openDepartmentOutline(page, { alreadyLoaded: true });
-    await row(page, parent).getByTitle("Focus on this subtree").click();
+    await row(page, parent).getByTitle(/^Focus on this chain/).click();
     await expect(row(page, child)).toBeVisible();
 
     await cleanUp(page, [child, parent]);

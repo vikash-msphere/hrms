@@ -1,4 +1,5 @@
 import { SPA_HEADERS, gotoRoute, test, expect, toast } from "./fixtures";
+import { approvePayrollRun } from "./payrollRun";
 
 // The Operations page has two run buttons, not one: the cron cards' "Run now" (operations.spec.ts covers that)
 // and, below them, a per-row "Run"/"Retry" on a single BACKGROUND JOB - the thing a payroll publish or an
@@ -111,9 +112,14 @@ async function approvedRun(page: import("@playwright/test").Page, period: string
   const made = await page.request.post("/v1/payroll-runs", { headers: SPA_HEADERS, data: { pay_period: period } });
   expect(made.status(), await made.text()).toBe(200);
   const run = (await made.json()) as { path: string };
-  for (const verb of ["build", "submit", "approve"]) {
+  for (const verb of ["build", "submit"]) {
     const res = await page.request.post(`/v1/${run.path}:${verb}`, { headers: SPA_HEADERS });
     expect(res.status(), `${verb}: ${await res.text()}`).toBeLessThan(300);
   }
+  // Approved through the shared helper, which REBUILDS on every attempt. A run goes stale the moment any
+  // employee record it drew from changes, and at 16 workers other specs are hiring, verifying tax and moving
+  // people throughout - so a bare `:approve` racing that is a 409 ("built before its inputs changed … rebuild
+  // it before approving"), which is the staleness gate working rather than a fault to route around.
+  await approvePayrollRun(page, run.path);
   return { path: run.path };
 }

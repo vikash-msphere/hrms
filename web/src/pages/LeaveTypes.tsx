@@ -26,12 +26,19 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { InfoHint } from "@/components/common/InfoHint";
 import { useToast } from "@/components/ui/use-toast";
 import { RestrictionsEditor } from "@/components/leave/RestrictionsEditor";
 import { getSetting } from "@/lib/settingsStore";
-import { describeRestrictions, mergeRestrictions, parseRestrictions } from "../../../src/domain/leaveRestrictions";
+import { parseRestrictions, storedLeaves } from "../../../src/domain/leaveRestrictions";
+
+/** How many rules a policy blob states for itself - set or exempted. `soft_rules` is a waiver, not a rule. */
+function ruleCountOf(restrictions: unknown): number {
+  return [...storedLeaves(restrictions)].filter((k) => k !== "soft_rules").length;
+}
+const ruleCount = (lt: LeaveType) => ruleCountOf(lt.restrictions);
 
 export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embedded?: boolean; title?: string; openId?: string }) {
   const { rows, state, error, reload } = useCollection<LeaveType>("leave-types", { showDeleted: true });
@@ -57,11 +64,18 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
       .catch(() => {});
   }, []);
   const orgRules = useMemo(() => parseRestrictions(orgRestrictions), [orgRestrictions]);
+  // Why the policy can't be saved, as the editor sees it - the same refusals the server would give, answered
+  // while the control that caused them is still on screen. Null when there is nothing wrong.
+  const [policyProblem, setPolicyProblem] = useState<string | null>(null);
+  // Which of the dialog's three tabs is showing. Reset on every opening, so a type is always entered by its
+  // name rather than wherever the previous type happened to be left.
+  const [tab, setTab] = useState("basics");
 
   function openCreate() {
     setEditing(null);
     setForm(EMPTY_FORM);
     setRestrictions(null);
+    setTab("basics");
     setOpen(true);
   }
   function openEdit(lt: LeaveType) {
@@ -83,6 +97,7 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
     };
     setForm(next);
     setRestrictions((lt.restrictions as Record<string, unknown> | undefined) ?? null);
+    setTab("basics");
     setOpen(true);
   }
 
@@ -142,9 +157,10 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
         : "not encashable",
     );
     parts.push(form.carryForward ? `carries into the next year${form.carryForwardCap.trim() ? ` (up to ${form.carryForwardCap.trim()} days)` : ""}` : "unused balance resets on 31 Dec");
-    // The restriction rules in the same sentence, read through the SAME merge the server enforces - the panel
-    // below says what this type overrides, and this says what it ends up with.
-    parts.push(...describeRestrictions(mergeRestrictions(orgRestrictions, restrictions)));
+    // The restriction rules are NOT repeated here. RestrictionsEditor renders its own "In force: …" line from
+    // the same merge, immediately above this paragraph, so appending them produced the identical sentence
+    // twice in one dialog. This says what the type's own switches add up to; the editor says what the rules
+    // come out as.
     return parts.join(" · ");
   })();
 
@@ -198,6 +214,18 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
         ) : (
           <Badge variant="muted">Resets</Badge>
         ),
+    },
+    {
+      // Whether a type carries a policy of its own is otherwise invisible until the dialog is opened, which
+      // makes "which of these override the org baseline?" a question answered one type at a time.
+      id: "restrictions",
+      header: "Restrictions",
+      filter: "select",
+      accessor: (lt) => (ruleCount(lt) ? "Has rules" : "Follows org"),
+      cell: (lt) => {
+        const n = ruleCount(lt);
+        return n ? <Badge variant="secondary">{n} rule{n === 1 ? "" : "s"}</Badge> : <span className="text-muted-foreground">—</span>;
+      },
     },
     stateColumn<LeaveType>(),
     ...metaColumns<LeaveType>(),
@@ -262,11 +290,35 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
         // editing only the policy threw the edit away without ever asking.
         form={{ ...form, restrictions }}
         submitLabel={editing ? "Save changes" : "Create"}
-        canSubmit={!!form.name.trim()}
-        whyNot="Give the leave type a name."
+        canSubmit={!!form.name.trim() && !policyProblem}
+        // The policy's own refusal wins over the name one: a nameless form says so in the field itself, and
+        // the rule that can't be saved is the thing the reader cannot otherwise see from the submit button.
+        whyNot={policyProblem ?? "Give the leave type a name."}
         onSubmit={submit}
         className="sm:max-w-2xl lg:max-w-4xl"
       >
+        {/* THREE TABS, because this form was one scroll of about fifty controls: its own twenty, then the
+            restrictions editor's thirty. Segmented rather than underline - every tabbed dialog in this app
+            (AccessTab, ApiKeysPanel, RequestsHistoryTabs) is segmented, and `underline` is defined by
+            resembling the sidebar's workspace bar (tabs.tsx:8-10), which is navigation chrome and reads wrong
+            inside a form you still have to Save or Cancel out of. */}
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList variant="segmented" aria-label="Leave type sections">
+            <TabsTrigger value="basics">Basics</TabsTrigger>
+            <TabsTrigger value="balance">Balance</TabsTrigger>
+            <TabsTrigger value="restrictions">
+              Restrictions
+              {/* The count, or a marker when the policy is one the server would refuse - the reader is blocked
+                  from saving by a rule on a tab they may not be looking at, so the tab has to say so. */}
+              {policyProblem ? (
+                <span className="ml-1.5 rounded-full bg-destructive px-1.5 text-[10px] leading-4 text-destructive-foreground">!</span>
+              ) : ruleCountOf(restrictions) > 0 ? (
+                <span className="ml-1.5 rounded-full bg-background/80 px-1.5 text-[10px] leading-4">{ruleCountOf(restrictions)}</span>
+              ) : null}
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="basics" className="space-y-5">
           {/* `htmlFor` by hand: the field holds the colour swatch beside the input, so Field has no single
               child to bind its label to and the label named nothing. */}
           <Field label="Name" htmlFor="leave-type-name" info="The color sets this type's pills on the calendar/timeline. Click the swatch to change it; 'Auto' picks a stable color.">
@@ -323,6 +375,9 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
             <Checkbox id="paid" checked={form.paid} onCheckedChange={(v) => setForm({ ...form, paid: v === true })} />
             <Label htmlFor="paid">Paid leave</Label>
           </div>
+          </TabsContent>
+
+          <TabsContent value="balance" className="space-y-5">
           {/* Three independent policies, each a short panel: side by side on a wide dialog they read as the
               alternatives they are, instead of a column taller than the screen. */}
           <div className="grid gap-3 lg:grid-cols-2">
@@ -370,12 +425,19 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
               </Field>
             </div>
           </div>
-          {/* The restrictions, folded by section: a leave type with no policy of its own shows eight closed
-              headers rather than forty controls, and the ones it does set say so in their summaries. */}
-          <div className="rounded-lg border p-3">
-            <div className="mb-2 flex items-center gap-1.5">
-              <p className="text-sm font-medium">Restrictions</p>
-              <InfoHint text="Rules on top of the org-wide leave policy in Settings. A rule left on 'inherit' follows the org; one set here overrides it for this type only." />
+          </TabsContent>
+
+          <TabsContent value="restrictions" className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <p className="text-sm font-medium">Restrictions</p>
+                <InfoHint text="Rules on top of the org-wide leave policy in Settings. A rule left on 'Org policy' follows the org; one set here overrides it for this type only." />
+              </div>
+              {/* The other half of the policy is a DIFFERENT settings entry, and this is where you find out you
+                  are inheriting something you want changed everywhere rather than just here. */}
+              <a href="#/settings/leave-policy?tab=restrictions" className="text-xs text-muted-foreground underline hover:text-foreground">
+                Org baseline →
+              </a>
             </div>
             <RestrictionsEditor
               scope="type"
@@ -384,12 +446,17 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
               baseline={orgRules}
               leaveTypes={rows}
               selfPath={editing?.path}
+              onValidityChange={setPolicyProblem}
             />
-          </div>
-          <p className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
-            <span className="font-medium text-foreground">{form.name.trim() || "This leave type"}:</span> {policySummary}.
-          </p>
-          {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
+          </TabsContent>
+        </Tabs>
+
+        {/* Below the tabs, not inside one: this is what the WHOLE form adds up to, and behind a tab it would
+            only be visible from a third of the form that produced it. */}
+        <p className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
+          <span className="font-medium text-foreground">{form.name.trim() || "This leave type"}:</span> {policySummary}.
+        </p>
+        {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
       </WriteDialog>
     </div>
   );

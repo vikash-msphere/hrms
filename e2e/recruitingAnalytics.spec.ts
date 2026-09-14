@@ -98,7 +98,12 @@ test("the funnel, source table and offer counts reflect what was actually filed,
 
     // The tile is the same "awaiting a reply" number read a second way (SummaryStrip's own aggregate, not
     // the chart's) - it only exists once that count is above zero, which this offer now guarantees.
-    await expect(page.getByRole("button", { name: /Awaiting a reply/ })).toBeVisible({ timeout: 30_000 });
+    // Anchored, and requiring the COUNT that follows the label: the donut beside these tiles has a slice of
+    // the same name and its rows are pressable too, so a bare /Awaiting a reply/ now matches both and the
+    // strict-mode violation names neither. The tile reads "Awaiting a reply <n> extended, no answer"; the
+    // chart's row is exactly the label. Both controls existing is correct - they are two ways to the same
+    // offers - so the locator is what has to say which one this line means, and this line means the tile.
+    await expect(page.getByRole("button", { name: /^Awaiting a reply\s+\d/ })).toBeVisible({ timeout: 30_000 });
 
     // A tile is a door, not just a number: it lands on the page that owns the rows it counted, already
     // focused on the same slice.

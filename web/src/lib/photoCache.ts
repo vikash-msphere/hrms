@@ -51,7 +51,7 @@ registerHydrator("faces", {
   // A different caller: which faces they may see is an access question, so none of these carries over.
   onReset: () => {
     disk.clear();
-    cache.clear();
+    resetAll();
   },
 });
 
@@ -77,6 +77,37 @@ function writeDisk(id: string, dataUri: string | null) {
 function dropDisk(id: string) {
   disk.delete(id);
   del("faces", id);
+}
+
+/**
+ * Give an entry up WITHOUT giving up its subscribers.
+ *
+ * A mounted `PhotoAvatar` subscribes through `useSyncExternalStore` (components/common/PhotoAvatar.tsx), and
+ * the callback lives on the `Entry` object. Deleting or clearing the map therefore left every avatar on screen
+ * holding a callback on an object nothing would ever notify again: the next render minted a FRESH entry with
+ * an empty `subs`, enqueued the fetch, and when the batch settled there was nobody to tell - so the face fell
+ * back to initials for the rest of the page life, until some unrelated re-render happened to read the snapshot
+ * again. Reachable from the whole-store purge below, which is the crash boundary's retry and the change feed's
+ * answer to a moved `authz_version`.
+ *
+ * So the entry stays and only its ANSWER is dropped. `settled: false` is what makes the next read re-request
+ * it, and the notify is what brings the avatars back when it lands.
+ */
+function reset(key: string, e: Entry) {
+  // Nothing is holding this one, so there is no subscriber to preserve and no reason to keep the object: drop
+  // it, exactly as before. (A stale version key - the face somebody just replaced - is only ever in this half.)
+  if (e.subs.size === 0) {
+    cache.delete(key);
+    return;
+  }
+  e.dataUri = null;
+  e.settled = false;
+  e.subs.forEach((cb) => cb());
+}
+
+/** Give up every cached entry, keeping the subscribers of the ones still on screen (see `reset`). */
+function resetAll() {
+  for (const [key, e] of [...cache]) reset(key, e);
 }
 
 function entry(key: string): Entry {
@@ -181,8 +212,8 @@ export function invalidatePhoto(employeeId: string) {
 }
 
 function forget(employeeId: string) {
-  for (const key of [...cache.keys()]) {
-    if (key === employeeId || key.startsWith(`${employeeId}@`)) cache.delete(key);
+  for (const [key, e] of [...cache]) {
+    if (key === employeeId || key.startsWith(`${employeeId}@`)) reset(key, e);
   }
   for (const key of [...disk.keys()]) {
     if (key === employeeId || key.startsWith(`${employeeId}@`)) dropDisk(key);
@@ -197,6 +228,6 @@ subscribeTopic<PhotoMsg>(TOPIC_PHOTO, ({ employee }) => forget(employee)); // lo
 // which employees this caller may see is an access question, so a face they were allowed yesterday is not
 // something to go on holding.
 subscribePurge(() => {
-  cache.clear();
+  resetAll();
   for (const key of [...disk.keys()]) dropDisk(key);
 });

@@ -196,7 +196,13 @@ const PII_PATTERNS: Array<[RegExp, string]> = [
   [/\b[A-Z]{5}\d{4}[A-Z]\b/g, "[pan]"], // Indian PAN: five letters, four digits, a letter
   [/\b[A-Z]{4}0[A-Z0-9]{6}\b/g, "[ifsc]"], // IFSC: four letters, a literal 0, six alphanumerics
   [/\b\d{4}[ -]?\d{4}[ -]?\d{4}\b/g, "[aadhaar]"], // 12 digits, however they were spaced
-  [/\b\d{9,18}\b/g, "[account]"], // a bare run of 9-18 digits is an account number, not a quantity
+  // A bare run of 9-18 digits is an account number, not a quantity - EXCEPT after a query parameter this app
+  // writes itself, where it is a millisecond timestamp. `changes?since=1757869200000`, `?from=`/`?to=` on the
+  // roster and analytics reads: thirteen digits every one of them, and redacting those turned the two most
+  // useful breadcrumbs for reading a session back (the change feed, the activity counts) into `[account]`.
+  // The lookbehind excludes only that position, so a number anywhere a person could have typed it is still
+  // caught - the exclusions are parameter names no field in this app is ever posted under.
+  [/(?<![?&](?:since|from|to|at|until)=)\b\d{9,18}\b/g, "[account]"],
 ];
 
 const scrub = (text: string): string => PII_PATTERNS.reduce((acc, [re, tag]) => acc.replace(re, tag), text);
@@ -249,6 +255,23 @@ const client = dsn
       beforeSend(event) {
         if (event.message) event.message = scrub(event.message);
         for (const ex of event.exception?.values ?? []) if (ex.value) ex.value = scrub(ex.value);
+        // THE URL, which the SDK attaches by itself. This app routes on the hash, and the hash carries text
+        // the person typed: DataTable serialises its column filters into it (`t.<key>={"f":{…}}`) and the
+        // server-side search box rides `?q=`. Somebody looking up a record by account number therefore put
+        // that number in the address bar, and from there into every issue raised while it was open.
+        if (event.request?.url) event.request.url = scrub(event.request.url);
+        if (event.request?.query_string && typeof event.request.query_string === "string") {
+          event.request.query_string = scrub(event.request.query_string);
+        }
+        // THE CONTEXTS, which is where `reportProblemToSentry` puts what the reporter actually wrote. Its
+        // `subject` went through `event.message` above and was scrubbed; `what_happened` - the longer box, and
+        // the one somebody pastes a reference number into - sat one field outside the net this file's own
+        // header describes ("a ticket subject somebody pasted a PAN into"). One level deep, which is the shape
+        // every context in this app has.
+        for (const ctx of Object.values(event.contexts ?? {})) {
+          if (!ctx) continue;
+          for (const [k, v] of Object.entries(ctx)) if (typeof v === "string") (ctx as Record<string, unknown>)[k] = scrub(v);
+        }
         return event;
       },
       beforeBreadcrumb(crumb) {

@@ -1,4 +1,4 @@
-import { gotoRoute, test, expect } from "./fixtures";
+import { allowConsoleErrors, gotoRoute, toast, test, expect } from "./fixtures";
 
 // The two self-service panels on a person's own profile that nobody else fills in for them: government IDs,
 // and the previous-employer income that keeps this year's tax projection honest.
@@ -14,6 +14,16 @@ test.describe("own PII", () => {
     const admin = await as("super");
     const page = await as("employee");
     const label = `E2E ID ${Date.now() % 100000}`;
+    // The 400 below is the FLOW, not a fault: the server refuses a removal that would strand employees'
+    // stored values, the panel puts that refusal in front of the admin, and only the re-send carries the
+    // confirmation. Reaching the second dialog therefore means logging one 400 on `settings/employee_fields`,
+    // every time. Matched on the STATUS rather than the url because the tolerance patterns are tested against
+    // the console message alone (fixtures.ts) - the url is appended only after that - and the message for a
+    // failed resource load names no request. Scoped to the admin page, whose only write here is that key.
+    allowConsoleErrors(admin, /status of 400 \(Bad Request\)/);
+    // And the 409 the identity save retries through, on the employee's page: the refusal is the app being
+    // right, but the browser logs every non-2xx fetch as a console error either way.
+    allowConsoleErrors(page, /status of 409 \(Conflict\)/);
 
     // The identity card has no fields of its own: an org declares what it collects (PAN, Aadhaar, a passport
     // number), and the card is that list. So the field is declared first, by the only role that may.
@@ -27,6 +37,10 @@ test.describe("own PII", () => {
       await admin.getByRole("button", { name: "Add field" }).click();
       await admin.getByPlaceholder("e.g. Passport number").last().fill(label);
       await admin.getByRole("button", { name: "Save fields" }).click();
+      // The press returns before the response does, so the reload below would abort the very write it is
+      // about to check for. Wait on the outcome instead - and on either outcome, because a save refused by
+      // the compare-and-swap is the expected case this loop exists to retry.
+      await expect(toast(admin, /Employee fields saved|Couldn't save|changed this while/i)).toBeVisible({ timeout: 30_000 });
       await admin.reload();
       await expect(admin.getByPlaceholder("e.g. Passport number").last()).toHaveValue(label, { timeout: 30_000 });
     }).toPass({ timeout: 120_000 });
@@ -42,7 +56,16 @@ test.describe("own PII", () => {
     await expect(form.getByText("Edit identity details")).toBeVisible();
     await form.getByLabel(label).fill("ABCDE1234F");
     await form.getByRole("button", { name: "Save", exact: true }).click();
-    await expect(page.getByRole("dialog")).toHaveCount(0);
+    // Retried through the CONFLICT, the same way profileNudges handles the emergency contact. Identity
+    // details are a compare-and-swap over the whole blob on an employee these specs share, so losing that
+    // race is the app being right: it re-reads, keeps what was typed, and says "check them and save again".
+    // The dialog staying open IS that message - so waiting for it to close without answering it read as a
+    // dialog that simply never closed, with a 409 in the worker log as the only trace.
+    const conflict = form.getByText(/Somebody else changed these details/);
+    await expect(async () => {
+      if (await conflict.count()) await form.getByRole("button", { name: "Save", exact: true }).click();
+      await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 10_000 });
+    }).toPass({ timeout: 60_000 });
 
     // Read back on the card, and again from cold - an ID that has to be typed twice is an ID nobody types.
     await expect(panel.getByText("ABCDE1234F")).toBeVisible({ timeout: 30_000 });
@@ -60,7 +83,20 @@ test.describe("own PII", () => {
       await expect(admin.getByPlaceholder("e.g. Passport number").last()).toHaveValue(label, { timeout: 30_000 });
       const row = admin.locator("div").filter({ has: admin.getByPlaceholder("e.g. Passport number") }).last();
       await row.getByRole("button", { name: "Remove field" }).last().click();
+      // Taking this field off the list is asked about TWICE, and neither dialog is optional here. First the
+      // panel: a field that has already been SAVED takes every employee's stored value with it, so the row
+      // does not vanish until that is confirmed (its confirm button carries the same name as the row's own,
+      // hence the dialog scope). Then the SERVER refuses the save outright rather than stranding values, and
+      // the panel puts that refusal - which names how many employees hold one - in front of the admin before
+      // re-sending with the delete flag. This test fills the field in from the employee's side further up, so
+      // the second dialog is guaranteed, and while it sat unanswered the save never landed at all.
+      await answer(admin, "Remove field");
       await admin.getByRole("button", { name: "Save fields" }).click();
+      await answer(admin, "Delete the values");
+      // Waited on the SAVE, not on the dialog. Answering the second confirm is what sends the real write, and
+      // the dialog closes on the press rather than on the response - so reloading as soon as it went away
+      // aborted the PATCH it had just authorised, every time, and the field came back with the page.
+      await expect(toast(admin, /Employee fields saved/)).toBeVisible({ timeout: 30_000 });
       await admin.reload();
       await expect(admin.getByPlaceholder("e.g. Passport number").last()).not.toHaveValue(label, { timeout: 30_000 });
     }).toPass({ timeout: 120_000 });
@@ -102,3 +138,18 @@ test.describe("own PII", () => {
     await expect(page.getByRole("tabpanel")).toContainText(/Declared|Pending|Unverified|verify/i);
   });
 });
+
+/**
+ * Press one confirm dialog's own button, if it is up.
+ *
+ * Tolerant of its absence on purpose: the employee-fields panel asks before removing a SAVED field and again
+ * when the server refuses to strand stored values, and a retry that re-enters the loop on a fresh snapshot
+ * can legitimately meet neither. Scoped to the dialog because these labels repeat on the rows behind it.
+ */
+async function answer(page: import("@playwright/test").Page, label: string) {
+  const button = page.getByRole("dialog").getByRole("button", { name: label, exact: true });
+  const up = await button.waitFor({ state: "visible", timeout: 10_000 }).then(() => true).catch(() => false);
+  if (!up) return;
+  await button.click();
+  await expect(button).toHaveCount(0, { timeout: 30_000 });
+}

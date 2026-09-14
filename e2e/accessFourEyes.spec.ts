@@ -83,6 +83,11 @@ test("a pending permission change is approved by a second admin, from the rules 
 
     // The second pair of eyes, pressed by somebody who is not the requester.
     await modal.getByRole("button", { name: "approve", exact: true }).first().click();
+    // Approving is the press that makes the grant live and cannot be taken back from the same button, so the
+    // app asks first (lib/confirmDecision.ts). Its confirm is a dialog of its own stacked on this modal -
+    // hence the text filter, since `getByRole("dialog")` alone now matches both.
+    const confirmApprove = admin.getByRole("dialog").filter({ hasText: "Approve this request?" });
+    await confirmApprove.getByRole("button", { name: "Approve", exact: true }).click();
     await expect.poll(() => status(admin, pending), { timeout: 30_000 }).toBe("active");
   } finally {
     for (const rule of temporary) await purge(admin, rule);

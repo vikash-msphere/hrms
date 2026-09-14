@@ -45,7 +45,7 @@ test.describe("view as", () => {
     // keyboard path picks the highlighted row and does not care where it is on screen.
     await page.getByPlaceholder("Search…").fill("emp@example.com");
     // `.first()`: the picker lists the match, and the page underneath can be naming them too.
-    await expect(page.getByRole("button", { name: /Eve Employee/ }).first()).toBeVisible();
+    await expect(page.getByRole("option", { name: /Eve Employee/ }).first()).toBeVisible();
     await page.keyboard.press("Enter");
 
     // Picking reloads the app as them. From here the nav is the employee's, not the admin's.

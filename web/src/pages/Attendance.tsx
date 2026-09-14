@@ -18,7 +18,7 @@ import {
 } from "@/lib/attendance";
 import type { AttendanceSession, AttendanceRegularization, Department, Employee, Holiday, LeaveRequest, LeaveType, Me } from "@/types";
 import { Chart } from "@/components/common/Chart";
-import { heatmapPoints } from "@/lib/chartTheme";
+import { heatmapDays } from "@/lib/chartTheme";
 import type { AttendanceSeriesDay } from "@/lib/analytics";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -258,6 +258,15 @@ export default function Attendance({ me }: { me: Me }) {
     try { localStorage.setItem(viewKey(me.email), v); } catch { /* private mode - the toggle just won't stick */ }
   };
   const goPage = (next: number) => { setPage(next); setSelectedDay(null); setPicked(new Set()); };
+  // Pressing a bar in the hours chart opens that day, in whichever shape the view has for a day: the month
+  // grid's detail panel on the calendar, the unfolded punch row in the history list. Not a view switch -
+  // the two views are different WINDOWS (a calendar month against the last thirty days), so a day picked in
+  // one of them is not always in the other.
+  const pickDay = useCallback((day: string) => {
+    if (view === "calendar") { setSelectedDay(day); return; }
+    setExpanded((prev) => new Set(prev).add(day));
+    requestAnimationFrame(() => document.getElementById(`att-day-${day}`)?.scrollIntoView({ block: "center", behavior: "smooth" }));
+  }, [view]);
 
   // Shared inputs for building per-day rows (holidays + approved leave).
   const holidayByDay = useMemo(() => {
@@ -747,13 +756,15 @@ export default function Attendance({ me }: { me: Me }) {
             prevLabel={prevLabel}
             comparing={compare}
             onToggleCompare={() => setCompare((c) => !c)}
+            selectedDay={view === "calendar" ? selectedDay : null}
+            onPickDay={pickDay}
           />
         )}
 
         {/* A year at a glance. Folded away and fetched only when it is opened: a year of punches is a server
             aggregate (GET /v1/people-analytics with a series), and nobody should pay for it to look at
             this month. */}
-        {!pageLoading && me.employee_id && <YearHeatmap employeeId={me.employee_id} tz={tz} />}
+        {!pageLoading && me.employee_id && <YearHeatmap employeeId={me.employee_id} tz={tz} onPickDay={pickDay} inWindow={(d) => d >= fromYmd && d <= toYmd} />}
 
         {/* The visible window at a glance: days/hours, punctuality with average in-out, and what needs fixing.
             Every metric narrows the history below, so the strip rides directly on top of it - under the charts,
@@ -950,6 +961,7 @@ export default function Attendance({ me }: { me: Me }) {
                                   Enter/Space - the chevron is decoration, not the control. The key handler
                                   ignores events from inside the row so the correction pencil keeps its own. */}
                               <tr
+                                id={`att-day-${r.day}`}
                                 className={cn("group cursor-pointer border-b last:border-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring", isOpen && "bg-muted/30")}
                                 tabIndex={0}
                                 aria-expanded={isOpen}
@@ -1116,10 +1128,17 @@ function DayProgress({ worked, full, half, shift, projection, breaks }: {
 //
 // It is CLOSED until asked for. The year comes from the people-analytics series (one request, one aggregate,
 // the caller's own attendance access), and an unopened panel costs nothing.
-function YearHeatmap({ employeeId, tz }: { employeeId: string; tz: string }) {
+function YearHeatmap({ employeeId, tz, onPickDay, inWindow }: {
+  employeeId: string;
+  tz: string;
+  /** Open a day the window below already holds. A year of squares reaches back past it - see the press handler. */
+  onPickDay: (day: string) => void;
+  inWindow: (day: string) => boolean;
+}) {
   const [open, setOpen] = useState(false);
   const [days, setDays] = useState<AttendanceSeriesDay[] | null>(null);
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  const [stale, setStale] = useState<string | null>(null); // a day pressed that the window below does not hold
 
   const today = localDay(new Date().toISOString(), tz);
   const from = new Date(Date.parse(`${today}T00:00:00Z`) - 364 * 86_400_000).toISOString().slice(0, 10);
@@ -1132,7 +1151,7 @@ function YearHeatmap({ employeeId, tz }: { employeeId: string; tz: string }) {
       .catch(() => setState("error"));
   }, [open, days, state, employeeId, from, today]);
 
-  const points = useMemo(() => heatmapPoints(new Map((days ?? []).map((d) => [d.day, Math.round((d.worked_minutes / 60) * 10) / 10]))), [days]);
+  const points = useMemo(() => heatmapDays(new Map((days ?? []).map((d) => [d.day, Math.round((d.worked_minutes / 60) * 10) / 10]))), [days]);
   const lateDays = (days ?? []).filter((d) => d.late).length;
 
   return (
@@ -1165,10 +1184,19 @@ function YearHeatmap({ employeeId, tz }: { employeeId: string; tz: string }) {
                   format={(v) => `${v}h`}
                   ariaLabel="Hours worked on each day of the last year"
                   emptyText="No punches in the last year."
+                  // A square outside the window the page is currently showing has nothing to open - the day's
+                  // punches are not loaded, and silently paging the history back a year under the reader is a
+                  // worse answer than doing nothing. So the press is offered only where it can be honoured.
+                  onSelectDay={(ymd) => { if (inWindow(ymd)) { onPickDay(ymd); setStale(null); } else setStale(ymd); }}
                 />
                 <p className="mt-2 text-xs text-muted-foreground">
                   {days.length} day{days.length === 1 ? "" : "s"} with punches · {lateDays} late arrival{lateDays === 1 ? "" : "s"} · darker is a longer day
                 </p>
+                {stale && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {fmtDayLong(stale)} is outside the window above - step the history back to open it.
+                  </p>
+                )}
               </>
             )}
           </div>
@@ -1178,7 +1206,7 @@ function YearHeatmap({ employeeId, tz }: { employeeId: string; tz: string }) {
   );
 }
 
-function HoursTrend({ rows, full, stats, prev, prevLabel, comparing, onToggleCompare }: {
+function HoursTrend({ rows, full, stats, prev, prevLabel, comparing, onToggleCompare, selectedDay, onPickDay }: {
   rows: AttendanceRow[];
   full: number;
   stats: WindowStats;
@@ -1186,6 +1214,9 @@ function HoursTrend({ rows, full, stats, prev, prevLabel, comparing, onToggleCom
   prevLabel: string;
   comparing: boolean;
   onToggleCompare: () => void;
+  /** The day the page has open, so the bar for it stays lit while the rest are dimmed. */
+  selectedDay: string | null;
+  onPickDay: (day: string) => void;
 }) {
   const days = [...rows].reverse(); // rows are newest-first; a time axis runs the other way
   const balance = stats.doneMinutes - stats.expectedMinutes;
@@ -1217,6 +1248,10 @@ function HoursTrend({ rows, full, stats, prev, prevLabel, comparing, onToggleCom
           markers={[{ label: `Full day (${fmtDurationShort(full)})`, value: Math.round((full / 60) * 100) / 100 }]}
           format={(v) => fmtDuration(Math.round(v * 60))}
           ariaLabel={`Hours worked on each of ${days.length} days in this window`}
+          // A bar is one day, and the page already has a place to put a day: pressing one opens that day's
+          // detail, the same thing pressing its cell in the month grid does.
+          onSelect={(i) => { const d = days[i]; if (d) onPickDay(d.day); }}
+          selected={selectedDay && days.findIndex((d) => d.day === selectedDay) >= 0 ? days.findIndex((d) => d.day === selectedDay) : null}
         />
 
         {comparing && (

@@ -1,7 +1,7 @@
-import { Plus } from "lucide-react";
+import { Check, ChevronRight, Plus } from "lucide-react";
 import type { Employee } from "@/types";
+import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 
 type Flags = NonNullable<Employee["profile_completeness"]>;
 export type CompletenessKey = keyof Flags;
@@ -31,36 +31,72 @@ export function ProfileCompleteness({ flags, onItem, variant = "self" }: { flags
   const done = items.length - missing.length;
   const pct = Math.round((done / items.length) * 100);
   return (
-    <Card className="mt-4">
-      <CardContent className="py-4 sm:py-4">
-        <div className="flex items-baseline justify-between gap-3">
-          <p className="text-sm font-medium">{variant === "record" ? "Record completeness" : "Complete your profile"}</p>
-          <p className="text-sm text-muted-foreground">
-            <span className="font-semibold text-foreground">{pct}%</span> · {done} of {items.length} done
-          </p>
+    <Card className="mt-4 rounded-2xl">
+      <CardContent className="px-5 py-5 sm:px-6 sm:py-[22px]">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-[16.5px] font-bold tracking-[-0.01em]">
+              {variant === "record" ? "This record is incomplete" : "Finish your profile"}
+            </span>
+            <span className="text-[13px] text-muted-foreground">
+              {missing.length} {missing.length === 1 ? "item is" : "items are"} still missing.
+            </span>
+          </div>
+          {/* The number first and big: the point of the card is how far off you are, and that is one glance. */}
+          <span className="flex items-baseline gap-[7px]">
+            <span className="text-[22px] font-bold tracking-[-0.02em] text-primary">{pct}%</span>
+            <span className="text-[13px] font-medium text-muted-foreground">{done} of {items.length} done</span>
+          </span>
         </div>
+
+        {/* One segment per item rather than one filled bar: at six items the segments ARE the checklist, so
+            the bar and the tiles below it agree about what is left instead of restating a percentage. */}
         <div
-          className="mt-2 h-2 overflow-hidden rounded-full bg-muted"
+          className="my-4 flex gap-1"
           role="progressbar"
           aria-valuenow={pct}
           aria-valuemin={0}
           aria-valuemax={100}
+          // One name for both variants: this is the meter's identity, not its heading. The visible heading
+          // reframes for HR; what the bar IS does not change.
           aria-label="Profile completeness"
         >
-          <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${pct}%` }} />
-        </div>
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {missing.map((i) => (
-            <Button
-              key={i.key}
-              size="sm"
-              variant="outline"
-              className="h-7 rounded-full px-2.5 text-xs font-normal"
-              onClick={() => onItem(i.key)}
-            >
-              <Plus className="h-3.5 w-3.5 text-primary" /> {i.label}
-            </Button>
+          {items.map((i) => (
+            <span key={i.key} className={cn("h-1.5 flex-1 rounded-full transition-colors", flags[i.key] ? "bg-primary" : "bg-muted")} />
           ))}
+        </div>
+
+        {/* Tiles, not chips: each one carries what it is AND that it is unfinished, which a pill the width of
+            its own label cannot. Done items stay on screen, greyed - a checklist that hides what you have
+            finished makes it impossible to see that you are nearly there. */}
+        <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fit,minmax(258px,1fr))]">
+          {items.map((i) => {
+            const complete = !!flags[i.key];
+            return (
+              <button
+                key={i.key}
+                type="button"
+                // Named for the SECTION alone. Without this the accessible name is the whole tile - label
+                // plus "Not added yet" - so the button announces its own status as part of its purpose, and
+                // anything looking for "Emergency contact" finds nothing.
+                aria-label={i.label}
+                onClick={() => onItem(i.key)}
+                className={cn(
+                  "flex min-w-0 items-center gap-[11px] rounded-xl border p-[11px] text-left transition-colors",
+                  complete ? "border-transparent bg-muted/40" : "bg-card hover:border-primary/40 hover:bg-accent",
+                )}
+              >
+                <span className={cn("flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg", complete ? "bg-emerald-100 dark:bg-emerald-950/60" : "bg-primary/10")}>
+                  {complete ? <Check className="h-3.5 w-3.5 text-emerald-700 dark:text-emerald-300" /> : <Plus className="h-3.5 w-3.5 text-primary" />}
+                </span>
+                <span className="flex min-w-0 flex-col gap-px">
+                  <span className={cn("truncate text-sm font-semibold", complete && "text-muted-foreground")}>{i.label}</span>
+                  <span className="truncate text-xs text-muted-foreground">{complete ? "Added" : "Not added yet"}</span>
+                </span>
+                {!complete && <ChevronRight className="ml-auto h-[15px] w-[15px] shrink-0 text-muted-foreground" />}
+              </button>
+            );
+          })}
         </div>
       </CardContent>
     </Card>

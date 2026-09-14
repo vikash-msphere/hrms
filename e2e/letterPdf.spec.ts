@@ -19,7 +19,7 @@ test("generating a letter downloads a real PDF", async ({ as }) => {
   // Who it is for: a searchable picker, not a select - the org can have thousands of people in it.
   await dialog.getByRole("button", { name: /Select an employee/ }).click();
   await page.getByPlaceholder("Search employees…").fill("Eve");
-  await page.getByRole("button", { name: "Eve Employee", exact: true }).click();
+  await page.getByRole("option", { name: "Eve Employee", exact: true }).click();
 
   // Which letter: the templates come from scripts/templates.sql. "Employment Verification" is one that needs
   // no extra typed input, so this stays a test of the render-and-download chain rather than of a form.

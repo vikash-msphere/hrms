@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Paperclip, Users, X } from "lucide-react";
 import { create, get, upload } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -8,7 +8,11 @@ import { chargeableDays } from "@/lib/leaveDays";
 import { bestBridge, breakAround } from "@/lib/holidayBreaks";
 import {
   checkLeaveRestrictions,
+  dayBar,
+  dayBarReason,
+  describeRestrictionsByGroup,
   hasAnyRestriction,
+  LEAF_CODES,
   mergeRestrictions,
   parseRestrictions,
   requiredNotice,
@@ -223,7 +227,11 @@ export function RequestLeaveDialog({
     const cache = new Map<string, LeaveRestrictions>();
     return (t?: LeaveType) => {
       if (!t) return parseRestrictions({});
-      const key = t.path;
+      // Keyed by the row's OWN restrictions as well as its path. The merge reads `t.restrictions`, so a cache
+      // keyed by the path alone went on answering with the policy a type USED to have the moment an edit
+      // reached the row - this admin's, or another's arriving through the store - and the dialog then
+      // previewed, and let through, a rule the server no longer enforces.
+      const key = `${t.path} ${JSON.stringify(t.restrictions ?? null)}`;
       if (!cache.has(key)) cache.set(key, mergeRestrictions(orgRestrictions, t.restrictions));
       return cache.get(key)!;
     };
@@ -388,12 +396,25 @@ export function RequestLeaveDialog({
     }
     return m;
   }, [requests, me.employee_id, myDept, deptOf, empName]);
-  const dayInfo = (ymd: string): DayInfo | undefined => {
+  // Stable per set of facts, not per render: the calendar memoizes "does any visible day carry a policy bar"
+  // on this function's identity, and a fresh closure every render would make that memo do nothing.
+  const dayInfo = useCallback((ymd: string): DayInfo | undefined => {
     const holiday = holidayNameByDay.get(ymd);
     const away = awayByDay.get(ymd);
-    if (!holiday && !away) return undefined;
-    return { holiday, halfHoliday: halfHolidaySet.has(ymd), away };
-  };
+    // The policy's own view of this one date, through the SAME predicates the server refuses with
+    // (domain/leaveRestrictions.ts#dayBar) - so a day the grid strikes out and a day the server would refuse
+    // are the same set, not two readings of one rule. Only the rules that can be decided for a date on its
+    // own: a notice requirement depends on how long the request is, so it belongs in the policy list instead.
+    const bar = selectedType ? dayBar(selectedRules, ymd) : null;
+    // The KIND travels with the reason: a closed period is drawn as the span it is, a recurring rule as a
+    // mark on its own day. Both come from the same predicate, so neither drawing can disagree with the
+    // refusal.
+    const barred = bar
+      ? { reason: dayBarReason(bar), kind: bar.kind === "window" ? ("window" as const) : ("day" as const) }
+      : undefined;
+    if (!holiday && !away && !barred) return undefined;
+    return { holiday, halfHoliday: halfHolidaySet.has(ymd), away, barred };
+  }, [holidayNameByDay, awayByDay, halfHolidaySet, selectedType, selectedRules]);
 
   /**
    * The leave policy, previewed before the round trip.
@@ -473,9 +494,53 @@ export function RequestLeaveDialog({
 
   const blocking = violations.filter((v) => v.severity === "error");
   const waived = violations.filter((v) => v.severity === "warning");
-  // What the selected type needs for a request of this length, said BEFORE the dates are wrong rather than
-  // after: "two days' notice" on the date field is a rule you can plan around.
-  const noticeNeeded = formDays != null && formDays > 0 ? requiredNotice(selectedRules.timing.advance_notice, formDays) : null;
+  // Until there are dates, no rule has been judged: the checklist lists what the policy asks for rather than
+  // ticking things it has not actually checked.
+  const datesChosen = !!form.start_date && !!form.end_date && formDays != null && formDays > 0;
+
+  /**
+   * THE POLICY AS ONE CHECKLIST, each rule in exactly one place whether it is met or broken.
+   *
+   * This replaces three surfaces that each stated part of the policy: a notice hint on the Start date
+   * field, a panel of blocking violations, and a panel of waived ones. They overlapped, so the code carried
+   * a flag to stop the hint printing a sentence the panel was already printing - an invariant living in a
+   * boolean that the next surface to be added would have had to remember. Here a rule has one row, and the
+   * row changes state; there is nothing to keep in sync.
+   *
+   * Built by joining what the policy SAYS (a clause per leaf) to what the evaluator ANSWERS (a violation per
+   * code) through the domain's own `LEAF_CODES`, so the screen never forms its own opinion about which rule
+   * a refusal belongs to.
+   */
+  const policyChecks = useMemo(() => {
+    if (!selectedType || !hasAnyRestriction(selectedRules)) return [];
+    const byCode = new Map(violations.map((v) => [v.code, v]));
+    const seen = new Set<string>();
+    const rows = describeRestrictionsByGroup(selectedRules)
+      // A waiver is not a rule - it changes what breaking one costs, and each waived rule says so on its
+      // own row below.
+      .filter((c) => c.group !== "soft_rules")
+      .map((c) => {
+        const code = LEAF_CODES[`${c.group}.${c.leaf}`];
+        const hit = code ? byCode.get(code) : undefined;
+        if (code) seen.add(code);
+        return {
+          key: `${c.group}.${c.leaf}`,
+          text: hit?.message ?? c.text,
+          state: !datesChosen ? "pending" : hit ? (hit.severity === "error" ? "unmet" : "waived") : "met",
+        } as const;
+      });
+    // Anything the evaluator refused that no clause described. Should be empty - but a rule the reader is
+    // blocked by and cannot see is the one failure this panel must not have, so it is caught rather than
+    // trusted away.
+    const orphans = violations
+      .filter((v) => !seen.has(v.code))
+      .map((v) => ({ key: `violation-${v.code}`, text: v.message, state: v.severity === "error" ? "unmet" : "waived" } as const));
+    return [...rows, ...orphans];
+  }, [selectedType, selectedRules, violations, datesChosen]);
+  // The notice rule used to be stated here as well, as a hint on the Start date field, with a flag to stop it
+  // printing while the violation panel was printing the same sentence. Both are gone: the checklist above
+  // states that rule in one row and changes the row's state, so there is no second surface to suppress. The
+  // flag was an invariant kept by hand, and the next surface added would have had to remember it.
 
   const canSubmit = !!form.leave_type && !!form.start_date && !!form.end_date && !!formDays && !insufficient && myConflicts.length === 0 && blocking.length === 0;
 
@@ -557,21 +622,55 @@ export function RequestLeaveDialog({
                 <p className="mt-1.5 text-xs text-muted-foreground">Change the dates, or cancel the existing request first.</p>
               </div>
             )}
-            {blocking.length > 0 && (
-              <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm">
-                <p className="font-medium text-destructive">This doesn't meet the {selectedType?.display_name ?? "leave"} policy</p>
-                <ul className="mt-1 list-disc space-y-1 pl-4">
-                  {blocking.map((v) => <li key={v.code}>{v.message}</li>)}
+            {policyChecks.length > 0 && (
+              <div className={cn(
+                "rounded-lg border p-3 text-sm",
+                blocking.length > 0 ? "border-destructive/40 bg-destructive/10" : waived.length > 0 ? "border-warning/40 bg-warning/10" : "bg-muted/40",
+              )}>
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-medium">{selectedType?.display_name ?? "Leave"} policy</p>
+                  <p className={cn(
+                    "text-xs font-medium",
+                    blocking.length > 0 ? "text-destructive" : waived.length > 0 ? "text-warning-foreground dark:text-warning" : "text-muted-foreground",
+                  )}>
+                    {!datesChosen
+                      ? `${policyChecks.length} rule${policyChecks.length === 1 ? "" : "s"} apply`
+                      : blocking.length > 0
+                        ? `${blocking.length} rule${blocking.length === 1 ? "" : "s"} not met`
+                        : waived.length > 0
+                          ? "Your approver will be told"
+                          : "All rules met"}
+                  </p>
+                </div>
+                <ul className="space-y-1">
+                  {policyChecks.map((c) => (
+                    <li key={c.key} className="flex items-start gap-2">
+                      {/* The mark carries the state in shape as well as colour - a row that reads only by
+                          hue says nothing to a reader who cannot separate the two. */}
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full text-[10px] font-bold leading-none",
+                          c.state === "met" && "bg-success text-success-foreground",
+                          c.state === "unmet" && "bg-destructive text-destructive-foreground",
+                          c.state === "waived" && "bg-warning text-warning-foreground",
+                          c.state === "pending" && "border border-muted-foreground/40 text-muted-foreground",
+                        )}
+                      >
+                        {c.state === "met" ? "✓" : c.state === "unmet" ? "✕" : c.state === "waived" ? "!" : "·"}
+                      </span>
+                      <span className={cn(c.state === "pending" && "text-muted-foreground")}>
+                        {c.text}
+                        {c.state === "waived" && (
+                          <span className="text-warning-foreground dark:text-warning"> - waived, your approver decides.</span>
+                        )}
+                      </span>
+                    </li>
+                  ))}
                 </ul>
-              </div>
-            )}
-            {waived.length > 0 && (
-              <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
-                <p className="font-medium text-warning-foreground dark:text-warning">Outside the usual policy - your approver will be told</p>
-                <ul className="mt-1 list-disc space-y-1 pl-4">
-                  {waived.map((v) => <li key={v.code}>{v.message}</li>)}
-                </ul>
-                <p className="mt-1.5 text-xs text-muted-foreground">You can still file this; it goes for approval with a note of what it breaks.</p>
+                {waived.length > 0 && blocking.length === 0 && (
+                  <p className="mt-1.5 text-xs text-muted-foreground">You can still file this; it goes for approval with a note of what it breaks.</p>
+                )}
               </div>
             )}
             {overlaps.length > 0 && (
@@ -613,7 +712,7 @@ export function RequestLeaveDialog({
               </Select>
             </Field>
             <FieldRow>
-              <Field label="Start date" hint={noticeNeeded ? `${selectedType?.display_name ?? "This leave"} needs ${noticeNeeded} day${noticeNeeded === 1 ? "" : "s"}' notice for ${fmtDays(formDays ?? 0)} day${formDays === 1 ? "" : "s"}. ${dayNote(form.start_date) ?? ""}`.trim() : dayNote(form.start_date)}>
+              <Field label="Start date" hint={dayNote(form.start_date)}>
                 <Input
                   type="date"
                   min={minDate}

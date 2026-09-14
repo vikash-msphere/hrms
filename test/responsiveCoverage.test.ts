@@ -763,4 +763,32 @@ describe("responsive coverage (rows)", () => {
     }
     expect(offenders, "add `tapToOpen` to the <Tooltip> - its text is unreachable on a phone without it").toEqual([]);
   });
+
+  // A card header that turns into a row - `flex-row justify-between`, a title on the left and an action
+  // button on the right - is the app's most repeated layout, and on a phone it is a fixed-width row: a
+  // button's label does not wrap, so its min-content width is the whole label, and a title that is one long
+  // word does not shrink below its own. When title + actions exceed the card, a non-wrapping row does not
+  // clip or scroll inside the card - it widens the card, the page, and the document, and the whole layout
+  // pans sideways with the action button hanging off the right edge. That is what the Compensation tab's
+  // "Revise" button did at 390px.
+  //
+  // `flex-wrap` is the whole fix: the actions drop to a second line when they no longer fit and the row is
+  // unchanged wherever it does fit. It costs nothing to carry, so the rule is unconditional rather than
+  // allowlisted per header.
+  it("a flex-row card header wraps", () => {
+    const offenders: string[] = [];
+    for (const [path, src] of files) {
+      for (const m of code(src).matchAll(/<CardHeader[^>]*className="([^"]*)"/g)) {
+        const cls = m[1]!;
+        if (!/\bflex-row\b/.test(cls)) continue;
+        if (/\bflex-wrap\b/.test(cls)) continue;
+        // A header that is a COLUMN on a phone and a row from `sm` up has already answered the question a
+        // different way - it never lays the title and the actions side by side at the width where they would
+        // not fit. `sm:flex-row` on a `flex-col` base is that shape.
+        if (/\bflex-col\b/.test(cls)) continue;
+        offenders.push(`${name(path)}: ${cls}`);
+      }
+    }
+    expect(offenders, "add `flex-wrap` (and a `gap-2`, since space-y does nothing across a wrap)").toEqual([]);
+  });
 });

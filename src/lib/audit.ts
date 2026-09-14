@@ -23,11 +23,15 @@ export async function audit(
   entityId?: string,
   meta?: unknown,
   snapshot?: Record<string, unknown> | null,
+  // An explicit label, for the entries anchored on NO record: a summary of an operation that touched several
+  // rows has no row of its own to describe, and without a name it is the one entry in the trail that `q`
+  // (which searches the stored columns, never meta) cannot find. Callers with a record pass the record.
+  named?: string,
 ) {
   // Prefer the label from the row the caller already holds (creates / shared helpers / the write-backstop's
   // response body) — no read. When no row was passed (inline updates/verbs anchored on a bare id), fetch the
   // record ONCE by uuid to snapshot its label. Either way the label is stored, so the feed reads nothing.
-  let entityName = describeRow(entity, snapshot);
+  let entityName = named ?? describeRow(entity, snapshot);
   if (entityName === undefined && entityId && snapshot == null) entityName = await labelFromDb(deps, entity, entityId);
   return writeAudit(deps, actor, action, entity, entityId, meta, entityName);
 }

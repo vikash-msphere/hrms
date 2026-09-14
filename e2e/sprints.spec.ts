@@ -94,7 +94,13 @@ test("a sprint is planned from the backlog, started, charted, and completed", as
 
   // Planning: the task is pulled out of the backlog and into the box, from the tile's own menu (the touch
   // path for what is otherwise a drag).
-  const tile = page.locator("div").filter({ hasText: task }).last();
+  // The actions menu is a SIBLING of the tile, not a child of it (Boards.tsx keeps it out of the tile's own
+  // `role="button"`), so the innermost div carrying the title does not contain it - filter on the control too.
+  const tile = page
+    .locator("div")
+    .filter({ hasText: task })
+    .filter({ has: page.getByRole("button", { name: "Task actions" }) })
+    .last();
   await tile.getByRole("button", { name: "Task actions" }).click();
   await page.getByRole("menuitem", { name: `Move to ${name}` }).click();
   // Out of the backlog and into the box: the tile stays on screen (it moved column, it did not go anywhere)

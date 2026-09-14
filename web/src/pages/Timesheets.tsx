@@ -8,6 +8,8 @@ import { todayStr, addDaysYmd, weekStartYmd, weekdayOf } from "@/lib/orgDay";
 import type { Card as KanbanCard, Employee, Me, Project, TimeEntry, TimeEntryStatus } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { Chart, ChartCard } from "@/components/common/Chart";
+import { ChartFilterNote } from "@/components/common/ChartFilterNote";
+import { useChartFocus } from "@/lib/chartFocus";
 import { topSlices } from "@/lib/chartTheme";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { AccessScope } from "@/components/access/AccessScope";
@@ -158,6 +160,25 @@ export default function Timesheets({ me }: { me: Me }) {
     const ids = new Set<string>([...mine.map((e) => idOf(e.project ?? "")), ...extraProjects].filter(Boolean));
     return [...ids].map((id) => projectById.get(id)).filter(Boolean) as Project[];
   }, [mine, extraProjects, projectById]);
+
+  // Either chart narrows the grid under it: a day takes it down to that column, a project to that row. Both
+  // are drawn from `mine` - the whole week - so a pick never removes the mark that would undo it.
+  const cf = useChartFocus<TimeEntry, "day" | "project">({
+    day: {
+      keys: days,
+      label: (k) => new Date(`${k}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" }),
+      match: (e, k) => e.date === k,
+    },
+    project: {
+      keys: weekCharts.projects.keys,
+      label: (k) => k,
+      match: (e, k) => (projectById.get(idOf(e.project ?? ""))?.name ?? "Project") === k,
+    },
+  });
+  // `days` itself stays the whole week: it is what "copy last week" writes into and what the grid's totals
+  // are reconciled against, and a filter is a way of LOOKING at a week, not a smaller week.
+  const shownDays = cf.picked?.dim === "day" ? days.filter((d) => d === cf.picked!.key) : days;
+  const shownProjects = cf.picked?.dim === "project" ? gridProjects.filter((p) => p.name === cf.picked!.key) : gridProjects;
 
   // Distinct descriptions this person has already used on a project (newest first), for the log dialog's
   // suggestion list. Drawn from what's loaded - no extra query for a convenience.
@@ -365,6 +386,7 @@ export default function Timesheets({ me }: { me: Me }) {
               stacked
               format={(v) => `${fmt(v)}h`}
               ariaLabel="Hours logged on each day of this week, split billable and non-billable"
+              {...cf.chart("day")}
             />
           </ChartCard>
           <ChartCard title="Where the week went" description="This week's hours by project.">
@@ -375,6 +397,7 @@ export default function Timesheets({ me }: { me: Me }) {
               datasets={[{ name: "Hours", values: weekCharts.projects.values }]}
               format={(v) => `${fmt(v)}h`}
               ariaLabel="Hours logged this week by project"
+              {...cf.chart("project")}
             />
           </ChartCard>
         </div>
@@ -390,18 +413,21 @@ export default function Timesheets({ me }: { me: Me }) {
         <EmptyState icon={Timer} title="No projects" description="Ask HR to add projects in Settings → Payroll → Projects before logging time." />
       ) : (
         <>
+          <ChartFilterNote label={cf.activeLabel} shown={cf.count(mine)} total={mine.length} onClear={cf.clear} />
           {/* A week grid is eight columns wide, which a phone cannot hold however narrow the cells get - and
               the project name is the column that must not be cut. Below `sm` the grid turns itself inside
               out: one card per project, with its seven days as a row of buttons underneath the name. Same
               cells, same taps, no sideways scrolling. */}
           <div className="space-y-2 sm:hidden">
-            {gridProjects.map((p) => (
+            {shownProjects.map((p) => (
               <div key={p.path} className="rounded-lg border p-3">
                 <div className="mb-2 truncate text-sm font-medium">{p.name}{p.client ? <span className="ml-1 text-xs text-muted-foreground">· {p.client}</span> : null}</div>
-                <div className="grid grid-cols-7 gap-1">
-                  {days.map((d, i) => (
+                {/* Columns follow the days actually shown: a picked day is one column, not one of seven with
+                    six blanks beside it. */}
+                <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${shownDays.length}, minmax(0, 1fr))` }}>
+                  {shownDays.map((d) => (
                     <div key={d} className="min-w-0 text-center">
-                      <div className={cn("text-[10px] font-medium uppercase tracking-wide text-muted-foreground", d === todayStr() && "text-primary")}>{WEEKDAY[i]}</div>
+                      <div className={cn("text-[10px] font-medium uppercase tracking-wide text-muted-foreground", d === todayStr() && "text-primary")}>{WEEKDAY[days.indexOf(d)]}</div>
                       <div className="text-[10px] tabular-nums text-muted-foreground">{new Date(d + "T00:00:00").getDate()}</div>
                       {dayCell(p, d)}
                     </div>
@@ -411,8 +437,8 @@ export default function Timesheets({ me }: { me: Me }) {
             ))}
             <div className="rounded-lg border p-3">
               <AddProjectRow projects={activeProjects.filter((p) => !gridProjects.some((g) => g.path === p.path))} onAdd={(id) => setExtraProjects((x) => [...x, id])} />
-              <div className="mt-2 grid grid-cols-7 gap-1 border-t pt-2">
-                {days.map((d) => (
+              <div className="mt-2 grid gap-1 border-t pt-2" style={{ gridTemplateColumns: `repeat(${shownDays.length}, minmax(0, 1fr))` }}>
+                {shownDays.map((d) => (
                   <div key={d} className="text-center text-[11px] font-medium tabular-nums text-muted-foreground">{dayTotal(d) ? `${fmt(dayTotal(d))}h` : "-"}</div>
                 ))}
               </div>
@@ -424,18 +450,18 @@ export default function Timesheets({ me }: { me: Me }) {
               <thead>
                 <tr className="border-b bg-muted/40">
                   <th className="sticky left-0 z-10 bg-muted/40 px-3 py-2 text-left font-medium">Project</th>
-                  {days.map((d, i) => (
+                  {shownDays.map((d) => (
                     <th key={d} className={cn("px-2 py-2 text-center font-medium", d === todayStr() && "text-primary")}>
-                      <div>{WEEKDAY[i]}</div><div className="text-xs font-normal tabular-nums text-muted-foreground">{new Date(d + "T00:00:00").getDate()}</div>
+                      <div>{WEEKDAY[days.indexOf(d)]}</div><div className="text-xs font-normal tabular-nums text-muted-foreground">{new Date(d + "T00:00:00").getDate()}</div>
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {gridProjects.map((p) => (
+                {shownProjects.map((p) => (
                   <tr key={p.path} className="border-b last:border-0">
                     <td className="sticky left-0 z-10 whitespace-nowrap border-r bg-card px-3 py-2 font-medium">{p.name}{p.client ? <span className="ml-1 text-xs text-muted-foreground">· {p.client}</span> : null}</td>
-                    {days.map((d) => (
+                    {shownDays.map((d) => (
                       <td key={d} className="border-r p-1 text-center align-middle last:border-0">{dayCell(p, d)}</td>
                     ))}
                   </tr>
@@ -444,7 +470,7 @@ export default function Timesheets({ me }: { me: Me }) {
                   <td className="sticky left-0 z-10 bg-muted/20 px-3 py-2">
                     <AddProjectRow projects={activeProjects.filter((p) => !gridProjects.some((g) => g.path === p.path))} onAdd={(id) => setExtraProjects((x) => [...x, id])} />
                   </td>
-                  {days.map((d) => <td key={d} className="px-2 py-2 text-center text-xs font-medium tabular-nums text-muted-foreground">{dayTotal(d) ? `${fmt(dayTotal(d))}h` : ""}</td>)}
+                  {shownDays.map((d) => <td key={d} className="px-2 py-2 text-center text-xs font-medium tabular-nums text-muted-foreground">{dayTotal(d) ? `${fmt(dayTotal(d))}h` : ""}</td>)}
                 </tr>
               </tbody>
             </table>

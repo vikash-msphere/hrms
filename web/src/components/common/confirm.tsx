@@ -59,17 +59,22 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
           // changes, delete this row), and portals paint in mount order, which would put this one behind.
           className="z-[60] max-w-md"
           overlayClassName="z-[60]"
-          // Enter confirms from anywhere in the dialog (Esc cancels via the dialog default), so a confirmation
-          // is a single keystroke - EXCEPT on a button, which activates itself.
+          // Enter confirms from anywhere in the dialog (Esc cancels via the dialog default), so an ordinary
+          // confirmation is a single keystroke - EXCEPT on a button, which activates itself.
           //
-          // The exception is the whole point on a destructive prompt. There `autoFocus` is deliberately
-          // withheld (so nobody deletes by reflex), which leaves focus on the dialog and makes the first Tab
-          // land on Cancel - the first button in the markup. Without this check, a keyboard user pressing Enter
-          // to CANCEL had that suppressed by `preventDefault` and ran `close(true)` instead: the delete they
-          // were declining. Every `confirm({ destructive: true })` in the app - reject, cancel, revoke,
-          // rescind, "Discard your changes?", the bulk destructive actions, the purge prompts.
+          // A DESTRUCTIVE PROMPT IS EXEMPT ENTIRELY. `autoFocus` is withheld there so nobody deletes by
+          // reflex, which leaves focus on the dialog itself - and "Enter confirms from anywhere" then handed
+          // the reflex back: focus is not on a button, so the guard below does not fire and a bare Enter ran
+          // `close(true)`. Pressing a row's Delete and then pressing Enter (a double-press, a held key, a
+          // keyboard user finishing the form behind it) confirmed the delete without reading the prompt.
+          // Every `confirm({ destructive: true })` in the app - reject, cancel, revoke, rescind, "Discard your
+          // changes?", the bulk destructive actions, the purge prompts.
+          //
+          // A destructive prompt is therefore answered by pressing a button: Tab to it, or click it. That is
+          // the same standard ui/dialog.tsx holds `onEnterSubmit` to, which takes Enter only from an <input>
+          // or with a modifier - enough to finish a form, not enough to be a reflex.
           onKeyDown={(e) => {
-            if (e.key !== "Enter") return;
+            if (e.key !== "Enter" || opts?.destructive) return;
             if ((e.target as HTMLElement | null)?.closest("button")) return; // let the focused button act
             e.preventDefault();
             close(true);

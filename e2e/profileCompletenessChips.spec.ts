@@ -1,7 +1,7 @@
 import { SPA_HEADERS, gotoRoute, expect, test } from "./fixtures";
 
 // The profile-completeness widget on a colleague's own record - never opened by any spec, on either of its
-// two homes (`/profile`, the self-service nudge, or here, HR's neutral "Record completeness" framing). A
+// two homes (`/profile`, the self-service nudge, or here, HR's neutral "This record is incomplete" framing). A
 // brand-new employee has nothing filled in beyond a name, so every tracked section reads incomplete - the
 // one state that needs no setup of its own to reach, and the chips are real navigation, not just paint:
 // pressing one has to land on the section it names.
@@ -24,10 +24,13 @@ test("a bare-new employee's record reads 0% complete, and each missing chip open
 
   try {
     await gotoRoute(page, `employees/${id}`);
-    await expect(page.getByText("Record completeness")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("This record is incomplete")).toBeVisible({ timeout: 30_000 });
     // Signature is left out of HR's tally entirely (it has no section on this page), so a brand-new record
     // is 0 of 6, not 0 of 7.
-    await expect(page.getByText("0% · 0 of 6 done")).toBeVisible();
+    // The score and the tally are separate elements now (the percentage is set large beside the count), so
+    // they are asserted as the two things they are rather than as one run of text.
+    await expect(page.getByText("0%", { exact: true })).toBeVisible();
+    await expect(page.getByText("0 of 6 done")).toBeVisible();
     const bar = page.getByRole("progressbar", { name: "Profile completeness" });
     await expect(bar).toHaveAttribute("aria-valuenow", "0");
 
@@ -43,7 +46,7 @@ test("a bare-new employee's record reads 0% complete, and each missing chip open
     // navigated.
     await page.getByRole("tab", { name: "Profile", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`employees/${id}$`));
-    await expect(page.getByText("Record completeness")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("This record is incomplete")).toBeVisible({ timeout: 30_000 });
     await page.getByRole("button", { name: "Emergency contact", exact: true }).click();
     await expect(page.getByRole("dialog").filter({ hasText: "Emergency details" })).toBeVisible({ timeout: 15_000 });
   } finally {

@@ -31,6 +31,8 @@ import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { WriteDialog } from "@/components/common/WriteDialog";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Chart, ChartCard } from "@/components/common/Chart";
+import { ChartFilterNote } from "@/components/common/ChartFilterNote";
+import { useChartFocus } from "@/lib/chartFocus";
 import { monthlyTotals } from "@/lib/chartTheme";
 import { readLocal, writeLocal } from "@/lib/localPref";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -339,7 +341,48 @@ export default function Directory({ me }: { me: Me }) {
   }, [focusRows, deptChip]);
 
   // The grid is a browsing surface: deleted people stay table-only (that's where restore/purge lives).
-  const gridRows = useMemo(() => chipRows.filter((e) => !e.delete_time), [chipRows]);
+  // The org's distribution and its growth, over the WHOLE live directory - never over the narrowed set. A
+  // chart drawn from rows its own bar has already filtered collapses to that one bar the moment it is
+  // pressed, leaving the reader holding a filter with nothing left to press to undo it. Clicking a
+  // department bar picks the same chip the row of chips below would: the chart is a filter, not a picture
+  // beside one.
+  const orgCharts = useMemo(() => {
+    const live = rows.filter((e) => !e.delete_time);
+    const counts = new Map<string, { id: string; n: number }>();
+    for (const e of live) {
+      const id = e.department ? idOf(e.department) : NONE;
+      const entry = counts.get(id) ?? { id, n: 0 };
+      entry.n++;
+      counts.set(id, entry);
+    }
+    const sorted = [...counts.values()].sort((a, b) => b.n - a.n).slice(0, 10);
+    return {
+      depts: {
+        labels: sorted.map((d) => (d.id === NONE ? "No department" : deptName(d.id) || d.id)),
+        values: sorted.map((d) => d.n),
+      },
+      deptIds: sorted.map((d) => d.id),
+      joiners: monthlyTotals(live.filter((e) => e.start_date).map((e) => ({ date: e.start_date!, value: 1 })), 12, todayStr()),
+    };
+  }, [rows, deptName]);
+  const setDeptFilter = (id: string | null) => setDeptChip((c) => (c === id ? null : id));
+
+  // The joiners chart's own filter. The department bar drives the chips below it (that dimension already has
+  // a visible control, and two surfaces for one filter is one too many); a start month has no chip, so it
+  // gets one of its own in the URL.
+  const cf = useChartFocus<Employee, "startMonth">({
+    startMonth: {
+      keys: orgCharts.joiners.keys,
+      label: (k) => orgCharts.joiners.labels[orgCharts.joiners.keys.indexOf(k)] ?? k,
+      match: (e, k) => (e.start_date ?? "").slice(0, 7) === k,
+    },
+  });
+  const monthRows = useMemo(
+    () => cf.apply(chipRows),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chipRows, cf.picked?.key],
+  );
+  const gridRows = useMemo(() => monthRows.filter((e) => !e.delete_time), [monthRows]);
   const gridSections = useMemo(() => {
     if (!grouped) return null;
     const by = new Map<string, Employee[]>();
@@ -366,29 +409,6 @@ export default function Directory({ me }: { me: Me }) {
       noManager: live.filter((e) => !e.manager).length,
     };
   }, [rows, clockedIn]);
-
-  // The org's distribution and its growth, over the live directory. Clicking a department bar picks the same
-  // chip the row of chips below would - the chart is a filter, not a picture beside one.
-  const orgCharts = useMemo(() => {
-    const live = rows.filter((e) => !e.delete_time);
-    const counts = new Map<string, { id: string; n: number }>();
-    for (const e of live) {
-      const id = e.department ? idOf(e.department) : NONE;
-      const entry = counts.get(id) ?? { id, n: 0 };
-      entry.n++;
-      counts.set(id, entry);
-    }
-    const sorted = [...counts.values()].sort((a, b) => b.n - a.n).slice(0, 10);
-    return {
-      depts: {
-        labels: sorted.map((d) => (d.id === NONE ? "No department" : deptName(d.id) || d.id)),
-        values: sorted.map((d) => d.n),
-      },
-      deptIds: sorted.map((d) => d.id),
-      joiners: monthlyTotals(live.filter((e) => e.start_date).map((e) => ({ date: e.start_date!, value: 1 })), 12, todayStr()),
-    };
-  }, [rows, deptName]);
-  const setDeptFilter = (id: string | null) => setDeptChip((c) => (c === id ? null : id));
 
   function openCreate() {
     setEditing(null);
@@ -558,6 +578,7 @@ export default function Directory({ me }: { me: Me }) {
               datasets={[{ name: "People", values: orgCharts.depts.values }]}
               ariaLabel="Headcount by department"
               onSelect={(i) => setDeptFilter(orgCharts.deptIds[i] ?? null)}
+              selected={deptChip ? (orgCharts.deptIds.indexOf(deptChip) >= 0 ? orgCharts.deptIds.indexOf(deptChip) : null) : null}
             />
           </ChartCard>
           <ChartCard title="Joiners by month" description="Who started when, over the last twelve months.">
@@ -568,6 +589,7 @@ export default function Directory({ me }: { me: Me }) {
               datasets={[{ name: "Joiners", values: orgCharts.joiners.values }]}
               format={(v) => `${v} joiner${v === 1 ? "" : "s"}`}
               ariaLabel="How many people started in each of the last twelve months"
+              {...cf.chart("startMonth")}
             />
           </ChartCard>
         </div>
@@ -675,11 +697,13 @@ export default function Directory({ me }: { me: Me }) {
               </div>
             </div>
 
+            <ChartFilterNote label={cf.activeLabel && `Joined ${cf.activeLabel}`} shown={monthRows.length} total={chipRows.length} onClear={cf.clear} />
+
             {view === "table" ? (
               <DataTable
                 columns={columns}
                 tableId="employees"
-                rows={chipRows}
+                rows={monthRows}
                 getRowId={(e) => e.path}
                 onRowClick={(e) => !e.delete_time && navigate(`employees/${idOf(e.path)}`)}
                 rowClassName={(e) => (e.delete_time ? "opacity-60" : undefined)}

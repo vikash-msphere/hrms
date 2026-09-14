@@ -38,18 +38,23 @@ function panelKey(hash: string): string {
 }
 
 let lastHash = window.location.hash;
-let restoringHash = false;
+// Set when the guard turns a navigation back, and read by the OTHER hashchange listeners registered in this
+// module. A listener's `return` ends that listener, not the event: the scroll handler below ran for the
+// rejected navigation too, so cancelling the prompt threw the dirty form to the top of the page and filed the
+// route the reader had just refused to leave as its scroll anchor.
+let navRejected = false;
 window.addEventListener("hashchange", () => {
-  if (restoringHash) {
-    restoringHash = false;
-    return;
-  }
+  navRejected = false;
   const next = window.location.hash;
   if (dirtyForms.size > 0 && panelKey(next) !== panelKey(lastHash) && !window.confirm(UNSAVED_MSG)) {
+    navRejected = true;
     // Restore synchronously: listeners registered after this one (useRoute) re-read location.hash and see the
-    // original route, so the dirty panel never unmounts. The queued hashchange for the restore is swallowed.
-    restoringHash = true;
-    window.location.hash = lastHash;
+    // original route, so the dirty panel never unmounts.
+    //
+    // `replaceState`, not `location.hash = lastHash`: assigning the hash PUSHES a history entry, so cancelling
+    // a BACK navigation left a stray forward entry and the next Back landed on the route the reader had just
+    // declined to leave. It also fires no hashchange of its own, so there is no second event to swallow.
+    history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}${lastHash}`);
     return;
   }
   lastHash = next;
@@ -123,6 +128,9 @@ function restoreScroll(target: number) {
 window.addEventListener("hashchange", (e) => {
   const back = cameFromHistory;
   cameFromHistory = false;
+  // The guard above put the address straight back, so nothing was navigated to and nothing was left: the
+  // scroll belongs exactly where it is.
+  if (navRejected) return;
   // The page being LEFT comes from the event's own `oldURL`, not from a variable this listener maintains:
   // several places (setRouteRecord, the query-state writers) rewrite the path with `replaceState` and
   // deliberately fire no hashchange, so anything tracked here would be describing a path the user left two
@@ -199,17 +207,37 @@ export function setQueryParams(patch: Record<string, string | null>) {
  * be a step behind on this one segment. Anything that acts on "which record is the URL pointing at" - opening
  * a deep-linked row - has to ask the URL rather than the last parse.
  */
+// Which segment carries the record. `settings` is the one page whose segment 1 is a TAB rather than a record:
+// a dozen catalogs are hosted inside it, so their records live one segment further along (`#/settings/
+// <tab>/<id>` - which is exactly what App.tsx hands each panel as `openId`). Reading segment 1 there gave
+// `useDeepOpen` the tab NAME to compare against a row id; it never matched, and every settings-hosted deep
+// link (leave types, shifts, pay components, pay grades, projects, goal templates, benefit plans, …) opened
+// the right tab with nothing on it - a link from a search hit or the activity feed that quietly did half its
+// job. Read and write go through the same function so the pair cannot drift apart again.
+const recordIndex = (page: string) => (page === "settings" ? 2 : 1);
+
 export function routeRecord(): string | null {
   const raw = window.location.hash.replace(/^#\/?/, "");
   const [path = ""] = raw.split("?");
-  return path.split("/")[1] || null;
+  const segments = path.split("/");
+  return segments[recordIndex(segments[0] ?? "")] || null;
 }
 
 export function setRouteRecord(id: string | null) {
   const raw = window.location.hash.replace(/^#\/?/, "");
   const [path, qs = ""] = raw.split("?");
-  const [page = "dashboard", , sub] = path.split("/");
-  const segments = id ? [page, id, ...(sub ? [sub] : [])] : [page];
+  const parts = path.split("/");
+  const page = parts[0] || "dashboard";
+  const at = recordIndex(page);
+  // Everything before the record stays (the settings tab); everything after it describes the record, so
+  // clearing the id clears that too - `#/page//tab` is not a route.
+  // A record cannot be written into a slot the segments before it have not filled. On `#/settings` with no tab
+  // chosen, `parts.slice(0, 2)` is just `["settings"]`, so the id landed in segment 1 - which that page reads
+  // as the TAB NAME. Nothing to anchor the record to means nothing to write.
+  if (id && parts.slice(0, at).filter(Boolean).length < at) return;
+  const head = parts.slice(0, at).map((s, i) => (i === 0 ? page : s)).filter(Boolean);
+  const tail = parts[at + 1];
+  const segments = id ? [...head, id, ...(tail ? [tail] : [])] : head;
   window.history.replaceState(window.history.state, "", `#/${segments.join("/")}${qs ? `?${qs}` : ""}`);
   syncLastHash();
 }

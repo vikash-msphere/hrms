@@ -31,6 +31,13 @@ test("the leave-type summary and disabled fields track every policy toggle live"
   await form.locator("#paid").click();
   await expect(summary).toContainText("unpaid");
 
+  // Everything from here down - probation, encashment, carry-forward - moved to the BALANCE tab when the
+  // dialog was split into Basics / Balance / Restrictions. A tab renders only its own panel, so those fields
+  // are not in the DOM at all until it is selected; without this the first of them reads as a field that
+  // vanished. The summary itself sits below the tabs and describes the whole form, so it stays put.
+  // Scoped to the dialog's own tablist: "Balance" is a short word, and the page behind carries tabs too.
+  await form.getByRole("tablist", { name: "Leave type sections" }).getByRole("tab", { name: "Balance", exact: true }).click();
+
   // Off probation: the panel's own fields go inert, and the summary drops the accrual clause for a flat refusal.
   const probationCap = form.getByLabel("Probation cap (days)");
   await expect(probationCap).toBeEnabled();

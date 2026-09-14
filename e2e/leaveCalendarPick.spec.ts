@@ -27,9 +27,11 @@ test("a range picked on the grid fills the dates and prices itself", async ({ as
   const start = nextWeekday(14);
   const end = weekdayAfter(start);
 
-  // Every day carries its own date as its name, which is what makes the grid readable without the banding -
-  // and what lets this press a particular day rather than "the fourteenth cell".
-  const day = (ymd: string) => form.getByRole("button", { name: new RegExp(`^${ymd}`) });
+  // Every day carries its own date, which is what lets this press a particular day rather than "the
+  // fourteenth cell". By `data-ymd` and not by name: the NAME is the spoken date ("Monday, 28 September
+  // 2026"), formatted for whoever is reading it, so matching on it would be this spec asserting the runner's
+  // locale agrees with the browser's. What the day IS does not move.
+  const day = (ymd: string) => form.locator(`button[data-ymd="${ymd}"]`);
   await expect(day(start)).toBeVisible({ timeout: 30_000 });
 
   // The first press opens the range, the second closes it. The inputs are the proof it reached the form: they

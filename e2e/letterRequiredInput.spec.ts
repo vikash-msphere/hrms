@@ -60,7 +60,7 @@ test("a required letter input blocks Generate until it's filled", async ({ as })
     const dialog = page.getByRole("dialog");
     await dialog.getByRole("button", { name: /Select an employee/ }).click();
     await page.getByPlaceholder("Search employees…").fill("Eve");
-    await page.getByRole("button", { name: "Eve Employee", exact: true }).click();
+    await page.getByRole("option", { name: "Eve Employee", exact: true }).click();
     await dialog.getByRole("combobox").first().click();
     await page.getByRole("option", { name: label }).click();
 

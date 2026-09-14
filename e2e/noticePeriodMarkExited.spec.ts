@@ -37,7 +37,7 @@ test("marking a notice period exited terminates the employee and disables their 
     const form = page.getByRole("dialog");
     await form.getByLabel("Employee").click();
     await page.getByPlaceholder(/Search|Select/).last().fill(fullName);
-    await expect(page.getByRole("button", { name: new RegExp(fullName) })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("option", { name: new RegExp(fullName) })).toBeVisible({ timeout: 15_000 });
     await page.keyboard.press("Enter");
 
     const noticeDate = await form.getByLabel("Notice given").inputValue();
@@ -97,7 +97,7 @@ test("withdrawing a notice period asks nothing and just calls it off", async ({ 
     const form = page.getByRole("dialog");
     await form.getByLabel("Employee").click();
     await page.getByPlaceholder(/Search|Select/).last().fill(fullName);
-    await expect(page.getByRole("button", { name: new RegExp(fullName) })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("option", { name: new RegExp(fullName) })).toBeVisible({ timeout: 15_000 });
     await page.keyboard.press("Enter");
     const noticeDate = await form.getByLabel("Notice given").inputValue();
     await form.getByLabel("Last working day").fill(addDays(noticeDate, 10));
@@ -146,7 +146,7 @@ test("a notice period record is deleted from the list", async ({ as }) => {
     const form = page.getByRole("dialog");
     await form.getByLabel("Employee").click();
     await page.getByPlaceholder(/Search|Select/).last().fill(fullName);
-    await expect(page.getByRole("button", { name: new RegExp(fullName) })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("option", { name: new RegExp(fullName) })).toBeVisible({ timeout: 15_000 });
     await page.keyboard.press("Enter");
     const noticeDate = await form.getByLabel("Notice given").inputValue();
     await form.getByLabel("Last working day").fill(addDays(noticeDate, 10));

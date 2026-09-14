@@ -342,6 +342,9 @@ export type EmployeeFieldDef = { key: string; label: string; mandatory: boolean;
 
 export type PersonalDetails = Wire<"personal-info">;
 
+/** Derived reachability (services/presence.ts), read lazily by the profile header. Never on the record. */
+export type Presence = Wire<"presence">;
+
 export type BankDetails = Wire<"bank-account">;
 
 // ---- Custom tables (the grid builder) ----

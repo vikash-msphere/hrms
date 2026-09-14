@@ -36,7 +36,7 @@ test("a duplicate is folded into another suggestion, and says where it went", as
     // board carries every other spec's suggestions too.
     await dialog.getByLabel("Duplicate of").click();
     await dialog.getByPlaceholder("Search suggestions…").fill(keeper);
-    await dialog.getByRole("button", { name: new RegExp(`^${escapeRe(keeper)}`) }).first().click();
+    await dialog.getByRole("option", { name: new RegExp(`^${escapeRe(keeper)}`) }).first().click();
 
     // What the choice means, said before it is made - and the submit changing from answering to merging.
     await expect(dialog.getByText(new RegExp(`closes pointing at|votes? move to`))).toBeVisible({ timeout: 30_000 });

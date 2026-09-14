@@ -546,6 +546,12 @@ export function useCodeScanner(onScan: (raw: string, scan: Scan) => void, opts?:
       if (video && !frozenRef.current && video.readyState >= 2) {
         try {
           const hit = await decodeSource(video);
+          // RE-CHECKED AFTER THE AWAIT. A decode is a real round trip through the native detector or the
+          // lazily imported ZXing reader, and the camera can be stopped - or the whole dialog unmounted -
+          // across it; the cleanup sets `stop`, but this invocation is already past the check at the top. So a
+          // code held in frame as the scanner closed still reported a hit, and on the stocktake walk-through
+          // that is a sighting filed against a count the person had just dismissed.
+          if (stop) return;
           if (hit && !(lastHitRef.current.raw === hit.raw && Date.now() - lastHitRef.current.at < 3000)) {
             lastHitRef.current = { raw: hit.raw, at: Date.now() };
             onScanRef.current(hit.raw, hit);
@@ -592,16 +598,22 @@ export function useCodeScanner(onScan: (raw: string, scan: Scan) => void, opts?:
       let hits = 0;
       let misses = 0;
       for (const file of Array.from(files ?? [])) {
+        // The bitmap is released in a `finally`. It was closed only on the way through, so a decode that threw
+        // left it open - and an ImageBitmap holds the DECODED pixels, which for a phone photo is tens of
+        // megabytes held until the tab is closed. The throwing path is precisely the one a bad file takes, and
+        // picking several at once is how this is used.
+        let bitmap: ImageBitmap | undefined;
         try {
-          const bitmap = await createImageBitmap(file);
+          bitmap = await createImageBitmap(file);
           const hit = await decodeSource(bitmap);
-          bitmap.close();
           if (hit) {
             onScanRef.current(hit.raw, hit);
             hits++;
           } else misses++;
         } catch {
           misses++;
+        } finally {
+          bitmap?.close();
         }
       }
       return { hits, misses };

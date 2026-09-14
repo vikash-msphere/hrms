@@ -1,4 +1,4 @@
-import { gotoRoute, purge, test, expect, toast } from "./fixtures";
+import { gotoRoute, personId, purge, test, expect, toast } from "./fixtures";
 
 // Praising a colleague, from anywhere in the app.
 //
@@ -24,7 +24,7 @@ test("kudos is given from the top bar and lands on the board", async ({ as }) =>
   // field also holds the colleague/team switch and so has no single control to bind a label to.
   await form.getByRole("button", { name: "Select a colleague…" }).click();
   await giver.getByPlaceholder("Search colleagues…").fill("Eve");
-  await expect(giver.getByRole("button", { name: /Eve Employee/ })).toBeVisible();
+  await expect(giver.getByRole("option", { name: /Eve Employee/ })).toBeVisible();
   await giver.keyboard.press("Enter");
   // The message box sits under a formatting toolbar, so the field's label has no single control to bind to;
   // the textarea is the only one in the dialog.
@@ -38,6 +38,26 @@ test("kudos is given from the top bar and lands on the board", async ({ as }) =>
   await expect(card).toContainText("Eve Employee");
 
   await purge(giver, await kudosPath(giver, message));
+});
+
+// The same hand-off, from a person's own profile - where the recipient is already in hand. The top-bar
+// button opens the composer on an empty picker; this one carries WHO in the intent, so the praise starts
+// written rather than starting with a search for somebody you are already looking at. Scoped to <main>
+// because the top-bar button is on this page too and answers to the same name.
+test("kudos given from a profile arrives with that person already filled in", async ({ as }) => {
+  const giver = await as("hr");
+  const eve = await personId(giver, "employee");
+
+  await gotoRoute(giver, `employees/${eve}`);
+  // "Kudos" on the record page, not "Give kudos": the header's action row is a set of short labels sharing
+  // one width (Kudos / Emergency / Org chart), and the verb is in the tooltip.
+  await giver.getByRole("main").getByRole("button", { name: "Kudos", exact: true }).click();
+
+  const form = giver.getByRole("dialog");
+  await expect(form.getByRole("heading", { name: /kudos/i })).toBeVisible();
+  // The picker shows the person instead of its "Select a colleague…" placeholder: the intent survived the
+  // navigation carrying the employee path, and the composer opened on it.
+  await expect(form.getByRole("button", { name: /Eve Employee/ })).toBeVisible();
 });
 
 /** The wire path of the kudo this spec gave. */

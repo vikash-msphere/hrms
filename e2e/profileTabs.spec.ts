@@ -125,6 +125,65 @@ test.describe("the employee record's tabs", () => {
     expect(problems, `tabs with problems:\n${problems.join("\n")}`).toEqual([]);
   });
 
+  test("no tab on the record scrolls sideways at a phone or tablet width", async ({ as }) => {
+    // The walk above measures overflow, but only at the desktop project's 1440px, where every card header on
+    // the record has room to lay its title and its action button out in one row. Narrow is where those rows
+    // stop fitting, and nothing in the lane looked: `everyViewport` walks every route at four widths but
+    // lands on whichever tab a route opens with, which on the record page is always Profile. So the record's
+    // other ten panels - the ones with the buttons on them - were measured at one width only, and the
+    // Compensation tab's "Revise" button hung off the right edge of a phone with the whole page panning to
+    // follow it.
+    test.setTimeout(300_000);
+    const page = await as("super");
+    allowConsoleErrors(page, /status of (503|500|429)/i);
+    const id = await personId(page, "hr");
+
+    const failures: string[] = [];
+    for (const { label: size, width, height } of [
+      { label: "phone", width: 390, height: 844 },
+      { label: "tablet", width: 768, height: 1024 },
+    ]) {
+      await page.setViewportSize({ width, height });
+      await gotoRoute(page, `employees/${id}`);
+      await expect(page.getByRole("tab", { name: "Profile", exact: true })).toBeVisible({ timeout: 30_000 });
+      const offered = new Set((await page.getByRole("tab").allInnerTexts()).map((t) => t.trim()).filter(Boolean));
+
+      for (const key of TABS) {
+        const label = LABEL[key];
+        if (!offered.has(label)) continue; // `leave`, on a person with no leave - see REQUIRED.
+        const tab = page.getByRole("tab", { name: label, exact: true });
+        try {
+          // The tab bar itself scrolls sideways at these widths, so the tab has to be brought into view
+          // before it can be pressed. Re-pressed on a miss for the reason `everyTab` gives: these panels
+          // re-render as their reads land, and a click that arrives mid-replacement selects nothing.
+          await tab.scrollIntoViewIfNeeded();
+          await expect(async () => {
+            if ((await tab.getAttribute("data-state")) !== "active") await tab.click({ timeout: 5_000 });
+            await expect(tab).toHaveAttribute("data-state", "active", { timeout: 5_000 });
+          }).toPass({ timeout: 30_000 });
+          await expect(page.getByRole("tabpanel").first()).toBeVisible({ timeout: 30_000 });
+          // Measured until it settles rather than once: a panel is briefly too wide while its reads are still
+          // arriving, and a single reading taken in that window reports a layout nobody ever sees.
+          const overflow = await settledOverflow(page);
+          if (overflow > 1) {
+            const culprits = await offenders(page, width);
+            failures.push(`${key} at ${size} (${width}px): the record is ${overflow}px wider than the window${culprits.length ? ` - widest: ${culprits.join(" | ")}` : ""}`);
+          }
+          // The tab band also holds the tab's settings gears, and those never widen the DOCUMENT - they take
+          // their width out of the scrolling tab strip beside them, so the check above cannot see them. The
+          // Compensation tab carries four, which at 390px is 184px of the 358 the band has: the strip was
+          // crushed into what was left and its last tab sat under the first gear.
+          const clash = await bandClash(page);
+          if (clash) failures.push(`${key} at ${size} (${width}px): ${clash}`);
+        } catch (e) {
+          failures.push(`${key} at ${size}: ${(e as Error).message.split("\n")[0]}`);
+        }
+      }
+    }
+
+    expect(failures, `record tabs that scroll sideways:\n${failures.join("\n")}`).toEqual([]);
+  });
+
   test("the open tab is in the URL, so a record link lands on the section somebody meant", async ({ as }) => {
     const page = await as("super");
     const id = await personId(page, "hr");
@@ -169,3 +228,80 @@ test.describe("the employee record's tabs", () => {
     }
   });
 });
+
+/**
+ * Whether anything in the record's tab band sits on top of the tab strip, or squeezes it to nothing.
+ *
+ * The band is the strip plus whatever gears the open tab has. Both are laid out by the same flex row, so
+ * neither can overlap the other in the box sense - what goes wrong is subtler and invisible to a document
+ * measurement: the gears are `shrink-0` and the strip is a scroll box that shrinks to zero, so on a narrow
+ * screen the gears take their width out of the strip and the strip's right edge ends up under them.
+ *
+ * Two questions, then. Do the two boxes intersect (a real overlap, if anything is ever positioned), and is
+ * the strip still wide enough to be a tab bar rather than a sliver. `null` when the band is clean, or when
+ * the open tab has no gears at all.
+ */
+async function bandClash(page: import("@playwright/test").Page): Promise<string | null> {
+  return page.evaluate(() => {
+    // The record's tab strip is the one inside the header card's last band; a panel can hold sub-tabs of its
+    // own, and the first tablist in the document is always the record's.
+    const list = document.querySelector<HTMLElement>('[role="tablist"]');
+    if (!list) return "the record's tab strip is not in the page";
+    const band = list.parentElement;
+    if (!band) return null;
+    const gears = Array.from(band.querySelectorAll<HTMLElement>("button")).filter((b) => !list.contains(b));
+    if (gears.length === 0) return null;
+
+    const strip = list.getBoundingClientRect();
+    for (const g of gears) {
+      const r = g.getBoundingClientRect();
+      if (r.width === 0) continue;
+      const overlapX = Math.min(r.right, strip.right) - Math.max(r.left, strip.left);
+      const overlapY = Math.min(r.bottom, strip.bottom) - Math.max(r.top, strip.top);
+      if (overlapX > 1 && overlapY > 1) {
+        return `the "${g.getAttribute("aria-label") ?? "settings"}" gear overlaps the tab strip by ${Math.round(overlapX)}x${Math.round(overlapY)}px`;
+      }
+    }
+    // A strip narrower than about three tabs is not scrollable-but-fine, it is a sliver with the gears having
+    // eaten the row. 180px is roughly three of the record's tabs.
+    if (strip.width < 180) {
+      return `the ${gears.length} settings gear(s) leave the tab strip only ${Math.round(strip.width)}px wide`;
+    }
+    return null;
+  });
+}
+
+/** How much wider than its viewport the document is, once it has stopped moving. */
+async function settledOverflow(page: import("@playwright/test").Page): Promise<number> {
+  let last = Number.POSITIVE_INFINITY;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const now = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    if (now <= 1) return now;
+    last = now;
+    await page.waitForTimeout(500);
+  }
+  return last;
+}
+
+/**
+ * The elements sticking out past the viewport, widest first.
+ *
+ * Only the ones whose own PARENT stays inside: an element pushed out by its container drags every ancestor
+ * out with it, and a list of forty nested divs says nothing. The innermost offender is the one to look at.
+ */
+async function offenders(page: import("@playwright/test").Page, width: number): Promise<string[]> {
+  return page.evaluate((vw) => {
+    const out: { label: string; right: number }[] = [];
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.right <= vw + 1) continue;
+      const parent = el.parentElement;
+      if (parent && parent !== document.body && parent.getBoundingClientRect().right > vw + 1) continue;
+      const cls = (typeof el.className === "string" ? el.className : "").split(/\s+/).filter(Boolean).slice(0, 4).join(".");
+      out.push({ label: `<${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}> right=${Math.round(r.right)}`, right: r.right });
+    }
+    return out.sort((a, b) => b.right - a.right).slice(0, 3).map((o) => o.label);
+  }, width);
+}

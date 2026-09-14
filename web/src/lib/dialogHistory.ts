@@ -82,7 +82,13 @@ export function pushDialogEntry(): number {
  * there would drag the reader off the page they just opened.
  */
 export function dropDialogEntry(token: number): void {
-  if (token !== lastPush) return;
+  // Forgotten either way. A dialog that is BURIED when it closes (one that opened another, and every dialog
+  // closed while a newer one is up) returned here without ever dropping its address, so `pushedOver` kept one
+  // href per such opening for the life of the tab, under a token that only ever counts up.
+  if (token !== lastPush) {
+    pushedOver.delete(token);
+    return;
+  }
   setTimeout(() => {
     const stale = pushedOver.get(token);
     pushedOver.delete(token);
@@ -104,13 +110,17 @@ export function dropDialogEntry(token: number): void {
     // later popstate this listener happens to catch - is a real destination and is left alone.
     const wanted = window.location.href;
     if (stale && stale !== wanted) {
-      window.addEventListener(
-        "popstate",
-        () => {
-          if (window.location.href === stale) window.history.replaceState(window.history.state, "", wanted);
-        },
-        { once: true },
-      );
+      // Detached on a deadline as well as on the pop, for the reason `selfBack` keeps its own timer: a
+      // `back()` with nothing to go back to fires no popstate at all. A `{ once: true }` listener then never
+      // runs and never unregisters - it simply waits, and rewrites the address on whatever popstate comes
+      // next, which by then is a navigation the reader asked for.
+      const correct = () => {
+        clearTimeout(deadline);
+        window.removeEventListener("popstate", correct);
+        if (window.location.href === stale) window.history.replaceState(window.history.state, "", wanted);
+      };
+      const deadline = setTimeout(() => window.removeEventListener("popstate", correct), 500);
+      window.addEventListener("popstate", correct);
     }
     selfBack();
   }, 0);

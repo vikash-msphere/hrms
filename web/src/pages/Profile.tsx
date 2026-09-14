@@ -1,16 +1,20 @@
-import { useMemo, useState } from "react";
-import { UserRound, Contact, IdCard, Landmark, ShieldCheck, PenLine, FileText, Hash, UserCog, Users, Network, Package, Wallet } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { UserRound, Contact, IdCard, Landmark, ShieldCheck, PenLine, FileText, HeartPulse, Network, Package, Wallet } from "lucide-react";
 import { navigate } from "@/router";
+import { get } from "@/api";
 import { useToast } from "@/components/ui/use-toast";
 import { useEmployee } from "@/hooks/useEmployee";
 import { useCollection } from "@/hooks/useCollection";
+import { usePresence } from "@/hooks/usePresence";
 import { useIntent } from "@/lib/intent";
-import { formatDate, idOf, probationLabel, tenureLabel } from "@/lib/utils";
+import { formatMonthYear, humanize, idOf, probationLabel, tenureDuration } from "@/lib/utils";
 import { todayStr } from "@/lib/orgDay";
-import type { Department, Employee, Me } from "@/types";
+import type { Department, Employee, Me, PersonalDetails } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
-import { ProfileView, ProfileDetails } from "@/components/common/ProfileView";
+import { ProfileView, ProfileFact, HEADER_BTN } from "@/components/common/ProfileView";
+import { PresencePill, PresenceNote } from "@/components/common/PresencePill";
+import { PeopleList } from "@/components/common/PeopleList";
 import { EmployeeAssets } from "@/components/common/EmployeeAssets";
 import { EmployeeDocuments } from "@/components/common/EmployeeDocuments";
 import { EmployeeBankDetails } from "@/components/common/EmployeeBankDetails";
@@ -31,9 +35,6 @@ import { Tabs, TabsContent, TabsList } from "@/components/ui/tabs";
 import { AccessTab } from "@/components/common/AccessTab";
 import { AccessScope } from "@/components/access/AccessScope";
 import { usePermission } from "@/lib/perm";
-
-// Same chip style as the employee page header.
-const CHIP = "inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground";
 
 export default function Profile({ me }: { me: Me }) {
   const { emp, state, error, reload } = useEmployee(me.employee_id);
@@ -60,6 +61,17 @@ export default function Profile({ me }: { me: Me }) {
   useIntent("new-asset-request", () => { setTab("assets"); setRequestAsset(true); });
   const [photoOpen, setPhotoOpen] = useState(false);
   const [emergencyOpen, setEmergencyOpen] = useState(false);
+  // Your own presence and your own phone - both lazy, both failure-silent (hooks/usePresence.ts).
+  const presence = usePresence(me.employee_id || null);
+  const [personal, setPersonal] = useState<PersonalDetails | null>(null);
+  useEffect(() => {
+    if (!me.employee_id) return;
+    let active = true;
+    get<PersonalDetails>(`employees/${me.employee_id}/personal-info`)
+      .then((p) => active && setPersonal(p))
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [me.employee_id]);
   const [bioOpen, setBioOpen] = useState(false);
 
   function gotoItem(key: CompletenessKey) {
@@ -85,15 +97,20 @@ export default function Profile({ me }: { me: Me }) {
     () => employees.filter((e) => !e.delete_time && e.manager && idOf(e.manager) === me.employee_id),
     [employees, me.employee_id],
   );
-  const copyText = (text: string, done: string) =>
-    navigator.clipboard.writeText(text).then(() => toast({ title: done, variant: "success" })).catch(() => {});
+  // The same team, in the shape the hover panel takes.
+  const reportPeople = useMemo(
+    () => directReports.map((e) => ({ id: idOf(e.path), name: `${e.first_name} ${e.last_name}`, photo: e.photo })),
+    [directReports],
+  );
 
   return (
     <div>
       <PageHeader title="My Profile" description="Keep your contact, identity, bank and tax details up to date." />
       {!me.employee_id ? (
         <>
-          <ProfileView name={name} email={me.email} />
+          {/* No employee record to draw, so the band carries the one thing this account does have.
+              `name` is the email's local part, so the heading is never empty here. */}
+          <ProfileView name={name} facts={<ProfileFact label="Account email" value={me.email} copy={me.email} />} />
           <Card className="mt-4">
             <CardContent className="py-6 text-sm text-muted-foreground sm:py-6">
               Your account isn't linked to an employee record yet. Ask an HR admin to connect it.
@@ -109,55 +126,75 @@ export default function Profile({ me }: { me: Me }) {
             <AccessScope collection="employees" objectPath={selfPath}>
               <ProfileView
                 name={`${emp.first_name} ${emp.last_name}`}
-                email={emp.work_email}
                 jobTitle={emp.job_title}
                 department={deptName(emp.department)}
+                employmentType={emp.employment_type ? humanize(emp.employment_type) : undefined}
+                workMode={emp.work_mode ? humanize(emp.work_mode) : undefined}
+                location={emp.location}
                 bio={emp.bio}
                 onEditBio={() => setBioOpen(true)}
-                avatar={<PhotoAvatar className="h-16 w-16 sm:h-[72px] sm:w-[72px]" employeeId={me.employee_id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
-                meta={
-                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                    {emp.employee_number && (
-                      <button type="button" className={CHIP} title="Copy employee ID" onClick={() => copyText(emp.employee_number!, "Employee ID copied")}>
-                        <Hash className="h-3 w-3" /> <span className="font-mono">{emp.employee_number}</span>
-                      </button>
+                avatar={<PhotoAvatar className="h-[68px] w-[68px] rounded-[14px] sm:h-[92px] sm:w-[92px] sm:rounded-[18px]" employeeId={me.employee_id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
+                note={<PresenceNote presence={presence} coveredByName={presence?.covered_by ? empName(presence.covered_by) : undefined} />}
+                /* The record, labelled - the band that replaced the detail grid the Profile tab used to
+                   draw underneath this card. Reports-to and direct reports are cells here rather than
+                   chips: they still navigate, and they say who rather than only how many. */
+                facts={
+                  <>
+                    <ProfileFact label="Work email" value={emp.work_email} copy={emp.work_email} />
+                    {/* Your own phone, so there is no gate to check - it is the same encrypted blob the
+                        Contact tab edits. */}
+                    {personal?.personal_phone && (
+                      <ProfileFact label="Phone" value={personal.personal_phone} copy={personal.personal_phone} field="personal-info" />
                     )}
-                    {emp.manager && empName(emp.manager) && (
-                      <button type="button" className={CHIP} title="Open their profile" onClick={() => navigate(`employees/${idOf(emp.manager!)}`)}>
-                        <UserCog className="h-3 w-3" /> Reports to {empName(emp.manager)}
-                      </button>
+                    <ProfileFact
+                      label="Reports to"
+                      value={emp.manager ? empName(emp.manager) : undefined}
+                      field="manager"
+                      onClick={emp.manager ? () => navigate(`employees/${idOf(emp.manager!)}`) : undefined}
+                    />
+                    <ProfileFact
+                      label="Direct reports"
+                      hoverContent={<PeopleList people={reportPeople} />}
+                      value={directReports.length > 0 ? `${directReports.length} ${directReports.length === 1 ? "person" : "people"}` : undefined}
+                      onClick={directReports.length > 0 ? () => navigate(`org-chart/${me.employee_id}`) : undefined}
+                    />
+                    <ProfileFact label="Employee ID" value={emp.employee_number} copy={emp.employee_number} field="employee_number" mono />
+                    <ProfileFact
+                      label="Joined"
+                      value={emp.start_date ? formatMonthYear(emp.start_date) : undefined}
+                      hint={emp.start_date ? tenureDuration(emp.start_date) : undefined}
+                    />
+                  </>
+                }
+                /* Probation isn't shown anywhere else on the self profile, so it surfaces here - beside the
+                   name, which is who it is about. */
+                status={
+                  <>
+                    <PresencePill presence={presence} />
+                    {/* The badge's own gate, on the ORG's day: `Date.parse` of a date-only value is UTC
+                        midnight, so this and the label inside it disagreed about the last day of probation
+                        for part of it. A day-string comparison has no offset to lose. */}
+                    {!!emp.probation_end_date && emp.probation_end_date.slice(0, 10) >= todayStr() && (
+                      <Badge variant="warning">{probationLabel(emp.probation_end_date) || "On probation"}</Badge>
                     )}
-                    {directReports.length > 0 && (
-                      <button type="button" className={CHIP} title="View your team in the org chart" onClick={() => navigate(`org-chart/${me.employee_id}`)}>
-                        <Users className="h-3 w-3" /> {directReports.length} direct report{directReports.length === 1 ? "" : "s"}
-                      </button>
-                    )}
-                  </div>
+                  </>
                 }
                 actions={
-                  /* Stacked, right-aligned: status badges on top, action buttons underneath (matches the
-                     employee page header). */
-                  /* Kept quiet on purpose - the identity (left) side should out-rank this stack. */
-                  <div className="flex flex-col items-end gap-1.5">
-                    <div className="flex flex-wrap items-center justify-end gap-2">
-                      {/* Employment status isn't shown anywhere else on the self profile - surface tenure + probation here. */}
-                      {!!emp.start_date && <span className="text-xs text-muted-foreground">{tenureLabel(emp.start_date)}</span>}
-                      {/* The badge's own gate, on the ORG's day: `Date.parse` of a date-only value is UTC
-                          midnight, so this and the label inside it disagreed about the last day of probation
-                          for part of it. A day-string comparison has no offset to lose. */}
-                      {!!emp.probation_end_date && emp.probation_end_date.slice(0, 10) >= todayStr() && (
-                        <Badge variant="warning">{probationLabel(emp.probation_end_date) || "On probation"}</Badge>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <Button variant="ghost" size="sm" className="text-muted-foreground" title="See where you sit in the org chart" onClick={() => navigate(`org-chart/${me.employee_id}`)}>
-                        <Network className="h-3.5 w-3.5" /> Org chart
-                      </Button>
-                      <EmergencyQuickView employeeId={me.employee_id} canEdit open={emergencyOpen} onOpenChange={setEmergencyOpen} onSaved={reload} />
-                    </div>
-                  </div>
+                  /* Both visible and both labelled, same as the employee page. There is no primary action
+                     on your own profile - the tabs and the field pencils are where you edit yourself. */
+                  <>
+                    <button type="button" className={HEADER_BTN} onClick={() => setEmergencyOpen(true)}>
+                      <HeartPulse className="h-[15px] w-[15px] text-destructive" /> Emergency
+                    </button>
+                    <button type="button" className={HEADER_BTN} onClick={() => navigate(`org-chart/${me.employee_id}`)}>
+                      <Network className="h-[15px] w-[15px]" /> Org chart
+                    </button>
+                  </>
                 }
               />
+              {/* Triggerless: the labelled button above is this dialog's affordance now. The completeness
+                  meter's "Emergency contact" chip opens the same controlled state. */}
+              <EmergencyQuickView employeeId={me.employee_id} canEdit open={emergencyOpen} onOpenChange={setEmergencyOpen} onSaved={reload} triggerless />
               {emp.profile_completeness && <ProfileCompleteness flags={emp.profile_completeness} onItem={gotoItem} />}
               <EditBioDialog employeeId={me.employee_id} current={emp.bio} open={bioOpen} onOpenChange={setBioOpen} onSaved={reload} />
               <Tabs value={tab} onValueChange={setTab} className="mt-6">
@@ -175,14 +212,8 @@ export default function Profile({ me }: { me: Me }) {
                   <AccessTab value="documents" target={{ collection: "personal-documents", label: "Documents" }}><FileText className="h-4 w-4" /> Documents</AccessTab>
                 </TabsList>
                 <TabsContent value="profile" className="space-y-4">
-                  <ProfileDetails
-                    employeeNumber={emp.employee_number}
-                    email={emp.work_email}
-                    jobTitle={emp.job_title}
-                    department={deptName(emp.department)}
-                    manager={empName(emp.manager)}
-                    joined={emp.start_date ? formatDate(emp.start_date) : undefined}
-                  />
+                  {/* No detail grid here: the header's facts band is that grid, one screen higher and
+                      without the second copy of every value. */}
                   <EmployeeProfilePersonal employeeId={me.employee_id} canEdit onSaved={reload} />
                 </TabsContent>
                 <TabsContent value="contact">

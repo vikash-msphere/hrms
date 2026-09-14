@@ -21,9 +21,22 @@ export type PositionInput = {
   job_title?: string | null;
   department?: string | null; // resource path; null clears the department
   location?: string | null;
+  employment_type?: string | null;
+  work_mode?: string | null;
   note?: string | null;
   effective_from?: string; // YYYY-MM-DD
 };
+export const EMPLOYMENT_TYPES = ["full_time", "part_time", "contract", "intern", "temporary"] as const;
+export const WORK_MODES = ["on_site", "hybrid", "remote"] as const;
+type EmploymentType = (typeof EMPLOYMENT_TYPES)[number];
+type WorkMode = (typeof WORK_MODES)[number];
+/** Narrow an incoming enum, rejecting anything the column cannot hold rather than writing it and finding out. */
+function asEnum<T extends string>(allowed: readonly T[], value: string | null | undefined, field: string): T | null {
+  if (value === null || value === undefined || value === "") return null;
+  const v = value.trim();
+  if (!(allowed as readonly string[]).includes(v)) throw invalidArgument(`${field} must be one of: ${allowed.join(", ")}`);
+  return v as T;
+}
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
@@ -78,6 +91,12 @@ export async function changeRole(deps: Deps, actor: AppUser, input: PositionInpu
   const departmentId = input.department !== undefined ? idFromPath(input.department) ?? null : current?.departmentId ?? emp.departmentId ?? null;
   const jobTitle = input.job_title !== undefined ? input.job_title?.trim() || null : current?.jobTitle ?? emp.jobTitle ?? null;
   const location = input.location !== undefined ? input.location?.trim() || null : current?.location ?? null;
+  const employmentType: EmploymentType | null = input.employment_type !== undefined
+    ? asEnum(EMPLOYMENT_TYPES, input.employment_type, "employment_type")
+    : current?.employmentType ?? emp.employmentType ?? null;
+  const workMode: WorkMode | null = input.work_mode !== undefined
+    ? asEnum(WORK_MODES, input.work_mode, "work_mode")
+    : current?.workMode ?? emp.workMode ?? null;
 
   // Everything the write needs, resolved BEFORE the batch: the code allocation is a read-then-write of its own
   // (services/codeAlloc.ts) and the row id is minted here so the successor can be read back by it. Nothing
@@ -117,12 +136,15 @@ export async function changeRole(deps: Deps, actor: AppUser, input: PositionInpu
       jobTitle,
       departmentId,
       location,
+      employmentType,
+      workMode,
       note: input.note?.trim() || null,
       effectiveFrom: new Date(from),
       effectiveTo: null,
     }),
-    // Keep the employee's live current designation/department in sync (the rest of the app reads these).
-    deps.db.update(schema.employees).set({ jobTitle, departmentId, updatedAt: now }).where(eq(schema.employees.uuid, employeeId)),
+    // Keep the employee's live current designation/department/place in sync (the rest of the app reads these
+    // rather than joining this table - see the mirror note on `employees` in db/schema.ts).
+    deps.db.update(schema.employees).set({ jobTitle, departmentId, location, employmentType, workMode, updatedAt: now }).where(eq(schema.employees.uuid, employeeId)),
   ]).catch((e: unknown) => {
     // The other ordering of the same race: our close matched nothing and the insert then collided on
     // `pos_open_idx`, so D1 rolled the whole batch back. Same answer as the short count below.

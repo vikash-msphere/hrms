@@ -1278,7 +1278,7 @@ export default function Dashboard({ me }: { me: Me }) {
           the "more in the inbox" line, which is where a number the card cannot show belongs. */}
       {showSection("approvals") && approvalItems.length > 0 && (
         <Card ref={regionRef("approvals")} style={sectionStyle("approvals")} className="mb-6 border-warning/40">
-          <CardHeader className="flex-row items-center justify-between space-y-0">
+          <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0">
             <CardTitle className="flex items-center gap-2 text-base">
               <CalendarCheck className="h-4 w-4 text-warning" /> Awaiting your approval
               <span className="rounded-full bg-warning px-2 py-0.5 text-xs font-medium text-warning-foreground">{approvalsAwaiting}</span>
@@ -1496,8 +1496,8 @@ export default function Dashboard({ me }: { me: Me }) {
           page by default, so its read is the one most often skipped entirely. */}
       {showSection("board") && (
         <Card ref={regionRef("board")} style={sectionStyle("board")} className="mb-6">
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <CardTitle className="flex items-center gap-2 text-base">
+          <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+            <CardTitle className="flex flex-wrap items-center gap-2 text-base">
               <Megaphone className="h-4 w-4 text-primary" /> Latest from the board
               {unread.length > 0 && (
                 <span className="rounded-full bg-primary px-2 py-0.5 text-xs font-medium text-primary-foreground">{unread.length} unread</span>

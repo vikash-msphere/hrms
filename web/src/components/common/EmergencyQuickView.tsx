@@ -29,6 +29,7 @@ export function EmergencyQuickView({
   open: openProp,
   onOpenChange,
   onSaved,
+  triggerless,
 }: {
   employeeId: string;
   canEdit: boolean;
@@ -37,6 +38,11 @@ export function EmergencyQuickView({
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   onSaved?: () => void;
+  // Drop the heart button and mount the dialog alone, for a caller that already offers this as a NAMED
+  // affordance of its own - the profile header's "Emergency" button. An unlabelled red icon is the
+  // loudest thing in a header and still the one whose meaning you have to hover to learn. The caller
+  // then owns `open`/`onOpenChange`.
+  triggerless?: boolean;
 }) {
   const { toast } = useToast();
   const [openLocal, setOpenLocal] = useState(false);
@@ -156,14 +162,18 @@ export function EmergencyQuickView({
 
   return (
     <>
-      <span className="inline-flex items-center gap-1">
-        {/* Ghost: lives in the banner's right stack, which should stay quieter than the identity side.
-            The red icon alone carries the recognition. */}
-        <Button variant="ghost" size="icon" title="Emergency details" onClick={() => setOpen(true)}>
-          <HeartPulse className="h-4 w-4 text-destructive" />
-        </Button>
-        <FieldAccess accessTarget={subRef} />
-      </span>
+      {!triggerless && (
+        <span className="inline-flex items-center gap-1">
+          {/* Ghost: lives in the banner's right stack, which should stay quieter than the identity side.
+              The red icon alone carries the recognition. */}
+          <Button variant="ghost" size="icon" title="Emergency details" onClick={() => setOpen(true)}>
+            <HeartPulse className="h-4 w-4 text-destructive" />
+          </Button>
+          {/* The `personal-info` manage-access icon also renders in the dialog header below, so a
+              triggerless mount loses the affordance from the page, not from the app. */}
+          <FieldAccess accessTarget={subRef} />
+        </span>
+      )}
       <Dialog open={open} onOpenChange={(next) => (edit ? guard.onOpenChange(next) : setOpen(next))}>
         {/* `sentry-mask`, like the seven sibling panels over this record: a dialog renders through a PORTAL,
             outside `<main data-page>`, so instrument.ts's route-level masking cannot reach it - and what is in
