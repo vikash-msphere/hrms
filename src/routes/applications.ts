@@ -44,6 +44,7 @@ export const applications = collectionRoutes<ApplicationInput, typeof schema.app
       stage: c.req.query("stage"),
       status: c.req.query("status"),
       showDeleted: page.showDeleted,
+      deletedOnly: page.deletedOnly,
     });
   },
   verbs: {

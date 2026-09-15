@@ -8,7 +8,7 @@ How access control works in this codebase, end to end. This is the **current** r
 3. [Policy is data](#3-policy-is-data)
 4. [The compiled store (`access_rules`)](#4-the-compiled-store-access_rules)
 5. [The grant shape](#5-the-grant-shape) - [5.1 The API-key ceiling](#51-the-api-key-ceiling-machine-callers)
-6. [From request to permission key](#6-from-request-to-permission-key)
+6. [From request to permission key](#6-from-request-to-permission-key) — [6.1 The owner key](#61-the-owner-key-flat-coded-collections-with-an-owner-column)
 7. [The matcher](#7-the-matcher)
 8. [The decision](#8-the-decision)
 9. [Request lifecycle and read budget](#9-request-lifecycle-and-read-budget)
@@ -100,12 +100,13 @@ access_rules(
   subject_kind text   -- 'role' | 'user'
   namespace    text   -- the collection (first pattern token), or '*' for the super "**" pattern
   pattern      text   -- the VERBATIM grant pattern - the decision input, never re-derived
-  scope_kind   text   -- 'all' | 'subtree' | 'exact' | 'self' | 'dept'   (derived narrowing metadata)
+  scope_kind   text   -- 'all'|'subtree'|'exact'|'self'|'dept'|'reports'|'org'  (derived narrowing metadata)
   scope_code   text   -- code prefix for subtree/exact; '' otherwise
   match_code   text   -- exact object code for per-object rows: user exceptions AND exact (object-pinned) role
                        --   rules (the IN-narrowing key); NULL for SCOPE rules (all/subtree/self/dept)
   level        text   -- read|write|admin for level rules; NULL for verb/deny rules
   effect       text   -- 'allow' | 'deny'
+  condition    text   -- optional JSON {field,op,value} threshold on the ROW (section 8); NULL for most rules
 )
   INDEX (subject, namespace, match_code)   -- serves all reads (a left-prefix superset)
 ```
@@ -220,6 +221,42 @@ a broad request space, anything the narrowed grant allows the original grant als
 The full key the matcher checks is the `resource` tokens plus the action token (level for standard, verb for
 custom): `["employees","04-1c-0a9","bank-account","read"]`.
 
+### 6.1 The owner key (flat-coded collections with an owner column)
+
+Almost every scoped collection is **owner-coded**: the row's own `code` is composed under its owner's employee
+code, so `me` and `my-dept` match it directly. Two are not - `assets` and `users` - and they carry an owner
+*column* instead (`assets.assigned_to`, `users.employee_id`). An owned code is the wrong fix for both: custody
+moves over an asset's life and a code is immutable, and a user account need not have an employee at all.
+
+Left alone, the two lanes of one grant disagreed. The **list** lane answers "own" fine (`applyScope` binds
+`eq(owner, ownerId)`), while the **item** lane asked `isUnder(callerCode, "0a")` against a flat code, which is
+false for everyone - so `GET /v1/assets/<id>` refused a row the list had just returned.
+
+So `Resolved` carries an optional second resource:
+
+```ts
+{ kind: "standard"; resource: "assets.0a"; level: "read"; ownerResource: "assets.04-1c-0a9" }
+```
+
+`ownerResource` is the same path with the **id token** replaced by the owner's employee code
+(`withOwnerResource`). The middleware sets it only for the collections in `OWNER_COLUMN_COLLECTIONS`
+(`services/codeCascade.ts`), which is **derived** - a collection with a real owner column in
+`LIST_OWNER_COLUMNS` that is *not* in `HIERARCHICAL_TABLES` - so it cannot drift from either registry. The
+owner id rides the id->code resolve, and the owner uuid->code hop uses the cached resolver, so warm this costs
+no extra read.
+
+Two rules make it safe, and they are not symmetric:
+
+- the **allow** lanes match against either key (this is the widening that makes the item lane answer at all);
+- the **deny** lane matches against **both**, or a deny authored on the row's own code would be bypassable
+  through the owner key.
+
+And two places deliberately keep deciding on the row's real code only: the **protected-field / reference gate**
+(`bodyDecision`) and **field redaction**. The owner key says the row is yours; a protected field is exactly
+what you may not set on your own row - without that split, a `users.me.**` rule (which the ACL can author)
+would match `users.<ownerCode>.role` and become self-promotion. The API-key ceiling is unaffected: `inScope`
+clamps by collection and level, and the owner key never changes the collection token.
+
 ## 7. The matcher
 
 `matchTokens(patternTokens, keyTokens, self)` (`permissions.ts`) compares a dot-split pattern to a dot-split
@@ -234,8 +271,25 @@ Within a single token (`matchToken`), against the concrete key token `kt`:
 - **`me`** - matches the literal `me`, or any `kt` whose code is under the caller's employee code
   (`isUnder(self.employeeCode, kt)`). This is how "your own" owned objects match.
 - **`my-dept`** - matches any `kt` under the caller's department code (`deptOf`).
-- **`<prefix>-*`** - explicit code-prefix scope, e.g. `04-*`.
+- **`<prefix>-*`** - explicit code-prefix scope, e.g. `04-*`. This is what a **subtree** rule compiles to,
+  and - because every owned code is composed under its employee, which is composed under its department - it
+  is also how a rule is anchored to one **named department**: `leave-requests.04-*.**` reaches that
+  department's leave requests whether or not it is the caller's own. The ACL offers it as the "one department"
+  tier (`scope: subtree` with a `departments` object as `scope_ref`); `dept`/`my-dept` stays the
+  subject-relative one.
+- **`my-reports`** / **`my-org`** - the MANAGER CHAIN: a code under one of the caller's direct reports, or
+  under anyone in their reporting line. These cannot come from the code, which encodes department nesting and
+  nothing else, so the caller's report set is resolved at auth time and carried on `SelfContext` - and ONLY
+  when the caller's own grant actually uses one of the tokens (`grantNeedsReports`), so nobody else pays a read
+  for it. An unresolved set matches nothing. `my-org` is capped at 8 levels and 500 people; both caps truncate,
+  which loses access rather than granting it.
 - anything else - matched literally (collection names, sub-resource names, concrete codes, verbs).
+
+There is deliberately **no `my-dept-only`** ("my department but not its sub-departments"). An owned row is
+`<deptPath>-<employeeSeg>-<leaf>`, so `04-1c-0a9-0kf` is indistinguishable - by shape or by depth - from a row
+belonging to an employee in the sub-department `04-1c-0a9`. Separating them needs to know which children a
+department has, which is a read the matcher cannot make; expressed on depth alone the tier would be right for
+`employees`/`departments` and silently match nothing on the thirty-odd owned collections.
 
 `me` and `my-dept` resolve against `self.employeeCode` (from the JWT via the auth read). No grant names a
 concrete employee. A per-object exception names a concrete `code` literally (section 10).
@@ -244,12 +298,36 @@ concrete employee. A per-object exception names a concrete `code` literally (sec
 
 `decide(grant, resolved, self)` (`permissions.ts`) returns `{ allow: true }` or `{ allow: false, reason }`:
 
-1. **Deny first.** For each `deny` pattern, if it matches the full key (resource + action), deny and stop.
-   Deny has no ladder and always wins.
+1. **Deny first.** For each `deny` pattern, if it matches the full key (resource + action) - or the owner key,
+   where there is one (section 6.1) - deny and stop. Deny has no ladder and always wins.
 2. **Standard methods** - take the maximum granted level over every `levels` pattern that matches the
-   resource tokens; allow if it is at least the required one (`read=1 < write=2 < admin=3`).
-3. **Custom methods** - allow if any `allow` pattern matches the full key; otherwise deny.
+   resource tokens (or the owner resource tokens); allow if it is at least the required one
+   (`read=1 < write=2 < admin=3`).
+3. **Custom methods** - allow if any `allow` pattern matches the full key (or the owner key); otherwise deny.
 4. **Default** - deny. Nothing reaches a handler without an explicit `{ allow: true }`.
+
+**The delete axis.** A `DELETE` resolves to the standard `write` level, so editing a record and destroying it
+are the same key and "may edit but never delete" could not be said. The middleware therefore asks the deny
+lane one extra question on a `DELETE` - `denyingPattern(grant, { verb: "delete" })` (or `purge` for `?force`)
+- and refuses if a deny matches. This is **subtractive only**: it is the deny pass (`denyingPattern`, the same
+loop `decide` runs first), never an allow, so no grant needs a verb it did not need before and nothing is
+widened. The `access.can` hint mirrors it, so a row never offers a Delete that would 403.
+
+**The threshold axis.** A rule may carry a `condition` - `{field, op, value}` on a money column the collection
+declares (`domain/ruleCondition.ts` `CONDITION_FIELDS`) - which is how "approve expenses up to 50,000" is said.
+It does not fit `matchToken`: every scope token is a predicate on the CODE, and this is one on the ROW. So it is
+a second pass, built exactly like the delete axis above: asked only after `decide()` has ALLOWED, against the
+pattern that decision named (`via`), and able only to refuse. Three properties keep it honest:
+
+- **it never grants.** There is no branch that turns a refusal into an allow.
+- **it unions.** A condition constrains a request only when every rule behind the pattern carries one; an
+  unconditional rule on the same pattern wins, so granting somebody an extra rule can never remove access.
+- **it fails closed.** An absent field, a non-numeric value or a row that was not loaded all read as "outside
+  the limit" - a cap must not evaporate exactly when the value is missing.
+
+It applies to ITEM requests only. A list has no single row to measure, and a threshold bounds acting on a
+record rather than seeing it: a manager reviews every expense in their department and can still be unable to
+approve the large ones. Making it a list predicate would hide rows they are meant to look at.
 
 `decide` is the sole authority. Whether the grant came from the role's compiled rules, a reconstructed
 blob, or a role+exception merge, the verdict is always rendered here.
@@ -345,6 +423,14 @@ the scope predicate (section 12).
 On `POST` / `PATCH` / `PUT` with a JSON body, after the resource-level write passes, `bodyDecision`
 (`authz.ts`) consults the manifest (`user.policy`) for the collection, deciding with the same merged grant:
 
+**Read-side field gating** is the mirror of this and runs where every resource is serialized rather than on
+the body: `policy.redacted_fields` lists base-record fields whose READ is decided at
+`<collection>.<code>.<field>`, and `withAccess` (`http/accessHint.ts`) drops the ones that fail. It is
+additive - a pattern's `**` matches trailing tokens, so every ordinary grant already satisfies the field key
+and nothing is narrowed by a field being listed. What it buys is the ability to take one away with a deny
+(`offers.*.base_comp.**`), scoped like any other pattern. PII sub-resources keep their own redactors
+(`http/fieldAccess.ts`), which are per-key inside the sub-resource.
+
 - **Protected fields** (`policy.protected_fields`) - for each protected field present, require `write` on
   `<collection>.<code>.<field>` (or `<collection>.<field>` on create). The single place mass-assignment /
   self-escalation is blocked: a plain employee cannot set `department`/`manager`; `compensation` amounts stay
@@ -363,19 +449,29 @@ reference or owner denies.
 A `WHERE` runs in the data layer, but the **decision** it encodes is made in the middleware.
 
 - `scopeFor(user, collection)` (`access.ts`) returns
-  `ListScope = { breadth: "all" | "dept" | "own", deptCode, ownerId, seeRestricted, shares?, denies? }`.
+  `ListScope = { breadth: "all" | "dept" | "own", deptCode, ownerId, seeRestricted, shares?, denies?, subtrees? }`.
 - `breadth` comes from `actorScope`, which **derives** it from the grant by probing `decide` with synthetic
   codes (no role names): can read a code under no real dept -> `all`; can read a sibling in its own dept ->
   `dept`; else `own`.
 - `shares` / `denies` are the caller's per-object exception codes for the collection (section 10), loaded by
   the middleware for list requests.
+- `subtrees` are the code prefixes of the caller's explicit **subtree grants** (`actorSubtrees`). The three
+  breadths are all relative to the caller, so a grant on somebody else's department matched none of them and
+  the list collapsed to `own` while the item path decided that department's rows correctly - a scope that
+  could open rows its own list would never show. Candidates are lifted from the grant's own patterns (a
+  lookup) and each is then confirmed by the same `decide` probe `actorScope` uses, so the engine stays the
+  sole authority; they cost no read, since `scopeFor` already holds the grant. They bind exactly like
+  `shares`, and like shares they add nothing at `all` breadth.
 - The middleware sets `ctx.scope`. A scoped collection reads it in its spec's `list(c)` hook (the one part of
   the standard lane a collection supplies itself, because only it can see the caller's scope and its own
   filters; `collectionRoute.ts` still owns the response shape and the access hints). That hook calls the
   service, and the list service calls `applyScope(scope, table.code, table.owner)`
-  (`listScope.ts`), which only **binds** the decision to columns: `(breadth-predicate OR code in a shared
-  subtree) AND code NOT in a denied subtree`, where the breadth predicate is `all` -> no filter, `dept` ->
-  `code GLOB '<deptCode>-*'` (boundary-anchored), `own` -> `owner = <ownerId>`. Each share/deny on code `C`
+  (`listScope.ts`), which only **binds** the decision to columns: `(breadth-predicate OR code in a shared or
+  granted subtree) AND code NOT in a denied subtree`, where the breadth predicate is `all` -> no filter,
+  `dept` -> `code GLOB '<deptCode>-*'` (boundary-anchored), `own` -> `owner = <ownerId>`. Shares (per-object
+  rows) and `subtrees` (subtree grants from the broad grant) bind identically - both mean "this code and
+  everything under it" - and are kept as separate fields only because one costs a read and the other does
+  not. Each share/grant/deny on code `C`
   binds as its **subtree** `(code = C OR code GLOB 'C-*')` - the same `isUnder` the item path decides with, so
   a share on a PARENT object lists its descendants (not just the exact node). The trailing `-` is the
   delimiter guard: `04-002` lists `04-002` + `04-002-*` but never the prefix-collision neighbour `04-0029`.
@@ -476,6 +572,15 @@ expand down the ladder. The super wildcard `**` is emitted as-is; the client tre
 match-all. This payload (served at `GET /v1/users/me`) is an affordance hint only - the server decides every
 request regardless of what the client shows.
 
+**Capabilities whose field slot names a collection.** `activity` and `export` (`COLLECTION_FIELD_CAPABILITIES`,
+`manifests.ts`) carry a target COLLECTION in the field position rather than a record field, so a rule reads
+`<capability>.<scope>.<collection>` - "the activity of leave requests", "exporting employees". That is what
+makes an app-wide capability grantable in pieces without a second scope axis: the id position says whose
+records, the field position says which kind. The client checks the broad capability OR the per-collection one
+(`canSeeActivity` / `canExport` in `web/src/lib/perm.ts`); `isFieldScopeTarget` validates the field against
+`COLLECTIONS` for exactly these two. `unmask` is field-scoped the ordinary way instead (`unmask.*.identity.uan`),
+decided per field by `unmaskGate`.
+
 **Per-object `access.can`.** Coarse capabilities are scope-stripped, so they can't tell the client whether the
 caller may act on a *specific* row. `computeCan(grant, self, collection, code)` (`src/http/accessHint.ts`)
 fills that gap: for a small static per-collection verb set (`ACCESS_VERBS`) it asks the same `decide()` whether
@@ -502,8 +607,11 @@ access rule - no code change.
   of level / verb / deny; known collection; a field rule only on an access-controlled field), the service
   builds the verbatim `pattern` once and reuses `deriveNarrowing` for the narrowing columns (`match_code` set
   only for `exact`) - byte-identical to the seed's `compileGrant` - then inserts the row and busts the role
-  cache (`grant:<role>`). Guards: you cannot create or delete rules of the role you are using; an identical
-  rule 409s. No blob, no recompile - the row IS the source of record.
+  cache (`grant:<role>`). Guards: **no author writes a rule for a subject that feeds their own grant** - a
+  caller's authority is `user rows` over `mergeGrants(everyone rows, own-role rows)`, so all three are refused:
+  the role you are using, your own user row, and `everyone` (super excepted there, since `**` cannot be
+  widened). An identical rule 409s. Applies to the bulk copy as well - the target is checked once, up front.
+  No blob, no recompile - the row IS the source of record.
 - **Policy write** strict-validates the manifest (`validateManifest`): unlike the lenient read path
   (`parsePolicy` falls back to `DEFAULT_POLICY`), a write rejects a malformed body so a bad edit can never
   silently revert the manifest.
@@ -608,7 +716,8 @@ sibling doc, having no row, stays denied.
 | `src/middleware/authz.ts` | the sole gate: resolve, overlay exceptions, decide, body AC, set scope, fail closed |
 | `src/services/accessRules.ts` | the one access-rule CRUD (role + user); `validateAccessRule` + `deriveNarrowing` -> row; guards |
 | `src/services/{roles,policy}.ts` | the role-catalog + manifest management services + lockout guards |
-| `src/services/listScope.ts` | `applyScope` - binds breadth + shares/denies to columns, decides nothing |
+| `src/services/listScope.ts` | `applyScope` - binds breadth + shares/subtrees/denies to columns, decides nothing |
+| `src/http/tableFieldAccess.ts` | a custom grid's two extra questions: per-row PII reads, and `unmaskGate` (per-field unmask) |
 | `src/domain/searchIndex.ts` | which collections global search covers, and how each mirrors its list scoping |
 | `src/db/searchDdl.ts` | generates the FTS5 index + sync triggers from that registry (appended to the migration) |
 | `src/services/globalSearch.ts` | builds the search query from `ctx.searchScopes`; binds, decides nothing |

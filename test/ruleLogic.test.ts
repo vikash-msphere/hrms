@@ -84,3 +84,65 @@ describe("expiryLabel", () => {
     expect(expiryLabel(new Date(Date.now() + 3 * 86400000).toISOString())).toMatch(/^expires in/);
   });
 });
+
+// The half-working rule. A row-scoped grant decides every individual record correctly and CANNOT open the
+// list: the engine decides `GET /v1/leave-requests` on the one-token key `leave-requests.read`, and
+// `leave-requests.me.**` needs a second token that key does not have. So the page 403s while every rule on
+// screen says the access is configured - and the client cannot warn either, because `capabilitiesOf` strips
+// the scope off a grant, so the SPA believes the collection is readable and fires the request that fails.
+//
+// The seeded roles never hit it (each holds the bare collection grant alongside its scoped rules). Rules
+// authored in the ACL had no such pairing, which is why the narrow tiers looked broken rather than narrow.
+describe("ruleFlags - unlistable", () => {
+  const unlistable = (flags: ReturnType<typeof ruleFlags>) => flags.find((f) => f.kind === "unlistable");
+
+  it("flags a row-scoped rule with nothing that opens the collection", () => {
+    const r = rule({ scope: "self" });
+    expect(unlistable(ruleFlags(r, [r]))?.note).toMatch(/open the list/);
+    for (const scope of ["dept", "subtree", "exact"]) {
+      const s = rule({ scope, scope_ref: "departments/abc" });
+      expect(unlistable(ruleFlags(s, [s])), `scope ${scope}`).toBeTruthy();
+    }
+  });
+
+  it("is silent once something reaches the collection", () => {
+    // The two shapes that match the one-token list key: the create gate (the bare rule) and org-wide
+    // (`<collection>.**`, whose `**` matches zero trailing tokens).
+    const scoped = rule({ scope: "self" });
+    for (const gate of [rule({ scope: "create", level: "read" }), rule({ scope: "all" })]) {
+      expect(unlistable(ruleFlags(scoped, [scoped, gate]))).toBeFalsy();
+    }
+  });
+
+  it("counts what the subject INHERITS - `everyone`, and a person's role", () => {
+    const scoped = rule({ scope: "self" });
+    const everyone = rule({ subject: "everyone", scope: "create", level: "read" });
+    expect(unlistable(ruleFlags(scoped, [scoped, everyone]))).toBeFalsy();
+
+    const person = rule({ subject_kind: "user", subject: "users/u1", scope: "self" });
+    const viaRole = rule({ subject_kind: "role", subject: "manager", scope: "create", level: "read" });
+    // Without the caller passing the person's role, the rule row alone cannot know it applies...
+    expect(unlistable(ruleFlags(person, [person, viaRole]))).toBeTruthy();
+    // ...and with it, the inherited gate counts.
+    expect(unlistable(ruleFlags(person, [person, viaRole], "manager"))).toBeFalsy();
+  });
+
+  it("does not fire on a verb rule, a create gate, or an org-wide rule", () => {
+    for (const r of [rule({ scope: "self", verb: "approve", level: undefined }), rule({ scope: "create", level: "write" }), rule({ scope: "all" })]) {
+      expect(unlistable(ruleFlags(r, [r]))).toBeFalsy();
+    }
+  });
+
+  it("a pending gate does not count - it grants nothing yet", () => {
+    const scoped = rule({ scope: "self" });
+    const pendingGate = rule({ scope: "create", level: "read", status: "pending" });
+    expect(unlistable(ruleFlags(scoped, [scoped, pendingGate]))).toBeTruthy();
+  });
+});
+
+describe("ruleSentence - a department anchor reads as a department", () => {
+  it("distinguishes a named-department subtree from an object subtree", () => {
+    expect(ruleSentence(rule({ scope: "subtree", scope_ref: "departments/sales" }))).toContain("one department's leave requests");
+    expect(ruleSentence(rule({ scope: "subtree", scope_ref: "leave-requests/req-1" }))).toContain("and everything below it");
+  });
+});

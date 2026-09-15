@@ -4,7 +4,7 @@ import { create, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
-import { cn, formatDate, idOf, personName } from "@/lib/utils";
+import { cn, formatDate, idOf, personIndex, personName } from "@/lib/utils";
 import { addDaysYmd, orgDayFromToday, todayStr, weekStartYmd } from "@/lib/orgDay";
 import { navigate, navigateTab } from "@/router";
 import { Card } from "@/components/ui/card";
@@ -62,7 +62,9 @@ export default function RemoteWork({ me }: { me: Me }) {
   const [form, setForm] = useState({ employee: "", start_date: todayStr(), end_date: todayStr(), startSession: 1, endSession: 2, location: "Home", reason: "" });
 
   const emp = (p?: string) => (p ? employees.find((e) => idOf(e.path) === idOf(p)) : undefined);
-  const empName = (p?: string, unknown?: string) => personName(employees, p, unknown);
+  // Built ONCE per directory read, not once per call - this is a DataTable column accessor (see `personName`).
+  const empIdx = useMemo(() => personIndex(employees), [employees]);
+  const empName = (p?: string, unknown?: string) => personName(empIdx, p, unknown);
 
   const pendingTotal = useMemo(() => rows.filter((r) => upper(r.state) === "PENDING").length, [rows]);
   // Who's working remotely today (approved request covering today), and my approved days starting this month.

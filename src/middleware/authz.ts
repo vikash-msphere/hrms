@@ -6,18 +6,18 @@ import type { Context, MiddlewareHandler } from "hono";
 import type { AppEnv, AppUser } from "../env";
 import type { Deps } from "../deps";
 import { forbidden } from "../lib/errors";
-import { resolveRequest, decide, type Decision, type Grant } from "../domain/permissions";
+import { resolveRequest, decide, denyingPattern, withOwnerResource, deptOf, type Decision, type Grant } from "../domain/permissions";
 import { scopeFor, verbScopeFor, stateReadAllowed, type ListScope } from "../domain/access";
-import { buildCodedPath, uuidToCode, resolveItemState, RESOURCE_COLLECTIONS } from "../lib/authzResolve";
+import { buildCodedPath, uuidToCode, resolveItemState, RESOURCE_COLLECTIONS, LIST_OWNER_COLUMNS, OWNER_COLUMN_COLLECTIONS } from "../lib/authzResolve";
 import { loadObjectRulesForRequest, loadObjectExceptionCodes, loadObjectExceptionCodesFor } from "../lib/policyLoad";
 import { SEARCHABLE_COLLECTIONS } from "../domain/searchIndex";
 import { DASHBOARD_SUMMARY_COLLECTIONS } from "../domain/dashboardSummary";
 import { ANALYTICS_COLLECTIONS } from "../domain/peopleAnalytics";
 import { TABLE_SOURCE_COLLECTIONS } from "../domain/tableFields";
 import { APPROVAL_SUMMARY_COLLECTIONS, TAX_VERIFICATION_QUEUE } from "../domain/approvalsSummary";
-import { ancestorsOf } from "../domain/codes";
+import { ancestorsOf, isUnder } from "../domain/codes";
 import { mergeGrants, rulesToGrant } from "../domain/compileGrants";
-import { EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
+import { isSuperGrant, roleSubjectsOf } from "../domain/grants";
 import { inScope } from "../domain/keyScope";
 // Which collections actually offer the `?force` hard purge. Written by the collection factory as each
 // collection is mounted, and every route module is imported at load (src/index.ts) - so the set is complete
@@ -28,6 +28,8 @@ import { DEFAULT_POLICY, subresourceBodyKey } from "../domain/manifests";
 import { audit } from "../lib/audit";
 import { isJsonBody } from "../http/jsonRequest";
 import { queryParam } from "../http/query";
+import { selfContextFor } from "../lib/selfContext";
+import { conditionAllows, conditionFieldsOf } from "../domain/ruleCondition";
 
 // Field-level + reference access control on write bodies (docs/archive/plan.txt 11C). For a POST/PATCH whose
 // resource-level write already passed, each PROTECTED field present in the body needs write on
@@ -244,14 +246,16 @@ const AGGREGATE_ROUTES = new Set(["search", "dashboard-summary", "people-analyti
 // Collections the caller may not list are simply absent from the map, so the consuming service can never
 // query them. The exceptions for all of them are read once, not once per collection.
 export async function scopesForCollections(deps: Deps, user: AppUser, collections: readonly string[]): Promise<Map<string, ListScope>> {
-  const self = { employeeCode: user.employeeCode };
+  // Same context the item lane decides with, so a fan-out (search, the summaries, the table builder) scopes a
+  // manager's collections exactly as a plain list of one of them would. Cached, so this is free once warm.
+  const self = await selfContextFor(deps, user);
   const listable = collections.filter((col) => decide(user.grant, resolveRequest("GET", `/v1/${col}`), self).allow);
   const out = new Map<string, ListScope>();
   if (listable.length === 0) return out;
-  const roleSubjects = isSuperGrant(user.grant) ? [user.role] : [user.role, EVERYONE_ROLE];
+  const roleSubjects = roleSubjectsOf(user, user.grant);
   const exceptions = await loadObjectExceptionCodesFor(deps, user.uuid, roleSubjects, listable);
   for (const col of listable) {
-    const scope = scopeFor(user, col);
+    const scope = scopeFor(user, col, self);
     const exc = exceptions.get(col);
     scope.shares = exc?.shares ?? [];
     scope.denies = exc?.denies ?? [];
@@ -290,7 +294,7 @@ export async function approvalScopesFor(deps: Deps, user: AppUser): Promise<Map<
     approvable.push(col);
   }
   if (!approvable.length) return out;
-  const roleSubjects = isSuperGrant(user.grant) ? [user.role] : [user.role, EVERYONE_ROLE];
+  const roleSubjects = roleSubjectsOf(user, user.grant);
   const exceptions = await loadObjectExceptionCodesFor(deps, user.uuid, roleSubjects, approvable);
   for (const col of approvable) out.get(col)!.denies = exceptions.get(col)?.denies ?? [];
   return out;
@@ -314,6 +318,11 @@ class AuthzDenied extends Error {
 
 export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
   let decision: Decision | null = null;
+  // How to re-ask THIS request's access question of a different grant, set by the lane that decided it. Used
+  // only by the view-as containment check below; stays null on the lanes that decide nothing concrete.
+  // A holder rather than a bare `let`, because every assignment happens inside a nested closure and narrowing
+  // would otherwise settle it at `null` for the reader below.
+  const contain: { reDecide: ((grant: Grant, employeeCode: string | null) => Decision) | null } = { reDecide: null };
   let pathname = "";
   try {
     const user = c.get("user");
@@ -340,7 +349,14 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // Reset the per-request audit flag (batch reuses one shared user object across sub-requests). audit() sets
       // it true when the handler logs its own activity row; the write backstop after next() reads it to dedupe.
       user.audited = false;
-      const self = { employeeCode: user.employeeCode };
+      // The matcher context for this request. Carries the caller's reporting line when - and only when -
+      // their grant uses the manager-chain tokens, so `my-reports` / `my-org` decide with real data and
+      // everybody else pays nothing (lib/selfContext.ts).
+      const self = await selfContextFor(deps, user);
+      // Set by whichever lane below decides a CONCRETE request, so the view-as containment check after the
+      // try/catch can put the identical question to the real caller's grant. See the check for why it is a
+      // closure rather than the resolved request itself (the activity lane asks two questions, not one).
+      const decidedAs = (fn: (grant: Grant, employeeCode: string | null) => Decision) => void (contain.reDecide = fn);
       const collection = collectionOf(pathname);
       // `?force=true` is the hard purge, and it is what lifts a DELETE from `write` to `admin`. It only lifts
       // it where the purge EXISTS: a collection whose delete is already permanent ignores the parameter
@@ -397,7 +413,7 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
         if (!tCode) {
           decision = { allow: false, reason: "activity: unresolved target resource" };
         } else {
-          const roleSubjects = isSuperGrant(user.grant) ? [user.role] : [user.role, EVERYONE_ROLE];
+          const roleSubjects = roleSubjectsOf(user, user.grant);
           let g: Grant = user.grant;
           const objRules = await loadObjectRulesForRequest(deps, user.uuid, roleSubjects, tEntity, ancestorsOf(tCode));
           if (objRules.length) g = mergeGrants(user.grant, rulesToGrant(objRules));
@@ -408,6 +424,15 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
           // token[1] and the collection as a sub-resource, so `activity.my-dept.**` / `activity.*.<col>` /
           // `activity.me.**` all narrow via the standard engine. Activity uses the caller's BROAD grant (role +
           // everyone + user rules); per-object activity shares are not a thing (the read gate carries objects).
+          // BOTH gates, as one closure, so the containment check below asks the real caller the same two
+          // questions rather than only the first: the broad grant is the right one to put to them (per-object
+          // activity shares are not a thing, exactly as above).
+          const bothGates = (grant: Grant, employeeCode: string | null): Decision => {
+            const asThem = { employeeCode };
+            const read = decide(grant, { kind: "standard", resource: `${tEntity}.${tCode}`, level: "read" }, asThem);
+            return read.allow ? decide(grant, { kind: "standard", resource: `activity.${tCode}.${tEntity}`, level: "read" }, asThem) : read;
+          };
+          decidedAs(bothGates);
           const readDec = decide(g, { kind: "standard", resource: `${tEntity}.${tCode}`, level: "read" }, self);
           decision = !readDec.allow
             ? readDec
@@ -417,20 +442,43 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       } else {
       const stateRule = user.policy.state_visibility?.[collection];
 
-      // Resolve the top id -> code. For a state-gated collection the SAME read also returns the row's
-      // public-state columns, so the item-read gate below adds no read (budget stays one id->code resolve).
+      // Resolve the top id -> code. For a state-gated collection, or one whose rows are flat-coded with an owner
+      // column, the SAME read also returns the row's public-state columns and/or its owner id - so neither the
+      // item-read gate below nor the owner key adds a read (budget stays one id->code resolve).
       let itemCode: string | null = null;
       let itemState: Record<string, unknown> | null = null;
-      const resolveId = stateRule
+      let itemOwnerId: string | null = null;
+      // The row's threshold columns, as loaded above. Shares the `state` bag because they come off one select;
+      // kept as its own name so the state gate and the condition gate never read each other's meaning into it.
+      let itemRow: Record<string, unknown> | null = null;
+      const ownerProp = OWNER_COLUMN_COLLECTIONS.has(collection) ? LIST_OWNER_COLUMNS[collection] : undefined;
+      // The columns a per-rule THRESHOLD could be evaluated against (domain/ruleCondition.ts). Selected only
+      // when this caller actually holds a conditioned rule, and read on the SAME statement as the code - so a
+      // threshold costs no read, and a caller without one changes nothing about the query.
+      const condFields = user.conditions?.size ? conditionFieldsOf(collection) : {};
+      const condCols = Object.values(condFields);
+      const resolveId = stateRule || ownerProp || condCols.length
         ? async (col: string, id: string) => {
-            const r = await resolveItemState(deps, col, id, Object.keys(stateRule.public_when));
+            const r = await resolveItemState(deps, col, id, [...(stateRule ? Object.keys(stateRule.public_when) : []), ...condCols], ownerProp);
             itemCode = r?.code ?? null;
             itemState = r?.state ?? null;
+            itemOwnerId = r?.ownerId ?? null;
+            itemRow = r?.state ?? null;
             return itemCode;
           }
         : async (col: string, id: string) => (itemCode = await uuidToCode(deps, col, id));
       const coded = await buildCodedPath(pathname, resolveId);
-      const resolved = resolveRequest(c.req.method, coded, force);
+      // The OWNER KEY (domain/permissions.ts Resolved#ownerResource). Only `assets` and `users` reach here: their
+      // rows carry a flat code, so `me` / `my-dept` could never match the item lane even where the list lane
+      // answered "own" - which is how `GET /v1/assets/<id>` came to 403 on a row the list had just returned.
+      //
+      // The owner id rode the resolve above; turning it into a CODE goes through the cached uuid->code resolver,
+      // so warm this is free. A resolve that comes back null adds no key at all - an asset held by nobody, or a
+      // service account with no employee, is decided exactly as it is today.
+      const ownerCode = itemOwnerId ? await uuidToCode(deps, "employees", itemOwnerId) : null;
+      const resolved = ownerCode
+        ? withOwnerResource(resolveRequest(c.req.method, coded, force), ownerCode)
+        : resolveRequest(c.req.method, coded, force);
 
       // Per-object exceptions: for an item request whose object code resolved, fetch the caller's per-object
       // rows - USER exceptions (grant-exceptions) AND any exact ROLE rules - narrowed by the object's ancestor
@@ -438,7 +486,7 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // over the merged patterns - a share raises access for THIS object, a per-object deny blocks it
       // (deny-wins). No object code -> the broad role grant alone.
       // `everyone` rules apply to every caller EXCEPT super (the `**` holder), who must stay unrestrictable.
-      const roleSubjects = isSuperGrant(user.grant) ? [user.role] : [user.role, EVERYONE_ROLE];
+      const roleSubjects = roleSubjectsOf(user, user.grant);
       let grant: Grant = user.grant;
       if (itemCode) {
         const objRules = await loadObjectRulesForRequest(deps, user.uuid, roleSubjects, collection, ancestorsOf(itemCode));
@@ -450,8 +498,56 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // Expose the resolved item code so a handler can do per-field read redaction off the SAME code the
       // decision used (no second uuid->code resolve). Null on collection/create paths.
       c.set("itemCode", itemCode);
+      // ...and the owner code the decision used, so the access hint is computed on the SAME pair of keys the
+      // request was decided on. Without it an item response would advertise no actions on a row this very
+      // request just allowed. Null for every collection but the flat-coded owner-column ones.
+      c.set("itemOwnerCode", ownerCode);
+      // The resolved request is caller-independent (it names the object's own code), so the real caller's
+      // grant can be asked the identical question - which is what the containment check below does. Per-object
+      // exceptions are deliberately NOT re-loaded for them: a share is authority over one object, and the
+      // conservative reading of "may this admin read this" is their own standing grant.
+      decidedAs((g, employeeCode) => decide(g, resolved, { employeeCode }));
       decision = decide(grant, resolved, self);
+      // The delete axis. A DELETE resolves to the standard `write` level (`domain/permissions.ts` levelFor),
+      // so editing a record and destroying it are the SAME key and "may edit but never delete" - the most
+      // common request after read-only - could not be said at all. The deny lane supplies the missing axis
+      // without adding a rung to the ladder or a grant anyone must now hold: a deny on the `delete` verb
+      // (or `purge`, the `?force` hard delete) blocks it, and everything else decides exactly as before.
+      // Subtractive by construction, and it reuses the deny semantics the model already has for
+      // separation-of-duties (payroll `:approve` is super-only the same way).
+      if (decision.allow && c.req.method.toUpperCase() === "DELETE") {
+        const verb = force ? "purge" : "delete";
+        // Carries the owner key: this lane exists to SUBTRACT, so it has to see every key the allow lane saw.
+        const denied = denyingPattern(grant, { kind: "custom", resource: resolved.resource, verb, ownerResource: resolved.ownerResource }, self);
+        if (denied) decision = { allow: false, reason: `denied by "${denied}"` };
+      }
+      // THE THRESHOLD AXIS (domain/ruleCondition.ts). A rule may carry a limit on the row it is exercised
+      // against - "approve expenses up to 50,000" - which no code token can express, because every scope token
+      // is a predicate on WHO owns a row and this one is a predicate on WHAT the row says.
+      //
+      // Subtractive, exactly like the delete axis above: it is asked only once `decide()` has already allowed,
+      // it consults the pattern THAT decision named (`via`), and its only possible outcome is a refusal. There
+      // is no branch here that turns a no into a yes, which is what keeps `decide()` the single authority.
+      //
+      // ITEM PATHS ONLY, and deliberately so. A list has no single row to measure, and a threshold is about
+      // ACTING rather than seeing: a manager may look at every expense in their department and still be unable
+      // to approve the large ones. Making it a list predicate would silently hide rows they are meant to review.
+      if (decision.allow && itemCode && user.conditions?.size) {
+        // The condition names the WIRE field an admin authored; the row bag is keyed by drizzle column. One
+        // translation here rather than a second spelling of the map in the evaluator.
+        const byWire: Record<string, unknown> = {};
+        for (const [wire, col] of Object.entries(condFields)) byWire[wire] = itemRow?.[col];
+        if (!conditionAllows(user.conditions, decision.via, byWire)) {
+          decision = { allow: false, reason: `outside the limit on "${decision.via}"` };
+        }
+      }
       // Resource-level write allowed -> additionally gate protected fields + body references.
+      //
+      // DELIBERATELY WITHOUT THE OWNER KEY. The owner key answers "is this row yours"; a protected field is
+      // precisely what you may not set on your own row, and `users` protects `role` and `status`. Were the key to
+      // reach here, a `users.me.**` rule - which the ACL can now author - would match `users.<ownerCode>.role`
+      // and become self-promotion to any role. So field and reference gates keep deciding on the row's REAL
+      // code, which for these collections is flat: only an explicit `users.*` / `users.**` holder matches it.
       if (decision.allow) decision = (await bodyDecision(c, deps, coded, user, grant)) ?? decision;
 
       // State-visibility gate: touching a NON-public row (e.g. unpublished/disabled) needs `requires` on
@@ -482,6 +578,36 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     }
   }
 
+  // ---- View-as containment (rail 2, second half) -----------------------------------------------------------
+  //
+  // A SIMULATION MAY NOT ANSWER WHAT THE REAL CALLER COULD NOT ASK. lib/viewAs.ts installs the SUBJECT's
+  // fully-assembled grant as the request principal and intersects it with nothing, and grant subsumption is
+  // not computable over patterns - so the only widening it could refuse was the upward one (borrowing super).
+  // The widening that matters is sideways: an ordinary employee holds `employees.me.bank-account.**` outright,
+  // both admin roles are deliberately kept out of everyone else's PII (domain/grants.ts `...OWN_PII`), and
+  // `GET /v1/employees/<X>/bank-account` under `X-View-As: employees/<X>` resolved to X's own code, matched X's
+  // own self-grant, and returned X's decrypted account number.
+  //
+  // Containment does not need to be computed over grants, because this middleware has ALREADY resolved this
+  // request: ask the real caller's grant the same concrete question and refuse the simulated answer when they
+  // would have been denied. That keeps the honest use of the feature - an access admin checking that somebody
+  // can see their own dashboard - and removes the sideways read, one request at a time. It is the caller-bound
+  // shape services/accessPreview.ts already applies to the preview surface next door.
+  //
+  // Lanes that decide nothing concrete (the fan-out aggregates: search, the dashboard/analytics summaries)
+  // set no `reDecide` and are not bound here. They gate on nothing themselves - any signed-in caller passes -
+  // and narrow by per-collection SCOPE instead, which under a simulation is the subject's, by design: those
+  // surfaces exist to show what the person being watched sees.
+  if (decision?.allow) {
+    const simulated = c.get("user")?.simulatedBy;
+    if (simulated) {
+      const real = contain.reDecide?.(simulated.grant, simulated.employeeCode) ?? { allow: true };
+      if (!real.allow) {
+        decision = { allow: false, reason: `view as: you may not read through a simulation what you cannot read as yourself (${real.reason})` };
+      }
+    }
+  }
+
   // Audit (best-effort; NEVER affects the decision). Records every denial (access.denied - the abuse
   // signal) and every allowed read of a sensitive surface (PII sub-resource / sensitive item / download),
   // anchored on the path's internal id. Ordinary allowed reads write nothing. A failed audit is logged,
@@ -499,7 +625,22 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // payslips/compensation) the caller's employee code. Used to skip auditing self-views of sensitive data.
     const ec = auser?.employeeCode;
     const ic = c.get("itemCode");
-    const isSelf = !!ec && !!ic && (ic === ec || ic.startsWith(`${ec}-`));
+    // NO READ MADE THROUGH A SIMULATION IS A SELF-READ. `isSelf` exists to stop logging YOUR reads of YOUR own
+    // data, and under view-as neither pronoun refers to the person driving: both sides of the comparison come
+    // from the SUBJECT, so it was always true and the `<col>.read.sensitive` row was never written - for
+    // `bank-account`, `identity` and `tax`, the three the policy calls an accountability event. The same
+    // request made honestly IS audited (the admin's code against the subject's), which left view-as quieter
+    // than acting as yourself, inverting lib/viewAs.ts's own promise that a simulated read stays attributable.
+    // lib/audit.ts stamps `viewing_as` faithfully - on rows that get written, and there was no row to stamp.
+    const isSelf = !auser?.simulatedBy && !!ec && !!ic && (ic === ec || ic.startsWith(`${ec}-`));
+    // How far the authorizing rule actually REACHED on this request, counted per pattern in `rule_usage` so an
+    // access review can tell a genuinely org-wide rule from one whose holders only ever touched their own team.
+    // Same two containment tests the engine decides with (`me` / `my-dept`), asked about the resolved item code.
+    // Undefined when there is no item (a collection-level request classifies nothing) - see the schema comment.
+    if (auser) {
+      const dept = deptOf(ec ?? null);
+      auser.authorizedScope = !dec.allow || !ic || !ec ? undefined : isSelf ? "self" : dept && isUnder(dept, ic) ? "dept" : "wider";
+    }
     try {
       const ev = accessAudit(c.req.method, pathname, dec, auser?.policy.audit ?? DEFAULT_POLICY.audit, isSelf);
       // Pass the AppUser (not just its email) so the row records actor_id → the feed resolves it to a name.
@@ -530,7 +671,9 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // (announcements:markAllRead does) would get one computed against a resource that does not exist.
     const isCollectionVerb = (segs[0]?.indexOf(":") ?? -1) >= 0;
     const collection = collectionOf(pathname);
-    const scope = scopeFor(user, collection);
+    // Re-derived rather than reached for: the decision's `self` is scoped to the block above. Both calls hit the
+    // same cache entry, so this costs no read.
+    const scope = scopeFor(user, collection, await selfContextFor(c.get("deps"), user));
     // A collection-level list also honors the caller's per-object shares/denies (one indexed read): shares
     // widen the result, denies remove rows (deny-wins). Covers user exceptions AND exact role rules. Item
     // paths don't need it (handled in the decision) - and neither do custom methods, which act on what the
@@ -539,7 +682,7 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // searchScopes/summaryScopes/approvalScopes (each already scoped per collection below), never this scope -
     // so the read would be a guaranteed-empty one thrown away.
     if (segs.length === 1 && !isCollectionVerb && !AGGREGATE_ROUTES.has(collection)) {
-      const roleSubjects = isSuperGrant(user.grant) ? [user.role] : [user.role, EVERYONE_ROLE];
+      const roleSubjects = roleSubjectsOf(user, user.grant);
       const exc = await loadObjectExceptionCodes(c.get("deps"), user.uuid, roleSubjects, collection);
       scope.shares = exc.shares;
       scope.denies = exc.denies;

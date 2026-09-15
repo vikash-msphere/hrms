@@ -36,6 +36,7 @@ export const attendance = collectionRoutes({
   },
   verbs: {
     clockIn: { run: (deps, user, _id, _body, c) => clockIn(deps, user, punchOrigin(c)) },
-    clockOut: { run: (deps, user, _id, _body, c) => clockOut(deps, user, punchOrigin(c)) },
+    // No `punchOrigin`: the fence is on the OPENING punch only (services/attendance.ts#assertPunchOrigin).
+    clockOut: { run: (deps, user) => clockOut(deps, user) },
   },
 });

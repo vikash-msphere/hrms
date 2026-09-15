@@ -23,5 +23,6 @@ export const dependents = collectionRoutes({
       page.pageToken,
       c.req.query("employee"),
       page.showDeleted,
+      page.deletedOnly,
     ),
 });

@@ -1,10 +1,11 @@
-import { eq } from "drizzle-orm";
+import { and } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { Wire } from "../http/wire";
 import { photoMarker } from "../http/serialize";
 import { daysInMonthUtc } from "../domain/calendar";
 import { orgToday, dayStartMs } from "./orgDay";
+import { liveEmployee } from "./liveEmployee";
 
 // Company-wide "who's celebrating soon" feed for the dashboard. Birthdays come from the ENCRYPTED personal
 // details blob (date_of_birth) and are returned as day+month ONLY - never the year, so no age is exposed.
@@ -57,10 +58,32 @@ export async function upcomingCelebrations(deps: Deps, withinDays = 30): Promise
   // before. Same reasoning as the 29 February clamp above - one rule on both surfaces. See orgDay.ts.
   const todayMs = dayStartMs(await orgToday(deps));
 
-  const rows = await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"));
+  // SEVEN COLUMNS, AND ALL THREE LIVENESS CONDITIONS IN SQL.
+  //
+  // `select()` used to pull every column of every active employee - `bankDetailsEnc`, `identityDetailsEnc`,
+  // `taxDetailsEnc` and `nationalIdEnc` among them, four encrypted blobs this function never opens, hauled
+  // into isolate memory for the whole org on every dashboard load.
+  //
+  // Liveness used to be decided AFTER the read: `delete_time` filtered in JS, and `disabled` not checked at
+  // all - so a disabled employee's birthday was broadcast to the whole company on the dashboard card.
+  // services/notifications.ts states the rule for exactly this shape and gives both halves of the reason:
+  // "an account switched off is not somebody to broadcast to either", and "filtered in SQL rather than in the
+  // isolate: the rows it drops do not have to be read, and D1 bills rows read". `liveEmployee()` is that
+  // predicate, imported rather than spelled a fourth way.
+  const rows = await deps.db
+    .select({
+      uuid: schema.employees.uuid,
+      firstName: schema.employees.firstName,
+      lastName: schema.employees.lastName,
+      photoKey: schema.employees.photoKey,
+      photoAt: schema.employees.photoAt,
+      startDate: schema.employees.startDate,
+      personalDetailsEnc: schema.employees.personalDetailsEnc,
+    })
+    .from(schema.employees)
+    .where(and(...liveEmployee()));
   const out: Celebration[] = [];
   for (const e of rows) {
-    if (e.deleteTime) continue;
     const name = `${e.firstName} ${e.lastName}`.trim();
     const ref = `employees/${e.uuid}`;
     // The same marker every other surface serves, version and all (http/serialize.ts). Built by hand here it

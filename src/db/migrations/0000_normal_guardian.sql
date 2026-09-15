@@ -9,6 +9,7 @@ CREATE TABLE `access_rules` (
 	`match_code` text,
 	`level` text,
 	`effect` text NOT NULL,
+	`condition` text,
 	`source` text DEFAULT 'acl' NOT NULL,
 	`status` text DEFAULT 'active' NOT NULL,
 	`requested_by` text,
@@ -1918,6 +1919,15 @@ CREATE TABLE `roles` (
 	`updated_at` integer NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE `rule_usage` (
+	`pattern` text PRIMARY KEY NOT NULL,
+	`hits` integer DEFAULT 0 NOT NULL,
+	`self_hits` integer DEFAULT 0 NOT NULL,
+	`dept_hits` integer DEFAULT 0 NOT NULL,
+	`last_used_at` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX `rule_usage_last_used_idx` ON `rule_usage` (`last_used_at`);--> statement-breakpoint
 CREATE TABLE `salary_structures` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -2264,6 +2274,15 @@ CREATE TABLE `transitions` (
 CREATE UNIQUE INDEX `transitions_code_unique` ON `transitions` (`code`);--> statement-breakpoint
 CREATE INDEX `transitions_page_idx` ON `transitions` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `trn_emp_idx` ON `transitions` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
+CREATE TABLE `user_roles` (
+	`user_id` text NOT NULL,
+	`role` text NOT NULL,
+	PRIMARY KEY(`user_id`, `role`),
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`uuid`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`role`) REFERENCES `roles`(`name`) ON UPDATE no action ON DELETE restrict
+);
+--> statement-breakpoint
+CREATE INDEX `user_roles_role_idx` ON `user_roles` (`role`);--> statement-breakpoint
 CREATE TABLE `users` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -2844,12 +2863,12 @@ CREATE TRIGGER "search_ad_letter_templates" AFTER DELETE ON "letter_templates" B
 END;
 --> statement-breakpoint
 CREATE TRIGGER "search_ai_announcements" AFTER INSERT ON "announcements" BEGIN
-  INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) VALUES ('announcements', new."uuid", new."code", NULL, nullif(trim(new."title"), ''), nullif(trim(new."kind"), ''), (new."delete_time" IS NOT NULL), (coalesce(new."published", 0) <> 1 OR coalesce(new."disabled", 0) <> 0), new."created_at");
+  INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) VALUES ('announcements', new."uuid", new."code", new."author_employee_id", nullif(trim(new."title"), ''), nullif(trim(new."kind"), ''), (new."delete_time" IS NOT NULL), (coalesce(new."published", 0) <> 1 OR coalesce(new."disabled", 0) <> 0), new."created_at");
   INSERT INTO "search_fts" ("rowid", "text") VALUES (last_insert_rowid(), coalesce(new."title", '') || ' ' || coalesce(new."body_text", '') || ' ' || coalesce(new."category", '') || ' ' || coalesce(new."kind", ''));
 END;
 --> statement-breakpoint
 CREATE TRIGGER "search_au_announcements" AFTER UPDATE ON "announcements" BEGIN
-  UPDATE "search_docs" SET "code" = new."code", "owner_id" = NULL, "title" = nullif(trim(new."title"), ''), "subtitle" = nullif(trim(new."kind"), ''), "deleted" = (new."delete_time" IS NOT NULL), "restricted" = (coalesce(new."published", 0) <> 1 OR coalesce(new."disabled", 0) <> 0) WHERE "collection" = 'announcements' AND "record_id" = new."uuid";
+  UPDATE "search_docs" SET "code" = new."code", "owner_id" = new."author_employee_id", "title" = nullif(trim(new."title"), ''), "subtitle" = nullif(trim(new."kind"), ''), "deleted" = (new."delete_time" IS NOT NULL), "restricted" = (coalesce(new."published", 0) <> 1 OR coalesce(new."disabled", 0) <> 0) WHERE "collection" = 'announcements' AND "record_id" = new."uuid";
   UPDATE "search_fts" SET "text" = coalesce(new."title", '') || ' ' || coalesce(new."body_text", '') || ' ' || coalesce(new."category", '') || ' ' || coalesce(new."kind", '') WHERE "rowid" = (SELECT "rowid" FROM "search_docs" WHERE "collection" = 'announcements' AND "record_id" = new."uuid");
 END;
 --> statement-breakpoint
@@ -3489,7 +3508,7 @@ INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitl
 --> statement-breakpoint
 INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."label", '') || ' ' || coalesce(t."category", '') || ' ' || coalesce(t."filename", '') FROM "search_docs" d JOIN "letter_templates" t ON t."uuid" = d."record_id" WHERE d."collection" = 'letter-templates' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
 --> statement-breakpoint
-INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'announcements', t."uuid", t."code", NULL, nullif(trim(t."title"), ''), nullif(trim(t."kind"), ''), (t."delete_time" IS NOT NULL), (coalesce(t."published", 0) <> 1 OR coalesce(t."disabled", 0) <> 0), t."created_at" FROM "announcements" t;
+INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'announcements', t."uuid", t."code", t."author_employee_id", nullif(trim(t."title"), ''), nullif(trim(t."kind"), ''), (t."delete_time" IS NOT NULL), (coalesce(t."published", 0) <> 1 OR coalesce(t."disabled", 0) <> 0), t."created_at" FROM "announcements" t;
 --> statement-breakpoint
 INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."title", '') || ' ' || coalesce(t."body_text", '') || ' ' || coalesce(t."category", '') || ' ' || coalesce(t."kind", '') FROM "search_docs" d JOIN "announcements" t ON t."uuid" = d."record_id" WHERE d."collection" = 'announcements' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
 --> statement-breakpoint
@@ -4910,6 +4929,18 @@ END;
 --> statement-breakpoint
 CREATE TRIGGER "chg_d_ticket_todos" AFTER DELETE ON "ticket_todos" BEGIN
   INSERT INTO "collection_versions" ("collection", "at") VALUES ('tickets', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_i_user_roles" AFTER INSERT ON "user_roles" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('users', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_u_user_roles" AFTER UPDATE ON "user_roles" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('users', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_d_user_roles" AFTER DELETE ON "user_roles" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('users', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
 --> statement-breakpoint
 CREATE TRIGGER "chg_i_attachments" AFTER INSERT ON "attachments" BEGIN

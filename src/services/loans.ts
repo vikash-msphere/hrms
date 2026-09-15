@@ -13,7 +13,7 @@ import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, alreadyExists, failedPrecondition } from "../lib/errors";
 import { genId } from "../lib/idCodec";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { deleteStateFilter, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { installmentAmount, isFullyRepaid, outstandingOf } from "../domain/loans";
 
 type Status = typeof schema.loans.$inferSelect.status;
@@ -32,12 +32,12 @@ import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatc
 import { checkEtag, updateAtVersion } from "./versionGuard";
 const MANUAL_REPAY_DEDUP_MS = 60_000; // an identical manual repayment within 60s = accidental double-submit
 
-export async function listLoans(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, status?: string, showDeleted = false) {
+export async function listLoans(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, status?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.loans.code, schema.loans.employeeId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.loans.employeeId, empId));
   if (status) conds.push(eq(schema.loans.status, status as Status));
-  if (!showDeleted) conds.push(isNull(schema.loans.deleteTime));
+  conds.push(deleteStateFilter(schema.loans.deleteTime, showDeleted, deletedOnly));
   return keysetPage(deps, schema.loans, "loans", and(...conds.filter(Boolean)), { dir: "desc", max: maxPageSize, pageToken });
 }
 

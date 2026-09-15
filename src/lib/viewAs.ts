@@ -7,7 +7,9 @@
 //
 // Three rails keep the simulation from becoming an escalation path:
 //   1. the REAL caller must hold `access-rules.preview` (fail-closed, super by default),
-//   2. a non-super caller may not borrow a super subject's authority,
+//   2. the simulation never hands the caller MORE authority than they already hold - a non-super caller may
+//      not borrow a super subject's identity, and no individual request is answered that the REAL caller
+//      would have been denied (decided per request in middleware/authz.ts, off `simulatedBy.grant`),
 //   3. it is READ-ONLY: GET/HEAD plus the GET-only `/v1/batch:run` transport, nothing else. Acting AS someone
 //      is never allowed - the admin stops the simulation and acts as themselves.
 // The audit trail keeps naming the real human (lib/audit.ts stamps `viewing_as` on the row), so a simulated
@@ -21,7 +23,7 @@ import { forbidden, invalidArgument, notFound } from "./errors";
 import { decide, type Grant } from "../domain/permissions";
 import { mergeGrants } from "../domain/compileGrants";
 import { EMPTY_GRANT, isSuperGrant } from "../domain/grants";
-import { loadRoleGrant, loadUserGrant } from "./policyLoad";
+import { loadRoleGrant, loadUserGrant, loadUserRoles } from "./policyLoad";
 
 export const VIEW_AS_HEADER = "X-View-As";
 const TOKEN_RE = /^[0-9a-hj-km-np-tv-z]{26}$/; // a wire-id token (the SPA speaks tokens, tests speak internal ids)
@@ -118,17 +120,38 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
   // of quietly rendering an empty app.
   if (status !== "active") throw reject("that account is disabled");
 
-  const [roleGrant, userGrant] = await Promise.all([loadRoleGrant(deps, roleName), userUuid ? loadUserGrant(deps, userUuid) : Promise.resolve(EMPTY_GRANT)]);
-  const grant: Grant = mergeGrants(roleGrant, userGrant);
-  // Rail 2: the simulation must never hand the caller MORE authority than they already hold. Full containment
-  // isn't computable over pattern grants, but the one case that matters - borrowing the break-glass identity -
-  // is, so a non-super caller may not step into a super subject.
+  // Every role the subject holds, assembled exactly as middleware/auth.ts assembles it for a real sign-in - a
+  // simulation that saw only the primary role would show less than the person actually has, and the whole point
+  // of the surface is that what the admin sees IS what the subject sees. A person with no account holds none.
+  const extraRoles = userUuid ? await loadUserRoles(deps, userUuid) : [];
+  const roles = [...new Set([roleName, ...extraRoles])];
+  const [roleGrants, userGrant] = await Promise.all([
+    Promise.all(roles.map((r) => loadRoleGrant(deps, r))),
+    userUuid ? loadUserGrant(deps, userUuid) : Promise.resolve(EMPTY_GRANT),
+  ]);
+  const grant: Grant = mergeGrants(roleGrants.reduce(mergeGrants), userGrant);
+  // Rail 2, first half: a non-super caller may not step into a super subject - borrowing the break-glass
+  // identity outright.
+  //
+  // SUBSUMPTION IS NOT COMPUTABLE OVER PATTERN GRANTS, and this used to be the whole of rail 2 because of it -
+  // which left every SIDEWAYS widening allowed, and sideways is the interesting direction. The seeded policy
+  // keeps both admin roles out of other people's PII on purpose (`...OWN_PII` in domain/grants.ts, written as
+  // the record of a fix: "HR sees only their OWN PII ... others' PII stays super-only"), while the `employee`
+  // role holds its own outright - so stepping into an ordinary employee and reading
+  // `employees/<X>/bank-account` was a self-match on X's own grant, answered with X's decrypted account
+  // number, and nothing asked whether the real caller could have made that read.
+  //
+  // The answer is that containment does not have to be computed over GRANTS: the middleware resolves THIS
+  // request and can ask the real caller's grant the same concrete question (see the containment check in
+  // middleware/authz.ts, which is why `simulatedBy` carries their grant below). Same shape
+  // services/accessPreview.ts already uses as a caller bound for the preview surface next door.
   if (isSuperGrant(grant) && !isSuperGrant(real.grant)) throw reject("you may not simulate a super admin");
 
   return {
     uuid: userUuid ?? "", // a person who never signed in has no account row; no user rules can match ""
     email,
     role: roleName,
+    roles,
     status: "active",
     employeeId: row.employeeId ?? null,
     employeeCode: row.employeeCode ?? null,
@@ -137,6 +160,17 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
     policy: real.policy, // the body-AC manifest is global - reuse the one auth already loaded
     // The real admin's SITTING travels with them: a simulation is still something that human did while signed
     // in, and it is the sitting an incident review most wants grouped.
-    simulatedBy: { uuid: real.uuid, email: real.email, employeeId: real.employeeId, name: real.name, sessionId: real.sessionId },
+    // The real admin's SITTING travels with them, and so does their own AUTHORITY: rail 2's second half is
+    // decided per request in middleware/authz.ts, which needs the real caller's grant and employee code to
+    // re-ask the question the subject's grant just answered.
+    simulatedBy: {
+      uuid: real.uuid,
+      email: real.email,
+      employeeId: real.employeeId,
+      employeeCode: real.employeeCode,
+      name: real.name,
+      sessionId: real.sessionId,
+      grant: real.grant,
+    },
   };
 }

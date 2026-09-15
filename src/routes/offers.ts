@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { nonNegativeMoney } from "../http/moneyField";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { contentDisposition } from "../http/contentDisposition";
@@ -13,7 +14,7 @@ import { renderOfferLetter } from "../services/offerLetter";
 const writeSchema = z
   .object({
     application: z.string().nullable().optional(),
-    base_comp: z.number().nullable().optional(),
+    base_comp: nonNegativeMoney().nullable().optional(),
     // NOT nullable: the currency column is NOT NULL defaulting to the org currency, and the serializer emits it
     // on every response.
     currency_code: z.string().optional(),
@@ -43,6 +44,7 @@ export const offers = collectionRoutes<OfferInput, typeof schema.offers>({
       application: c.req.query("application"),
       status: c.req.query("status"),
       showDeleted: page.showDeleted,
+      deletedOnly: page.deletedOnly,
     });
   },
   verbs: {

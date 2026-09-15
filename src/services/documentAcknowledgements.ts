@@ -1,5 +1,6 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -12,11 +13,11 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 // edited - a signature is a point-in-time fact. The spec therefore carries no `insert`/`patch`, which is what
 // makes the factory mount no POST and no PATCH for this collection. What is left is reading them
 // (scope-limited, optionally filtered to one document for the HR "who signed" view) + admin cleanup.
-export async function listDocumentAcknowledgements(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, documentRef?: string, showDeleted = false) {
+export async function listDocumentAcknowledgements(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, documentRef?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.documentAcknowledgements.code, schema.documentAcknowledgements.employeeId)];
   const documentId = idFromPath(documentRef);
   if (documentId) conds.push(eq(schema.documentAcknowledgements.documentId, documentId));
-  if (!showDeleted) conds.push(isNull(schema.documentAcknowledgements.deleteTime));
+  conds.push(deleteStateFilter(schema.documentAcknowledgements.deleteTime, showDeleted, deletedOnly));
   return keysetPage<typeof schema.documentAcknowledgements.$inferSelect>(deps, schema.documentAcknowledgements, "document-acknowledgements", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken });
 }
 

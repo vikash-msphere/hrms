@@ -399,7 +399,11 @@ components:
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
         email: { type: string, format: email, readOnly: true }
-        role: { type: string, description: Role value employee/manager/hr_admin/payroll_admin/super_admin. }
+        role: { type: string, description: "The PRIMARY role. This is what the audit trail records point-in-time and what the UI labels people by." }
+        roles:
+          type: array
+          description: "Additional roles this account holds beyond the primary one. Their grants are UNIONED with it, so a role here can only add access. Sending this replaces the whole set; an empty array clears it. The primary role is ignored if included. Absent when the roles were not loaded for this response."
+          items: { type: string }
         status: { type: string, description: Account status value active/disabled. }
         employee: { type: string, description: "Resource path: employees/{employee_id}" }
         holiday_feed_token: { type: string, readOnly: true, description: "On users/me only: the caller's unguessable token for the public holiday calendar feed at /calendar/holidays/{token}. Present only when the org enabled the feed and the caller has an employee record (never for a simulated principal)." }
@@ -417,7 +421,13 @@ components:
               items: { type: string }
             scopes:
               type: object
-              description: Per-collection grantable scope tiers (self/dept/subtree/all) from the policy manifest; drives the ACL scope chips so each access icon offers the relevant scopes.
+              description: Per-collection grantable scope tiers (self/reports/org/dept/subtree/all) from the policy manifest; drives the ACL scope chips so each access icon offers the relevant scopes.
+              additionalProperties:
+                type: array
+                items: { type: string }
+            condition_fields:
+              type: object
+              description: Per-collection fields a rule may carry a threshold on (an approval limit). Only collections listed here can take a rule `condition`; drives the ACL limit box so it is offered exactly where the engine honours it.
               additionalProperties:
                 type: array
                 items: { type: string }
@@ -979,7 +989,7 @@ components:
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
         delete_time: { type: string, format: date-time, readOnly: true }
-        employee: { type: string, description: "Resource path: employees/{employee_id} (the subject)." }
+        employee: { type: string, description: "Resource path: employees/{employee_id} (the subject). Set on create and immutable afterwards - the check's code is allocated under its subject. A patch carrying this field is rejected." }
         transition: { type: string, readOnly: true, description: "The onboarding (transitions/{id}) that requested this check, if any." }
         check_type: { type: string, description: "identity | address | education | employment | criminal | reference | credit | other." }
         status: { type: string, description: "pending | in_progress | clear | discrepancy | failed." }
@@ -2261,7 +2271,7 @@ components:
               currency: { type: string }
               recommended: { type: number, nullable: true, description: "target x attainment. Null when either half is missing." }
               awarded: { type: number, nullable: true, description: "Already paid for this cycle, so a second run reports rather than repeats." }
-              blocked: { type: string, enum: [no_attainment, no_target, already_awarded, not_shared], description: "Why this line cannot be paid. `not_shared` is a review still in flight: it is scored live and reported, but never paid, because the score can still change." }
+              blocked: { type: string, enum: [no_attainment, no_target, already_awarded, not_shared, comp_not_visible], description: "Why this line cannot be paid. `not_shared` is a review still in flight: it is scored live and reported, but never paid, because the score can still change. `comp_not_visible` is the reader holding no compensation grant: `target`, `recommended` and `currency` are withheld, because both figures state the person's variable-pay target." }
         awarded:
           type: object
           readOnly: true
@@ -3842,7 +3852,14 @@ components:
         subject_kind: { type: string, description: "'role' or 'user'." }
         subject: { type: string, description: "Role name (subject_kind=role) or users/{user_id} (subject_kind=user)." }
         collection: { type: string, description: The collection this rule applies to. }
-        scope: { type: string, description: "create | all | self | dept | subtree | exact. `create` is the collection-level create gate (no field/verb)." }
+        scope: { type: string, description: "create | all | self | reports | org | dept | subtree | exact. `create` is the collection-level create gate (no field/verb). `reports` is the holder's direct reports and `org` their whole reporting line - the manager chain, which the department tiers cannot express." }
+        condition:
+          type: object
+          properties:
+            field: { type: string, description: "The money field the limit is measured on." }
+            op: { type: string, description: "lte | lt | gte | gt." }
+            value: { type: number, description: "The limit." }
+          description: "Optional THRESHOLD on the row the rule is exercised against, e.g. approve expenses up to a limit. Fields: field (a money field the collection declares - amount, or principal on loans), op (lte | lt | gte | gt), value (a number). It can only SUBTRACT: a request the rule would not have authorized is not authorized by adding one, and an unconditional rule on the same pattern wins. Item requests only - a threshold bounds acting on a record, never seeing it in a list. Not available on a create rule, which has no row to measure."
         scope_ref: { type: string, description: "For scope=exact: the {collection}/{id} the rule is anchored to (server resolves to a code)." }
         field: { type: string, description: "Optional protected field this rule governs (field-level write)." }
         level: { type: string, description: "Standard-method level (read|write|admin). Mutually exclusive with verb; omit when effect=deny." }
@@ -4512,6 +4529,7 @@ paths:
                 collection: { type: string, description: "The collection access is wanted for." }
                 verb: { type: string, description: "Optional custom method being asked for." }
                 note: { type: string, maxLength: 500, description: "Optional free-text context shown to the admins." }
+                hours: { type: integer, minimum: 1, maximum: 336, description: "Optional: ask for the access TEMPORARILY, for this many hours. Carried to the admins so they set a matching expiry; it grants nothing by itself." }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -4616,6 +4634,69 @@ paths:
                   source_total: { type: integer, description: Active rules the source subject holds. }
                   correlation_id: { type: string, description: Groups every audit entry this copy wrote. }
                   first_error: { type: string, description: "The first refusal, when any rule failed (the field is named first_error, not error: a plain `error` property makes the AEP linter read this as an error envelope)." }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/access-rules:scopeCounts:
+    post:
+      description: "Custom method scopeCounts: how many RECORDS a scope choice would reach, for the scope chips in the grant dialog. Only the tiers with a well-defined number are answered - org-wide, and a named department; `self` and `dept` are subject-relative (they mean something different for every holder of the rule) and are deliberately absent rather than computed against whoever is authoring it. Counts stop at 500 and set `capped`, so the reader sees the order-of-magnitude difference without the request reading a whole table. Fail-closed like any custom method."
+      operationId: ":ScopeCountsAccessRules"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [collection]
+              properties:
+                collection: { type: string, description: "The collection the rule is being written against." }
+                department: { type: string, description: "Resource path: departments/{department_id}. Adds the count for that department's subtree. Omit for the org-wide count alone." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: The record counts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [collection, all]
+                properties:
+                  collection: { type: string, description: "The collection the counts are for." }
+                  all: { type: object, description: "Org-wide. Fields: count (integer), capped (boolean - true when the real total is higher than count)." }
+                  named_dept: { type: object, description: "The named department's subtree, same shape as all. Absent when no department was given, or when the collection's rows carry no code for a department to match." }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/access-rules:review:
+    post:
+      description: "Custom method review: the access review. Lists ACTIVE allow rules that have authorized nothing in the last 90 days, and org-wide rules whose every recorded use fitted inside a narrower scope the collection already offers. Read off a per-pattern usage counter written beside each audit row, so it costs a small indexed read rather than a scan of the audit trail. Usage is counted per grant PATTERN, so rules compiling to the same pattern are reported together. Routine reads are not audited, so \"unused\" means no writes and no sensitive reads - a shortlist to check, never a delete list. Fail-closed like any custom method."
+      operationId: ":ReviewAccessRules"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              description: No arguments. The window is fixed at 90 days so two reviewers always compare like with like.
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: The review.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [window_days, unused, over_broad, caveat]
+                properties:
+                  window_days: { type: integer, description: How far back the unused check looks. }
+                  caveat: { type: string, description: "What the numbers do not cover, for display alongside them." }
+                  unused: { type: array, description: "Active allow rules whose pattern has authorized nothing inside the window. Fields: rule, subject, subject_kind, pattern, level, last_used.", items: { type: object } }
+                  over_broad: { type: array, description: "Org-wide rules whose every recorded use fitted inside a narrower tier the collection supports. Fields: rule, subject, subject_kind, pattern, collection, hits, self_hits, dept_hits, narrower.", items: { type: object } }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/access-rules/{access_rule_id}:
@@ -15031,6 +15112,47 @@ paths:
                 type: object
                 properties:
                   enrolled: { type: integer, description: How many new enrollments were created. }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/employees/{employee_id}:viewers:
+    post:
+      description: >-
+        Custom method viewers: who can currently READ the caller's own employee record, and each of its
+        sensitive sub-resources. The effective-access report aimed at the subject rather than at an admin.
+        The target is always the CALLER's own record - the path id does not choose whose record is reported -
+        so holding this discloses nothing about anybody else. Read-only; makes no access decision of its own.
+      operationId: ":ListEmployeeViewers"
+      parameters: [ { in: path, name: employee_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  roster: { type: integer, description: How many people were graded. }
+                  complete: { type: boolean, description: "False when the org is larger than one page of subjects, so the lists are a sample." }
+                  reports:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        target: { type: string, description: "Empty for the base record, else the sub-resource name (bank-account, identity, tax, personal-info)." }
+                        viewers:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              name: { type: string, nullable: true }
+                              email: { type: string }
+                              role: { type: string }
+                              why: { type: string, description: "Why they can see it, in words." }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/employees:upcomingCelebrations:

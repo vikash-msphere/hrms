@@ -34,5 +34,6 @@ export const events = collectionRoutes({
       page.maxPageSize,
       page.pageToken,
       page.showDeleted,
+      page.deletedOnly,
     ),
 });

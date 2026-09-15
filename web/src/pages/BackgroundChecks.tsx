@@ -96,7 +96,9 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
 
   const empById = useMemo(() => new Map(employees.map((e) => [idOf(e.path), e])), [employees]);
   const emp = (p?: string) => (p ? empById.get(idOf(p)) : undefined);
-  const empName = (p?: string, unknown?: string) => personName(employees, p, unknown);
+  // `empById` above is the same lookup this needs, so it is reused rather than re-scanned: this is a
+  // DataTable column accessor, called per row per compare during a sort (see `personName`).
+  const empName = (p?: string, unknown?: string) => personName(empById, p, unknown);
 
   const stats = useMemo(() => {
     const live = rows.filter((c) => !c.delete_time);
@@ -144,7 +146,11 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
   }
   function bodyFromForm(checkType: string, document: string) {
     return {
-      employee: form.employee, check_type: checkType, status: form.status,
+      // The subject is fixed at create: the row's code is allocated under them, and a code never moves, so the
+      // server refuses `employee` on a patch (src/services/backgroundChecks.ts). Sending it unchanged would be
+      // refused just the same - a merge-patch is judged on the keys present, not on whether the value differs.
+      ...(editing ? {} : { employee: form.employee }),
+      check_type: checkType, status: form.status,
       vendor: form.vendor.trim(), reference_no: form.reference_no.trim(),
       // `format: date` fields, and "" is not a date - an empty one is left out.
       ...(form.initiated_date ? { initiated_date: form.initiated_date } : {}),
@@ -328,10 +334,13 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
           </Button>
         )}
       >
-          <Field label="Employee">
+          {/* Fixed at create: the check's code is allocated under its subject, so the server refuses a re-point.
+              Shown rather than hidden - whose check this is, is the first thing the form has to say. */}
+          <Field label="Employee" hint={editing ? "The subject can't be changed. File a new check against the right employee and delete this one." : undefined}>
             <Combobox
               value={form.employee}
               onValueChange={(v) => setForm({ ...form, employee: v })}
+              disabled={!!editing}
               placeholder="Select an employee…"
               searchPlaceholder="Search employees…"
               options={employees.filter((e) => !e.disabled).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))}

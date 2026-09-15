@@ -41,6 +41,12 @@ export function applyScope(
   if (!scope) return sql`1 = 0`; // fail closed: no scope set -> no rows
   const shares = scope.shares ?? [];
   const denies = scope.denies ?? [];
+  // Subtree GRANTS (`<col>.<code>-*.**`) bind identically to per-object shares - both mean "this code and
+  // everything under it" - and differ only in where the middleware got them: a share is a per-object row, a
+  // subtree is a pattern in the broad grant. They are kept as separate fields on ListScope because they are
+  // loaded differently (one costs a read, the other does not), and joined here because the predicate is the
+  // same one.
+  const widen = [...shares, ...(scope.subtrees ?? [])];
 
   // Match code C and everything under it (boundary-anchored). Mirrors the engine's isUnder on the item path.
   const subtree = (c: string): SQL => (code ? or(eq(code, c), sql`${code} glob ${`${c}-*`}`)! : sql`1 = 0`);
@@ -60,10 +66,10 @@ export function applyScope(
   else if (scope.breadth === "dept") base = scope.deptCode && code ? subtree(scope.deptCode) : sql`1 = 0`;
   else base = scope.ownerId && owner ? eq(owner, scope.ownerId) : sql`1 = 0`; // own
 
-  // OR in per-object shares (each as its subtree). If breadth is 'all' (base undefined) the caller already
-  // sees everything, so shares add nothing.
+  // OR in per-object shares and subtree grants (each as its subtree). If breadth is 'all' (base undefined)
+  // the caller already sees everything, so they add nothing.
   let pred = base;
-  if (shares.length && base !== undefined) pred = or(base, ...shares.map(subtree));
+  if (widen.length && base !== undefined) pred = or(base, ...widen.map(subtree));
 
   // AND NOT per-object denies (deny-wins, even against 'all'): a denied subtree is hidden regardless of breadth.
   //

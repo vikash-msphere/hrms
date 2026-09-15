@@ -37,5 +37,6 @@ export const complianceEvents = collectionRoutes({
       page.maxPageSize,
       page.pageToken,
       page.showDeleted,
+      page.deletedOnly,
     ),
 });

@@ -69,8 +69,13 @@ export type RunResult = {
 export type RunOptions = {
   maxPageSize: number;
   pageToken?: string;
-  /** Whether the caller holds the `unmask` capability (decided by the route from the grant). */
-  unmask?: boolean;
+  /**
+   * May this caller see the real value behind a masked column - asked PER FIELD, because `unmask` is
+   * grantable per field (`unmask.*.bank-account.account_number`), not only as one switch over all PII.
+   * Decided by the route from the grant (http/tableFieldAccess.ts `unmaskGate`); absent = everything masked.
+   * A plain boolean is the all-or-nothing form, which is what a caller holding the broad capability means.
+   */
+  unmask?: boolean | ((field: { subresource?: string; fieldKey?: string }) => boolean);
   /** The view's own code, for the audit row. */
   viewCode?: string | null;
 };
@@ -115,12 +120,23 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
     }
     selected.push({ col, field });
   }
+  // Decided ONCE PER FIELD and memoized, because it is a decision over the grant and every row of the page
+  // renders the same columns - asking per cell would re-decide it a hundred times for one response. Covers
+  // the filter-only fields too (`judgedOnly` below), which are resolved later and are not in `selected`.
+  const unmaskMemo = new Map<string, boolean>();
+  const askUnmask = (field: ResolvedField): boolean =>
+    typeof opts.unmask === "function" ? opts.unmask({ subresource: subresourceOf(field), fieldKey: field.fieldKey }) : opts.unmask === true;
+  const unmaskable = (field: ResolvedField): boolean => {
+    let v = unmaskMemo.get(field.key);
+    if (v === undefined) unmaskMemo.set(field.key, (v = askUnmask(field)));
+    return v;
+  };
   const columns: RunColumn[] = selected.map(({ col, field }) => ({
     key: field.key,
     label: col.label || field.label,
     kind: field.kind,
     collection: field.collection,
-    masked: field.masked && !opts.unmask ? true : undefined,
+    masked: field.masked && !unmaskable(field) ? true : undefined,
   }));
 
   // ---- The base page -------------------------------------------------------------------------------------
@@ -318,13 +334,15 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
         cells[field.key] = null;
         continue;
       }
-      cells[field.key] = cellValue(base, field, r, rowAt, sourceValues, opts.unmask === true);
+      cells[field.key] = cellValue(base, field, r, rowAt, sourceValues, unmaskable(field));
     }
     if (judgedOnly.length) {
       const extra: Record<string, unknown> = {};
       // A field this caller may not see stays null here too - the field-access denial applies to what a filter
       // may judge on, not only to what a cell may show.
-      for (const field of judgedOnly) extra[field.key] = denied?.has(field.key) ? null : cellValue(base, field, r, rowAt, sourceValues, opts.unmask === true);
+      // `judgedOnly` fields never reach `selected`, so they are not in the memo - decide them the same way,
+      // or a filter would judge on a masked string and quietly match nothing.
+      for (const field of judgedOnly) extra[field.key] = denied?.has(field.key) ? null : cellValue(base, field, r, rowAt, sourceValues, unmaskable(field));
       judged.set(rowId, extra);
     }
     rows.push({ path: `${base}/${rowId}`, cells, ...(denied?.size ? { denied: [...denied] } : {}) });
@@ -368,12 +386,17 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
   // counts only - never a value.
   const sensitive = columns.filter((c) => selected.find((s) => s.field.key === c.key)?.field.masked);
   if (sensitive.length) {
+    // WHICH fields came back unmasked, not whether the caller holds the capability. Now that `unmask` is
+    // grantable per field, one boolean would say "unmasked: true" for a run that revealed an account number
+    // and masked every statutory id - and the trail exists to answer exactly which values left.
+    const revealed = sensitive.filter((c) => !c.masked).map((c) => c.key);
     await audit(deps, user, "table-views.run.sensitive", "table-views", undefined, {
       view: opts.viewCode ?? null,
       base,
       fields: sensitive.map((c) => c.key).slice(0, 64),
       rows: filtered.length,
-      unmasked: opts.unmask === true,
+      unmasked: revealed.length > 0,
+      ...(revealed.length ? { unmasked_fields: revealed.slice(0, 64) } : {}),
     });
   }
 
@@ -384,6 +407,17 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
 
 /** The sub-resource each PII source is field-gated under. */
 const SUBRESOURCE: Record<string, string | undefined> = { identity: "identity", personal: "personal-info", bank: "bank-account" };
+
+/**
+ * The sub-resource a field is field-gated under - the first half of the `identity.uan` /
+ * `bank-account.account_number` target a per-field rule names.
+ *
+ * The catalogue sets `subresource` on every source field (services/tableCatalog.ts), and SUBRESOURCE above is
+ * the same mapping keyed by source. Preferring the field's own value keeps this honest if a source ever gates
+ * under something other than its key; falling back to the map means a field that predates the property still
+ * resolves rather than silently becoming un-unmaskable.
+ */
+const subresourceOf = (field: ResolvedField): string | undefined => field.subresource ?? (field.source ? SUBRESOURCE[field.source] : undefined);
 
 function cellValue(
   base: string,
@@ -518,8 +552,13 @@ function baseFilterSql(table: SQLiteTable & Record<string, any>, field: Resolved
   if (!col) return undefined;
   const v = f.value;
   switch (f.op) {
-    case "empty": return isNull(col);
-    case "not_empty": return isNotNull(col);
+    // EMPTY STRING COUNTS AS EMPTY, matching the in-memory half below (`cell === ""` is empty there). SQL's
+    // `IS NULL` alone made the same saved filter answer differently depending on whether the column happened
+    // to sit on the base table or behind a link - the same split `likeEscape`, `lowerEq` and `equalsValue`
+    // were each written to close, one operator over. The write paths normalise `""` to null, so this is the
+    // two halves stating one rule rather than a live divergence.
+    case "empty": return or(isNull(col), eq(col, ""));
+    case "not_empty": return and(isNotNull(col), ne(col, ""));
     case "eq": return v == null ? undefined : textual(field, v) ? lowerEq(col, v) : eq(col, coerce(field, v));
     case "ne": return v == null ? undefined : textual(field, v) ? not(lowerEq(col, v)) : ne(col, coerce(field, v));
     case "gt": return v == null ? undefined : gt(col, coerce(field, v));

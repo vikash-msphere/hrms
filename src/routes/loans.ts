@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { positiveMoney } from "../http/moneyField";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import {
@@ -14,15 +15,16 @@ import { toLoanResource } from "../http/serialize";
 // `round2` - which is 0 for any realistic principal. `installmentAmount` then returns 0 every month, so
 // payroll recovers nothing and the loan never closes: a payable that quietly never gets paid back, with no
 // error at any point. The same holds for a principal large enough that the derived EMI stops being money.
-// `.finite()` because `z.number()` admits Infinity (JSON cannot carry it, but a non-JSON caller can), and
 // `.int()` on installments because a fractional count was silently rounded in the service.
 //
-// The ceilings are deliberately generous rather than policy: 30 years of monthly instalments, and a
-// principal past which the figure is a typo rather than a loan. Real approval limits are HR's, not a schema's.
+// The money bound is `positiveMoney()` (http/moneyField.ts) rather than a local one: this file worked the
+// hazard out first and every other money input in the app was left bare, so the reasoning is now in the
+// shared helper and this is one of its callers. The installment ceiling stays here - 30 years of monthly
+// payments is a fact about loans, not about money. Neither is policy: real approval limits are HR's.
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
   kind: z.enum(["loan", "advance"]).optional(),
-  principal: z.number().finite().positive().max(1_000_000_000).optional(),
+  principal: positiveMoney().optional(),
   installments: z.number().int().min(1).max(360).optional(),
   reason: z.string().nullable().optional(),
   start_date: z.string().nullable().optional(),
@@ -31,7 +33,7 @@ const writeSchema = z.object({
 // `allow_duplicate` is the caller confirming that an identical repayment recorded moments ago is a SEPARATE
 // one, not their own double-click - the service refuses that case rather than guessing (see
 // recordLoanRepayment). Absent/false is the ordinary path.
-const repaymentSchema = z.object({ amount: z.number().finite().positive().max(1_000_000_000), allow_duplicate: z.boolean().optional() }).strict();
+const repaymentSchema = z.object({ amount: positiveMoney(), allow_duplicate: z.boolean().optional() }).strict();
 
 // Employee loans and advances. Both writes stay the service's own: a loan can only be requested for yourself
 // and only edited while PENDING (past that it is a payable that payroll recovers). Delete/restore are the
@@ -48,7 +50,7 @@ export const loans = collectionRoutes<LoanInput, typeof schema.loans>({
     create: (deps, actor, input, id) => createLoan(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateLoan(deps, actor, id, patch, ifMatch),
   },
-  list: (c, page) => listLoans(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("status"), page.showDeleted),
+  list: (c, page) => listLoans(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("status"), page.showDeleted, page.deletedOnly),
   verbs: {
     approve: { run: (deps, user, id) => approveLoan(deps, user, id) },
     reject: { run: (deps, user, id) => rejectLoan(deps, user, id) },

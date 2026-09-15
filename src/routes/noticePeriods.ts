@@ -39,6 +39,6 @@ export const noticePeriods = collectionRoutes<NoticePeriodInput, typeof schema.n
   },
   list: (c, page) => {
     // Row visibility was decided in middleware (scopeFor over the grant); `?status` narrows it further.
-    return listNoticePeriods(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted);
+    return listNoticePeriods(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted, page.deletedOnly);
   },
 });

@@ -9,7 +9,12 @@
 // `scope` is the chosen tier for an object/collection target: "exact" (this object), "self" (own), "dept",
 // "subtree", or "all". Omitted -> the legacy default (exact when an object is in scope, else all), so callers
 // that don't pick a scope behave exactly as before.
-export type AccessRuleTarget = { collection: string; objectPath?: string; field?: string; create?: boolean; scope?: string };
+// `anchorPath` is the object a "named-dept" rule is anchored to ("departments/<id>"), picked by the grantor
+// rather than taken from the page. It is a SEPARATE field from `objectPath` on purpose: `objectPath` is
+// whatever the clicked element is about (a leave request, an employee), and a named-department rule is
+// deliberately not about that object at all - conflating them is how a "this department" grant would silently
+// pin itself to whichever row the admin happened to open the modal from.
+export type AccessRuleTarget = { collection: string; objectPath?: string; anchorPath?: string; field?: string; create?: boolean; scope?: string };
 // The scope-bearing fields of an access rule (as listed by the API / sent on create). `verb` (the custom
 // method) is intentionally NOT matched here - scope matching is verb-agnostic; the modal partitions matched
 // rules by verb itself (a level rule has no verb; a custom-method rule's verb names the method).
@@ -33,6 +38,10 @@ export function ruleScopeFor(t: AccessRuleTarget): RuleScopeBody {
   if (t.create) return { scope: "create" };
   const field = t.field ? { field: t.field } : {};
   const s = effScope(t);
+  // A named department compiles to the SAME wire scope as a subtree - it is one, `<deptCode>-*` - and differs
+  // only in where the anchor came from. The server sees no new scope value; the tier exists so the UI can
+  // offer "one department" without an object on the page.
+  if (s === "named-dept") return t.anchorPath ? { scope: "subtree", scope_ref: t.anchorPath, ...field } : { scope: "all", ...field };
   // exact (this object) and subtree (this object + the codes under it) are BOTH anchored to the clicked
   // object, so they pin via scope_ref; with no object in scope they degrade to collection-wide.
   if (s === "exact" || s === "subtree") return t.objectPath ? { scope: s, scope_ref: t.objectPath, ...field } : { scope: "all", ...field };
@@ -48,6 +57,9 @@ export function ruleMatchesTarget(r: AccessRuleRow, t: AccessRuleTarget): boolea
   if (t.create) return r.scope === "create" && !r.field && !r.verb;
   if ((r.field ?? undefined) !== (t.field ?? undefined)) return false;
   const s = effScope(t);
+  // A named-department rule is stored as `subtree`, so it is matched by its ANCHOR, not by the page's object -
+  // otherwise two rules on different departments would read as the same rule.
+  if (s === "named-dept") return r.scope === "subtree" && !!t.anchorPath && r.scope_ref === t.anchorPath;
   if (s === "exact" || s === "subtree") return r.scope === s && r.scope_ref === t.objectPath;
   return r.scope === s;
 }

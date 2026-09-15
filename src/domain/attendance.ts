@@ -144,6 +144,31 @@ export function localMinutes(ms: number, tz: string): number {
   return h * 60 + m;
 }
 
+/**
+ * Minutes one attendance session is worth to loss of pay.
+ *
+ * AN OPEN SESSION IS NOT ZERO. Both LOP walks used to score a session with no `clock_out` as 0 minutes, and
+ * `lopDayUnits` reads 0 as "punched, and too short to earn a half day" - so a clock-in, which is positive
+ * evidence of attendance, was charged as a full day's absence. Two ways in: a forgotten clock-out on a past
+ * day, and - worse - building or rebuilding a run inside the period, which judges today and so docked a full
+ * day for every employee currently clocked in. It also inflated `ncpDays` on the PF ECR, so a statutory return
+ * overstated non-contributing days.
+ *
+ * An open session is credited from its clock-in to `min(now, the end of its own local day)`: the same reading
+ * the live attendance page already shows the employee, capped so a session left open for a week cannot credit
+ * a week. The org-local day boundary is derived from `localMinutes`, like every other day-relative reading
+ * here, so the cap lands on the day the punch belongs to rather than on a UTC one.
+ *
+ * Used by BOTH copies of the walk - services/payroll.ts#assembleLop and
+ * services/settlements.ts#finalMonthLopDays - because the settlement is a leaver's terminal payout and there
+ * is no later run to correct a disagreement between them.
+ */
+export function sessionWorkedMinutes(clockInMs: number, clockOutMs: number | null, nowMs: number, tz: string): number {
+  if (clockOutMs != null) return Math.max(0, Math.round((clockOutMs - clockInMs) / 60000));
+  const endOfLocalDay = clockInMs + (1440 - localMinutes(clockInMs, tz)) * 60_000;
+  return Math.max(0, Math.round((Math.min(nowMs, endOfLocalDay) - clockInMs) / 60000));
+}
+
 // A count_as_work calendar event as payroll sees it. All-day events are date-anchored at UTC midnight, so
 // their calendar days come off the instant directly rather than through the org timezone.
 export type WorkEvent = { startMs: number; endMs: number; allDay: boolean; requiresClockIn: boolean };

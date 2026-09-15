@@ -587,7 +587,13 @@ function CalibrationPanel({ cycle, employees, departments }: { cycle: ReviewCycl
   };
 
   return (
-    <div className="mt-2 space-y-3 rounded-lg border bg-muted/20 p-4">
+    // MASKED FROM SESSION REPLAY. `reviews` is on instrument.ts's SENSITIVE_PAGES for a reason that names this
+    // exact surface - "a replay of the calibration grid or a reviewer's draft undoes that from outside" - but
+    // the calibration grid lives on the review-CYCLES page, which the route mask does not cover. The panel
+    // carries it itself, like the seven profile panels do: the distribution, the nine-box and the names on it
+    // are named people's ratings. Headings, labels and buttons stay readable through instrument.ts's `unmask`
+    // list, so what this hides is the values.
+    <div data-sentry-mask className="mt-2 space-y-3 rounded-lg border bg-muted/20 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-medium">Calibration</p>
         {departments.length > 0 && (
@@ -759,6 +765,10 @@ function VariablePayPanel({ cycle, employees }: { cycle: ReviewCycle; employees:
                           {l.blocked === "already_awarded" ? `already awarded ${money(l.awarded, l.currency)}`
                             : l.blocked === "no_target" ? "no variable pay target"
                             : l.blocked === "not_shared" ? "review not shared yet"
+                            // The server withholds the target and the recommendation from a reader with no
+                            // compensation grant (services/variablePay.ts). Say so, rather than leaving two
+                            // dashes that read as "this person has no target".
+                            : l.blocked === "comp_not_visible" ? "needs compensation access to price"
                             : "nothing scored yet"}
                         </span>
                       )}

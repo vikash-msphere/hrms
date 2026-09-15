@@ -10,7 +10,7 @@ import { keysetPage } from "./keysetPage";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
+import { deleteStateFilter, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import { emitEvent } from "./eventBus";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
@@ -34,10 +34,10 @@ const dateOrNull = (s?: string | null) => (s ? new Date(Date.parse(s + "T00:00:0
 // `sprints` is a flat catalog with a `code` and no owner column, so an own-scoped caller gets nothing -
 // fail-closed, the same answer the generic list gives. The board filter moves into SQL with it (there is an
 // index on `board_id`), so a board's sprints cost a seek rather than a read of the table.
-export async function listSprints(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, boardId?: string, showDeleted = false) {
+export async function listSprints(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, boardId?: string, showDeleted = false, deletedOnly = false) {
   const conds: (SQL | undefined)[] = [applyScope(scope, schema.sprints.code, undefined)];
   if (boardId) conds.push(eq(schema.sprints.boardId, boardId));
-  if (!showDeleted) conds.push(isNull(schema.sprints.deleteTime));
+  conds.push(deleteStateFilter(schema.sprints.deleteTime, showDeleted, deletedOnly));
   return keysetPage<typeof schema.sprints.$inferSelect>(deps, schema.sprints, "sprints", and(...conds.filter(Boolean) as SQL[]), {
     max: maxPageSize,
     pageToken,

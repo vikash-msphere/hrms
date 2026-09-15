@@ -9,9 +9,9 @@ import { byIdChunks } from "../lib/dbBatch";
 import type { Deps } from "../deps";
 import { decide, matchingPattern, capabilitiesOf, type Grant, type Level } from "../domain/permissions";
 import { mergeGrants, rulesToGrant, deriveNarrowing, type ScopeKind } from "../domain/compileGrants";
-import { EVERYONE_ROLE, EMPTY_GRANT, isSuperGrant } from "../domain/grants";
+import { EMPTY_GRANT, roleSubjectsOf } from "../domain/grants";
 import { ancestorsOf } from "../domain/codes";
-import { loadRoleGrant, loadUserGrant, loadObjectRulesForRequest } from "../lib/policyLoad";
+import { loadRoleGrant, loadUserGrant, loadUserRoles, loadObjectRulesForRequest } from "../lib/policyLoad";
 import { uuidToCode, tableFor } from "../lib/authzResolve";
 import { invalidArgument, notFound, forbidden } from "../lib/errors";
 import type { AppUser } from "../env";
@@ -173,13 +173,22 @@ export async function previewAccess(deps: Deps, body: PreviewBody, actor?: AppUs
   for (const u of subjectsResolved) {
     // Same assembly as the middleware: role grant (everyone folded in, super-exempt) + the user's own
     // broad rules, then - for an object target - that object's exception rules for this subject.
-    const [roleGrant, userGrant] = await Promise.all([loadRoleGrant(deps, u.role), u.userUuid ? loadUserGrant(deps, u.userUuid) : Promise.resolve(EMPTY_GRANT)]);
+    // Every role the subject holds, not just their primary - otherwise the preview understates a person who was
+    // given a second role, which is the exact case the preview exists to make legible. A subject with no account
+    // (a person who has never signed in) holds no secondary roles by construction.
+    const extraRoles = u.userUuid ? await loadUserRoles(deps, u.userUuid) : [];
+    const subjectRoles = [...new Set([u.role, ...extraRoles])];
+    const [roleGrants, userGrant] = await Promise.all([
+      Promise.all(subjectRoles.map((r) => loadRoleGrant(deps, r))),
+      u.userUuid ? loadUserGrant(deps, u.userUuid) : Promise.resolve(EMPTY_GRANT),
+    ]);
+    const roleGrant = roleGrants.reduce(mergeGrants);
     // The BROAD grant (pre object-exception merge) is what /users/me derives capabilities from - keep it
     // for include_capabilities so the simulated shell gates exactly like the real one would.
     const broadGrant: Grant = mergeGrants(roleGrant, userGrant);
     let grant: Grant = broadGrant;
     if (code) {
-      const roleSubjects = isSuperGrant(grant) ? [u.role] : [u.role, EVERYONE_ROLE];
+      const roleSubjects = roleSubjectsOf({ role: u.role, roles: subjectRoles }, grant);
       const objRules = await loadObjectRulesForRequest(deps, u.userUuid ?? "", roleSubjects, collection, ancestors);
       if (objRules.length) grant = mergeGrants(grant, rulesToGrant(objRules));
     }

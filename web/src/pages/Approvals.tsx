@@ -104,7 +104,11 @@ function TaxVerificationsCard({ rows, money, onDone }: { rows: TaxVerification[]
             <div key={v.employee} className="flex flex-wrap items-center justify-between gap-3 py-3">
               <div className="min-w-0">
                 <p className="font-medium">{v.employee_name}</p>
-                <p className="text-xs text-muted-foreground">Income {money(v.prior_employer_income)} · TDS {money(v.prior_employer_tds)}</p>
+                {/* MASKED from session replay: another person's prior-employer income and TDS, by name.
+                    `tax-verifications` is in MEMORY_ONLY, and the same two figures on the Tax declarations
+                    page are already masked by the `tax-declarations` route - this queue is the other place
+                    they render. */}
+                <p className="text-xs text-muted-foreground" data-sentry-mask>Income {money(v.prior_employer_income)} · TDS {money(v.prior_employer_tds)}</p>
               </div>
               {canDecide && (
                 <div className="flex items-center gap-1.5">

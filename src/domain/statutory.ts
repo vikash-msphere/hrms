@@ -53,13 +53,16 @@ export const DEFAULT_PT_CONFIG: PtConfig = {
 // stored order - a top (`up_to: null`) slab listed first would otherwise charge its amount to every wage.
 export function professionalTax(grossWages: number, cfg: PtConfig): number {
   if (grossWages <= 0) return 0;
-  // A STORED BLOB CAN BE PARTIAL, and this used to spread whatever it found. `getSettingValue` merges the
-  // settings row over the default SHALLOWLY, so `{"annual_cap": 2500}` leaves `slabs` undefined and
-  // `[...undefined]` is a TypeError - a 500 on every payroll build and every full-and-final, from a settings
-  // edit. The settings validator (routes/settings.ts validateProfessionalTax) is the first line; this says
-  // which key is at fault for a row written before it existed, instead of a bare spread failure.
+  // A STORED `slabs` KEY REPLACES THE DEFAULT TABLE OUTRIGHT, and this used to spread whatever it found.
+  // `getSettingValue` is `{ ...fallback, ...JSON.parse(row.value) }` (services/settings.ts), so it merges one
+  // level only: omitting `slabs` keeps the default table, but storing `"slabs": null`, `{}` or anything else
+  // non-array hands it straight through, and `[...null]` is a TypeError - a 500 on every payroll build and
+  // every full-and-final, from a settings edit. (The same shallow merge bites harder one level down in
+  // incomeTax.ts, where a stored `regimes` block replaces the whole map.) The settings validator
+  // (routes/settings.ts validateProfessionalTax) is the first line; this says which key is at fault for a row
+  // written before it existed, instead of a bare spread failure.
   if (!Array.isArray(cfg?.slabs) || !cfg.slabs.length) {
-    throw new Error("settings/professional-tax has no `slabs` table: a stored blob REPLACES the default rather than merging into it, so it must carry the whole slab table.");
+    throw new Error("settings/professional-tax has no usable `slabs` table: a stored `slabs` key REPLACES the default table rather than merging into it, so it must carry the whole slab table.");
   }
   for (const s of [...cfg.slabs].sort((a, b) => (a.up_to ?? Infinity) - (b.up_to ?? Infinity))) {
     if (s.up_to == null || grossWages <= s.up_to) {

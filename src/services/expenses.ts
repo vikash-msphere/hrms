@@ -6,7 +6,7 @@ import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { eq, and, asc, lte, lt, gte, ne } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
-import type { ListScope } from "../domain/access";
+import { scopeFor, type ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -94,10 +94,31 @@ async function resolveRef(deps: Deps, table: any, path: string | null | undefine
   return id;
 }
 
+/**
+ * May this caller file an expense owned by SOMEBODY ELSE?
+ *
+ * The same question `leave-requests` answers, for the same reason: `expenses: write` is the collection-level
+ * grant that makes self-service filing work, so naming another employee in the payload decides nothing about
+ * authority. A caller whose expense reach is `own` gets their own id regardless of what the body said.
+ *
+ * Defence in depth beside the `expenses` entry in OWNER_REFS (domain/manifests.ts), which makes the middleware
+ * demand write on `expenses.<ownerCode>` before the body ever reaches here. A grant the decision engine cannot
+ * read is not authority either, so the throwing case answers "own".
+ */
+function reachesBeyondOwnExpenses(actor: AppUser): boolean {
+  if (!actor.grant) return false;
+  try {
+    return scopeFor(actor, "expenses").breadth !== "own";
+  } catch {
+    return false;
+  }
+}
+
 export async function createExpense(deps: Deps, actor: AppUser, input: ExpenseInput) {
   const amount = Number(input.amount);
   if (!Number.isFinite(amount) || amount <= 0) throw invalidArgument("amount must be a positive number");
-  const employeeId = idFromPath(input.employee) ?? actor.employeeId;
+  const named = idFromPath(input.employee);
+  const employeeId = named && reachesBeyondOwnExpenses(actor) ? named : actor.employeeId;
   if (!employeeId) throw invalidArgument("employee is required");
   const tax = Number(input.tax_amount ?? 0);
   if (!Number.isFinite(tax) || tax < 0) throw invalidArgument("tax_amount must be zero or positive");

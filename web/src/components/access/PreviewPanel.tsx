@@ -107,9 +107,13 @@ export function PreviewPanel({ target, activeVerb, createMode, rulesVersion = 0 
     );
   }
 
-  const yes = (ok: boolean, label: string) => (
-    <Badge variant={ok ? "success" : "muted"} className="gap-1">
-      {ok ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />} {label}
+  // A refusal is the verdict an admin most needs to read correctly, so it never borrows the allowed
+  // wording: "can submit" behind a small cross still reads as "can submit" at a glance, and a muted
+  // badge looks like a disabled control rather than a NO. The label itself flips to the negative and
+  // the badge goes red, so the answer survives being skimmed.
+  const yes = (ok: boolean, allowed: string, denied: string) => (
+    <Badge variant={ok ? "success" : "destructive"} className="gap-1">
+      {ok ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />} {ok ? allowed : denied}
     </Badge>
   );
 
@@ -137,14 +141,14 @@ export function PreviewPanel({ target, activeVerb, createMode, rulesVersion = 0 
           {verdict.disabled ? (
             <Badge variant="destructive" className="gap-1"><ShieldOff className="h-3 w-3" /> account disabled</Badge>
           ) : verb ? (
-            yes(verdict.verb_allowed === true, `can ${verb}`)
+            yes(verdict.verb_allowed === true, `can ${verb}`, `cannot ${verb}`)
           ) : createMode ? (
-            yes(verdict.write, "can create")
+            yes(verdict.write, "can create", "cannot create")
           ) : (
             <>
-              {yes(verdict.read, "read")}
-              {yes(verdict.write, "write")}
-              {yes(verdict.admin, "full")}
+              {yes(verdict.read, "read", "no read")}
+              {yes(verdict.write, "write", "no write")}
+              {yes(verdict.admin, "full", "no full")}
             </>
           )}
           {verdict.denied && <Badge variant="destructive">explicit deny in effect</Badge>}

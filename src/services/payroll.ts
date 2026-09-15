@@ -25,7 +25,7 @@ import { runBatch, runBatchChecked, chunk, byIdChunks, insertBatches, groupBy, t
 import { getSettingValue } from "./settings";
 import { documentLetterhead, letterheadMark, type OrgWithDocumentLogos } from "./letterheads";
 import type { LetterheadSpec } from "../lib/letterPdf";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, type LeaveRange, localDay, utcDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, type LeaveRange, localDay, utcDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, sessionWorkedMinutes } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidOvertimeAll, markOvertimePaidByRun, resetOvertimePaidByRun } from "./overtimeRequests";
 import { resetCompArrearsPaidByRun, markCompArrearsPaidByRun, splitDriftFor } from "./compensation";
@@ -218,7 +218,9 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
     const ms = +new Date(s.clockIn);
     if (ms < startMs || ms > endMs + 86_400_000) continue;
     const day = localDay(ms, tz);
-    const minutes = s.clockOut ? Math.max(0, Math.round((+new Date(s.clockOut) - ms) / 60000)) : 0;
+    // An OPEN session is credited, not scored zero - see domain/attendance.ts#sessionWorkedMinutes for why a
+    // clock-in was being charged as a full day's absence.
+    const minutes = sessionWorkedMinutes(ms, s.clockOut ? +new Date(s.clockOut) : null, +deps.clock.now(), tz);
     let m = workedByEmp.get(s.employeeId);
     if (!m) workedByEmp.set(s.employeeId, (m = new Map<string, number>()));
     m.set(day, (m.get(day) ?? 0) + minutes);

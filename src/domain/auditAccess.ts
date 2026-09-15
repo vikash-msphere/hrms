@@ -79,10 +79,35 @@ export const READ_VERBS = new Set([
   "automations:test", // dry run: evaluates the condition, executes no action
   "batch:run", // GET-only multi-read transport (each sub-request is separately gated + audited)
   "payslips:preview", "payslips:download", "payslips:previewTemplate",
-  "payroll-runs:previewPayslip", "payroll-runs:bankFile", "payroll-runs:statutoryReport",
+  "payroll-runs:previewPayslip", "payroll-runs:statutoryReport",
+  // `payroll-runs:bankFile` is NOT here, despite streaming bytes like its neighbours. It also STAMPS the run
+  // (services/bankFile.ts: "Stamp the first generation. Handing the file to the bank is where the money
+  // actually leaves"), and that stamp is irreversible and load-bearing - services/payroll.ts refuses to delete
+  // a stamped run and the SPA hides its delete control. This set is a STRUCTURAL fact about the handler, and
+  // structurally that handler changes state, so listing it made the write backstop skip a mutation. The trail
+  // was not missing - the verb is in AUDIT.sensitive_verbs, so accessAudit already writes one
+  // `payroll-runs.read.sensitive` row - but that is the wrong TYPE: somebody asking "who locked this run, and
+  // when" found a read event, and any filter or alert keyed on writes missed it entirely. Off this list both
+  // rows are written, which is the honest record for a call that streams every employee's account number AND
+  // locks the run.
   "personal-documents:previewLetter", "personal-documents:download",
   "org-documents:download",
   "candidates:download", "referrals:download", "expenses:download", "reimbursements:download", "tax-declarations:download",
+  // Four more that were in neither registry for the same reason, and are as plainly reads as the two below:
+  // each renders a PDF or hands back a stored image and files nothing (the handlers say so - "Nothing is
+  // stored either way", "nothing is filed either way"), yet `offers.letter` and `reviews.pdf` were landing in
+  // the trail as changes to the offer and to the review.
+  "offers:letter", "reviews:pdf",
+  "letterheads:image", "letterheads:preview",
+  // Two byte-streaming verbs that were in NEITHER registry, so each was filed as a mutation by the backstop
+  // below - `leave-requests.download` and `tickets.attachment` entries reading as a change to the record.
+  // Both handlers read a row, fetch from R2 and return (services/attachments.ts#downloadAttachment,
+  // services/tickets.ts#readTicketAttachment); structurally they change nothing, which is the only question
+  // this set asks. Whether the read deserves a row is the separate question, answered in AUDIT.sensitive_verbs
+  // (both are there now), and the two registries have to agree or the trail is filed under the wrong half of
+  // the vocabulary: a reviewer filtering for "viewed" to answer "who opened this person's medical document"
+  // got nothing back, and the rows that did exist sat under "other".
+  "leave-requests:download", "tickets:attachment",
 ]);
 
 // Collections whose writes never reach the activity feed. These are recipient/caller-owned personal state with

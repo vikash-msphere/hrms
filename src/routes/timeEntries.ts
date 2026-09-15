@@ -32,7 +32,7 @@ export const timeEntries = collectionRoutes<TimeEntryInput, typeof schema.timeEn
     create: (deps, actor, input, id) => createTimeEntry(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateTimeEntry(deps, actor, id, patch, ifMatch),
   },
-  list: (c, page) => listTimeEntries(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("from"), c.req.query("to"), c.req.query("status"), page.showDeleted),
+  list: (c, page) => listTimeEntries(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("from"), c.req.query("to"), c.req.query("status"), page.showDeleted, page.deletedOnly),
   verbs: {
     submit: { run: (deps, user, id) => submitTimeEntry(deps, user, id) },
     approve: { run: (deps, user, id) => approveTimeEntry(deps, user, id) },

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { nonNegativeMoney } from "../http/moneyField";
 import { collectionRoutes } from "../http/collectionRoute";
 import { benefitPlanSpec } from "../services/benefitPlans";
 import { toBenefitPlanResource } from "../http/serialize";
@@ -8,8 +9,8 @@ const writeSchema = z.object({
   category: z.enum(["health", "dental", "vision", "life", "disability", "retirement", "other"]).optional(),
   description: z.string().nullable().optional(),
   provider: z.string().nullable().optional(),
-  employee_cost: z.number().optional(),
-  employer_cost: z.number().optional(),
+  employee_cost: nonNegativeMoney().optional(),
+  employer_cost: nonNegativeMoney().optional(),
   cost_period: z.enum(["month", "year"]).optional(),
   allows_dependents: z.boolean().optional(),
   auto_enroll: z.boolean().optional(),

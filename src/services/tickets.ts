@@ -5,6 +5,7 @@ import { eq, and, asc, inArray, isNull } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
 import { keysetPage } from "./keysetPage";
+import { deleteStateFilter } from "./softDelete";
 import { notify, notifyMany } from "./notifications";
 import { notifyMentions } from "./mentions";
 import { emitEvent } from "./eventBus";
@@ -43,7 +44,7 @@ export type TicketInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const PRIORITIES = new Set(["low", "medium", "high"]);
 
-export async function listTickets(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, assigneeFilter?: string, actor?: AppUser, departmentFilter?: string, q?: string) {
+export async function listTickets(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, assigneeFilter?: string, actor?: AppUser, departmentFilter?: string, q?: string, showDeleted = false, deletedOnly = false) {
   // Visibility decided by the middleware (scopeFor over the grant); here we only bind it to columns. The
   // owner (for "own") is the requester, exactly like leave-requests.
   const conds = [applyScope(scope, schema.tickets.code, schema.tickets.employeeId)];
@@ -60,7 +61,10 @@ export async function listTickets(deps: Deps, scope: ListScope, maxPageSize: num
     const assigneeId = assigneeFilter === "me" ? actor?.employeeId : idFromPath(assigneeFilter);
     conds.push(assigneeId ? eq(schema.tickets.assigneeId, assigneeId) : (undefined as never));
   }
-  conds.push(isNull(schema.tickets.deleteTime));
+  // Tickets ARE soft-deletable, so the factory mounts DELETE and `:restore` for them. This used to drop
+  // soft-deleted rows unconditionally, which left a deleted ticket unreachable: no list could surface it, so
+  // nothing could restore it except a caller who already held the id.
+  conds.push(deleteStateFilter(schema.tickets.deleteTime, showDeleted, deletedOnly));
   const { items: slice, nextPageToken } = await keysetPage<typeof schema.tickets.$inferSelect>(
     deps, schema.tickets, "tickets", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken },
   );

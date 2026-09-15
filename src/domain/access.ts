@@ -3,24 +3,15 @@
 // single GRANTS policy. Coarse capability checks live here; instance/scoped decisions call decide()
 // directly (resolveRequest + the actor's employeeCode).
 import { capabilitiesOf, decide, resolveRequest } from "./permissions";
+import { hasCapability } from "./capabilityMatch";
 import type { Grant, SelfContext } from "./permissions";
 import type { StateRule } from "./manifests";
 import type { AppUser } from "../env";
 
-// Same matching as the frontend hasCapability (web/src/lib/perm.ts): exact "collection.action", with the
-// super_admin wildcard ("**.<action>" / "**.**") and a collection's wildcard-verb rule ("<collection>.**")
-// as match-all for the cases they cover.
-const LEVELS = new Set(["read", "write", "admin"]);
-export function hasCapability(caps: string[], capability: string): boolean {
-  if (caps.includes(capability)) return true;
-  const action = capability.split(".").pop() ?? "";
-  if (caps.includes(`**.${action}`) || caps.includes("**.**")) return true;
-  // A wildcard-verb rule (access rule verb:"*" - every custom method of one collection) becomes the capability
-  // `<collection>.**`, so asking about one of those verbs by name must answer yes. It says nothing about the
-  // read/write/admin ladder, which is a level grant and a separate rule.
-  const dot = capability.lastIndexOf(".");
-  return dot > 0 && !LEVELS.has(action) && caps.includes(`${capability.slice(0, dot)}.**`);
-}
+// The matching rule itself lives in domain/capabilityMatch.ts - a dependency-free leaf the SPA imports too, so
+// client and server cannot answer this question differently. Re-exported here because this is where the
+// server's callers already reach for it.
+export { hasCapability } from "./capabilityMatch";
 
 // Coarse, scope-stripped capability check for the actor, computed from the grant carried on the actor (so
 // it honors runtime policy with no role-keyed cache to go stale). For per-object/scoped decisions use decide().
@@ -62,6 +53,66 @@ export function actorScope(actor: Pick<AppUser, "grant" | "employeeCode">, colle
   const dept = deptOf(actor);
   if (dept && canRead(`${dept}-${SCOPE_PROBE_LEAF}`)) return "dept"; // a sibling in the caller's dept, not the caller
   return "own";
+}
+
+// The code prefixes this actor holds an explicit SUBTREE grant on for `collection` - the `<code>-*` id token
+// (`leave-requests.04-1c-*.**`), which is how "this department and everything under it" is expressed, whether
+// the department is the caller's own or not.
+//
+// This is the one scope tier `actorScope` cannot answer, and the reason it needs its own function. The three
+// breadths are all RELATIVE to the caller (everything / my department / mine), so each can be settled by one
+// probe. A subtree names a place in the hierarchy that has nothing to do with where the caller sits, so there
+// is no synthetic code to probe blind: `zzzzz` is under no department and `<myDept>-zzzz` is under the wrong
+// one, so a grant on somebody ELSE'S department matched neither and the list collapsed to `own`. The item
+// path decided such a grant correctly all along, which is the worst shape a scope can have - the caller could
+// open rows their own list would never show them.
+//
+// So the candidates are lifted from the grant's own patterns, and that is a LOOKUP, not a decision: every
+// candidate is then put back through the same `decide()` probe `actorScope` uses, one level down
+// (`<prefix>-<SCOPE_PROBE_LEAF>`), and only a prefix the engine actually grants read on survives. A pattern
+// the engine would not honour - a deny over the top of it, a level below read - is dropped here by the engine
+// itself rather than by this function's reading of the pattern.
+//
+// Deny patterns are deliberately not scanned for candidates: a deny subtracts, and it already reaches the
+// list through `ListScope.denies`, which applies even at `all` breadth.
+// `verb` selects the lane, exactly as actorScope/actorVerbScope split: absent reads the level patterns and
+// probes a GET (what a list needs), present reads the custom-method patterns and probes that verb (what a
+// verb-driven aggregate like the approvals badge needs).
+export function actorSubtrees(
+  actor: Pick<AppUser, "grant" | "employeeCode">,
+  collection: string,
+  verb?: string,
+  self: SelfContext = { employeeCode: actor.employeeCode ?? null },
+): string[] {
+  const out: string[] = [];
+  const patterns = verb ? actor.grant.allow : Object.keys(actor.grant.levels);
+  for (const pattern of patterns) {
+    const toks = pattern.split(".");
+    if (toks[0] !== collection) continue; // `**` and other namespaces cannot narrow THIS collection to a subtree
+    const id = toks[1];
+    // `-*` alone would be the empty prefix, which `isUnder` refuses - such a pattern matches nothing, so it is
+    // no more a subtree grant than a typo is.
+    if (!id || !id.endsWith("-*") || id.length <= 2) continue;
+    const prefix = id.slice(0, -2);
+    if (out.includes(prefix)) continue;
+    // The engine's verdict, not the pattern's promise.
+    const probe = `/v1/${collection}/${prefix}-${SCOPE_PROBE_LEAF}${verb ? `:${verb}` : ""}`;
+    if (decide(actor.grant, resolveRequest(verb ? "POST" : "GET", probe), self).allow) out.push(prefix);
+  }
+  // THE MANAGER CHAIN, bound the same way. A `my-reports` / `my-org` rule reaches rows composed under a report's
+  // employee code, which is exactly what a subtree means - so each report's code is offered as a candidate and
+  // put through the SAME probe every other candidate takes. Without this the item lane would open a report's
+  // record while the list that is supposed to contain it stopped at the caller's own rows: the split-brain grant
+  // the owner key had to be invented for, one relationship along.
+  //
+  // The sets are empty unless the caller's grant actually uses the tokens (the middleware only loads them then),
+  // so this loop costs nothing for everybody else.
+  for (const code of new Set([...(self.reportCodes ?? []), ...(self.orgCodes ?? [])])) {
+    if (out.includes(code)) continue;
+    const probe = `/v1/${collection}/${code}-${SCOPE_PROBE_LEAF}${verb ? `:${verb}` : ""}`;
+    if (decide(actor.grant, resolveRequest(verb ? "POST" : "GET", probe), self).allow) out.push(code);
+  }
+  return out;
 }
 
 // How broadly the actor may perform a CUSTOM VERB on a collection's rows - the same synthetic-code probe as
@@ -119,14 +170,29 @@ export function stateReadAllowed(grant: Grant, itemResource: string, state: Reco
 // `shares`/`denies` are the caller's per-object exception codes for this collection (grant-exceptions),
 // loaded by the middleware for list requests: shares OR into the breadth, denies AND-NOT out (deny-wins,
 // mirroring the item path). Exact codes only - applyScope binds them with IN / NOT IN (no SQL prefix).
-export type ListScope = { breadth: Scope; deptCode: string | null; ownerId: string | null; seeRestricted: boolean; shares?: string[]; denies?: string[] };
+//
+// `subtrees` are the code prefixes of the caller's explicit subtree GRANTS (actorSubtrees). They OR in
+// exactly like shares, and for the same reason: breadth is a single relative tier and cannot also say "and
+// the whole of department 04". Unlike shares they come from the broad grant rather than per-object rows, so
+// they cost no read - `scopeFor` computes them from the grant it already holds.
+export type ListScope = { breadth: Scope; deptCode: string | null; ownerId: string | null; seeRestricted: boolean; shares?: string[]; denies?: string[]; subtrees?: string[] };
 
-export function scopeFor(actor: Pick<AppUser, "grant" | "employeeCode" | "employeeId" | "policy">, collection: string): ListScope {
+export function scopeFor(
+  actor: Pick<AppUser, "grant" | "employeeCode" | "employeeId" | "policy">,
+  collection: string,
+  // The caller's matcher context. Passed in by the middleware so the manager chain (SelfContext.reportCodes /
+  // orgCodes) reaches `actorSubtrees` below; defaulted so every other caller is unchanged.
+  self: SelfContext = { employeeCode: actor.employeeCode ?? null },
+): ListScope {
+  const breadth = actorScope(actor, collection);
   return {
-    breadth: actorScope(actor, collection),
+    breadth,
     deptCode: deptOf(actor),
     ownerId: actor.employeeId ?? null,
     seeRestricted: seeRestrictedFor(actor, collection),
+    // At `all` breadth there is nothing left to widen, so the scan is skipped rather than computed and
+    // discarded - this runs for every collection of every fan-out response (search, the summaries).
+    subtrees: breadth === "all" ? [] : actorSubtrees(actor, collection, undefined, self),
   };
 }
 
@@ -139,6 +205,20 @@ export function verbScopeFor(
   verb: string,
 ): ListScope | null {
   const breadth = actorVerbScope(actor, collection, verb);
-  if (!breadth) return null;
-  return { breadth, deptCode: deptOf(actor), ownerId: actor.employeeId ?? null, seeRestricted: seeRestrictedFor(actor, collection) };
+  const subtrees = actorSubtrees(actor, collection, verb);
+  // A subtree is authority in its own right, and `actorVerbScope` cannot see it: it returns null when the
+  // caller holds the verb at none of the three RELATIVE tiers, which a subtree holder does not - so the badge
+  // counted nothing for a manager granted approve over one named department.
+  //
+  // `own` with a NULL owner is the empty breadth, not a widening: `applyScope` answers `1 = 0` for an own
+  // breadth with nothing to bind, so the subtrees below carry the whole predicate and the caller's own rows
+  // are not quietly added to a queue they may not act on.
+  if (!breadth && !subtrees.length) return null;
+  return {
+    breadth: breadth ?? "own",
+    deptCode: deptOf(actor),
+    ownerId: breadth ? actor.employeeId ?? null : null,
+    seeRestricted: seeRestrictedFor(actor, collection),
+    subtrees,
+  };
 }

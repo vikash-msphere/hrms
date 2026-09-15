@@ -3,8 +3,10 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { capabilitiesOf } from "../domain/permissions";
+import { grantableScopes } from "../domain/manifests";
+import { conditionableFields } from "../domain/ruleCondition";
 import { collectionRoutes } from "../http/collectionRoute";
-import { getUser, listUsers, updateUser, type UserInput } from "../services/users";
+import { getUser, listUsers, updateUser, type UserInput, decorateUserRoles } from "../services/users";
 import { toUserResource } from "../http/serialize";
 import { getSettingValue } from "../services/settings";
 
@@ -14,6 +16,9 @@ const updateSchema = z
     // refuses the reserved `everyone` subject. A hardcoded enum here would have made a role added through the
     // roles catalog unassignable, which is the opposite of what that catalog is for.
     role: z.string().min(1).optional(),
+    // The SECONDARY roles, replaced wholesale. Same reasoning as `role` above for why these are plain strings:
+    // roles are data, and `updateUser` validates them against the table. An empty array clears the set.
+    roles: z.array(z.string().min(1)).max(20).optional(),
     status: z.enum(["active", "disabled"]).optional(),
     employee: z.string().nullable().optional(),
   })
@@ -37,6 +42,10 @@ const accounts = collectionRoutes<UserInput, typeof schema.users>({
   // Scoped by the account's employee link, which the generic list cannot bind (it knows a table's `code`, not
   // which column owns the row). Without it everyone who may read their own account could list every account.
   list: (c, page) => listUsers(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken),
+  // The SECONDARY roles each account holds, in ONE read for the whole page - the same shape every other derived
+  // field on this factory uses, so item, list and the write response all carry it without three spellings.
+  // `users.role` is on the row already; this is only the join table.
+  decorate: (deps, _actor, rows) => decorateUserRoles(deps, rows),
 });
 
 // `users/me` is NOT a collection item: it answers about the CALLER. It carries the capability set the SPA gates
@@ -77,7 +86,9 @@ export const users = new Hono<AppEnv>()
         ...res,
         holiday_feed_token: await feedToken(),
         ...(sessionId ? { session_id: sessionId } : {}),
-        caller_access: { capabilities: capabilitiesOf(u.grant), scopes: u.policy.supported_scopes ?? {} },
+        // `grantableScopes`, not the raw manifest map: a tier the UI must offer can be DERIVED from another
+        // (named-dept from dept), and the chips have to reflect what the engine honours, not what the row stores.
+        caller_access: { capabilities: capabilitiesOf(u.grant), scopes: grantableScopes(u.policy), condition_fields: conditionableFields() },
       });
     // A "view as" subject can be someone who has never signed in: lib/viewAs.ts grades them as the account they
     // WOULD get on first login, so there is no users row to read. Synthesize the identity from the simulated
@@ -85,8 +96,8 @@ export const users = new Hono<AppEnv>()
     // simulation is read-only, so nothing keyed on the (absent) account id can be written.
     if (u.simulatedBy && !u.uuid) {
       const now = c.get("deps").clock.now();
-      return withCallerAccess(toUserResource({ uuid: "", createdAt: now, updatedAt: now, email: u.email, role: u.role, status: u.status, employeeId: u.employeeId }));
+      return withCallerAccess(toUserResource({ uuid: "", createdAt: now, updatedAt: now, email: u.email, role: u.role, roles: u.roles.filter((r) => r !== u.role), status: u.status, employeeId: u.employeeId }));
     }
-    return withCallerAccess(toUserResource(await getUser(c.get("deps"), u, "me")));
+    return withCallerAccess(toUserResource((await decorateUserRoles(c.get("deps"), [await getUser(c.get("deps"), u, "me")]))[0]));
   })
   .route("/", accounts);

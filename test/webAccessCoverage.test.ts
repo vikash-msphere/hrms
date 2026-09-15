@@ -25,7 +25,14 @@ const VERB_MARK = /AccessAction|RowActions/;
 
 // path suffix -> reason. Empty today; keep it that way unless a file truly manages no grantable resource.
 const PAGE_ALLOW: Record<string, string> = {};
-const VERB_ALLOW: Record<string, string> = {};
+const VERB_ALLOW: Record<string, string> = {
+  // "Who can see my record": the ONE verb in the app that is deliberately not an admin affordance. It reports
+  // on the caller's OWN record - the service pins the target to their employee id, so the path id never
+  // chooses whose record is graded - and every role holds it for themselves (`employees.me.viewers`). Wrapping
+  // it in AccessAction would offer to manage a permission that is not meant to be taken away: a person being
+  // able to find out who reads their bank details is the feature, not a grant.
+  "components/common/MyViewers.tsx": "self-only privacy report; held by everyone for their own record by design",
+};
 // Per-object affordances whose object was never fetched as a row, so there IS no `access.can` to pass: the
 // path is known (it makes a good ACL target) but the hint is not, and the gate falls back to the caller's
 // capability. Add a file here only when the object genuinely never arrives as a resource in that view.

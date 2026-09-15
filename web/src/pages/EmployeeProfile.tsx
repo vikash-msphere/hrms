@@ -7,7 +7,7 @@ import { useEmployee } from "@/hooks/useEmployee";
 import { useCollection } from "@/hooks/useCollection";
 import { usePresence } from "@/hooks/usePresence";
 import { get, patch } from "@/api";
-import { formatDate, formatMonthYear, humanize, idOf, probationLabel, tenureDuration } from "@/lib/utils";
+import { formatDate, formatMonthYear, humanize, idOf, probationLabel, reportsUnder, tenureDuration } from "@/lib/utils";
 import { navigate } from "@/router";
 import { fireIntent } from "@/lib/intent";
 import { usePermission, useCanSeeActivity, useIsSuperAdmin } from "@/lib/perm";
@@ -153,6 +153,8 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
   const prevEmp = empIdx > 0 ? liveEmployees[empIdx - 1] : undefined;
   const nextEmp = empIdx >= 0 ? liveEmployees[empIdx + 1] : undefined;
   const directReports = useMemo(() => liveEmployees.filter((e) => e.manager && idOf(e.manager) === id), [liveEmployees, id]);
+  /** Everyone under this person - the manager picker must not offer any of them (see `reportsUnder`). */
+  const managerCycleIds = useMemo(() => reportsUnder(liveEmployees, id), [liveEmployees, id]);
   // The same team, in the shape the hover panel takes. Memoized so hovering the cell
   // does not rebuild the array (and with it every avatar) on each render.
   const reportPeople = useMemo(
@@ -341,7 +343,7 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
               // Bio is personal: the "Add a short bio" prompt is owner-only. HR still gets the edit
               // pencil once a bio EXISTS (moderation), just not the empty-state nudge.
               onEditBio={me.employee_id === id || (canManage && !!emp.bio) ? () => setBioOpen(true) : undefined}
-              avatar={<PhotoAvatar className="h-[68px] w-[68px] rounded-[14px] sm:h-[92px] sm:w-[92px] sm:rounded-[18px]" employeeId={id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable={canBank} onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
+              avatar={<PhotoAvatar className="h-[68px] w-[68px] rounded-full sm:h-[92px] sm:w-[92px]" employeeId={id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable={canBank} onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
               /* Where they sit, as the only two chips - both go somewhere. The pill shape is the promise
                  that pressing it does something, so facts with nothing behind them are cells in the band
                  below instead. The manager's field-access icon rides along here, since this chip is the
@@ -685,7 +687,11 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
                       value={core.manager}
                       onValueChange={(v) => setCore({ ...core, manager: v })}
                       searchPlaceholder="Search people…"
-                      options={[{ value: NONE, label: "None" }, ...employees.filter((e) => !e.disabled && idOf(e.path) !== id).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))]}
+                      // Self AND everyone under them: pointing somebody's manager at their own report closes
+                      // the reporting line into a loop, which `assertNoManagerCycle` now refuses server-side.
+                      // Excluding them here means the picker stops offering a move that will come back as an
+                      // error. See `reportsUnder` on why this narrows rather than decides.
+                      options={[{ value: NONE, label: "None" }, ...employees.filter((e) => !e.disabled && idOf(e.path) !== id && !managerCycleIds.has(idOf(e.path))).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))]}
                     />
                   </Field>
                 </FieldRow>

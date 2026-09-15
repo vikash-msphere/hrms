@@ -1279,14 +1279,14 @@ function AttendanceTab({ toast }: { toast: Toast }) {
 
           <TabsContent value="schedule" className="space-y-4">
             <p className="text-sm text-muted-foreground">Used to flag late arrivals, early departures and absent days. Punch times are recorded as exact instants; the shift below is wall-clock in this timezone.</p>
-            <Field label="Timezone" hint="The org's calendar day. Everything that turns on \u201ctoday\u201d - the LOP window, leave back-dating, the nightly tick - is read in this zone.">
+            <Field label="Timezone" hint="The org's calendar day. Everything that turns on “today” - the LOP window, leave back-dating, the nightly tick - is read in this zone.">
               <Combobox
                 className="w-full sm:w-80"
                 value={cfg.timezone}
                 onValueChange={(v) => setCfg((c) => ({ ...c, timezone: v }))}
                 options={timezoneOptions(cfg.timezone)}
-                placeholder="Select a timezone\u2026"
-                searchPlaceholder="Search zones\u2026"
+                placeholder="Select a timezone…"
+                searchPlaceholder="Search zones…"
                 emptyText="No zone matches."
               />
             </Field>

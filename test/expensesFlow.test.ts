@@ -14,6 +14,8 @@ import {
 } from "../src/services/expenses";
 import type { ListScope } from "../src/domain/access";
 import { approvedUnpaidReimbursements } from "../src/services/reimbursements";
+import { grantFor } from "../src/domain/grants";
+import { DEFAULT_POLICY } from "../src/domain/manifests";
 
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 let deps: Deps;
@@ -186,5 +188,63 @@ describe("expenses workflow", () => {
     expect(mine.items.map((r) => r.amount).sort((a, b) => a - b)).toEqual([1000, 2500]);
     const everything = await listExpenses(deps, scope, 100, undefined, {});
     expect(everything.items.length).toBe(3);
+  });
+});
+
+// WHOSE EXPENSE IS THIS? A behavioural test, because the answer has already been mis-read once from the source
+// alone - a review pass retracted this defect after reading the very guard that closed it and taking it for
+// something that had always been there.
+//
+// The trap `leave-requests` documents, one collection over: `expenses: write` is the collection-level grant
+// that makes self-service filing work, so it decides nothing about WHOSE expense is being filed. Naming
+// another employee in the payload is something any caller can do. Before the guard, an ordinary employee could
+// POST `{ "employee": "employees/<colleague>", "amount": 50000 }` and the row was created OWNED BY the
+// colleague - code-allocated under their code, so it landed in their expense list and their manager's queue,
+// `:submit` notified THEIR manager and drove automations against them, and the creator's own `own`-scoped list
+// could not see it afterwards. Plant and forget.
+//
+// TWO INDEPENDENT DEFENCES, and this exercises the service half. The other is the `expenses` entry in
+// `OWNER_REFS` (domain/manifests.ts), which makes the middleware demand write on `expenses.<ownerCode>` before
+// the body reaches the service at all; `test/ownerOnCreateDrift.test.ts` is what holds that one.
+describe("an expense is owned by the caller unless they may reach past their own rows", () => {
+  const withGrant = (actor: AppUser, role: string): AppUser =>
+    ({ ...actor, role, grant: grantFor(role), policy: DEFAULT_POLICY }) as AppUser;
+
+  it("forces self when an ordinary employee names a colleague", async () => {
+    const me = await seedEmployee();
+    const colleague = await seedEmployee();
+    const actor = withGrant(await seedActor(me), "employee");
+
+    const row = await createExpense(deps, actor, { employee: `employees/${colleague}`, amount: 50_000, description: "planted" });
+    expect(row.employeeId).toBe(me);
+    // And the code is allocated under the CALLER, so it cannot surface in the colleague's scoped list either.
+    expect(row.employeeId).not.toBe(colleague);
+  });
+
+  it("still lets that employee file their own, which is what the collection grant is for", async () => {
+    const me = await seedEmployee();
+    const actor = withGrant(await seedActor(me), "employee");
+
+    const named = await createExpense(deps, actor, { employee: `employees/${me}`, amount: 100, description: "mine, named" });
+    const omitted = await createExpense(deps, actor, { amount: 200, description: "mine, implied" });
+    expect([named.employeeId, omitted.employeeId]).toEqual([me, me]);
+  });
+
+  it("lets finance file on behalf, which is the case the field exists for", async () => {
+    // A vendor invoice arrives at finance, not at the employee who ordered it - `hr_admin` holds `expenses` at
+    // all breadth, so its reach genuinely extends past its own rows.
+    const someone = await seedEmployee();
+    const finance = withGrant(await seedActor(await seedEmployee()), "hr_admin");
+
+    const row = await createExpense(deps, finance, { employee: `employees/${someone}`, amount: 9_000, description: "vendor invoice" });
+    expect(row.employeeId).toBe(someone);
+  });
+
+  it("refuses when there is nobody to own it - it never falls back to the named employee", async () => {
+    // A caller with no employee record and only `own` reach: the honest answer is a refusal, not the colleague
+    // the body asked for. This is the branch that would quietly re-open the hole if it fell back.
+    const colleague = await seedEmployee();
+    const actor = { ...(await seedActor(await seedEmployee())), employeeId: null, role: "employee", grant: grantFor("employee"), policy: DEFAULT_POLICY } as unknown as AppUser;
+    await expect(createExpense(deps, actor, { employee: `employees/${colleague}`, amount: 10 })).rejects.toThrow(/employee is required/);
   });
 });

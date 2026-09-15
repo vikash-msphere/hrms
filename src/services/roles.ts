@@ -54,6 +54,12 @@ export async function deleteRole(deps: Deps, actor: AppUser, name: string) {
   if ((await deps.db.select({ u: schema.users.uuid }).from(schema.users).where(eq(schema.users.role, name)).limit(1))[0]) {
     throw failedPrecondition("role is in use by one or more users"); // FK ON DELETE RESTRICT also enforces this
   }
+  // ...and the same question of the SECONDARY holders. A role nobody carries as their primary can still be held
+  // by people through `user_roles` (db/schema.ts), whose FK is RESTRICT for exactly this reason - so without
+  // this check the delete would fail deep in SQLite as a 500 instead of answering the precondition it is.
+  if ((await deps.db.select({ u: schema.userRoles.userId }).from(schema.userRoles).where(eq(schema.userRoles.role, name)).limit(1))[0]) {
+    throw failedPrecondition("role is in use by one or more users");
+  }
   // Drop the role's access rules (fold of the old removeRoleRules), bust its cache, then remove the role.
   await deps.db.delete(schema.accessRules).where(and(eq(schema.accessRules.subject, name), eq(schema.accessRules.subjectKind, "role")));
   clearCache(`grant:${name}`);

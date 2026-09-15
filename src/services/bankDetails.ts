@@ -5,8 +5,7 @@ import type { AppUser } from "../env";
 import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
 import { getSettingValue } from "./settings";
-import { etagOf } from "../http/serialize";
-import { checkEtag, updateAtVersion } from "./versionGuard";
+import { checkSubEtag, subResourceEtag, updateAtVersion } from "./versionGuard";
 
 /** The org's declared banks (settings/organization `banks`), normalized for comparison. Empty = not configured. */
 export async function orgBanks(deps: Deps): Promise<string[]> {
@@ -81,9 +80,12 @@ export function toMaskedBankView(stored: StoredBank | null) {
 export async function getBankDetails(deps: Deps, _actor: AppUser, employeeId: string) {
   // Access (owner / super by default) is enforced by the middleware on employees/<code>/bank-account.
   const emp = await loadEmployee(deps, employeeId);
-  // The employee row's version rides every answer, including the empty ones: `setBankDetails` is
-  // version-guarded, and that guard does nothing unless the caller was handed a version to send back.
-  const etag = etagOf(+new Date(emp.updatedAt));
+  // THIS BLOB's version rides every answer, including the empty ones: `setBankDetails` is version-guarded,
+  // and that guard does nothing unless the caller was handed a version to send back. Derived from the
+  // ciphertext rather than from `employees.updated_at`, because all four encrypted sub-resources share that
+  // one timestamp - so a row-derived version made HR's edit to an emergency contact fail the bank form the
+  // employee had open, on fields neither had touched (services/versionGuard.ts#subResourceEtag).
+  const etag = subResourceEtag(emp.bankDetailsEnc);
   if (!emp.bankDetailsEnc) return { on_file: false, etag };
   try {
     const json = await deps.encryptor.decrypt(emp.bankDetailsEnc);
@@ -96,7 +98,7 @@ export async function getBankDetails(deps: Deps, _actor: AppUser, employeeId: st
 
 export async function setBankDetails(deps: Deps, actor: AppUser, employeeId: string, input: BankDetailsInput, ifMatch?: string) {
   const emp = await loadEmployee(deps, employeeId);
-  checkEtag(emp, ifMatch); // the precise 409 for a caller that already knows its read is stale
+  checkSubEtag(emp.bankDetailsEnc, ifMatch); // the precise 409 for a caller that already knows its read is stale
   if (input == null || typeof input !== "object") throw invalidArgument("bank details body required");
   // `bank_name` IS AN ENUM, and it has to be enforced here rather than only in the picker.
   //
@@ -159,10 +161,10 @@ export async function setBankDetails(deps: Deps, actor: AppUser, employeeId: str
   // the employee updates their IFSC, and whichever lands second restores the other's old value; the trail
   // cannot help, because this path deliberately records field NAMES only. The comment above states the cost
   // of losing these fields by a different route: "a payroll disbursement that cannot be paid".
-  const updated = await updateAtVersion(deps, schema.employees, "employee", emp, { bankDetailsEnc: enc, updatedAt: new Date() });
+  await updateAtVersion(deps, schema.employees, "employee", emp, { bankDetailsEnc: enc, updatedAt: new Date() });
   // WHICH fields changed, never their values: an account number in a table read by everyone with the `audit`
   // capability outlives the access control on the record it came from. `fieldsMeta` is the shape for exactly
   // this - the trail says "they changed the account number", which is the whole of what it is owed.
   await audit(deps, actor, "employee.bank_details.update", "employees", emp.uuid, fieldsMeta(stored), emp);
-  return { ...toMaskedBankView(stored), etag: etagOf(+new Date(updated.updatedAt)) };
+  return { ...toMaskedBankView(stored), etag: subResourceEtag(enc) };
 }

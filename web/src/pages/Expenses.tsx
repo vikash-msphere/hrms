@@ -10,7 +10,7 @@ import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useRoute } from "@/router";
 import { formatDate, formatMoney, idOf, cn } from "@/lib/utils";
-import { todayStr } from "@/lib/orgDay";
+import { orgDayOf, thisMonthStr, todayStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { useTabActivity, markTabSeen } from "@/lib/tabActivity";
@@ -82,7 +82,9 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 // The budget period a date falls in, in the server's own key format (domain/expenses periodKeyFor) - so the
 // form can find the cap this expense will land against without asking the server to compute it.
 function periodKeyOf(dateStr: string, type?: string): string {
-  const d = dateStr ? new Date(`${dateStr}T00:00:00Z`) : new Date();
+  // An absent date falls back to the ORG's today, never the browser's - a bare `new Date()` here would read
+  // the viewer's clock and put a period boundary a timezone away from the one the server computes.
+  const d = new Date(`${dateStr || todayStr()}T00:00:00Z`);
   const y = d.getUTCFullYear();
   const m = d.getUTCMonth();
   if (type === "yearly") return String(y);
@@ -309,11 +311,14 @@ export default function Expenses({ me }: { me: Me }) {
   const toPay = payQ.state === "ready" && tab === "pay" ? payQ.rows.filter((r) => !r.recurring && !r.reimbursable) : toPayLocal;
   const viaPayroll = useMemo(() => ledgerAll.filter((r) => up(r.state) === "APPROVED" && r.reimbursable), [ledgerAll]);
   const mine = useMemo(() => ledgerAll.filter(isOwn), [ledgerAll, isOwn]);
-  const monthStart = useMemo(() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), 1).getTime(); }, []);
-  const paidThisMonth = useMemo(
-    () => ledgerAll.filter((r) => up(r.state) === "PAID" && r.paid_time && new Date(r.paid_time).getTime() >= monthStart),
-    [ledgerAll, monthStart],
-  );
+  // "This month" is the ORG's month, not the browser's. A local-clock boundary
+  // (`new Date(n.getFullYear(), n.getMonth(), 1)`) made this figure differ per viewer: for an org on IST read
+  // from New York, an expense paid at 02:00 IST on the 1st sits before the reader's month start and drops out
+  // of the total; west of UTC the previous month's late payments get counted in. `useMemo(…, [])` froze the
+  // boundary at mount too, so a tab left open across a month boundary kept reporting the old month. Comparing
+  // org-local `YYYY-MM` strings is the form the rest of this file already uses, and it has neither problem.
+  const paidInThisMonth = (r: Expense) => up(r.state) === "PAID" && !!r.paid_time && orgDayOf(r.paid_time).slice(0, 7) === thisMonthStr();
+  const paidThisMonth = useMemo(() => ledgerAll.filter(paidInThisMonth), [ledgerAll]);
   // An unpaid expense with no invoice on it is the one accounts will hand back, so it earns a metric.
   const noInvoice = useMemo(() => ledgerAll.filter((r) => !r.has_invoice && up(r.state) !== "PAID"), [ledgerAll]);
   // Committed money only: an expense that is still submitted or was rejected has not been spent, and putting
@@ -330,7 +335,8 @@ export default function Expenses({ me }: { me: Me }) {
   // Metrics whose rows live on no queue tab of their own narrow the whole ledger instead.
   const kf = useKpiFocus<Expense, "viaPayroll" | "paidThisMonth" | "noInvoice">({
     viaPayroll: { label: "employee-fronted approvals", match: (r) => up(r.state) === "APPROVED" && !!r.reimbursable },
-    paidThisMonth: { label: "expenses paid this month", match: (r) => up(r.state) === "PAID" && !!r.paid_time && new Date(r.paid_time).getTime() >= monthStart },
+    // The same predicate the tile counts, so the drill-through and the figure cannot disagree.
+    paidThisMonth: { label: "expenses paid this month", match: paidInThisMonth },
     noInvoice: { label: "unpaid expenses with no invoice", match: (r) => !r.has_invoice && up(r.state) !== "PAID" },
   });
   const ledgerKpi = (key: "viaPayroll" | "paidThisMonth" | "noInvoice") => {

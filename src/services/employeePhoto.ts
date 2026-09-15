@@ -7,7 +7,7 @@ import { notFound, invalidArgument, forbidden } from "../lib/errors";
 import { getEmployee } from "./employees";
 import { applyScope } from "./listScope";
 import { scopeFor } from "../domain/access";
-import { isSuperGrant, EVERYONE_ROLE } from "../domain/grants";
+import { isSuperGrant, EVERYONE_ROLE, roleSubjectsOf } from "../domain/grants";
 import { loadObjectExceptionCodes } from "../lib/policyLoad";
 
 const MAX_BYTES = 3 * 1024 * 1024; // 3 MB
@@ -74,7 +74,7 @@ export async function batchGetPhotos(deps: Deps, actor: AppUser, employeeIds: st
   const wanted = [...new Set(employeeIds)].slice(0, MAX_BATCH);
   if (!wanted.length) return [];
   const scope = scopeFor(actor, "employees");
-  const roleSubjects = isSuperGrant(actor.grant) ? [actor.role] : [actor.role, EVERYONE_ROLE];
+  const roleSubjects = roleSubjectsOf(actor, actor.grant);
   const exc = await loadObjectExceptionCodes(deps, actor.uuid, roleSubjects, "employees");
   scope.shares = exc.shares;
   scope.denies = exc.denies;

@@ -576,15 +576,30 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
     const made: { copy: Goal; old: Goal; oldStatus: GoalStatus }[] = [];
     try {
       for (const g of list) {
+        // Everything the edit form above sends, minus the two things carry-over decides for itself (the due
+        // date and the cycle). A partial copy is worse than a clean loss here: dropping `unit`/`baseline`/
+        // `target`/`current` left the goal carrying the old PERCENTAGE with nothing behind it, so
+        // `measuredPct` returned null, the measure control vanished from the drawer, and a key result silently
+        // became a manual-progress goal - while the number that feeds weighted attainment in a review, and
+        // through `review-cycles:award` variable pay, survived. `kind` is on the same list: without it a
+        // `key_result` comes back as an `objective`.
         const copy = await create<Goal>("goals", {
           title: g.title,
           description: g.description ?? "",
           weight: g.weight ?? 0,
           progress: g.progress ?? 0,
           status: g.status,
+          kind: g.kind,
           due_date: nextQuarterEndStr(),
+          // The measure travels whole, the way the edit form sends it.
+          unit: g.unit ?? null,
+          baseline_value: g.baseline_value ?? null,
+          target_value: g.target_value ?? null,
+          current_value: g.current_value ?? null,
           ...(g.employee ? { employee: `employees/${idOf(g.employee)}` } : {}),
           ...(g.parent ? { parent: `goals/${idOf(g.parent)}` } : {}),
+          ...(g.department ? { department: `departments/${idOf(g.department)}` } : {}),
+          ...(g.blocked_by ? { blocked_by: `goals/${idOf(g.blocked_by)}` } : {}),
           ...(nextCycleRef ? { cycle: nextCycleRef } : {}),
         });
         await patch(`goals/${idOf(g.path)}`, { status: "cancelled" }, g.etag);

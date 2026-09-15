@@ -87,7 +87,7 @@ export const cards = collectionRoutes<CardInput, typeof schema.cards>({
   },
   list: (c, page) => {
     const board = c.req.query("board");
-    return listCards(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, board ? board.split("/").pop() : undefined, page.showDeleted);
+    return listCards(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, board ? board.split("/").pop() : undefined, page.showDeleted, page.deletedOnly);
   },
   verbs: {
     move: {

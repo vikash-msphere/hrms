@@ -45,7 +45,7 @@ export const taxDeclarations = collectionRoutes<TaxDeclarationInput, typeof sche
     update: (deps, actor, id, patch, ifMatch) => updateTaxDeclaration(deps, actor, id, patch, ifMatch),
   },
   list: (c, page) =>
-    listTaxDeclarations(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("financial_year"), c.req.query("status"), page.showDeleted),
+    listTaxDeclarations(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("financial_year"), c.req.query("status"), page.showDeleted, page.deletedOnly),
   verbs: {
     // The ETag rides through: verifying is a decision about a row its own employee may still be editing, so it
     // is refused when that row has moved since the verifier read it (services/taxDeclarations.ts says why).

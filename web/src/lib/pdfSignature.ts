@@ -221,8 +221,12 @@ function trustedRoots(): pkijs.Certificate[] {
  * (the next signer's revision was appended after it), so only the LAST one is expected to reach EOF. Earlier
  * ones still have to TILE - start at 0 and omit nothing but their own container - because that property has
  * nothing to do with who signed afterwards.
+ *
+ * `fileTailClean` is the same question asked of the FILE rather than of this signature: nothing but whitespace
+ * follows the furthest byte any /ByteRange in the file names. It is the belt to `isLast`'s braces - `isLast` is
+ * a position among matches, which a junk match can take, while this one cannot be displaced by anything.
  */
-async function verifyOne(pdfBin: string, raw: RawSig, isLast: boolean): Promise<SignatureResult> {
+async function verifyOne(pdfBin: string, raw: RawSig, isLast: boolean, fileTailClean: boolean): Promise<SignatureResult> {
   try {
     const ci = new pkijs.ContentInfo({ schema: asn1js.fromBER(ab(raw.der)).result });
     const sd = new pkijs.SignedData({ schema: ci.content });
@@ -273,10 +277,11 @@ async function verifyOne(pdfBin: string, raw: RawSig, isLast: boolean): Promise<
     // that the bytes the signature NAMED are unaltered, and a file can carry any amount of content those bytes
     // do not include. A signature over part of a document is not a signature over the document, so it can never
     // read "valid", however cleanly it verifies and however well its certificate chains.
-    const coversDocument = raw.tilesFile && (isLast ? raw.reachesEnd : true);
+    const endsTheFile = raw.reachesEnd && fileTailClean;
+    const coversDocument = raw.tilesFile && (isLast ? endsTheFile : true);
     const coverageNote = !raw.tilesFile
       ? "the signature covers only part of the file"
-      : !raw.reachesEnd && isLast
+      : !endsTheFile && isLast
         ? "the document was changed after it was signed (content was appended)"
         : undefined;
 
@@ -312,11 +317,45 @@ async function verifyOne(pdfBin: string, raw: RawSig, isLast: boolean): Promise<
 //
 // Document order is revision order (each incremental update appends), so the LAST entry is the newest
 // signature - the one whose ranges have to reach the end of the file. See verifyOne's `isLast`.
+//
+// "Last" has to be decided over SIGNATURES, not over regex matches. `extractRawSignatures` scans raw bytes, and
+// `/ByteRange [ n n n n ]` followed by a `<…>` is not confined to a signature dictionary - a content stream, a
+// string, or a PDF carried as an embedded attachment can produce one. Such a match parses to junk and reports
+// amber on its own, which is harmless; what is not harmless is that it would take the last position and so
+// spare the REAL signature the append check, which is the half of this module with security meaning.
+//
+// So the position is taken from the furthest match that actually parses as a PKCS#7 SignedData, and the check
+// is backed by a property of the file (`tailClean`) that no single match can displace.
 export async function verifyPdfSignatures(bytes: Uint8Array): Promise<SignatureResult[]> {
   ensureEngine();
   const pdfBin = toBinary(bytes);
   const raws = extractRawSignatures(pdfBin);
+  if (!raws.length) return [];
+
+  const parses = raws.map((r) => parsesAsSignedData(r.der));
+  // No match parses: nothing is a real signature, so fall back to the last one and let it report its own error.
+  const lastReal = parses.lastIndexOf(true);
+  const newest = lastReal === -1 ? raws.length - 1 : lastReal;
+
+  const furthest = Math.max(...raws.map((r) => r.byteRange[2] + r.byteRange[3]));
+  const tailClean = furthest <= pdfBin.length && pdfBin.slice(furthest).trim() === "";
+
   const out: SignatureResult[] = [];
-  for (let i = 0; i < raws.length; i++) out.push(await verifyOne(pdfBin, raws[i]!, i === raws.length - 1));
+  for (let i = 0; i < raws.length; i++) out.push(await verifyOne(pdfBin, raws[i]!, i === newest, tailClean));
   return out;
+}
+
+// Does this /Contents blob decode as a PKCS#7 SignedData at all? Cheap, structural, and deliberately not a
+// verification: it only has to separate a real signature container from a stray byte pattern that matched the
+// /ByteRange regex.
+function parsesAsSignedData(der: Uint8Array): boolean {
+  try {
+    const asn = asn1js.fromBER(ab(der));
+    if (asn.offset === -1) return false;
+    const ci = new pkijs.ContentInfo({ schema: asn.result });
+    new pkijs.SignedData({ schema: ci.content });
+    return true;
+  } catch {
+    return false;
+  }
 }

@@ -72,7 +72,7 @@ describe("the accounts list is scoped", () => {
 // for one of them, a self-scoped grant resolves against whichever employee code the account carries).
 describe("an employee may hold only one sign-in account", () => {
   const actor = (uuid: string): AppUser => ({
-    uuid, email: "admin@test.example", role: "super_admin", status: "active",
+    uuid, email: "admin@test.example", role: "super_admin", roles: ["super_admin"], status: "active",
     employeeId: null, employeeCode: null, name: "Admin", grant: EMPTY_GRANT, policy: DEFAULT_POLICY,
   });
 

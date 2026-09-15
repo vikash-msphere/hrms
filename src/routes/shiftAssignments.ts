@@ -18,5 +18,5 @@ export const shiftAssignments = collectionRoutes<ShiftAssignmentInput, typeof sc
   param: "assignment_id",
   writeSchema,
   serialize: toShiftAssignmentResource,
-  list: (c, page) => listShiftAssignments(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("from"), c.req.query("to"), page.showDeleted),
+  list: (c, page) => listShiftAssignments(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("from"), c.req.query("to"), page.showDeleted, page.deletedOnly),
 });

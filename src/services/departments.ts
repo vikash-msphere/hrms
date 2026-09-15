@@ -1,7 +1,7 @@
 import { allocUnderDept, CODE_WIDTH } from "./codeAlloc";
 // SIMPLE resource template. Copy this file for holidays, announcements, leave-types,
 // pay-components, pay-periods (rename table, fields, capability). See docs/03-add-a-resource.md.
-import { and, eq, isNull, type SQL } from "drizzle-orm";
+import { and, eq, type SQL } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -13,6 +13,7 @@ import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lifecycle";
 import { crudService, type CrudSpec, type SetOf } from "./crud";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
@@ -26,10 +27,10 @@ const managerIdsJson = (managers?: string[] | null) =>
 // Honors the middleware-decided list scope: `departments` defines a `subtree` read tier, so a scoped grant
 // must not see the whole tree. Departments have no employee owner, so the hierarchy `code` is both the scope
 // key and the owner column. `all`-breadth callers get no filter (unchanged); a narrower grant is enforced.
-export async function listDepartments(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
+export async function listDepartments(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, deletedOnly = false) {
   // Paged in SQL (services/keysetPage.ts), soft-delete filter included, rather than reading the whole tree
   // into the isolate to slice one page out of it.
-  const conds = [applyScope(scope, schema.departments.code, schema.departments.code), showDeleted ? undefined : isNull(schema.departments.deleteTime)];
+  const conds = [applyScope(scope, schema.departments.code, schema.departments.code), deleteStateFilter(schema.departments.deleteTime, showDeleted, deletedOnly)];
   return keysetPage<typeof schema.departments.$inferSelect>(deps, schema.departments, "departments", and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
 }
 

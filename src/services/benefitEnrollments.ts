@@ -2,6 +2,7 @@ import { eq, and, isNull, type SQL } from "drizzle-orm";
 import { CODE_WIDTH, allocOwnedCode, allocOwnedCodeRuns } from "./codeAlloc";
 import { insertBatches, runBatch } from "../lib/dbBatch";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -68,11 +69,11 @@ async function ownDependentIds(deps: Deps, employeeId: string, refs?: string[]):
   return kept.length ? JSON.stringify(kept) : null;
 }
 
-export async function listBenefitEnrollments(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, showDeleted = false) {
+export async function listBenefitEnrollments(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.benefitEnrollments.code, schema.benefitEnrollments.employeeId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.benefitEnrollments.employeeId, empId));
-  if (!showDeleted) conds.push(isNull(schema.benefitEnrollments.deleteTime));
+  conds.push(deleteStateFilter(schema.benefitEnrollments.deleteTime, showDeleted, deletedOnly));
   // Paged in SQL (services/keysetPage.ts) rather than by reading every enrolment the scope matches into the
   // isolate and slicing one page out - this grows as headcount x plans x every year enrolment is re-run, and
   // D1 bills rows read. The soft-delete filter is in the WHERE for the same reason.

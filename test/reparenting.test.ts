@@ -14,7 +14,7 @@ import { createEmployee, updateEmployee } from "../src/services/employees";
 import { HIERARCHICAL_TABLES, reprefixPattern } from "../src/services/codeCascade";
 import { decide } from "../src/domain/permissions";
 import { rulesToGrant } from "../src/domain/compileGrants";
-import { RESOURCE_COLLECTIONS } from "../src/lib/authzResolve";
+import { RESOURCE_COLLECTIONS, LIST_OWNER_COLUMNS, OWNER_COLUMN_COLLECTIONS } from "../src/lib/authzResolve";
 
 // Re-parenting cascade: moving an employee (or a whole department subtree) recomputes the internal `code` for
 // the moved entity AND every row nested under it, since authz scope is a code-prefix match. The wire id never
@@ -136,7 +136,24 @@ describe("re-parenting: coverage tripwire", () => {
     // rewritten, but it has no wire collection, so no access rule can name it.
     for (const c of cols) if (c !== null) expect(RESOURCE_COLLECTIONS).toContain(c);
     // Tripwire: bump this when a new employee-owned (allocOwnedCode) collection is added AND wired into the cascade.
-    expect(cols.length).toBe(44);
+    expect(cols.length).toBe(45);
+  });
+
+  // The OWNER KEY's registry, kept honest from the other side. `OWNER_COLUMN_COLLECTIONS` (lib/authzResolve.ts)
+  // is the set of collections whose rows are FLAT-coded but carry a real owner column, and it is written out
+  // rather than computed because computing it would mean importing a service into two hot-path modules, in a
+  // graph that already carries ~157 cycles - one such edge already reordered module init and left
+  // `DEFAULT_POLICY` undefined at request time. So the derivation lives here instead, as an assertion.
+  //
+  // Both directions matter: a collection wrongly IN the set gets a widened item lane, one wrongly OUT keeps the
+  // split-brain grant the owner key exists to close.
+  it("OWNER_COLUMN_COLLECTIONS is exactly the flat-coded collections with a real owner column", () => {
+    const hier = new Set(HIERARCHICAL_TABLES.map((h) => h.collection).filter((c): c is string => c !== null));
+    const expected = Object.entries(LIST_OWNER_COLUMNS)
+      .filter(([collection, col]) => col !== "code" && col !== "uuid" && !hier.has(collection))
+      .map(([collection]) => collection)
+      .sort();
+    expect([...OWNER_COLUMN_COLLECTIONS].sort()).toEqual(expected);
   });
 
   // THE DIRECTION THAT ACTUALLY DRIFTED. The assertion above checks that everything in the list is a real

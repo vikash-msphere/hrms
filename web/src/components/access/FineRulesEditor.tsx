@@ -5,6 +5,9 @@ import { roleLabel } from "@/lib/roles";
 import { customMethodsFor } from "./customMethods";
 import { type AccessRule, BASE_COLLECTIONS, collectionsForRules, labelOf, scopesForCollection, fetchScopeCapabilities, scopeText, permText } from "./permMatrix";
 import { ruleSentence, ruleFlags } from "./ruleLogic";
+// The server's own set, imported rather than restated: it is what `isFieldScopeTarget` validates against, so a
+// picker built from anything else would offer rules the validator refuses (which is exactly what happened).
+import { COLLECTION_FIELD_CAPABILITIES } from "../../../../src/domain/manifests";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -130,6 +133,10 @@ export function FineRulesEditor({
         // "access works".
         const flags = ruleFlags(r, rules);
         const bad = flags.find((f) => f.kind === "denied" || f.kind === "shadowed");
+        // NOT struck through, unlike the two above: this rule is live and correct for every individual record,
+        // it just has no page to show them on. "Incomplete", not "dead" - striking it out would send an admin
+        // to delete the rule when the fix is to add one.
+        const partial = !bad && flags.find((f) => f.kind === "unlistable");
         const life = flags.find((f) => f.kind === "pending" || f.kind === "expiring");
         return (
           <div className="min-w-64 space-y-0.5">
@@ -137,6 +144,11 @@ export function FineRulesEditor({
             {bad && (
               <span className="flex items-start gap-1 text-[11px] text-amber-700 dark:text-amber-400" title={bad.note}>
                 <AlertTriangle className="mt-px h-3 w-3 shrink-0" /> {bad.kind === "denied" ? "no effect - a deny overrides this" : "no effect - already covered by a broader rule"}
+              </span>
+            )}
+            {partial && (
+              <span className="flex items-start gap-1 text-[11px] text-amber-700 dark:text-amber-400" title={partial.note}>
+                <AlertTriangle className="mt-px h-3 w-3 shrink-0" /> cannot open the list - pair with read on the collection
               </span>
             )}
             {life && (
@@ -189,10 +201,12 @@ export function FineRulesEditor({
             options={allCollections.map((c) => [c, labelOf(c)])}
           />
           <Picker label="Scope" value={add.scope} onChange={(v) => setAdd({ ...add, scope: v })} options={scopeOpts.map((s) => [s.value, s.label])} />
-          {add.collection === "activity" ? (
-            // Activity's "field" slot is the TARGET collection: empty = all collections' activity, else scope
-            // the trail to one collection (compiles to `activity.<scope>.<collection>`).
-            <Picker label="For collection" value={add.field || ANY_COLLECTION} onChange={(v) => setAdd({ ...add, field: v === ANY_COLLECTION ? "" : v })} options={[[ANY_COLLECTION, "All collections"], ...BASE_COLLECTIONS.filter((c) => c !== "activity").map((c) => [c, labelOf(c)] as [string, string])]} wide />
+          {COLLECTION_FIELD_CAPABILITIES.has(add.collection) ? (
+            // For these capabilities the "field" slot is the TARGET collection: empty = every collection, else
+            // narrow to one (`activity.<scope>.<collection>`, `export.<scope>.<collection>`). Driven by the
+            // server's own set rather than a name test here, so the picker and the validator that accepts what
+            // it writes can never disagree about which capabilities work this way.
+            <Picker label="For collection" value={add.field || ANY_COLLECTION} onChange={(v) => setAdd({ ...add, field: v === ANY_COLLECTION ? "" : v })} options={[[ANY_COLLECTION, "All collections"], ...BASE_COLLECTIONS.filter((c) => !COLLECTION_FIELD_CAPABILITIES.has(c)).map((c) => [c, labelOf(c)] as [string, string])]} wide />
           ) : (
             <div className="w-24">
               <label className="mb-1 block text-xs font-medium">Field</label>

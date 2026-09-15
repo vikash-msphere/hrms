@@ -11,7 +11,7 @@ import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, purgeRow, type PurgeCascade } from "./softDelete";
+import { deleteStateFilter, visibleByDelete, softDeleteRow, purgeRow, type PurgeCascade } from "./softDelete";
 import { byIdChunks, chunk, insertBatches, runBatch } from "../lib/dbBatch";
 import { notifyMany } from "./notifications";
 import { checkEtag, updateAtVersion } from "./versionGuard";
@@ -36,9 +36,9 @@ const dateOrNull = (s?: string | null) => (s ? new Date(Date.parse(s + "T00:00:0
 // shares and DENIES (resolved by middleware/authz.ts for every collection-level list), and `applyScope` is the
 // only thing that binds them - so a per-object deny on a cycle had no effect on this list.
 // `review-cycles` is a flat catalog with a `code` and no owner column, so an own-scoped caller gets nothing.
-export async function listReviewCycles(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
+export async function listReviewCycles(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, deletedOnly = false) {
   const conds: (SQL | undefined)[] = [applyScope(scope, schema.reviewCycles.code, undefined)];
-  if (!showDeleted) conds.push(isNull(schema.reviewCycles.deleteTime));
+  conds.push(deleteStateFilter(schema.reviewCycles.deleteTime, showDeleted, deletedOnly));
   return keysetPage<typeof schema.reviewCycles.$inferSelect>(deps, schema.reviewCycles, "review-cycles", and(...conds.filter(Boolean) as SQL[]), {
     max: maxPageSize,
     pageToken,

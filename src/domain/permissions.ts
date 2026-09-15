@@ -5,9 +5,30 @@
 
 export type Level = "read" | "write" | "admin";
 
+/**
+ * `ownerResource` is the SAME resource path with the id token replaced by the code of the row's OWNER - set by
+ * the middleware only for a collection whose rows carry a FLAT code alongside an owner column
+ * (services/codeCascade.ts OWNER_COLUMN_COLLECTIONS: `assets`, `users`, and nothing else today).
+ *
+ * WHY A SECOND KEY RATHER THAN A NEW TOKEN. Those collections' two lanes of one grant disagreed. The LIST lane
+ * answers "own" fine - `applyScope` binds `eq(owner, ownerId)` - but the ITEM lane asks `isUnder(callerCode, kt)`
+ * against a flat code, which is false for everyone. So `GET /v1/assets/<id>` refused a row the list had just
+ * returned. An owned code is the fix everywhere the owner is fixed at create; it is the WRONG fix here, because
+ * custody moves (an asset changes hands) and a `users` row may have no employee at all, while a code is
+ * immutable by design.
+ *
+ * Expressed as an alternate resource, not as new `matchToken` semantics, so the BOLA surface stays one
+ * reviewable place: nothing about how a pattern matches a key changes, only which keys a request is judged on.
+ * The two keys always share their first token (the collection), so the per-namespace pattern buckets below hold.
+ *
+ * NOT SYMMETRIC, and that is the point: the ALLOW lanes take either key (the owner key can only widen, which is
+ * what makes the item lane answer at all), while the DENY lane matches against BOTH (a deny authored on the
+ * row's own code must not become bypassable through the owner key). Deny-wins is the invariant that direction
+ * protects, and it is the direction that leaks if this is ever "simplified" into one symmetric OR.
+ */
 export type Resolved =
-  | { kind: "standard"; resource: string; level: Level } // resource = dotted path with codes, e.g. "employees.04-1c-0a9.bank-account"
-  | { kind: "custom"; resource: string; verb: string };
+  | { kind: "standard"; resource: string; level: Level; ownerResource?: string } // resource = dotted path with codes, e.g. "employees.04-1c-0a9.bank-account"
+  | { kind: "custom"; resource: string; verb: string; ownerResource?: string };
 
 // Standard-method -> required level. GET=read; POST/PATCH=write; DELETE soft=write, DELETE ?force=admin.
 function levelFor(method: string, force: boolean): Level {
@@ -33,6 +54,24 @@ export function resolveRequest(method: string, pathname: string, force = false):
   return { kind: "standard", resource, level: levelFor(method, force) };
 }
 
+/**
+ * `r` plus its OWNER key: the same resource with the id token (token[1], the position `buildCodedPath`
+ * substitutes) replaced by `ownerCode`. See Resolved#ownerResource for what it is for.
+ *
+ * PURE, and here rather than inline in the middleware, because the token position is a fact about the resource
+ * grammar - the same fact `reprefixPattern` (services/codeCascade.ts) has to know - and a second place spelling
+ * it would be a second place to get it wrong.
+ *
+ * Returns `r` unchanged when there is no id token to replace (a collection-level path like `/v1/assets`), so a
+ * caller may apply it unconditionally.
+ */
+export function withOwnerResource(r: Resolved, ownerCode: string): Resolved {
+  const toks = r.resource.split(".");
+  if (toks.length < 2) return r;
+  toks[1] = ownerCode;
+  return { ...r, ownerResource: toks.join(".") };
+}
+
 // The single permission key the matcher checks: "<resource>.<action>" where action is the level token
 // (standard) or the verb (custom).
 export function keyOf(r: Resolved): string {
@@ -49,7 +88,27 @@ export type Grant = {
   deny?: string[]; // key patterns (resource + action); deny WINS, no downward ladder
 };
 
-export type SelfContext = { employeeCode: string | null }; // caller's employee code, from the JWT
+/**
+ * What the matcher knows about the CALLER. `employeeCode` comes off the auth read and answers `me` / `my-dept`.
+ *
+ * `reportCodes` / `orgCodes` are the manager chain, which the code hierarchy cannot express: a code encodes
+ * exactly one relationship, department nesting. `my-dept` has been standing in for "my team" throughout the
+ * manager grant, and wherever the reporting line diverges from the department tree - a matrix org, a dotted
+ * line, a manager who owns people in two departments, a department with two managers - it is wrong in BOTH
+ * directions at once: it shows a manager peers they do not manage, and hides reports who sit elsewhere.
+ *
+ * They are OPTIONAL because they cost a read. Almost no grant mentions these tokens, so the middleware resolves
+ * them only when the caller's own grant actually uses one (`grantNeedsReports` below) - otherwise every request
+ * in the app would pay for a relationship nobody asked about. Undefined therefore means "not loaded", and the
+ * tokens fail CLOSED on it: an unresolved report set matches nothing rather than everything.
+ */
+export type SelfContext = {
+  employeeCode: string | null; // caller's employee code, from the auth read
+  /** Employee codes of the caller's DIRECT reports (`my-reports`). */
+  reportCodes?: readonly string[];
+  /** Employee codes of the caller's whole reporting subtree, direct reports included (`my-org`). */
+  orgCodes?: readonly string[];
+};
 
 /**
  * `via` is the PATTERN that allowed it - `compensation.**`, `leave-requests.me.*` - recorded so the trail can
@@ -74,7 +133,7 @@ export const LVL: Record<Level, number> = { read: 1, write: 2, admin: 3 };
 // The `|| null` on the result is not belt-and-braces: a code beginning with `-` splits to a leading empty
 // segment, so `"-0kf"` yields the dept `""`. An empty scope prefix must never reach a containment test as if
 // it were a scope (see the header on codes.ts#isUnder) - it is a missing value, not "everything".
-function deptOf(employeeCode: string | null): string | null {
+export function deptOf(employeeCode: string | null): string | null {
   if (!employeeCode) return null;
   const segs = segments(employeeCode);
   return (segs.length >= 2 ? segs.slice(0, -1).join("-") : "") || null;
@@ -95,6 +154,18 @@ function matchToken(pt: string, kt: string, self: SelfContext): boolean {
     const d = deptOf(self.employeeCode);
     return !!d && isUnder(d, kt);
   }
+  // NO `my-dept-only` TOKEN, and the reason is worth writing down because it looks like a one-liner next to
+  // `my-dept`. "My department but not its sub-departments" cannot be decided from the code alone: an owned row
+  // is `<deptPath>-<employeeSeg>-<leaf>`, so `04-1c-0a9-0kf` is indistinguishable, by shape or by depth, from a
+  // row belonging to an employee in a SUB-department `04-1c-0a9`. Telling them apart needs to know which
+  // children the department actually has, which is a read the matcher cannot make. Expressed on depth alone the
+  // tier would be exactly right for `employees` and `departments` and would silently match nothing on the
+  // thirty-odd owned collections - a half-working chip, which is worse than an absent one.
+  //
+  // The MANAGER CHAIN (see SelfContext). A report's own code, or any row owned-coded under it - the same
+  // containment `me` uses, asked of somebody else's code. An unloaded set is empty, so these match nothing.
+  if (pt === "my-reports") return (self.reportCodes ?? []).some((c) => isUnder(c, kt));
+  if (pt === "my-org") return (self.orgCodes ?? []).some((c) => isUnder(c, kt));
   // `-*` would ask for the empty prefix; isUnder refuses it, so such a pattern matches nothing rather than
   // everything. A grant that means "all codes" is written `*` or `**`, which never reach here.
   if (pt.endsWith("-*")) return isUnder(pt.slice(0, -2), kt); // explicit code prefix, e.g. "04-*"
@@ -152,7 +223,32 @@ type GrantIndex = {
 // matches any, and the code-scope tokens are only ever meaningful positionally - all of them have to be
 // consulted whatever collection is being asked about. Anything else is a literal collection name.
 const spansCollections = (first: string): boolean =>
-  first === "**" || first === "*" || first === "me" || first === "my-dept" || first.endsWith("-*");
+  first === "**" || first === "*" || first === "me" || first === "my-dept" || first === "my-reports" || first === "my-org" || first.endsWith("-*");
+
+/**
+ * Does this grant use the manager-chain tokens at all?
+ *
+ * Resolving the caller's reports costs a read, and almost no grant mentions them - so the middleware asks this
+ * first and loads the set only when the answer is yes. Memoized on the grant object, exactly like the pattern
+ * index above, so the scan happens once per grant rather than once per request.
+ *
+ * Deliberately over-inclusive: a token anywhere in the pattern counts. The tokens are only meaningful in the id
+ * position, so scanning every token can only ever return `true` too often - which costs one read - where being
+ * too clever could return `false` for a pattern that does use them, and silently strip the caller's access.
+ */
+const NEEDS_REPORTS = new WeakMap<Grant, { direct: boolean; org: boolean }>();
+export function grantNeedsReports(grant: Grant): { direct: boolean; org: boolean } {
+  let hit = NEEDS_REPORTS.get(grant);
+  if (hit) return hit;
+  hit = { direct: false, org: false };
+  for (const p of [...Object.keys(grant.levels), ...grant.allow, ...(grant.deny ?? [])]) {
+    if (!hit.direct && p.includes("my-reports")) hit.direct = true;
+    if (!hit.org && p.includes("my-org")) hit.org = true;
+    if (hit.direct && hit.org) break;
+  }
+  NEEDS_REPORTS.set(grant, hit);
+  return hit;
+}
 
 const INDEX = new WeakMap<Grant, GrantIndex>();
 
@@ -182,17 +278,48 @@ function indexOf(grant: Grant): GrantIndex {
   return idx;
 }
 
+/**
+ * The DENY lane alone: the pattern that explicitly denies `r`, or null.
+ *
+ * Split out of `decide` so the same deny pass can be asked about a key the request is not otherwise decided
+ * on. The one caller is the delete gate (`middleware/authz.ts`): a `DELETE` resolves to the standard `write`
+ * level, which is what makes "may edit but never delete" inexpressible - the two actions are one key. Asking
+ * the deny lane about the `delete` VERB adds the missing axis without touching what grants anything: a verb
+ * deny can only ever subtract from an allow the standard lane already made.
+ *
+ * It is deliberately NOT a `decide()` on the custom lane, which is fail-closed and would require every
+ * deletion in the app to be granted a verb it has never needed.
+ */
+export function denyingPattern(grant: Grant, r: Resolved, self: SelfContext): string | null {
+  const action = r.kind === "standard" ? r.level : r.verb;
+  const keyTokens = [...r.resource.split("."), action];
+  // Both keys, for the reason Resolved#ownerResource states: a deny must bite whichever key the allow lane
+  // would have used, or the owner key becomes a way around it.
+  const ownerKeyTokens = r.ownerResource ? [...r.ownerResource.split("."), action] : null;
+  for (const d of indexOf(grant).deny) {
+    if (matchTokens(d.tokens, keyTokens, self)) return d.pattern;
+    if (ownerKeyTokens && matchTokens(d.tokens, ownerKeyTokens, self)) return d.pattern;
+  }
+  return null;
+}
+
 // The decision. Fail-closed: anything not explicitly allowed is denied; any matching deny wins.
 export function decide(grant: Grant, r: Resolved, self: SelfContext): Decision {
   const resourceTokens = r.resource.split(".");
   const action = r.kind === "standard" ? r.level : r.verb;
   const keyTokens = [...resourceTokens, action];
+  // The owner key (Resolved#ownerResource). Null for every collection but the flat-coded owner-column ones, so
+  // the shape of this function is unchanged for the whole rest of the app.
+  const ownerTokens = r.ownerResource ? r.ownerResource.split(".") : null;
+  const ownerKeyTokens = ownerTokens ? [...ownerTokens, action] : null;
   const idx = indexOf(grant);
   const ns = resourceTokens[0]!;
 
-  // deny precedence (matches the full key incl. action token; no downward ladder).
+  // deny precedence (matches the full key incl. action token; no downward ladder). BOTH keys - see
+  // Resolved#ownerResource for why this half is not optional.
   for (const d of idx.deny) {
     if (matchTokens(d.tokens, keyTokens, self)) return { allow: false, reason: `denied by "${d.pattern}"` };
+    if (ownerKeyTokens && matchTokens(d.tokens, ownerKeyTokens, self)) return { allow: false, reason: `denied by "${d.pattern}"` };
   }
 
   if (r.kind === "standard") {
@@ -207,7 +334,7 @@ export function decide(grant: Grant, r: Resolved, self: SelfContext): Decision {
         const lvl = LVL[p.level!];
         // The ladder takes the MAX, so a pattern that cannot raise it need not be matched at all.
         if (lvl <= max) continue;
-        if (matchTokens(p.tokens, resourceTokens, self)) {
+        if (matchTokens(p.tokens, resourceTokens, self) || (ownerTokens && matchTokens(p.tokens, ownerTokens, self))) {
           max = lvl;
           via = p.pattern;
           if (max >= need) return { allow: true, via: p.pattern }; // nothing above the need can change the answer
@@ -218,7 +345,9 @@ export function decide(grant: Grant, r: Resolved, self: SelfContext): Decision {
   }
   for (const list of [idx.allowByNs.get(ns), idx.allowAny]) {
     if (!list) continue;
-    for (const a of list) if (matchTokens(a.tokens, keyTokens, self)) return { allow: true, via: a.pattern };
+    for (const a of list) {
+      if (matchTokens(a.tokens, keyTokens, self) || (ownerKeyTokens && matchTokens(a.tokens, ownerKeyTokens, self))) return { allow: true, via: a.pattern };
+    }
   }
   return { allow: false, reason: `no grant for ${r.resource}.${r.verb}` };
 }
@@ -232,12 +361,17 @@ export function matchingPattern(grant: Grant, r: Resolved, self: SelfContext): s
   const resourceTokens = r.resource.split(".");
   const action = r.kind === "standard" ? r.level : r.verb;
   const keyTokens = [...resourceTokens, action];
+  // Mirrors decide()'s handling of the owner key, deny half included - a hint that disagreed with the decision
+  // would render an affordance the request then refuses, which is the failure this function exists to avoid.
+  const ownerTokens = r.ownerResource ? r.ownerResource.split(".") : null;
+  const ownerKeyTokens = ownerTokens ? [...ownerTokens, action] : null;
   const idx = indexOf(grant);
   const ns = resourceTokens[0]!;
 
   // A matching deny means not-allowed -> no positive provenance.
   for (const d of idx.deny) {
     if (matchTokens(d.tokens, keyTokens, self)) return null;
+    if (ownerKeyTokens && matchTokens(d.tokens, ownerKeyTokens, self)) return null;
   }
 
   if (r.kind === "standard") {
@@ -247,7 +381,7 @@ export function matchingPattern(grant: Grant, r: Resolved, self: SelfContext): s
       if (!list) continue;
       for (const p of list) {
         const lvl = LVL[p.level!];
-        if (lvl > bestLvl && matchTokens(p.tokens, resourceTokens, self)) { bestLvl = lvl; best = p.pattern; }
+        if (lvl > bestLvl && (matchTokens(p.tokens, resourceTokens, self) || (ownerTokens && matchTokens(p.tokens, ownerTokens, self)))) { bestLvl = lvl; best = p.pattern; }
       }
     }
     return bestLvl >= LVL[r.level] ? best : null;
@@ -258,7 +392,7 @@ export function matchingPattern(grant: Grant, r: Resolved, self: SelfContext): s
   for (const list of [idx.allowByNs.get(ns), idx.allowAny]) {
     if (!list) continue;
     for (const a of list) {
-      if ((!best || a.ord < best.ord) && matchTokens(a.tokens, keyTokens, self)) best = a;
+      if ((!best || a.ord < best.ord) && (matchTokens(a.tokens, keyTokens, self) || (ownerKeyTokens && matchTokens(a.tokens, ownerKeyTokens, self)))) best = a;
     }
   }
   return best?.pattern ?? null;

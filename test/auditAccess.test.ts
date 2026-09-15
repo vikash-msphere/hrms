@@ -10,17 +10,35 @@ const ALLOW: Decision = { allow: true };
 const DENY: Decision = { allow: false, reason: "need read on employees.07-001" };
 const ev = (m: string, p: string, d: Decision) => accessAudit(m, p, d, AUDIT);
 
-// Keeps the two audit tables honest as verbs are added: a "sensitive read" that actually MUTATES would be
-// logged as a read AND skipped by the write backstop, silently losing the write from the trail.
+// Sensitive verbs that also CHANGE STATE, so they are deliberately absent from READ_VERBS and produce BOTH
+// rows: the `.read.sensitive` one for what they streamed, and the write backstop's one for what they changed.
+// Each entry is a claim about the handler, so each carries what it mutates.
+const SENSITIVE_AND_MUTATING: Record<string, string> = {
+  "payroll-runs:bankFile":
+    "stamps `bank_file_at` on the first generation (services/bankFile.ts), which irreversibly locks the run against deletion",
+};
+
+// Keeps the two audit tables honest as verbs are added: a "sensitive read" that actually MUTATES and is listed
+// in READ_VERBS would be logged as a read AND skipped by the write backstop, silently losing the write from
+// the trail. So a sensitive verb is either a genuine read (in READ_VERBS) or a declared mutator (named above,
+// and out of READ_VERBS) - never both, and never neither.
 describe("audit policy shape", () => {
-  it("every sensitive verb is qualified `collection:verb` on a real collection, and is a READ", () => {
+  it("every sensitive verb is qualified `collection:verb` on a real collection, and is a read or a declared mutator", () => {
     for (const key of AUDIT.sensitive_verbs) {
       const [collection, verb, ...rest] = key.split(":");
       expect(rest, key).toHaveLength(0);
       expect(verb, key).toBeTruthy();
       expect(COLLECTIONS.has(collection!), key).toBe(true);
-      expect(READ_VERBS.has(key), `${key} is audited as a read but is not in READ_VERBS`).toBe(true);
+      if (SENSITIVE_AND_MUTATING[key]) {
+        expect(READ_VERBS.has(key), `${key} mutates, so it must stay OUT of READ_VERBS or the write is lost`).toBe(false);
+      } else {
+        expect(READ_VERBS.has(key), `${key} is audited as a read but is not in READ_VERBS`).toBe(true);
+      }
     }
+  });
+  it("every declared sensitive mutator is still a sensitive verb", () => {
+    const stale = Object.keys(SENSITIVE_AND_MUTATING).filter((k) => !AUDIT.sensitive_verbs.includes(k));
+    expect(stale).toEqual([]);
   });
   it("every read-only verb is qualified `collection:verb` on a real collection", () => {
     for (const key of READ_VERBS) {
@@ -88,6 +106,15 @@ describe("accessAudit", () => {
     expect(ev("POST", "/v1/payroll-runs/pr1:statutoryReport", ALLOW)).toMatchObject({ action: "payroll-runs.read.sensitive" });
   });
 
+  // `:bankFile` is BOTH, and the two rows answer different questions: the sensitive-read row says who was
+  // handed every employee's account number, the write row says who locked the run against deletion
+  // (services/bankFile.ts stamps `bank_file_at` on the first generation, and services/payroll.ts then refuses
+  // to delete it). It sat in READ_VERBS, so only the read row was ever written, and "who locked this run"
+  // answered with a read event that any write-keyed filter or alert missed.
+  it("logs :bankFile as a WRITE as well - it stamps the run irreversibly", () => {
+    expect(mutationAudit("POST", "/v1/payroll-runs/pr1:bankFile")).toMatchObject({ action: "payroll-runs.bankFile", entityId: "pr1" });
+  });
+
   it("carries only safe keys - method + the field NAME, never a value", () => {
     const a = ev("GET", "/v1/employees/abc123/bank-account", ALLOW);
     expect(Object.keys(a!.meta).sort()).toEqual(["field", "method"]); // no value-bearing keys
@@ -144,7 +171,7 @@ describe("mutationAudit", () => {
       "/v1/employees:upcomingCelebrations", "/v1/employees/e1:downloadIdentityDoc",
       "/v1/boards/b1:metrics", "/v1/automations/a1:test", "/v1/batch:run",
       "/v1/payslips:previewTemplate", "/v1/payslips/ps1:preview", "/v1/payslips/ps1:download",
-      "/v1/payroll-runs/pr1:previewPayslip", "/v1/payroll-runs/pr1:bankFile", "/v1/payroll-runs/pr1:statutoryReport",
+      "/v1/payroll-runs/pr1:previewPayslip", "/v1/payroll-runs/pr1:statutoryReport",
       "/v1/personal-documents:previewLetter", "/v1/personal-documents/pd1:download",
       "/v1/org-documents/od1:download", "/v1/candidates/c1:download", "/v1/referrals/r1:download",
       "/v1/expenses/ex1:download", "/v1/reimbursements/rb1:download", "/v1/tax-declarations/td1:download",

@@ -10,6 +10,7 @@
 import { and, eq, inArray, isNull, type SQL } from "drizzle-orm";
 import { keysetPage } from "./keysetPage";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -65,8 +66,8 @@ const scopeColumns = (raw: StocktakeInput["scope"]) =>
 // One place for the by-id predicate, so the guarded flip in `close` and the plain reads cannot drift.
 const eqUuid = (id: string) => eq(schema.stocktakes.uuid, id);
 
-export async function listStocktakes(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const where = and(showDeleted ? undefined : isNull(schema.stocktakes.deleteTime), applyScope(scope, schema.stocktakes.code, schema.stocktakes.code));
+export async function listStocktakes(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, deletedOnly = false) {
+  const where = and(deleteStateFilter(schema.stocktakes.deleteTime, showDeleted, deletedOnly), applyScope(scope, schema.stocktakes.code, schema.stocktakes.code));
   // Newest first: the count somebody is running (or just ran) is the one they came for.
   return keysetPage(deps, schema.stocktakes, "stocktakes", where, { dir: "desc", max: maxPageSize, pageToken });
 }

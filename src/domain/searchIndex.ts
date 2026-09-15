@@ -118,7 +118,13 @@ export const SEARCH_INDEX: SearchEntry[] = [
     match: ["title", "fileName", "documentType", "financialYear"], title: ["title", "fileName"], subtitle: ["documentType"] },
   { collection: "letter-templates", table: schema.letterTemplates, scoping: flat,
     match: ["label", "category", "filename"], title: ["label"], subtitle: ["category"] },
-  { collection: "announcements", table: schema.announcements, scoping: flat,
+  // SCOPED BY AUTHOR, matching `services/announcements.ts#visibleWhere`, which binds the author column. Held
+  // as `flat` this was the one entry that disagreed with its own list service: an `own`-breadth caller's board
+  // shows only the posts they wrote, while search applied no row filter at all - so ⌘K would return the title
+  // and subtitle of every post in the org to somebody whose board shows none of them. Inert on the seeded
+  // policy (every role holds `announcements.**`, so both sides answer "all"), and live the moment an admin
+  // narrows announcements through the ACL, which is the entire purpose of the ACL.
+  { collection: "announcements", table: schema.announcements, scoping: scoped("authorEmployeeId"),
     match: ["title", "bodyText", "category", "kind"], title: ["title"], subtitle: ["kind"] },
   { collection: "events", table: schema.events, scoping: scoped("code"),
     match: ["title", "description"], title: ["title"], subtitle: ["description"] },

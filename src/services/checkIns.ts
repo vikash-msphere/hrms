@@ -1,6 +1,7 @@
-import { eq, and, inArray, isNull, type SQL } from "drizzle-orm";
+import { eq, and, inArray, type SQL } from "drizzle-orm";
 import { CODE_WIDTH, allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -29,11 +30,11 @@ const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 const cleanItems = (items?: ActionItem[]) =>
   Array.isArray(items) ? JSON.stringify(items.filter((i) => i?.text?.trim()).map((i) => ({ text: i.text.trim(), done: !!i.done }))) : null;
 
-export async function listCheckIns(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, showDeleted = false) {
+export async function listCheckIns(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.checkIns.code, schema.checkIns.employeeId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.checkIns.employeeId, empId));
-  if (!showDeleted) conds.push(isNull(schema.checkIns.deleteTime));
+  conds.push(deleteStateFilter(schema.checkIns.deleteTime, showDeleted, deletedOnly));
   // Paged in SQL (services/keysetPage.ts) on `createdAt` (what the cursor carries), newest first. It used to
   // read every matching check-in into the isolate and slice one page out - this table grows as headcount x
   // cadence forever, and D1 bills rows read, so the whole history was paid for on every page. The soft-delete

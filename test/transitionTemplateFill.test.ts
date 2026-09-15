@@ -102,3 +102,62 @@ describe("choosing a template after the process was opened", () => {
     await expect(updateTransition(deps, actor, opened.uuid, { template: ONBOARDING.id })).rejects.toThrow(/active process/);
   });
 });
+
+// "SO EVERY TASK ALWAYS HAS AN OWNER" - the claim the fallback chain makes, and the one it used to break.
+//
+// `resolveAssignee` fell back from the manager only when the pointer was NULL, never when it resolved to
+// somebody terminated, disabled or soft-deleted - and a departed manager is the ORDINARY case, not a
+// contrived one. Winding a team down offboards the manager first and their reports afterwards, so every
+// offboarding checklist that follows resolved its `manager` tasks - collect the laptop, revoke system access,
+// exit interview - onto the person who had already gone. The task then showed as owned (their code was
+// allocated for it) while nobody who could see it had been told, which is how a checklist sits open with
+// "revoke system access" unticked.
+describe("a checklist never lands on somebody who has left", () => {
+  const managerTasks = ONBOARDING.tasks.filter((t) => t.assignee?.type === "manager");
+
+  it("hands a departed manager's tasks to the actor who started the process", async () => {
+    const actor = await seedActor();
+    const hire = await seedHire();
+    const gone = await seedHire();
+    await deps.db.update(schema.employees).set({ status: "terminated" }).where(eq(schema.employees.uuid, gone));
+    await deps.db.update(schema.employees).set({ managerId: gone }).where(eq(schema.employees.uuid, hire));
+
+    const opened = await createTransition(deps, actor, { employee: `employees/${hire}`, kind: "onboarding", template: ONBOARDING.id, anchor_date: "2026-09-01" });
+    const tasks = await tasksOf(opened.uuid);
+    expect(managerTasks.length).toBeGreaterThan(0);
+    for (const t of managerTasks) {
+      expect(tasks.find((row) => row.title === t.title)!.assigneeId, t.title).toBe(actor.employeeId);
+    }
+    // Nothing is owned by the person who left.
+    expect(tasks.some((row) => row.assigneeId === gone)).toBe(false);
+  });
+
+  it("still hands them to the manager when the manager is here", async () => {
+    const actor = await seedActor();
+    const hire = await seedHire();
+    const manager = await seedHire();
+    await deps.db.update(schema.employees).set({ managerId: manager }).where(eq(schema.employees.uuid, hire));
+
+    const opened = await createTransition(deps, actor, { employee: `employees/${hire}`, kind: "onboarding", template: ONBOARDING.id, anchor_date: "2026-09-01" });
+    const tasks = await tasksOf(opened.uuid);
+    for (const t of managerTasks) {
+      expect(tasks.find((row) => row.title === t.title)!.assigneeId, t.title).toBe(manager);
+    }
+  });
+
+  it("falls all the way to the subject when neither the manager nor the actor is live", async () => {
+    // The last rung of the chain, and the only one that cannot be wrong: the process is about them.
+    const actor = await seedActor();
+    const hire = await seedHire();
+    const gone = await seedHire();
+    await deps.db.update(schema.employees).set({ status: "terminated" }).where(eq(schema.employees.uuid, gone));
+    await deps.db.update(schema.employees).set({ managerId: gone }).where(eq(schema.employees.uuid, hire));
+    await deps.db.update(schema.employees).set({ disabled: true }).where(eq(schema.employees.uuid, actor.employeeId!));
+
+    const opened = await createTransition(deps, actor, { employee: `employees/${hire}`, kind: "onboarding", template: ONBOARDING.id, anchor_date: "2026-09-01" });
+    const tasks = await tasksOf(opened.uuid);
+    for (const t of managerTasks) {
+      expect(tasks.find((row) => row.title === t.title)!.assigneeId, t.title).toBe(hire);
+    }
+  });
+});

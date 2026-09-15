@@ -1,6 +1,7 @@
 import { eq, and, gte, isNull, lte, type SQL } from "drizzle-orm";
 import { CODE_WIDTH, allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -19,13 +20,13 @@ export type ShiftAssignmentInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
-export async function listShiftAssignments(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, from?: string, to?: string, showDeleted = false) {
+export async function listShiftAssignments(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, from?: string, to?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.shiftAssignments.code, schema.shiftAssignments.employeeId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.shiftAssignments.employeeId, empId));
   if (from && !Number.isNaN(dayMs(from))) conds.push(gte(schema.shiftAssignments.date, new Date(dayMs(from))));
   if (to && !Number.isNaN(dayMs(to))) conds.push(lte(schema.shiftAssignments.date, new Date(dayMs(to) + 86_399_999)));
-  if (!showDeleted) conds.push(isNull(schema.shiftAssignments.deleteTime));
+  conds.push(deleteStateFilter(schema.shiftAssignments.deleteTime, showDeleted, deletedOnly));
   // Paged in SQL (services/keysetPage.ts) on `createdAt`, which is what the cursor carries. It used to read
   // every assignment the filters matched and slice a page out of it in the isolate - a roster grows as
   // headcount x days, and D1 bills rows read, so an unfiltered list cost the whole table to answer with 50

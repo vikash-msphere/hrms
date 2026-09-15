@@ -19,6 +19,7 @@ import { uploadPhoto, clearPhoto, getPhoto, uploadSignature, clearSignature, get
 import { putAttachment, downloadAttachment, deleteAttachment, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { identityDocSlot } from "../services/identityDetails";
+import { whoCanSeeMe } from "../services/myViewers";
 import { toEmployeeResource } from "../http/serialize";
 import { jsonBody } from "../http/jsonRequest";
 import { redactIdentity, redactFlat, deniedFieldKeys } from "../http/fieldAccess";
@@ -122,6 +123,11 @@ const records = collectionRoutes<EmployeeWrite, typeof schema.employees>({
     // Auto-enrol the employee in default benefit plans (idempotent). Used by the new-hire automation, and
     // callable by HR directly. Answers with a count, not the employee.
     enrollDefaultBenefits: { raw: async (c, id) => c.json(await enrollDefaultBenefits(c.get("deps"), c.get("user"), id)) },
+    // "Who can see my record?" - the effective-access report aimed at the person asking rather than at an
+    // admin. The middleware gates it as `employees.me.viewers`, which every role holds for THEMSELVES only
+    // (grants.ts OWN_PII_ALLOW); the service additionally nails the target to the caller's own employee id,
+    // so the path id is never what decides whose record is reported. Answers with the report, not an employee.
+    viewers: { raw: async (c) => c.json(await whoCanSeeMe(c.get("deps"), c.get("user"))) },
   },
 });
 

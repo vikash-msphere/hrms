@@ -16,6 +16,7 @@
 // covered - it pinned the client to the seed, not to the org's setting.
 import { DEFAULT_TICKET_WORKFLOW, type StateMachine, type Transition } from "../../../src/domain/stateMachines";
 import { readSetting } from "./settingsStore";
+import { subscribeInvalidations } from "./resourceStore";
 import { useEffect, useState } from "react";
 
 export type TicketTransition = Transition;
@@ -54,13 +55,43 @@ export function hydrateTicketWorkflow(): Promise<StateMachine> {
   return hydrating;
 }
 
-/** The workflow in force, re-rendering the caller once the org's own table has been read. */
+/**
+ * Read it AGAIN, because the memo above is settled for the life of the page.
+ *
+ * `services/tickets.ts` decides every transition from `settings/ticket-workflow` and re-reads the key per
+ * request, so it adopts a saved workflow immediately. Without this the SPA kept the table it booted with for
+ * the rest of the session - which is verbatim the symptom this module's header says reading the org's table
+ * was written to remove: the board renders the old columns and the move menu offers transitions the server
+ * now refuses. Reading the org's table fixed the boot case and left the after-save case.
+ *
+ * `lib/orgDay.ts#rehydrateOrgTimezone` is the same four lines for the same reason; `lib/clock.tsx` is the
+ * third. This was the one of the three that had neither.
+ */
+export function rehydrateTicketWorkflow(): Promise<StateMachine> {
+  hydrating = null;
+  return hydrateTicketWorkflow();
+}
+
+// Any settings write - this tab's or a sibling's, since the bus routes a remote invalidation through the same
+// subscription - re-reads the workflow, and tells every mounted `useTicketWorkflow` to take the new table.
+const workflowListeners = new Set<(sm: StateMachine) => void>();
+subscribeInvalidations((collections) => {
+  if (!collections.includes("settings")) return;
+  void rehydrateTicketWorkflow().then((sm) => { for (const fn of workflowListeners) fn(sm); });
+});
+
+/** The workflow in force, re-rendering the caller once the org's own table has been read - and after a save. */
 export function useTicketWorkflow(): StateMachine {
   const [sm, setSm] = useState<StateMachine>(active);
   useEffect(() => {
     let live = true;
     void hydrateTicketWorkflow().then((next) => { if (live) setSm(next); });
-    return () => { live = false; };
+    // Snapshotting into state on mount is what makes the subscription above necessary HERE too: clearing the
+    // module memo corrects `ticketWorkflow()` for the next caller, but a component already mounted holds the
+    // table it copied and would keep rendering it until it remounted.
+    const onChange = (next: StateMachine) => { if (live) setSm(next); };
+    workflowListeners.add(onChange);
+    return () => { live = false; workflowListeners.delete(onChange); };
   }, []);
   return sm;
 }

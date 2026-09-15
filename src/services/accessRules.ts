@@ -4,7 +4,7 @@
 // byte-identical to what the seed's `compileGrant` produces, so a created row is indistinguishable from a
 // seeded one and the engine + BOLA oracles never change. No grant blob, no recompile. Super-only via the
 // `access-rules` collection key (the middleware gates it).
-import { and, eq, inArray, isNotNull, lte } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lte } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -14,10 +14,11 @@ import { clearCache, clearCachePrefix } from "../lib/cache";
 import { notFound, failedPrecondition, alreadyExists, invalidArgument } from "../lib/errors";
 import { validateAccessRule, type AccessRuleInput } from "../domain/policyValidate";
 import { deriveNarrowing } from "../domain/compileGrants";
-import { EVERYONE_ROLE } from "../domain/grants";
+import { EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
 import { uuidToCode, codeToUuid } from "../lib/authzResolve";
 import { genId } from "../lib/idCodec";
-import { getSettingValue } from "./settings";
+import { getSettingValue, upsertSetting } from "./settings";
+import { systemActor } from "../lib/systemActor";
 import { accessAdminEmployeeIds } from "./accessRequest";
 import { notifyMany } from "./notifications";
 import { toAccessRuleResource, parseRulePattern } from "../http/serialize";
@@ -33,6 +34,10 @@ export async function buildPattern(deps: Deps, r: AccessRuleInput): Promise<stri
   let idToken = "";
   if (r.scope === "self") idToken = "me";
   else if (r.scope === "dept") idToken = "my-dept";
+  // The manager chain, subject-relative like the two above: the token carries no code, and who it reaches is
+  // resolved per caller when the decision is made (domain/permissions.ts matchToken).
+  else if (r.scope === "reports") idToken = "my-reports";
+  else if (r.scope === "org") idToken = "my-org";
   else if (r.scope === "exact" || r.scope === "subtree") {
     const ref = r.scopeRef!;
     const slash = ref.indexOf("/");
@@ -78,12 +83,46 @@ async function approvalRequired(deps: Deps): Promise<boolean> {
   return cfg.enabled === true;
 }
 
+/**
+ * NOBODY AUTHORS THEIR OWN AUTHORITY. Refused for every subject that feeds the author's own grant.
+ *
+ * middleware/auth.ts assembles a caller's authority from THREE subjects, not one - lib/policyLoad.ts merges
+ * the caller's user rows over `mergeGrants(everyone rows, own-role rows)`. So "cannot edit rules of the role
+ * you are using" was one third of the guard: an ACL admin could still author a broad rule against their OWN
+ * user row, or against `everyone` (which is unioned into every non-super caller's grant), and hold whatever
+ * it granted from the next request onward. One rule per collection is all it takes to reach `compensation`,
+ * `payslips` or `audit` at admin - precisely the collections the seeded policy keeps a delegated admin out of.
+ *
+ * Latent while `access-rules` has no seeded grant (only super holds it, and super already has `**`), but
+ * delegating access management is the feature: `useCanManageAccess()` and the four-eyes queue exist so that
+ * more than one person administers permissions.
+ *
+ * Super is exempt only for `everyone`: a super author cannot widen themselves with it (they already hold
+ * `**`), and org-wide rules are a normal super action - the seeded `everyone` grants are exactly that shape.
+ * The self-subject guards apply to everyone, super included, because writing a rule for the role or the user
+ * you are signed in as is never the way to change your own access.
+ */
+function assertNotSelfWidening(actor: AppUser, subjectKind: "role" | "user", subject: string): void {
+  if (subjectKind === "user") {
+    if (subject === actor.uuid) throw failedPrecondition("cannot write rules for your own user - ask another access admin");
+    return;
+  }
+  if (subject === actor.role) throw failedPrecondition("cannot edit rules of the role you are using");
+  if (subject === EVERYONE_ROLE && !isSuperGrant(actor.grant)) {
+    throw failedPrecondition("the 'everyone' role includes you, so its rules are super-admin only");
+  }
+}
+
 // What the rule GRANTS, in words - the one sentence builder for every notification and audit line the
 // server writes about a rule ("write access to their department's leave requests"). The web UI has its own
 // richer renderer (collectionMeta + verbMeta); this is the plain-language server-side equivalent.
-export function ruleSentence(r: { collection: string; scope: string; field?: string; level?: string; verb?: string; effect: string }): string {
+export function ruleSentence(r: { collection: string; scope: string; scopeRef?: string; field?: string; level?: string; verb?: string; effect: string }): string {
   const nouns = r.collection.replace(/-/g, " ");
-  const where = r.scope === "self" ? `their own ${nouns}` : r.scope === "dept" ? `their department's ${nouns}` : r.scope === "exact" || r.scope === "subtree" ? `one ${nouns} record` : nouns;
+  // A subtree anchored to a DEPARTMENT is the named-department tier - one department's rows, not one record -
+  // and the trail is where somebody checks which. Callers that do not resolve the anchor omit `scopeRef` and
+  // get the record wording, which is right for `exact` and no worse than before for the rest.
+  const anchored = r.scopeRef?.startsWith("departments/") ? `one department's ${nouns}` : `one ${nouns} record`;
+  const where = r.scope === "self" ? `their own ${nouns}` : r.scope === "dept" ? `their department's ${nouns}` : r.scope === "exact" || r.scope === "subtree" ? anchored : nouns;
   const what = r.verb ? `the "${r.verb}" action on ${where}` : r.scope === "create" ? `creating ${nouns}` : `${r.level ?? "read"} access to ${where}${r.field ? ` (field "${r.field}")` : ""}`;
   return r.effect === "deny" ? `no ${what}` : what;
 }
@@ -178,7 +217,7 @@ async function notifyGranted(deps: Deps, actor: AppUser, row: typeof schema.acce
   if (row.effect !== "allow" || row.status !== "active" || r.subject === EVERYONE_ROLE) return;
   const empIds = (await affectedEmployeeIds(deps, row.subjectKind, row.subject)).filter((e) => e !== actor.employeeId);
   if (!empIds.length) return;
-  const sentence = ruleSentence({ collection: row.namespace, scope: r.scope, field: r.field, level: row.level ?? undefined, verb: r.verb, effect: row.effect });
+  const sentence = ruleSentence({ collection: row.namespace, scope: r.scope, scopeRef: r.scopeRef, field: r.field, level: row.level ?? undefined, verb: r.verb, effect: row.effect });
   await notifyMany(deps, empIds, {
     type: "access.granted",
     title: "You have new access",
@@ -213,11 +252,39 @@ async function serializeRule(deps: Deps, row: typeof schema.accessRules.$inferSe
 // rows that have an object at all.
 export async function withObjectRefs(deps: Deps, rows: (typeof schema.accessRules.$inferSelect)[]) {
   return Promise.all(
-    rows.map(async (r) => ({
-      ...r,
-      _objectUuid: r.scopeKind === "exact" && r.matchCode ? await codeToUuid(deps, r.namespace, r.matchCode) : null,
-    })),
+    rows.map(async (r) => {
+      if (r.scopeKind === "exact" && r.matchCode) {
+        return { ...r, _objectUuid: await codeToUuid(deps, r.namespace, r.matchCode), _objectCollection: r.namespace };
+      }
+      if (r.scopeKind === "subtree" && r.scopeCode) {
+        const anchor = await resolveAnchor(deps, r.namespace, r.scopeCode);
+        return { ...r, _objectUuid: anchor?.uuid ?? null, _objectCollection: anchor?.collection ?? null };
+      }
+      return { ...r, _objectUuid: null, _objectCollection: null };
+    }),
   );
+}
+
+/**
+ * The object a SUBTREE rule is anchored to, from the code prefix the rule stores.
+ *
+ * A subtree rule keeps only the prefix (`scope_code`) - the decision input - so the anchor's collection is
+ * not written down anywhere, and it cannot be assumed to be the rule's own: granting one department's leave
+ * requests stores a `departments` code on a `leave-requests` rule. Rather than add a column for a fact that
+ * is only ever needed to draw a name on an admin screen, it is recovered here, and the recovery is total
+ * because only two collections produce codes that anything else nests under: `departments` (the hierarchy)
+ * and `employees` (owned rows hang off an employee). Anchoring to anything else composes a prefix nothing is
+ * coded under, which the validator refuses outright.
+ *
+ * The rule's own namespace is tried first so a same-collection anchor (a departments subtree) costs one read
+ * and never risks matching a coincidentally equal code in another table.
+ */
+async function resolveAnchor(deps: Deps, namespace: string, code: string): Promise<{ collection: string; uuid: string } | null> {
+  for (const collection of [...new Set([namespace, "departments", "employees"])]) {
+    const uuid = await codeToUuid(deps, collection, code);
+    if (uuid) return { collection, uuid };
+  }
+  return null;
 }
 
 /**
@@ -228,7 +295,7 @@ export async function withObjectRefs(deps: Deps, rows: (typeof schema.accessRule
 export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown, opts: { quiet?: boolean } = {}) {
   const r = validateAccessRule(body, actor.policy, deps.clock.now());
 
-  // Resolve + guard the subject.
+  // Resolve + guard the subject. See assertNotSelfWidening for why all three subject kinds are checked.
   let subject: string;
   if (r.subjectKind === "user") {
     subject = r.subject.slice("users/".length);
@@ -236,8 +303,8 @@ export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown
   } else {
     subject = r.subject;
     if (!(await deps.db.select({ n: schema.roles.name }).from(schema.roles).where(eq(schema.roles.name, subject)).limit(1))[0]) throw notFound("subject role not found");
-    if (subject === actor.role) throw failedPrecondition("cannot edit rules of the role you are using");
   }
+  assertNotSelfWidening(actor, r.subjectKind, subject);
 
   const pattern = await buildPattern(deps, r);
   const n = deriveNarrowing(pattern);
@@ -254,6 +321,8 @@ export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown
     status: (await approvalRequired(deps)) ? ("pending" as const) : ("active" as const),
     requestedBy: actor.uuid,
     expiresAt: r.expiresAt ?? null,
+    // The threshold, stored as JSON beside the pattern rather than compiled into it - see db/schema.ts.
+    condition: r.condition ? JSON.stringify(r.condition) : null,
     source: "acl" as const, // authored by a person here; services/ticketShares.ts owns the "ticket-share" rows
   };
 
@@ -268,7 +337,7 @@ export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown
     await deps.db
       .select({ id: schema.accessRules.uuid })
       .from(schema.accessRules)
-      .where(and(eq(schema.accessRules.subject, subject), eq(schema.accessRules.subjectKind, r.subjectKind), eq(schema.accessRules.pattern, pattern), eq(schema.accessRules.effect, r.effect), eq(schema.accessRules.source, "acl")))
+      .where(and(eq(schema.accessRules.subject, subject), eq(schema.accessRules.subjectKind, r.subjectKind), eq(schema.accessRules.pattern, pattern), eq(schema.accessRules.effect, r.effect), eq(schema.accessRules.source, "acl"), r.condition ? eq(schema.accessRules.condition, JSON.stringify(r.condition)) : isNull(schema.accessRules.condition)))
       .limit(1)
   )[0];
   if (dup) throw alreadyExists("an identical access rule already exists");
@@ -320,8 +389,10 @@ export async function cloneAccessRules(deps: Deps, actor: AppUser, body: unknown
     if (!(await deps.db.select({ u: schema.users.uuid }).from(schema.users).where(eq(schema.users.uuid, to.subject)).limit(1))[0]) throw notFound("target user not found");
   } else {
     if (!(await deps.db.select({ n: schema.roles.name }).from(schema.roles).where(eq(schema.roles.name, to.subject)).limit(1))[0]) throw notFound("target role not found");
-    if (to.subject === actor.role) throw failedPrecondition("cannot edit rules of the role you are using");
   }
+  // Same three-subject guard the per-rule create applies (assertNotSelfWidening): copying forty rules onto
+  // yourself, or onto `everyone`, widens the author exactly as authoring one does.
+  assertNotSelfWidening(actor, to.subjectKind, to.subject);
 
   // ACTIVE rules only. A `pending` row is a request nobody has approved and a `pending_delete` one is on its
   // way out - copying either would forward a decision that has not been made.
@@ -513,6 +584,62 @@ export function ruleIdFromRef(ref: unknown): string {
   const id = s.startsWith("access-rules/") ? s.slice("access-rules/".length) : s;
   if (!id) throw invalidArgument("rule is required as access-rules/{id}");
   return id;
+}
+
+/**
+ * Periodic access recertification: remind the access admins to confirm or revoke the standing privileges.
+ *
+ * `expires_at` handles access somebody KNEW was temporary. Nothing handled the rest - a grant made for one
+ * project, for one person's leave cover, for an audit three quarters ago, stays exactly as it was because
+ * removing it is nobody's job on any particular day. That is how an HR system ends up with more payroll
+ * writers than it has payroll staff, and no single moment where anyone did anything wrong.
+ *
+ * Opt-in per org (`access-review` settings blob) and DIGEST-shaped, not a queue: it names the standing
+ * privileged rules - permanent, active, write-or-better or a custom method, and not the `everyone` role's
+ * self-service - and points at the permissions screen where they are already removable. Deliberately no new
+ * "attestation" resource: the decision an admin makes here is to keep a rule or delete it, both of which the
+ * existing surface does, audited, and inventing a parallel record of "confirmed on this date" would be a
+ * second source of truth about access that nothing enforces.
+ *
+ * Due-ness is stored on the setting itself, so a skipped tick (a failed cron, a redeploy) simply runs late
+ * rather than being missed - the same reasoning as the expiry sweep below being hygiene rather than the
+ * enforcement mechanism.
+ */
+export async function reviewStandingAccess(deps: Deps): Promise<number> {
+  const cfg = await getSettingValue<{ enabled?: boolean; every_days?: number; last_run?: string }>(deps, "access-review", {});
+  if (cfg.enabled !== true) return 0;
+  const everyDays = Number.isFinite(cfg.every_days) && (cfg.every_days as number) > 0 ? Math.round(cfg.every_days as number) : 90;
+  const now = deps.clock.now();
+  const last = cfg.last_run ? Date.parse(cfg.last_run) : NaN;
+  if (Number.isFinite(last) && +now - last < everyDays * 86_400_000) return 0;
+
+  // Standing = permanent and active. A rule with an expiry is already handled, and a pending one is a
+  // request nobody has approved, so neither is something to re-confirm.
+  const standing = (await deps.db
+    .select()
+    .from(schema.accessRules)
+    .where(and(isNull(schema.accessRules.expiresAt), eq(schema.accessRules.status, "active"))))
+    // Privileged only: a read rule is not what an access review is for, and including every one of them
+    // would bury the handful that matter under a hundred that do not. `everyone` is excluded for the same
+    // reason - it is the org's own self-service baseline, not a grant to a person.
+    .filter((r) => r.subject !== EVERYONE_ROLE && (r.level === null || r.level === "write" || r.level === "admin"));
+
+  // Record the run whether or not there is anything to say, so an org with nothing outstanding does not get
+  // asked again tomorrow.
+  await upsertSetting(deps, systemActor(), "access-review", { ...cfg, last_run: new Date(+now).toISOString() });
+  if (!standing.length) return 0;
+
+  const empIds = await accessAdminEmployeeIds(deps);
+  if (!empIds.length) return 0;
+  const subjects = new Set(standing.map((r) => subjectKey(r))).size;
+  await notifyMany(deps, empIds, {
+    type: "access.review",
+    title: "Time to review standing access",
+    body: `${standing.length} permanent rule${standing.length === 1 ? "" : "s"} across ${subjects} role${subjects === 1 ? "" : "s"}/people grant write access or a custom method. Confirm each is still needed, and remove the ones that are not.`,
+    link: "#/settings/permissions",
+  });
+  await audit(deps, "system", "access-review.due", "access-rules", undefined, { rules: standing.length, subjects, every_days: everyDays });
+  return standing.length;
 }
 
 // Nightly hygiene: drop rules whose expiry has passed. They already stopped deciding the moment they lapsed

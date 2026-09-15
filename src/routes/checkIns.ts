@@ -25,5 +25,5 @@ export const checkIns = collectionRoutes<CheckInInput, typeof schema.checkIns>({
   param: "check_in_id",
   writeSchema,
   serialize: toCheckInResource,
-  list: (c, page) => listCheckIns(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), page.showDeleted),
+  list: (c, page) => listCheckIns(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), page.showDeleted, page.deletedOnly),
 });

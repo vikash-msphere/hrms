@@ -53,6 +53,12 @@ const dsn = import.meta.env.DEV && !devOptIn ? undefined : import.meta.env.VITE_
 const SENSITIVE_PAGES = [
   "payslips", // a table of net pay, deductions and statutory contributions - values with labels around them
   "payroll-runs", // the same, per employee, for a whole company
+  // Loans and advances: what named colleagues have borrowed from the company, what is still outstanding and
+  // what is being taken out of their pay each month, all on one table. Debt passes the test above on its own
+  // terms - somebody asking the company for money is not ordinary business data about them - and `loans` is
+  // in MEMORY_ONLY for the same reason. The card headings, the status badges and the buttons stay readable
+  // through `unmask`, so what this costs is the figures.
+  "loans",
   // Offers: a table of what the company offered named people, which is the payroll-runs shape one step before
   // anybody is an employee - and the more negotiation-sensitive version of it, since two candidates' figures
   // side by side is the comparison an offer is confidential to prevent. The panel's own scorecard is already

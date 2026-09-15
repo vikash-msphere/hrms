@@ -4,22 +4,26 @@
 import { invalidArgument } from "../lib/errors";
 import { COLLECTIONS } from "./collections";
 import type { Level } from "./permissions";
-import { isFieldScopeTarget, type Policy } from "./manifests";
+import { isFieldScopeTarget, supportedScopesOf, type Policy } from "./manifests";
+import { CONDITION_OPS, conditionFieldsOf, parseCondition, type RuleCondition } from "./ruleCondition";
 
 const LEVELS = new Set<Level>(["read", "write", "admin"]);
 // `create` is the collection-level CREATE gate: it compiles to the 1-token `<collection>` pattern (matches the
 // bare collection POST + list, never an individual object). Distinct from `all`, which compiles to
 // `<collection>.**` (every object). The engine already evaluates 1-token patterns (the seed uses them); this
 // just lets the ACL author one.
-const SCOPES = new Set(["all", "self", "dept", "subtree", "exact", "create"]);
+// `reports` / `org` are the manager chain (domain/permissions.ts SelfContext). Subject-relative like `self`
+// and `dept`, so like them they take no `scope_ref`.
+const SCOPES = new Set(["all", "self", "reports", "org", "dept", "subtree", "exact", "create"]);
 const VERB_RE = /^[a-zA-Z][a-zA-Z0-9]*$/; // a custom-method name (e.g. download, approve)
 
-export type AccessRuleScope = "all" | "self" | "dept" | "subtree" | "exact" | "create";
+export type AccessRuleScope = "all" | "self" | "reports" | "org" | "dept" | "subtree" | "exact" | "create";
 export type AccessRuleInput = {
   subjectKind: "role" | "user";
   subject: string; // role name, or "users/<id>" (the id already wire-decoded by the inbound edge)
   collection: string;
   scope: AccessRuleScope;
+  condition?: RuleCondition;
   scopeRef?: string; // "{collection}/{id}" for scope exact/subtree
   field?: string;
   level?: Level; // present only for an allow level rule
@@ -49,6 +53,22 @@ export function validateAccessRule(body: unknown, policy: Policy, now: Date = ne
   if (typeof scope !== "string" || !SCOPES.has(scope)) throw invalidArgument("scope must be all|self|dept|subtree|exact|create");
   if ((scope === "exact" || scope === "subtree") && (typeof b.scope_ref !== "string" || !b.scope_ref.includes("/"))) {
     throw invalidArgument(`scope ${scope} requires scope_ref as {collection}/{id}`);
+  }
+  // A CROSS-collection anchor - `{collection: "leave-requests", scope: "subtree", scope_ref: "departments/x"}`
+  // - is how a named department is granted, and it works because every owned code is composed under its
+  // employee, which is composed under its department: the compiled `<deptCode>-*` token reaches the whole
+  // department's rows. It is only meaningful when the rule's collection is department-coded, which is exactly
+  // what declaring the `dept` tier says (supportedScopesOf derives `named-dept` from it). Anchoring a flat
+  // collection to a department, or to some third collection, composes a prefix nothing is coded under: the
+  // rule stores, displays and decides NOTHING, which is the one outcome an access UI must never produce
+  // silently. `exact` is unaffected - it pins to one object of the rule's own collection.
+  if (scope === "subtree") {
+    const refCollection = String(b.scope_ref).slice(0, String(b.scope_ref).indexOf("/"));
+    if (refCollection !== collection) {
+      if (refCollection !== "departments") throw invalidArgument(`scope_ref for scope=subtree must be a ${collection} or a departments object`);
+      const tiers = supportedScopesOf(policy, collection);
+      if (!tiers.includes("named-dept")) throw invalidArgument(`"${collection}" is not department-coded, so it cannot be scoped to one department`);
+    }
   }
   // The create gate is collection-level only: no per-object/field/verb narrowing (a verb/field would make the
   // 1-token pattern meaningless).
@@ -86,10 +106,28 @@ export function validateAccessRule(body: unknown, policy: Policy, now: Date = ne
     if (t <= +now) throw invalidArgument("expire_time must be in the future");
     expiresAt = new Date(t);
   }
+  // An optional THRESHOLD on the row (domain/ruleCondition.ts). Validated against the collection's declared
+  // conditionable fields, so a typo is refused at authoring time rather than becoming a rule that silently
+  // refuses everything (the evaluator fails closed on an unknown field, which is right at decision time and
+  // useless as feedback here).
+  let condition: RuleCondition | undefined;
+  if (b.condition !== undefined && b.condition !== null && b.condition !== "") {
+    const parsed = parseCondition(b.condition);
+    if (!parsed) throw invalidArgument(`condition must be {field, op, value} with op one of ${CONDITION_OPS.join("/")} and a numeric value`);
+    const allowed = conditionFieldsOf(collection);
+    if (!allowed[parsed.field]) {
+      const names = Object.keys(allowed);
+      throw invalidArgument(names.length ? `condition field must be one of ${names.join("/")} for ${collection}` : `${collection} rules cannot carry a condition`);
+    }
+    // A limit on a rule that grants nothing to exercise it against is a rule that reads as capped and is not.
+    if (scope === "create") throw invalidArgument("a create rule has no row to measure, so it cannot carry a condition");
+    condition = parsed;
+  }
   return {
     subjectKind,
     subject,
     collection,
+    condition,
     scope: scope as AccessRuleScope,
     scopeRef: typeof b.scope_ref === "string" ? b.scope_ref : undefined,
     field: typeof field === "string" ? field : undefined,

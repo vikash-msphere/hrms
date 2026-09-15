@@ -1,6 +1,7 @@
-import { eq, and, gte, lte, isNull, type SQL } from "drizzle-orm";
+import { eq, and, gte, lte, type SQL } from "drizzle-orm";
 import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
@@ -45,14 +46,14 @@ async function assertLiveCard(deps: Deps, cardId: string) {
   if (!card || card.del) throw invalidArgument("task not found");
 }
 
-export async function listTimeEntries(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, from?: string, to?: string, status?: string, showDeleted = false) {
+export async function listTimeEntries(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, from?: string, to?: string, status?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.timeEntries.code, schema.timeEntries.employeeId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.timeEntries.employeeId, empId));
   if (status) conds.push(eq(schema.timeEntries.status, status as Status));
   if (from && !Number.isNaN(dayMs(from))) conds.push(gte(schema.timeEntries.date, new Date(dayMs(from))));
   if (to && !Number.isNaN(dayMs(to))) conds.push(lte(schema.timeEntries.date, new Date(dayMs(to) + 86_399_999)));
-  if (!showDeleted) conds.push(isNull(schema.timeEntries.deleteTime));
+  conds.push(deleteStateFilter(schema.timeEntries.deleteTime, showDeleted, deletedOnly));
   // Paged in SQL (services/keysetPage.ts), on `createdAt` - which is what the cursor carries. It used to read
   // EVERY entry the filters matched and slice one page out of it in the isolate, which for a caller with no
   // `?employee` filter is the whole table: `time_entries` grows as headcount x working days, and D1 bills the

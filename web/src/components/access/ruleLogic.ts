@@ -35,7 +35,11 @@ export function wherePhrase(r: Pick<AccessRule, "collection" | "scope" | "scope_
     case "exact":
       return `one ${meta.singular}`;
     case "subtree":
-      return `one ${meta.singular} and everything below it`;
+      // A subtree anchored to a DEPARTMENT is the named-department tier and reaches that department's rows,
+      // which is a different sentence from "one <thing> and everything below it" - and the one an admin
+      // reading the rules list is trying to check. The anchor's collection is on the ref, so they are
+      // distinguishable without a second field.
+      return r.scope_ref?.startsWith("departments/") ? `one department's ${meta.plural}` : `one ${meta.singular} and everything below it`;
     case "create":
       return `new ${meta.plural}`;
     default:
@@ -48,14 +52,25 @@ export function wherePhrase(r: Pick<AccessRule, "collection" | "scope" | "scope_
  * `subjectLabel` omitted it reads as a bare predicate ("can read …"), which is what the commit line on the
  * modal's Add button wants ("Grant: <sentence>").
  */
+/** ", up to 50,000" for a rule carrying an approval limit, or "" for the overwhelming majority that do not. */
+function limitPhrase(r: AccessRule): string {
+  const c = r.condition as { field?: string; op?: string; value?: number } | undefined;
+  if (!c || typeof c.value !== "number") return "";
+  const word = c.op === "lt" ? "under" : c.op === "gte" ? "from" : c.op === "gt" ? "over" : "up to";
+  return `, ${word} ${c.value.toLocaleString()}`;
+}
+
 export function ruleSentence(r: AccessRule, subjectLabel?: string): string {
   const who = subjectLabel ?? (r.subject_kind === "role" ? roleLabel(r.subject) : "this person");
   const field = r.field ? ` (${r.field} field)` : "";
   const deny = r.effect === "deny";
   if (r.scope === "create") return `${who} ${deny ? "cannot create" : "can create"} ${metaFor(r.collection).plural}`;
-  if (r.verb) return `${who} ${deny ? "cannot use" : "can use"} ${permPhrase(r)} on ${wherePhrase(r)}`;
+  // The approval LIMIT, spelled out in the same sentence as the rest of the rule. A cap that only shows as a
+  // number in a form the admin has already left is a cap nobody reviewing the list can see.
+  const limit = limitPhrase(r);
+  if (r.verb) return `${who} ${deny ? "cannot use" : "can use"} ${permPhrase(r)} on ${wherePhrase(r)}${limit}`;
   if (deny) return `${who} is denied all access to ${wherePhrase(r)}${field}`;
-  return `${who} has ${permPhrase(r)} to ${wherePhrase(r)}${field}`;
+  return `${who} has ${permPhrase(r)} to ${wherePhrase(r)}${field}${limit}`;
 }
 
 /** "expires in 3d" / "expired" for a rule's expiry, or null when the rule is permanent. */
@@ -64,11 +79,47 @@ export function expiryLabel(expiresAt?: string): string | null {
   return +new Date(expiresAt) <= Date.now() ? "expired" : `expires ${relativeFuture(expiresAt)}`;
 }
 
-export type RuleFlag = { kind: "denied" | "shadowed" | "pending" | "expiring"; note: string };
+export type RuleFlag = { kind: "denied" | "shadowed" | "unlistable" | "pending" | "expiring"; note: string };
+
+// The scopes whose compiled pattern needs a second token, and so cannot match the ONE-token key a list
+// request is decided on (`leave-requests.read`). `all` compiles to `<collection>.**`, whose `**` matches zero
+// trailing tokens, and `create` IS the bare one-token rule - those two reach the list; nothing else does.
+const ROW_SCOPES = new Set(["self", "dept", "subtree", "exact"]);
+
+/**
+ * Can this subject call the collection endpoint at all - the question every row-scoped rule silently depends
+ * on? A rule that decides items correctly and cannot open the list is the most confusing shape in the whole
+ * model, because nothing on screen says which half is missing.
+ *
+ * `everyone` counts for any subject (the engine unions it into every caller). A user's ROLE rules count too,
+ * but only when the caller passes the role - the rule row itself does not carry it.
+ */
+export function reachesCollection(r: AccessRule, all: AccessRule[], subjectRole?: string): boolean {
+  const inherited = [EVERYONE_ROLE, ...(r.subject_kind === "user" && subjectRole ? [subjectRole] : [])];
+  return all.some(
+    (o) =>
+      o.collection === r.collection &&
+      o.effect === "allow" &&
+      o.status !== "pending" &&
+      !o.verb &&
+      !o.field &&
+      (o.scope === "create" || o.scope === "all") &&
+      ((o.subject_kind === r.subject_kind && o.subject === r.subject) || (o.subject_kind === "role" && inherited.includes(o.subject))),
+  );
+}
 
 // Does rule `a` cover everything rule `b` reaches? Only an org-wide rule is a true superset of another tier;
 // same-tier rules cover each other. Object-anchored tiers must also name the same object.
 function covers(a: AccessRule, b: AccessRule): boolean {
+  // `create` is not another tier of the row-scope ladder - it is a separate dimension, the way the standard
+  // ladder and a custom method are in `targetCovers` below. `src/domain/policyValidate.ts` says so outright:
+  // "scope=create gates collection-level creation; it takes no field or verb". Without this, the `all`
+  // shortcut answered true against a create rule, and since `create` is absent from BREADTH the breadth test
+  // passed trivially too - so any subject holding BOTH an all-scope write/admin allow AND a create allow on
+  // the same collection (what a full-admin role looks like on any catalog) had its create rule badged "adds
+  // nothing". Acting on that advice revokes the ability to add records, which is the one direction a lint
+  // must not be wrong in.
+  if ((a.scope === "create") !== (b.scope === "create")) return false;
   if (a.scope === "all") return true;
   if (a.scope !== b.scope) return false;
   if (a.scope === "exact" || a.scope === "subtree") return a.scope_ref === b.scope_ref;
@@ -109,7 +160,7 @@ function appliesToSameSubject(r: AccessRule, other: AccessRule): boolean {
  *   • shadowed - a broader allow already grants at least as much, so removing this one changes nothing.
  * Plus the lifecycle notes (pending approval, expiring soon) so one badge column answers "is this live?".
  */
-export function ruleFlags(r: AccessRule, all: AccessRule[]): RuleFlag[] {
+export function ruleFlags(r: AccessRule, all: AccessRule[], subjectRole?: string): RuleFlag[] {
   const flags: RuleFlag[] = [];
   if (r.status === "pending") flags.push({ kind: "pending", note: "Awaiting approval - this rule grants nothing yet." });
   if (r.status === "pending_delete") flags.push({ kind: "pending", note: "Removal awaiting approval - still in force until approved." });
@@ -145,6 +196,15 @@ export function ruleFlags(r: AccessRule, all: AccessRule[]): RuleFlag[] {
         (LEVEL_RANK[o.level ?? ""] ?? 0) >= mine,
     );
     if (broader) flags.push({ kind: "shadowed", note: `Already covered by a broader rule (${permPhrase(broader)} to ${wherePhrase(broader)}), so this one adds nothing.` });
+    // The half-working rule: every individual record decides correctly and the LIST is refused, so the page
+    // that shows those records is a 403 and nothing says why. Only row-scoped LEVEL rules can be in this
+    // state - a verb rule grants an action rather than a view, and is left to the grantor.
+    if (!r.verb && ROW_SCOPES.has(r.scope) && !reachesCollection(r, all, subjectRole)) {
+      flags.push({
+        kind: "unlistable",
+        note: `This narrows WHICH ${metaFor(r.collection).plural} they reach, but nothing lets them open the list - so the page still refuses them. Pair it with read access to the collection.`,
+      });
+    }
   }
   return flags;
 }
@@ -152,6 +212,12 @@ export function ruleFlags(r: AccessRule, all: AccessRule[]): RuleFlag[] {
 /**
  * The deny that would make a NEW allow inert, for the author-time warning in the ACL modal (the lint above
  * judges rules that already exist; this judges the one about to be written). Returns the offending rule.
+ *
+ * It shares `covers`, so it inherits the create/non-create split added there - and that is the answer the
+ * ENGINE gives, not a convenience. `services/accessRules.ts#buildPattern` compiles a create rule to the bare
+ * one-token `<collection>` pattern and says in as many words that it is "distinct from `<collection>.**`
+ * (every object)", which is what an org-wide rule compiles to. So an org-wide deny does not bar creation, and
+ * warning that it does would send the author looking for a rule that is not in the way.
  */
 export function denyBlocking(
   candidate: { subject_kind: "role" | "user"; subject: string; collection: string; scope: string; scope_ref?: string; field?: string; verb?: string },

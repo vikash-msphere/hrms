@@ -52,7 +52,7 @@ export const transitions = collectionRoutes<TransitionInput, typeof schema.trans
     purge: (deps, actor, id, ifMatch) => purgeTransition(deps, actor, id, ifMatch),
   },
   list: (c, page) =>
-    listTransitions(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("kind"), c.req.query("state"), page.showDeleted),
+    listTransitions(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("kind"), c.req.query("state"), page.showDeleted, page.deletedOnly),
   verbs: {
     complete: { run: (deps, user, id) => setTransitionState(deps, user, id, "COMPLETED") },
     cancel: { run: (deps, user, id) => setTransitionState(deps, user, id, "CANCELLED") },

@@ -9,7 +9,7 @@ import { and, eq, inArray, isNull, lte, or, gte } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import type { ListScope } from "../domain/access";
+import { scopeFor, type ListScope } from "../domain/access";
 import { applyScope } from "./listScope";
 import { audit } from "../lib/audit";
 import { failedPrecondition, invalidArgument, isVariablePayCollision, notFound } from "../lib/errors";
@@ -35,7 +35,7 @@ export type VariablePayLine = {
   /** A bonus already awarded for this cycle, so a second run does not double-pay. */
   awarded: number | null;
   /** Why this line cannot be paid, when it cannot. */
-  blocked?: "no_attainment" | "no_target" | "already_awarded" | "not_shared";
+  blocked?: "no_attainment" | "no_target" | "already_awarded" | "not_shared" | "comp_not_visible";
 };
 
 /** The bonus `kind` that marks a payout as this cycle's variable pay - also how a re-run spots its own work. */
@@ -50,7 +50,7 @@ const reasonFor = (cycleName: string) => `Variable pay for ${cycleName}`;
  * unscoped, because the score IS the review's, already frozen into it at sharing; re-deriving it through a
  * narrower lens would quietly hand two people two different payout figures for the same person.
  */
-export async function variablePayRun(deps: Deps, scope: ListScope, cycleId: string): Promise<{ cycle: typeof schema.reviewCycles.$inferSelect; lines: VariablePayLine[] }> {
+async function variablePayLines(deps: Deps, scope: ListScope, cycleId: string): Promise<{ cycle: typeof schema.reviewCycles.$inferSelect; lines: VariablePayLine[] }> {
   const cycle = (await deps.db.select().from(schema.reviewCycles).where(eq(schema.reviewCycles.uuid, cycleId)).limit(1))[0];
   if (!cycle || cycle.deleteTime) throw notFound("review cycle not found");
 
@@ -103,6 +103,76 @@ export async function variablePayRun(deps: Deps, scope: ListScope, cycleId: stri
   }
   lines.sort((a, b) => (b.recommended ?? -1) - (a.recommended ?? -1));
   return { cycle, lines };
+}
+
+/**
+ * May this caller read compensation figures at all?
+ *
+ * `variable_pay_target` and `currency_code` are DECLARED PROTECTED FIELDS on `compensation`
+ * (domain/manifests.ts), and `compensation` is in `AUDIT.sensitive_collections`. This verb read them for every
+ * reviewee with no access decision of any kind - it bound the caller's scope to REVIEWS and then ran a plain
+ * select over the compensation table - so a role could reach salary figures through it that it cannot reach
+ * through any compensation surface.
+ *
+ * That is not hypothetical on the seeded policy, it is the policy: `hr_admin` is the only non-super subject
+ * with a review-cycles custom-method allow, and `compensation` is granted to `payroll_admin` ONLY. The role
+ * this endpoint is written for is exactly the role the app keeps out of salary data, and
+ * `services/letterData.ts` states the same hazard in as many words for the letter path.
+ *
+ * Decided ONCE, off the caller's own compensation scope, rather than per employee: `canReadObjectCode` costs a
+ * rules query each, and this module's own comments name the per-reviewee fan-out as the thing that made a
+ * two-hundred-person cycle stop working. A null breadth is "holds compensation at no tier", which is HR's
+ * position out of the box.
+ *
+ * DELIBERATELY COARSE, and coarse in the narrowing direction: a caller holding compensation at `own` or `dept`
+ * still gets the whole report redacted rather than a partial one. Per-object shares are not consulted either
+ * (they need the middleware's own read). Both make the answer tighter than a real compensation list would be,
+ * which is the safe side of a figure nobody should be reading here.
+ */
+function mayReadCompensation(actor: AppUser): boolean {
+  try {
+    return scopeFor(actor, "compensation").breadth === "all";
+  } catch {
+    // A grant the decision engine cannot read is not authority either.
+    return false;
+  }
+}
+
+/**
+ * The same line with every compensation-derived figure taken off it.
+ *
+ * `recommended` goes as well as `target`, and that is the point rather than caution: it is
+ * `target x attainment / 100` and `attainment` is on the same line, so publishing the recommendation IS
+ * publishing the target to anyone willing to divide. `currency` falls back to the value a line already
+ * carries for somebody with no compensation row at all, so a redacted line is indistinguishable from an
+ * absent one - which is the disclosure a reader is owed.
+ *
+ * `awarded` stays: it is a `bonuses` figure, and the roles that reach this report hold bonuses outright.
+ */
+function withoutComp(line: VariablePayLine): VariablePayLine {
+  return {
+    ...line,
+    target: null,
+    recommended: null,
+    currency: "INR",
+    // An award that already happened is the more useful thing to say, and says nothing about salary.
+    blocked: line.blocked === "already_awarded" ? "already_awarded" : "comp_not_visible",
+  };
+}
+
+/**
+ * The reported run: what each reviewee earned and what they are owed for it, narrowed to what THIS caller may
+ * read. The verb's public entry point.
+ */
+export async function variablePayRun(
+  deps: Deps,
+  actor: AppUser,
+  scope: ListScope,
+  cycleId: string,
+): Promise<{ cycle: typeof schema.reviewCycles.$inferSelect; lines: VariablePayLine[] }> {
+  const { cycle, lines } = await variablePayLines(deps, scope, cycleId);
+  if (mayReadCompensation(actor)) return { cycle, lines };
+  return { cycle, lines: lines.map(withoutComp) };
 }
 
 function safeParse(json: string): GoalSnapshot[] {
@@ -191,7 +261,12 @@ export async function awardVariablePay(
 }> {
   const ids = new Set(employeeRefs.map(idFromPath).filter(Boolean) as string[]);
   if (!ids.size) throw invalidArgument("select at least one person to award");
-  const { cycle, lines } = await variablePayRun(deps, scope, cycleId);
+  // PRICED OFF THE UNFILTERED FIGURES, REPORTED WITHOUT THEM. The award has to multiply the real target by the
+  // real attainment - the whole point of the two-press flow is that the bonus it writes is exactly the figure
+  // it reported - and the `bonuses` row it produces is something the awarding roles hold outright. What must
+  // not travel is the per-person compensation TARGET on the report, so the lines handed back go through the
+  // same redaction `variablePayRun` applies.
+  const { cycle, lines } = await variablePayLines(deps, scope, cycleId);
   if (cycle.state === "DRAFT") throw failedPrecondition("this cycle has not been launched, so nothing has been scored yet");
 
   // The date this award is BOOKED on, in the org's timezone - it lands on a bonus row that payroll then picks
@@ -240,10 +315,13 @@ export async function awardVariablePay(
     fields: [...ids].slice(0, 12).map((e) => `employees/${e}`),
     note: `awarded ${awarded} variable payout${awarded === 1 ? "" : "s"} totalling ${total} ${currency}${skipped ? `, skipped ${skipped}` : ""}`,
   }, cycle);
+  const showComp = mayReadCompensation(actor);
   const after = lines.map((line) => {
     const justPaid = paid.get(line.employee);
-    if (justPaid === undefined) return line;
-    return { ...line, awarded: round2((line.awarded ?? 0) + justPaid), blocked: "already_awarded" as const };
+    const patched = justPaid === undefined
+      ? line
+      : { ...line, awarded: round2((line.awarded ?? 0) + justPaid), blocked: "already_awarded" as const };
+    return showComp ? patched : withoutComp(patched);
   });
   return { cycle, lines: after, result: { awarded, total, skipped, currency } };
 }

@@ -1,21 +1,11 @@
 import { createContext, useContext } from "react";
 
-// UI gating against the server-computed capability set (users/me access.capabilities). Mirrors the
-// backend's capabilitiesOf model: exact "collection.action", with the super_admin wildcard
-// ("**.<action>" / "**.**") treated as match-all. THIS IS UX ONLY - the server enforces every request.
-export function hasCapability(caps: string[], perm: string): boolean {
-  if (caps.includes(perm)) return true;
-  const action = perm.split(".").pop() ?? "";
-  if (caps.includes(`**.${action}`) || caps.includes("**.**")) return true;
-  // A wildcard-verb rule ("all custom methods of this collection", access rule verb:"*") arrives as the
-  // capability `<collection>.**`, so a holder asking about ONE of those verbs has to be answered yes - else
-  // the role that was granted everything sees fewer buttons than a role granted one verb by name. It says
-  // nothing about the read/write/admin ladder, which is a level grant and a different rule.
-  const dot = perm.lastIndexOf(".");
-  if (dot > 0 && !LEVELS.has(action) && caps.includes(`${perm.slice(0, dot)}.**`)) return true;
-  return false;
-}
-const LEVELS = new Set(["read", "write", "admin"]);
+// UI gating against the server-computed capability set (users/me access.capabilities). THE MATCHING RULE IS
+// THE SERVER'S (src/domain/capabilityMatch.ts), re-exported rather than restated: this was a byte-equivalent
+// second implementation that declared itself a mirror, and a mirror is a thing that drifts. THIS IS UX ONLY -
+// the server re-decides every request, which is why the shared leaf is safe to read on both sides.
+import { hasCapability } from "../../../src/domain/capabilityMatch";
+export { hasCapability };
 
 // The caller's capability set, provided once at the app root (from me.capabilities) so <Can>/usePermission
 // don't need it prop-drilled.
@@ -48,6 +38,19 @@ export function canSeeActivity(caps: string[], collection?: string): boolean {
 }
 export function useCanSeeActivity(collection?: string): boolean {
   return canSeeActivity(useCapabilities(), collection);
+}
+
+// May the caller EXPORT — the broad `export.read` cap (any table) OR the per-collection
+// `export.<collection>.read` cap, exactly like activity above. Export is generated in the browser from rows
+// already on screen, so this is the gate: it decides which tables offer the affordance, and an export can
+// still only ever contain what the holder could already read (the list endpoint has already filtered it).
+// Splitting it per collection is what lets "may export leave data" exist without also meaning "may export
+// payroll". Pass the table's collection so a narrowed grant lights up only its own.
+export function canExport(caps: string[], collection?: string): boolean {
+  return hasCapability(caps, "export.read") || (!!collection && hasCapability(caps, `export.${collection}.read`));
+}
+export function useCanExport(collection?: string): boolean {
+  return canExport(useCapabilities(), collection);
 }
 
 // "Manage access" permission (access-management mode). After the role/user unification there is ONE

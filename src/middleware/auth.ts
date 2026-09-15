@@ -7,8 +7,9 @@ import type { AppEnv, AppUser } from "../env";
 import type { Deps } from "../deps";
 import type { Grant } from "../domain/permissions";
 import type { Policy } from "../domain/manifests";
-import { mergeGrants } from "../domain/compileGrants";
-import { loadRoleGrant, loadUserGrant, loadManifest } from "../lib/policyLoad";
+import { mergeGrants, mergeConditions } from "../domain/compileGrants";
+import type { ConditionIndex } from "../domain/ruleCondition";
+import { loadRoleGrant, loadUserGrant, loadUserRoles, loadManifest, loadRoleConditions, loadUserConditions } from "../lib/policyLoad";
 import { resolveViewAs, VIEW_AS_HEADER } from "../lib/viewAs";
 import { unauthenticated, forbidden, isUserEmailCollision, isUserEmployeeCollision } from "../lib/errors";
 import { getCookie } from "hono/cookie";
@@ -90,11 +91,41 @@ function assertLive(user: UserRow): void {
   if (user.employeeDeleteTime) throw forbidden("user disabled");
 }
 
-// The caller's broad authority: their role grant (which already folds in `everyone`) merged with their own
-// broad user rules. Both cached, so warm this costs ~0 reads.
-async function loadAuthority(deps: Deps, user: UserRow): Promise<{ grant: Grant; policy: Policy }> {
-  const [roleGrant, userGrant, policy] = await Promise.all([loadRoleGrant(deps, user.role), loadUserGrant(deps, user.uuid), loadManifest(deps)]);
-  return { grant: mergeGrants(roleGrant, userGrant), policy };
+/**
+ * The caller's broad authority: their PRIMARY role's grant (which already folds in `everyone`), plus each
+ * SECONDARY role they hold, plus their own broad user rules. All cached, so warm this costs ~0 reads.
+ *
+ * UNION, and the order does not matter: `mergeGrants` takes the highest level per pattern and concatenates the
+ * allow and deny lanes, so merging is associative here and a role can only ever ADD. That is the same shape
+ * `everyone` has always had - this is one more source of the same kind, not a new kind.
+ *
+ * THE RESULT IS PER USER, NOT PER ROLE, and that is the part to be careful with: the inputs are each cached
+ * under their own key (`grant:<role>`, `userRoles:<uuid>`, `userGrant:<uuid>`) and merged fresh per request.
+ * Nothing caches the merged grant, so there is no combined key that could be served to the wrong caller when
+ * somebody's role set changes - the failure mode a per-role cache of a per-user answer would have.
+ */
+async function loadAuthority(deps: Deps, user: UserRow): Promise<{ grant: Grant; policy: Policy; roles: string[]; conditions: ConditionIndex }> {
+  const [primary, extraRoles, userGrant, policy, userConds] = await Promise.all([
+    loadRoleGrant(deps, user.role),
+    loadUserRoles(deps, user.uuid),
+    loadUserGrant(deps, user.uuid),
+    loadManifest(deps),
+    loadUserConditions(deps, user.uuid),
+  ]);
+  // The primary can also appear in the join table (an admin ticking the box they already hold); holding a role
+  // twice must not mean loading it twice, and the set is what `roleSubjects` fans out over downstream.
+  const roles = [...new Set([user.role, ...extraRoles])];
+  const secondary = await Promise.all(roles.filter((r) => r !== user.role).map((r) => loadRoleGrant(deps, r)));
+  // The thresholds ride alongside, merged the same way and off the same cached rows. They decide nothing on
+  // their own (domain/ruleCondition.ts): the middleware consults them only after `decide()` has already allowed,
+  // and only ever to refuse.
+  const roleConds = await Promise.all(roles.map((r) => loadRoleConditions(deps, r)));
+  return {
+    grant: secondary.reduce(mergeGrants, mergeGrants(primary, userGrant)),
+    policy,
+    roles,
+    conditions: roleConds.reduce(mergeConditions, userConds),
+  };
 }
 
 // ---- API-key lane ----------------------------------------------------------------------------------------
@@ -133,7 +164,7 @@ async function authenticateApiKey(c: Parameters<MiddlewareHandler<AppEnv>>[0], d
   if (!user) throw unauthenticated("API key owner no longer exists");
   assertLive(user);
 
-  const { grant, policy } = await loadAuthority(deps, user);
+  const { grant, policy, roles, conditions } = await loadAuthority(deps, user);
 
   // Convenience column, not an audit record: written at most once per throttle window so a busy integration
   // does not add a D1 write to every call. Off the response path, and never fatal.
@@ -157,6 +188,8 @@ async function authenticateApiKey(c: Parameters<MiddlewareHandler<AppEnv>>[0], d
     uuid: user.uuid,
     email: user.email,
     role: user.role,
+    roles,
+    conditions,
     status: user.status,
     employeeId: user.employeeId,
     employeeCode: user.employeeCode,
@@ -363,12 +396,14 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   // is EMPTY_GRANT, so mergeGrants is a no-op.
   // The role grant already includes the `everyone` pseudo-role (unioned inside loadRoleGrant in the SAME query,
   // super-exempt), so the broad authority is just role + the caller's own user rules - no extra `everyone` read.
-  const { grant, policy } = await loadAuthority(deps, user);
+  const { grant, policy, roles, conditions } = await loadAuthority(deps, user);
 
   const caller: AppUser = {
     uuid: user.uuid,
     email: user.email,
     role: user.role,
+    roles,
+    conditions,
     status: user.status,
     employeeId: user.employeeId,
     employeeCode: user.employeeCode,

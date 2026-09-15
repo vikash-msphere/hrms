@@ -4,8 +4,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
-import { etagOf } from "../http/serialize";
-import { checkEtag, updateAtVersion } from "./versionGuard";
+import { checkSubEtag, subResourceEtag, updateAtVersion } from "./versionGuard";
 
 // Personal contact + emergency info. Stored as an encrypted JSON blob; returned in full to the
 // employee, HR and super_admin (not masked - HR needs to read these). Health data lives here too.
@@ -56,9 +55,11 @@ export async function getPersonalDetails(deps: Deps, _actor: AppUser, employeeId
   const emp = await loadEmployee(deps, employeeId);
   // The VERSION rides the view. `setPersonalDetails` is version-guarded, but the guard is inert unless the
   // caller can send an If-Match, and a caller can only send one if a read gave it to them - which is why all
-  // three SPA callers of this record were doing full-blob writes with no version at all. The etag is the
-  // employee row's, the same one the collection serializer emits, so client and server agree by construction.
-  return { ...(await read(deps, emp.personalDetailsEnc)), etag: etagOf(+new Date(emp.updatedAt)) };
+  // three SPA callers of this record were doing full-blob writes with no version at all. The etag is THIS
+  // blob's, not the employee row's: the four encrypted sub-resources share one `updated_at`, so a row-derived
+  // version made an edit to any of them conflict with an open form on all the others (services/versionGuard.ts
+  // #subResourceEtag).
+  return { ...(await read(deps, emp.personalDetailsEnc)), etag: subResourceEtag(emp.personalDetailsEnc) };
 }
 
 /**
@@ -74,7 +75,7 @@ export async function getPersonalDetails(deps: Deps, _actor: AppUser, employeeId
  */
 export async function setPersonalDetails(deps: Deps, actor: AppUser, employeeId: string, input: PersonalDetails, ifMatch?: string): Promise<PersonalDetails & { etag: string }> {
   const emp = await loadEmployee(deps, employeeId);
-  checkEtag(emp, ifMatch);
+  checkSubEtag(emp.personalDetailsEnc, ifMatch);
   const next: PersonalDetails = { ...(await read(deps, emp.personalDetailsEnc)) };
   const MAX_LEN = 2000;
   for (const k of PERSONAL_FIELDS) {
@@ -98,10 +99,11 @@ export async function setPersonalDetails(deps: Deps, actor: AppUser, employeeId:
   // The merge above fixes two dialogs fighting WITHIN one read; the version in the WHERE is what stops two
   // reads fighting (services/versionGuard.ts). Both are needed - merging a stale blob still discards whatever
   // landed after it was read.
-  const updated = await updateAtVersion(deps, schema.employees, "employee", emp, { personalDetailsEnc: enc, updatedAt: new Date() });
+  await updateAtVersion(deps, schema.employees, "employee", emp, { personalDetailsEnc: enc, updatedAt: new Date() });
   // Field names only, never the values (see bankDetails): a home address and a date of birth are the record.
   await audit(deps, actor, "employee.personal_details.update", "employees", emp.uuid, fieldsMeta(next), emp);
   // The version this write produced, so the dialog that stays open holds a current one rather than the one it
-  // read - the same reason the card dialogs take the etag off their own responses.
-  return { ...next, etag: etagOf(+new Date(updated.updatedAt)) };
+  // read - the same reason the card dialogs take the etag off their own responses. Off the ciphertext just
+  // written, which is what the next If-Match will be compared against.
+  return { ...next, etag: subResourceEtag(enc) };
 }

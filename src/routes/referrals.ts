@@ -45,7 +45,7 @@ export const referrals = collectionRoutes<ReferralInput, typeof schema.referrals
     create: (deps, actor, input, id) => createReferral(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateReferral(deps, actor, id, patch, ifMatch),
   },
-  list: (c, page) => listReferrals(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted),
+  list: (c, page) => listReferrals(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted, page.deletedOnly),
   verbs: {
     award: { run: (deps, user, id) => awardReferralBonusNow(deps, user, id) },
     upload: {

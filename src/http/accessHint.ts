@@ -5,14 +5,17 @@
 // actions the caller can't perform. Bounded: a small static verb set per collection (kept honest by the
 // drift test in test/accessHint.test.ts). The decision is computed server-side and shipped as data - no
 // access decision moves into the client.
-import { decide, matchingPattern, type Grant } from "../domain/permissions";
+import { decide, denyingPattern, matchingPattern, withOwnerResource, type Grant, type Resolved } from "../domain/permissions";
 import { deriveNarrowing, type ScopeKind } from "../domain/compileGrants";
+import { redactedFieldsOf } from "../domain/manifests";
 import type { AppUser } from "../env";
 
 type Self = { employeeCode: string | null };
 
 // Standard methods map to a level; everything else is a custom method (`:verb`). `delete` is the soft delete
 // (write); the hard `purge` (admin/?force) stays on the coarse `*.admin` capability, not a per-row hint.
+// `delete` additionally honours a deny on the `delete` verb - the axis that separates editing from
+// destroying, since both otherwise resolve to `write` (see computeCan below).
 const STANDARD_LEVEL: Record<string, "write" | "admin"> = { update: "write", delete: "write" };
 
 // The candidate verbs probed per collection. Forward + inverse lifecycle members are both listed so the UI
@@ -89,7 +92,7 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   offers: ["update", "delete", "approve", "extend", "accept", "decline", "rescind", "letter"],
   expenses: ["update", "delete", "submit", "approve", "reject", "cancel", "pay", "upload", "download"],
   automations: ["update", "delete", "enable", "disable", "test"],
-  "access-rules": ["update", "delete", "preview", "requestAccess", "approve", "reject", "clone"],
+  "access-rules": ["update", "delete", "preview", "requestAccess", "approve", "reject", "clone", "review", "scopeCounts"],
 };
 const DEFAULT_VERBS = ["update", "delete"];
 
@@ -150,6 +153,8 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "test", // dry-run an automation rule against a sample event (automations)
   "requestAccess", // ask access admins for a missing grant (access-rules)
   "clone", // copy every rule one subject holds onto another, as one act (access-rules)
+  "review", // the access review: unused rules + org-wide rules the recorded usage says could be narrower (access-rules)
+  "scopeCounts", // how many records a scope choice reaches, for the ACL's scope chips (access-rules)
   "printTag", "reissueTag", // asset sticker: stamp it as printed / rotate its secret so a lost tag dies (assets)
   "batchCreate", // add a whole delivery of assets in one call - a quantity of identical things, or a list of serials (assets)
   "recordFound", // log a scan that matched no asset during an inventory count (stocktakes)
@@ -159,8 +164,13 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
 
 // The verbs this caller may perform on the object with internal `code`, decided by the engine over `grant`
 // (the broad role grant, or - on item paths - the per-object-merged grant). Pure, in-memory, zero DB.
-export function computeCan(grant: Grant, self: Self, collection: string, code: string, candidates?: readonly string[]): string[] {
+export function computeCan(grant: Grant, self: Self, collection: string, code: string, candidates?: readonly string[], ownerCode?: string | null): string[] {
   const resource = `${collection}.${code}`;
+  // The OWNER KEY, for the flat-coded owner-column collections (assets, users). The middleware decides the real
+  // request with it (domain/permissions.ts Resolved#ownerResource), so the hint has to be computed with it too:
+  // without it the SPA would show no Edit or Delete on the very rows a self-scoped caller can edit, and - since
+  // this app hides what the caller cannot use rather than disabling it - the affordance would simply not exist.
+  const withOwner = (r: Resolved): Resolved => (ownerCode ? withOwnerResource(r, ownerCode) : r);
   // A factory-built collection passes the methods it ACTUALLY mounted (http/collectionRoute.ts), so the hint
   // can never advertise an action the route does not have - an append-only collection like event-log used to
   // inherit the update+delete default and offer the SPA two buttons that would 404.
@@ -169,7 +179,13 @@ export function computeCan(grant: Grant, self: Self, collection: string, code: s
   for (const v of verbs) {
     const level = STANDARD_LEVEL[v];
     const resolved = level ? { kind: "standard" as const, resource, level } : { kind: "custom" as const, resource, verb: v };
-    if (decide(grant, resolved, self).allow) can.push(v);
+    if (!decide(grant, withOwner(resolved), self).allow) continue;
+    // `delete` is decided on the standard `write` level like `update`, so the two are one key - except that a
+    // deny on the `delete` VERB blocks the request (middleware/authz.ts). Mirror that here or the row would
+    // offer a Delete action whose only outcome is a 403, which is precisely what `access.can` exists to
+    // prevent. The same deny lane, asked the same question - owner key included, as the middleware asks it.
+    if (v === "delete" && denyingPattern(grant, withOwner({ kind: "custom" as const, resource, verb: "delete" }), self)) continue;
+    can.push(v);
   }
   return can;
 }
@@ -178,8 +194,9 @@ export function computeCan(grant: Grant, self: Self, collection: string, code: s
 // see this" answer the modal surfaces ("allowed via your own record / your department / org-wide"). Subject
 // (which role/rule) is intentionally not exposed: the runtime grant is flattened across subjects, so only the
 // matching pattern's scope survives - and the scope is the part users actually act on. Null if not derivable.
-export function computeWhy(grant: Grant, self: Self, collection: string, code: string): ScopeKind | null {
-  const pat = matchingPattern(grant, { kind: "standard", resource: `${collection}.${code}`, level: "read" }, self);
+export function computeWhy(grant: Grant, self: Self, collection: string, code: string, ownerCode?: string | null): ScopeKind | null {
+  const r = { kind: "standard" as const, resource: `${collection}.${code}`, level: "read" as const };
+  const pat = matchingPattern(grant, ownerCode ? withOwnerResource(r, ownerCode) : r, self);
   return pat ? deriveNarrowing(pat).scopeKind : null;
 }
 
@@ -197,15 +214,49 @@ export function accessHint(
   code: string | null | undefined,
   grant: Grant = user.grant,
   candidates?: readonly string[],
+  /** The row owner's employee code, for a flat-coded owner-column collection. See computeCan. */
+  ownerCode?: string | null,
 ): AccessHint {
   // A row with no code can't be decided against -> fail safe (hint nothing; the server still enforces).
   const self = { employeeCode: user.employeeCode };
-  const can = code ? computeCan(grant, self, collection, code, candidates) : [];
-  const why = code ? computeWhy(grant, self, collection, code) : null;
+  const can = code ? computeCan(grant, self, collection, code, candidates, ownerCode) : [];
+  const why = code ? computeWhy(grant, self, collection, code, ownerCode) : null;
   return why ? { can, why } : { can };
 }
 
-/** Attach an already-computed hint (or compute it now) to a serialized resource. */
+/**
+ * Per-field READ gate for base-record fields (`policy.redacted_fields`), applied where every resource is
+ * serialized so no collection has to remember to do it.
+ *
+ * Each listed field is decided at `<collection>.<code>.<field>` level read and dropped from the payload when
+ * that fails. ADDITIVE: a pattern's `**` matches trailing tokens, so `offers.**` / `leave-requests.my-dept.**`
+ * already satisfy the field key and nobody loses a field by it being listed. What the list buys is the
+ * ability to take one away - a deny on `offers.*.base_comp` removes that field and nothing else, scoped like
+ * any other pattern - instead of forcing the choice between the whole record and none of it.
+ *
+ * Dropped, not nulled: an absent key reads as "not provided" to every client, while `null` on a field that is
+ * genuinely nullable would be indistinguishable from a real empty value.
+ *
+ * NO OWNER KEY here, matching the write-side field gate in middleware/authz.ts: the owner key says the ROW is
+ * yours, and a redacted field is exactly the part of your own row you may not see. Deciding it on the row's real
+ * code keeps "read my own asset" and "read the fields marked sensitive on it" two separate grants.
+ */
+function redactFields<T extends object>(res: T, user: AppUser, collection: string, code: string | null | undefined, grant: Grant): T {
+  if (!code) return res;
+  const fields = redactedFieldsOf(user.policy, collection);
+  if (!fields.length) return res;
+  const self = { employeeCode: user.employeeCode };
+  let out: Record<string, unknown> | null = null;
+  for (const f of fields) {
+    if (!(f in res)) continue; // already absent (undefined on the wire) - nothing to decide
+    if (decide(grant, { kind: "standard", resource: `${collection}.${code}.${f}`, level: "read" }, self).allow) continue;
+    out ??= { ...(res as Record<string, unknown>) };
+    delete out[f];
+  }
+  return (out ?? res) as T;
+}
+
+/** Attach an already-computed hint (or compute it now) to a serialized resource, field-redacted for them. */
 export function withAccess<T extends object>(
   res: T,
   user: AppUser,
@@ -215,5 +266,5 @@ export function withAccess<T extends object>(
   candidates?: readonly string[],
   hint?: AccessHint,
 ): T & { access: AccessHint } {
-  return { ...res, access: hint ?? accessHint(user, collection, code, grant, candidates) };
+  return { ...redactFields(res, user, collection, code, grant), access: hint ?? accessHint(user, collection, code, grant, candidates) };
 }

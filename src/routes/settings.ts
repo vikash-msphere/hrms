@@ -4,6 +4,7 @@ import { zValidator } from "@hono/zod-validator";
 import type { AppEnv } from "../env";
 import { listSettings, getSetting, upsertSetting, MANAGED_KEYS } from "../services/settings";
 import { toSettingResource } from "../http/serialize";
+import { redactSettingResource } from "../http/settingRedact";
 import { clampPageSize } from "../http/pagination";
 import { notFound, invalidArgument } from "../lib/errors";
 import { parsePayslipTemplate } from "../domain/payslipTemplate";
@@ -13,7 +14,9 @@ import { validateRestrictions } from "../domain/leaveRestrictions";
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
 import { validateAtsConfig, orphanedStages, type AtsStage } from "../domain/ats";
 import { stagesInUse } from "../services/ats";
-import { getFieldDefs, identityValueCounts, purgeIdentityFields } from "../services/identityDetails";
+import { getFieldDefs, identityValueCounts, purgeIdentityFieldsSlice, IDENTITY_PURGE_JOB, type IdentityPurgeCursor } from "../services/identityDetails";
+import { allocFlatCode } from "../services/codeAlloc";
+import * as schema from "../db/schema";
 
 const writeSchema = z.object({ value: z.unknown().optional(), key: z.string().optional() }).strict();
 
@@ -393,6 +396,150 @@ function validateAts(value: unknown) {
   if (errors.length) throw invalidArgument(`ats: ${errors.join("; ")}`);
 }
 
+/**
+ * THE CLEARED FIELD IS THE FAILING VALUE, and it is why the keys below are here.
+ *
+ * `getSettingValue` merges the stored blob over the typed default with a SHALLOW spread
+ * (`{ ...fallback, ...parsed }`), so a stored `null` does not fall back to the default - it REPLACES it. A
+ * settings screen whose number input was emptied stores `null`, reports success, and the arithmetic
+ * downstream reads it as the absence of a number rather than as an error:
+ *
+ *   - `overtime.hours_per_month: null` makes `cfg.hours_per_month > 0` false, so the hourly rate is
+ *     `0 * multiplier` and EVERY overtime line in the run pays nothing (domain/payroll.ts#overtimePay).
+ *     A non-numeric `multiplier` reaches `round2(NaN)`, which returns 0 - the failure domain/money.ts exists
+ *     to prevent.
+ *   - `probation.default_months: null` makes `addMonths(start, null)` `start`, so every employee created
+ *     afterwards gets a probation END equal to their start date (services/employees.ts) - which silently
+ *     flips who `availableDuringProbation` and the probation leave cap apply to. A non-numeric value is
+ *     worse: `Date.UTC(y, NaN, d)` is an Invalid Date written to a `timestamp_ms` column, and every later
+ *     comparison against it reads false.
+ *
+ * Neither throws, so neither is reportable from anywhere downstream: the only place a bad value can be
+ * caught is here, before it is stored. That is the same argument the `tax-config` / `professional-tax` note
+ * below makes, applied to the rest of the keys whose leaves feed arithmetic.
+ *
+ * ABSENT IS NOT THE SAME AS NULL, and the distinction is the whole point: a key the blob omits keeps the
+ * typed default (the merge leaves it alone), so `undefined` passes and an explicit `null` does not.
+ */
+function numericLeaves(key: string, value: unknown, fields: { name: string; min?: number; gt?: number; nullable?: boolean }[]) {
+  if (!isObj(value)) throw invalidArgument(`${key} must be an object`);
+  for (const f of fields) {
+    const v = value[f.name];
+    if (v === undefined) continue; // absent = the default stands
+    if (v === null && f.nullable) continue; // explicitly "not set", and the reader treats it that way
+    if (!finite(v)) throw invalidArgument(`${key}.${f.name} must be a number (clearing the field stores null, which silently replaces the default rather than restoring it)`);
+    if (f.gt !== undefined && v <= f.gt) throw invalidArgument(`${key}.${f.name} must be greater than ${f.gt}`);
+    if (f.min !== undefined && v < f.min) throw invalidArgument(`${key}.${f.name} must be at least ${f.min}`);
+  }
+}
+
+// An enum leaf. Same absent/null rule as the numeric ones: omitted keeps the default, an explicit value must
+// be one the reader knows. A typo here is silent in a different way - `INCREMENT[v.rounding] ?? 0.5` and
+// `v.rate_basis === "gross" ? ... : "base"` both fall back, so the org goes on rounding (or pricing) the way
+// it did before while the screen says it saved something else.
+function enumLeaf(key: string, value: Record<string, unknown>, name: string, allowed: readonly string[]) {
+  const v = value[name];
+  if (v === undefined) return;
+  if (typeof v !== "string" || !allowed.includes(v)) throw invalidArgument(`${key}.${name} must be one of: ${allowed.join(", ")}`);
+}
+
+function validateOvertime(value: unknown) {
+  numericLeaves("overtime", value, [
+    // `hours_per_month` is the divisor the ordinary hourly wage comes out of, so 0 is not merely wrong, it is
+    // the value that pays nothing. `rate_per_hour` is nullable BY DESIGN: null is the shipped default and
+    // means "derive the rate from base pay" rather than "no rate".
+    { name: "multiplier", gt: 0 },
+    { name: "hours_per_month", gt: 0 },
+    { name: "rate_per_hour", min: 0, nullable: true },
+  ]);
+  const v = value as Record<string, unknown>;
+  if (v.enabled != null && typeof v.enabled !== "boolean") throw invalidArgument("overtime.enabled must be a boolean");
+}
+
+function validateProbation(value: unknown) {
+  // Zero months IS a legitimate policy ("no probation"), so it is not rejected - the failure this guards is
+  // a cleared or mistyped field arriving as a probation end date equal to the start date, or as NaN.
+  numericLeaves("probation", value, [{ name: "default_months", min: 0 }]);
+  const v = value as Record<string, unknown>;
+  if (v.default_months !== undefined && v.default_months !== null && !Number.isInteger(v.default_months)) {
+    throw invalidArgument("probation.default_months must be a whole number of months");
+  }
+}
+
+function validateLeaveAccrual(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("leave_accrual must be an object");
+  enumLeaf("leave_accrual", value, "rounding", ["none", "half", "day"]);
+}
+
+function validateLeaveEncashment(value: unknown) {
+  // The divisor prices every cashout AND every exit encashment (services/leaveEncashments.ts prices both off
+  // this one config, deliberately). Its reader already refuses a non-positive value and falls back to 30,
+  // which is exactly what makes a bad one invisible: the org is paying at a rate nobody chose.
+  numericLeaves("leave_encashment", value, [{ name: "per_day_divisor", gt: 0 }]);
+  enumLeaf("leave_encashment", value as Record<string, unknown>, "rate_basis", ["base", "gross"]);
+}
+
+function validateLoanPerquisite(value: unknown) {
+  // A taxable perquisite added to withholding. Off by default, and only checked when it is ON: a disabled
+  // policy values nothing whatever the numbers say.
+  if (!isObj(value)) throw invalidArgument("loan-perquisite must be an object");
+  if (value.enabled != null && typeof value.enabled !== "boolean") throw invalidArgument("loan-perquisite.enabled must be a boolean");
+  if (value.enabled === false) return;
+  numericLeaves("loan-perquisite", value, [
+    { name: "sbi_rate_pct", min: 0 },
+    { name: "interest_charged_pct", min: 0 },
+    { name: "exempt_principal_upto", min: 0 },
+  ]);
+}
+
+/**
+ * `referrals`: the money a referral bonus pays out, and it belongs with the arithmetic keys rather than the
+ * flags. `resolveBonusAmount` (domain/referrals.ts) ends `return cfg.default_bonus_amount` with no guard, so a
+ * cleared field does not fall back to the shipped 10,000 - it writes a null bonus onto the award, which is a
+ * WRONG STORED ANSWER of exactly the shape `overtime` and `probation` produce, on the one payout a referrer
+ * chases. The tiers above it are the same: `t.amount` is returned as found.
+ */
+function validateReferrals(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("referrals must be an object");
+  numericLeaves("referrals", value, [{ name: "default_bonus_amount", min: 0 }]);
+  enumLeaf("referrals", value, "award_trigger", ["joining", "probation"]);
+  if (value.join_tiers !== undefined) {
+    if (!Array.isArray(value.join_tiers)) throw invalidArgument("referrals.join_tiers must be an array");
+    value.join_tiers.forEach((t, i) => {
+      if (!isObj(t)) throw invalidArgument(`referrals.join_tiers[${i}] must be an object`);
+      if (!nonNegative(t.amount)) throw invalidArgument(`referrals.join_tiers[${i}].amount must be a non-negative number`);
+      // `max_days == null` is the open top tier (the reader tests for exactly that), so null is meaningful here.
+      if (t.max_days != null && !nonNegative(t.max_days)) throw invalidArgument(`referrals.join_tiers[${i}].max_days must be a non-negative number, or null for the open tier`);
+    });
+  }
+}
+
+function validatePerformance(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("performance must be an object");
+  enumLeaf("performance", value, "goal_approval", ["off", "required"]);
+  // A REPLACED list, not a merged one: `competencies` and `scale` are top-level keys, so storing either one
+  // replaces the shipped default wholesale. An empty or malformed list is therefore the whole framework.
+  if (value.competencies !== undefined) {
+    if (!Array.isArray(value.competencies) || !value.competencies.length) throw invalidArgument("performance.competencies must be a non-empty array");
+    value.competencies.forEach((c, i) => {
+      if (!isObj(c) || typeof c.key !== "string" || !c.key.trim()) throw invalidArgument(`performance.competencies[${i}].key must be a non-empty string`);
+      if (typeof c.label !== "string" || !c.label.trim()) throw invalidArgument(`performance.competencies[${i}].label must be a non-empty string`);
+      // `competencyScore` degrades a mistyped weight to an unweighted mean rather than throwing, so a typo
+      // here changes everyone's score without ever saying it did.
+      if (c.weight !== undefined && c.weight !== null && (!finite(c.weight) || c.weight < 0)) throw invalidArgument(`performance.competencies[${i}].weight must be a non-negative number`);
+    });
+    const keys = value.competencies.map((c) => (c as { key: string }).key);
+    if (new Set(keys).size !== keys.length) throw invalidArgument("performance.competencies keys must be unique - ratings are stored under the key, so a duplicate overwrites the other competency's score");
+  }
+  if (value.scale !== undefined) {
+    if (!Array.isArray(value.scale) || !value.scale.length) throw invalidArgument("performance.scale must be a non-empty array - an empty rating scale leaves every review with nothing to pick");
+    value.scale.forEach((s, i) => {
+      if (!isObj(s) || !finite(s.value)) throw invalidArgument(`performance.scale[${i}].value must be a number`);
+      if (typeof s.label !== "string" || !s.label.trim()) throw invalidArgument(`performance.scale[${i}].label must be a non-empty string`);
+    });
+  }
+}
+
 // Per-key value validation for settings whose shape the money math relies on. Generic settings accept any
 // JSON; a few keys must be guarded so a bad config can't silently corrupt payroll. A Map (not an object) so a
 // setting_id like "constructor" resolves to nothing rather than to an inherited prototype member.
@@ -420,7 +567,50 @@ const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
   // leave type. The read side is deliberately lenient, which is what makes the gap silent: a mistyped rule
   // here would simply never be enforced, on a screen that had said it saved.
   ["leave_restrictions", (v) => void validateRestrictions(v)],
+  // The keys whose LEAVES feed arithmetic. See the note above `numericLeaves` for why a cleared field is the
+  // value that matters here and why none of these can be caught anywhere downstream.
+  ["overtime", validateOvertime],
+  ["probation", validateProbation],
+  ["leave_accrual", validateLeaveAccrual],
+  ["leave_encashment", validateLeaveEncashment],
+  ["loan-perquisite", validateLoanPerquisite],
+  ["performance", validatePerformance],
+  ["referrals", validateReferrals],
 ]);
+
+/**
+ * Keys the server READS through `getSettingValue` that deliberately have no validator, each with the reason.
+ *
+ * Derived rather than remembered: test/settingValidatorDrift.test.ts walks every `getSettingValue(deps,
+ * "<key>", ...)` in src/ and demands the key be in SETTING_VALIDATORS or named here, so the list above cannot
+ * quietly fall behind the list of keys the app actually consults - which is exactly how `tax-config` and
+ * `professional-tax` came to be unguarded while six keys with far less at stake were not.
+ */
+export const UNVALIDATED_SETTING_KEYS = new Map<string, string>([
+  // The two MANAGED_KEYS: their values live in this table but the generic PATCH 404s them (they are served
+  // only by /v1/bank-formats and /v1/payroll-debit), so this registry is never consulted for them at all.
+  // Their shape is checked by the namespace that owns the write.
+  ["bank-formats", "a MANAGED_KEY: the generic settings PATCH refuses it, so the write - and its validation - belongs to /v1/bank-formats"],
+  ["payroll-debit", "a MANAGED_KEY: the generic settings PATCH refuses it, so the write - and its validation - belongs to /v1/payroll-debit"],
+  ["access-approval", "one flag, read as `cfg.enabled === true` (services/accessRules.ts): anything but the boolean is the default"],
+  ["access-review", "`every_days` is already guarded at the read (`Number.isFinite && > 0`, else 90); the rest are flags"],
+  ["attachments", "one cap, already guarded at the read (`> 0`, else 10 MB) in services/attachments.ts#maxUploadBytes"],
+  ["employee-number", "the human-id FORMAT; domain/employeeNumber.ts#normalizeConfig clamps every leaf, and a wrong format shows in the next employee number issued"],
+  ["employee_fields", "custom field DEFINITIONS; services/identityDetails.ts re-normalises the list on every read (a non-array falls back to the shipped fields)"],
+  ["expenses", "`auto_approve_threshold` is guarded at the read (`> 0`); a malformed `budget_alert_thresholds` throws where it is read, which is visible, not a wrong stored answer"],
+  ["holidays", "`max_optional` refuses the pick loudly when it is not a usable number, rather than quietly allowing more"],
+  ["kudos", "the praise-level points table; a malformed one throws at pointsForLevel rather than scoring wrongly"],
+  ["leave-requests", "form flags; `allow_backdated` is read negated, so a bad value is STRICTER (the request is refused, visibly), and the enforceable half is `leave_restrictions`, which IS validated"],
+  ["notifications", "per-category enable/priority flags; nothing is computed from them and nothing is stored - the worst case is a notification not emitted"],
+  ["payroll-approval", "one flag, read as `cfg.enabled === true` (services/payroll.ts)"],
+  ["reimbursements", "one enum, read as `v.payout_mode === \"separate\"` - anything else is the default"],
+  ["ticket-categories", "a routing catalogue; a malformed one throws where it is read rather than routing a ticket to the wrong team"],
+  ["transition-templates", "checklists; findTemplate tolerates a miss by leaving the checklist empty, which is visible, and a malformed blob throws"],
+]);
+
+// The keys the registry above guards, as data. Exported for test/settingValidatorDrift.test.ts, which holds
+// it against every key the server actually reads.
+export const SETTING_VALIDATOR_KEYS: ReadonlySet<string> = new Set(SETTING_VALIDATORS.keys());
 
 // Exported so test/attendanceSettings.test.ts can drive the per-key rules without a request: these guard the
 // blobs the day and money math read, and the failures they exist to stop (a timezone the runtime throws on, a
@@ -433,14 +623,16 @@ export function validateSettingValue(key: string, value: unknown) {
 export const settings = new Hono<AppEnv>()
   .get("/", async (c) => {
     const { items, nextPageToken } = await listSettings(c.get("deps"), clampPageSize(Number(c.req.query("max_page_size")) || undefined), c.req.query("page_token"));
-    return c.json({ results: items.map(toSettingResource), next_page_token: nextPageToken });
+    // The list is what the SPA actually reads (web/src/lib/settingsStore.ts pulls every key in one request), so
+    // the redaction has to sit here as well as on the single-key GET, not only on the one an admin opens.
+    return c.json({ results: items.map((r) => redactSettingResource(toSettingResource(r), c.get("user"))), next_page_token: nextPageToken });
   })
   .get("/:setting_id", async (c) => {
     // Managed keys (bank-formats, payroll-debit) are served only by their own access-gated namespaces, never
     // through the broadly-readable generic settings API.
     if (MANAGED_KEYS.has(c.req.param("setting_id"))) throw notFound("setting not found");
     const row = await getSetting(c.get("deps"), c.req.param("setting_id"));
-    return c.json(toSettingResource(row));
+    return c.json(redactSettingResource(toSettingResource(row), c.get("user")));
   })
   .patch("/:setting_id", zValidator("json", writeSchema), async (c) => {
     if (MANAGED_KEYS.has(c.req.param("setting_id"))) throw notFound("setting not found");
@@ -471,6 +663,9 @@ export const settings = new Hono<AppEnv>()
     // `?delete_removed_values=true` is the caller saying "yes, delete them" - at which point the values AND
     // the proofs uploaded against them are actually deleted, rather than hidden and left resurrectable by any
     // later field whose label slugs the same way.
+    // Keys removed from `employee_fields` whose values the caller confirmed deleting. Resolved BEFORE the
+    // write (the old field list is what says which keys went) and acted on AFTER it - see below.
+    let identityPurgeKeys: string[] = [];
     if (key === "employee_fields") {
       const value = c.req.valid("json").value;
       const next = isObj(value) && Array.isArray(value.fields) ? (value.fields as { key?: unknown; label?: unknown }[]) : null;
@@ -495,12 +690,31 @@ export const settings = new Hono<AppEnv>()
                 "Removing them deletes those values and any uploaded proof - re-send with delete_removed_values to confirm.",
             );
           }
-          await purgeIdentityFields(c.get("deps"), c.get("user"), removed.map((f) => f.key));
+          identityPurgeKeys = removed.map((f) => f.key);
         }
       }
     }
     // Optional, like every other patch in the API: send the ETag the edited value was read at and a save that
     // would overwrite somebody else's is refused with 409 instead of silently winning (services/settings.ts).
     const row = await upsertSetting(c.get("deps"), c.get("user"), c.req.param("setting_id"), c.req.valid("json").value, c.req.header("If-Match"));
-    return c.json(toSettingResource(row));
+    // THE SETTINGS ROW IS WRITTEN FIRST, and only then is anything destroyed. The purge walks every employee's
+    // encrypted blob and every uploaded proof, which does not fit in one invocation - so it runs as a bounded
+    // slice here and the rest goes to the drain (services/identityDetails.ts#purgeIdentityFieldsSlice). Ordered
+    // the other way round, an invocation killed mid-walk left values and proofs irreversibly gone for the first
+    // N employees while the settings row still listed the field, and the caller saw a 500 for an operation they
+    // had confirmed in a dialog that promised a clean delete.
+    if (identityPurgeKeys.length) {
+      const deps = c.get("deps");
+      const first = await purgeIdentityFieldsSlice(deps, c.get("user"), { keys: identityPurgeKeys, phase: "docs" });
+      if (!first.done && first.next) {
+        await deps.db.insert(schema.jobs).values({
+          code: await allocFlatCode(deps, schema.jobs),
+          kind: IDENTITY_PURGE_JOB,
+          payload: JSON.stringify({ ...first.next, correlationId: deps.trace } satisfies IdentityPurgeCursor & { correlationId?: string }),
+        });
+      }
+    }
+    // A no-op for the caller who just wrote the key - it is the same write decision - but it keeps the
+    // invariant simple: every serialized setting leaves this file through the redactor.
+    return c.json(redactSettingResource(toSettingResource(row), c.get("user")));
   });

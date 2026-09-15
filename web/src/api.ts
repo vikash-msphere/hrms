@@ -517,6 +517,27 @@ export function get<T>(path: string): Promise<T> {
   return coalescedGet<T>(path);
 }
 
+/**
+ * The same read, made CONDITIONAL on a copy the caller already holds - `listConditional` for a path that is
+ * not a collection list.
+ *
+ * `employees:upcomingCelebrations` is what this exists for. It is the heaviest read in the app per unit of
+ * usefulness - the server scans the live roster and decrypts one PII blob per employee to answer it - it is
+ * held by every role, and the dashboard fires it on every mount. It is a custom method rather than a
+ * collection, so neither `useCollection` nor the resource store reaches it; the caller holds the validator
+ * itself and hands it back here.
+ */
+export async function getConditional<T>(
+  path: string,
+  etag?: string,
+): Promise<{ notModified: true } | { notModified?: false; body: T; etag?: string }> {
+  // The validator comes back WITH this response rather than from a lookup afterwards, for the reason
+  // `listConditional` gives: two concurrent reads of one path would otherwise hand each other's etag over.
+  const answer = await coalescedGetDetailed<T | typeof NOT_MODIFIED>(path, etag);
+  if (answer.body === NOT_MODIFIED) return { notModified: true };
+  return { body: answer.body as T, etag: answer.etag };
+}
+
 // `authz_version` stamps what the caller may currently do (src/domain/authzVersion.ts). It is separate from
 // `collections` because it invalidates differently: a stored row carries the access hints and field redactions
 // computed for the caller who fetched it, so a DIFFERENT version gives up every stored copy rather than any

@@ -31,7 +31,8 @@ import { EditBioDialog } from "@/components/common/EditBioDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList } from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { MyViewers } from "@/components/common/MyViewers";
 import { AccessTab } from "@/components/common/AccessTab";
 import { AccessScope } from "@/components/access/AccessScope";
 import { usePermission } from "@/lib/perm";
@@ -133,7 +134,7 @@ export default function Profile({ me }: { me: Me }) {
                 location={emp.location}
                 bio={emp.bio}
                 onEditBio={() => setBioOpen(true)}
-                avatar={<PhotoAvatar className="h-[68px] w-[68px] rounded-[14px] sm:h-[92px] sm:w-[92px] sm:rounded-[18px]" employeeId={me.employee_id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
+                avatar={<PhotoAvatar className="h-[68px] w-[68px] rounded-full sm:h-[92px] sm:w-[92px]" employeeId={me.employee_id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
                 note={<PresenceNote presence={presence} coveredByName={presence?.covered_by ? empName(presence.covered_by) : undefined} />}
                 /* The record, labelled - the band that replaced the detail grid the Profile tab used to
                    draw underneath this card. Reports-to and direct reports are cells here rather than
@@ -210,6 +211,12 @@ export default function Profile({ me }: { me: Me }) {
                   <AccessTab value="signature" target={{ collection: "employees", objectPath: selfPath, field: "signature", label: "Signature" }}><PenLine className="h-4 w-4" /> Signature</AccessTab>
                   {canAssets && <AccessTab value="assets" target={{ collection: "assets", label: "Assets" }}><Package className="h-4 w-4" /> Assets</AccessTab>}
                   <AccessTab value="documents" target={{ collection: "personal-documents", label: "Documents" }}><FileText className="h-4 w-4" /> Documents</AccessTab>
+                  {/* Not an AccessTab: this tab is ABOUT access rather than governed by one, and it is
+                      deliberately open to everybody on their own profile - a person being able to find out
+                      who reads their bank details is the point, not a permission to be granted. */}
+                  {/* `shrink-0` for the reason AccessTab's wrapper carries it: in the scrolling tab strip a
+                      shrinkable trigger is squeezed narrower than its nowrap label and spills over the next. */}
+                  <TabsTrigger value="privacy" className="shrink-0"><ShieldCheck className="h-4 w-4" /> Privacy</TabsTrigger>
                 </TabsList>
                 <TabsContent value="profile" className="space-y-4">
                   {/* No detail grid here: the header's facts band is that grid, one screen higher and
@@ -253,6 +260,9 @@ export default function Profile({ me }: { me: Me }) {
                 )}
                 <TabsContent value="documents">
                   <EmployeeDocuments employeeId={me.employee_id} title="My documents" />
+                </TabsContent>
+                <TabsContent value="privacy">
+                  <MyViewers selfPath={selfPath} />
                 </TabsContent>
               </Tabs>
             </AccessScope>

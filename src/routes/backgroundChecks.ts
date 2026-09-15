@@ -31,5 +31,6 @@ export const backgroundChecks = collectionRoutes({
       page.maxPageSize,
       page.pageToken,
       page.showDeleted,
+      page.deletedOnly,
     ),
 });

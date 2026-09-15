@@ -96,7 +96,6 @@ function isMonth(period: PayPeriod, y: number, m: number): boolean {
 }
 
 export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string; openId?: string }) {
-  const isSuperAdmin = me.role === "super_admin";
   const { rows, state, error, reload } = useCollection<PayrollRun>("payroll-runs");
   const { rows: periods, reload: reloadPeriods } = useCollection<PayPeriod>("pay-periods");
   // A quick monthly run creates the period AND the run in one go, so it needs both rights. Only super_admin
@@ -241,11 +240,20 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     }
     return t;
   }, [items]);
-  // The bank file is super-admin-only (it exposes every employee's account number), so only super needs the
-  // list of configured banks to populate the per-bank download menu.
+  // The configured banks, which populate the per-bank download menu on an approved run.
+  //
+  // Read UNCONDITIONALLY. This used to be gated on `me.role === "super_admin"`, which is the same defect the
+  // comment on Approve below describes having fixed: it asks about a ROLE where the decision is a PERMISSION.
+  // `bankFile` is one of the candidate verbs accessHint computes for this collection
+  // (src/http/accessHint.ts), so `run.access.can` already carries it exactly when the caller may invoke it -
+  // and the row then hid the action anyway, because `banks` was empty for anyone whose role was not
+  // super_admin. The gate also bought nothing: the `.catch` below already swallows a 403, so a caller without
+  // `bank-formats.read` ends up with an empty list either way.
+  //
+  // WORTH KNOWING WHEN GRANTING: `bankFile` without `bank-formats.read` leaves a verb the UI cannot drive -
+  // the caller may invoke it, but there is no bank to pick, so no menu renders.
   const [banks, setBanks] = useState<string[]>([]);
   useEffect(() => {
-    if (!isSuperAdmin) return;
     let live = true;
     get<{ results: BankFormat[] }>("bank-formats")
       .then((r) => live && setBanks((r.results ?? []).map((f) => f.bank).filter(Boolean) as string[]))
@@ -253,7 +261,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     return () => {
       live = false;
     };
-  }, [isSuperAdmin]);
+  }, []);
 
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState("");

@@ -269,6 +269,8 @@ function TableList() {
 function OneTable({ id }: { id: string }) {
   const route = useRoute();
   const { toast } = useToast();
+  // Deliberately the BROAD capability, not a per-collection one: a custom grid draws columns from several
+  // collections at once, so no single collection's export grant can stand for what it would put in the file.
   const canExport = usePermission("export.read");
   const [view, setView] = useState<TableView | null>(null);
   const [catalogue, setCatalogue] = useState<TableCatalogue | null>(null);

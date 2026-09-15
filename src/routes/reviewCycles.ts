@@ -55,16 +55,25 @@ export const reviewCycles = collectionRoutes<ReviewCycleInput, typeof schema.rev
     purge: (deps, actor, id, ifMatch) => purgeReviewCycle(deps, actor, id, ifMatch),
   },
   // This list scopes by the caller (a cycle is visible to whoever holds a review in it), not by a code filter.
-  list: (c, page) => listReviewCycles(c.get("deps"), c.get("user"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted),
+  list: (c, page) => listReviewCycles(c.get("deps"), c.get("user"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, page.deletedOnly),
   verbs: {
     launch: { schema: employeesSchema, run: (deps, user, id, body) => launchReviewCycle(deps, user, id, body.employees) },
     enroll: { schema: employeesSchema, run: (deps, user, id, body) => addRevieweesToCycle(deps, user, id, body.employees) },
     // Attainment -> money, in two presses. `:variablePay` computes and reports (nothing is written); `:award`
-    // writes the bonuses at exactly the figures it reported. Both read reviews through the caller's own scope,
-    // so a manager sees their team and HR sees everyone.
+    // writes the bonuses at exactly the figures it reported. Both read reviews through the caller's own scope.
+    //
+    // WHO REACHES THEM: `hr_admin` and super. Both verbs need a custom-method allow on `review-cycles`, and
+    // the seeded manager grant carries `review-cycles` at `read` only - a level grant carries no custom
+    // methods - so a manager gets 403 here rather than their team's numbers. This comment used to claim
+    // otherwise; the grant is the deliberate half (pricing a payout is the cycle administrator's act, like
+    // `:launch` and `:close` beside it), so the sentence is what was wrong.
+    //
+    // The caller rides along so the compensation figures are dropped for anyone without a compensation grant -
+    // the report still renders, it just cannot state a target its reader may not see (services/variablePay.ts,
+    // and the same control services/letterData.ts applies to a letter's CTC blocks).
     variablePay: {
       run: async (deps, user, id, _body, c) => {
-        const { cycle, lines } = await variablePayRun(deps, c.get("scope"), id);
+        const { cycle, lines } = await variablePayRun(deps, user, c.get("scope"), id);
         return { ...cycle, _variablePay: lines };
       },
     },

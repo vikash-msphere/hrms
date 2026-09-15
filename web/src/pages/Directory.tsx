@@ -7,7 +7,7 @@ import { useDebounced } from "@/hooks/useDebounced";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
-import { cn, formatDate, idOf } from "@/lib/utils";
+import { cn, formatDate, idOf, reportsUnder } from "@/lib/utils";
 import { daysBetweenYmd, todayStr, thisMonthStr } from "@/lib/orgDay";
 import { navigate } from "@/router";
 import type { Department, Employee, Me } from "@/types";
@@ -243,6 +243,9 @@ export default function Directory({ me }: { me: Me }) {
     if (full.length < 3) return null;
     return rows.find((e) => !e.delete_time && `${e.first_name} ${e.last_name}`.trim().toLowerCase() === full) ?? null;
   }, [rows, editing, form.first_name, form.last_name]);
+
+  /** Everyone under the person being edited - the manager picker must not offer any of them (`reportsUnder`). */
+  const editSubordinateIds = useMemo(() => reportsUnder(rows, editing ? idOf(editing.path) : null), [rows, editing]);
 
   // Live presence: employee ids with an open clock session (drives the "clocked in" dot). The shared clock
   // (lib/clock.tsx, mounted in the shell) already reads exactly this set for the top-bar chip, so reading it
@@ -802,8 +805,12 @@ export default function Directory({ me }: { me: Me }) {
               onValueChange={(v) => setForm({ ...form, manager: v })}
               options={[
                 { value: NONE, label: "No manager" },
+                // Self AND everyone under them. Pointing somebody's manager at their own report closes the
+                // reporting line into a loop, which `assertNoManagerCycle` refuses server-side; excluding them
+                // here means the picker stops offering a move that will come back as an error. See
+                // `reportsUnder` on why this narrows the list rather than deciding anything.
                 ...rows
-                  .filter((e) => !e.delete_time && (!editing || e.path !== editing.path))
+                  .filter((e) => !e.delete_time && (!editing || (e.path !== editing.path && !editSubordinateIds.has(idOf(e.path)))))
                   .map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` })),
               ]}
               placeholder="No manager"

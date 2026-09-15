@@ -18,6 +18,7 @@ import type { Deps } from "../deps";
 import { customMethod } from "./customMethod";
 import { lifecycleVerb } from "./lifecycleVerb";
 import { accessHint, withAccess } from "./accessHint";
+import { LIST_OWNER_COLUMNS, OWNER_COLUMN_COLLECTIONS, pageOwnerCodes } from "../lib/authzResolve";
 import { clampPageSize } from "./pagination";
 import { lastWriteAt, listEtag, etagMatches } from "./listEtag";
 import { jsonBody } from "./jsonRequest";
@@ -143,8 +144,10 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
     const [decorated] = await decorate(c, row ? [row] : []);
     const user = c.get("user");
     const grant = c.get("objectGrant");
-    // Hint first, then serialize: a resource may shape itself around what the caller may do.
-    const hint = accessHint(user, collection, row?.code, grant, hintVerbs);
+    // Hint first, then serialize: a resource may shape itself around what the caller may do. The owner code is
+    // the one the middleware already decided with (no second lookup), so the hint cannot disagree with the
+    // request that produced it.
+    const hint = accessHint(user, collection, row?.code, grant, hintVerbs, c.get("itemOwnerCode"));
     const res = serialize(decorated ?? row, user, hint.can) as object;
     return c.json(withAccess(res, user, collection, row?.code, grant, hintVerbs, hint));
   };
@@ -212,12 +215,16 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
       : await svc.list(c.get("deps"), user, c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, page.deletedOnly);
     const { items, nextPageToken, extra }: { items: any[]; nextPageToken?: string; extra?: Record<string, unknown> } = listed;
     const rows = await decorate(c, items);
+    // Owner codes for the page, in ONE read, for the flat-coded owner-column collections only. The hint needs
+    // them for the same reason the item lane does; per row they would be a lookup per row.
+    const ownerProp = OWNER_COLUMN_COLLECTIONS.has(collection) ? LIST_OWNER_COLUMNS[collection] : undefined;
+    const ownerCodes = ownerProp ? await pageOwnerCodes(c.get("deps"), rows, ownerProp) : undefined;
     // `extra` is for an aggregate the page itself cannot carry - notifications ships `snoozed_count` so the
     // bell can say "3 snoozed" without a second request.
     return c.json(
       {
         results: rows.map((r) => {
-          const hint = accessHint(user, collection, r.code, user.grant, hintVerbs);
+          const hint = accessHint(user, collection, r.code, user.grant, hintVerbs, ownerCodes?.get(r.code));
           return withAccess(serialize(r, user, hint.can) as object, user, collection, r.code, user.grant, hintVerbs, hint);
         }),
         next_page_token: nextPageToken,

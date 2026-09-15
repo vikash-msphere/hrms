@@ -5,7 +5,7 @@
 // decide(read). Honors per-template ACL tightening (deny-wins) exactly like a real request would.
 import { decide, type Grant } from "../domain/permissions";
 import { mergeGrants, rulesToGrant } from "../domain/compileGrants";
-import { isSuperGrant, EVERYONE_ROLE } from "../domain/grants";
+import { isSuperGrant, EVERYONE_ROLE, roleSubjectsOf } from "../domain/grants";
 import { ancestorsOf } from "../domain/codes";
 import { loadObjectRulesForRequest } from "./policyLoad";
 import { uuidToCode } from "./authzResolve";
@@ -16,7 +16,7 @@ import type { AppUser } from "../env";
 // for a missing code (fail safe).
 export async function canReadObjectCode(deps: Deps, user: AppUser, collection: string, code: string | null | undefined): Promise<boolean> {
   if (!code) return false;
-  const roleSubjects = isSuperGrant(user.grant) ? [user.role] : [user.role, EVERYONE_ROLE];
+  const roleSubjects = roleSubjectsOf(user, user.grant);
   let grant: Grant = user.grant;
   const objRules = await loadObjectRulesForRequest(deps, user.uuid, roleSubjects, collection, ancestorsOf(code));
   if (objRules.length) grant = mergeGrants(user.grant, rulesToGrant(objRules));

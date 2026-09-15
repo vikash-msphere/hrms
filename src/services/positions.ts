@@ -90,7 +90,7 @@ export async function changeRole(deps: Deps, actor: AppUser, input: PositionInpu
   // so a promotion that only changes the title keeps the existing department/location, and vice versa.
   const departmentId = input.department !== undefined ? idFromPath(input.department) ?? null : current?.departmentId ?? emp.departmentId ?? null;
   const jobTitle = input.job_title !== undefined ? input.job_title?.trim() || null : current?.jobTitle ?? emp.jobTitle ?? null;
-  const location = input.location !== undefined ? input.location?.trim() || null : current?.location ?? null;
+  const location = input.location !== undefined ? input.location?.trim() || null : current?.location ?? emp.location ?? null;
   const employmentType: EmploymentType | null = input.employment_type !== undefined
     ? asEnum(EMPLOYMENT_TYPES, input.employment_type, "employment_type")
     : current?.employmentType ?? emp.employmentType ?? null;

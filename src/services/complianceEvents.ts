@@ -2,9 +2,10 @@
 // control here - the middleware gates the collection by path + grants (private by default). Mirrors the
 // holidays service. Status is a simple workflow (pending -> filed | waived); marking a row filed without an
 // explicit date stamps today.
-import { and, isNull } from "drizzle-orm";
+import { and } from "drizzle-orm";
 import { keysetPage } from "./keysetPage";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -39,8 +40,8 @@ const parseDate = (s: string, field: string): Date => {
   return new Date(ms);
 };
 
-export async function listComplianceEvents(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const where = and(showDeleted ? undefined : isNull(schema.complianceEvents.deleteTime), applyScope(scope, schema.complianceEvents.code, schema.complianceEvents.code));
+export async function listComplianceEvents(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, deletedOnly = false) {
+  const where = and(deleteStateFilter(schema.complianceEvents.deleteTime, showDeleted, deletedOnly), applyScope(scope, schema.complianceEvents.code, schema.complianceEvents.code));
   return keysetPage(deps, schema.complianceEvents, "compliance-events", where, { max: maxPageSize, pageToken });
 }
 

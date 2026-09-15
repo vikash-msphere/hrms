@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { positiveMoney, nonNegativeMoney } from "../http/moneyField";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listCompensation, getCompensation, reviseCompensation, updateCompensation, deleteCompensation, decorateCompensation, type CompensationInput } from "../services/compensation";
@@ -16,8 +17,8 @@ import { toCompensationResource } from "../http/serialize";
 const reviseSchema = z
   .object({
     employee: z.string(),
-    annual_ctc: z.number().positive(),
-    variable_pay_target: z.number().min(0).nullable().optional(),
+    annual_ctc: positiveMoney(),
+    variable_pay_target: nonNegativeMoney().nullable().optional(),
     currency_code: z.string().optional(),
     pay_grade: z.string().nullable().optional(),
     salary_structure: z.string().nullable().optional(),

@@ -1,14 +1,22 @@
-// Background-verification tracking: flat company-wide CRUD + restore over `background_checks`. NO access
+// Background-verification tracking: employee-OWNED CRUD + restore over `background_checks`. NO access
 // control here - the middleware gates the collection by path + grants (private by default; this is sensitive,
-// so super-only until HR is granted via the ACL). Mirrors the compliance-events service.
-import { and, eq, isNull } from "drizzle-orm";
+// so super-only until HR is granted via the ACL).
+//
+// The row's code is allocated under its subject's employee code (`allocOwnedCode`), not flat. That is what makes
+// the two lanes of one grant agree: the list binds `applyScope` to `employeeId` for an `own`/`dept` breadth, and
+// the item lane matches `me` / `my-dept` against the row's CODE. With a flat code the second of those could never
+// answer, so `GET /v1/background-checks/<id>` refused a row the list had just returned - which is why this
+// collection was left without the `self`/`dept` tiers the rest of its kind carry.
+import { and, eq } from "drizzle-orm";
 import { keysetPage } from "./keysetPage";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
 import { crudService, has, type CrudSpec, type SetOf } from "./crud";
+import { CODE_WIDTH, allocOwnedCode } from "./codeAlloc";
 import { idFromPath } from "./documentsCommon";
 import { orgToday, dayStartMs } from "./orgDay";
 
@@ -18,6 +26,7 @@ type CheckType = (typeof CHECK_TYPES)[number];
 type Status = (typeof STATUSES)[number];
 
 export type BackgroundCheckInput = {
+  /** The subject. Required on create, and immutable afterwards - the row's code is allocated under them. */
   employee?: string;
   check_type?: CheckType;
   status?: Status;
@@ -45,8 +54,8 @@ function validate(input: BackgroundCheckInput) {
 
 // A check belongs to an employee, so the list is row-filtered by the scope the middleware computed (own record
 // / own department / all), in SQL - not by the generic whole-table read.
-export async function listBackgroundChecks(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const where = and(showDeleted ? undefined : isNull(schema.backgroundChecks.deleteTime), applyScope(scope, schema.backgroundChecks.code, schema.backgroundChecks.employeeId));
+export async function listBackgroundChecks(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, deletedOnly = false) {
+  const where = and(deleteStateFilter(schema.backgroundChecks.deleteTime, showDeleted, deletedOnly), applyScope(scope, schema.backgroundChecks.code, schema.backgroundChecks.employeeId));
   return keysetPage(deps, schema.backgroundChecks, "background-checks", where, { max: maxPageSize, pageToken });
 }
 
@@ -55,6 +64,10 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.b
   collection: "background-checks",
   auditName: "background-check",
   notFound: "background check not found",
+  // Owner-coded under the SUBJECT of the check, which is what a `background-checks.me.**` rule reaches and what
+  // lets a manager's `my-dept` rule cover their reports. The owner is fixed at create (see `patch` below).
+  allocCode: (deps, table, values, attempt) =>
+    allocOwnedCode(deps, table, schema.backgroundChecks.employeeId, values.employeeId as string, CODE_WIDTH.owned, attempt > 1),
   insert: async (input, deps) => {
     const employeeId = idFromPath(input.employee);
     if (!employeeId) throw invalidArgument("employee is required");
@@ -80,11 +93,13 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.b
   patch: async (patch, row, deps) => {
     validate(patch);
     const set: SetOf<typeof schema.backgroundChecks> = {};
-    if (has(patch, "employee")) {
-      const e = idFromPath(patch.employee);
-      if (!e) throw invalidArgument("employee cannot be empty");
-      set.employeeId = e;
-    }
+    // The SUBJECT is immutable. The row's code is allocated under their employee code and a code never changes:
+    // nothing in this codebase re-codes a row when its owner column moves (codeCascade rewrites prefixes when an
+    // EMPLOYEE moves department, which is a different operation). So a re-point would leave the code under the
+    // previous subject - the row would keep answering their `me` rule and their manager's `my-dept` one, and stop
+    // answering the new subject's, silently and permanently. Re-filing is the honest way to correct a mis-filed
+    // check, and it leaves an audit trail of both acts.
+    if (has(patch, "employee")) throw invalidArgument("employee cannot be changed; delete this check and file it against the right employee");
     if (has(patch, "check_type")) set.checkType = patch.check_type;
     if (has(patch, "vendor")) set.vendor = patch.vendor?.trim() || null;
     if (has(patch, "reference_no")) set.referenceNo = patch.reference_no?.trim() || null;

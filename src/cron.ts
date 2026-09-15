@@ -2,6 +2,7 @@ import { allocFlatCode, allocOwnedCode } from "./services/codeAlloc";
 // The successor row's id is minted before the claim in the recurrence rolls, so a failed create can be asked
 // whether it landed before the claim is released. Same shape as services/cards.ts#rollRecurringCards.
 import { genId } from "./lib/idCodec";
+import { systemActor } from "./lib/systemActor";
 import { asc, eq, and, or, ne, isNull, isNotNull, lte, lt, gte, sql, inArray } from "drizzle-orm";
 import * as schema from "./db/schema";
 import type { Deps } from "./deps";
@@ -19,7 +20,8 @@ import { nudgeMissingScorecards } from "./services/ats";
 import { reconcilePendingEsign } from "./services/esign/callback";
 import { publishDueAnnouncements } from "./services/announcements";
 import { nextOccurrence } from "./services/events";
-import { purgeExpiredAccessRules } from "./services/accessRules";
+import { purgeExpiredAccessRules, reviewStandingAccess } from "./services/accessRules";
+import { purgeIdentityFieldsSlice, IDENTITY_PURGE_JOB, type IdentityPurgeCursor } from "./services/identityDetails";
 import { rollRecurringCards } from "./services/cards";
 import { creditHolidayCompOff } from "./services/compOff";
 import { getSettingValue } from "./services/settings";
@@ -194,8 +196,13 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // Sweep lapsed temporary access rules. They already stopped deciding at their expiry instant (policyLoad
     // filters on it), so this is table hygiene, not the enforcement mechanism.
     const accessRulesExpired = await run("purgeExpiredAccessRules", () => purgeExpiredAccessRules(deps));
+    // Periodic recertification of STANDING privilege (opt-in per org via the `access-review` setting). The
+    // expiry sweep above only handles access somebody knew was temporary; this is the rest - the grant made
+    // for one project or one person's leave cover that nobody's job it is to remove. No-ops on every tick
+    // that is not due, so it costs one settings read a night.
+    const accessReviewed = await run("reviewStandingAccess", () => reviewStandingAccess(deps));
     return {
-      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired },
+      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, accessReviewed },
       failures,
     };
   }
@@ -381,6 +388,21 @@ async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" 
         await deps.db
           .update(schema.jobs)
           .set({ status: "queued", runAfter: null, payload: JSON.stringify({ ...fan, offset: res.nextOffset }) })
+          .where(eq(schema.jobs.uuid, job.uuid));
+        return "requeued";
+      }
+    } else if (job.kind === IDENTITY_PURGE_JOB) {
+      // Removed identity fields past the slice the settings write did inline. Same LRO shape as the rest: a
+      // bounded number of proof deletions, then a bounded walk of the encrypted blobs by employee uuid,
+      // requeued with the advanced cursor. The settings row is ALREADY written, so a purge that stalls leaves
+      // the field gone from every surface with some values still on disk - recoverable by the next tick, which
+      // is the direction that does not destroy data it cannot finish destroying.
+      const purge = payload as IdentityPurgeCursor;
+      const res = await purgeIdentityFieldsSlice(deps, systemActor(), purge);
+      if (!res.done && res.next) {
+        await deps.db
+          .update(schema.jobs)
+          .set({ status: "queued", runAfter: null, payload: JSON.stringify({ ...purge, ...res.next }) })
           .where(eq(schema.jobs.uuid, job.uuid));
         return "requeued";
       }

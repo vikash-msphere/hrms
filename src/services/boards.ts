@@ -11,7 +11,7 @@ import { keysetPage } from "./keysetPage";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
+import { deleteStateFilter, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import {
   DEFAULT_BOARD_COLUMNS, DEFAULT_SCRUM_COLUMNS, normalizeColumns, normalizeSwimlanes, normalizeLabels,
   normalizePrefix, derivePrefix, parseColumns, type SwimlaneMode, SWIMLANE_MODES,
@@ -52,9 +52,9 @@ const asArgError = <T>(fn: () => T): T => {
 //
 // `boards` has no owner column (it is a flat catalog with a `code`), so an own-scoped caller correctly gets
 // nothing - the same fail-closed answer the generic list gives, rather than the whole table.
-export async function listBoards(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
+export async function listBoards(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, deletedOnly = false) {
   const conds: (SQL | undefined)[] = [applyScope(scope, schema.boards.code, undefined)];
-  if (!showDeleted) conds.push(isNull(schema.boards.deleteTime));
+  conds.push(deleteStateFilter(schema.boards.deleteTime, showDeleted, deletedOnly));
   return keysetPage<typeof schema.boards.$inferSelect>(deps, schema.boards, "boards", and(...conds.filter(Boolean) as SQL[]), {
     max: maxPageSize,
     pageToken,

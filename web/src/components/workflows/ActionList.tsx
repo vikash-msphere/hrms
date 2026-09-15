@@ -12,6 +12,7 @@ import type { Department } from "@/types";
 import { TemplatedInput } from "./TemplatedInput";
 import type { Action, WaitArm, WorkflowMeta, Variable } from "./types";
 import { variablesFor } from "./useWorkflowMeta";
+import { bodyToRows, isFieldMap, rowsToBody, type BodyRow } from "./bodyValue";
 
 // ---- Add-action intent menu (leads with WHAT you want to do, not HTTP) ----
 const INTENTS: { kind: Action["kind"]; label: string; icon: typeof Bell; make: () => Action }[] = [
@@ -255,39 +256,7 @@ function ActionEditor({ action, onChange, meta, triggerType, vars }: { action: A
 }
 
 // ---- apiCall: guided Create / Act-on-record / Raw ----
-type BodyRow = { key: string; value: string };
-function bodyToRows(body: unknown): BodyRow[] {
-  return body && typeof body === "object" && !Array.isArray(body) ? Object.entries(body as Record<string, unknown>).map(([k, v]) => ({ key: k, value: typeof v === "string" ? v : JSON.stringify(v) })) : [];
-}
-
-/** A body this field form cannot represent: an array, or a scalar. Shown read-only rather than erased. */
-function isFieldMap(body: unknown): boolean {
-  return body == null || (typeof body === "object" && !Array.isArray(body));
-}
-
-// THE ROUND-TRIP HAS TO BE LOSSLESS. Numbers and booleans survived it; an array, a nested object and `null`
-// did not - `rowsToBody` had no branch that parsed one back, so `["employees/a1"]` was shown in the row and
-// written back as the STRING '["employees/a1"]'. And editing any row re-serialises all of them, so touching
-// an unrelated field was enough. Several write schemas require arrays (goal-templates `:assign` takes
-// `employees`, cards `initial_todos`, announcements poll `options`), the guided form cannot author one at
-// all, so such a rule has to be written through the JSON hatch - and then merely OPENING it here and
-// touching the body converted it to a string, which the server rejects with a 400 naming a field the reader
-// never typed wrong.
-function parseValue(v: string): unknown {
-  if (v === "true") return true;
-  if (v === "false") return false;
-  if (v === "null") return null;
-  if (v.includes("{{")) return v; // a template is always a string
-  if (/^[[{]/.test(v.trim())) { try { return JSON.parse(v); } catch { return v; } }
-  return v !== "" && !Number.isNaN(Number(v)) ? Number(v) : v;
-}
-function rowsToBody(rows: BodyRow[]): Record<string, unknown> | undefined {
-  const entries = rows.filter((r) => r.key.trim());
-  if (!entries.length) return undefined;
-  const out: Record<string, unknown> = {};
-  for (const r of entries) out[r.key] = parseValue(r.value);
-  return out;
-}
+// The body round-trip lives in bodyValue.ts, on its own, so it can be tested without a DOM.
 
 function ApiCallEditor({ action, onChange: onChangeProp, meta, vars }: { action: Extract<Action, { kind: "apiCall" }>; onChange: (a: Action) => void; meta: WorkflowMeta | null; vars: Variable[] }) {
   const resources = meta?.resources ?? [];

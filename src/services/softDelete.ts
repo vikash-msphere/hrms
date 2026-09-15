@@ -1,7 +1,7 @@
 // Generic soft-delete helpers shared by every CRUD resource (logic stays in the
 // service layer, not in routes). A resource is "soft-deletable" if its table has a
 // `deleteTime` column. List filtering hides soft-deleted rows unless showDeleted.
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, isNotNull, type SQL } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -74,6 +74,26 @@ export function visibleByDelete<T extends { deleteTime?: Date | number | null }>
   return showDeleted ? rows : rows.filter((r) => !r.deleteTime);
 }
 
+/**
+ * The delete-state condition every list binds, as ONE implementation.
+ *
+ * `deletedOnly` is a SEPARATE flag from `showDeleted`, and http/collectionRoute.ts says why in as many words:
+ * a "Deleted" view is its own fetch rather than a client-side filter over a page of mostly-live rows - which
+ * on any list longer than one page would show an empty trash while the deleted rows sat past the cursor. The
+ * generic lane (services/crud.ts) has always bound both; the bespoke `list` hooks each re-derived the pair by
+ * hand, and between them dropped `deletedOnly` fifteen times and `showDeleted` once, so `?deleted_only=true`
+ * answered with live rows mixed in - precisely the page the flag was invented to avoid.
+ *
+ * Returns `undefined` when no condition is needed (`showDeleted` with no `deletedOnly`), so callers can push
+ * it straight into their `conds` array.
+ */
+export function deleteStateFilter(deleteTimeColumn: unknown, showDeleted?: boolean, deletedOnly?: boolean): SQL | undefined {
+  const col = deleteTimeColumn as never;
+  if (deletedOnly) return isNotNull(col);
+  if (!showDeleted) return isNull(col);
+  return undefined;
+}
+
 /** Mark a row deleted (idempotent guard: already-deleted -> 404). */
 export async function softDeleteRow(
   deps: Deps,
@@ -126,8 +146,14 @@ export async function restoreRow(
   return updated;
 }
 
-/** Permanently remove a row (super_admin only - enforced at the route). `onPurge`
- *  runs side effects like deleting an R2 object before the DB row is removed. */
+/**
+ * Permanently remove a row (super_admin only - enforced at the route).
+ *
+ * `onPurge` is the escape hatch for a side effect this function cannot know about, run AFTER the row is gone
+ * (see the note at the call). It is not how attachments are cleaned up: every `attachments` row and R2 object
+ * belonging to the purged record is swept here, generically, because the key is `(collection, object_id)` and
+ * both halves are already in hand - see the note by the read below.
+ */
 export async function purgeRow(
   deps: Deps,
   actor: AppUser,
@@ -159,6 +185,29 @@ export async function purgeRow(
   // the read above and this write. SQL does not treat that as an error, so the group commits without the row
   // going. It stays guarded anyway (see atVersion): losing that race is a 409 the caller retries, and the
   // window is the microseconds between two statements of one request against a super-admin hard purge.
+  // THE OTHER FK-LESS POINTER AT THIS ROW, and it had no sweeper at all. `attachments` is keyed
+  // `(collection, object_id)` with `object_id` a bare `text().notNull()` and no `.references()`, exactly like
+  // `access_rules.match_code` below - so SQLite never refuses a purge over an attachment, the DELETE succeeds,
+  // and test/purgeCascadeDrift (which holds each declaration against the schema's own foreign keys) cannot see
+  // the pointer either. `purgeRow` takes an `onPurge` hook documented for precisely this ("runs side effects
+  // like deleting an R2 object"), and services/crud.ts passes `undefined` at the only place a factory
+  // collection's purge is built - so nothing was calling it.
+  //
+  // What survived a `DELETE /v1/candidates/<id>?force` was the encrypted object in R2, forever, and the
+  // `attachments` row naming it - and that row carries `file_name`, which for a resume is routinely the
+  // person's name. Seven soft-deletable collections write here (candidates, referrals, leave-requests,
+  // reimbursements, expenses, tax-declarations and employees' identity scans), and a hard purge is the
+  // operation reached for to honour an erasure request, which made it the one operation that left the
+  // document behind.
+  //
+  // Done GENERICALLY here rather than as a declaration per collection, the way the access-rules cleanup above
+  // already is: `purgeRow` holds both halves of the key, so there is no per-collection decision to get wrong
+  // and nothing for the eighth attachment-bearing collection to remember.
+  const attached = await deps.db
+    .select({ r2Key: schema.attachments.r2Key })
+    .from(schema.attachments)
+    .where(and(eq(schema.attachments.collection, collection), eq(schema.attachments.objectId, id)));
+
   const stmts: (BatchStmt | CheckedStmt)[] = [...(cascade?.first ?? [])];
   for (const { table: t, column } of cascade?.detach ?? []) {
     // `updated_at` moves with the clearing, because it IS a change to that record: its etag has to stop
@@ -188,6 +237,11 @@ export async function purgeRow(
       deps.db.delete(schema.accessRules).where(and(eq(schema.accessRules.namespace, collection), eq(schema.accessRules.matchCode, purgedCode))),
     );
   }
+  // The metadata rows go inside the batch (so a refused purge leaves them exactly where they were); the R2
+  // objects they name are deleted AFTER it commits, for the reason the note below the batch spells out.
+  if (attached.length) {
+    stmts.push(deps.db.delete(schema.attachments).where(and(eq(schema.attachments.collection, collection), eq(schema.attachments.objectId, id))));
+  }
   stmts.push({ stmt: deps.db.delete(table).where(atVersion(table, row)).returning({ uuid: table.uuid }), expect: 1, label: "purge" });
   let short: string[];
   try {
@@ -214,6 +268,21 @@ export async function purgeRow(
       await onPurge(row);
     } catch (e) {
       console.error(`[purge] ${collection}/${id}: the row is gone but its stored object was not deleted (orphaned, reclaimable)`, e);
+    }
+  }
+  // The stored objects, in the same order and for the same reason: the metadata rows are already gone, so a
+  // failure here leaves an object nothing points at (reclaimable) rather than a row pointing at nothing.
+  //
+  // `photoKey` / `signatureKey` are the only stored objects that hang off a COLUMN rather than off the
+  // `attachments` table - services/employeePhoto.ts deletes them when the field is cleared, and nothing
+  // deleted them when the row went. Read structurally (the helper is generic over every table), which costs
+  // nothing on the tables that have neither.
+  const storedKeys = [...attached.map((a) => a.r2Key), ...["photoKey", "signatureKey"].map((k) => row[k]).filter((v): v is string => typeof v === "string" && !!v)];
+  for (const key of storedKeys) {
+    try {
+      await deps.docs.delete(key);
+    } catch (e) {
+      console.error(`[purge] ${collection}/${id}: the row is gone but stored object "${key}" was not deleted (orphaned, reclaimable)`, e);
     }
   }
   // The row is gone for good after this, so its values survive only here.

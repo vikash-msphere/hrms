@@ -3,7 +3,7 @@ import { Plus, Trash2, ArrowRight } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
-import { formatDate, idOf, personName } from "@/lib/utils";
+import { formatDate, idOf, personIndex, personName } from "@/lib/utils";
 import { todayStr } from "@/lib/orgDay";
 import type { ApprovalDelegation, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -39,7 +39,9 @@ export default function Delegations({ me }: { me: Me }) {
   const [form, setForm] = useState(EMPTY);
 
   const emp = (p?: string) => (p ? employees.find((e) => idOf(e.path) === idOf(p)) : undefined);
-  const empName = (p?: string, unknown?: string) => personName(employees, p, unknown);
+  // Built ONCE per directory read, not once per call - this is a DataTable column accessor (see `personName`).
+  const empIdx = useMemo(() => personIndex(employees), [employees]);
+  const empName = (p?: string, unknown?: string) => personName(empIdx, p, unknown);
 
   const today = todayStr();
   const activeCount = useMemo(() => rows.filter((r) => r.from_date <= today && r.to_date >= today).length, [rows, today]);

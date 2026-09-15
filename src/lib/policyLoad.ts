@@ -15,8 +15,10 @@ import type { Grant } from "../domain/permissions";
 import type { Policy } from "../domain/manifests";
 import { DEFAULT_POLICY } from "../domain/manifests";
 import { EMPTY_GRANT, EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
-import { rulesToGrant, mergeGrants, type CompiledRule } from "../domain/compileGrants";
+import { rulesToGrant, mergeGrants, conditionsOf, mergeConditions, type CompiledRule } from "../domain/compileGrants";
+import type { ConditionIndex } from "../domain/ruleCondition";
 import { cached } from "./cache";
+import { byIdChunks } from "./dbBatch";
 
 // THE liveness predicate for authority: which rows actually decide. Every load path below applies this, so
 // the two lifecycle features ride one condition:
@@ -53,6 +55,9 @@ const RULE_COLUMNS = {
   effect: schema.accessRules.effect,
   status: schema.accessRules.status,
   expiresAt: schema.accessRules.expiresAt,
+  // The per-rule threshold (domain/ruleCondition.ts). Selected with every other decision column so the
+  // condition index is built from the SAME cached rows the grant is, rather than a second read per request.
+  condition: schema.accessRules.condition,
 } as const;
 
 // Per-object EXCEPTION rules for one request: the caller's USER exceptions AND any exact ROLE rules in this
@@ -224,6 +229,23 @@ export async function loadRoleGrant(deps: Deps, role: string): Promise<Grant> {
   return roleGrantFrom(rows, role, deps.clock.now());
 }
 
+/**
+ * The per-rule THRESHOLDS this role's live rules carry (domain/ruleCondition.ts).
+ *
+ * Reads the SAME cached rows `loadRoleGrant` just reduced, so it costs no read of its own, and applies the same
+ * liveness cut - an expired rule must stop constraining exactly when it stops granting.
+ */
+export async function loadRoleConditions(deps: Deps, role: string): Promise<ConditionIndex> {
+  const rows = await cached(`grant:${role}`, TTL_MS, () => roleRulesUncached(deps, role));
+  return conditionsOf(rows.filter(isLive(deps.clock.now())));
+}
+
+/** The same, for the caller's own broad user rules. */
+export async function loadUserConditions(deps: Deps, userUuid: string): Promise<ConditionIndex> {
+  const rows = await cached(`userGrant:${userUuid}`, TTL_MS, () => userRulesUncached(deps, userUuid));
+  return conditionsOf(rows.filter(isLive(deps.clock.now())));
+}
+
 // A USER's BROAD grant - the user's own scope rules (match_code IS NULL), symmetric with the role grant, so a
 // user can hold collection/dept/field-scope access just like a role (not only per-object exceptions). Exact
 // (per-object) user rows are excluded here; they ride the narrowed lane (`loadObjectRulesForRequest`). Cached
@@ -255,6 +277,75 @@ export async function loadUserGrantUncached(deps: Deps, userUuid: string): Promi
 export async function loadUserGrant(deps: Deps, userUuid: string): Promise<Grant> {
   const rows = await cached(`userGrant:${userUuid}`, TTL_MS, () => userRulesUncached(deps, userUuid));
   return userGrantFrom(rows, deps.clock.now());
+}
+
+/**
+ * The SECONDARY roles a user holds (db/schema.ts `user_roles`), cached per user.
+ *
+ * Its own cache band rather than a join onto the auth read: the common case is NO rows, and a cached empty array
+ * costs nothing on every subsequent request, whereas widening the auth join would add a table to a query every
+ * request in the app runs. Busted by name (`userRoles:<uuid>`) wherever the set is edited - services/users.ts.
+ *
+ * The PRIMARY role is deliberately not included: it comes off the `users` row the caller already read, and
+ * folding it in here would mean this cache had to be busted on a plain role change too.
+ */
+export async function loadUserRoles(deps: Deps, userUuid: string): Promise<string[]> {
+  return cached(`userRoles:${userUuid}`, TTL_MS, async () =>
+    (await deps.db.select({ role: schema.userRoles.role }).from(schema.userRoles).where(eq(schema.userRoles.userId, userUuid))).map((r) => r.role),
+  );
+}
+
+/**
+ * How deep `my-org` will walk the reporting line, and how many people it will carry.
+ *
+ * A transitive subtree is unbounded by nature, and this runs on the auth path of a platform that bills rows
+ * read. The depth cap is one read per level; the size cap stops a CEO's `my-org` rule from loading the whole
+ * company into a matcher that then does a linear scan per decision. Both are generous for a real reporting
+ * line and both fail by TRUNCATING, which loses access rather than granting it.
+ */
+const ORG_MAX_DEPTH = 8;
+const ORG_MAX_PEOPLE = 500;
+
+/**
+ * The caller's reporting line as employee CODES: their direct reports, and optionally the whole subtree below.
+ *
+ * WHY CODES AND NOT IDS. The matcher compares codes (`isUnder`), because every owned row is composed under its
+ * owner's employee code - so a report's code answers for that person's leave requests, payslips and documents
+ * without a second lookup per collection.
+ *
+ * Cached per (employee, depth) like the grant itself: the reporting line is read-mostly, and the same short TTL
+ * bounds how long a re-parented report keeps or loses reach. Loaded ONLY when the caller's grant actually uses
+ * the tokens (domain/permissions.ts `grantNeedsReports`), so a request from somebody with no manager rule pays
+ * nothing.
+ */
+export async function loadReportCodes(deps: Deps, managerEmployeeId: string, transitive: boolean): Promise<string[]> {
+  return cached(`reports:${transitive ? "org" : "direct"}:${managerEmployeeId}`, TTL_MS, async () => {
+    const childrenOf = async (ids: string[]) =>
+      ids.length
+        ? await byIdChunks(ids, (group) =>
+            deps.db
+              .select({ uuid: schema.employees.uuid, code: schema.employees.code })
+              .from(schema.employees)
+              .where(and(inArray(schema.employees.managerId, group), isNull(schema.employees.deleteTime))),
+          )
+        : [];
+    let frontier = [managerEmployeeId];
+    const seen = new Set<string>([managerEmployeeId]);
+    const codes: string[] = [];
+    for (let depth = 0; depth < (transitive ? ORG_MAX_DEPTH : 1); depth++) {
+      const rows = await childrenOf(frontier);
+      // A cycle in the reporting line (A manages B manages A) is a data error, not an impossibility - `seen`
+      // makes it terminate rather than loop the auth path forever.
+      const next = rows.filter((r) => !seen.has(r.uuid));
+      for (const r of next) {
+        seen.add(r.uuid);
+        if (r.code) codes.push(r.code);
+      }
+      if (!next.length || codes.length >= ORG_MAX_PEOPLE) break;
+      frontier = next.map((r) => r.uuid);
+    }
+    return codes.slice(0, ORG_MAX_PEOPLE);
+  });
 }
 
 // The global manifest (one row, key 'manifest'), cached. Falls back to DEFAULT_POLICY (never empty).

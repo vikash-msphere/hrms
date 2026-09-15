@@ -3,6 +3,8 @@ import type { AppEnv } from "../env";
 import { jsonBody } from "../http/jsonRequest";
 import { previewAccess, type PreviewBody } from "../services/accessPreview";
 import { requestAccess } from "../services/accessRequest";
+import { accessReview } from "../services/accessReview";
+import { scopeCounts, type ScopeCountBody } from "../services/scopeCount";
 import { cloneAccessRules, decideAccessRule, ruleIdFromRef } from "../services/accessRules";
 
 // Collection-level custom methods on access-rules (each mounted whole in index.ts, like batch:run).
@@ -18,6 +20,23 @@ export const accessPreviewRoute = new Hono<AppEnv>().post("/", async (c) => {
 
 export const accessRequestRoute = new Hono<AppEnv>().post("/", async (c) =>
   c.json(await requestAccess(c.get("deps"), c.get("user"), await jsonBody(c))),
+);
+
+// How many RECORDS a scope choice reaches, for the ACL's scope chips (services/scopeCount.ts). Collection-level,
+// so it keys as `access-rules.scopeCounts` and is fail-closed like every custom method - granted alongside
+// `:preview`, which answers the same shape of question about PEOPLE.
+export const accessScopeCountsRoute = new Hono<AppEnv>().post("/", async (c) =>
+  c.json(await scopeCounts(c.get("deps"), await jsonBody<ScopeCountBody>(c))),
+);
+
+// The access REVIEW: which authored rules nobody has used, and which org-wide rules the recorded usage says
+// could be narrower (services/accessReview.ts). Collection-level, so it keys as `access-rules.review` and is
+// fail-closed like every custom method - super by default, grantable to access admins alongside `:preview`.
+//
+// A POST despite being a read, because that is what a custom method is in this API (AEP), and `:preview` next
+// to it is the same shape. It takes no body.
+export const accessReviewRoute = new Hono<AppEnv>().post("/", async (c) =>
+  c.json(await accessReview(c.get("deps"), c.get("user").policy)),
 );
 
 // Four-eyes decisions on a pending permission change. Collection-level (the rule travels in the body) so

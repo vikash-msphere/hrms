@@ -17,9 +17,11 @@ export function Combobox({
   searchPlaceholder = "Search…",
   emptyText = "No matches.",
   className,
+  contentClassName,
   disabled,
   autoFocus,
   id,
+  onOpenChange,
 }: {
   value: string;
   onValueChange: (value: string) => void;
@@ -28,7 +30,14 @@ export function Combobox({
   searchPlaceholder?: string;
   emptyText?: string;
   className?: string;
+  /** Width/styling for the POPUP. Defaults to the trigger's width; override it for a compact trigger. */
+  contentClassName?: string;
   disabled?: boolean;
+  // Told when the popup opens and closes, so a caller whose options are EXPENSIVE can fetch them on first
+  // open instead of on mount. Without it the only lazy trigger available is the caller's own state changing,
+  // which for a control that IS the state change (pick a value, and that is the choice) happens too late -
+  // the list is empty exactly when it is first read.
+  onOpenChange?: (open: boolean) => void;
   // Lands on the TRIGGER (a button, which is labelable), so a <Field> can point its <label for> at this
   // control the same way it does at an <input>. Field sets it automatically - see components/common/Field.tsx.
   id?: string;
@@ -77,7 +86,13 @@ export function Combobox({
   };
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(o) => {
+        setOpen(o);
+        onOpenChange?.(o);
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"
@@ -102,7 +117,11 @@ export function Combobox({
           <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-0">
+      {/* Matching the trigger's width is right for a full-width form field and wrong for a compact trigger:
+          a chip sized to "Sales" would open a list two words wide. `contentClassName` overrides it (cn runs
+          twMerge, so a caller's `w-*` replaces this one) without changing the default every other caller
+          depends on. */}
+      <PopoverContent align="start" className={cn("w-[var(--radix-popover-trigger-width)] p-0", contentClassName)}>
         <div className="flex items-center gap-2 border-b px-3">
           <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
           <input

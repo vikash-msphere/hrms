@@ -1,5 +1,5 @@
 // Company events (holidays' timed sibling): all-day or timed, optionally counting as work for attendees.
-import { and, eq, inArray, isNull, type SQL } from "drizzle-orm";
+import { and, eq, inArray, type SQL } from "drizzle-orm";
 import * as schema from "../db/schema";
 import { byIdChunks } from "../lib/dbBatch";
 import type { Deps } from "../deps";
@@ -8,6 +8,7 @@ import type { EventRepeat } from "../domain/calendar";
 import { audit, noteMeta } from "../lib/audit";
 import { invalidArgument, notFound } from "../lib/errors";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import { keysetPage } from "./keysetPage";
 import { has, type CrudSpec, type SetOf } from "./crud";
@@ -41,11 +42,11 @@ function parseTime(s: string | undefined, allDay: boolean): number {
 }
 
 // Scope-filtered in SQL (an event can be shared to a department), then paged like any other collection.
-export async function listEvents(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
+export async function listEvents(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, deletedOnly = false) {
   // Paged in SQL (services/keysetPage.ts), soft-delete filter included, rather than reading the whole
   // calendar into the isolate to slice one page out of it: the events table only grows, and D1 bills the rows
   // a query reads.
-  const conds = [applyScope(scope, schema.events.code, schema.events.code), showDeleted ? undefined : isNull(schema.events.deleteTime)];
+  const conds = [applyScope(scope, schema.events.code, schema.events.code), deleteStateFilter(schema.events.deleteTime, showDeleted, deletedOnly)];
   return keysetPage<typeof schema.events.$inferSelect>(deps, schema.events, "events", and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
 }
 

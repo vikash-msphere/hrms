@@ -3,6 +3,7 @@
 import type { Wire } from "./wire";
 import type { AppUser } from "../env";
 import { RESOURCE_COLLECTIONS } from "../lib/authzResolve";
+import { parseCondition } from "../domain/ruleCondition";
 import { round2 } from "../domain/money";
 import { parseIllustrationLayout, parseRecipientLayout } from "../domain/illustration";
 import { parseScope, scopeToWire } from "../domain/keyScope";
@@ -21,17 +22,15 @@ import { todayMsOf } from "../domain/attendance";
 // the activity endpoint itself, …) that would fail the target-resolve gate and audit a bogus denial.
 const RESOLVABLE_ENTITIES = new Set(RESOURCE_COLLECTIONS);
 
-// KNOWN FALSE CONFLICT on the employee SUB-resources. `bank-account`, `personal-info`, `identity` and `tax`
-// are separate encrypted blobs on the employee row, but each one's etag is this function over the SAME
-// `employees.updated_at`. So a write to any one of them bumps the version every other one is holding, and the
-// next If-Match PATCH gets a 409 naming a conflict that does not exist: HR filling in an emergency contact
-// invalidates the bank form the employee has open, on fields neither of them touched. The only remedy the UI
-// offers is "reload and reapply" for a change nobody actually collided on.
+// The ROW's validator: one version per row, off `updated_at`.
 //
-// The real fix is a version per sub-resource rather than one per row, which is a schema change plus every
-// reader and writer of those four blobs - too big to slip into unrelated work. Until then, expect the e2e
-// suite to surface it as an intermittent 409 in employeeRecord.spec.ts whenever a spec that writes the shared
-// fixture person's personal-info (profileNudges.spec.ts) runs alongside it.
+// NOT the employee's four encrypted SUB-resources (`bank-account`, `personal-info`, `identity`, `tax`). They
+// are separate blobs on one `employees` row, so versioning them from this function gave all four the same
+// validator: a write to any one of them invalidated the `If-Match` a caller was holding on the other three,
+// and the PATCH was refused with a conflict that did not happen - HR filling in an emergency contact failing
+// the bank form the employee had open, on fields neither of them touched. Each of those four is versioned
+// from a hash of its OWN ciphertext instead (services/versionGuard.ts#subResourceEtag), so a validator moves
+// only when the blob behind it does.
 export const etagOf = (updateTimeMs: number) => `W/"${updateTimeMs}"`;
 const iso = (d: Date | number) => new Date(d).toISOString();
 
@@ -122,6 +121,10 @@ export function toUserResource(r: any): Wire<"user"> {
     ...baseResource(r, "users"),
     email: r.email,
     role: r.role,
+    // The SECONDARY roles, when the caller decorated the row with them (services/users.ts). Omitted rather than
+    // emitted empty when they were not loaded: `[]` would say "this person holds no extra roles", which is a
+    // different claim from "nobody asked", and the account list does not pay for the join.
+    ...(Array.isArray(r.roles) ? { roles: r.roles as string[] } : {}),
     status: r.status,
     employee: ref("employees", r.employeeId),
   };
@@ -377,6 +380,10 @@ export function parseRulePattern(pattern: string, level: string | null | undefin
 
 export function toAccessRuleResource(r: any, objectUuid: string | null): Wire<"access-rule"> {
   const { verb, field, createGate } = parseRulePattern(r.pattern, r.level);
+  // The anchor's OWN collection, which for a subtree rule need not be the rule's: a named-department grant on
+  // leave requests is anchored to a `departments` object (services/accessRules.ts resolveAnchor). Falls back
+  // to the namespace, which is right for every `exact` rule - those pin to an object of their own collection.
+  const anchorCollection: string = r._objectCollection ?? r.namespace;
   return {
     path: `access-rules/${r.uuid}`,
     create_time: iso(r.createdAt),
@@ -386,10 +393,15 @@ export function toAccessRuleResource(r: any, objectUuid: string | null): Wire<"a
     subject: r.subjectKind === "user" ? `users/${r.subject}` : r.subject,
     collection: r.namespace,
     scope: createGate ? "create" : r.scopeKind, // create | all | self | dept | subtree | exact
-    ...(r.scopeKind === "exact" && objectUuid ? { scope_ref: `${r.namespace}/${objectUuid}` } : {}),
+    ...((r.scopeKind === "exact" || r.scopeKind === "subtree") && objectUuid ? { scope_ref: `${anchorCollection}/${objectUuid}` } : {}),
     ...(field ? { field } : {}),
     ...(r.level ? { level: r.level } : {}),
     ...(verb ? { verb } : {}),
+    // The approval LIMIT, parsed rather than echoed: a row written before the column existed, or one hand-edited
+    // to something unusable, must read as "no limit" on the wire exactly as it decides (domain/ruleCondition.ts
+    // fails closed on it at decision time, but the UI showing a limit the engine ignores would be worse than
+    // showing none).
+    ...(parseCondition(r.condition) ? { condition: parseCondition(r.condition)! } : {}),
     effect: r.effect,
     // Lifecycle: `active` decides; `pending` / `pending_delete` are four-eyes changes awaiting a second
     // admin, and `requested_by` names who asked (they may not approve it themselves).

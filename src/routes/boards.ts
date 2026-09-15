@@ -60,7 +60,7 @@ export const boards = collectionRoutes<BoardInput, typeof schema.boards>({
   },
   // Scoped by the caller exactly as the generic list is: `c.get("scope")` carries the breadth the middleware
   // decided AND the caller's per-object shares/denies, and the service binds it with `applyScope`.
-  list: (c, page) => listBoards(c.get("deps"), c.get("user"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted),
+  list: (c, page) => listBoards(c.get("deps"), c.get("user"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, page.deletedOnly),
   verbs: {
     configure: { schema: configureSchema, run: (deps, user, id, body) => configureBoard(deps, user, id, body) },
     metrics: {

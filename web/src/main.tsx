@@ -30,6 +30,20 @@ import { startOverflowProbe } from "@/lib/overflowProbe";
 import { startClippedTitles } from "@/lib/clippedTitle";
 
 startOverflowProbe();
+// SHIPS, unlike its dev-only neighbour above, and that is a decision rather than an oversight - it was running
+// in production either way, so what is written here is the reason.
+//
+// It is a real feature for real users: a truncated name, ticket title or file name with no way to read it is a
+// dead end on every list in the app, and the measurement has to happen in the live layout (a class name cannot
+// say whether a box is actually clipping) so there is no build-time version of it.
+//
+// The cost, stated so the next person can weigh it rather than rediscover it: a document-wide
+// `MutationObserver` plus a `ResizeObserver` over every element matching `[class*="truncate"]` and friends and
+// each of their direct children - hundreds of nodes on a full table. The module keeps that bounded: work is
+// batched into one `requestAnimationFrame`, the layout read happens once per dirty element per frame, the
+// expensive `getComputedStyle` is cached per element until its own class or style changes, and an attribute
+// mutation re-measures that one element rather than re-walking the page. If that ever stops being enough, the
+// cheap answer is to gate it the way `startOverflowProbe` gates itself.
 startClippedTitles();
 
 createRoot(document.getElementById("root")!).render(

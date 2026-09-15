@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { positiveMoney } from "../http/moneyField";
 import { collectionRoutes } from "../http/collectionRoute";
 import { expenseBudgetSpec, listExpenseBudgets } from "../services/expenseBudgets";
 import { toExpenseBudgetResource } from "../http/serialize";
@@ -8,7 +9,7 @@ const writeSchema = z.object({
   category: z.string().nullable().optional(),
   period_type: z.enum(["monthly", "quarterly", "yearly"]).optional(),
   period_key: z.string().min(1).optional(),
-  amount: z.number().positive().optional(),
+  amount: positiveMoney().optional(),
   recurring: z.boolean().optional(),
 }).strict();
 

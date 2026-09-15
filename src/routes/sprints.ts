@@ -38,7 +38,7 @@ export const sprints = collectionRoutes<SprintInput, typeof schema.sprints>({
     // Scoped by the caller exactly as the generic list is: `c.get("scope")` carries the breadth the middleware
     // decided AND the caller's per-object shares/denies, and the service binds it with `applyScope`.
     const board = c.req.query("board");
-    return listSprints(c.get("deps"), c.get("user"), c.get("scope"), page.maxPageSize, page.pageToken, board ? board.split("/").pop() : undefined, page.showDeleted);
+    return listSprints(c.get("deps"), c.get("user"), c.get("scope"), page.maxPageSize, page.pageToken, board ? board.split("/").pop() : undefined, page.showDeleted, page.deletedOnly);
   },
   verbs: {
     activate: { run: (deps, user, id) => activateSprint(deps, user, id) },

@@ -23,16 +23,65 @@ export function idOf(path: string): string {
  *
  * So an unresolvable ref reads as `unknown` - which callers set to whatever their sentence needs ("your
  * manager", "-") - and an absent ref is empty, because there is no person to name at all.
+ *
+ * TAKES A PREPARED MAP TOO, and six pages hand it one. This is used as a DataTable column accessor, and an
+ * accessor is called per row per compare during a sort and again for every value in a `filter: "select"`
+ * popover - so a linear `find` over an `{ all: true }` employees read (ALL_CAP is 1000) turned sorting a
+ * hundred-row table in a 500-person org into hundreds of thousands of scanned entries. `personIndex` builds
+ * the lookup once, in a `useMemo`, the way `RequestLeaveDialog` and `Expenses` already did by hand.
  */
-export function personName(
-  people: { path: string; first_name?: string | null; last_name?: string | null }[],
-  ref?: string | null,
-  unknown = "Someone",
-): string {
+export type PersonRef = { path: string; first_name?: string | null; last_name?: string | null };
+export type PersonIndex = Map<string, PersonRef>;
+
+/** The lookup `personName` prefers: build it once per directory read, not once per accessor call. */
+export function personIndex(people: PersonRef[]): PersonIndex {
+  return new Map(people.map((p) => [idOf(p.path), p]));
+}
+
+export function personName(people: PersonRef[] | PersonIndex, ref?: string | null, unknown = "Someone"): string {
   if (!ref) return "";
-  const person = people.find((p) => idOf(p.path) === idOf(ref));
+  const id = idOf(ref);
+  const person = people instanceof Map ? people.get(id) : people.find((p) => idOf(p.path) === id);
   if (!person) return unknown;
   return [person.first_name, person.last_name].filter(Boolean).join(" ") || unknown;
+}
+
+/**
+ * Everyone who reports to `subjectId`, directly or through someone else.
+ *
+ * WHAT IT IS FOR: a manager picker must not offer somebody's own report as their manager, because that closes
+ * the reporting line into a loop. `services/employees.ts#assertNoManagerCycle` refuses the write, and that is
+ * the check that actually holds - this one exists so the UI stops offering a move the server will refuse, which
+ * is a better answer than a red toast after the fact.
+ *
+ * BEST EFFORT, deliberately. It sees only the rows the caller has loaded (pages read `employees` with
+ * `{ all: true }`, whose `ALL_CAP` is 1000), so past that the tree is partial and a descendant can be missed.
+ * That is why the authority is the server: this narrows the list, it does not decide anything.
+ *
+ * Walked breadth-first from a parent→children index rather than by re-scanning the array per level, and the
+ * visited set doubles as the cycle guard - existing data may already hold a loop the guard above now refuses.
+ */
+export function reportsUnder(
+  people: { path: string; manager?: string | null }[],
+  subjectId: string | null | undefined,
+): Set<string> {
+  const out = new Set<string>();
+  if (!subjectId) return out;
+  const byManager = new Map<string, string[]>();
+  for (const p of people) {
+    if (!p.manager) continue;
+    const mgr = idOf(p.manager);
+    (byManager.get(mgr) ?? byManager.set(mgr, []).get(mgr)!).push(idOf(p.path));
+  }
+  const queue = [subjectId];
+  while (queue.length) {
+    for (const child of byManager.get(queue.shift()!) ?? []) {
+      if (out.has(child) || child === subjectId) continue;
+      out.add(child);
+      queue.push(child);
+    }
+  }
+  return out;
 }
 
 /** Title-case a SCREAMING_SNAKE or kebab/snake token for display. */
@@ -142,29 +191,20 @@ export function probationLabel(endDate: string): string {
   return days === 0 ? "On probation · ends today" : `On probation · ${days}d left`;
 }
 
-// Round to 2 decimal places (paise), decimal-half-correct - the browser-side twin of the server's one rounding
-// helper (src/domain/money.ts). `Math.round(n * 100) / 100` multiplies in float, so a decimal half-case rounds
-// the WRONG way (`1.005 * 100` is `100.4999…` → 1.00 instead of 1.01); scaling through the decimal string makes
-// the parser produce the nearest double to the intended decimal, so the half-case rounds as a human expects.
-// Every mirrored money computation in the UI (the CTC breakdown, the top-down split preview) goes through this,
-// so a previewed figure can't disagree with the server's by a paise.
+// Rounding to 2 decimal places (paise) is the SERVER's function, re-exported - not a browser copy of it.
 //
-// KEEP THIS BODY IDENTICAL to src/domain/money.ts#round2 - test/moneyDrift.test.ts fails when they diverge.
-// It had already drifted twice: the tie rule (the server's is symmetric about zero, this one broke ties toward
-// +∞, so a negative preview and the figure the run wrote could differ by a paise) and the upper-range guard
-// (`${1e21}e2` parses as NaN, so this answered NaN where the server answered the number).
+// `src/domain/money.ts` states the rule ("rounding behaviour is defined in exactly one place") and the module
+// is dependency-free, so the SPA imports it the way it already imports domain/leave.ts, domain/attendance.ts
+// and domain/payroll.ts. It was a body-identical re-implementation here, and it had already drifted twice -
+// the tie rule (the server's is symmetric about zero, the copy broke ties toward +infinity, so a negative
+// preview and the figure the run wrote differed by a paise) and the upper-range guard (`${1e21}e2` parses as
+// NaN, so the copy answered NaN where the server answered the number). The canonical one was in the bundle
+// the whole time: EmployeeCompensation.tsx imports src/domain/payroll, which imports ./money - so the page
+// doing the CTC arithmetic held both copies at once.
 //
-// Both parses are checked rather than guarded by one magnitude threshold: `${n}e2` and `${rounded}e-2` switch
-// to exponential notation at DIFFERENT inputs (n = 1e21 and n = 1e19), and a single threshold on the first
-// left the second returning NaN - which `|| 0` then made a silent zero. See the full note on the server copy.
-export function round2(n: number): number {
-  if (!Number.isFinite(n) || Math.abs(n) < 1e-6) return 0;
-  const scaled = Number(`${n}e2`);
-  if (!Number.isFinite(scaled)) return Math.round(n);
-  const rounded = Math.sign(scaled) * Math.round(Math.abs(scaled));
-  const back = Number(`${rounded}e-2`);
-  return Number.isFinite(back) ? back || 0 : Math.round(n);
-}
+// Re-exported under this name because every mirrored money computation in the UI (the CTC breakdown, the
+// top-down split preview) already reaches for `round2` from here.
+export { round2 } from "../../../src/domain/money";
 
 // Format an amount in a currency. `decimals` sets the shown precision (both min and max fraction digits) so
 // the currency's configured minor-unit count is honoured everywhere - e.g. INR at 0 renders ₹1,800, not

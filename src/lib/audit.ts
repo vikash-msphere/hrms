@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -447,12 +447,68 @@ export type AuditEntry = { action: string; entity: string; entityId?: string; me
  */
 export async function auditMany(deps: Deps, actor: AppUser | string, entries: AuditEntry[]): Promise<void> {
   if (!entries.length) return;
+  const via = authorizingPattern(actor);
   const values = entries.map((e) => auditValues(actor, e.action, e.entity, e.entityId, e.meta, describeRow(e.entity, e.snapshot), deps));
-  await runBatch(deps.db, insertBatches(values, (rows) => deps.db.insert(schema.auditLog).values(rows)));
+  // ONE bump for the whole act, not one per row. A box of twenty adapters is a single authorized request, and
+  // counting it twenty times would make a bulk route look like the most-used rule in the org.
+  const stmts = insertBatches(values, (rows) => deps.db.insert(schema.auditLog).values(rows));
+  await runBatch(deps.db, via ? [...stmts, bumpRuleUsage(deps, via, authorizingScope(actor), new Date())] : stmts);
+}
+
+/**
+ * The grant PATTERN that authorized this act, or undefined - the single definition of that question, read both
+ * by the meta stamp on the audit row and by the `rule_usage` counter beside it. Two spellings of it would let
+ * the row and the counter disagree about which rule did the work, which is precisely what the counter exists to
+ * be trusted on.
+ *
+ * A SIMULATION COUNTS AS NOTHING, matching the audit row: under "view as" the decision was rendered against the
+ * SUBJECT's grant, so crediting it to that pattern would report rules as used by people who never made a
+ * request. A string actor (system/cron) holds no grant at all.
+ */
+function authorizingPattern(actor: AppUser | string): string | undefined {
+  if (typeof actor === "string") return undefined;
+  return actor.simulatedBy ? undefined : actor.authorizedBy;
+}
+
+/** The reach that pattern had on this request, on the same terms as `authorizingPattern`. */
+function authorizingScope(actor: AppUser | string): AppUser["authorizedScope"] {
+  if (typeof actor === "string") return undefined;
+  return actor.simulatedBy ? undefined : actor.authorizedScope;
+}
+
+/**
+ * Bump the usage counter for one pattern. Returned as a STATEMENT rather than awaited, so every caller can put
+ * it in the same batch as the audit row it belongs to - the counter must never cost a request an extra round
+ * trip on a platform that budgets subrequests.
+ *
+ * `hits` is `excluded.hits` + 1 rather than a read-then-write: the increment happens inside the statement, so
+ * two concurrent requests through the same rule cannot both read the same count and write the same total.
+ */
+function bumpRuleUsage(deps: Deps, pattern: string, scope: AppUser["authorizedScope"], at: Date) {
+  const self = scope === "self" ? 1 : 0;
+  const dept = scope === "dept" ? 1 : 0;
+  return deps.db
+    .insert(schema.ruleUsage)
+    .values({ pattern, hits: 1, selfHits: self, deptHits: dept, lastUsedAt: at })
+    .onConflictDoUpdate({
+      target: schema.ruleUsage.pattern,
+      set: {
+        hits: sql`${schema.ruleUsage.hits} + 1`,
+        selfHits: sql`${schema.ruleUsage.selfHits} + ${self}`,
+        deptHits: sql`${schema.ruleUsage.deptHits} + ${dept}`,
+        lastUsedAt: at,
+      },
+    });
 }
 
 async function writeAudit(deps: Deps, actor: AppUser | string, action: string, entity: string, entityId?: string, meta?: unknown, entityName?: string) {
-  await deps.db.insert(schema.auditLog).values(auditValues(actor, action, entity, entityId, meta, entityName, deps));
+  // `auditValues` marks the actor as audited as a side effect, so the pattern is read BEFORE it runs - the read
+  // is independent of that, but reading it after would make the order load-bearing for no reason.
+  const via = authorizingPattern(actor);
+  const row = auditValues(actor, action, entity, entityId, meta, entityName, deps);
+  const insert = deps.db.insert(schema.auditLog).values(row);
+  if (!via) return void (await insert);
+  await runBatch(deps.db, [insert, bumpRuleUsage(deps, via, authorizingScope(actor), new Date())]);
 }
 
 // The audit row itself, built without writing it - shared by the single and batched forms so both record the
@@ -478,7 +534,7 @@ function auditValues(actor: AppUser | string, action: string, entity: string, en
   // WHAT authorized this. A denial has always explained itself; a permission explained nothing, so "which
   // grant let them do that" - the question an access review exists to ask - had an answer on only one side.
   // Recorded to the PATTERN, which narrows it to a handful of rules rather than naming one (see Decision.via).
-  const authorizedBy = sim ? undefined : typeof actor === "string" ? undefined : actor.authorizedBy;
+  const authorizedBy = authorizingPattern(actor);
   if (authorizedBy) meta = { ...(meta && typeof meta === "object" && !Array.isArray(meta) ? meta : meta === undefined ? {} : { meta }), authorized_by: authorizedBy };
   const acting = deps?.actingAs;
   if (acting) meta = { ...(meta && typeof meta === "object" && !Array.isArray(meta) ? meta : meta === undefined ? {} : { meta }), [`via_${acting.kind}`]: { name: acting.name, ...(acting.ref ? { ref: acting.ref } : {}) } };

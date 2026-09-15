@@ -16,7 +16,7 @@ import { orgToday, dayStartMs } from "./orgDay";
 import { genId } from "../lib/idCodec";
 import { invalidArgument, notFound, aborted, failedPrecondition, oneOf, isCodeCollision, isCardSeqCollision } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
+import { deleteStateFilter, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import { emitEvent } from "./eventBus";
 import { updateGoalProgress } from "./goals";
 import { notify } from "./notifications";
@@ -350,10 +350,10 @@ async function columnCards(deps: Deps, boardId: string, columnKey: string) {
     .where(and(eq(schema.cards.boardId, boardId), eq(schema.cards.columnKey, columnKey), isNull(schema.cards.deleteTime)));
 }
 
-export async function listCards(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, boardId?: string, showDeleted = false) {
+export async function listCards(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, boardId?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.cards.code, schema.cards.employeeId)];
   if (boardId) conds.push(eq(schema.cards.boardId, boardId));
-  if (!showDeleted) conds.push(isNull(schema.cards.deleteTime));
+  conds.push(deleteStateFilter(schema.cards.deleteTime, showDeleted, deletedOnly));
   const page = await keysetPage<typeof schema.cards.$inferSelect>(deps, schema.cards, "cards", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
   // Attach compact checklist progress (done/total) per row so the board tile shows it without loading items.
   // One grouped read over just this page's cards keeps it cheap.

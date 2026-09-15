@@ -9,8 +9,9 @@
 // a lossless projection (round-tripped by `rulesToGrant`, differentially tested == blob decision), and the
 // P1 exact-IN narrowing is differentially tested as a correct superset. No SQL prefix/`LIKE` match ever.
 import { LVL, type Grant, type Level } from "./permissions";
+import { parseCondition, type ConditionIndex } from "./ruleCondition";
 
-export type ScopeKind = "all" | "subtree" | "exact" | "self" | "dept";
+export type ScopeKind = "all" | "subtree" | "exact" | "self" | "dept" | "reports" | "org";
 export type Effect = "allow" | "deny";
 
 // One compiled rule, id-less and subject-less by itself: storage assigns the id (genId), and the caller
@@ -23,7 +24,41 @@ export type CompiledRule = {
   matchCode: string | null; // exact object code for per-object rows (user exceptions OR exact role rules); NULL for scope/pattern rules
   level: Level | null; // read|write|admin for level rules; NULL for verb (allow) / deny rules
   effect: Effect;
+  // Optional per-rule threshold, as stored (JSON text) - carried through so a caller's condition index can be
+  // built from the same rows their grant is. Never affects the pattern or the compiled Grant.
+  condition?: string | null;
 };
+
+/**
+ * The conditions each ALLOW pattern carries, for one caller's rule set (domain/ruleCondition.ts ConditionIndex).
+ *
+ * Built beside the Grant rather than inside it: the Grant is the decision input and must stay exactly what it
+ * was, or every consumer of it - mergeGrants, the API-key clamp, the capability set - would have to learn about
+ * a concept that decides nothing. Deny rules are skipped: a deny already refuses outright, and a "deny only
+ * above ₹50,000" is a different feature (it would have to GRANT below the line, which conditions never do).
+ *
+ * A rule with no condition contributes `null`, which is what makes an unconditional rule beat a capped one on
+ * the same pattern - see the union note in ruleCondition.ts.
+ */
+export function conditionsOf(rules: CompiledRule[]): ConditionIndex {
+  const out: ConditionIndex = new Map();
+  for (const r of rules) {
+    if (r.effect !== "allow") continue;
+    const list = out.get(r.pattern) ?? [];
+    list.push(parseCondition(r.condition ?? null));
+    out.set(r.pattern, list);
+  }
+  return out;
+}
+
+/** Merge two condition indexes the way grants merge: a pattern's entries from both sides, concatenated. */
+export function mergeConditions(a: ConditionIndex, b: ConditionIndex): ConditionIndex {
+  if (!a.size) return b;
+  if (!b.size) return a;
+  const out: ConditionIndex = new Map(a);
+  for (const [pattern, list] of b) out.set(pattern, [...(out.get(pattern) ?? []), ...list]);
+  return out;
+}
 
 // Derive the narrowing keys from a grant pattern. The id/scope position is token[1] (the token right after
 // the collection); in grant patterns it is always a scope token (`me` / `my-dept` / `*` / `<prefix>-*` /
@@ -36,6 +71,10 @@ export function deriveNarrowing(pattern: string): { namespace: string; scopeKind
   if (scope === undefined) return { namespace, scopeKind: "all", scopeCode: "" }; // collection-only pattern (e.g. "employees")
   if (scope === "me") return { namespace, scopeKind: "self", scopeCode: "" };
   if (scope === "my-dept") return { namespace, scopeKind: "dept", scopeCode: "" };
+  // The manager chain. Subject-relative like `me`/`my-dept`, so no scope code: the rule means "whoever reports
+  // to the holder", resolved per caller at decision time rather than pinned to a place in the tree.
+  if (scope === "my-reports") return { namespace, scopeKind: "reports", scopeCode: "" };
+  if (scope === "my-org") return { namespace, scopeKind: "org", scopeCode: "" };
   if (scope === "*" || scope === "**") return { namespace, scopeKind: "all", scopeCode: "" };
   if (scope.endsWith("-*")) return { namespace, scopeKind: "subtree", scopeCode: scope.slice(0, -2) }; // "04-*" -> prefix "04"
   return { namespace, scopeKind: "exact", scopeCode: scope }; // a literal code in the id position (user per-object rows)

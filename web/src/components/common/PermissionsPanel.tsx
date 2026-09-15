@@ -1,6 +1,6 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { Download, Upload, GitCompareArrows, KeyRound } from "lucide-react";
+import { Download, Upload, GitCompareArrows, KeyRound, Sparkles } from "lucide-react";
 import { listAll, create, remove, get, invoke } from "@/api";
 import { ruleSentence, expiryLabel } from "@/components/access/ruleLogic";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -11,6 +11,7 @@ import { ruleScopeFor, ruleMatchesTarget } from "@/components/access/accessRuleS
 import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules, COLLECTION_GROUPS, groupOf, accessTone } from "@/components/access/permMatrix";
 import { CellOption } from "@/components/access/CellOption";
 import { cloneAccessRules, restoreAccessRules, ruleBody } from "@/components/access/cloneRules";
+import { ROLE_TEMPLATES, templateRuleBody, templateSize } from "@/components/access/roleTemplates";
 import { useAccessMode } from "@/components/access/AccessModeProvider";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
@@ -42,6 +43,9 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   const canManage = usePermission("access-rules.write");
   const canClone = usePermission("access-rules.clone"); // bulk copying is its own verb, granted separately
   const [compare, setCompare] = React.useState<{ a: string; b: string } | null>(null);
+  // The role a starter pack is being applied to, once one is chosen. A fresh role is deny-all, so the first
+  // thing an admin needs after creating one is a defensible starting point rather than an empty grid.
+  const [template, setTemplate] = React.useState<{ kind: Kind; subject: string; key: string } | null>(null);
   const fileRef = React.useRef<HTMLInputElement>(null);
   const [rules, setRules] = React.useState<AccessRule[]>([]);
   const [roles, setRoles] = React.useState<Role[]>([]);
@@ -59,6 +63,36 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
       .then((s) => setFourEyes(s.value?.enabled === true))
       .catch(() => setFourEyes(null)); // not readable / not configured -> hide the switch rather than guess
   }, []);
+
+  // Periodic recertification of standing privilege (settings key `access-review`). Sits beside four-eyes
+  // because they are the two halves of governing a rule's LIFE: one guards how it is made, the other asks
+  // whether it is still wanted. `expires_at` already covers access somebody knew was temporary; this is the
+  // grant made for one project that nobody's job it is to remove.
+  const [review, setReview] = React.useState<boolean | null>(null);
+  React.useEffect(() => {
+    getSetting<{ enabled?: boolean }>("access-review")
+      .then((s) => setReview(s.value?.enabled === true))
+      .catch(() => setReview(null));
+  }, []);
+
+  async function setReviewEnabled(enabled: boolean) {
+    // Only the ON direction asks, and it asks nothing alarming: this schedules a reminder, it never removes
+    // access. Turning it off stops a notification, which needs no ceremony.
+    if (enabled && !(await confirm({
+      title: "Ask for a quarterly access review?",
+      description: "Every 90 days the access admins get one notification listing the permanent rules that grant write access or a custom method, to confirm or remove. It only reminds - no access is ever changed for you.",
+      confirmLabel: "Turn on",
+    }))) return;
+    try {
+      // `last_run` is deliberately not sent: the cron owns it, and resetting it here would make a toggle
+      // re-trigger a review that already went out.
+      await saveSetting("access-review", { value: { enabled } });
+      setReview(enabled);
+      toast({ title: enabled ? "Access reviews scheduled" : "Access reviews turned off", variant: "success" });
+    } catch (e) {
+      toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
+    }
+  }
 
   async function setFourEyesEnabled(enabled: boolean) {
     // BOTH directions ask. Turning this off is the consequential one: it removes the second pair of eyes from
@@ -305,6 +339,46 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     await reload();
   }
 
+  /**
+   * Apply a starter pack to a role - the same replay the JSON import does, over a curated bundle instead of
+   * a file. Every rule goes through `POST /v1/access-rules`, so a template cannot author anything an admin
+   * could not have written by hand, and it lands in the four-eyes queue and the audit trail like any other
+   * change. Additive: rules that already exist come back as 409 and are counted as skipped, so applying a
+   * template twice is safe and applying one over an existing role only fills gaps.
+   */
+  async function applyTemplate(kind: Kind, subject: string, key: string) {
+    const t = ROLE_TEMPLATES.find((x) => x.key === key);
+    if (!t) return;
+    const who = kind === "role" ? roleLabel(subject) : (users.find((u) => u.path === subject)?.email ?? "this person");
+    const ok = await confirm({
+      title: `Apply "${t.label}" to ${who}?`,
+      description: `${templateSize(t)} rules are added: ${t.summary} Nothing is removed, and rules already there are kept - review them afterwards before relying on it.`,
+      confirmLabel: "Apply",
+    });
+    if (!ok) return;
+    setBusy(true);
+    let added = 0;
+    let skipped = 0;
+    const failed: string[] = [];
+    for (const r of t.rules) {
+      try {
+        await create("access-rules", templateRuleBody(kind, subject, r));
+        added++;
+      } catch (e) {
+        const msg = String((e as Error).message);
+        if (msg.toLowerCase().includes("already exists")) skipped++;
+        else failed.push(msg);
+      }
+    }
+    setTemplate(null);
+    toast({
+      title: `Added ${added} rules to ${who}`,
+      description: `${skipped} already there${failed.length ? ` · ${failed.length} rejected: ${failed[0]}` : ""}`,
+      variant: failed.length ? "destructive" : "success",
+    });
+    await reload();
+  }
+
   // Copy every rule one subject holds onto another - the honest way to make "same as HR, plus payroll"
   // instead of hand-rebuilding 40 rules and missing three.
   async function cloneRules(from: { kind: Kind; subject: string }, to: { kind: Kind; subject: string }) {
@@ -340,6 +414,19 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
       <Button size="sm" variant="outline" className="h-7" onClick={exportRules} title="Download every rule as JSON for review, backup or moving between environments">
         <Download className="h-3.5 w-3.5" /> Export
       </Button>
+      {canManage && (subjectKind === "role" ? roles.length > 0 : users.length > 0) && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7"
+          onClick={() => setTemplate({ kind: subjectKind, subject: (subjectKind === "role" ? roles[0]?.name : users[0]?.path) ?? "", key: ROLE_TEMPLATES[0]!.key })}
+          title={subjectKind === "role"
+            ? "Give a role a least-privilege starting point instead of building it rule by rule"
+            : "Give one person a second job's access without inventing a role for it"}
+        >
+          <Sparkles className="h-3.5 w-3.5" /> Start from a template
+        </Button>
+      )}
       {canManage && (
         <>
           <Button size="sm" variant="outline" className="h-7" onClick={() => fileRef.current?.click()} title="Add rules from a previously exported JSON file (additive; duplicates are skipped)">
@@ -443,11 +530,79 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     </Dialog>
   );
 
+  // Starter packs. A new role is deny-all by design, so the choice this dialog offers is the JOB, not the
+  // rules: pick who this person is and get a least-privilege bundle to review, instead of an empty grid and
+  // sixty decisions. The rules are listed before applying, because a template an admin cannot read is a
+  // template they cannot be responsible for.
+  const templateDialog = template && (
+    <Dialog open onOpenChange={(o) => !o && setTemplate(null)}>
+      <DialogContent className="max-h-[85dvh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-primary" /> Start from a template
+          </DialogTitle>
+          <DialogDescription>
+            Adds a least-privilege set of rules. Nothing is removed, and every rule is authored through the
+            normal path - so it is validated, audited, and waits for a second approver if four-eyes is on.
+            Applied to a PERSON it is how somebody takes on a second job's access without inventing a role for
+            it (their copy will not follow the template if the template later changes).
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="min-w-48 flex-1">
+            <label className="mb-1 block text-xs font-medium">{template.kind === "role" ? "Role" : "Person"}</label>
+            <Select value={template.subject} onValueChange={(v) => setTemplate({ ...template, subject: v })}>
+              <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {template.kind === "role"
+                  ? roles.map((r) => <SelectItem key={r.name} value={r.name}>{roleLabel(r.name)}</SelectItem>)
+                  : users.map((u) => <SelectItem key={u.path} value={u.path}>{u.email}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="min-w-48 flex-1">
+            <label className="mb-1 block text-xs font-medium">Template</label>
+            <Select value={template.key} onValueChange={(v) => setTemplate({ ...template, key: v })}>
+              <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {ROLE_TEMPLATES.map((t) => <SelectItem key={t.key} value={t.key}>{t.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button disabled={busy || !template.subject} onClick={() => void applyTemplate(template.kind, template.subject, template.key)}>Apply</Button>
+        </div>
+        {(() => {
+          const t = ROLE_TEMPLATES.find((x) => x.key === template.key);
+          if (!t) return null;
+          return (
+            <>
+              <p className="text-sm text-muted-foreground">{t.summary}</p>
+              <p className="text-xs font-medium">{templateSize(t)} rules</p>
+              <ul className="space-y-0.5 rounded-lg border p-3 text-xs">
+                {t.rules.map((r, i) => (
+                  <li key={i} className={r.effect === "deny" ? "text-destructive" : "text-muted-foreground"}>
+                    {r.effect === "deny" ? "deny " : ""}
+                    {r.verb ? `"${r.verb}" on ` : r.scope === "create" && r.level === "read" ? "open the list of " : r.scope === "create" ? "create " : `${r.level ?? "read"} `}
+                    {labelOf(r.collection)}
+                    {r.field ? ` (${r.field})` : ""}
+                    {r.scope === "dept" ? " - their department's" : r.scope === "self" ? " - their own" : ""}
+                  </li>
+                ))}
+              </ul>
+            </>
+          );
+        })()}
+      </DialogContent>
+    </Dialog>
+  );
+
   // Everything waiting on a second approver, across every collection - the queue the four-eyes setting
   // creates. Without one place listing them, a pending change is only visible to whoever opens that exact
   // key icon, which is how a "requested" grant sits unnoticed for a week.
   const pending = rules.filter((r) => r.status === "pending" || r.status === "pending_delete");
-  const pendingCard = (pending.length > 0 || fourEyes !== null) && (
+  // `review !== null` counts too: the card now hosts BOTH lifecycle switches, so a workspace that can read
+  // the review setting but not the approval one would otherwise lose the whole card and with it the toggle.
+  const pendingCard = (pending.length > 0 || fourEyes !== null || review !== null) && (
     <Card className="mb-3">
       <CardContent className="space-y-2 pt-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -457,11 +612,18 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
               {fourEyes ? "Every change waits for a different access admin to approve it." : "Changes apply immediately. Turn on four-eyes approval to require a second admin."}
             </p>
           </div>
-          {fourEyes !== null && canWriteSettings && (
-            <label className="flex items-center gap-2 text-sm">
-              <Checkbox checked={fourEyes} onCheckedChange={(v) => void setFourEyesEnabled(v === true)} /> Require a second approver
-            </label>
-          )}
+          <div className="flex flex-col gap-1.5">
+            {fourEyes !== null && canWriteSettings && (
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox checked={fourEyes} onCheckedChange={(v) => void setFourEyesEnabled(v === true)} /> Require a second approver
+              </label>
+            )}
+            {review !== null && canWriteSettings && (
+              <label className="flex items-center gap-2 text-sm" title="Every 90 days, remind the access admins to confirm or remove the permanent rules that grant write access or a custom method.">
+                <Checkbox checked={review} onCheckedChange={(v) => void setReviewEnabled(v === true)} /> Review standing access quarterly
+              </label>
+            )}
+          </div>
         </div>
         {pending.map((r) => (
           <div key={r.path} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-300 bg-amber-50/60 px-3 py-2 text-sm dark:border-amber-800 dark:bg-amber-950/30">
@@ -494,6 +656,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     <>
       {controlsSlot ? createPortal(toggles, controlsSlot) : null}
       {compareDialog}
+      {templateDialog}
       {pendingCard}
       <Card>
       <CardContent className="pt-4 sm:pt-6">

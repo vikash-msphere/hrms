@@ -11,10 +11,11 @@ import { getSettingValue } from "./settings";
 import { DEFAULT_NOTIFICATION_CONFIG, eventConfig, isMutedByUser, isDigestible, parseNotificationPrefs, type NotificationConfig, type NotificationPriority } from "../domain/notificationConfig";
 import { queueForDigest, queueManyForDigest } from "./notificationDigest";
 import { pushToEmployee } from "./webPush";
-import { insertBatches, runBatch } from "../lib/dbBatch";
+import { byIdChunks, insertBatches, runBatch } from "../lib/dbBatch";
 import { activeDelegatesFor } from "./approvalDelegations";
 import { ENCODABLE } from "../middleware/encodeWireIds";
 import { checkEtag, updateAtVersion } from "./versionGuard";
+import { liveEmployee, isLiveEmployee, LIVE_EMPLOYEE_COLUMNS, type LiveEmployeeColumns } from "./liveEmployee";
 
 // Full name of an employee-ish row, or null. Used to denormalize the actor's display name onto a notification.
 const nameOf = (p?: { firstName?: string | null; lastName?: string | null } | null): string | null =>
@@ -74,10 +75,22 @@ export async function notify(deps: Deps, input: NotifyInput): Promise<void> {
     // One read resolves the recipient's per-user mute prefs and (when present) the actor's display name.
     const ids = [...new Set([recipientId, input.actorId].filter(Boolean) as string[])];
     const people = await deps.db
-      .select({ uuid: schema.employees.uuid, firstName: schema.employees.firstName, lastName: schema.employees.lastName, prefs: schema.employees.notificationPrefs })
+      .select({ uuid: schema.employees.uuid, firstName: schema.employees.firstName, lastName: schema.employees.lastName, prefs: schema.employees.notificationPrefs, ...LIVE_EMPLOYEE_COLUMNS })
       .from(schema.employees)
       .where(inArray(schema.employees.uuid, ids));
     const byId = new Map(people.map((p) => [p.uuid, p]));
+    // THE RECIPIENT HAS TO STILL BE SOMEBODY. `middleware/auth.ts#assertLive` refuses a terminated, deleted or
+    // disabled employee a session, so a row written to one is a row nobody can ever read - and it is not free:
+    // each one spends an allocation off that person's `code_sequences` counter. The rule was bound on the
+    // AUDIENCE arm (`audienceEmployeeIds`) and nowhere else, which left every single-recipient path - the
+    // fourteen modules whose approval nudge routes through `notifyManager` below, every direct `notify()` -
+    // addressing people who cannot sign in. Binding it HERE makes the guarantee structural rather than
+    // something each of the twenty callers has to remember.
+    //
+    // Checked on the row rather than in the `where`, because this same read resolves the ACTOR's display name:
+    // an approval granted by somebody who has since left still shows their name on the notification, and a SQL
+    // predicate would drop that row along with the dead recipient.
+    if (!isLiveEmployee(byId.get(recipientId))) return;
     const prefs = parseNotificationPrefs(byId.get(recipientId)?.prefs);
     if (isMutedByUser(prefs, input.type)) return;
     const priority = input.priority ?? cfg.priority;
@@ -179,7 +192,7 @@ export async function notifyMany(
     };
     const emps = await inChunks(uniq, (c) =>
       deps.db
-        .select({ uuid: schema.employees.uuid, code: schema.employees.code, firstName: schema.employees.firstName, lastName: schema.employees.lastName, prefs: schema.employees.notificationPrefs })
+        .select({ uuid: schema.employees.uuid, code: schema.employees.code, firstName: schema.employees.firstName, lastName: schema.employees.lastName, prefs: schema.employees.notificationPrefs, ...LIVE_EMPLOYEE_COLUMNS })
         .from(schema.employees)
         .where(inArray(schema.employees.uuid, c)),
     );
@@ -198,7 +211,13 @@ export async function notifyMany(
     const actorId = input.actorId || null;
     const titleOf = (rid: string) => (input.titleFor ? input.titleFor(rid)?.trim() : null) || input.title!;
     const bodyOf = (rid: string) => (input.bodyFor ? input.bodyFor(rid)?.trim() || null : body);
-    const remaining = uniq.filter((rid) => !mutedFor.has(rid));
+    // Same liveness rule as `notify()` above, for the same reason and off the same read - `audienceEmployeeIds`
+    // filters the audiences it RESOLVES, but a caller that hands this function a list of its own (a goal
+    // template applied to thirty people, a ticket fanned out to a team) was never filtered by anything. This
+    // also drops ids that resolve to no employee at all, which used to reach the insert and fail the foreign
+    // key inside the catch below - "best-effort" quietly meaning "not told".
+    const live = new Set(emps.filter((e) => isLiveEmployee(e)).map((e) => e.uuid));
+    const remaining = uniq.filter((rid) => live.has(rid) && !mutedFor.has(rid));
     // THE DIGEST PREFERENCE APPLIES HERE TOO. `notify()` parks low-signal informational items for the daily
     // summary; this path read the same prefs blob (it parses it for the mute check one line up) and applied
     // only the mute half, so every fan-out went straight to the bell - mentions, announcements, ticket
@@ -272,7 +291,27 @@ const bareId = (ref: string) => (ref.includes("/") ? ref.slice(ref.lastIndexOf("
 export async function audienceEmployeeIds(deps: Deps, audience: Audience): Promise<string[]> {
   if (audience.kind === "none") return [];
   if (audience.kind === "everyone") return activeEmployeeIds(deps);
-  if (audience.kind === "employees") return audience.employees.map(bareId);
+  if (audience.kind === "employees") {
+    // NAMED PEOPLE ARE STILL FILTERED FOR LIVENESS. This arm used to return the rule's list verbatim - no
+    // liveness check and no existence check - while the two arms either side of it bind `LIVE_EMPLOYEE`, so
+    // the function's own first line ("the (active) employee uuids") was false for exactly the case an author
+    // writes by hand. The email half happens to be covered, by a second filter in a different file
+    // (services/emailFanOut.ts re-reads the recipients before sending); the in-app half had nothing: a rule
+    // naming a terminated or soft-deleted employee minted `notifications` rows nobody can ever read
+    // (middleware/auth.ts#assertLive refuses them a session), each one spending a `code_sequences` allocation,
+    // and a stale id that no longer resolves failed the FK and was swallowed as a non-fatal insert failure.
+    const named = audience.employees.map(bareId).filter(Boolean);
+    if (!named.length) return [];
+    // `byIdChunks`, because D1 binds at most 100 parameters per statement and an audience naming more people
+    // than that is an ordinary way to write a rule.
+    const rows = await byIdChunks(named, (group) => deps.db
+      .select({ uuid: schema.employees.uuid })
+      .from(schema.employees)
+      .where(and(inArray(schema.employees.uuid, group), ...LIVE_EMPLOYEE)));
+    // Back into the order the rule named them in, so a digest reads the way its author wrote it.
+    const live = new Set(rows.map((r) => r.uuid));
+    return named.filter((id) => live.has(id));
+  }
   // department: its LIVE members. The audience is written by the workflow builder, which stores the department
   // the way every other ref on the wire is written (`departments/<id>`) so the inbound edge decodes it; a bare
   // id is accepted too, for a rule authored against the raw column. Same roster rule as `activeEmployeeIds`
@@ -284,14 +323,62 @@ export async function audienceEmployeeIds(deps: Deps, audience: Audience): Promi
   return rows.map((r) => r.uuid);
 }
 
+/**
+ * The first manager UP THE CHAIN who can actually be told something, starting at `startId`.
+ *
+ * THE POINTER IS NEVER CLEARED, so it outlives the person. Neither exit reparents anybody: `removeEmployee`
+ * soft-deletes the row and disables the login without touching another employee's `manager_id`, and
+ * `terminateForOffboarding` stamps `status: "terminated"` and likewise reparents nobody. So
+ * `employees.manager_id` can point at somebody who left months ago, and `middleware/auth.ts#assertLive`
+ * guarantees that person will never open a session to see what was sent to them.
+ *
+ * Walking up is the honest answer rather than returning null: winding a team down offboards the manager
+ * first and their reports afterwards, and with a bare null every offboarding checklist that follows loses its
+ * "collect the laptop" / "revoke system access" nudge entirely. The skip-level manager is who covers those
+ * reports in any org chart, so that is who is told.
+ *
+ * ONE READ PER HOP and no more: each node's row carries both the liveness columns and the next pointer, so a
+ * live manager (the overwhelming case) costs exactly one. The cap and the `seen` set bound a cycle - the org
+ * chart is a tree by construction, but this is a loop over data an admin can edit.
+ */
+const MAX_MANAGER_HOPS = 8;
+async function firstLiveManagerId(deps: Deps, startId: string, subjectId: string): Promise<string | null> {
+  const seen = new Set<string>([subjectId]);
+  let id: string | null = startId;
+  for (let hop = 0; hop < MAX_MANAGER_HOPS && id; hop++) {
+    if (seen.has(id)) return null;
+    seen.add(id);
+    const node: ({ managerId: string | null } & LiveEmployeeColumns) | undefined = (await deps.db
+      .select({ managerId: schema.employees.managerId, ...LIVE_EMPLOYEE_COLUMNS })
+      .from(schema.employees)
+      .where(eq(schema.employees.uuid, id))
+      .limit(1))[0];
+    if (!node) return null; // the pointer names a row that no longer exists at all
+    if (isLiveEmployee(node)) return id;
+    id = node.managerId;
+  }
+  return null;
+}
+
 // Notify an employee's manager that a report filed something needing review (the natural approver). No-op if
-// the employee has no manager or is their own manager. Resolves the requester's name in the same read it uses
-// for the manager id, and templates the message off `noun` (e.g. "leave request", "reimbursement claim").
+// the employee has no manager or is their own manager, and it escalates past a manager who has left (see
+// `firstLiveManagerId`) rather than writing into a mailbox nobody can open. Resolves the requester's name in
+// the same read it uses for the manager id, and templates the message off `noun` (e.g. "leave request",
+// "reimbursement claim").
 export async function notifyManager(deps: Deps, employeeId: string, opts: { type: string; noun: string }): Promise<void> {
   if (!employeeId) return;
   const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
-  const managerId = emp?.managerId;
-  if (!managerId || managerId === employeeId) return;
+  const pointer = emp?.managerId;
+  if (!pointer || pointer === employeeId) return;
+  const managerId = await firstLiveManagerId(deps, pointer, employeeId);
+  // Nobody live above them. The request does NOT stall - the approve grants are scoped by DEPARTMENT
+  // (`leave-requests.my-dept.approve`) and by `*` for hr_admin, not by the reporting line, so another manager
+  // in the department or HR can still decide it. What would be lost silently is the nudge, so say so once
+  // rather than writing a row into a switched-off mailbox and reporting success.
+  if (!managerId) {
+    console.warn(`[notifications] ${opts.type}: employees/${employeeId} has no live manager above them; nobody was nudged`);
+    return;
+  }
   const name = emp ? `${emp.firstName} ${emp.lastName}` : "An employee";
   // Always points at the Approvals inbox - that's where every pending decision is actioned, not the per-page
   // tabs (a page's Requests tab shows only the caller's own items; History shows only decided ones). The
@@ -311,36 +398,27 @@ export async function notifyManager(deps: Deps, employeeId: string, opts: { type
 
 // The manager of an employee, or null when they have none / are their own manager. A shared helper for the
 // many "tell the report's manager" notifications across modules.
+//
+// LIVE MANAGERS ONLY, escalating past one who has left (see `firstLiveManagerId` above). Every caller uses the
+// answer as a person: a recipient to notify, or - in `reviewerIdOf` - who WRITES somebody's review. A pointer
+// at a terminated employee is not an answer to either question, and the review one is the sharper case: a
+// cycle launched after the manager left had its write-up assigned to them, where it sat.
 export async function managerIdOf(deps: Deps, employeeId: string): Promise<string | null> {
   if (!employeeId) return null;
   const e = (await deps.db.select({ m: schema.employees.managerId }).from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
-  return e?.m && e.m !== employeeId ? e.m : null;
+  if (!e?.m || e.m === employeeId) return null;
+  return firstLiveManagerId(deps, e.m, employeeId);
 }
 
 /**
  * Everyone still HERE - the broadcast audience for org-wide notifications (announcements) and, through
  * `audienceEmployeeIds`, for the workflow engine's `emailAudience` action.
  *
- * THREE COLUMNS, and `status` is the one that was missing. `status` and the soft-delete mark are independent:
- * offboarding stamps `status: "terminated"` and disables the login (services/transitions.ts) and never touches
- * `delete_time`, while the generic soft delete stamps `delete_time` and never touches `status`. Filtering only
- * the second therefore kept every leaver the org has ever offboarded in the org-wide audience - and this
- * audience reaches further than a bell: lifecycle.ts mails the same list when the author asks for it, and
- * `notifyMany` pushes to registered devices, so a departed employee's phone went on buzzing with company
- * announcements. `disabled` joins them because it is the same statement: an account switched off is not
- * somebody to broadcast to either.
- *
- * The strict reading is what every other roster in the app already uses - src/cron.ts `activeRoster`,
- * services/documentAck.ts `ackRoster`, and payroll's own build roster - each of which says so in a comment.
- * This was the outlier, and the broadcast one.
- *
- * Filtered in SQL rather than in the isolate: the rows it drops do not have to be read, and D1 bills rows read.
+ * The rule itself (three columns, and why each one is needed) lives in services/liveEmployee.ts, so the other
+ * surfaces that need it can take the predicate without taking this whole module with it. Aliased to the name
+ * the readers of this file already know.
  */
-const LIVE_EMPLOYEE = [
-  eq(schema.employees.status, "active"),
-  isNull(schema.employees.deleteTime),
-  eq(schema.employees.disabled, false),
-];
+const LIVE_EMPLOYEE = liveEmployee();
 
 export async function activeEmployeeIds(deps: Deps): Promise<string[]> {
   const rows = await deps.db.select({ uuid: schema.employees.uuid }).from(schema.employees).where(and(...LIVE_EMPLOYEE));

@@ -75,3 +75,42 @@ describe("collection registry stays in sync (drift gate)", () => {
     expect(missing).toEqual([]);
   });
 });
+
+// A cross-collection anchor is how a named department is granted: the rule is about `leave-requests`, the
+// anchor is a `departments` object, and it works because every owned code is composed under its employee,
+// which is composed under its department - so `<deptCode>-*` reaches the whole department's rows.
+//
+// The failure it has to refuse is the silent one. Anchoring a collection that is NOT department-coded
+// composes a prefix nothing is coded under: the rule stores fine, displays fine, and decides nothing. An
+// access UI may refuse a rule; it may not accept one and quietly do nothing with it.
+describe("validateAccessRule - cross-collection subtree anchor", () => {
+  const anchor = (collection: string) => ({ subject_kind: "role", subject: "manager", collection, scope: "subtree", scope_ref: "departments/abc", level: "read" });
+
+  it("accepts a department anchor on a department-coded collection", () => {
+    expect(validateAccessRule(anchor("leave-requests"), P).scopeRef).toBe("departments/abc");
+    expect(validateAccessRule(anchor("employees"), P).scopeRef).toBe("departments/abc");
+    // Newly department-scopable, and so newly anchorable (manifests.ts SUPPORTED_SCOPES).
+    expect(validateAccessRule(anchor("expenses"), P).scopeRef).toBe("departments/abc");
+  });
+
+  it("refuses a department anchor on a collection that is not department-coded", () => {
+    // Flat catalogues: their codes have no department segment, so the prefix would match nothing.
+    expect(() => validateAccessRule(anchor("holidays"), P)).toThrow(/not department-coded/);
+    expect(() => validateAccessRule(anchor("leave-types"), P)).toThrow(/not department-coded/);
+  });
+
+  it("refuses an anchor that is neither the rule's own collection nor a department", () => {
+    const r = { subject_kind: "role", subject: "manager", collection: "leave-requests", scope: "subtree", scope_ref: "employees/abc", level: "read" };
+    expect(() => validateAccessRule(r, P)).toThrow(/must be a leave-requests or a departments object/);
+  });
+
+  it("still accepts a same-collection subtree (the departments case it was built for)", () => {
+    const r = { subject_kind: "role", subject: "manager", collection: "departments", scope: "subtree", scope_ref: "departments/abc", level: "read" };
+    expect(validateAccessRule(r, P).scope).toBe("subtree");
+  });
+
+  it("leaves `exact` alone - it pins to one object of the rule's own collection", () => {
+    const r = { subject_kind: "role", subject: "manager", collection: "leave-requests", scope: "exact", scope_ref: "leave-requests/abc", level: "read" };
+    expect(validateAccessRule(r, P).scope).toBe("exact");
+  });
+});

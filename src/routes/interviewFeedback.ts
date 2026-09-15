@@ -34,6 +34,7 @@ export const interviewFeedback = collectionRoutes<FeedbackInput, typeof schema.i
     return listInterviewFeedback(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, {
       interview: c.req.query("interview"),
       showDeleted: page.showDeleted,
+      deletedOnly: page.deletedOnly,
     });
   },
 });

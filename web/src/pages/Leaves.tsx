@@ -7,7 +7,7 @@ import { usePermission } from "@/lib/perm";
 import { useApprovals } from "@/lib/approvals";
 import { leaveBalanceOf, leaveDecisionContext, leaveOverlapCount, leaveSummary } from "@/lib/leaveApproval";
 import { useIntent } from "@/lib/intent";
-import { formatDate, idOf, cn, personName, round2 } from "@/lib/utils";
+import { formatDate, idOf, cn, personIndex, personName, round2 } from "@/lib/utils";
 import { todayStr, daysBetweenYmd } from "@/lib/orgDay";
 import { leaveColor } from "@/lib/leaveColors";
 import { readHashQuery, writeHashQuery } from "@/lib/urlQuery";
@@ -181,7 +181,10 @@ export default function Leaves({ me }: { me: Me }) {
   // turns a surprising "Mon-Fri = 3 days" into an obvious one.
   const holidayByDay = useMemo(() => {
     const m = new Map<string, string>();
-    for (const h of holidays) if (!h.disabled && !h.delete_time && h.date) m.set(h.date.slice(0, 10), h.display_name || "Holiday");
+    // `applies !== false` alongside `disabled`: a regional holiday for another location is a normal working
+    // day here, and the server already charged it as one. Without it this note named a holiday the server did
+    // not drop - in the sentence whose whole job is to reconcile with the server's charged figure.
+    for (const h of holidays) if (!h.disabled && !h.delete_time && h.applies !== false && h.date) m.set(h.date.slice(0, 10), h.display_name || "Holiday");
     return m;
   }, [holidays]);
   const workDays = schedule.work_days?.length ? schedule.work_days : DEFAULT_SCHEDULE.work_days;
@@ -215,7 +218,10 @@ export default function Leaves({ me }: { me: Me }) {
     () => (me.employee_id ? employees.find((e) => idOf(e.path) === me.employee_id) : undefined),
     [employees, me.employee_id],
   );
-  const empName = (p?: string) => personName(employees, p, "-") || "-";
+  // Through the same prepared index `empOf` closes over, not a fresh linear scan: this is handed to
+  // DataTable as a column accessor on two tables (see `personName`).
+  const empIdx = useMemo(() => personIndex(employees), [employees]);
+  const empName = (p?: string) => personName(empIdx, p, "-") || "-";
 
   // The ORG's day, not the reader's. Every comparison below is against a date the SERVER decided (a request
   // is upcoming, a balance year has started), and those are stated in the org timezone.

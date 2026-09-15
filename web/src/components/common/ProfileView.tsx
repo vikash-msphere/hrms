@@ -115,13 +115,13 @@ export function ProfileView({
           its own; when they wrap, the actions are alone on their line and sit left, under the person. */}
       <div ref={identityRef} className="flex flex-wrap items-start gap-4 p-5 sm:gap-5 sm:px-7 sm:pb-[22px] sm:pt-[26px]">
         <div className="flex min-w-0 flex-[1_1_440px] items-start gap-4 sm:gap-5">
-          {/* A rounded SQUARE, not a circle: a square holds more of a face at the same footprint, and it
-              sits with the rest of the card's geometry instead of being the one round thing on it. Smaller
-              on a phone, where 92px is a quarter of the width and the name has to live beside it. */}
-          <div className="shrink-0 overflow-hidden rounded-[14px] shadow-[inset_0_0_0_1px_hsl(var(--border))] sm:rounded-[18px]">
+          {/* A circle: the face is the one round thing on the card, and the ring reads as a portrait frame
+              rather than another panel edge. Smaller on a phone, where 92px is a quarter of the width and
+              the name has to live beside it. */}
+          <div className="shrink-0 overflow-hidden rounded-full shadow-[inset_0_0_0_1px_hsl(var(--border))]">
             {avatar ?? (
-              <Avatar className="h-[68px] w-[68px] rounded-[14px] sm:h-[92px] sm:w-[92px] sm:rounded-[18px]">
-                <AvatarFallback className="rounded-[14px] bg-muted text-2xl font-semibold text-muted-foreground sm:rounded-[18px]">
+              <Avatar className="h-[68px] w-[68px] rounded-full sm:h-[92px] sm:w-[92px]">
+                <AvatarFallback className="rounded-full bg-muted text-2xl font-semibold text-muted-foreground">
                   {initials(seed)}
                 </AvatarFallback>
               </Avatar>
@@ -142,8 +142,13 @@ export function ProfileView({
 
             {roleParts.length > 0 && (
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[15px] text-muted-foreground">
+                {/* Keyed by INDEX, deliberately: the list is positional (job title, department, employment
+                    type, work mode + location) and never reorders, while two of those parts holding the same
+                    string is ordinary in an HR system - "Operations" the job title inside "Operations" the
+                    department. Keying by the value duplicates the key among siblings, which makes React's
+                    reconciliation ambiguous and logs a warning. */}
                 {roleParts.map((part, i) => (
-                  <React.Fragment key={part}>
+                  <React.Fragment key={i}>
                     {i > 0 && <Dot />}
                     <span className={cn("min-w-0 truncate", i === 0 && "font-semibold text-foreground")}>{part}</span>
                   </React.Fragment>

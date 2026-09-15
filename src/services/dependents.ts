@@ -1,8 +1,9 @@
 // Dependents: who an employee can enrol in a benefit plan. Employee-owned (the code is allocated under the
 // owner), so a caller sees their own by scope; HR sees the department or all.
-import { eq, and, isNull, type SQL } from "drizzle-orm";
+import { eq, and, type SQL } from "drizzle-orm";
 import { CODE_WIDTH, allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -20,11 +21,11 @@ export type DependentInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
-export async function listDependents(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, showDeleted = false) {
+export async function listDependents(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.dependents.code, schema.dependents.employeeId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.dependents.employeeId, empId));
-  if (!showDeleted) conds.push(isNull(schema.dependents.deleteTime));
+  conds.push(deleteStateFilter(schema.dependents.deleteTime, showDeleted, deletedOnly));
   // Paged in SQL (services/keysetPage.ts) rather than by reading every dependent the scope matches and
   // slicing one page out of it in the isolate - a whole-org read on the HR lane, billed by rows read, to
   // answer with fifty. The soft-delete filter is in the WHERE for the same reason.

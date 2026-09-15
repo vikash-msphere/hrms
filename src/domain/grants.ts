@@ -67,6 +67,43 @@ const OWN_ATTENDANCE: Record<string, Level> = {
 };
 const OWN_ATTENDANCE_ALLOW = ["attendance.me.clockIn", "attendance.me.clockOut", "attendance-regularizations.me.cancel"];
 
+// Self-service custom methods on the caller's OWN employee record. `me`-bound, so each reaches exactly the
+// caller's own row and nobody else's.
+//
+// `viewers` answers "who can see my record, and my bank/identity/tax details" - the effective-access question
+// asked from the subject's side instead of an admin's. It is the report every other access surface already
+// computes, pointed the other way; the service pins the target to the caller's own employee id, so the verb
+// discloses nothing about anyone else even though it runs the same engine the admin preview does. Deliberately
+// held by everyone: a person being able to find out who reads their bank details is the point.
+const OWN_SELF_SERVICE_ALLOW = ["employees.me.viewers"];
+
+// Shared work surface - EVERY role works the boards, delegates their own approvals and builds their own
+// grids. Spread into each role, like OWN_ATTENDANCE.
+//
+// Boards, sprints and the cards on them are collaborative by nature, so the card grant is deliberately
+// ALL-breadth rather than `me`: cards are owner-coded by assignee, and a column that shows only the cards
+// assigned to the reader is a private to-do list, not a board. Board SHAPE (columns, WIP limits, swimlanes)
+// stays out - `boards:configure` is the manager/HR verb below.
+//
+// `approval-delegations` and `table-views` are owner-coded (delegator / view owner) and their services pin
+// the owner to the caller, so `me` reaches exactly the caller's own rows. `table-fields` is the builder's
+// field catalogue - a virtual capability with no rows, read like any other catalogue.
+const OWN_WORK: Record<string, Level> = {
+  "boards.**": "read",
+  "sprints.**": "read",
+  "cards.**": "write",
+  "approval-delegations.**": "read", // who is covering for whom is org-visible; writing is `me` below
+  "approval-delegations.me.**": "write",
+  "table-views": "write", // may call the list/create endpoints (rows scoped to own by applyScope)
+  "table-views.me.**": "write",
+  "table-fields.**": "read",
+};
+const OWN_WORK_ALLOW = [
+  "cards.**", // every card verb (move/assign/block/comment/todos/watch) on the shared board surface
+  "boards.*.metrics", // flow analytics for a board the caller can already read
+  "table-views.me.run", // produce the rows for own saved grid (`:run` is the whole point of a view)
+];
+
 // Board social: every employee may give kudos (the open recognition wall) and react / reply / mark-read / vote
 // on ANY board item (kudos are board posts now - kind="kudos"). `giveKudos` is a collection verb; the rest are
 // all-scope (`*`) item verbs. Paired with `announcements.me.**` write (below) so an author can edit + soft-
@@ -92,6 +129,9 @@ const employee: Grant = {
     "leave-balances": "read",
     payslips: "read",
     "employees.me": "read", // own directory record (item)
+    // Own presence pill. A sub-resource, so the base `employees.me` read does NOT reach it (a 2-token pattern
+    // never matches a 3-token key) - without this line the caller's own profile header 403s.
+    "employees.me.presence.**": "read",
     ...OWN_PII, // own bank/identity/personal-info (self-service)
     "leave-requests": "write", // create + list (rows scoped in service)
     "leave-requests.me.**": "write", // own leave-requests (owner code embedded in the id)
@@ -109,6 +149,7 @@ const employee: Grant = {
     "personal-documents.me.**": "read", // own personal documents (items)
     "announcements.me.**": "write", // edit + soft-delete own board posts / kudos (owner-coded; HR moderates all)
     ...OWN_ATTENDANCE, // clock in/out + own attendance + file own regularizations
+    ...OWN_WORK, // boards/cards/sprints, own approval delegation, own saved grids
     // Self-service request workflows (same shape as leave-requests: collection write = create + list own,
     // `.me.**` = own rows; the create gate pins the owner ref to self, so none of these reach anyone else).
     "overtime-requests": "write",
@@ -153,7 +194,9 @@ const employee: Grant = {
   },
   allow: [
     ...OWN_ATTENDANCE_ALLOW,
+    ...OWN_SELF_SERVICE_ALLOW,
     ...BOARD_SOCIAL_ALLOW,
+    ...OWN_WORK_ALLOW,
     "overtime-requests.me.cancel",
     "remote-work-requests.me.cancel",
     "asset-requests.me.cancel",
@@ -230,6 +273,9 @@ const manager: Grant = {
     // matches `employees.<member>` but not `employees.<member>.bank-account`, so a manager sees the team
     // roster without their PII (PII stays super-only by default). Own PII still via OWN_PII.
     "employees.my-dept": "read",
+    // Presence of each dept member - the same reading of leave + attendance the manager already holds
+    // through `attendance.my-dept.**`, surfaced as the profile header's pill.
+    "employees.my-dept.presence.**": "read",
     "leave-requests.my-dept.**": "read", // dept's leave-requests (to review/approve) - no PII sub-resources
     "leave-balances.my-dept.**": "read", // dept's leave balances
     "attendance.my-dept.**": "read", // dept's attendance (sessions + presence)
@@ -247,6 +293,11 @@ const manager: Grant = {
     "shift-assignments.my-dept.**": "write",
     "expenses.my-dept.**": "read", // dept's operational expenses (to review/approve)
     "vendors.**": "read", // resolve vendor names on the team's expenses
+    // Own the team's work surface: create/rename/archive boards and run their sprints (the shape verbs are
+    // below). Everyone else reads the boards and works the cards (OWN_WORK).
+    "boards.**": "write",
+    "sprints.**": "write",
+    "goal-templates.**": "read", // apply a blueprint to the team; authoring the catalogue is HR's
   },
   // Approve/reject scoped to the manager's own dept subtree (matches the my-dept read scope above).
   // `*` here would let a manager decide ANY dept's request (cross-dept BOLA); `my-dept` keeps it owned.
@@ -276,6 +327,9 @@ const manager: Grant = {
     // Credit a share of a team goal to whoever delivered it. The manager's call and not the owner's: a share
     // scores in the CONTRIBUTOR's review, so it is a statement about somebody else's performance.
     "goals.my-dept.setContributors",
+    "boards.**", // configure the board's shape (columns, WIP limits, swimlanes, labels) + restore
+    "sprints.**", // activate/complete the team's sprints + restore
+    "goal-templates.*.apply", // stamp a blueprint onto a report or the whole team
     // The manager's half of the goal-setting handshake: agree the goal a report submitted, or send it back
     // with the reason (services/goals.ts#approveGoal / #requestGoalChanges). `my-dept` like every other
     // decision verb here - `*` would let a manager agree any department's goals. A goal the manager SETS for
@@ -304,6 +358,7 @@ const hr_admin: Grant = {
     "employees.*.department.**": "write",
     "employees.*.manager.**": "write",
     "employees.*.bio.**": "write", // moderate/tidy anyone's public about-me (not PII)
+    "employees.*.presence.**": "read", // anyone's status pill (derived from leave + attendance, which HR reads in full)
     "employees.*.tax.**": "write", // income-tax (TDS) projection for everyone - HR/payroll manage it (unlike bank/identity PII)
     "departments.**": "write",
     "positions.**": "write", // HR records promotions/transfers (effective-dated role history)
@@ -315,6 +370,11 @@ const hr_admin: Grant = {
     "announcements.**": "write",
     "org-documents.**": "write",
     "personal-documents.**": "write",
+    // Who has signed the current version of a policy, and who is still pending: the Documents page's
+    // AckProgressDialog reads this roster, and HR is the only role that opens it. Nothing had granted the
+    // collection at any level, so the panel silently showed an empty signed list next to a chase list holding
+    // the whole company - the same "route shipped, grant did not" shape as the presence pill.
+    "document-acknowledgements.**": "read",
     "pay-periods.**": "write",
     "pay-components.**": "write",
     "reimbursement-categories.**": "write", // HR configures reimbursement categories
@@ -337,6 +397,10 @@ const hr_admin: Grant = {
     "workflow-meta.**": "read", // builder metadata endpoint (virtual)
     "esign-providers.**": "read", // e-sign driver catalog for the Settings E-signature tab (virtual)
     ...OWN_ATTENDANCE, // HR clocks in/out + files own regularizations like any employee
+    ...OWN_WORK, // boards/cards/sprints, own approval delegation, own saved grids
+    "boards.**": "write", // HR administers the boards org-wide (create/rename/archive; shape verbs below)
+    "sprints.**": "write",
+    "goal-templates.**": "write", // HR curates the goal blueprint catalogue (a Settings entry)
     "attendance.**": "read", // HR sees all attendance (presence, history)
     "attendance-regularizations.**": "read", // HR reviews all regularization requests
     "overtime-requests.**": "read", // HR reviews + decides these org-wide (verbs below)
@@ -391,6 +455,11 @@ const hr_admin: Grant = {
   },
   allow: [
     ...OWN_ATTENDANCE_ALLOW,
+    ...OWN_SELF_SERVICE_ALLOW,
+    ...OWN_WORK_ALLOW,
+    "boards.**", // configure any board's shape + restore
+    "sprints.**",
+    "goal-templates.**", // :apply + lifecycle/restore on the blueprint catalogue
     "attendance-regularizations.*.approve", // HR decides regularizations org-wide
     "attendance-regularizations.*.reject",
     "leave-requests.*.approve", // leave.decide includes hr_admin (not just managers)
@@ -500,6 +569,7 @@ const payroll_admin: Grant = {
     "personal-documents.me.**": "read", // own personal docs (self-service, like every employee)
     "announcements.me.**": "write", // edit + soft-delete own board posts / kudos (like every employee)
     ...OWN_ATTENDANCE, // payroll clocks in/out + files own regularizations like any employee
+    ...OWN_WORK, // boards/cards/sprints, own approval delegation, own saved grids
   },
   // Payroll runs the workflow but NOT approve (separation of duties) and NOT bankFile - the bank file
   // exposes the employer debit account + every employee's account number, so it is super_admin-only.
@@ -537,11 +607,13 @@ const payroll_admin: Grant = {
     "employees.batchGetPhotos",
     "batch.run",
     ...OWN_ATTENDANCE_ALLOW,
+    ...OWN_SELF_SERVICE_ALLOW,
     ...BOARD_SOCIAL_ALLOW,
+    ...OWN_WORK_ALLOW,
   ],
 };
 
-const super_admin: Grant = { levels: { "**": "admin" }, allow: ["**"] };
+const super_admin: Grant ={ levels: { "**": "admin" }, allow: ["**"] };
 
 // The seed grant set (typed default). NOT the runtime source of truth once P0b lands - the DB `grants`
 // table is, loaded onto the user context. `satisfies` keeps the precise literal keys (so `GRANTS.employee`
@@ -561,6 +633,27 @@ export const EVERYONE_ROLE = "everyone";
 // Whether a grant confers the unrestricted super wildcard. Such a caller is exempt from `everyone` rules.
 export function isSuperGrant(g: Grant): boolean {
   return g.levels["**"] != null || g.allow.includes("**");
+}
+
+/**
+ * The role SUBJECTS a per-object rule lookup must fan out over for this caller: every role they hold, plus the
+ * `everyone` pseudo-role.
+ *
+ * ONE DEFINITION, because there are eight call sites and they are the kind that drift. The expression was
+ * written out at each of them, so adding secondary roles (db/schema.ts `user_roles`) meant changing all eight or
+ * silently having per-object role rules stop applying to somebody's second role at whichever one was missed -
+ * a fail-closed bug, but an invisible one: the share simply does not appear.
+ *
+ * `everyone` applies to every caller EXCEPT super (the `**` holder), who must stay unrestrictable - an
+ * `everyone` DENY that could bind super would be a lockout of the break-glass identity.
+ */
+export function roleSubjectsOf(principal: { role: string; roles?: readonly string[] }, grant: Grant): string[] {
+  // The PRIMARY role is the floor. Taking the array alone would mean a principal assembled without one - a test
+  // fixture, a future code path that forgets - silently contributed NO role subjects, so every per-object role
+  // rule stopped applying to them. That fails closed, which is the right direction and the wrong failure: the
+  // share simply does not appear, with nothing to notice. The primary always belongs in the set anyway.
+  const held = principal.roles?.length ? [...new Set(principal.roles)] : [principal.role];
+  return isSuperGrant(grant) ? held : [...held, EVERYONE_ROLE];
 }
 
 // Fail-closed accessor for a dynamic (string) role. The single seam P0b repoints from this seed map to the

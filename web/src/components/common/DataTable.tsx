@@ -16,13 +16,16 @@ import { useConfirm } from "@/components/common/confirm";
 import { useAccessMode, type AccessTargetRef } from "@/components/access/AccessModeProvider";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { AccessAction } from "@/components/access/AccessAction";
-import { usePermission } from "@/lib/perm";
+import { usePermission, useCanExport } from "@/lib/perm";
 import { exportTable } from "@/lib/exportTable";
 import { useCollectionHasMore } from "@/hooks/useCollection";
 import { syncLastHash } from "@/router";
 import { useMedia } from "@/hooks/useMedia";
 
 const PAGE_SIZES = [10, 25, 50, 100, 0]; // 0 = All
+
+/** Joins column ids into one comparable key. A character no column id can contain, so the key is unambiguous. */
+const ID_SEP = String.fromCharCode(0);
 
 export type Column<T> = {
   id: string;
@@ -217,7 +220,14 @@ export function DataTable<T>({
   // columns without a header (e.g. the actions menu) are pinned at the end.
   const managed = React.useMemo(() => columns.filter((c) => c.header !== ""), [columns]);
   const trailing = React.useMemo(() => columns.filter((c) => c.header === ""), [columns]);
-  const managedIds = React.useMemo(() => managed.map((c) => c.id), [managed]);
+  // Keyed on the id STRING, not on `managed`. Pages build their `columns` as a fresh array literal in the
+  // render body, so `managed` takes a new identity every render and everything derived from it did too -
+  // including `orderedManaged`, which is in the layout-persist effect's dependency array, so that effect
+  // re-ran and `JSON.stringify`d the whole prefs payload on every render of every table in the app. Column
+  // IDS are plain strings and cannot go stale the way a column's accessor closure can, so this is the one
+  // part of the chain that is safe to freeze.
+  const managedIdsKey = managed.map((c) => c.id).join(ID_SEP);
+  const managedIds = React.useMemo(() => managedIdsKey.split(ID_SEP).filter(Boolean), [managedIdsKey]);
 
   // READ ONCE, not once per render. `useRef(loadLocalPrefs(tableId))` evaluates its argument on every render
   // and keeps only the first result, so this was a synchronous `localStorage.getItem` plus a `JSON.parse` per
@@ -457,8 +467,23 @@ export function DataTable<T>({
   // Only the filters are deferred. Sort is a click, not a stream of input, so deferring it would add latency
   // to a gesture that has none to hide. Everything that must react to the typed value at once - the filter
   // chips, the URL mirror, `onFilterChange`, the reset to page one - keeps reading `filters` directly.
+  //
+  // WHAT THE SPLIT DOES NOT BUY, stated plainly because the shape of the code suggests otherwise. `colById` is
+  // derived from `columns`, which pages build as a fresh array literal in the render body, so the memo below
+  // is invalidated on EVERY render and the pass runs in the urgent render as well as the deferred one. The
+  // deferral still does its job - it keeps the keystroke itself off the critical path and lets React abandon a
+  // half-finished pass - but it does not make the urgent render free.
+  //
+  // Freezing the memo on a column-ID signature would fix the count and break the result. A column's accessor
+  // is a closure over data the page loaded separately (`empName` over `employees`, `deptName` over
+  // `departments`), and that data arrives without `rows`, `sort` or the filters changing - so a memo keyed on
+  // ids alone would keep sorting and filtering through accessors that still read an empty directory, long
+  // after the cells beside them rendered the names. A stale sort order is a worse defect than a second pass.
+  // The pass is made CHEAP instead (see `personName`'s prepared-map overload, which is what made these
+  // accessors linear scans), and the RESULT is kept referentially stable below so nothing downstream churns.
   const deferredFilters = React.useDeferredValue(filters);
 
+  const lastFiltered = React.useRef<T[]>([]);
   const filtered = React.useMemo(() => {
     let out = rows;
     // Columns can hide a value by default (e.g. "Deleted") unless the user filters for it.
@@ -486,10 +511,16 @@ export function DataTable<T>({
         out = [...out].sort((a, b) => dir * compare(col.accessor!(a), col.accessor!(b)));
       }
     }
+    // Same rows in the same order as last time? Hand back the SAME array. The pass above has to re-run (its
+    // accessors are fresh closures every render - see the note on the deferral), but a new array identity for
+    // an unchanged result is what made everything downstream re-run with it: the bulk-selection prune effect,
+    // `selectedRows`, and every consumer the table hands `filtered` to.
+    const prev = lastFiltered.current;
+    if (prev.length === out.length && prev.every((r, i) => r === out[i])) return prev;
+    lastFiltered.current = out;
     return out;
     // `columns` is read for `hideValueByDefault` but is not listed: it is usually a fresh array per render,
-    // and `colById` is derived from it, so it already changes whenever the columns really do. Listing it would
-    // re-filter and re-sort every row on every render of every table in the app.
+    // and `colById` is derived from it, so it already changes whenever the columns really do.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- columns is covered by colById; see above
   }, [rows, deferredFilters, sort, colById]);
 
@@ -1181,7 +1212,11 @@ export function DataTable<T>({
   // Cross-module export: the visible, accessor-bearing columns (skips the access/actions columns) of the
   // FILTERED rows (all of them, not just the current page). Gated by the `export` capability; the AccessAction
   // overlays the manage icon in access mode so admins control who may export.
-  const canExport = usePermission("export.read");
+  //
+  // Per TABLE, not app-wide: the table's own collection is passed, so `export.<collection>.read` lights up
+  // this table alone while the broad `export.read` still covers every one. Exporting payroll and exporting
+  // the holiday list were the same switch, which meant the safe half could not be granted without the other.
+  const canExport = useCanExport(accessCollection);
   const exportCols = visibleColumns.filter((c) => c.accessor && c.header);
   function runExport(format: "csv" | "xlsx") {
     const headers = exportCols.map((c) => c.header);

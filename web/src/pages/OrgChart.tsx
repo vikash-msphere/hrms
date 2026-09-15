@@ -205,7 +205,15 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     const forceOpen = new Set<string>();
     if (q) {
       for (const n of nodes.values()) if (n.search.includes(q)) matches.add(n.id);
-      for (const id of matches) { let p = nodes.get(id)?.parentId ?? null; while (p) { forceOpen.add(p); p = nodes.get(p)?.parentId ?? null; } }
+      // Guarded like the two other parent walks below (`locate`'s trail, and `focusTrail`): a manager cycle is
+      // writable - services/employees.ts refuses one now, but older rows and the API predate that - and this
+      // walk runs inside a useMemo DURING RENDER, so an unguarded one freezes the tab outright the moment a
+      // search term matches anybody inside the loop. `forceOpen` is itself the visited set here: a parent
+      // already in it has had its chain walked.
+      for (const id of matches) {
+        let p = nodes.get(id)?.parentId ?? null;
+        while (p && !forceOpen.has(p)) { forceOpen.add(p); p = nodes.get(p)?.parentId ?? null; }
+      }
     }
     return { matches, forceOpen };
   }, [q, nodes]);
@@ -388,6 +396,10 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     if (!node) return;
     if (targetId === id) return;
     if ((targetId ?? null) === node.parentId) return; // no-op
+    // Partial by construction: the tree is read with `{ all: true }`, whose ALL_CAP is 1000, so past that a
+    // descendant is simply not here to find. `services/employees.ts#assertNoManagerCycle` and
+    // `codeCascade.ts#moveDepartment` are what actually refuse the write; this turns the common case into a
+    // message instead of a failed request.
     if (targetId && descendantsOf(id).has(targetId)) {
       toast({ variant: "destructive", title: "Can't move there", description: `${node.label} can't report into its own ${view === "people" ? "report" : "sub-department"}.` });
       return;

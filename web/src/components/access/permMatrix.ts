@@ -21,6 +21,9 @@ export type AccessRule = {
   status?: "active" | "pending" | "pending_delete";
   requested_by?: string;
   expire_time?: string;
+  // An approval LIMIT on the row the rule is exercised against (server-set, authored at create time). Absent on
+  // almost every rule; present only where the collection declares a field the engine can measure.
+  condition?: { field: string; op: string; value: number };
   create_time?: string;
 };
 
@@ -33,19 +36,26 @@ export const CELL = ["none", "read", "write", "admin", "deny"] as const;
 // reading the record; scope narrows whose records, Field picks one collection), `export` gates the
 // data-export affordance on every table (holders export only what they can read).
 export const COLLECTION_GROUPS: { label: string; collections: string[] }[] = [
-  { label: "People & org", collections: ["employees", "departments", "compensation", "dependents", "users"] },
+  { label: "People & org", collections: ["employees", "departments", "compensation", "positions", "dependents", "users"] },
   { label: "Attendance & scheduling", collections: ["attendance", "attendance-regularizations", "overtime-requests", "remote-work-requests", "shifts", "shift-assignments", "time-entries", "projects"] },
   { label: "Leave", collections: ["leave-requests", "leave-types", "leave-balances", "leave-encashments", "holidays", "holiday-selections"] },
-  { label: "Payroll & compensation", collections: ["payroll-runs", "payslips", "pay-components", "pay-grades", "salary-structures", "pay-periods", "bonuses", "loans", "tax-declarations", "bank-formats"] },
+  { label: "Payroll & compensation", collections: ["payroll-runs", "payslips", "pay-components", "pay-grades", "salary-structures", "pay-periods", "bonuses", "settlements", "loans", "tax-declarations", "bank-formats", "payroll-debit-accounts"] },
   { label: "Expenses", collections: ["reimbursements", "reimbursement-categories", "expenses", "expense-categories", "expense-budgets", "vendors"] },
   { label: "Benefits", collections: ["benefit-plans", "benefit-enrollments"] },
-  { label: "Performance", collections: ["goals", "review-cycles", "reviews", "review-feedback", "check-ins"] },
+  { label: "Performance", collections: ["goals", "goal-templates", "review-cycles", "reviews", "review-feedback", "check-ins"] },
   { label: "Boards", collections: ["boards", "cards", "sprints"] },
-  { label: "Engagement", collections: ["announcements", "suggestions", "events", "kudos"] },
+  // No `kudos` row: kudos are announcements with kind="kudos", so there is no such collection to grant on
+  // (domain/collections.ts) and the validator rejected every rule the row could author.
+  { label: "Engagement", collections: ["announcements", "suggestions", "events"] },
   { label: "Recruiting", collections: ["job-requisitions", "candidates", "applications", "interviews", "interview-feedback", "offers", "referrals"] },
   { label: "Onboarding & compliance", collections: ["transitions", "transition-tasks", "background-checks", "notice-periods", "org-documents", "personal-documents", "document-acknowledgements", "letter-templates", "letterheads", "compliance-events", "compliance-rules"] },
   { label: "Support & ops", collections: ["tickets", "ticket-checklists", "assets", "asset-categories", "asset-requests", "stocktakes", "approval-delegations", "automations", "operations", "settings"] },
-  { label: "Capabilities", collections: ["activity", "export"] },
+  // Administering the platform itself. Every one of these is private-by-default (only super reaches it via
+  // `**`), which is exactly why they belong here: an org that wants a dedicated auditor or an IT admin who
+  // mints API keys has to be able to FIND the resource before it can grant it, and the only other route was
+  // the raw API or an already-existing rule (see `collectionsForRules`).
+  { label: "Platform & security", collections: ["access-rules", "roles", "policy", "api-keys", "audit", "notifications", "table-views"] },
+  { label: "Capabilities", collections: ["activity", "export", "unmask", "timeline", "tax-verifications"] },
 ];
 export const BASE_COLLECTIONS = COLLECTION_GROUPS.flatMap((g) => g.collections);
 // Group label for a collection ("Other" for live-rule collections outside the curated catalog).
@@ -89,6 +99,18 @@ export const SCOPES = [
 // access.scopes), not a parallel hardcoded list - so the chips always reflect what the engine actually
 // honors. Cached once per session (the map is global + static for the session).
 let scopeCapsCache: Record<string, string[]> | null = null;
+/**
+ * The fields each collection may carry an approval LIMIT on, from the same `/users/me` payload as the scopes.
+ * Empty for almost every collection; the ACL offers the limit box only where this says the engine honours one.
+ */
+let conditionFieldsCache: Record<string, string[]> | null = null;
+export async function fetchConditionFields(): Promise<Record<string, string[]>> {
+  if (conditionFieldsCache) return conditionFieldsCache;
+  const me = await fetchMeRaw();
+  conditionFieldsCache = (me?.caller_access as { condition_fields?: Record<string, string[]> } | undefined)?.condition_fields ?? {};
+  return conditionFieldsCache;
+}
+
 export async function fetchScopeCapabilities(): Promise<Record<string, string[]>> {
   if (scopeCapsCache) return scopeCapsCache;
   // Reuse the single shared /users/me request (see useMe.fetchMeRaw) instead of issuing a second one.
@@ -99,8 +121,19 @@ export async function fetchScopeCapabilities(): Promise<Record<string, string[]>
 
 // Canonical narrowest-first ordering for the scope chips. `exact`/`subtree` are object-anchored (offered only
 // when an object is in scope - they pin to it via scope_ref); `self`/`dept`/`all` are subject-relative.
-const SCOPE_ORDER = ["exact", "subtree", "self", "dept", "all"] as const;
-const SCOPE_LABELS: Record<string, string> = { exact: "This one", subtree: "This & below", self: "Own", dept: "Department", all: "All" };
+const SCOPE_ORDER = ["exact", "subtree", "self", "reports", "org", "dept", "named-dept", "all"] as const;
+const SCOPE_LABELS: Record<string, string> = {
+  exact: "This one",
+  subtree: "This & below",
+  self: "Own",
+  // The MANAGER CHAIN, which the department tiers below cannot express: a reporting line is not the department
+  // tree, and conflating them shows a manager peers they do not manage while hiding reports who sit elsewhere.
+  reports: "My reports",
+  org: "My reports & theirs",
+  dept: "Department",
+  "named-dept": "One department",
+  all: "All",
+};
 // Per-collection label tweaks (value -> label) for collections whose scoping reads differently. Tickets are
 // owner-coded with category-based sharing, so own-vs-all is framed for support rather than Own/Department.
 const SCOPE_LABEL_OVERRIDES: Record<string, Record<string, string>> = {
@@ -119,6 +152,9 @@ export function scopesForCollection(collection: string, hasObject: boolean, caps
   for (const v of SCOPE_ORDER) {
     if (v === "exact") { if (hasObject) out.push({ value: v, label: scopeLabel(collection, v) }); continue; }
     if (v === "subtree") { if (hasObject && tiers.has("subtree")) out.push({ value: v, label: scopeLabel(collection, v) }); continue; }
+    // `named-dept` deliberately does NOT need an object on the page: it brings its own department picker, which
+    // is the whole point - the department being granted has nothing to do with the row the modal was opened on.
+    if (v === "named-dept") { if (tiers.has("named-dept")) out.push({ value: v, label: scopeLabel(collection, v) }); continue; }
     if (tiers.has(v)) out.push({ value: v, label: scopeLabel(collection, v) });
   }
   if (out.length === 0) out.push({ value: "all", label: scopeLabel(collection, "all") }); // defensive: always grantable
@@ -130,9 +166,13 @@ export function scopeText(r: AccessRule): string {
   switch (r.scope) {
     case "create": return "create only"; // the collection-level create gate - no access to existing objects
     case "self": return "own";
+    case "reports": return "their direct reports";
+    case "org": return "their whole reporting line";
     case "dept": return "department";
     case "exact": return r.scope_ref ? `object ${r.scope_ref.split("/").pop()}` : "object";
-    case "subtree": return "subtree";
+    // A subtree rule anchored to a DEPARTMENT is the named-department tier; anchored to its own collection it
+    // is "this object and below". The anchor's collection is on the ref, so the two read differently.
+    case "subtree": return r.scope_ref?.startsWith("departments/") ? "one department" : "subtree";
     default: return "all";
   }
 }

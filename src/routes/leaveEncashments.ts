@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { positiveDays } from "../http/moneyField";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import {
@@ -14,7 +15,7 @@ const createSchema = z
   .object({
     employee: z.string(),
     leave_type: z.string(),
-    days: z.number().positive(),
+    days: positiveDays(),
   })
   .strict();
 

@@ -65,22 +65,34 @@ export function EmergencyQuickView({
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Load on open (whether via the trigger button or the controlled prop).
+  //
+  // GUARDED, like every other refetching effect in this app (hooks/useResource.ts, hooks/usePresence.ts).
+  // `employeeId` genuinely changes under a mounted instance - pages/EmployeeProfile.tsx passes the id the
+  // prev/next stepper moves, and nothing closes this dialog on that change - so two reads can be in flight for
+  // two different people at once. Unguarded, a response for A landing after one for B rendered A's emergency
+  // contacts, blood group and insurance e-card under B's name, which is the worst panel in the app to get
+  // wrong in that direction.
   useEffect(() => {
     if (!open) return;
+    let live = true;
     setEdit(false);
     setLoading(true);
-    void loadInsurance();
+    void loadInsurance(() => live);
     get<PersonalDetails>(`employees/${employeeId}/personal-info`)
-      .then((r) => setData(r))
+      .then((r) => { if (live) setData(r); })
       .catch((e) => {
+        if (!live) return;
         toast({ title: "Couldn't load emergency details", description: (e as Error).message, variant: "destructive" });
         setOpen(false);
       })
-      .finally(() => setLoading(false));
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, employeeId]);
 
-  async function loadInsurance() {
+  // `isLive` is the effect's own guard, passed in so a reload triggered by a save (which has no guard to give)
+  // still shares one implementation with the guarded one above.
+  async function loadInsurance(isLive: () => boolean = () => true) {
     try {
       // Ask the server for THIS person's documents (`?employee=`, which the list route takes), rather than
       // reading the newest page of everybody's and filtering here. The server scope is an AUTHZ scope, not a
@@ -88,9 +100,10 @@ export function EmergencyQuickView({
       // then shows "no insurance on file" for somebody who has one - next to an upload button that would file
       // a duplicate. It hid its own failure too, because a card just uploaded is always the newest row.
       const r = await list<DocumentResource>("personal-documents", { params: { employee: `employees/${employeeId}` } });
+      if (!isLive()) return;
       setInsDocs((r.results ?? []).filter((x) => x.document_type === "INSURANCE"));
     } catch {
-      setInsDocs([]);
+      if (isLive()) setInsDocs([]);
     }
   }
 

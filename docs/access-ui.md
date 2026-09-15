@@ -16,9 +16,25 @@ One resource - `access-rules` - expresses everything. A rule is
 - **Custom methods** (AEP `:verb`) are fail-closed: allowed only by an explicit verb-allow; verb `*` = all
   methods of the collection in one rule (allow-only).
 - **Scopes**, narrowest first: `exact` (this object) / `subtree` (this object & below) are object-anchored
-  (pinned via `scope_ref`); `self` / `dept` / `all` are subject-relative. The grantable tiers per collection
-  come from the backend policy manifest carried on `users/me` (`caller_access.scopes`) - the UI never
-  hardcodes them.
+  (pinned via `scope_ref`); `self` / `dept` / `named-dept` / `all` are chosen from the chips. The grantable
+  tiers per collection come from the backend policy manifest carried on `users/me` (`caller_access.scopes`) -
+  the UI never hardcodes them.
+  - **`named-dept` ("One department")** is the tier that says WHICH department rather than "the subject's
+    own". It brings its own department picker, so unlike `subtree` it needs no object on the page - the
+    department being granted has nothing to do with the row the modal was opened on. It is stored as a
+    `subtree` rule anchored to a `departments` object, because that is what it is (`<deptCode>-*`), and it is
+    **derived**, not declared: a collection that offers `dept` is department-coded, so it can be anchored to
+    any department (`supportedScopesOf`). The add buttons stay disabled until a department is picked - without
+    an anchor the rule would degrade to org-wide, the opposite of what was asked for.
+- **Every row-scoped grant is paired with a list gate.** The engine decides a LIST on the one-token key
+  (`leave-requests.read`), which no scoped pattern can match - so "read their own leave requests", authored
+  alone, decides every item correctly and 403s the page, and the client cannot warn either (`capabilitiesOf`
+  strips the scope, so the SPA believes the collection is readable and fires the request that fails). The
+  seeded roles never hit this because each holds the bare collection grant alongside its scoped rules. So the
+  modal authors that pairing too: one extra rule at READ (never create - that is the bare rule at WRITE and
+  stays the separate "new X" affordance), as its own visible, removable row, skipped when the subject already
+  reaches the collection via their own rule, their role or `everyone`. Rules authored elsewhere (the
+  fine-rules editor, import, the API) get the `unlistable` lint instead.
 - **Create gate** is separate from write-on-existing-objects: a "new X" affordance manages the 1-token
   `<collection>` create rule.
 - **Hints**: every serialized row carries `access.can` (effective verbs for the caller, decided server-side
@@ -95,7 +111,13 @@ never arrives as a row); no action is merely `disabled` by a permission check; a
   own verb-scoped icons).
 - `web/src/components/access/permMatrix.ts` `BASE_COLLECTIONS`: every grantable collection, grouped by
   module - the row set of the Permissions matrix and the fine-rules editor. Add new collections here
-  (see the add-collection checklist).
+  (see the add-collection checklist). Every name in it must be a real member of `COLLECTIONS`, or the rules
+  its row authors are refused as naming an unknown collection - gated by `test/collections.test.ts`. The
+  converse is deliberately not gated: `COLLECTIONS` holds plumbing (`batch`, `preferences`, `event-log`,
+  `cron-runs`) that no admin should be offered a row for.
+- `src/domain/manifests.ts` `COLLECTION_FIELD_CAPABILITIES`: the capabilities whose `field` slot names a
+  target COLLECTION (`activity`, `export`). The fine-rules editor shows its "For collection" picker from this
+  set, and `isFieldScopeTarget` validates against it, so the picker and the validator cannot disagree.
 - `src/domain/notificationConfig.ts` `NOTIFICATION_CATEGORIES` + `web/src/lib/notificationMeta.ts`
   `CATEGORY_META`: the `access` category (requests, grants, four-eyes decisions) lives in both.
 
@@ -105,7 +127,7 @@ never arrives as a row); no action is merely `disabled` by a permission check; a
 explains* each collection: curated `label` / `singular` / `plural` (the auto kebab→words derivation
 produced "all export", "a bonuse"), an `allPhrase` for what the org-wide tier really covers, and a `note` -
 the one-paragraph answer to "what does granting this actually do?". Notes exist where real ambiguity does:
-`export` (one app-wide switch, not per-table; exports only what the holder can already read), `activity`
+`export` (any table, or one named table; exports only what the holder can already read), `activity`
 (ANDed with record access), `settings` (per-section vs all sections), `users` (accounts, not employee
 records), `leave-balances` (system-maintained; write = manual adjustment), and the like. `permMatrix.labelOf`
 and the key-icon tooltips (`AccessTarget.describeTarget`) resolve through the same meta, so the matrix, the
@@ -141,7 +163,27 @@ pre-selected chip that reads as a broken picker.
 - **Access requests**: `POST /v1/access-rules:requestAccess` notifies every access admin (roles holding
   `access-rules.write`) that the caller wants a collection/verb. Fail-closed verb - an org enables the
   flow by granting `requestAccess` to Everyone from the "Who can manage access" icon. The web shell offers
-  it automatically: any 403 raises a one-per-collection toast with a "Request access" action.
+  it automatically: any 403 raises a one-per-collection toast with a "Request access" action, and the
+  `NoAccess` wall collects a reason and an optional duration (4h / a day / 3 days / a week, capped at a
+  fortnight server-side). The duration grants nothing - it travels to the admin so they set a matching
+  expiry, which is the existing temporary-access mechanism. Every request also writes an
+  `access-request.raised` audit row carrying the reason: a request that every admin ignores used to leave no
+  trace at all, and "why did this person get payroll write in March" is the question a reviewer asks.
+- **Starter packs** (`web/src/components/access/roleTemplates.ts`): a new role is deny-all, so "Start from a
+  template" seeds one from a curated least-privilege bundle - Recruiter, Auditor, Team lead, IT/asset
+  manager, Benefits administrator, Front desk. Each is a list of rule bodies replayed through the ordinary
+  create path (same validation, same four-eyes queue, same audit), listed in full before it is applied, and
+  additive. Applying one to a PERSON rather than a role is how somebody takes on a second job's access
+  without inventing a role for it; their copy does not follow the template afterwards, which the dialog says.
+- **Recertification**: with the `access-review` setting on, a nightly cron digests the STANDING privileges
+  (permanent, active, write-or-better or a custom method, excluding `everyone`) to the access admins every
+  90 days. It only reminds - no access is ever changed for anyone - and due-ness lives on the setting, so a
+  skipped tick runs late rather than being missed. Toggled beside four-eyes: the two halves of governing a
+  rule's life, one guarding how it is made and one asking whether it is still wanted.
+- **"Who can see this"** (profile → Privacy): the effective-access report aimed at the subject instead of an
+  admin - who can currently read their record, contact details, identity, bank and tax sections, and why.
+  It is `previewAccess` with the target nailed to the caller's own employee id, which is what makes
+  `employees.me.viewers` safe to hold for everyone.
 - **App-wide view-as**: with access mode on, the floating pill offers "view as…" (preview-capability
   holders): pick a person and the whole shell re-gates on THEIR server-computed capability set + role
   (`include_capabilities` on `:preview` returns the same scope-stripped set `/users/me` carries). The
@@ -166,6 +208,9 @@ pre-selected chip that reads as a broken picker.
   - `denied` - a deny covering the same target beats it (including an `everyone` deny, which the engine
     unions into every role);
   - `shadowed` - a broader allow already grants at least as much;
+  - `unlistable` - a row-scoped level rule with nothing that opens the collection (see the list gate above).
+    Rendered as a warning but NOT struck through, unlike the two above: the rule is live and correct for every
+    individual record, it just has no page to show them on, so the fix is to add a rule, not delete this one;
   - lifecycle notes (pending approval, expiry).
   The fine-rules table leads with the sentence and strikes through dead rules; the ACL modal uses the same
   logic for its author-time "a deny is already in place" warning and its commit line.
@@ -204,9 +249,11 @@ Every layer that shows or fetches is capability-gated, each at ONE central place
   a control that IS the data (a checklist tick-box showing what is done) - it stays, read-only.
 - **Bell**: the notifications provider treats the read capability (not just fetch errors) as
   `available`, so the bell disappears for holders of nothing.
-- Settings gear (`settings.write` + per-entry perm), export button (`export.read`), activity affordances
-  (`activity.read` / per-collection), quick-create menu and ⌘K actions (per-action caps) were already
-  centrally gated.
+- Settings gear (`settings.write` + per-entry perm), export button (`export.read` / per-collection), activity
+  affordances (`activity.read` / per-collection), quick-create menu and ⌘K actions (per-action caps) are all
+  centrally gated. The export button reads the TABLE's own collection, so `export.<collection>.read` lights up
+  that table alone; the custom-grid builder deliberately requires the broad capability, since one grid draws
+  columns from several collections and no single one stands for what the file would hold.
 
 ## Access-mode UX
 

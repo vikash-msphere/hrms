@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, index, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, real, index, uniqueIndex, primaryKey } from "drizzle-orm/sqlite-core";
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 import { genId } from "../lib/idCodec";
@@ -83,6 +83,36 @@ export const users = sqliteTable("users", {
   employeeUniq: uniqueIndex("users_employee_idx").on(t.employeeId),
 }));
 
+/**
+ * The SECONDARY roles a user holds, beyond `users.role`.
+ *
+ * WHY `users.role` STAYS. It is the PRIMARY role and it is load-bearing in three places that want exactly one
+ * answer: `audit_log.actor_role` records it point-in-time on every row, "view as" swaps it, and the UI labels
+ * people by it. Replacing it with a pure join table would mean deciding, at each of those, which of somebody's
+ * roles to name - so the table is additive and the column keeps its meaning.
+ *
+ * WHAT THIS BUYS over applying a role TEMPLATE to a person (which already works): the copy does not follow the
+ * template afterwards. Someone who is both a team lead and the office's asset manager can be seeded from the IT
+ * bundle today, but changing that bundle later leaves their copy on the old rules. Holding the role means they
+ * track it.
+ *
+ * Union semantics, like every other source of authority: the caller's grant is their primary role's, plus each
+ * held role's, plus `everyone`, plus their own user rules - all merged (domain/compileGrants.ts mergeGrants).
+ * A role here can only ADD; nothing in this table narrows anything.
+ *
+ * RESTRICT on the role, so a role stays undeletable while anybody holds it - the same promise `users.role`'s FK
+ * already makes, which is why services/roles.ts has to check both. CASCADE on the user, because these rows are
+ * meaningless without the account and a deleted account must not pin a role forever.
+ */
+export const userRoles = sqliteTable("user_roles", {
+  userId: text("user_id").notNull().references((): AnySQLiteColumn => users.uuid, { onDelete: "cascade" }),
+  role: text("role").notNull().references((): AnySQLiteColumn => roles.name, { onDelete: "restrict" }),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.role] }),
+  // "Does anybody hold this role?" - the role delete guard's question, asked without scanning.
+  roleIdx: index("user_roles_role_idx").on(t.role),
+}));
+
 // Machine credentials. An API key is NOT a principal of its own - it acts as its owner (a real `users` row)
 // and may only ever NARROW that user's authority, never widen it (domain/keyScope.ts). That is why there is
 // no role column here: the role comes from the owner.
@@ -150,7 +180,9 @@ export const accessRules = sqliteTable("access_rules", {
   subjectKind: text("subject_kind", { enum: ["role", "user"] }).notNull(),
   namespace: text("namespace").notNull(), // collection (first pattern token) or '*' (the super "**" pattern)
   pattern: text("pattern").notNull(), // VERBATIM grant pattern - the decision input, never re-derived
-  scopeKind: text("scope_kind", { enum: ["all", "subtree", "exact", "self", "dept"] }).notNull(),
+  // `reports`/`org` are the manager chain (domain/permissions.ts SelfContext): subject-relative like
+  // `self`/`dept`, so they carry no `scope_code` - who they reach is resolved per caller at decision time.
+  scopeKind: text("scope_kind", { enum: ["all", "subtree", "exact", "self", "dept", "reports", "org"] }).notNull(),
   scopeCode: text("scope_code").notNull().default(""), // code prefix for subtree/exact; '' otherwise
   matchCode: text("match_code"), // exact object code for per-object rows (user OR exact role rules), the IN-narrowing key; NULL for scope rules
   level: text("level", { enum: ["read", "write", "admin"] }), // NULL for verb (allow) / deny rules
@@ -166,6 +198,14 @@ export const accessRules = sqliteTable("access_rules", {
   // scope an admin declared "would be destroying a grant, not tidying a dangling one". Nothing in the table
   // could tell the two apart; this column is that difference, and both the machinery's dedupe and its delete
   // are scoped to it.
+  // An optional threshold on the ROW the rule is exercised against, as JSON `{field, op, value}` - the approval
+  // limit the pattern model has no slot for (domain/ruleCondition.ts). It can only ever SUBTRACT from what the
+  // pattern already grants, so a rule with one is never wider than the same rule without.
+  //
+  // NOT compiled into the pattern, deliberately: the pattern is the decision input and is matched by code, while
+  // this is a predicate on a column. Keeping them apart is what lets `decide()` stay the sole authority with the
+  // condition as a second, subtractive pass - the same shape the delete-verb deny already has.
+  condition: text("condition"),
   source: text("source", { enum: ["acl", "ticket-share"] }).notNull().default("acl"),
   // Row lifecycle, for orgs that want four-eyes on permission changes (settings key `access-approval`).
   // A rule awaiting approval to be ADDED (`pending`) is inert; a rule awaiting approval to be REMOVED
@@ -2914,6 +2954,48 @@ export const codeSequences = sqliteTable("code_sequences", {
   scope: text("scope").primaryKey(),
   next: integer("next").notNull(),
 });
+
+/**
+ * How often each GRANT PATTERN has actually authorized something, and when it last did - the counter an access
+ * review reads to answer "which rules has nobody used?" and "which org-wide rule could be narrower?".
+ *
+ * WHY A COUNTER AND NOT A QUERY OVER `audit_log`. `decide()` already returns the pattern that allowed a request
+ * and `lib/audit.ts` stamps it as `authorized_by` - but inside the row's JSON `meta` column. Rolling that up
+ * means matching inside JSON across the whole table, which is the scan `docs/authz.md` §12.2 rules out ("D1
+ * bills rows read and `LIKE '%q%'` cannot use an index"). `audit_log` grows with every action in the app, so
+ * that report would cost more every month it ran. This is a handful of rows, keyed and indexed, written in the
+ * SAME batch as the audit row it comes from - so it adds no round trip to any request.
+ *
+ * KEYED BY PATTERN, NOT BY RULE ID, deliberately. `via` carries the pattern because by decision time the grant
+ * is a compiled projection and several rules have collapsed into one (see permissions.ts Decision.via), so a
+ * rule id would have to be threaded through the compiler, the cached blob, mergeGrants and the API-key clamp.
+ * The report therefore answers at pattern granularity and says so; "which of these three rules" is one query
+ * away when somebody asks.
+ *
+ * NOT A COMPLETE PICTURE OF READS, and the report has to say this too: routine reads are deliberately not
+ * audited (volume - see manifests.ts AUDIT), so a zero here means "no writes and no sensitive reads", not "no
+ * access". It is still the right first cut for an access review, and it is the only one that is cheap.
+ */
+export const ruleUsage = sqliteTable("rule_usage", {
+  // The grant pattern verbatim, e.g. `leave-requests.my-dept.**` - the same string `authorized_by` records.
+  pattern: text("pattern").primaryKey(),
+  hits: integer("hits").notNull().default(0),
+  // How far the rule actually REACHED, counted alongside the total, which is what turns "this rule is org-wide"
+  // into a recommendation an admin can act on: a rule whose every hit was the holder's own record, or inside
+  // their own department, is one that could have been written at `self` or `dept`. Without these the report can
+  // only say a rule is broad - which the admin already knew when they wrote it.
+  //
+  // Both counters are only incremented for a request that resolved to an ITEM; a collection-level request has no
+  // row to classify, so it raises `hits` alone and the report treats `self + dept < hits` as "reached wider, or
+  // reached something unclassifiable" - the conservative reading, which never recommends narrowing on thin
+  // evidence.
+  selfHits: integer("self_hits").notNull().default(0),
+  deptHits: integer("dept_hits").notNull().default(0),
+  lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }).notNull(),
+}, (t) => ({
+  // The report's window predicate ("nothing since <date>"), so it never reads the whole table.
+  lastUsedIdx: index("rule_usage_last_used_idx").on(t.lastUsedAt),
+}));
 
 export const collectionVersions = sqliteTable("collection_versions", {
   collection: text("collection").primaryKey(),

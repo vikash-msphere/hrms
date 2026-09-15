@@ -17,11 +17,17 @@ import { fetchAllAccessRules, scopeText, permText, accessTone, type AccessRule }
 import { ruleSentence, expiryLabel, denyBlocking, ALL_VERBS } from "./ruleLogic";
 import { usePaged, Pager } from "@/components/common/Pager";
 import { roleLabel, registerRoleLabels, EVERYONE_ROLE } from "@/lib/roles";
-import type { Employee, User } from "@/types";
+// `Department` is the SHARED wire type, not a local shape. A hand-written `{ path; name }` compiled fine and
+// rendered three blank rows: the serializer emits the name as `display_name` (http/serialize.ts
+// toDepartmentResource), so `d.name` was always undefined. Using the generated type makes that a type error.
+import type { Department, Employee, User } from "@/types";
+
+/** One scope's reach. `capped` means the server stopped counting at its cap, so the real total is higher. */
+type ScopeCount = { count: number; capped: boolean };
 import type { AccessTargetRef } from "./AccessModeProvider";
 import { ruleScopeFor, ruleMatchesTarget } from "./accessRuleScope";
 import { customMethodsFor } from "./customMethods";
-import { scopesForCollection, fetchScopeCapabilities } from "./permMatrix";
+import { scopesForCollection, fetchScopeCapabilities, fetchConditionFields } from "./permMatrix";
 import { metaFor } from "./collectionMeta";
 import { verbInfo } from "./verbMeta";
 import { PreviewPanel, fetchPreview } from "./PreviewPanel";
@@ -108,9 +114,18 @@ export function AclModal({
   // The grant is exactly as narrow as the chosen chip; the option set + narrowest-first default come from the
   // central scopesForCollection.
   const [scopeSel, setScopeSel] = React.useState("all");
+  // The department a "one department" (named-dept) rule is anchored to, as a `departments/<id>` path. Only
+  // meaningful while that chip is selected; "" means the grantor has not picked one yet, which blocks the add.
+  const [anchorPath, setAnchorPath] = React.useState("");
+  const [departments, setDepartments] = React.useState<Department[]>([]);
   // Per-collection grantable scope tiers from the policy manifest (carried on users/me). Fetched once + cached
   // in permMatrix, so opening successive icons reuses it. Empty until loaded -> the target collapses to "all".
   const [scopeCaps, setScopeCaps] = React.useState<Record<string, string[]>>({});
+  // Which fields this collection may carry an approval LIMIT on, and the limit being authored. Both come from
+  // the server (`/users/me` caller_access.condition_fields) so the box appears exactly where the engine honours
+  // one, never from a second list here that could drift from CONDITION_FIELDS.
+  const [condFields, setCondFields] = React.useState<Record<string, string[]>>({});
+  const [limit, setLimit] = React.useState("");
   // Bumped after every rule reload -> the preview panel re-asks the engine for the person it is showing.
   const [rulesVersion, setRulesVersion] = React.useState(0);
   // Recent access-rule changes from the audit trail: who authored which rule and when. Loaded once per open
@@ -119,6 +134,23 @@ export function AclModal({
   const [showHistory, setShowHistory] = React.useState(false);
   React.useEffect(() => {
     fetchScopeCapabilities().then(setScopeCaps).catch(() => setScopeCaps({}));
+    // Same single `/users/me` payload as the scopes above, so this adds no request.
+    fetchConditionFields().then(setCondFields).catch(() => setCondFields({}));
+  }, []);
+  // Departments are fetched when the "one department" chip is first OPENED, not on mount: most rules are
+  // never anchored, and this modal opens on every key icon in the app, so loading the org chart up front
+  // would be a read per open to serve a minority path. `loadedDepts` guards the in-flight case too - the
+  // popover can be opened and closed faster than the request returns.
+  const loadedDepts = React.useRef(false);
+  const loadDepartments = React.useCallback(() => {
+    if (loadedDepts.current) return;
+    loadedDepts.current = true;
+    listAll<Department>("departments")
+      .then(setDepartments)
+      .catch(() => {
+        loadedDepts.current = false; // a failed load must be retryable on the next open
+        setDepartments([]);
+      });
   }, []);
 
   const objectPath = target?.objectPath;
@@ -142,6 +174,31 @@ export function AclModal({
     setScopeSel((cur) => (scopeOpts.some((o) => o.value === cur) ? cur : scopeOpts[0]?.value ?? "all"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collection, objectPath, field, createMode, activeVerb, scopeCaps]);
+  // HOW MUCH each scope actually covers. The modal names the target and warns about denies but could never say
+  // how much a scope choice reaches, which is the one number that makes "All" feel like a decision rather than
+  // the default. Only `all` and a NAMED department get a figure: `self` and `dept` are subject-relative, so a
+  // number computed here would describe whoever is authoring the rule rather than the rule.
+  //
+  // ON DEMAND, ONCE PER TARGET - not per chip, and never for a collection whose scope row is not even shown.
+  // The server caps each count (services/scopeCount.ts), so this cannot become a table scan on `attendance`.
+  // A caller without the `scopeCounts` verb simply sees no numbers: `skipForbiddenHandler` keeps the 403 from
+  // raising a toast about a capability they never asked for.
+  const [scopeCounts, setScopeCounts] = React.useState<{ all?: ScopeCount; named_dept?: ScopeCount } | null>(null);
+  React.useEffect(() => {
+    setScopeCounts(null);
+    if (createMode || !collection || scopeOpts.length < 2) return;
+    let live = true;
+    void api("/access-rules:scopeCounts", { method: "POST", body: JSON.stringify({ collection, ...(anchorPath ? { department: anchorPath } : {}) }), skipForbiddenHandler: true })
+      .then((r) => live && setScopeCounts(r as { all?: ScopeCount; named_dept?: ScopeCount }))
+      .catch(() => {}); // counts are a nicety; their absence must never block authoring a rule
+    return () => {
+      live = false;
+    };
+  }, [collection, createMode, anchorPath, scopeOpts.length]);
+  // "214", or "500+" once the server stopped counting. The exact figure past the cap buys nothing: the reader is
+  // comparing orders of magnitude, not auditing a total.
+  const countText = (c?: { count: number; capped: boolean }) => (c ? `${c.count.toLocaleString()}${c.capped ? "+" : ""}` : "");
+
   // Custom methods offered for this target: the collection's methods, shown as drill-in chips for an
   // object/collection target (a pure field target manages a level, not a method; a verb-target is already focused).
   const collectionVerbs = customMethodsFor(collection ?? "");
@@ -197,6 +254,7 @@ export function AclModal({
     setFocusVerb(undefined);
     setAddUsers([]);
     setAddExpires("");
+    setAnchorPath(""); // a department picked for the last target must never carry into the next one
     setShowHistory(false);
   }, [target, reload]);
 
@@ -230,7 +288,12 @@ export function AclModal({
   // target -> rule scope + scope matching are pure + unit-tested (./accessRuleScope). Matching ignores the
   // verb dimension, so we partition the matched rules here: level/deny rules have no verb; a verb's rule is
   // the one whose `verb` equals it.
-  const t = { collection: collection ?? "", objectPath, field, create: createMode, scope: scopeSel };
+  const t = { collection: collection ?? "", objectPath, anchorPath: anchorPath || undefined, field, create: createMode, scope: scopeSel };
+  // Belt-and-braces, not a live path: picking the department is what selects this tier, so the two cannot come
+  // apart through the UI. It stays because the consequence if they ever did is silent and wrong rather than
+  // loud - `ruleScopeFor` degrades an unanchored named-dept to ORG-WIDE, the opposite of what was asked for -
+  // and a guard against writing the widest possible rule by accident is worth one boolean.
+  const scopeIncomplete = scopeSel === "named-dept" && !anchorPath;
   const matchesTarget = (r: AccessRule) => ruleMatchesTarget(r, t);
   const scopeBody = (): Record<string, unknown> => ruleScopeFor(t) as Record<string, unknown>;
 
@@ -239,6 +302,14 @@ export function AclModal({
   // A date-only picker means "expires at the end of that day", which is what "access until Friday" means to
   // a human - the server takes any ISO instant.
   const expiryBody = (): Record<string, unknown> => (addExpires ? { expire_time: new Date(`${addExpires}T23:59:59`).toISOString() } : {});
+  // The fields this collection can be limited on. A DENY never carries one: a deny already refuses outright,
+  // and "deny above X" would have to grant below the line, which conditions deliberately cannot do.
+  const limitField = (createMode ? [] : condFields[collection ?? ""] ?? [])[0];
+  const limitNum = Number(limit);
+  const limitValid = limit.trim() !== "" && Number.isFinite(limitNum) && limitNum > 0;
+  // `lte` - "approve up to and including this much" is what an approval limit means to the person setting it.
+  const conditionBody = (): Record<string, unknown> =>
+    limitField && limitValid ? { condition: { field: limitField, op: "lte", value: limitNum } } : {};
 
   const roleAll = (name: string) => rules.filter((r) => r.subject_kind === "role" && r.subject === name && matchesTarget(r));
   // Same subject + same target dimension, but at ANOTHER scope tier - shown as context so "HR already has
@@ -401,8 +472,15 @@ export function AclModal({
       }
       // An expiring DENY would quietly re-open access on a date nobody is watching, so an expiry only ever
       // rides on a grant.
-      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...levelBody(value), ...(value === "deny" ? {} : expiryBody()) });
-      undoable(`Updated ${roleLabel(name)}`, async () => {
+      let gate: string | null = null;
+      if (value !== "none") {
+        await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...levelBody(value), ...(value === "deny" ? {} : { ...expiryBody(), ...conditionBody() }) });
+        // Paired after the rule it serves - see ensureListGate. A role's scoped grant is exactly as unusable
+        // without it as a person's.
+        gate = await ensureListGate("role", name);
+      }
+      undoable(`Updated ${roleLabel(name)}${gate ? " · also given access to open the list" : ""}`, async () => {
+        if (gate) await remove(gate);
         for (const r of (await fetchAllAccessRules()).filter((x) => x.subject_kind === "role" && x.subject === name && matchesTarget(x) && !x.verb)) await remove(r.path, r.etag);
         for (const r of before) await recreate(r);
       });
@@ -442,7 +520,7 @@ export function AclModal({
         await remove(r.path, r.etag);
         removed.push(r);
       }
-      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...verbBody(v, value as "allow" | "deny"), ...(value === "deny" ? {} : expiryBody()) });
+      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...verbBody(v, value as "allow" | "deny"), ...(value === "deny" ? {} : { ...expiryBody(), ...conditionBody() }) });
       undoable(`Updated ${roleLabel(name)} · ${v}`, async () => {
         for (const r of (await fetchAllAccessRules()).filter((x) => x.subject_kind === "role" && x.subject === name && matchesTarget(x) && x.verb === v)) await remove(r.path, r.etag);
         for (const r of before) await recreate(r);
@@ -489,6 +567,46 @@ export function AclModal({
     }
   }
 
+  /**
+   * A row-scoped grant does not, on its own, let anyone open the page it is about.
+   *
+   * The engine decides a LIST (`GET /v1/leave-requests`) on the one-token key `leave-requests.read`, and a
+   * scoped pattern cannot match it: `leave-requests.me.**` and `leave-requests.07-*.**` both need a second
+   * token the list key does not have. Only the bare collection rule and the org-wide `<collection>.**` do.
+   * So "read their own leave requests", authored alone, is a rule that decides every ITEM correctly and 403s
+   * the list - and the client cannot warn about it either, because `capabilitiesOf` strips the scope off a
+   * grant, so the SPA believes the collection is readable and fires the request that fails.
+   *
+   * The seeded roles never hit this: every one of them holds the bare collection grant (`"leave-requests":
+   * "write"`) alongside its scoped rules, which is where the list access has always come from. Rules authored
+   * here had no such pairing, which is why the narrow tiers looked broken rather than narrow.
+   *
+   * So the pairing is authored too: one extra rule, at READ (the list, never create - create is the bare rule
+   * at WRITE and stays the separate "new X" affordance), as its own visible, removable row rather than a
+   * hidden widening. It is skipped when the subject already reaches the collection some other way - their own
+   * org-wide rule, the create gate, their role, or `everyone`.
+   *
+   * Returns the created rule's path so the caller's undo takes it back out with the rule that needed it.
+   */
+  async function ensureListGate(subjectKind: "role" | "user", subject: string): Promise<string | null> {
+    // Only row-scoped ALLOWs need it. A deny grants nothing, `all` already matches the list key, and the
+    // create gate IS the bare rule.
+    // Only row-scoped LEVEL allows. A verb grant is deliberately an action grant - pairing it with collection
+    // read would widen "may approve" into "may see the collection", which is a decision for the grantor to
+    // make on the level chip, not a side effect of granting a method.
+    if (createMode || verbMode || addAccess === "deny" || !collection) return null;
+    if (scopeSel === "all") return null;
+    // Anything that already lets this subject call the collection endpoint. For a person that includes the
+    // rules they inherit: their role, and `everyone` (which the engine unions into every caller).
+    const inherited = subjectKind === "user" ? [users.find((u) => u.path === subject)?.role, EVERYONE_ROLE] : [EVERYONE_ROLE];
+    const reaches = (r: AccessRule) =>
+      r.collection === collection && r.effect === "allow" && !r.verb && !r.field && (r.scope === "create" || r.scope === "all") &&
+      ((r.subject_kind === subjectKind && r.subject === subject) || (r.subject_kind === "role" && inherited.includes(r.subject)));
+    if (rules.some(reaches)) return null;
+    const row = await create<AccessRule>("access-rules", { subject_kind: subjectKind, subject, collection, scope: "create", level: "read" });
+    return row.path;
+  }
+
   // One rule per picked person, in one go. Rules that already exist come back as a 409 from the server; that
   // person is reported as skipped instead of failing the whole batch, so a bulk grant is safely repeatable.
   async function addUserRule() {
@@ -503,10 +621,18 @@ export function AclModal({
       const body = verbMode ? verbBody(activeVerb!, addAccess === "deny" ? "deny" : "allow") : levelBody(addAccess);
       const added: string[] = [];
       let skipped = 0;
+      let gated = 0;
       for (const subject of subjects) {
         try {
-          const row = await create<AccessRule>("access-rules", { subject_kind: "user", subject, collection, ...scopeBody(), ...body, ...expiryBody() });
+          const row = await create<AccessRule>("access-rules", { subject_kind: "user", subject, collection, ...scopeBody(), ...body, ...expiryBody(), ...(addAccess === "deny" ? {} : conditionBody()) });
           added.push(row.path);
+          // Paired AFTER the rule it serves, so a failure to author the grant never leaves a lone list gate
+          // behind. Undo takes both back out (it walks `added`).
+          const gate = await ensureListGate("user", subject);
+          if (gate) {
+            added.push(gate);
+            gated++;
+          }
         } catch (e) {
           if (String((e as Error).message).toLowerCase().includes("already exists")) skipped++;
           else throw e;
@@ -514,7 +640,7 @@ export function AclModal({
       }
       setAddUsers([]);
       undoable(
-        `${added.length} ${added.length === 1 ? "person" : "people"} updated${skipped ? ` · ${skipped} already had it` : ""}`,
+        `${subjects.length - skipped} ${subjects.length - skipped === 1 ? "person" : "people"} updated${skipped ? ` · ${skipped} already had it` : ""}${gated ? ` · ${gated} also given access to open the list` : ""}`,
         async () => {
           for (const path of added) await remove(path);
         },
@@ -571,7 +697,13 @@ export function AclModal({
     scopeSel === "exact" ? objectName
     : scopeSel === "subtree" ? `${objectName} & below`
     : scopeSel === "self" ? `their own ${plural}`
+    : scopeSel === "reports" ? `their direct reports' ${plural}`
+    : scopeSel === "org" ? `${plural} for everyone in their reporting line`
     : scopeSel === "dept" ? `their department's ${plural}`
+    // Named by the department it is anchored to, not by "a department": the whole point of the tier is WHICH
+    // one, and a sentence that does not say so reads identically to the subject-relative `dept` rule above.
+    : scopeSel === "named-dept"
+      ? `${plural} in ${departments.find((d) => d.path === anchorPath)?.display_name ?? "a department you pick"}`
     : meta.allPhrase ?? `all ${plural}`;
   const scopeNote = createMode
     ? `creating a new ${singular}`
@@ -684,11 +816,57 @@ export function AclModal({
         {scopeOpts.length > 1 ? (
           <div className="flex flex-wrap items-center gap-1.5 rounded-md border bg-muted/30 p-2">
             <span className="mr-1 text-xs font-medium text-muted-foreground">Scope:</span>
-            {scopeOpts.map((s) => (
-              <Button key={s.value} variant={scopeSel === s.value ? "default" : "outline"} size="sm" className="h-7" onClick={() => setScopeSel(s.value)}>
-                {s.value === "exact" ? `This ${singular}` : s.value === "subtree" ? `This ${singular} & below` : s.label}
-              </Button>
-            ))}
+            {scopeOpts.map((s) =>
+              // The department chip IS the picker. A chip that selects a "one department" MODE and then a
+              // second control underneath to say which one is two decisions for one answer - and it leaves a
+              // state where the scope is chosen but means nothing. Opening this chip offers the departments;
+              // choosing one is what selects the scope, so the tier can never be half-set. (The board
+              // composer's audience chip works the same way, for the same reason.)
+              s.value === "named-dept" ? (
+                <Combobox
+                  key={s.value}
+                  // Sized and coloured as a chip: `cn` runs twMerge, so these win over the trigger's own
+                  // h-9/w-full/bg-card defaults rather than fighting them.
+                  className={cn(
+                    "h-7 w-auto gap-1.5 rounded-md px-3 text-sm font-medium shadow-sm",
+                    scopeSel === s.value && anchorPath
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-input bg-background text-foreground",
+                  )}
+                  // The chip is only as wide as the department it names, so the popup takes its own width -
+                  // capped against the viewport so a long department name cannot push it off a phone screen.
+                  contentClassName="w-64 max-w-[calc(100vw-2rem)]"
+                  value={anchorPath}
+                  onValueChange={(v) => {
+                    setAnchorPath(v);
+                    setScopeSel("named-dept"); // picking the department IS choosing the scope
+                  }}
+                  onOpenChange={(open) => open && loadDepartments()}
+                  placeholder={s.label}
+                  searchPlaceholder="Search departments…"
+                  emptyText={departments.length ? "No matches." : "Loading departments…"}
+                  options={departments.map((d) => ({ value: d.path, label: d.display_name }))}
+                />
+              ) : (
+                <Button key={s.value} variant={scopeSel === s.value ? "default" : "outline"} size="sm" className="h-7" onClick={() => setScopeSel(s.value)}>
+                  {s.value === "exact" ? `This ${singular}` : s.value === "subtree" ? `This ${singular} & below` : s.label}
+                  {/* The reach, on the one chip that has a fixed answer. Muted and inside the chip, so it reads
+                      as a property of the choice rather than a second control. */}
+                  {s.value === "all" && scopeCounts?.all && (
+                    <span className="ml-1.5 tabular-nums opacity-70">{countText(scopeCounts.all)}</span>
+                  )}
+                </Button>
+              ),
+            )}
+            {/* The comparison, once both halves are known. A sentence rather than two bare figures: "12 of 214"
+                is the least-privilege prompt, and the numbers alone leave the reader to do that arithmetic at
+                the moment they are least inclined to. Only shown when the narrower tier is genuinely smaller -
+                saying "214 of 214" would argue for the org-wide choice. */}
+            {scopeCounts?.named_dept && scopeCounts.all && scopeCounts.named_dept.count < scopeCounts.all.count && (
+              <p className="basis-full text-xs text-muted-foreground">
+                That department holds {countText(scopeCounts.named_dept)} of {countText(scopeCounts.all)} {plural}.
+              </p>
+            )}
           </div>
         ) : (
           (() => {
@@ -915,7 +1093,25 @@ export function AclModal({
                       <Input type="date" className="h-9" value={addExpires} min={new Date(Date.now() + 86400000).toISOString().slice(0, 10)} onChange={(e) => setAddExpires(e.target.value)} />
                     </div>
                   )}
-                  <Button disabled={busy || !addUsers.length} onClick={addUserRule}>
+                  {/* APPROVAL LIMIT. Offered only on collections the engine can measure (caller_access.
+                      condition_fields), and never on a deny - a deny already refuses outright, and "deny above
+                      X" would have to grant below the line, which a condition deliberately cannot do. Empty =
+                      no limit, which is what every rule authored before this existed means. */}
+                  {limitField && addAccess !== "deny" && (
+                    <div className="w-40">
+                      <label className="mb-1 block text-xs font-medium" title="Leave empty for no limit.">Limit (optional)</label>
+                      <Input
+                        type="number"
+                        min="1"
+                        inputMode="numeric"
+                        className="h-9"
+                        placeholder={`Max ${limitField}`}
+                        value={limit}
+                        onChange={(e) => setLimit(e.target.value)}
+                      />
+                    </div>
+                  )}
+                  <Button disabled={busy || !addUsers.length || scopeIncomplete || (limit.trim() !== "" && !limitValid)} onClick={addUserRule}>
                     <Plus className="h-4 w-4" /> Add{addUsers.length > 1 ? ` ${addUsers.length}` : ""}
                   </Button>
                 </div>
@@ -1033,7 +1229,7 @@ export function AclModal({
                       );
                     })()}
                     {verbMode ? (
-                      <Select value={roleVerbCurrent(role.name, activeVerb!)} onValueChange={(v) => setRoleVerb(role.name, activeVerb!, v)} disabled={busy}>
+                      <Select value={roleVerbCurrent(role.name, activeVerb!)} onValueChange={(v) => setRoleVerb(role.name, activeVerb!, v)} disabled={busy || scopeIncomplete}>
                         <SelectTrigger className={cn("w-full shrink-0 sm:w-40", ACCESS_TRIGGER)}>
                           <SelectValue />
                         </SelectTrigger>
@@ -1046,7 +1242,7 @@ export function AclModal({
                         </SelectContent>
                       </Select>
                     ) : (
-                      <Select value={roleLevelCurrent(role.name)} onValueChange={(v) => setRoleLevel(role.name, v)} disabled={busy}>
+                      <Select value={roleLevelCurrent(role.name)} onValueChange={(v) => setRoleLevel(role.name, v)} disabled={busy || scopeIncomplete}>
                         <SelectTrigger className={cn("w-full shrink-0 sm:w-40", ACCESS_TRIGGER)}>
                           <SelectValue />
                         </SelectTrigger>

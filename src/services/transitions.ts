@@ -1,5 +1,5 @@
-import { eq, and, inArray, isNull } from "drizzle-orm";
-import { allocOwnedCode, allocFlatCode } from "./codeAlloc";
+import { eq, and, inArray } from "drizzle-orm";
+import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
@@ -9,13 +9,14 @@ import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
-import { purgeRow, type PurgeCascade } from "./softDelete";
+import { deleteStateFilter, purgeRow, type PurgeCascade } from "./softDelete";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { getSettingValue } from "./settings";
 import { DEFAULT_TRANSITION_TEMPLATES, type TaskAssignee, type TransitionTemplate } from "../domain/transitions";
 import { notify } from "./notifications";
+import { liveEmployee } from "./liveEmployee";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
 export type TransitionInput = {
@@ -29,11 +30,11 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 const DAY = 86_400_000;
 
-export async function listTransitions(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, kind?: string, state?: string, showDeleted = false) {
+export async function listTransitions(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, kind?: string, state?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.transitions.code, schema.transitions.employeeId)];
   if (kind) conds.push(eq(schema.transitions.kind, kind as typeof schema.transitions.$inferSelect.kind));
   if (state) conds.push(eq(schema.transitions.state, state as typeof schema.transitions.$inferSelect.state));
-  if (!showDeleted) conds.push(isNull(schema.transitions.deleteTime));
+  conds.push(deleteStateFilter(schema.transitions.deleteTime, showDeleted, deletedOnly));
   return keysetPage(deps, schema.transitions, "transitions", and(...conds.filter(Boolean)), { dir: "desc", max: maxPageSize, pageToken });
 }
 
@@ -60,13 +61,41 @@ export async function tasksForTransitions(deps: Deps, transitionIds: string[]) {
   return map;
 }
 
-// Resolve a template assignee to a concrete employee: the subject, their manager, or a named person - falling
-// back to the actor (who started it) then the subject, so every task always has an owner. (This is task
-// ownership, not an access decision - written as a switch to avoid the singleSource role-literal heuristic.)
-function resolveAssignee(a: TaskAssignee | undefined, subjectId: string, managerId: string | null, actorId: string | null): string {
+/**
+ * Which of a set of employee ids belong to somebody who can still sign in.
+ *
+ * One read for the whole template, off the shared predicate (services/liveEmployee.ts) so this is not a fourth
+ * hand-spelling of the same three columns.
+ */
+async function liveAmong(deps: Deps, ids: (string | null | undefined)[]): Promise<Set<string>> {
+  const want = [...new Set(ids.filter((id): id is string => !!id))];
+  if (!want.length) return new Set();
+  const rows = await byIdChunks(want, (group) => deps.db
+    .select({ uuid: schema.employees.uuid })
+    .from(schema.employees)
+    .where(and(inArray(schema.employees.uuid, group), ...liveEmployee())));
+  return new Set(rows.map((r) => r.uuid));
+}
+
+/**
+ * Resolve a template assignee to a concrete employee: the subject, their manager, or a named person - falling
+ * back to the actor (who started it) then the subject, so every task always has an owner. (This is task
+ * ownership, not an access decision - written as a switch to avoid the singleSource role-literal heuristic.)
+ *
+ * THE FALLBACK TESTS LIVENESS, NOT NULLNESS, and that is the difference between "always has an owner" being
+ * true and being a claim. The chain used to fire only when the pointer was null, never when it resolved to
+ * somebody terminated, disabled or deleted - and a departed MANAGER is the ordinary case, not a contrived
+ * one: winding a team down offboards the manager first, so every offboarding checklist afterwards resolved
+ * its `manager` tasks ("collect the laptop", "revoke system access", "exit interview") onto the person who
+ * had already gone. `insertTask` then allocated an owned code against them and notified them, and the task
+ * showed as owned while nobody who could see it had been told - which is how a checklist sits open with
+ * "revoke system access" unticked.
+ */
+function resolveAssignee(a: TaskAssignee | undefined, subjectId: string, managerId: string | null, actorId: string | null, live: Set<string>): string {
+  const or = (...candidates: (string | null | undefined)[]) => candidates.find((id) => !!id && live.has(id)) ?? subjectId;
   switch (a?.type) {
-    case "manager": return managerId ?? actorId ?? subjectId;
-    case "specific": return idFromPath(a.employee) ?? actorId ?? subjectId;
+    case "manager": return or(managerId, actorId);
+    case "specific": return or(idFromPath(a.employee), actorId);
     default: return subjectId; // "employee" (the subject) or unset
   }
 }
@@ -82,9 +111,14 @@ async function insertTask(deps: Deps, transitionId: string, subjectId: string, a
 
 // Open a background-verification check for the subject as part of an onboarding, linked to its transition.
 // Created directly (not via the BGV service) to avoid a service cycle; status starts pending, initiated today.
+//
+// The code is allocated the SAME way the service allocates it - under the subject - and that is not a detail
+// this path may diverge on. A flat code here would leave every onboarding-spawned check outside its subject's
+// namespace: their own `me` rule and their manager's `my-dept` rule would answer for the checks HR filed by hand
+// and not for the ones onboarding opened, which is the shape of bug nobody sees until an access review.
 async function spawnBackgroundCheck(deps: Deps, transitionId: string, subjectId: string, checkType: string): Promise<string> {
   const row = (await deps.db.insert(schema.backgroundChecks).values({
-    code: await allocFlatCode(deps, schema.backgroundChecks),
+    code: await allocOwnedCode(deps, schema.backgroundChecks, schema.backgroundChecks.employeeId, subjectId),
     employeeId: subjectId,
     transitionId,
     checkType: checkType as typeof schema.backgroundChecks.$inferInsert.checkType,
@@ -104,9 +138,12 @@ async function findTemplate(deps: Deps, templateId: string) {
 // Write a template's tasks onto a transition. Used by a create that chose one, and by an update that fills a
 // checklist that was opened empty (a hire whose onboarding was started before anyone picked a template).
 async function instantiateTemplate(deps: Deps, actor: AppUser, tpl: TransitionTemplate, transitionId: string, subjectId: string, managerId: string | null, anchorMs: number) {
+  // Every id the fallback chain below could pick, resolved in ONE read for the whole checklist rather than
+  // one per task: the manager, the actor, and each person a `specific` task names.
+  const live = await liveAmong(deps, [managerId, actor.employeeId, ...tpl.tasks.map((t) => (t.assignee?.type === "specific" ? idFromPath(t.assignee.employee) : null))]);
   let i = 0;
   for (const t of tpl.tasks) {
-    const assigneeId = resolveAssignee(t.assignee, subjectId, managerId, actor.employeeId ?? null);
+    const assigneeId = resolveAssignee(t.assignee, subjectId, managerId, actor.employeeId ?? null, live);
     const dueDate = !Number.isNaN(anchorMs) && t.due_offset_days != null ? new Date(anchorMs + t.due_offset_days * DAY) : null;
     // A bg_check task opens a background-verification check for the subject and links the task to it.
     const bgId = t.bg_check ? await spawnBackgroundCheck(deps, transitionId, subjectId, t.bg_check) : null;

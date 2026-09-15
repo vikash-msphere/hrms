@@ -186,7 +186,12 @@ export default function Candidates({ me }: { me: Me }) {
                     <tr key={c.path} className="border-b last:border-0 align-top">
                       <td className="px-3 py-2">
                         <button type="button" className="font-medium hover:underline" onClick={() => navigate(`candidates/${idOf(c.path)}`)}>{c.name}</button>
-                        <div className="text-xs text-muted-foreground">{[c.email, c.phone].filter(Boolean).join(" · ")}</div>
+                        {/* MASKED from session replay. `candidates` is in MEMORY_ONLY, and resourceStore.ts
+                            states why this collection is the sharpest case: its subjects "are not employees:
+                            name, personal email, phone and free-text notes on people OUTSIDE the org, who
+                            never agreed to anything and cannot ask for it back". The name stays readable so a
+                            replay of the pipeline is still legible; the personal contact details do not. */}
+                        <div className="text-xs text-muted-foreground" data-sentry-mask>{[c.email, c.phone].filter(Boolean).join(" · ")}</div>
                       </td>
                       <td data-label="Pipeline" className="px-3 py-2">
                         {(() => {

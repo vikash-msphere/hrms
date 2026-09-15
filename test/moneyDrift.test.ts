@@ -222,24 +222,18 @@ describe("money drift - every stored money value is round2/sum2-pinned", () => {
     expect(isPinned("sql`${schema.loans.repaid} + ${amount}`")).toBe(false);
   });
 
-  // The server's rounding helper and the browser's copy of it must be the SAME FUNCTION. Compared on the
-  // normalised body rather than on outputs, so a divergence is caught at the source instead of only at
-  // whichever input a test happened to pick.
-  it("keeps the browser's round2 byte-identical to the server's", () => {
-    const body = (src: string) => {
-      const at = src.indexOf("export function round2(");
-      expect(at, "round2 not found").toBeGreaterThan(-1);
-      const open = src.indexOf("{", at);
-      let depth = 0;
-      for (let i = open; i < src.length; i++) {
-        if (src[i] === "{") depth++;
-        else if (src[i] === "}" && --depth === 0) return src.slice(open + 1, i).replace(/\/\/[^\n]*/g, "").replace(/\s+/g, " ").trim();
-      }
-      throw new Error("unbalanced round2 body");
-    };
-    const [server] = Object.entries(rawTwins).filter(([k]) => k.includes("domain/money"))[0]!.slice(1) as [string];
+  // THE BROWSER MUST NOT CARRY A COPY of the rounding helper - it re-exports the server's.
+  //
+  // This used to compare two bodies and assert they were byte-identical, which is the weaker guarantee: it
+  // caught a divergence only after somebody had written one, and the two had already drifted twice (the tie
+  // rule, and the upper-range guard) before it existed. `src/domain/money.ts` is dependency-free and already
+  // in the bundle - EmployeeCompensation.tsx imports src/domain/payroll, which imports it - so there is
+  // nothing for a second copy to buy. Now the only thing web/src/lib/utils.ts may do with `round2` is hand
+  // the server's one through.
+  it("has no second implementation of round2 in the browser", () => {
     const [browser] = Object.entries(rawTwins).filter(([k]) => k.includes("lib/utils"))[0]!.slice(1) as [string];
-    expect(body(browser)).toBe(body(server));
+    expect(browser).not.toMatch(/function\s+round2\s*\(/);
+    expect(browser).toMatch(/export \{ round2 \} from "\.\.\/\.\.\/\.\.\/src\/domain\/money";/);
   });
 
   it("accepts the pinned forms the codebase actually uses", () => {

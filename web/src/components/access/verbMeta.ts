@@ -140,6 +140,14 @@ const PER_COLLECTION: Record<string, Record<string, VerbInfo>> = {
       caution: "Grants read access to anything any non-super role can see, by simulating that person. Treat it as an access-admin capability, not an ordinary method.",
     },
     requestAccess: { label: "Request access", description: "Let people ask access admins for a missing grant (grant to Everyone to enable the flow)." },
+    review: {
+      label: "Run the access review",
+      description: "List rules nobody has used in 90 days, and org-wide rules whose recorded use never left the holder's own team. Reads usage counts only - it changes no access.",
+    },
+    scopeCounts: {
+      label: "See how many records a scope reaches",
+      description: "Show record counts next to the scope choices when granting ('All 214 · One department 12'), so the narrower option is visible before it is skipped.",
+    },
     approve: { label: "Approve permission changes", description: "Apply a pending grant or removal queued by four-eyes approval. Nobody can approve their own request." },
     reject: { label: "Reject permission changes", description: "Turn down a pending grant or removal queued by four-eyes approval." },
     clone: {

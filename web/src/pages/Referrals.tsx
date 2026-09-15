@@ -245,7 +245,10 @@ export default function Referrals({ me, openId }: { me: Me; openId?: string }) {
                         <div className="font-medium">{r.candidate_name}</div>
                         <div className="text-xs text-muted-foreground">
                           {[r.position_title, deptName(r.department)].filter(Boolean).join(" · ")}
-                          {r.candidate_email ? <div>{r.candidate_email}</div> : null}
+                          {/* MASKED from session replay: a referred person's personal email. They are
+                              outside the org and never agreed to anything - the same case
+                              resourceStore.ts makes for keeping `candidates` off the disk. */}
+                          {r.candidate_email ? <div data-sentry-mask>{r.candidate_email}</div> : null}
                         </div>
                       </td>
                       {showOwner && <td data-label="Referrer" className="px-3 py-2 text-muted-foreground">{empName(r.referrer)}</td>}

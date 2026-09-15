@@ -8,8 +8,7 @@ import { holdsForAnyone, roleHolderEmployeeIds } from "./capabilityHolders";
 import { notFound, invalidArgument, failedPrecondition } from "../lib/errors";
 import { getEmployeeTaxProjection, readDeclarations, readRawTaxDetails, type TaxDeclarations, type TaxProjection } from "./taxProjection";
 import type { Wire } from "../http/wire";
-import { etagOf } from "../http/serialize";
-import { checkEtag, updateAtVersion } from "./versionGuard";
+import { checkSubEtag, subResourceEtag, updateAtVersion } from "./versionGuard";
 
 // Income-tax (TDS) sub-resource: stores only the employee's manual DECLARATIONS (prior-employer income + TDS
 // for mid-year joiners) as an encrypted blob - everything else (the year's tax, the monthly schedule, the
@@ -121,7 +120,7 @@ export async function listPendingTaxVerifications(deps: Deps): Promise<PendingTa
       employee_name: `${e.firstName} ${e.lastName}`,
       prior_employer_income: raw.priorEmployerIncome ?? 0,
       prior_employer_tds: raw.priorEmployerTds ?? 0,
-      etag: etagOf(+new Date(e.updatedAt)),
+      etag: subResourceEtag(e.taxDetailsEnc),
     });
   }
   return out.sort((a, b) => a.employee_name.localeCompare(b.employee_name));
@@ -133,7 +132,7 @@ export async function getTaxDetails(deps: Deps, _actor: AppUser, employeeId: str
   const effective = await readDeclarations(deps, emp.taxDetailsEnc); // verified-only, for the projection
   // The version rides the view, because the guard in setTaxDetails below is load-bearing and inert without it:
   // a reviewer can only send an If-Match if a read handed them one.
-  return { ...toView(await getEmployeeTaxProjection(deps, emp, effective), raw), etag: etagOf(+new Date(emp.updatedAt)) };
+  return { ...toView(await getEmployeeTaxProjection(deps, emp, effective), raw), etag: subResourceEtag(emp.taxDetailsEnc) };
 }
 
 const num = (v: unknown): number | undefined => {
@@ -160,7 +159,7 @@ export async function setTaxDetails(deps: Deps, actor: AppUser, employeeId: stri
   // between the read and the write was not just decided unseen - it was overwritten and gone. Same fix as
   // `tax-declarations:verify` on the other declaration surface. The guard applies whether or not a header was
   // sent (services/versionGuard.ts).
-  checkEtag(emp, ifMatch);
+  checkSubEtag(emp.taxDetailsEnc, ifMatch);
   const raw = await readRawTaxDetails(deps, emp.taxDetailsEnc);
   const isSelf = actor.employeeId === employeeId;
   const action = typeof input.action === "string" ? input.action : undefined;
@@ -200,7 +199,7 @@ export async function setTaxDetails(deps: Deps, actor: AppUser, employeeId: stri
   // what makes the verification queue countable without decrypting anything. A declaration with no figures on
   // it isn't in any queue, so it clears the column rather than parking it in DECLARED forever.
   const declared = next.priorEmployerIncome != null || next.priorEmployerTds != null;
-  const updatedEmp = await updateAtVersion(deps, schema.employees, "employee", emp, {
+  await updateAtVersion(deps, schema.employees, "employee", emp, {
     taxDetailsEnc: enc,
     taxVerificationStatus: declared ? next.status ?? "DECLARED" : null,
     updatedAt: new Date(),
@@ -224,5 +223,5 @@ export async function setTaxDetails(deps: Deps, actor: AppUser, employeeId: stri
     });
   }
   const effective = await readDeclarations(deps, enc); // verified-only, for the projection
-  return { ...toView(await getEmployeeTaxProjection(deps, emp, effective), next), etag: etagOf(+new Date(updatedEmp.updatedAt)) };
+  return { ...toView(await getEmployeeTaxProjection(deps, emp, effective), next), etag: subResourceEtag(enc) };
 }

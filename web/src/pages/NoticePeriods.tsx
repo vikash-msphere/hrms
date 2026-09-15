@@ -6,7 +6,7 @@ import { DEFAULT_TRANSITION_TEMPLATES, type TransitionTemplate } from "@/lib/tra
 import { Checkbox } from "@/components/ui/checkbox";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
-import { cn, formatDate, idOf, humanize, personName } from "@/lib/utils";
+import { cn, formatDate, idOf, humanize, personIndex, personName } from "@/lib/utils";
 import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
 import type { NoticePeriod, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -94,7 +94,9 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
   const chosenTemplate = offboardingTemplates.find((t) => t.id === form.template);
 
   const emp = (p?: string) => (p ? employees.find((e) => idOf(e.path) === idOf(p)) : undefined);
-  const empName = (p?: string, unknown?: string) => personName(employees, p, unknown);
+  // Built ONCE per directory read, not once per call - this is a DataTable column accessor (see `personName`).
+  const empIdx = useMemo(() => personIndex(employees), [employees]);
+  const empName = (p?: string, unknown?: string) => personName(empIdx, p, unknown);
 
   const isServing = (n: NoticePeriod) => !n.delete_time && n.status === "serving";
   const isThisMonth = (n: NoticePeriod) => isServing(n) && n.last_working_day.slice(0, 7) === todayStr().slice(0, 7);

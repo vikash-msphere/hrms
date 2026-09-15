@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { useCollection } from "@/hooks/useCollection";
 import { useEmployee } from "@/hooks/useEmployee";
+import { useCelebrations } from "@/hooks/useCelebrations";
 import { useVisibleRegions } from "@/hooks/useInView";
 import { usePermission } from "@/lib/perm";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -206,19 +207,9 @@ export default function Dashboard({ me }: { me: Me }) {
   // Birthdays and anniversaries: the celebrations card, the "celebrating this week" KPI and the timeline's
   // markers. Scans the directory server-side, so it waits for one of those three to be on screen.
   const wantCelebrations = wantCalendar || wantKpis || wantTimeline;
-  const [celebrations, setCelebrations] = useState<Celebration[]>([]);
-  const [celebsLoading, setCelebsLoading] = useState(true);
-  useEffect(() => {
-    if (!wantCelebrations) return;
-    let live = true;
-    get<{ results: Celebration[] }>("employees:upcomingCelebrations")
-      .then((r) => live && setCelebrations(r.results ?? []))
-      .catch(() => live && setCelebrations([]))
-      .finally(() => live && setCelebsLoading(false));
-    return () => {
-      live = false;
-    };
-  }, [wantCelebrations]);
+  // Held per tab and revalidated rather than re-read: the server walks the roster and decrypts a blob per
+  // employee to answer this, and the dashboard mounts often. See hooks/useCelebrations.ts.
+  const { rows: celebrations, loading: celebsLoading } = useCelebrations(30, wantCelebrations);
 
   const canTimeline = usePermission("timeline.read");
   // Events are private by default, so the events card is dropped entirely for callers without the grant
@@ -427,7 +418,11 @@ export default function Dashboard({ me }: { me: Me }) {
     () => holidays.filter((h) => h.date >= today && !h.disabled && h.applies !== false).sort((a, b) => a.date.localeCompare(b.date)).slice(0, 5),
     [holidays, today]
   );
-  const isHolidayToday = useMemo(() => holidays.some((h) => h.date === today && !h.disabled), [holidays, today]);
+  // `applies !== false` for the same reason the line above carries it, and it matters more here: this gates
+  // the org-wide "Not clocked in" KPI to 0 with the hint "Holiday today", so one office's regional holiday
+  // used to suppress the attendance gap for the whole org on an ordinary working day - the thing an ops
+  // dashboard exists to surface, hidden exactly when there is something to see.
+  const isHolidayToday = useMemo(() => holidays.some((h) => h.date === today && !h.disabled && h.applies !== false), [holidays, today]);
   // Org events whose window overlaps the next 7 days, soonest first. Computed from the rows the timeline
   // already loaded, so this KPI costs no extra read. Instants compare on the date part, so an all-day event
   // counts for its whole day (and a running multi-day event still counts as "this week").
@@ -1300,7 +1295,11 @@ export default function Dashboard({ me }: { me: Me }) {
                       <span className="flex min-w-0 flex-1 items-center gap-2 text-sm">
                         <span className="truncate">
                           <span className="font-medium">{who ? `${who.first_name} ${who.last_name}` : "Someone"}</span>
-                          <span className="text-muted-foreground"> · {it.desc}</span>
+                          {/* MASKED from session replay, the same judgement ApprovalRow makes: `desc` is
+                              another person's loan principal or reimbursement amount, and `loans` is in
+                              MEMORY_ONLY for that content. The dashboard is not a masked route and must not
+                              be - it is mostly chrome - so the mask sits on the value. */}
+                          <span className="text-muted-foreground" data-sentry-mask> · {it.desc}</span>
                         </span>
                         <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">{it.kind}</span>
                       </span>
@@ -1344,7 +1343,8 @@ export default function Dashboard({ me }: { me: Me }) {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Reject this {rejecting?.kind.toLowerCase()}?</DialogTitle>
-            <DialogDescription>{rejecting?.desc}</DialogDescription>
+            {/* Same value as the row above, so the same mask. */}
+            <DialogDescription data-sentry-mask>{rejecting?.desc}</DialogDescription>
           </DialogHeader>
           {rejecting && REJECT_NOTE.has(rejecting.collection) && (
             <Textarea

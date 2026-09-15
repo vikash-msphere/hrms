@@ -3,6 +3,7 @@ import { get } from "@/api";
 import { APP_NAME } from "./brand";
 import { formatMoney } from "./utils";
 import { getSetting } from "@/lib/settingsStore";
+import { decimalsFor } from "../../../src/domain/currency";
 
 // Organization branding (name + logo), stored as a single `settings/organization` JSON row (logo is a small
 // data URL, so no binary/R2 plumbing). Loaded once at the app root and shared so the sidebar brand, the tax
@@ -91,20 +92,22 @@ const DEFAULT_ORG: OrgSettings = {
   banks: ["HDFC Bank", "ICICI Bank", "State Bank of India", "Axis Bank", "Kotak Mahindra Bank", "Punjab National Bank"],
 };
 
-// App default minor-unit digits by ISO code (mirror of the server's domain/currency.ts). Only exceptions to
-// the 2dp norm are listed, plus INR (app convention 0). Everything else falls through to 2.
-const BASE_DECIMALS: Record<string, number> = {
-  INR: 0, JPY: 0, KRW: 0, VND: 0, CLP: 0, ISK: 0, HUF: 0, TWD: 0, UGX: 0, XAF: 0, XOF: 0, XPF: 0, RWF: 0, PYG: 0, KMF: 0, DJF: 0, BIF: 0, GNF: 0, VUV: 0,
-  BHD: 3, KWD: 3, OMR: 3, TND: 3, JOD: 3, IQD: 3, LYD: 3,
-};
-
-// Display precision for a currency: org override first, then the base table, then 2. Clamped to [0, 4].
+/**
+ * Display precision for a currency: the org's override first, then the server's own base table, then 2.
+ *
+ * `decimalsFor` IS THE SERVER'S FUNCTION (src/domain/currency.ts), not a mirror of it. It used to restate the
+ * 26-entry base table and the [0, 4] clamp here, declaring itself a mirror in the comment - and the two had
+ * already parted company on the no-code fallback (the server falls back to INR, this fell back to the org's
+ * default currency). That divergence was unreachable, since every server call site passes an explicit code;
+ * the reachable one is adding a zero-decimal currency to the server table, which would render a figure at 2dp
+ * in the UI and 0dp on the payslip with nothing failing. `currency.ts` imports nothing, so the SPA takes it
+ * directly, the way it already takes domain/money.ts and domain/leave.ts.
+ *
+ * The org's default currency is applied HERE rather than inside the shared function, because "which currency
+ * did the caller mean" is a question about this app's org context and not about ISO 4217.
+ */
 export function currencyDecimals(code: string | null | undefined, org: OrgSettings): number {
-  const c = (code || org.default_currency || "INR").toUpperCase();
-  const cfg = org.currency_decimals;
-  const raw = cfg && Object.prototype.hasOwnProperty.call(cfg, c) ? cfg[c] : (c in BASE_DECIMALS ? BASE_DECIMALS[c] : 2);
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.min(4, Math.max(0, Math.trunc(n))) : 2;
+  return decimalsFor(code || org.default_currency || "INR", org.currency_decimals);
 }
 
 const Ctx = createContext<{ org: OrgSettings; reload: () => void }>({ org: DEFAULT_ORG, reload: () => {} });

@@ -87,6 +87,11 @@ const SIDE_TABLES: Record<string, { table: unknown; collection: string }> = {
   announcement_replies: { table: schema.announcementReplies, collection: "announcements" },
   announcement_poll_options: { table: schema.announcementPollOptions, collection: "announcements" },
   announcement_poll_votes: { table: schema.announcementPollVotes, collection: "announcements" },
+  // A user's SECONDARY roles are a field of the account (`roles` on the serialized user), so a write here is a
+  // change to that collection exactly as a write to `users.role` is. Without the stamp, granting somebody a
+  // second role would leave every client's cached account list showing the old set until something else
+  // happened to touch `users`.
+  user_roles: { table: schema.userRoles, collection: "users" },
   card_comments: { table: schema.cardComments, collection: "cards" },
   card_todos: { table: schema.cardTodos, collection: "cards" },
   card_movements: { table: schema.cardMovements, collection: "cards" },
@@ -142,6 +147,11 @@ export const UNSTAMPED_TABLES: Record<string, string> = {
   // Per-VIEWER UI state (theme, tab badges), fetched by its own key-addressed route and never listed. The
   // browser that wrote it is the only one that reads it back.
   preferences: "per-viewer UI state, key-addressed, never listed",
+  // The per-pattern grant usage counter. Written on every audited allow, read only by the access review
+  // (`POST /v1/access-rules:review`), which is a live report and caches nothing. Stamping it would mark the
+  // access-rules collection changed on every audited request in the app - the opposite of what a change stamp
+  // is for, and it would invalidate every client's rule cache continuously.
+  rule_usage: "internal counter; the review that reads it is a live report, never cached as a collection",
 };
 
 // `attachments` is a side table too, but a POLYMORPHIC one: every row names its own parent collection, so

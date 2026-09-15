@@ -462,7 +462,11 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
                     the link can read it, so don't share it.
                   </p>
                   <div className="flex gap-1.5">
-                    <Input readOnly value={feedUrl} onFocus={(e) => e.currentTarget.select()} className="h-8 font-mono text-[11px]" />
+                    {/* BLOCKED from session replay: the URL carries `holiday_feed_token`, which is a bearer
+                        credential for one person's calendar feed. Far less valuable than an API key, but a
+                        secret in plain DOM text on an unmasked route all the same, and replay is
+                        unmask-by-default. */}
+                    <Input readOnly value={feedUrl} onFocus={(e) => e.currentTarget.select()} className="h-8 font-mono text-[11px]" data-sentry-block />
                     <Button
                       size="sm"
                       variant="outline"

@@ -4,7 +4,7 @@ import { get } from "@/api";
 import { navigate } from "@/router";
 import { useRoute, setQueryParams } from "@/router";
 import { idOf, cn } from "@/lib/utils";
-import { usePermission } from "@/lib/perm";
+import { usePermission, useCanExport } from "@/lib/perm";
 import { useCollection } from "@/hooks/useCollection";
 import type { Department, Me } from "@/types";
 import {
@@ -45,7 +45,9 @@ const DAY_MS = 86_400_000;
 
 export default function TeamAnalytics({ me }: { me: Me }) {
   const route = useRoute();
-  const canExport = usePermission("export.read");
+  // The report's rows ARE the employee roster (its header access icon points at `employees` for the same
+  // reason), so that is the collection a narrowed export grant has to name.
+  const canExport = useCanExport("employees");
   const { rows: depts } = useCollection<Department>("departments", { all: true });
 
   // The window and the department live in the URL, so a narrowed report is a link somebody can send.

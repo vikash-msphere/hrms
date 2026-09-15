@@ -137,8 +137,13 @@ export function assertPublicHttpsUrl(raw: string): URL {
   const reject = () => {
     throw new Error("webhook url host is not permitted");
   };
-  // `URL` keeps IPv6 hosts bracketed; strip them so one code path judges the address either way.
-  const host = u.hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+  // `URL` keeps IPv6 hosts bracketed; strip them so one code path judges the address either way. The trailing
+  // dot goes too: it is the fully-qualified spelling of the SAME name and resolves identically, but `URL`
+  // preserves it for names (it strips one only when the host parses as an IPv4 literal). Left on, it walks
+  // straight past every name rule below - the anchored `BLOCKED_NAMES` regex misses `localhost.`, the
+  // `.internal` suffix test misses `metadata.google.internal.`, and `metadata.` even satisfies the bare-label
+  // check because it contains a dot. Normalising here means each of those is judged as the name it is.
+  const host = u.hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "").replace(/\.$/, "");
   if (!host) reject();
 
   const h6 = ipv6Hextets(host);

@@ -1,7 +1,8 @@
 // The authoritative set of collection names that may appear as the first token of a grant pattern. The
 // grant validator rejects any pattern naming a collection not in here, so a typo or a stale collection can
 // never compile into authority. `**` (the super cross-collection pattern) is allowed separately - it is not
-// a collection. Kept in lockstep with the routes + the seed grants by test/collections.test.ts (drift gate).
+// a collection. Held against the ROUTE MOUNTS by test/collections.test.ts (drift gate), so a mounted
+// collection cannot be missing from here and be silently unnameable.
 export const COLLECTIONS: ReadonlySet<string> = new Set([
   // code-bearing resources (mirror authzResolve TABLES) + the config collections
   "letter-templates",
@@ -73,9 +74,15 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   // `esign-providers.read` gates GET /v1/esign-providers (from the driver registry; no data of its own).
   "esign-providers",
   "settings", "preferences",
-  // bank bulk-payment formats (mappings + template). The sensitive debit accounts live behind the
-  // payroll-debit-accounts namespace, which is private-by-default (no grant names it), so it is NOT listed.
-  "bank-formats",
+  // bank bulk-payment formats (mappings + template), and the employer debit accounts the files are drawn on.
+  // `payroll-debit-accounts` is PRIVATE-BY-DEFAULT: no seeded grant names it, so only super_admin reaches it
+  // out of the box. It is listed here because listing is what makes a namespace NAMEABLE at all - leaving it
+  // out enforced something stronger and unstated, that no grant could ever name it, so a `payroll_admin` could
+  // not be given the debit-account editor even deliberately and the ACL rejected the rule as naming an unknown
+  // collection with no hint why. Every other private-by-default namespace in the app (`referrals`, `boards`,
+  // `api-keys`, `timeline`, `export`, `audit`) is listed and ungranted; this one now says the same thing in
+  // the code that its comment always said in prose.
+  "bank-formats", "payroll-debit-accounts",
   // policy-management collections (governed by their own keys, super-only by default)
   "roles", "policy", "access-rules",
   // Virtual UI capability (no table, no route): gates visibility of the Dashboard team timeline. The data it
@@ -111,9 +118,11 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   // Virtual capability (no table, no route of its own): `unmask.read` decides whether a custom grid serves the
   // REAL value of a masked field (a full PAN, a full account number) rather than the masked form the profile
   // shows. It grants no data access on its own - the per-field read on `employees.<code>.identity.<key>` still
-  // has to allow - it only decides whether what you may already read arrives masked. Private by default
-  // (super-only via `**` until an admin grants it), like `export` and `timeline`, and every unmasked run
-  // writes its own audit row.
+  // has to allow - it only decides whether what you may already read arrives masked. Grantable per FIELD as
+  // well as wholesale (`unmask.*.bank-account.account_number.**`), so reading account numbers for a bank file
+  // need not also mean reading everyone's statutory ids. Private by default (super-only via `**` until an
+  // admin grants it), like `export` and `timeline`, and every unmasked run writes its own audit row NAMING
+  // the fields it revealed.
   "unmask",
   // Virtual capability (no table): `audit.read` gates the ORG-WIDE activity feed (GET /v1/activity with no
   // ?resource) — every audit row across all collections, including sensitive-read + denial rows. Sensitive

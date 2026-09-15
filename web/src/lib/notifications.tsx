@@ -296,10 +296,20 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     if (woken.length) {
       const wokenPaths = new Set(woken.map((n) => n.path));
       setRows((prev) => prev.map((r) => (wokenPaths.has(r.path) ? { ...r, snooze_until_time: undefined } : r)));
-      for (const n of woken) {
-        publish(NOTIF_TOPIC, { op: "reminded", path: n.path } satisfies BusMsg); // tell sibling tabs: don't re-toast
-        void patch(`notifications/${idOf(n.path)}`, { snooze_until_time: null }).catch(() => {});
-      }
+      // `skipInvalidation` on each, then ONE invalidation when they settle - the shape `markManyRead` below
+      // documents at length. Without it every cleared stamp ran `withInvalidation`, which forces a re-read of
+      // the whole feed for a provider that is always subscribed, and `patchRows` stamps `patchedAt`, so a
+      // forced read already in flight when the next write lands fails resourceStore's `patchedAt >= startedAt`
+      // check and is discarded and rescheduled rather than adopted. N due reminders were N reads and N retries.
+      for (const n of woken) publish(NOTIF_TOPIC, { op: "reminded", path: n.path } satisfies BusMsg); // tell sibling tabs: don't re-toast
+      void Promise.allSettled(
+        woken.map((n) => patch(`notifications/${idOf(n.path)}`, { snooze_until_time: null }, undefined, { skipInvalidation: true })),
+      ).then((results) => {
+        // A failure reloads rather than invalidating: the local rows above already say the stamp is gone, so
+        // the feed has to be re-read to find out which ones really are. Same recovery `markManyRead` uses.
+        if (results.some((r) => r.status === "rejected")) reload();
+        else broadcastInvalidation(invalidateCollections(["notifications"]));
+      });
     }
 
     // Fresh arrivals: high/urgent only, and never a woken reminder (guarded by the snooze stamp). Skips the very
@@ -313,7 +323,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     seen.current = ids;
     if (fresh.length === 1) toast({ title: fresh[0]!.title, description: fresh[0]!.body || undefined });
     else if (fresh.length > 1) toast({ title: `${fresh.length} new notifications`, description: "Open the bell to review them." });
-  }, [rows, setRows]);
+  }, [rows, setRows, reload]);
 
   // Cross-tab bus. Each mutation broadcasts its delta; sibling tabs replay the SAME local transform (no network)
   // so all tabs of this user stay consistent. Sender never receives its own message, so applying here can't loop.

@@ -158,6 +158,50 @@ describe("view as - the simulation is enforced server-side", () => {
     expect(((await res.json()) as { detail?: string }).detail).toMatch(/super admin/);
   });
 
+  it("refuses a read the REAL caller could not make, however wide the subject's own grant is", async () => {
+    // Rail 2 used to be one case: a non-super caller may not step into a super subject. Everything else was
+    // allowed, and the widening that matters is not upward - it is SIDEWAYS, into an ordinary employee's own
+    // `me` scope. The seeded policy keeps the admin roles out of other people's PII on purpose, and stepping
+    // into somebody reads it with their self-grant unless the real caller is asked the same question.
+    const hr = await seedPerson("04-004", "Hr", "hr_admin");
+    const diya = await seedPerson("04-002", "Diya", "employee");
+    await deps.db.insert(schema.accessRules).values({ subject: "hr_admin", subjectKind: "role", namespace: "access-rules", pattern: "access-rules.preview", scopeKind: "all", scopeCode: "", matchCode: null, level: null, effect: "allow" });
+    clearCache();
+    (b as Record<string, unknown>).DEV_FAKE_EMAIL = hr.email;
+
+    // Diya may read her own record; this hr_admin holds nothing on `employees` at all.
+    const asDiya = { "X-View-As": await viewAs("users", diya.userId) };
+    expect((await req(`/v1/employees/${diya.employeeId}`)).status).toBe(403); // as themselves
+    const res = await req(`/v1/employees/${diya.employeeId}`, asDiya);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { detail?: string }).detail).toMatch(/you do not have permission/);
+
+    // ...and the containment NARROWS rather than blinds: granted the read as themselves, the simulation works.
+    await deps.db.insert(schema.accessRules).values({ subject: "hr_admin", subjectKind: "role", namespace: "employees", pattern: "employees.**", scopeKind: "all", scopeCode: "", matchCode: null, level: "read", effect: "allow" });
+    clearCache();
+    expect((await req(`/v1/employees/${diya.employeeId}`, asDiya)).status).toBe(200);
+  });
+
+  it("records a sensitive read made through a simulation - it is not a self-read", async () => {
+    // `isSelf` exists to stop logging YOUR reads of YOUR own data, and it is computed from the request
+    // principal - which under a simulation is the SUBJECT on both sides, so it was always true and the
+    // `employees.read.sensitive` row was never written. That made view-as QUIETER than acting as yourself for
+    // the three sub-resources the policy calls an accountability event.
+    const admin = await seedPerson("04-001", "Admin", "super_admin");
+    const diya = await seedPerson("04-002", "Diya", "employee");
+    (b as Record<string, unknown>).DEV_FAKE_EMAIL = admin.email;
+
+    const res = await req(`/v1/employees/${diya.employeeId}/bank-account`, { "X-View-As": await viewAs("users", diya.userId) });
+    expect(res.status).toBe(200); // allowed: Diya may read her own bank details
+
+    const rows = await deps.db.select().from(schema.auditLog).where(eq(schema.auditLog.action, "employees.read.sensitive"));
+    expect(rows.length).toBe(1);
+    // Attributed to the human driving, naming who they were watching as - which is the promise lib/viewAs.ts
+    // makes and could not keep while there was no row to stamp.
+    expect(rows[0]!.actorEmail).toBe(admin.email);
+    expect(JSON.parse(rows[0]!.meta ?? "{}")).toMatchObject({ viewing_as: diya.email, field: "bank-account" });
+  });
+
   it("audits the read against the real admin, tagged with who they were watching as", async () => {
     const admin = await seedPerson("04-001", "Admin", "super_admin");
     const diya = await seedPerson("04-002", "Diya", "employee");

@@ -8,7 +8,7 @@ import { orgDayOf, orgTimezone, thisMonthStr, todayStr } from "@/lib/orgDay";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useDiscardGuard } from "@/hooks/useDiscardGuard";
-import { formatDate, idOf, personName } from "@/lib/utils";
+import { formatDate, idOf, personIndex, personName } from "@/lib/utils";
 import { navigate, navigateTab } from "@/router";
 import type { OvertimeRequest, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -77,7 +77,10 @@ export default function Overtime({ me }: { me: Me }) {
   const [seedNonce, setSeedNonce] = useState(0); // bumped when the range is filled in programmatically
 
   const emp = (p?: string) => (p ? employees.find((e) => idOf(e.path) === idOf(p)) : undefined);
-  const empName = (p?: string, unknown?: string) => personName(employees, p, unknown);
+  // Built ONCE per directory read, not once per call: this is handed to DataTable as a column accessor,
+  // so it runs per row per compare during a sort and over every row again for the filter popover.
+  const empIdx = useMemo(() => personIndex(employees), [employees]);
+  const empName = (p?: string, unknown?: string) => personName(empIdx, p, unknown);
   const isSelf = !!me.employee_id && !!form.employee && idOf(form.employee) === me.employee_id;
 
   const pendingTotal = useMemo(() => rows.filter((r) => upper(r.state) === "PENDING").length, [rows]);

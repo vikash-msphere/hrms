@@ -63,13 +63,22 @@ export function ProfileStickyBar({
       <div
         data-testid="profile-sticky-bar"
         aria-hidden={!stuck}
+        // `inert` alongside `aria-hidden`, because opacity is not hiding. `opacity-0` +
+        // `pointer-events-none` takes the bar out of sight and out of the mouse's reach, but leaves every
+        // control inside it in the TAB ORDER - so a keyboard user tabbing down a profile page lands focus on
+        // an invisible "Org chart" button. It is also what axe calls `aria-hidden-focus`: a subtree announced
+        // as non-existent that the focus ring can still enter. `inert` removes the descendants from focus and
+        // from the accessibility tree together, which is the pair that has to move as one. Spread rather than
+        // passed as a boolean, like the drawer scrim in App.tsx: on React 18 `inert={false}` is a non-boolean
+        // attribute warning, and any value at all - "false" included - makes an element inert.
+        {...(!stuck ? ({ inert: "" } as React.HTMLAttributes<HTMLDivElement>) : {})}
         className={cn(
           "absolute inset-x-0 top-0 transition-all duration-200",
           stuck ? "pointer-events-auto translate-y-0 opacity-100" : "pointer-events-none -translate-y-2 opacity-0",
         )}
       >
         <div className="flex flex-wrap items-center gap-3.5 rounded-[14px] border bg-card/85 px-4 py-2.5 shadow-lg backdrop-blur">
-          <PhotoAvatar className="h-[38px] w-[38px] shrink-0 rounded-[9px]" employeeId={employeeId} name={name} photo={photo} />
+          <PhotoAvatar className="h-[38px] w-[38px] shrink-0 rounded-full" employeeId={employeeId} name={name} photo={photo} />
           <div className="flex min-w-0 flex-col">
             <span className="truncate text-[15px] font-bold leading-tight tracking-[-0.01em]">{name}</span>
             {subtitle && <span className="truncate text-[12.5px] text-muted-foreground">{subtitle}</span>}

@@ -89,10 +89,26 @@ export type PunchOrigin = { ip: string | null; allowList?: string };
 //
 // APPROVED only. A PENDING request must never ease the fence, or filing one would be a self-service bypass.
 async function remoteWorkCovers(deps: Deps, employeeId: string, at: number): Promise<boolean> {
+  // THE DATE BOUND IS IN SQL. This used to select every APPROVED remote-work request the employee had ever
+  // had, with no bound at all, and filter in JS - on a table that only grows, for a read paid by every
+  // off-network punch in a remote-first org. The sibling reads in this file push their windows into SQL and
+  // the repo's D1 discipline is explicit about it; this is that pair of predicates.
+  //
+  // WIDE IN SQL, EXACT IN JS - the rule services/orgDay.ts states. `start_date`/`end_date` are DATE-ONLY
+  // columns anchored at UTC midnight, while `at` is an INSTANT, and the slot arithmetic below decides the call
+  // in the ORG timezone. No zone is more than 14 hours from UTC, so a punch on the last covered local day can
+  // sit up to a day and a half past that day's UTC-midnight anchor: two days of slack at each end covers every
+  // row the slot test could possibly match, and the test itself still makes the decision.
+  const slackMs = 2 * 86_400_000;
   const approved = await deps.db
     .select()
     .from(schema.remoteWorkRequests)
-    .where(and(eq(schema.remoteWorkRequests.employeeId, employeeId), eq(schema.remoteWorkRequests.state, "APPROVED")));
+    .where(and(
+      eq(schema.remoteWorkRequests.employeeId, employeeId),
+      eq(schema.remoteWorkRequests.state, "APPROVED"),
+      gte(schema.remoteWorkRequests.endDate, new Date(at - slackMs)),
+      lte(schema.remoteWorkRequests.startDate, new Date(at + slackMs)),
+    ));
   if (!approved.length) return false;
   const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
   const tz = att.timezone || DEFAULT_ATTENDANCE.timezone;
@@ -102,13 +118,22 @@ async function remoteWorkCovers(deps: Deps, employeeId: string, at: number): Pro
   return approved.some((r) => slotOf(+new Date(r.startDate), r.startSession) <= punchSlot && punchSlot <= slotOf(+new Date(r.endDate), r.endSession));
 }
 
-// The network fence. Empty/unset list = no fence. With a fence configured an unresolvable client IP is a
-// denial, not a pass: a punch we cannot place is exactly what the fence exists to stop.
+// The network fence, on CLOCK-IN ONLY. Empty/unset list = no fence. With a fence configured an unresolvable
+// client IP is a denial, not a pass: a punch we cannot place is exactly what the fence exists to stop.
 //
 // The fence answers "are you at work?", and approved remote work is the sanctioned answer "no, and that was
 // agreed" - so an off-network punch is allowed for exactly the approved period, and is fenced again the
 // moment that period ends. The lookup runs ONLY after the IP misses, so the ordinary in-office punch (and
 // every punch in a deployment with no fence) still costs no extra read.
+//
+// WHY CLOCK-OUT IS NOT FENCED. "Are you at work?" is the question whose answer is NO at the moment somebody
+// leaves the building, so fencing the closing punch refused it for the ordinary case it was aimed at. The
+// session then stays open, `att_open_emp_idx` is a partial unique index on (employee, open), so every later
+// `clockIn` answers "already clocked in" and the person can never punch again - and loss of pay is derived
+// from punches, so every subsequent working day reads as a full absence (services/payroll.ts#assembleLop)
+// with nothing on screen explaining why. Recovery needed an approved regularization, i.e. an approver, before
+// the employee could clock in again. Closing a session you already opened asserts nothing about where you
+// are; the in-office punch that OPENED it is the one this fence exists to check.
 async function assertPunchOrigin(deps: Deps, employeeId: string, at: number, origin: PunchOrigin): Promise<void> {
   const rules = parseIpAllowList(origin.allowList);
   if (!rules.length) return;
@@ -146,11 +171,12 @@ export async function clockIn(deps: Deps, actor: AppUser, origin: PunchOrigin) {
 }
 
 // Clock out: close the caller's open session now. Errors if none is open.
-export async function clockOut(deps: Deps, actor: AppUser, origin: PunchOrigin) {
+export async function clockOut(deps: Deps, actor: AppUser) {
   const employeeId = actor.employeeId;
   if (!employeeId) throw invalidArgument("you are not linked to an employee record");
   const at = +deps.clock.now();
-  await assertPunchOrigin(deps, employeeId, at, origin);
+  // NOT fenced - see assertPunchOrigin. Refusing the closing punch locks the session open, and an open
+  // session is what docks every later day as a full absence.
   const open = await openSessionFor(deps, employeeId);
   if (!open) throw failedPrecondition("not clocked in");
   const [row] = await deps.db

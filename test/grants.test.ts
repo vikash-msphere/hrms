@@ -253,14 +253,12 @@ describe("capabilitiesOf (scope-stripped tier-1 set)", () => {
 //     deliberately not the payroll operator's own.
 describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purpose", () => {
   const WITHHELD = [
-    // ACL-only collections: kanban, the ops console, keys, and the access system itself.
+    // ACL-only collections: the ops console, keys, and the access system itself. Kanban is NOT here any more -
+    // boards, cards and sprints ship with seeded grants (OWN_WORK in src/domain/grants.ts), because a module
+    // whose every verb reaches only super_admin renders as if it did not exist under "hide, never disable".
     "access-rules:approve", "access-rules:clone", "access-rules:preview", "access-rules:reject",
-    "access-rules:requestAccess", "api-keys:revoke",
-    "boards:configure", "boards:metrics",
-    "cards:addTodos", "cards:assign", "cards:block", "cards:comment", "cards:move", "cards:prioritize",
-    "cards:promoteTodo", "cards:removeTodo", "cards:toggleTodo", "cards:unblock", "cards:unwatch",
-    "cards:watch",
-    "cron-runs:run", "operations:run", "sprints:activate", "sprints:complete",
+    "access-rules:requestAccess", "access-rules:review", "access-rules:scopeCounts", "api-keys:revoke",
+    "cron-runs:run", "operations:run",
     "letterheads:deleteImage", "letterheads:duplicate", "letterheads:image", "letterheads:preview",
     "letterheads:uploadImage",
     "referrals:award", "suggestions:downvote", "suggestions:merge", "suggestions:upvote",

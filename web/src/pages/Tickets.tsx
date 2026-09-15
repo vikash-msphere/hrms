@@ -696,7 +696,9 @@ function NewTicketDialog({ open, onOpenChange, form, setForm, files, setFiles, c
           </Select>
         </Field>
         <Field label="Description (optional)">
-          <Textarea rows={4} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+          {/* Masked in replay for the reason given over the ticket body below. instrument.ts records inputs by
+              default, so the body is recorded as it is TYPED as well as once it is stored. */}
+          <Textarea data-sentry-mask rows={4} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
         </Field>
 
         {/* A screenshot answers a support ticket faster than three rounds of "what did it say?". Files are held
@@ -1023,7 +1025,12 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
           {t.update_time && <div><dt className="text-muted-foreground">Last activity</dt><dd>{fmtDateTime(t.update_time)}</dd></div>}
         </dl>
 
-        {t.description && <p className="whitespace-pre-wrap rounded-lg border bg-muted/30 p-3 text-sm">{t.description}</p>}
+        {/* Masked in session replay (`data-sentry-mask`, see web/src/instrument.ts), like the leave reason on
+            Leaves.tsx. `tickets: ["description"]` is in domain/manifests.ts REDACTED_FIELDS because a ticket
+            raised about a person can carry anything, while the queue around it - subject, state, assignee -
+            is ordinary business data and stays readable. This page deliberately attaches replays
+            (`session_replays`), so it is the page most likely to be recorded, not the least. */}
+        {t.description && <p data-sentry-mask className="whitespace-pre-wrap rounded-lg border bg-muted/30 p-3 text-sm">{t.description}</p>}
 
         {/* The replay the requester chose to attach. An outbound link to the Sentry console, not an embed:
             watching it needs a Sentry login, which is the point - the recording is support tooling, and the

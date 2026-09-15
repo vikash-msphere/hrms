@@ -21,6 +21,6 @@ export const departments = collectionRoutes<DepartmentInput, typeof schema.depar
   list: (c, page) => {
     // `departments` defines a `subtree` read tier, so a scoped grant must not see the whole tree; the middleware
     // decided that scope and the service binds it to the hierarchy code.
-    return listDepartments(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted);
+    return listDepartments(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, page.deletedOnly);
   },
 });

@@ -739,7 +739,14 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
             <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
             <p>This is the only time this key is shown. It is stored one-way, so it cannot be recovered - if you lose it, delete this key and create another.</p>
           </div>
-          <div className="flex items-center gap-2">
+          {/* BLOCKED from session replay, not masked. This dialog's own copy says what the value is - "a
+              machine credential that acts as you" - and the secret is shown once and is unrecoverable, so a
+              leak here has no rotation prompted by discovery. Replay is unmask-by-default (instrument.ts) and
+              nothing else reaches this: the input has no `name` and no `type` for the field rules to match,
+              Settings is not a SENSITIVE_PAGES route, and a dialog renders through a portal outside
+              `<main data-page="…">` in any case. `block` removes the node from the recording rather than
+              substituting characters, which is the right instrument for a live credential. */}
+          <div className="flex items-center gap-2" data-sentry-block>
             <Input readOnly value={minted ?? ""} className="font-mono text-xs" onFocus={(e) => e.currentTarget.select()} />
             <Button
               variant={copied ? "outline" : "default"}
@@ -785,7 +792,9 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
                 <Copy className="h-3.5 w-3.5" /> Copy command
               </Button>
             </div>
-            <pre className="overflow-x-auto rounded-md border bg-muted/40 p-2 font-mono text-[11px] leading-relaxed">{curlSnippet}</pre>
+            {/* The same secret, as DOM text rather than an input - so even `maskAllInputs` would not cover it.
+                Blocked for the same reason as the field above. */}
+            <pre className="overflow-x-auto rounded-md border bg-muted/40 p-2 font-mono text-[11px] leading-relaxed" data-sentry-block>{curlSnippet}</pre>
           </div>
           <p className="text-xs text-muted-foreground">Scope: {scopeSentence}.</p>
           <DialogFooter>

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { positiveMoney, nonNegativeMoney } from "../http/moneyField";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { jsonBody } from "../http/jsonRequest";
@@ -21,10 +22,10 @@ const writeSchema = z
     vendor: z.string().nullable().optional(),
     category: z.string().nullable().optional(),
     department: z.string().nullable().optional(),
-    amount: z.number().positive(),
+    amount: positiveMoney(),
     // NOT nullable: `expenses.tax_amount` is NOT NULL defaulting to 0, and the serializer emits it on every
     // response. "No tax" is 0, not null.
-    tax_amount: z.number().nonnegative().optional(),
+    tax_amount: nonNegativeMoney().optional(),
     incurred_on: z.string().nullable().optional(),
     description: z.string().nullable().optional(),
     invoice_number: z.string().nullable().optional(),

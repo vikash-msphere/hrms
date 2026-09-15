@@ -231,7 +231,7 @@ export function RequestLeaveDialog({
       // keyed by the path alone went on answering with the policy a type USED to have the moment an edit
       // reached the row - this admin's, or another's arriving through the store - and the dialog then
       // previewed, and let through, a rule the server no longer enforces.
-      const key = `${t.path} ${JSON.stringify(t.restrictions ?? null)}`;
+      const key = `${t.path}\u0000${JSON.stringify(t.restrictions ?? null)}`;
       if (!cache.has(key)) cache.set(key, mergeRestrictions(orgRestrictions, t.restrictions));
       return cache.get(key)!;
     };
@@ -426,11 +426,20 @@ export function RequestLeaveDialog({
    */
   const violations = useMemo(() => {
     if (!selectedType || !form.start_date || !form.end_date || formDays == null || formDays <= 0) return [];
-    if (!hasAnyRestriction(selectedRules)) return [];
+    const typeId = idOf(selectedType.path);
+    // A COMBINATION RULE BINDS BOTH TYPES, so "does this type configure anything?" is the wrong question to
+    // decide whether there is a policy to evaluate. A type with an empty blob of its own that another type
+    // names in `no_combination_with` is still bound by it - the server says so in as many words
+    // (services/leaveRequests.ts#inboundCombinationGap) and refuses the create. Without this half the dialog
+    // showed a clean checklist and an enabled Submit for exactly that configuration, then the request came
+    // back refused: the one case where the preview answered the opposite of the server. Pure in-memory over
+    // rules the dialog has already merged for every type, so it costs no read.
+    const inboundRule = types.some((t) => idOf(t.path) !== typeId
+      && rulesFor(t).combinations.no_combination_with?.some((ref) => idOf(ref) === typeId));
+    if (!hasAnyRestriction(selectedRules) && !inboundRule) return [];
     const startMs = Date.parse(form.start_date + "T00:00:00Z");
     const endMs = Date.parse(form.end_date + "T00:00:00Z");
     if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs < startMs) return [];
-    const typeId = idOf(selectedType.path);
     const neighbours: LeaveNeighbour[] = myRequests
       .filter((lr) => lr.employee && idOf(lr.employee) === me.employee_id && (upper(lr.state) === "APPROVED" || upper(lr.state) === "PENDING"))
       .map((lr) => {
@@ -449,6 +458,25 @@ export function RequestLeaveDialog({
     // "Ever" can't be answered from a page of requests, so the lifetime rules are left to the server rather
     // than previewed from a window that would under-count them and say yes to something it will refuse.
     const serving = noticePeriods.find((n) => (n.status ?? "").toLowerCase() === "serving" && !n.delete_time);
+    const exitWindow = serving
+      ? { fromMs: Date.parse(serving.notice_date.slice(0, 10) + "T00:00:00Z"), toMs: Date.parse(serving.last_working_day.slice(0, 10) + "T00:00:00Z") }
+      : null;
+    // Days of THIS type already booked inside the notice window, counted whole for a request that straddles
+    // the notice date - the same reading the server takes (services/leaveRequests.ts). Computed rather than
+    // passed as 0, which previewed an `exit.during_notice: "capped"` policy as `0 + days` against the cap and
+    // so always looked satisfiable. Like `neighbours`, it is read off the page of own requests the dialog
+    // already holds, so a request past that window's cursor is not counted and the preview can under-count;
+    // the server re-runs the rule over an aggregate and is the authority. (`lifetime` is left null for the
+    // same reason one step further: "ever" cannot be answered from a page at all.)
+    const exitDaysUsed = exitWindow
+      ? myRequests
+        .filter((lr) => lr.employee && idOf(lr.employee) === me.employee_id
+          && (upper(lr.state) === "APPROVED" || upper(lr.state) === "PENDING")
+          && lr.leave_type && idOf(lr.leave_type) === typeId
+          && Date.parse(lr.end_date.slice(0, 10) + "T00:00:00Z") >= exitWindow.fromMs
+          && Date.parse(lr.start_date.slice(0, 10) + "T00:00:00Z") <= exitWindow.toMs)
+        .reduce((sum, lr) => sum + (Number(lr.days) || 0), 0)
+      : 0;
     return checkLeaveRestrictions({
       rules: selectedRules,
       leaveTypeId: typeId,
@@ -472,10 +500,8 @@ export function RequestLeaveDialog({
       halfDayHolidays: halfHolidaySet,
       neighbours: neighbours.filter((n) => n.leaveTypeId),
       lifetime: null,
-      exitWindow: serving
-        ? { fromMs: Date.parse(serving.notice_date.slice(0, 10) + "T00:00:00Z"), toMs: Date.parse(serving.last_working_day.slice(0, 10) + "T00:00:00Z") }
-        : null,
-      exitDaysUsed: 0,
+      exitWindow,
+      exitDaysUsed,
     });
   }, [selectedType, selectedRules, rulesFor, form.start_date, form.end_date, form.startSession, form.endSession, form.reason, formDays, myRequests, types, me.employee_id, todayYmd, meEmployee, workDays, holidaySet, halfHolidaySet, doc, noticePeriods]);
   /**
@@ -564,6 +590,10 @@ export function RequestLeaveDialog({
         } catch (e) {
           toast({ title: "Leave requested, but the document didn't attach", description: (e as Error).message, variant: "destructive" });
           try { sessionStorage.removeItem(DRAFT_KEY()); } catch { /* nothing to clean up */ }
+          // Cleared alongside the rest, exactly as the success path below does. The draft this flag refers to
+          // has just been deleted, so a mount site that keeps this component alive would otherwise reopen it
+          // showing "Picked up where you left off" and a Start over link over an empty form.
+          setRestored(false);
           setForm({ leave_type: "", start_date: "", end_date: "", reason: "", startSession: 1, endSession: 2 });
           setDoc(null);
           onOpenChange(false);

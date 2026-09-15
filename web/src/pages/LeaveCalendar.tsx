@@ -7,7 +7,7 @@ import { get } from "@/api";
 import { navigate } from "@/router";
 import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
 import { useApprovals } from "@/lib/approvals";
-import { usePermission } from "@/lib/perm";
+import { usePermission, useCanExport } from "@/lib/perm";
 import { idOf, cn } from "@/lib/utils";
 import { leaveColor } from "@/lib/leaveColors";
 import { readHashQuery, writeHashQuery } from "@/lib/urlQuery";
@@ -45,6 +45,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { getSetting } from "@/lib/settingsStore";
 import { parseRestrictions } from "../../../src/domain/leaveRestrictions";
+import { useCelebrations } from "@/hooks/useCelebrations";
 
 // Who is away, when, and what that leaves the team with. Four views over one set of rows: the month grid
 // (bars, drag-to-request), the team rows (overlap), the quarter heat map (planning), the agenda (phones).
@@ -157,19 +158,14 @@ export default function LeaveCalendar({ me }: { me: Me }) {
   const employeesTruncated = useCollectionHasMore(["employees"]);
   const approvals = useApprovals();
   const canRequest = usePermission("leave-requests.write");
-  const canExport = usePermission("export.read");
+  // The calendar is a view over leave requests, so a per-collection export grant on them covers it.
+  const canExport = useCanExport("leave-requests");
 
   // Birthdays and work anniversaries, placed by their month/day. The feed only reaches 90 days ahead, so the
   // markers thin out on far-future months - and it's only fetched when the layer is on.
-  const [celebrations, setCelebrations] = useState<Celebration[]>([]);
-  useEffect(() => {
-    if (!showCelebrations) return;
-    let live = true;
-    get<{ results: Celebration[] }>("employees:upcomingCelebrations?within=90")
-      .then((r) => live && setCelebrations(r.results ?? []))
-      .catch(() => live && setCelebrations([]));
-    return () => { live = false; };
-  }, [showCelebrations]);
+  // Held per tab and revalidated rather than re-read - the same copy the dashboard card uses when the two
+  // windows match. See hooks/useCelebrations.ts for what this read costs the server.
+  const { rows: celebrations } = useCelebrations(90, showCelebrations);
 
   // The denominator. An aggregate, because counting loaded employee rows counts one page, not the org.
   const [headcount, setHeadcount] = useState<number | null>(null);

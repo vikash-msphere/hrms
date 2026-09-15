@@ -22,6 +22,7 @@ import {
 import { ASSET_CONDITIONS, ASSET_STATUSES, type AssetStatus } from "../domain/assetCustody";
 import { toAssetResource } from "../http/serialize";
 import { accessHint, withAccess } from "../http/accessHint";
+import { LIST_OWNER_COLUMNS, pageOwnerCodes } from "../lib/authzResolve";
 
 const writeSchema = z
   .object({
@@ -82,11 +83,15 @@ const batchSchema = z
 export const assetBatchCreate = new Hono<AppEnv>().post("/", zValidator("json", batchSchema), async (c) => {
   const user = c.get("user");
   const rows = await createAssetsBatch(c.get("deps"), user, c.req.valid("json").items);
+  // Assets are flat-coded with an owner column, so the hint needs the holder's employee code the same way the
+  // factory's list lane does - one read for the batch, not one per asset. A delivery into stock owns nobody, so
+  // the usual case resolves to an empty map and costs nothing.
+  const ownerCodes = await pageOwnerCodes(c.get("deps"), rows, LIST_OWNER_COLUMNS.assets!);
   // Same hint-then-serialize order the factory uses, so a caller who may print tags gets the tag secret of
   // every asset they just created and can send the run straight to the sticker printer.
   return c.json({
     results: rows.map((r) => {
-      const hint = accessHint(user, "assets", r.code);
+      const hint = accessHint(user, "assets", r.code, undefined, undefined, r.code ? ownerCodes.get(r.code) : undefined);
       return withAccess(toAssetResource(r, user, hint.can), user, "assets", r.code, undefined, undefined, hint);
     }),
   });

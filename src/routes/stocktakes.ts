@@ -37,7 +37,7 @@ export const stocktakes = collectionRoutes({
   param: "stocktake_id",
   writeSchema,
   serialize: toStocktakeResource,
-  list: (c, page) => listStocktakes(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted),
+  list: (c, page) => listStocktakes(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, page.deletedOnly),
   verbs: {
     recordFound: { schema: foundSchema, run: (deps, user, id, body: FoundInput) => recordFound(deps, user, id, body ?? {}) },
     close: { schema: closeSchema, run: (deps, user, id, body: { notes?: string | null }) => closeStocktake(deps, user, id, body ?? {}) },

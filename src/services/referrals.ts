@@ -12,7 +12,7 @@ import { emitEvent } from "./eventBus";
 import { recordBonus } from "./bonuses";
 import { invalidArgument, notFound, failedPrecondition, aborted, oneOf } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { deleteStateFilter, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { getSettingValue } from "./settings";
 import { orgToday } from "./orgDay";
 import { DEFAULT_REFERRALS_CONFIG, milestoneReached, resolveBonusAmount, type ReferralsConfig } from "../domain/referrals";
@@ -43,10 +43,10 @@ const SYSTEM_ACTOR = systemActor();
 
 const cfgOf = (deps: Deps) => getSettingValue<ReferralsConfig>(deps, "referrals", DEFAULT_REFERRALS_CONFIG);
 
-export async function listReferrals(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false) {
+export async function listReferrals(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.referrals.code, schema.referrals.referrerId)];
   if (statusFilter) conds.push(eq(schema.referrals.status, statusFilter as Status));
-  if (!showDeleted) conds.push(isNull(schema.referrals.deleteTime));
+  conds.push(deleteStateFilter(schema.referrals.deleteTime, showDeleted, deletedOnly));
   return keysetPage(deps, schema.referrals, "referrals", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 

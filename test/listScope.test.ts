@@ -78,3 +78,39 @@ describe("applyScope - fail-closed list binding", () => {
     expect(applyScope(scope({ breadth: "all" }), code, owner)).toBeUndefined();
   });
 });
+
+// Subtree GRANTS bind exactly like per-object shares - both mean "this code and everything under it" - and
+// they are what makes a named-department rule show rows instead of only opening records one by one.
+describe("applyScope - subtree grants", () => {
+  it("ORs the granted subtree into the breadth, boundary-anchored", () => {
+    const sql = sqlOf(applyScope(scope({ breadth: "own", ownerId: "emp-1", subtrees: ["07"] }), code, owner))!;
+    expect(sql).toContain("glob"); // the index-range operator, never LIKE - see the note on applyScope
+    expect(sql).toContain("or");
+    // The trailing '-' is the delimiter guard: 07 must not reach the prefix-collision neighbour 079.
+    const q = dialect.sqlToQuery(applyScope(scope({ breadth: "own", ownerId: "emp-1", subtrees: ["07"] }), code, owner)!);
+    expect(q.params).toContain("07-*");
+  });
+
+  it("adds nothing at `all` breadth - the caller already sees everything", () => {
+    expect(sqlOf(applyScope(scope({ breadth: "all", subtrees: ["07"] }), code, owner))).toBeUndefined();
+  });
+
+  it("carries the whole predicate when the breadth binds nothing (a subtree-only approver)", () => {
+    // `own` with a NULL owner is the empty breadth: without the subtree this is `1 = 0`, so the rows that
+    // come back are the subtree's and nothing else.
+    const sql = sqlOf(applyScope(scope({ breadth: "own", ownerId: null, subtrees: ["07"] }), code, owner))!;
+    expect(sql).toContain("1 = 0");
+    expect(sql).toContain("glob");
+  });
+
+  it("is still beaten by a deny (deny wins, as everywhere else)", () => {
+    const sql = sqlOf(applyScope(scope({ breadth: "own", ownerId: "emp-1", subtrees: ["07"], denies: ["07-1a"] }), code, owner))!;
+    expect(sql).toContain("not");
+  });
+
+  it("a table with no code column matches the subtree against nothing, rather than everything", () => {
+    // Same failure direction as every other branch here: a missing column is `1 = 0`, so the OR falls back to
+    // the breadth alone instead of widening to rows the grant never named.
+    expect(sqlOf(applyScope(scope({ breadth: "own", ownerId: "emp-1", subtrees: ["07"] }), undefined, owner))).toContain("1 = 0");
+  });
+});

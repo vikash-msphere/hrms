@@ -38,7 +38,7 @@ const ids = { anaEmp: genId(), boEmp: genId(), carlaEmp: genId(), ana: genId(), 
 
 // Two access admins: `ana` authors, `bo` approves (four eyes needs two humans).
 const actor = (uuid: string, email: string, employeeId: string): AppUser =>
-  ({ uuid, email, role: "hr_admin", status: "active", employeeId, employeeCode: null, name: email, grant: { levels: {}, denies: [], customs: [] } as never, policy: DEFAULT_POLICY }) as AppUser;
+  ({ uuid, email, role: "hr_admin", roles: ["hr_admin"], status: "active", employeeId, employeeCode: null, name: email, grant: { levels: {}, denies: [], customs: [] } as never, policy: DEFAULT_POLICY }) as AppUser;
 const ana = () => actor(ids.ana, "ana@test.example", ids.anaEmp);
 const bo = () => actor(ids.bo, "bo@test.example", ids.boEmp);
 
@@ -329,5 +329,42 @@ describe("copying one subject's rules onto another", () => {
     await expect(cloneAccessRules(deps, ana(), { from: employee(), to: { subject_kind: "role", subject: "hr_admin" } })).rejects.toThrow(/role you are using/);
     await expect(cloneAccessRules(deps, ana(), { from: employee(), to: employee() })).rejects.toThrow(/different subjects/);
     await expect(cloneAccessRules(deps, ana(), { from: employee(), to: { subject_kind: "role", subject: "nope" } })).rejects.toThrow(/target role not found/);
+  });
+});
+
+// NOBODY AUTHORS THEIR OWN AUTHORITY.
+//
+// middleware/auth.ts builds a caller's grant from THREE subjects (lib/policyLoad: own user rows over
+// `mergeGrants(everyone rows, own-role rows)`), and only the role one was guarded. Both of the other two are
+// a one-request self-grant for a delegated ACL admin: `compensation` at admin from the next request onward.
+// Asserted at the service, since that is the single door - the collection route, the clone and the four-eyes
+// queue all go through it.
+describe("a rule author cannot widen themselves", () => {
+  const superAna = () => ({ ...ana(), grant: { levels: { "**": "admin" }, allow: ["**"] } }) as unknown as AppUser;
+  const selfRule = (extra: Record<string, unknown> = {}) => ({ subject_kind: "user", subject: `users/${ids.ana}`, collection: "compensation", scope: "all", level: "admin", ...extra });
+
+  it("refuses a user rule the author wrote for their own user", async () => {
+    await expect(createAccessRule(deps, ana(), selfRule())).rejects.toThrow(/rules for your own user/);
+    expect(await deps.db.select().from(schema.accessRules)).toHaveLength(0);
+  });
+
+  it("still allows a user rule for somebody else", async () => {
+    const rule = await createAccessRule(deps, ana(), { ...selfRule(), subject: `users/${ids.bo}` });
+    expect(rule.subject).toBe(ids.bo);
+  });
+
+  it("refuses an `everyone` rule from a non-super author, because `everyone` includes them", async () => {
+    await expect(createAccessRule(deps, ana(), { ...selfRule(), subject_kind: "role", subject: "everyone" })).rejects.toThrow(/'everyone' role includes you/);
+  });
+
+  it("lets super author `everyone` - it cannot widen a caller who already holds `**`", async () => {
+    const rule = await createAccessRule(deps, superAna(), { ...selfRule(), subject_kind: "role", subject: "everyone", level: "read" });
+    expect(rule.subject).toBe("everyone");
+  });
+
+  it("holds on the clone too, which is the same widening forty rules at a time", async () => {
+    const from = { subject_kind: "role", subject: "employee" };
+    await expect(cloneAccessRules(deps, ana(), { from, to: { subject_kind: "user", subject: `users/${ids.ana}` } })).rejects.toThrow(/rules for your own user/);
+    await expect(cloneAccessRules(deps, ana(), { from, to: { subject_kind: "role", subject: "everyone" } })).rejects.toThrow(/'everyone' role includes you/);
   });
 });

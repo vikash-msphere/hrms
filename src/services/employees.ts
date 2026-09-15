@@ -239,6 +239,46 @@ export async function removeEmployee(deps: Deps, actor: AppUser, id: string, ifM
   if (disabled.length) await audit(deps, actor, "employee.disableLogin", "employees", id, { via: "delete", users: disabled.length });
 }
 
+/** How far up a reporting line is walked before the depth itself is treated as a cycle. */
+const MANAGER_CHAIN_CAP = 100;
+
+/**
+ * Refuse a manager assignment that would close the reporting line into a loop.
+ *
+ * The DEPARTMENT hierarchy has had this since it existed (codeCascade.ts#moveDepartment refuses a self-parent
+ * and a move under a descendant), and goals check both `parent` and `blocked_by` the same way. The manager line
+ * had nothing: `set.managerId` took whatever the patch named, so "Priya now reports to Sam" while Sam still
+ * reports to Priya - a state an HR admin passes through mid-reorg - was writable, from the API and from the two
+ * manager pickers alike. The client refused it in exactly one place, the org chart's drag handler, and that
+ * check reads a tree capped at 1000 rows so it cannot even see a descendant past the cap.
+ *
+ * Here rather than in the UI because this is the only place that holds for every write path, and because the
+ * cost of a cycle lands on every consumer that walks the chain afterwards.
+ *
+ * ONE STATEMENT, for the reason goals.ts#followChain gives: a D1 query is a subrequest against a 50-per-
+ * invocation budget, and an update that also cascades codes, writes, audits and notifies cannot spend a read
+ * per level. The walk starts AT the proposed manager and climbs; finding `id` on the way up means the edit
+ * would point the line back at itself. Deleted rows are walked through rather than stopping the walk - a
+ * soft-deleted manager in the middle still links the two ends.
+ */
+async function assertNoManagerCycle(deps: Deps, id: string, nextManagerId: string): Promise<void> {
+  if (nextManagerId === id) throw invalidArgument("an employee cannot be their own manager");
+  const rows = await deps.db.all<{ id: string | null }>(sql`
+    with recursive chain(id, depth) as (
+      select "manager_id", 1 from "employees" where "uuid" = ${nextManagerId}
+      union all
+      select e."manager_id", c.depth + 1 from "employees" e join chain c on e."uuid" = c.id
+      where c.id is not null and c.depth <= ${MANAGER_CHAIN_CAP}
+    )
+    select id from chain where id is not null
+  `);
+  const chain = rows.map((r) => r.id).filter((x): x is string => !!x);
+  if (chain.includes(id)) throw invalidArgument("that would make the reporting line circular: they already report to this employee");
+  // A chain longer than the cap is degenerate whatever it is - a loop the walk could not close inside the cap,
+  // or a hierarchy deeper than any real org - and either way it is not a shape to write more of.
+  if (chain.length > MANAGER_CHAIN_CAP) throw invalidArgument("reporting line is too deep");
+}
+
 // JSON Merge Patch: present = set, explicit null = clear, absent = unchanged.
 export async function updateEmployee(deps: Deps, actor: AppUser, id: string, patch: EmployeeInput, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, id)).limit(1))[0];
@@ -268,7 +308,11 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
     // is a thing the reader's client resolves to the department's NAME.
     if (next !== row.departmentId) { await moveEmployee(deps, id, row.code!, next); moved = true; await audit(deps, actor, "employee.reparent", "employees", id, { from: row.departmentId ? `departments/${row.departmentId}` : null, to: next ? `departments/${next}` : null }); }
   }
-  if (has("manager")) set.managerId = idFromPath(patch.manager) ?? null;
+  if (has("manager")) {
+    const nextMgr = idFromPath(patch.manager) ?? null;
+    if (nextMgr && nextMgr !== row.managerId) await assertNoManagerCycle(deps, id, nextMgr);
+    set.managerId = nextMgr;
+  }
   if (has("start_date")) set.startDate = dateMs(patch.start_date);
   if (has("probation_end_date")) set.probationEndDate = dateMs(patch.probation_end_date);
   if (has("epf_enrolled")) set.epfEnrolled = !!patch.epf_enrolled;

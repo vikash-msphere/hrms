@@ -2,7 +2,7 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { toTableViewResource } from "../http/serialize";
-import { canUnmask } from "../http/tableFieldAccess";
+import { unmaskGate } from "../http/tableFieldAccess";
 import { clampPageSize } from "../http/pagination";
 import { getTableViewRow, listTableViews, parseSpec, tableViewSpec, type TableViewInput } from "../services/tableViews";
 import { runTableView } from "../services/tableRun";
@@ -79,7 +79,7 @@ export const tableViews = collectionRoutes<TableViewInput, typeof schema.tableVi
         const result = await runTableView(deps, user, c.get("tableScopes") ?? new Map(), { ...spec, params }, {
           maxPageSize: clampPageSize(Number(q.max_page_size) || undefined),
           pageToken: q.page_token,
-          unmask: canUnmask(user),
+          unmask: unmaskGate(user),
           viewCode: row.code,
         });
         return c.json(result);

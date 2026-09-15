@@ -18,5 +18,6 @@ export const documentAcknowledgements = collectionRoutes({
       page.pageToken,
       c.req.query("document"),
       page.showDeleted,
+      page.deletedOnly,
     ),
 });

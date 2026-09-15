@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { positiveMoney } from "../http/moneyField";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 import * as schema from "../db/schema";
@@ -14,7 +15,7 @@ const COL = "bonuses";
 const recordSchema = z
   .object({
     employee: z.string(),
-    amount: z.number().positive(),
+    amount: positiveMoney(),
     currency_code: z.string().optional(),
     kind: z.string().nullable().optional(),
     reason: z.string().nullable().optional(),
@@ -28,7 +29,7 @@ const awardSchema = z
     scope: z.enum(["company", "department", "individual"]),
     department: z.string().nullable().optional(),
     employee: z.string().nullable().optional(),
-    amount: z.number().positive(),
+    amount: positiveMoney(),
     currency_code: z.string().optional(),
     kind: z.string().nullable().optional(),
     reason: z.string().nullable().optional(),

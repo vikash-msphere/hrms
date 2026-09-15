@@ -5,7 +5,7 @@ import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
 import { useMedia } from "@/hooks/useMedia";
 import { useApprovals } from "@/lib/approvals";
 import { useClock, listAllSessions } from "@/lib/clock";
-import { usePermission } from "@/lib/perm";
+import { usePermission, useCanExport } from "@/lib/perm";
 import { fireIntent, useIntent } from "@/lib/intent";
 import { navigate } from "@/router";
 import { exportTable } from "@/lib/exportTable";
@@ -146,7 +146,7 @@ export default function Attendance({ me }: { me: Me }) {
   const showDayProgress = sched.show_day_progress !== false;
   const showFinishProjection = showDayProgress && sched.show_finish_projection !== false;
   const canApprove = me.capabilities.includes("attendance-regularizations.approve");
-  const canExport = usePermission("export.read");
+  const canExport = useCanExport("attendance");
   const canLogOvertime = usePermission("overtime-requests.write");
   // `all: true` on the roster: this is the grid's list of PEOPLE, one row each, with no "load more" for a
   // reader to press - the shape `all` exists for. On one page, an org past a hundred simply had rows missing.
@@ -1801,7 +1801,10 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
           {leave.start_date === leave.end_date ? leave.start_date : `${leave.start_date} – ${leave.end_date}`} · {leave.days} day{leave.days === 1 ? "" : "s"}
         </p>
         {leave.reason ? (
-          <p className="text-muted-foreground"><span className="font-medium text-foreground">Reason:</span> {leave.reason}</p>
+          // The leave reason is masked in session replay wherever it renders (Leaves.tsx says why: it is
+          // routinely a diagnosis or a bereavement, and `leave-requests: ["reason"]` is in REDACTED_FIELDS for
+          // that reason). The label stays readable; only the value is hidden.
+          <p className="text-muted-foreground"><span className="font-medium text-foreground">Reason:</span> <span data-sentry-mask>{leave.reason}</span></p>
         ) : (
           <p className="text-xs italic text-muted-foreground">No reason provided.</p>
         )}

@@ -169,13 +169,21 @@ export default function Reviews({ me }: { me: Me }) {
     nominate: "Feedback requests sent",
     nudge: "Reminder sent",
   };
-  async function act(r: Review, verb: string, body?: Record<string, unknown>) {
+  // Returns whether the server took it. A refusal is reported here and NOT rethrown, so the outcome has to
+  // travel as a value or it does not travel at all - and two callers need it: both submit paths drop the
+  // manager's write-up, the competency grid and every per-goal verdict from the draft store on the line after
+  // the await, which on a swallowed refusal deleted work the server never received while "Draft saved on this
+  // device" was still on screen. `Tickets.tsx#act` is the same helper with the same signature, for the same
+  // reason. Callers that have nothing to discard can ignore the result.
+  async function act(r: Review, verb: string, body?: Record<string, unknown>): Promise<boolean> {
     try {
       await invoke(`reviews/${idOf(r.path)}`, verb, undefined, body);
       toast({ title: REVIEW_TOAST[verb] ?? "Review updated", variant: "success" });
       reloadAll();
+      return true;
     } catch (e) {
       toast({ title: "Couldn't update review", description: (e as Error).message, variant: "destructive" });
+      return false;
     }
   }
   async function feedbackAct(f: ReviewFeedback, verb: string, body?: Record<string, unknown>) {
@@ -545,8 +553,8 @@ export default function Reviews({ me }: { me: Me }) {
                 getSuggested={() => suggestFor(r)}
                 onSubmitSelf={(self_comment, self_ratings) => act(r, "submitSelf", { self_comment, ...(self_ratings && Object.keys(self_ratings).length ? { self_ratings } : {}) })}
                 onSubmitManager={(body) => act(r, "submitManager", body)}
-                onAcknowledge={(comment) => act(r, "acknowledge", comment?.trim() ? { comment: comment.trim() } : undefined)}
-                onNudge={() => act(r, "nudge")}
+                onAcknowledge={async (comment) => { await act(r, "acknowledge", comment?.trim() ? { comment: comment.trim() } : undefined); }}
+                onNudge={async () => { await act(r, "nudge"); }}
                 onSkip={async () => {
                   const ok = await confirm({
                     title: "Skip this stage?",
@@ -589,8 +597,9 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
   employees: Employee[];
   departments: Department[];
   getSuggested: () => string[];
-  onSubmitSelf: (selfComment: string, selfRatings?: Record<string, number>) => Promise<void>;
-  onSubmitManager: (body: { ratings: Record<string, number>; overall_rating?: number; manager_comment?: string; goal_ratings?: Record<string, GoalVerdict> }) => Promise<void>;
+  /** Both resolve to whether the SERVER took the submission - the local draft is only dropped on `true`. */
+  onSubmitSelf: (selfComment: string, selfRatings?: Record<string, number>) => Promise<boolean>;
+  onSubmitManager: (body: { ratings: Record<string, number>; overall_rating?: number; manager_comment?: string; goal_ratings?: Record<string, GoalVerdict> }) => Promise<boolean>;
   onAcknowledge: (comment?: string) => Promise<void>;
   onSkip: () => Promise<void>;
   onNudge: () => Promise<void>;
@@ -755,12 +764,16 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
       const goal_ratings = Object.fromEntries(
         Object.entries(goalRatings).filter(([, v]) => v?.rating != null || v?.comment?.trim()),
       );
-      await onSubmitManager({
+      const saved = await onSubmitManager({
         ratings,
         overall_rating: overall,
         manager_comment: mgrComment.trim(),
         ...(Object.keys(goal_ratings).length ? { goal_ratings } : {}),
       });
+      // Only once the server has the work. A refusal - a 409 from someone else moving the stage, a 403 after a
+      // grant narrowed, a dropped connection - leaves the draft exactly where it was, which is the invariant
+      // the "Draft saved on this device" label below is asserting.
+      if (!saved) return;
       clearDraftFor("manager");
       clearDraftFor("ratings");
       clearDraftFor("overall");
@@ -944,7 +957,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <AccessAction verb="submitSelf" can={can} label="Submit self-assessment">
-                <Button size="sm" loading={busy === "self"} disabled={!selfText.trim()} onClick={run("self", async () => { await onSubmitSelf(selfText.trim(), selfRatings); clearDraftFor("self"); clearDraftFor("selfRatings"); })}>Submit self-assessment <ChevronRight className="h-3.5 w-3.5" /></Button>
+                <Button size="sm" loading={busy === "self"} disabled={!selfText.trim()} onClick={run("self", async () => { if (!(await onSubmitSelf(selfText.trim(), selfRatings))) return; clearDraftFor("self"); clearDraftFor("selfRatings"); })}>Submit self-assessment <ChevronRight className="h-3.5 w-3.5" /></Button>
               </AccessAction>
               {skipBtn}
               {!!selfText.trim() && <span className="ml-auto text-xs text-muted-foreground">Draft saved on this device</span>}

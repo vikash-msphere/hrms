@@ -109,7 +109,15 @@ function dropDisk() {
 // that is configured and not applied - the failure `getSettingValue`'s own header calls out. The app reads
 // about two dozen keys today, so it is a cliff rather than a present defect, and invisible right up to it. A
 // partial snapshot is worse than a slow one.
-async function fetchAll(): Promise<Map<string, unknown>> {
+//
+// RETURNS BOTH HALVES rather than assigning one of them. `etags` used to be written here, as a side effect, on
+// the way out - so it was the one thing a fetch adopted that the generation guards at the call sites could not
+// refuse. A superseded read then had its values discarded and its etags kept, leaving `etags` describing a
+// different snapshot than `loaded` holds, which is exactly the invariant its declaration above claims ("in step
+// with `loaded`/`stored` at all times"): `getSetting` handed back a fresh value with a stale version,
+// `saveSetting` sent that as `If-Match`, and the server refused a save that should have gone through. Values
+// and etags are one snapshot, so they are adopted in one statement, inside the guard.
+async function fetchAll(): Promise<{ values: Map<string, unknown>; etags: Map<string, string> }> {
   try {
     const rows: Row[] = [];
     let pageToken: string | undefined;
@@ -125,10 +133,13 @@ async function fetchAll(): Promise<Map<string, unknown>> {
     }
     // Etags are replaced wholesale alongside the values they describe, never merged into the old set: a
     // leftover etag for a key this read did not return would be a version claim about a row we have not seen.
-    etags = new Map(rows.flatMap((s) => (s.etag ? [[s.key, s.etag] as [string, string]] : [])));
-    return new Map(rows.map((s) => [s.key, s.value]));
+    return {
+      values: new Map(rows.map((s) => [s.key, s.value])),
+      etags: new Map(rows.flatMap((s) => (s.etag ? [[s.key, s.etag] as [string, string]] : []))),
+    };
   } catch {
-    return new Map<string, unknown>(); // unreadable / offline: every key reads as unset
+    // unreadable / offline: every key reads as unset
+    return { values: new Map<string, unknown>(), etags: new Map<string, string>() };
   }
 }
 
@@ -171,15 +182,18 @@ function load(): Promise<Map<string, unknown>> {
         // this branch served before the wait existed, rather than a page that never finishes. The refetch
         // keeps running and corrects `loaded` for whoever asks next.
         const refetchGen = generation;
-        const refetched = fetchAll();
-        void refetched.then((all) => {
+        const refetched = fetchAll().then((snap) => {
           // Generation-guarded like the wait above, and for the same reason. A save that lands while this read
           // is in flight bumps the generation and drops the snapshot; without the check this completion then
           // re-stamped the pre-write values as current, in memory AND on disk, so the next `getSetting` - and
-          // the next page load - answered with the values the save had just replaced.
-          if (generation !== refetchGen || !all.size) return;
-          writeDisk(all);
-          loaded = Promise.resolve(all);
+          // the next page load - answered with the values the save had just replaced. The etags are adopted in
+          // the same breath as the values, never separately - see `fetchAll`.
+          if (generation === refetchGen && snap.values.size) {
+            etags = snap.etags;
+            writeDisk(snap.values);
+            loaded = Promise.resolve(snap.values);
+          }
+          return snap.values;
         });
         return (loaded = Promise.race([refetched, afterMs(RECONCILE_WAIT_MS).then(() => disk)]));
       });
@@ -191,10 +205,11 @@ function load(): Promise<Map<string, unknown>> {
     // keeps working against the same map.
     const bgGen = generation;
     void fetchAll().then((fresh) => {
-      if (!fresh.size) return; // a failed refresh says nothing about the config; keep what we have
+      if (!fresh.values.size) return; // a failed refresh says nothing about the config; keep what we have
       if (generation !== bgGen) return; // a save landed while this was in flight: these values are the stale ones
+      etags = fresh.etags; // one snapshot, adopted in one place - see `fetchAll`
       disk.clear();
-      for (const [k, v] of fresh) disk.set(k, v);
+      for (const [k, v] of fresh.values) disk.set(k, v);
       writeDisk(disk);
     });
     return loaded;
@@ -207,13 +222,16 @@ function load(): Promise<Map<string, unknown>> {
   // already gives (`fetchAll`'s own catch) - while the real fetch keeps running in the background and corrects
   // `loaded` for whoever asks next if it does eventually land.
   const freshGen = generation;
-  const fresh = fetchAll();
-  void fresh.then((all) => {
+  const fresh = fetchAll().then((snap) => {
     // Generation-guarded: a save that lands before this first read completes has already dropped the snapshot,
     // and adopting the pre-write values here would put them back as current for the rest of the page life.
-    if (generation !== freshGen || !all.size) return;
-    writeDisk(all);
-    loaded = Promise.resolve(all);
+    // Etags ride with the values they describe - see `fetchAll`.
+    if (generation === freshGen && snap.values.size) {
+      etags = snap.etags;
+      writeDisk(snap.values);
+      loaded = Promise.resolve(snap.values);
+    }
+    return snap.values;
   });
   return (loaded = Promise.race([fresh, afterMs(RECONCILE_WAIT_MS).then(() => new Map<string, unknown>())]));
 }

@@ -139,7 +139,7 @@ function hrContactClause(d: LetterDefaults): string {
 
 // The placeholder/derived-clause map + a presence test. Derived "clauses" carry their own conditional
 // inclusion and inline bold, so the editable template text stays simple while the tricky bits stay correct.
-function buildContext(ctx: LetterContext, input: Record<string, string> = {}): { v: Record<string, string>; present: (key: string) => boolean } {
+function buildContext(ctx: LetterContext, input: Record<string, string> = {}, declared?: ReadonlySet<string>): { v: Record<string, string>; present: (key: string) => boolean } {
   const e = ctx.employee;
   const d = ctx.defaults;
   const probMonths = monthsBetween(e.startDate, e.probationEndDate) ?? d.probation_months ?? null;
@@ -231,7 +231,31 @@ function buildContext(ctx: LetterContext, input: Record<string, string> = {}): {
     v.settlement_date = fmtDate(ctx.settlement.date ?? ctx.today);
   }
   // HR-provided inputs (for custom letters) become placeholders too; single-line values are usable as {{key}}.
-  for (const [k, val] of Object.entries(input)) if (typeof val === "string") v[k] = val;
+  //
+  // FILTERED TO THE KEYS THE TEMPLATE DECLARES, because this spread is the LAST assignment into `v` and the
+  // route accepts arbitrary keys (`input: z.record(z.string(), z.string().max(20_000))`, up to 200 of them).
+  // Unfiltered, last-write-wins let the caller overwrite any DERIVED placeholder - `{{ctc_annual}}`,
+  // `{{settlement_net}}`, `{{inc_new_annual}}`, `{{employee_name}}`, `{{signatory_name}}` - on a letter that is
+  // then rendered, filed as the employee's `personal-documents` row, frozen for re-render, and optionally sent
+  // for Aadhaar e-signature.
+  //
+  // That defeated a control routes/letterGenerate.ts states explicitly: the caller rides along "so the CTC
+  // blocks are dropped for anyone without a compensation grant - the letter still generates, it just cannot
+  // state a figure its author may not read". The seeded `hr_admin` grant deliberately holds no `compensation`
+  // entry, so `ctx.comp` is undefined for HR and a `requires: ctc` block is dropped - but an inline
+  // `{{ctc_annual}}` in ordinary body text resolved from `v`, and `v.ctc_annual` was whatever `input` said. Not
+  // a read bypass (the author still cannot learn the real CTC); an integrity one in the other direction, where
+  // that same author authors an official CTC, increment or settlement letter stating any figure they choose.
+  //
+  // `template.inputs` already exists to name the fields HR fills in, so declaring is the model the file
+  // carries - and filtering here also turns a typo'd input key into a visible no-op rather than a silent
+  // override of something else. `declared` absent means no filter, for the internal callers that build their
+  // own map rather than taking one off the wire.
+  for (const [k, val] of Object.entries(input)) {
+    if (typeof val !== "string") continue;
+    if (declared && !declared.has(k)) continue;
+    v[k] = val;
+  }
   const present = (key: string): boolean => {
     if (key === "ctc") return !!ctx.comp;
     if (key === "increment") return !!ctx.increment;
@@ -306,7 +330,7 @@ export type ResolvedLetter = { content: LetterContent; title: string; fileName: 
 // Resolve a stored template against a context (+ optional HR input) into renderable content + a title + a
 // download filename.
 export function resolveLetter(template: LetterTemplate, ctx: LetterContext, input: Record<string, string> = {}): ResolvedLetter {
-  const { v, present } = buildContext(ctx, input);
+  const { v, present } = buildContext(ctx, input, new Set((template.inputs ?? []).map((i) => i.key)));
   const blocks: LetterBlock[] = [];
   for (const b of template.blocks) {
     if (b.requires && !present(b.requires)) continue;

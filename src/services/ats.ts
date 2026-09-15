@@ -8,6 +8,7 @@ import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
 import { keysetPage } from "./keysetPage";
+import { deleteStateFilter } from "./softDelete";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -55,10 +56,10 @@ export type RequisitionInput = {
   closed_date?: string | null;
 };
 
-export async function listRequisitions(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false) {
+export async function listRequisitions(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false, deletedOnly = false) {
   const conds = [];
   if (statusFilter) conds.push(eq(schema.jobRequisitions.status, statusFilter as RequisitionStatus));
-  if (!showDeleted) conds.push(isNull(schema.jobRequisitions.deleteTime));
+  conds.push(deleteStateFilter(schema.jobRequisitions.deleteTime, showDeleted, deletedOnly));
   const scoped = applyScope(scope, schema.jobRequisitions.code, schema.jobRequisitions.code);
   if (scoped) conds.push(scoped);
   return keysetPage(deps, schema.jobRequisitions, "job-requisitions", conds.length ? and(...conds) : undefined, { max: maxPageSize, pageToken });
@@ -153,7 +154,7 @@ export type CandidateInput = {
   notes?: string | null;
 };
 
-export async function listCandidates(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, q?: string) {
+export async function listCandidates(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, q?: string, deletedOnly = false) {
   // Server-side text filter (FTS, services/searchFilter.ts). Narrows the scope above; it can never widen it.
   // A candidate pool is the archetype of a collection that outgrows a page and stays useful afterwards - the
   // recruiter's normal question is about somebody who applied months ago, who is exactly who a newest-first
@@ -161,7 +162,7 @@ export async function listCandidates(deps: Deps, scope: ListScope | undefined, m
   // the page's own search box could not.
   const textMatch = await searchFilter(deps, "candidates", q, schema.candidates.uuid);
   const where = and(
-    showDeleted ? undefined : isNull(schema.candidates.deleteTime),
+    deleteStateFilter(schema.candidates.deleteTime, showDeleted, deletedOnly),
     applyScope(scope, schema.candidates.code, schema.candidates.code),
     textMatch,
   );
@@ -226,13 +227,13 @@ export type ApplicationInput = {
   applied_date?: string | null;
 };
 
-export async function listApplications(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, opts: { requisition?: string; candidate?: string; stage?: string; status?: string; showDeleted?: boolean } = {}) {
+export async function listApplications(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, opts: { requisition?: string; candidate?: string; stage?: string; status?: string; showDeleted?: boolean; deletedOnly?: boolean } = {}) {
   const conds = [];
   if (opts.requisition) conds.push(eq(schema.applications.requisitionId, idFromPath(opts.requisition)!));
   if (opts.candidate) conds.push(eq(schema.applications.candidateId, idFromPath(opts.candidate)!));
   if (opts.stage) conds.push(eq(schema.applications.stage, opts.stage));
   if (opts.status) conds.push(eq(schema.applications.status, opts.status as any));
-  if (!opts.showDeleted) conds.push(isNull(schema.applications.deleteTime));
+  conds.push(deleteStateFilter(schema.applications.deleteTime, opts.showDeleted, opts.deletedOnly));
   const scoped = applyScope(scope, schema.applications.code, schema.applications.code);
   if (scoped) conds.push(scoped);
   return keysetPage(deps, schema.applications, "applications", conds.length ? and(...conds) : undefined, { max: maxPageSize, pageToken });
@@ -482,11 +483,11 @@ export type InterviewInput = {
 const interviewersJson = (v?: string[] | null) => JSON.stringify(Array.from(new Set((v ?? []).map((a) => idFromPath(a)).filter((x): x is string => !!x))));
 const parseTs = (s: string, field: string): Date => { const ms = Date.parse(s); if (Number.isNaN(ms)) throw invalidArgument(`${field} is not a valid time`); return new Date(ms); };
 
-export async function listInterviews(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, opts: { application?: string; status?: string; showDeleted?: boolean } = {}) {
+export async function listInterviews(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, opts: { application?: string; status?: string; showDeleted?: boolean; deletedOnly?: boolean } = {}) {
   const conds = [];
   if (opts.application) conds.push(eq(schema.interviews.applicationId, idFromPath(opts.application)!));
   if (opts.status) conds.push(eq(schema.interviews.status, opts.status as any));
-  if (!opts.showDeleted) conds.push(isNull(schema.interviews.deleteTime));
+  conds.push(deleteStateFilter(schema.interviews.deleteTime, opts.showDeleted, opts.deletedOnly));
   const scoped = applyScope(scope, schema.interviews.code, schema.interviews.code);
   if (scoped) conds.push(scoped);
   return keysetPage(deps, schema.interviews, "interviews", conds.length ? and(...conds) : undefined, { max: maxPageSize, pageToken });
@@ -663,10 +664,10 @@ export type FeedbackInput = {
   comment?: string | null;
 };
 
-export async function listInterviewFeedback(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, opts: { interview?: string; showDeleted?: boolean } = {}) {
+export async function listInterviewFeedback(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, opts: { interview?: string; showDeleted?: boolean; deletedOnly?: boolean } = {}) {
   const conds = [applyScope(scope, schema.interviewFeedback.code, schema.interviewFeedback.authorId)];
   if (opts.interview) conds.push(eq(schema.interviewFeedback.interviewId, idFromPath(opts.interview)!));
-  if (!opts.showDeleted) conds.push(isNull(schema.interviewFeedback.deleteTime));
+  conds.push(deleteStateFilter(schema.interviewFeedback.deleteTime, opts.showDeleted, opts.deletedOnly));
   return keysetPage(deps, schema.interviewFeedback, "interview-feedback", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 
@@ -727,11 +728,11 @@ export type OfferInput = {
   notes?: string | null;
 };
 
-export async function listOffers(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, opts: { application?: string; status?: string; showDeleted?: boolean } = {}) {
+export async function listOffers(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, opts: { application?: string; status?: string; showDeleted?: boolean; deletedOnly?: boolean } = {}) {
   const conds = [];
   if (opts.application) conds.push(eq(schema.offers.applicationId, idFromPath(opts.application)!));
   if (opts.status) conds.push(eq(schema.offers.status, opts.status as any));
-  if (!opts.showDeleted) conds.push(isNull(schema.offers.deleteTime));
+  conds.push(deleteStateFilter(schema.offers.deleteTime, opts.showDeleted, opts.deletedOnly));
   const scoped = applyScope(scope, schema.offers.code, schema.offers.code);
   if (scoped) conds.push(scoped);
   return keysetPage(deps, schema.offers, "offers", conds.length ? and(...conds) : undefined, { max: maxPageSize, pageToken });

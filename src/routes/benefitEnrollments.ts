@@ -21,6 +21,6 @@ export const benefitEnrollments = collectionRoutes<BenefitEnrollmentInput, typeo
   serialize: toBenefitEnrollmentResource,
   list: (c, page) => {
     // Row visibility was decided in middleware (scopeFor over the grant); `?employee` narrows it further.
-    return listBenefitEnrollments(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), page.showDeleted);
+    return listBenefitEnrollments(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), page.showDeleted, page.deletedOnly);
   },
 });

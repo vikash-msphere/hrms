@@ -90,6 +90,60 @@ describe("purge cascades cover every foreign key that points at the row", () => 
     });
   }
 
+  // THE POINTERS THAT ARE NOT FOREIGN KEYS, which is the blind spot in everything above.
+  //
+  // Every assertion so far reads the schema's own `.references()`, and a column that points at a row WITHOUT
+  // one is invisible to all of it - SQLite never refuses the purge over such a pointer, so the DELETE succeeds
+  // and nothing signals a problem. There are exactly two in the schema, and both were found the hard way:
+  //
+  //   `access_rules.match_code`  - the per-object ACL rules naming the purged row by its `code`. They outlived
+  //                                their target silently, rendering in the ACL surface as an entry whose object
+  //                                no longer resolves and deciding nothing.
+  //   `attachments.object_id`    - the file behind the row, keyed `(collection, object_id)`. A hard purge left
+  //                                the encrypted R2 object AND the metadata row carrying `file_name` behind -
+  //                                and a resume's filename is routinely the person's name. Seven soft-deletable
+  //                                collections write here, and `?force` is the operation reached for to honour
+  //                                an erasure request, which made it the one operation that kept the document.
+  //
+  // Both are swept generically inside `purgeRow` (no per-collection declaration to get wrong). This test pins
+  // that: it asserts the sweep exists for each, and - the part that catches the NEXT one - that the schema has
+  // grown no third FK-less pointer at a purged row without somebody deciding what happens to it.
+  it("sweeps the pointers that carry no foreign key, and knows of no third one", () => {
+    const sources = import.meta.glob("../src/**/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+    const softDelete = Object.entries(sources).find(([p]) => p.endsWith("/softDelete.ts"))![1];
+
+    // The access-rules sweep: exact rules in this collection's namespace naming the purged code.
+    expect(softDelete).toMatch(/delete\(schema\.accessRules\)[\s\S]{0,200}?matchCode/);
+    // The attachments sweep: the metadata rows in the batch, and the R2 objects they name after it commits.
+    expect(softDelete).toMatch(/delete\(schema\.attachments\)[\s\S]{0,200}?objectId/);
+    expect(softDelete).toMatch(/deps\.docs\.delete\(/);
+    // ...including the two stored objects that hang off a COLUMN rather than off `attachments`.
+    expect(softDelete).toMatch(/photoKey/);
+    expect(softDelete).toMatch(/signatureKey/);
+
+    // A third FK-less pointer would look like a column named `*_id` / `*_code` / `*_key` on a table that
+    // declares no foreign key for it. Rather than re-deriving that (which would flag every legitimate scalar),
+    // pin the two tables that are known to carry one: if a NEW table starts storing a `collection` +
+    // `object_id` pair, it is the same shape and needs the same sweep.
+    const objectPointerTables = Object.entries(schema as Record<string, unknown>).filter(([, table]) => {
+      if (!table || typeof table !== "object") return false;
+      let cfg: ReturnType<typeof getTableConfig>;
+      try {
+        cfg = getTableConfig(table as never);
+      } catch {
+        return false;
+      }
+      const names = new Set(cfg.columns.map((col) => col.name));
+      const pointsAtAnyRow = names.has("object_id") || names.has("match_code");
+      return pointsAtAnyRow && !cfg.foreignKeys.some((fk) => ["object_id", "match_code"].includes(fk.reference().columns[0]!.name));
+    }).map(([name]) => name);
+
+    expect(
+      objectPointerTables.sort(),
+      "these tables point at an arbitrary row without a foreign key, so SQLite will not refuse a purge over them and purgeCascade cannot express them - each needs a sweep inside purgeRow",
+    ).toEqual(["accessRules", "attachments"]);
+  });
+
   // A cascade written inline at the `purgeRow` call site is one this file cannot see, and every gap found so
   // far was in a teardown nobody was holding against the schema. So a bespoke purge must name its cascade,
   // export it, and add it to HAND_WRITTEN above - which is a line of work that buys a permanent check.

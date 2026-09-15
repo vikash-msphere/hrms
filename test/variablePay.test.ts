@@ -81,7 +81,7 @@ describe("the variable-pay run", () => {
     await seedComp(employee.employeeId, 200_000);
     const cycle = await cycleWith(manager, employee, 70);
 
-    const { lines } = await variablePayRun(deps, ALL, cycle.uuid);
+    const { lines } = await variablePayRun(deps, manager, ALL, cycle.uuid);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatchObject({ attainment: 70, target: 200_000, recommended: 140_000 });
     expect(lines[0]!.blocked).toBeUndefined(); // payable: nothing in its way
@@ -101,7 +101,7 @@ describe("the variable-pay run", () => {
     });
     const cycle = await cycleWith(manager, employee, 70);
 
-    const { lines } = await variablePayRun(deps, ALL, cycle.uuid);
+    const { lines } = await variablePayRun(deps, manager, ALL, cycle.uuid);
     expect(lines[0]).toMatchObject({ target: 200_000, recommended: 140_000 });
   });
 
@@ -111,7 +111,7 @@ describe("the variable-pay run", () => {
     await seedComp(noTarget.employeeId, null);
     const cycle = await cycleWith(manager, noTarget, 80);
 
-    const { lines } = await variablePayRun(deps, ALL, cycle.uuid);
+    const { lines } = await variablePayRun(deps, manager, ALL, cycle.uuid);
     expect(lines[0]).toMatchObject({ attainment: 80, target: null, recommended: null, blocked: "no_target" });
   });
 
@@ -145,7 +145,7 @@ describe("the variable-pay run", () => {
     expect(await deps.db.select().from(schema.bonuses)).toHaveLength(1);
 
     // And the second run reports the payment rather than re-offering it.
-    const { lines } = await variablePayRun(deps, ALL, cycle.uuid);
+    const { lines } = await variablePayRun(deps, manager, ALL, cycle.uuid);
     expect(lines[0]).toMatchObject({ awarded: 50_000, blocked: "already_awarded" });
   });
 
@@ -204,6 +204,64 @@ describe("the variable-pay run", () => {
     expect(entry).toBeTruthy();
     expect(entry!.entityId).toBe(cycle.uuid);
     expect(JSON.parse(entry!.meta ?? "{}").note).toMatch(/totalling 80000 INR/);
+  });
+
+  // THE REPORT STATES A COMPENSATION FIGURE, so the reader needs a compensation grant to see it.
+  //
+  // `variable_pay_target` and `currency_code` are declared protected fields on `compensation`
+  // (domain/manifests.ts) and `compensation` is a sensitive collection, but this verb bound the caller's scope
+  // to REVIEWS and then read the compensation table with no access decision at all. That is not hypothetical
+  // on the seeded policy, it IS the policy: `hr_admin` is the only non-super subject with a review-cycles
+  // custom-method allow, and compensation is granted to `payroll_admin` only.
+  //
+  // `recommended` is withheld with `target`, and that is the point rather than caution: it is
+  // `target x attainment` and attainment is on the same line, so publishing it publishes the target to anyone
+  // willing to divide.
+  describe("compensation figures are withheld from a reader with no compensation grant", () => {
+    const asRole = (actor: AppUser & { employeeId: string }, role: string) =>
+      ({ ...actor, role, grant: grantFor(role) }) as AppUser & { employeeId: string };
+
+    it("redacts target, recommended and currency for hr_admin, and says why", async () => {
+      const manager = await seedActor();
+      const employee = await seedActor(manager.employeeId);
+      await seedComp(employee.employeeId, 200_000);
+      const cycle = await cycleWith(manager, employee, 70);
+
+      const { lines } = await variablePayRun(deps, asRole(manager, "hr_admin"), ALL, cycle.uuid);
+      expect(lines).toHaveLength(1);
+      // The attainment is the review's own and stays; the salary-derived halves do not.
+      expect(lines[0]).toMatchObject({ attainment: 70, target: null, recommended: null, currency: "INR", blocked: "comp_not_visible" });
+    });
+
+    it("shows them to payroll_admin, which is the role the seed grants compensation to", async () => {
+      const manager = await seedActor();
+      const employee = await seedActor(manager.employeeId);
+      await seedComp(employee.employeeId, 200_000);
+      const cycle = await cycleWith(manager, employee, 70);
+
+      const { lines } = await variablePayRun(deps, asRole(manager, "payroll_admin"), ALL, cycle.uuid);
+      expect(lines[0]).toMatchObject({ attainment: 70, target: 200_000, recommended: 140_000 });
+      expect(lines[0]!.blocked).toBeUndefined();
+    });
+
+    // The award still PRICES off the real figure - the whole point of the two-press flow is that the bonus it
+    // writes is the figure it reported - and the bonuses row is something the awarding role holds outright.
+    // What must not travel is the per-person target on the answer.
+    it("still writes the right bonus, and still redacts the lines it hands back", async () => {
+      const manager = await seedActor();
+      const employee = await seedActor(manager.employeeId);
+      await seedComp(employee.employeeId, 200_000);
+      const cycle = await cycleWith(manager, employee, 100);
+
+      const hr = asRole(manager, "hr_admin");
+      const { lines, result } = await awardVariablePay(deps, hr, ALL, cycle.uuid, [`employees/${employee.employeeId}`]);
+      expect(result.awarded).toBe(1);
+      expect(result.total).toBe(200_000); // priced off the unredacted target
+      const bonus = (await deps.db.select().from(schema.bonuses))[0]!;
+      expect(bonus.amount).toBe(200_000);
+      // ...and the report still refuses to state it.
+      expect(lines[0]).toMatchObject({ target: null, recommended: null });
+    });
   });
 
   it("carries the target forward onto the next compensation revision", async () => {

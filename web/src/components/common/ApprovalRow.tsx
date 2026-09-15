@@ -109,8 +109,15 @@ export function ApprovalRow({
               </span>
             )}
           </p>
-          <p className="truncate text-sm text-muted-foreground">{summary}</p>
-          {context && <p className="truncate text-xs text-muted-foreground">{context}</p>}
+          {/* MASKED from session replay. This one line is the only cross-PERSON financial detail in the app
+              that renders on an unmasked route: an approver's queue puts several colleagues' loan principals,
+              reimbursement amounts and descriptions, encashment payouts and expense invoice numbers on one
+              screen, and `loans` is in MEMORY_ONLY for exactly that content. Masking it here rather than at
+              each caller covers every mount of this row (Approvals, Dashboard, Leaves, Expenses,
+              LeaveCalendar) and cannot be forgotten by the next one. The name above stays readable - a replay
+              of an approvals queue with no names in it says nothing about what was being triaged. */}
+          <p className="truncate text-sm text-muted-foreground" data-sentry-mask>{summary}</p>
+          {context && <p className="truncate text-xs text-muted-foreground" data-sentry-mask>{context}</p>}
           {/* How long it has waited is the queue's priority signal - too useful to drop on the device where
               the queue gets triaged. On a phone it rides here instead of in its own column. */}
           {!decidedState && (
@@ -207,7 +214,9 @@ export function RejectDialog({ target, onClose, onRejected }: { target: RejectTa
           <DialogTitle>Reject this request?</DialogTitle>
           <DialogDescription>
             {target?.name}
-            {target?.summary ? <> · {target.summary}</> : null}
+            {/* The same summary as the row, so the same mask - and a dialog is a portal outside
+                `<main data-page="…">`, so no route mask could reach it either way. */}
+            {target?.summary ? <> · <span data-sentry-mask>{target.summary}</span></> : null}
           </DialogDescription>
         </DialogHeader>
         {supportsNote && (

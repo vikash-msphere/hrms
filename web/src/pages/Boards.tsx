@@ -232,16 +232,24 @@ function useCardFilter(meId?: string | null, storageKey?: string) {
     writeLocalJson(storageKey, any ? ({ assignees: [...assignees], priorities: [...priorities], labels: [...labels], departments: [...departments], mine, reported } satisfies SavedFilter) : null);
   }, [assignees, priorities, labels, departments, mine, reported, storageKey]);
   const effDept = (c: CardT) => (c.department ? idOf(c.department) : NONE);
-  const match = (c: CardT) => {
-    if (q && !`${c.title} ${c.description ?? ""}`.toLowerCase().includes(q.toLowerCase())) return false;
-    if (mine && (!c.assignee || idOf(c.assignee) !== meId)) return false;
-    if (reported && (!c.reporter || idOf(c.reporter) !== meId)) return false;
-    if (assignees.size && !assignees.has(c.assignee ? idOf(c.assignee) : NONE)) return false;
-    if (priorities.size && !priorities.has(c.priority)) return false;
-    if (labels.size && !(c.labels ?? []).some((k) => labels.has(k))) return false;
-    if (departments.size && !departments.has(effDept(c))) return false;
-    return true;
-  };
+  // STABLE IDENTITY, because every consumer memoizes on it. `match` used to be a fresh closure per render, so
+  // the board's `visible` list, its per-cell card lists and BoardToolbar's own `useMemo(…, [cards, filter])`
+  // all recomputed on every render - and a keystroke in the board search box is a render. The needle is
+  // lowercased once here rather than inside the predicate, where it ran once per card per pass.
+  const needle = q.trim().toLowerCase();
+  const match = useCallback(
+    (c: CardT) => {
+      if (needle && !`${c.title} ${c.description ?? ""}`.toLowerCase().includes(needle)) return false;
+      if (mine && (!c.assignee || idOf(c.assignee) !== meId)) return false;
+      if (reported && (!c.reporter || idOf(c.reporter) !== meId)) return false;
+      if (assignees.size && !assignees.has(c.assignee ? idOf(c.assignee) : NONE)) return false;
+      if (priorities.size && !priorities.has(c.priority)) return false;
+      if (labels.size && !(c.labels ?? []).some((k) => labels.has(k))) return false;
+      if (departments.size && !departments.has(c.department ? idOf(c.department) : NONE)) return false;
+      return true;
+    },
+    [needle, mine, reported, assignees, priorities, labels, departments, meId],
+  );
   return {
     q, setQ, mine, setMine, reported, setReported, assignees, priorities, labels, departments, active, clear, match, effDept,
     toggleAssignee: (k: string) => setAssignees((s) => toggleSet(s, k)),
@@ -590,11 +598,28 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   }, [board, cards, empName, goalTitle, deptName, noneLabel, laneKeyOf]);
 
   const filter = useCardFilter(me.employee_id, `boards:filter:${boardId}`);
-  const visible = cards.filter(filter.match);
+  const visible = useMemo(() => cards.filter(filter.match), [cards, filter.match]);
+
+  // EVERY CELL IN ONE PASS. `cardsIn` used to re-filter and re-sort the whole visible set on each call, and it
+  // is called `columns × lanes` times to decide which lanes render and `columns × visibleLanes` times again to
+  // render them - so a 6-column board with swimlanes by assignee across a 12-person team was ~156 filter-plus-
+  // sort passes over every card on the board, per render, and a keystroke in the search box is a render. One
+  // bucketing pass plus one sort per non-empty cell gives the same answer.
+  const cells = useMemo(() => {
+    const byColumn = new Map<string, Map<string, CardT[]>>();
+    const laneless = board.swimlane_mode === "none";
+    for (const c of visible) {
+      const lanes = byColumn.get(c.column_key) ?? byColumn.set(c.column_key, new Map()).get(c.column_key)!;
+      const lane = laneless ? "" : laneKeyOf(c);
+      (lanes.get(lane) ?? lanes.set(lane, []).get(lane)!).push(c);
+    }
+    for (const lanes of byColumn.values()) for (const list of lanes.values()) list.sort(byRank);
+    return byColumn;
+  }, [visible, board.swimlane_mode, laneKeyOf]);
+  // One shared empty array, so a cell with no cards keeps a stable identity across renders.
+  const EMPTY_CELL = useMemo<CardT[]>(() => [], []);
   const cardsIn = (colKey: string, laneKey: string) =>
-    visible
-      .filter((c) => c.column_key === colKey && (board.swimlane_mode === "none" || laneKeyOf(c) === laneKey))
-      .sort(byRank);
+    cells.get(colKey)?.get(board.swimlane_mode === "none" ? "" : laneKey) ?? EMPTY_CELL;
 
   // Apply the board's swimlane display prefs: optionally drop lanes with no cards under the current
   // filter. Never applies in "none" mode (single implicit lane).

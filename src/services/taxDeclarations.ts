@@ -1,6 +1,7 @@
-import { eq, and, isNull, type SQL } from "drizzle-orm";
+import { eq, and, type SQL } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
@@ -24,13 +25,13 @@ export type TaxDeclarationInput = {
 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 
-export async function listTaxDeclarations(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, financialYear?: string, status?: string, showDeleted = false) {
+export async function listTaxDeclarations(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, financialYear?: string, status?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.taxDeclarations.code, schema.taxDeclarations.employeeId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.taxDeclarations.employeeId, empId));
   if (financialYear) conds.push(eq(schema.taxDeclarations.financialYear, financialYear));
   if (status) conds.push(eq(schema.taxDeclarations.status, status as Status));
-  if (!showDeleted) conds.push(isNull(schema.taxDeclarations.deleteTime));
+  conds.push(deleteStateFilter(schema.taxDeclarations.deleteTime, showDeleted, deletedOnly));
   // Paged in SQL (services/keysetPage.ts) on `createdAt` (the cursor's key). It used to read every matching
   // declaration into the isolate to slice one page - these accumulate a set per employee per financial year
   // and are never pruned, and D1 bills rows read, so an HR-scope list with no filters paid for every year the

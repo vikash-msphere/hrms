@@ -41,6 +41,46 @@ export function checkEtag(row: VersionedRow, ifMatch?: string): void {
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
 }
 
+/**
+ * The validator for one of the employee row's ENCRYPTED SUB-RESOURCES (`bank-account`, `personal-info`,
+ * `identity`, `tax`), derived from that blob's own ciphertext rather than from the row's `updated_at`.
+ *
+ * The four blobs live on one `employees` row, so one `updated_at` versioned all four: HR filling in an
+ * emergency contact bumped the version the employee was holding on the bank form, and their next PATCH was
+ * refused with a conflict on fields neither of them had touched. The only remedy the SPA offers is "reload
+ * and reapply" - on a payroll-relevant form, for a collision that did not happen.
+ *
+ * Hashing the ciphertext gives each blob a validator that moves only when THAT blob is written. The blob is
+ * re-encrypted on every write with a fresh IV, so the hash changes even when the plaintext does not - which
+ * is the direction that has to be safe: a validator that failed to move after a real write would silently
+ * lose the update. An absent blob has a validator of its own, so a first write is guarded like any other.
+ *
+ * 64 bits of FNV-1a over the base64 ciphertext, in two independently-seeded halves. This is a concurrency
+ * validator, not a security claim: nothing derives authority from it, and the ROW-level compare-and-swap in
+ * `updateAtVersion` still backs every write, so a hash collision costs a missed stale-read warning rather
+ * than a lost update.
+ */
+export function subResourceEtag(enc: string | null | undefined): string {
+  const s = enc ?? "";
+  let a = 0x811c9dc5;
+  let b = 0x01000193;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193) >>> 0;
+    b = Math.imul(b ^ c, 0x85ebca6b) >>> 0;
+  }
+  return `W/"${a.toString(16).padStart(8, "0")}${b.toString(16).padStart(8, "0")}"`;
+}
+
+/**
+ * The `checkEtag` of the sub-resources: refuse a caller whose `If-Match` disagrees with the blob they are
+ * about to write. The row-level guarded write still runs afterwards, so this is the precise error for the
+ * common case, not the guarantee.
+ */
+export function checkSubEtag(enc: string | null | undefined, ifMatch?: string): void {
+  if (ifMatch && ifMatch !== subResourceEtag(enc)) throw aborted("etag mismatch");
+}
+
 /** `uuid = ? AND updated_at = <the version we read>` - the version half of a guarded write. */
 export const atVersion = (table: Table, row: VersionedRow) => and(eq(table.uuid, row.uuid), eq(table.updatedAt, new Date(row.updatedAt)));
 

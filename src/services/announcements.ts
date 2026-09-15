@@ -8,6 +8,7 @@ import { audit, createdMeta, diffMeta, noteMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import { keysetPage } from "./keysetPage";
 import { searchFilter } from "./searchFilter";
 import { runBatch, insertBatches, byIdChunks } from "../lib/dbBatch";
@@ -87,9 +88,9 @@ function resolveAudience(input: { audience_scope?: "everyone" | "department" | "
 // grant plus the manifest's state rule); this only binds it to columns: the caller's scope, minus soft-deleted,
 // and - unless they may see restricted rows (an editor) - only what is live. One predicate, so the board list
 // and :markAllRead cannot drift on what "visible" means.
-function visibleWhere(scope: ListScope, showDeleted = false): SQL | undefined {
+function visibleWhere(scope: ListScope, showDeleted = false, deletedOnly = false): SQL | undefined {
   const conds = [applyScope(scope, schema.announcements.code, schema.announcements.authorEmployeeId)];
-  if (!showDeleted) conds.push(isNull(schema.announcements.deleteTime));
+  conds.push(deleteStateFilter(schema.announcements.deleteTime, showDeleted, deletedOnly));
   if (!scope.seeRestricted) conds.push(and(eq(schema.announcements.published, true), eq(schema.announcements.disabled, false)));
   return and(...(conds.filter(Boolean) as SQL[]));
 }
@@ -115,11 +116,12 @@ export async function listAnnouncements(
   showDeleted = false,
   q?: string,
   kind?: "announcement" | "post" | "poll" | "kudos",
+  deletedOnly = false,
 ) {
   // Server-side text filter (FTS over title, body, category, kind). It ANDs onto the visibility above and can
   // never widen it, so an author still finds their own drafts and nobody else starts seeing them.
   const textMatch = await searchFilter(deps, "announcements", q, schema.announcements.uuid);
-  const visible = visibleWhere(scope, showDeleted);
+  const visible = visibleWhere(scope, showDeleted, deletedOnly);
   // `?kind=kudos` narrows the board to one kind. The board itself is a FEED - a window by design - but the
   // recognition rollups beside it (a month's podium, six months of who was recognized, twelve months of how
   // often) are aggregates, and an aggregate folded over whatever the feed happens to have loaded redraws as

@@ -32,6 +32,12 @@ import type { AppUser } from "../env";
  * caller may not read are simply absent from the context, so an `{{ctc_annual}}` in a template resolves to
  * nothing rather than to a figure. A caller is omitted entirely (the cron/system path, a self-service letter
  * assembled by code rather than by a person) only where there is no principal to decide against.
+ *
+ * THREE SOURCES, THREE DECISIONS. `compensation`, `bonuses` and `settlements` are each gated against the
+ * employee's own code before they are read. The check is per source because the sources are independent
+ * grants, and that is precisely how it went wrong once already: it was applied to compensation and to nothing
+ * else, so the settlement's net AND its full line breakdown, and the bonus amount and reason, were assembled
+ * for anyone who could generate a letter.
  */
 export async function assembleLetterContext(deps: Deps, employeeId: string, viewer?: AppUser): Promise<LetterContext> {
   const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
@@ -124,12 +130,34 @@ export async function assembleLetterContext(deps: Deps, employeeId: string, view
     };
   }
 
-  // Most recent one-off award, for the bonus/incentive letter.
-  const bonusRow = (await deps.db.select().from(schema.bonuses).where(eq(schema.bonuses.employeeId, employeeId)).orderBy(desc(schema.bonuses.awardDate)).limit(1))[0];
+  // THE OTHER TWO SENSITIVE SOURCES, GATED THE SAME WAY. The compensation check above was applied per source
+  // by hand, so it covered the one source it was written for and these two were assembled with no check at
+  // all - which is the shape of the gap rather than an accident of it. `settlements` sits in
+  // `AUDIT.sensitive_collections` alongside `compensation`, and `ctx.settlement` carries the net AND the full
+  // line breakdown (salary, encashment, gratuity, notice recovery, loan recovery, TDS) into
+  // `{{settlement_net}}` and the `settlement_table` computed block; `ctx.bonus` carries the amount and reason.
+  //
+  // Not live on the seeded policy - today's letter author (`hr_admin`) holds `settlements.**` and
+  // `bonuses.**` outright, so a letter tells them nothing they cannot read directly. It becomes live the
+  // moment settlements is narrowed through the ACL, or letter generation is granted to another role, which is
+  // exactly the reasoning the compensation gate above records for itself.
+  //
+  // Same decision key as compensation: the EMPLOYEE's code, which is what every row for them hangs off, so a
+  // `me` rule matches a person's own letter and an org-wide one matches any.
+  const mayReadBonus = viewer ? await canReadObjectCode(deps, viewer, "bonuses", emp.code) : true;
+  const mayReadSettlement = viewer ? await canReadObjectCode(deps, viewer, "settlements", emp.code) : true;
+
+  // Most recent one-off award, for the bonus/incentive letter. Not read at all for a caller without the grant,
+  // so `{{bonus_amount}}` resolves to nothing and a `requires: bonus` block is dropped.
+  const bonusRow = mayReadBonus
+    ? (await deps.db.select().from(schema.bonuses).where(eq(schema.bonuses.employeeId, employeeId)).orderBy(desc(schema.bonuses.awardDate)).limit(1))[0]
+    : undefined;
   const bonus = bonusRow ? { amount: bonusRow.amount, currency: bonusRow.currency, kind: bonusRow.kind ?? undefined, reason: bonusRow.reason ?? undefined, date: bonusRow.awardDate } : undefined;
 
-  // Most recent full-and-final settlement snapshot, for the FnF letter.
-  const settleRow = (await deps.db.select().from(schema.settlements).where(eq(schema.settlements.employeeId, employeeId)).orderBy(desc(schema.settlements.settlementDate)).limit(1))[0];
+  // Most recent full-and-final settlement snapshot, for the FnF letter. Same narrowing.
+  const settleRow = mayReadSettlement
+    ? (await deps.db.select().from(schema.settlements).where(eq(schema.settlements.employeeId, employeeId)).orderBy(desc(schema.settlements.settlementDate)).limit(1))[0]
+    : undefined;
   const settlement = settleRow ? { lines: JSON.parse(settleRow.linesJson) as { name: string; kind: "earning" | "deduction"; amount: number }[], net: settleRow.net, date: settleRow.settlementDate } : undefined;
 
   return {

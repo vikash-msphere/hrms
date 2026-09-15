@@ -80,6 +80,27 @@ const MEMORY_ONLY = new Set([
   // free-text notes on people OUTSIDE the org, who never agreed to anything and cannot ask for it back. Same
   // reasoning, same conclusion - read on one page, so keep it off the disk.
   "candidates",
+  // The four below came off the OTHER sensitivity list. instrument.ts already judged each too sensitive to
+  // send to session replay, with its reason written out - and replay is this rule one hop further (a third
+  // party, with retention), so anything on that list belongs on this one. They were not, so the app was
+  // refusing to record them while writing them to the browser profile for up to seven days.
+  // test/replayMaskDrift.test.ts now asserts both directions, which is what stops the two parting again.
+  //
+  // Private 1:1s. `toCheckInResource` (src/http/serialize.ts) goes to real trouble over `private_note` -
+  // "served to the ONE person who wrote it and to nobody else - not to the other party, not to an HR admin who
+  // can read the row, not to a manager reading down the chain" - and that field was then written in plaintext
+  // to whatever machine the manager opened the page on, outliving the session and surviving a closed tab.
+  "check-ins",
+  // Ratings and written assessments, plus 360 feedback whose whole design is that the subject cannot attribute
+  // it. `manager_comment`, `overall_rating`, `ratings` and `goal_ratings` are served only when
+  // `_managerVisible` - deliberately withheld from the employee until the review is shared - and were then
+  // stored on the reviewer's disk.
+  "reviews",
+  "review-feedback",
+  // Anonymity is a PRODUCT PROMISE (services/suggestions.ts keeps the submitter off the notification and out
+  // of the peer view). A copy on disk beside an identified browser profile is the same promise broken, one
+  // machine over.
+  "suggestions",
 ]);
 
 /** Whether a loaded copy of this collection may be written to disk (see MEMORY_ONLY above). */

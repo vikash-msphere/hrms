@@ -121,7 +121,7 @@ export const goals = collectionRoutes<GoalInput, typeof schema.goals>({
     remove: (deps, actor, id, ifMatch) => deleteGoal(deps, actor, id, ifMatch),
     restore: (deps, actor, id) => restoreGoal(deps, actor, id),
   },
-  list: (c, page) => listGoals(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted, c.req.query("cycle"), c.req.query("burnup") === "true", c.req.query("stage"), c.req.query("employee") || undefined),
+  list: (c, page) => listGoals(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted, c.req.query("cycle"), c.req.query("burnup") === "true", c.req.query("stage"), c.req.query("employee") || undefined, page.deletedOnly),
   verbs: {
     updateProgress: { schema: progressSchema, run: (deps, user, id, body) => updateGoalProgress(deps, user, id, body.progress, body.status, body.note) },
     setConfidence: { schema: confidenceSchema, run: (deps, user, id, body) => setGoalConfidence(deps, user, id, body.confidence, body.note) },

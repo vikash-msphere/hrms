@@ -39,7 +39,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const CLEAR = [schema.projects, schema.goalComments, schema.goals, schema.auditLog, schema.accessRules, schema.users, schema.employees, schema.roles];
+const CLEAR = [schema.attachments, schema.projects, schema.goalComments, schema.goals, schema.auditLog, schema.accessRules, schema.users, schema.employees, schema.roles];
 beforeEach(async () => {
   for (const t of CLEAR) await deps.db.delete(t);
 });
@@ -204,5 +204,75 @@ describe("hard purge: the per-object access rules that named the row go with it"
     // The sweep rides the same batch as the teardown, so a refusal takes it back with everything else - the
     // row is still there and so is the rule that governs it.
     expect(await survives(pinned)).toBe(true);
+  });
+});
+
+// THE OTHER FK-LESS POINTER, and it had no sweeper at all.
+//
+// `purgeRow` takes an `onPurge` hook documented for exactly this ("runs side effects like deleting an R2
+// object"), and services/crud.ts passes `undefined` at the only place a factory collection's purge is built -
+// so nothing ever called it, and there is no nightly sweeper either. `attachments.object_id` carries no
+// foreign key, so SQLite never refused the purge over an attachment and test/purgeCascadeDrift (which holds
+// every declaration against the schema's own foreign keys) could not see the pointer either.
+//
+// What survived a `DELETE /v1/candidates/<id>?force` was the encrypted object in R2, forever, AND the
+// `attachments` row naming it - and that row carries `file_name`, which for a resume is routinely the
+// person's name. Seven soft-deletable collections write into this one table, and `?force` is the operation
+// reached for to honour an erasure request, which made it the one operation that kept the document.
+//
+// The sweep is generic on `(collection, object_id)` - purgeRow holds both halves - so the parent used here is
+// simply whatever this suite already seeds.
+describe("a hard purge takes the record's attachments with it", () => {
+  const attachmentsOf = (objectId: string) =>
+    deps.db.select().from(schema.attachments).where(eq(schema.attachments.objectId, objectId));
+
+  async function attach(objectId: string, slot: string, fileName: string) {
+    const uuid = genId();
+    const r2Key = `attachments/goals/${objectId}/${uuid}`;
+    await deps.docs.put(r2Key, new TextEncoder().encode("the bytes"), "application/pdf");
+    await deps.db.insert(schema.attachments).values({ uuid, collection: "goals", objectId, slot, r2Key, fileName, contentType: "application/pdf", sizeBytes: 9 });
+    return r2Key;
+  }
+
+  it("deletes the metadata row and the stored object, for every slot", async () => {
+    const actor = await seedActor();
+    const { goalId } = await seedGoalWithComment(actor.employeeId!);
+    const receipt = await attach(goalId, "receipt", "Priya Sharma - resume.pdf");
+    const proof = await attach(goalId, "proof", "rent-receipt.pdf");
+    expect(await attachmentsOf(goalId)).toHaveLength(2);
+
+    await purge(actor, goalId, COMPLETE);
+
+    expect(await attachmentsOf(goalId)).toHaveLength(0);
+    expect(await deps.docs.get(receipt)).toBeNull();
+    expect(await deps.docs.get(proof)).toBeNull();
+  });
+
+  it("leaves another record's attachments alone", async () => {
+    const actor = await seedActor();
+    const { goalId } = await seedGoalWithComment(actor.employeeId!);
+    const other = await seedGoalWithComment(actor.employeeId!);
+    await attach(goalId, "receipt", "mine.pdf");
+    const keep = await attach(other.goalId, "receipt", "theirs.pdf");
+
+    await purge(actor, goalId, COMPLETE);
+
+    expect(await attachmentsOf(other.goalId)).toHaveLength(1);
+    expect(await deps.docs.get(keep)).not.toBeNull();
+  });
+
+  it("keeps both when the purge itself is refused", async () => {
+    // The metadata rows ride the same batch as the teardown, and the R2 deletes run only after it commits -
+    // the order purgeRow argues for, so a refusal leaves a live row whose file still exists rather than a
+    // record pointing at bytes that are gone.
+    const actor = await seedActor();
+    const { goalId } = await seedGoalWithComment(actor.employeeId!);
+    await deps.db.insert(schema.projects).values({ uuid: genId(), code: `p-${genId().slice(0, 5)}`, name: "Migration", goalId });
+    const key = await attach(goalId, "receipt", "still-here.pdf");
+
+    await expect(purge(actor, goalId, INCOMPLETE)).rejects.toMatchObject({ httpStatus: 409 });
+
+    expect(await attachmentsOf(goalId)).toHaveLength(1);
+    expect(await deps.docs.get(key)).not.toBeNull();
   });
 });

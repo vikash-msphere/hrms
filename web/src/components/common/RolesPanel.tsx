@@ -38,7 +38,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
   const { toast } = useToast();
 
   const [editing, setEditing] = useState<User | null>(null);
-  const [form, setForm] = useState({ role: "employee", status: "active", employee: NONE });
+  const [form, setForm] = useState({ role: "employee", status: "active", employee: NONE, roles: [] as string[] });
   const [permUser, setPermUser] = useState<User | null>(null);
 
   const empName = useMemo(() => {
@@ -68,7 +68,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
 
   function openEdit(u: User) {
     setEditing(u);
-    setForm({ role: u.role, status: u.status, employee: u.employee ? `employees/${idOf(u.employee)}` : NONE });
+    setForm({ role: u.role, status: u.status, employee: u.employee ? `employees/${idOf(u.employee)}` : NONE, roles: [...(u.roles ?? [])].sort() });
   }
 
   const isSelf = editing?.email === me.email;
@@ -78,6 +78,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
     !!editing &&
     (form.role !== editing.role ||
       form.status !== editing.status ||
+      form.roles.join() !== [...(editing.roles ?? [])].sort().join() ||
       form.employee !== (editing.employee ? `employees/${idOf(editing.employee)}` : NONE));
 
   // Throws to fail: WriteDialog pins the message in the form and keeps the choices made.
@@ -87,6 +88,9 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
     if (!isSelf) {
       body.role = form.role;
       body.status = form.status;
+      // Sent whole, not as a diff - the server replaces the set. The primary is filtered out there too, but
+      // dropping it here keeps the request saying exactly what the form means.
+      body.roles = form.roles.filter((r) => r !== form.role);
     }
     await patch("users/" + idOf(editing.path), body, editing.etag);
     toast({ title: "User updated", variant: "success" });
@@ -205,6 +209,36 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
                 ))}
               </SelectContent>
             </Select>
+          </Field>
+          {/* ADDITIONAL roles. Separate from the primary rather than folded into one multi-select, because the
+              primary is not interchangeable with these: it is what the audit trail records for every act this
+              person performs and what the app labels them by. Toggles rather than a combobox - the list is short,
+              and seeing which roles somebody does NOT hold is half of what this control is read for. */}
+          <Field
+            label="Additional roles"
+            field="roles"
+            hint="Their permissions are added to the primary role. Someone who is both a team lead and the office's asset manager holds both - and keeps tracking each bundle as it changes."
+            accessTarget={{ collection: "users", field: "roles", label: "Additional roles" }}
+          >
+            <div className="flex flex-wrap gap-1.5">
+              {ROLE_OPTIONS.filter((r) => r !== form.role).map((r) => {
+                const on = form.roles.includes(r);
+                return (
+                  <Button
+                    key={r}
+                    type="button"
+                    variant={on ? "default" : "outline"}
+                    size="sm"
+                    className="h-7"
+                    disabled={isSelf}
+                    aria-pressed={on}
+                    onClick={() => setForm({ ...form, roles: on ? form.roles.filter((x) => x !== r) : [...form.roles, r].sort() })}
+                  >
+                    {roleLabel(r)}
+                  </Button>
+                );
+              })}
+            </div>
           </Field>
           <Field label="Status" field="status" accessTarget={{ collection: "users", field: "status", label: "Status" }}>
             <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v })} disabled={isSelf}>

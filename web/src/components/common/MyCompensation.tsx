@@ -77,7 +77,14 @@ export function MyCompensation({ employeeId }: { employeeId: string }) {
           <Button size="sm" variant={unit === "annual" ? "default" : "ghost"} className="h-7" onClick={() => setUnit("annual")}>Annual</Button>
         </div>
       </CardHeader>
-      <CardContent>
+      {/* MASKED from session replay. `profile` is deliberately NOT a SENSITIVE_PAGES route (instrument.ts:
+          masking it hid the headings, statuses and dates that make a replay readable), and the rule stated
+          there is that a panel added to the profile is recorded unless it says otherwise. This panel shows the
+          CTC headline, its build-up, the pending arrears and every past revision, which is the same class of
+          figure `compensation` is in MEMORY_ONLY for - so it says otherwise here. The mask sits on the CONTENT
+          rather than the Card so the title and the monthly/annual toggle stay readable, and `unmask` keeps the
+          column headings inside it. */}
+      <CardContent data-sentry-mask>
         {!loaded ? (
           // Shaped like what arrives: the CTC headline block, then the component breakdown under it.
           <>

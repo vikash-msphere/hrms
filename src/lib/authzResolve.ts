@@ -3,9 +3,10 @@
 // id resolver is injected, so it is unit-testable) + a DB-backed uuid->code resolver with an in-isolate
 // cache. NOTE: only the top resource id (segment after the collection) is resolved today; nested ids
 // arrive with the 0.7/0.8 wire flip + parent-wildcard work.
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
+import { byIdChunks } from "./dbBatch";
 
 // Collection name -> table, for resources that carry an authz-relevant `code`.
 // The registry is exported (as COLLECTION_TABLES) because it is the one place that knows, for every wire
@@ -189,6 +190,29 @@ export const LIST_OWNER_COLUMNS: Record<string, string> = {
 };
 
 /**
+ * Collections whose rows carry a FLAT code but a real employee OWNER column - the set the item lane needs an
+ * OWNER KEY for (domain/permissions.ts Resolved#ownerResource).
+ *
+ * The membership rule is mechanical: a collection belongs here when `LIST_OWNER_COLUMNS` above binds it a real
+ * owner column - not `code` or `uuid`, which are the "owned by its own identity" spellings a catalogue uses -
+ * and it is NOT owned-coded (absent from `HIERARCHICAL_TABLES`, where the owner already sits inside the row's
+ * own code and a second key could only add reach).
+ *
+ * WRITTEN OUT RATHER THAN COMPUTED, deliberately. Computing it needs `HIERARCHICAL_TABLES`, which lives in
+ * `services/codeCascade.ts` because it pairs collections with drizzle tables - and importing a service from
+ * this module (or from `middleware/authz.ts` and `http/collectionRoute.ts`, which read this set on the hot
+ * path) adds an import edge into a graph that already carries ~157 cycles through `deps.ts -> index.ts`. One
+ * such edge was enough to reorder module initialisation and leave `DEFAULT_POLICY` undefined at request time,
+ * which surfaced as every factory-built route answering 500. So the set is data here, in a leaf module, and
+ * `test/reparenting.test.ts` asserts it is exactly the complement described above - the same
+ * registry-plus-tripwire shape `LIST_OWNER_COLUMNS` itself uses.
+ *
+ * Getting it wrong is asymmetric: a collection wrongly IN gets a widened item lane, one wrongly OUT keeps the
+ * split-brain grant the owner key exists to close. The tripwire covers both directions.
+ */
+export const OWNER_COLUMN_COLLECTIONS: ReadonlySet<string> = new Set(["assets", "users"]);
+
+/**
  * The owner column to hand `applyScope` for `collection`, off the table backing it.
  *
  * Undefined when the collection binds no owner, when the map names a column the table does not carry, and
@@ -243,23 +267,66 @@ export async function codeToUuid(deps: Deps, collection: string, code: string): 
   return row?.uuid ?? null;
 }
 
-// Resolve a state-gated item: its `code` AND the requested state columns, in ONE read (uncached - state is
-// mutable, unlike code). Lets the middleware gate item reads on row state (e.g. "unpublished") without a
-// second read, so the budget stays "the one id->code resolve". `cols` are drizzle property names.
+// Resolve an item's `code` AND whatever else the decision needs off the same row, in ONE read (uncached - the
+// extra columns are mutable, unlike code). Lets the middleware gate item reads on row state (e.g.
+// "unpublished") and match an owner column without a second read, so the budget stays "the one id->code
+// resolve". `cols` are drizzle property names; `ownerProp` is the owner column (LIST_OWNER_COLUMNS) when the
+// collection needs one, and comes back separately because it is an OWNER id, not row state.
+//
+// The owner id still has to become an owner CODE, but that hop is `uuidToCode(deps, "employees", ownerId)` -
+// the cached resolver above - so warm it costs no read at all.
 export async function resolveItemState(
   deps: Deps,
   collection: string,
   id: string,
   cols: string[],
-): Promise<{ code: string | null; state: Record<string, unknown> } | null> {
+  ownerProp?: string,
+): Promise<{ code: string | null; state: Record<string, unknown>; ownerId: string | null } | null> {
   const t = TABLES[collection];
   if (!t) return null;
   const sel: Record<string, any> = { code: t.code };
   for (const col of cols) if (t[col]) sel[col] = t[col];
+  // Selected under a reserved key so a state column of the same name cannot shadow it, and so the owner never
+  // lands in `state` (which is matched against the collection's public_when rule).
+  if (ownerProp && t[ownerProp]) sel.__owner = t[ownerProp];
   const row = (await deps.db.select(sel).from(t).where(eq(t.uuid, id)).limit(1))[0] as Record<string, unknown> | undefined;
   if (!row) return null;
-  const { code, ...state } = row;
-  return { code: (code as string | null) ?? null, state };
+  const { code, __owner, ...state } = row;
+  return { code: (code as string | null) ?? null, state, ownerId: (__owner as string | null) ?? null };
+}
+
+/**
+ * The owner employee CODE for each row of a page, keyed by the row's own code - what the access hint needs for a
+ * flat-coded owner-column collection (http/accessHint.ts computeCan).
+ *
+ * ONE read for the whole page, not one per row. The item lane can lean on the per-isolate uuid->code cache
+ * because it resolves a single owner; a hundred-row asset list cold would be a hundred indexed lookups, which is
+ * the eager read the D1 budget forbids. So the distinct owners are fetched in a single `IN` (chunked by the
+ * usual parameter cap) and mapped back.
+ *
+ * `ownerProp` is the drizzle property naming the owner column (LIST_OWNER_COLUMNS). Rows with no owner - an
+ * asset in stock, a service account with no employee - contribute no entry, and the hint then decides them on
+ * the row's own code exactly as it does today.
+ */
+export async function pageOwnerCodes(deps: Deps, rows: any[], ownerProp: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const owners = [...new Set(rows.map((r) => r?.[ownerProp]).filter((v): v is string => typeof v === "string" && v.length > 0))];
+  if (!owners.length) return out;
+  const codeOf = new Map<string, string>();
+  for (const group of await byIdChunks(owners, (ids) =>
+    deps.db.select({ uuid: schema.employees.uuid, code: schema.employees.code }).from(schema.employees).where(inArray(schema.employees.uuid, ids)),
+  )) {
+    if (group.code) codeOf.set(group.uuid, group.code);
+  }
+  for (const r of rows) {
+    const code = r?.code as string | undefined;
+    const owner = r?.[ownerProp] as string | undefined;
+    if (code && owner) {
+      const oc = codeOf.get(owner);
+      if (oc) out.set(code, oc);
+    }
+  }
+  return out;
 }
 
 export type IdResolver = (collection: string, id: string) => Promise<string | null>;

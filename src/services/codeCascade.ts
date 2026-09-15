@@ -81,6 +81,7 @@ export const HIERARCHICAL_TABLES: HierTable[] = [
   { table: schema.taxDeclarations, collection: "tax-declarations" },
   { table: schema.referrals, collection: "referrals" },
   { table: schema.interviewFeedback, collection: "interview-feedback" },
+  { table: schema.backgroundChecks, collection: "background-checks" },
   // Mixed: owned when the poster/creator has an employee record, flat when they do not. See the header.
   { table: schema.announcements, collection: "announcements", ownedWhen: (t) => isNotNull(t.authorEmployeeId) },
   { table: schema.jobs, collection: "operations", ownedWhen: (t) => isNotNull(t.employeeId) },
@@ -98,7 +99,7 @@ export const HIERARCHICAL_TABLES: HierTable[] = [
   { table: schema.compOffCredits, collection: null },
 ];
 
-const HIER_COLLECTIONS = HIERARCHICAL_TABLES.map((h) => h.collection).filter((c): c is string => c !== null);
+export const HIER_COLLECTIONS = HIERARCHICAL_TABLES.map((h) => h.collection).filter((c): c is string => c !== null);
 
 /**
  * The id-position tokens that are SCOPE WORDS, not codes. Never rewritten, and the guard is not cosmetic.

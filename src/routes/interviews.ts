@@ -38,6 +38,7 @@ export const interviews = collectionRoutes<InterviewInput, typeof schema.intervi
       application: c.req.query("application"),
       status: c.req.query("status"),
       showDeleted: page.showDeleted,
+      deletedOnly: page.deletedOnly,
     });
   },
   verbs: {

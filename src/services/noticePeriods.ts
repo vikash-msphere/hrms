@@ -1,6 +1,7 @@
 import { allocOwnedCode } from "./codeAlloc";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { applyScope } from "./listScope";
+import { deleteStateFilter } from "./softDelete";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -40,10 +41,10 @@ const dayMs = (s: string, field: string): number => {
   return ms;
 };
 
-export async function listNoticePeriods(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false) {
+export async function listNoticePeriods(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.noticePeriods.code, schema.noticePeriods.employeeId)];
   if (statusFilter) conds.push(eq(schema.noticePeriods.status, statusFilter as Status));
-  if (!showDeleted) conds.push(isNull(schema.noticePeriods.deleteTime));
+  conds.push(deleteStateFilter(schema.noticePeriods.deleteTime, showDeleted, deletedOnly));
   return keysetPage<typeof schema.noticePeriods.$inferSelect>(deps, schema.noticePeriods, "notice-periods", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken });
 }
 

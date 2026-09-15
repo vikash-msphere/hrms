@@ -32,10 +32,22 @@ describe("round2", () => {
     expect(round2(1234.56)).toBe(1234.56);
     expect(round2(0)).toBe(0);
   });
-  it("collapses non-finite / sub-paise noise to 0", () => {
-    expect(round2(NaN)).toBe(0);
-    expect(round2(Infinity)).toBe(0);
+  it("collapses sub-paise noise to 0", () => {
     expect(round2(1e-9)).toBe(0);
+  });
+
+  // A NON-FINITE FIGURE THROWS RATHER THAN ANSWERING 0, which is the failure mode this whole module's header
+  // names. It is reached the ordinary way - a float accumulator that overflows - and answering 0 turns an
+  // overflowed total into a report that reads as untouched: `computeBudgetSpendMany` accumulates SUBMITTED
+  // expenses into a plain `+=`, so two absurd claims made a budget show `pending: 0` and `remaining: the whole
+  // cap` with the rows still on the books, and no threshold alert fired. Same call domain/incomeTax.ts
+  // #monthlyTds makes: "an arrival is worth a throw rather than a zero".
+  it("throws on a non-finite figure instead of answering zero", () => {
+    expect(() => round2(NaN)).toThrow(/non-finite/);
+    expect(() => round2(Infinity)).toThrow(/non-finite/);
+    expect(() => round2(-Infinity)).toThrow(/non-finite/);
+    // The overflowed TOTAL is the reachable case, and it surfaces rather than reading as 0.
+    expect(() => sum2([1e308, 1e308])).toThrow(/non-finite/);
   });
   it("stays a number at the top of the range, where JS stringifies exponentially", () => {
     // The decimal-string scaling (`${n}e2`) only parses while `n` is positional. At 1e21 JS switches to
@@ -67,5 +79,13 @@ describe("sum2", () => {
     expect(sum2([1000000.01, 2000000.02, 3000000.03])).toBe(6000000.06);
     expect(sum2([])).toBe(0);
     expect(sum2([1.005, 1.005])).toBe(2.01); // 2.0099999... -> 2.01
+  });
+
+  // A non-finite ELEMENT is a missing line, which has always meant "nothing to add"; a non-finite TOTAL is
+  // every element being real and their sum leaving the range, which is the case that must not read as 0.
+  it("drops a non-finite element but refuses a non-finite total", () => {
+    expect(sum2([100, NaN, 50])).toBe(150);
+    expect(sum2([1e308, 5000])).toBe(1e308); // large-but-finite still passes through
+    expect(() => sum2([1e308, 1e308, 1e308])).toThrow(/non-finite/);
   });
 });

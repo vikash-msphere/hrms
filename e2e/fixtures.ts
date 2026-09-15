@@ -71,6 +71,20 @@ const IGNORED_CONSOLE = [
   // 500 and 502 stay failures: those the app really can produce (errorHandler's internal, `upstreamFailed`),
   // and a spec that provokes one still opts in by name through `allowConsoleErrors`.
   /status of 503/i,
+  // A letterhead thumbnail whose bytes went while the row naming them was on screen.
+  //
+  // The letterheads CATALOGUE is one org-wide list, and four specs have its panel open at once
+  // (letterheads, letterheadArtwork, letterheadCopy, letterheadPrintVersion). A row's artwork is not part of
+  // the row - `Settings.tsx`'s LetterheadRow and the designer both fetch `:image` per slot, driven by the
+  // `assets` map the LIST answer carried. So when `letterheadArtwork` uploads a mark and removes it again,
+  // any page that read the list in between holds a row that still names the slot and asks for bytes the
+  // server has already dropped: `getLetterheadImage` answers 404, which is the honest status for a slot with
+  // no image. Both callers catch it and fall back to the placeholder, so nothing is broken on screen - the
+  // only trace is the console line, and no amount of app care can close a window that opens in another
+  // browser. Seen 2026-09-15: two of these failed `letterheads.spec.ts`, which passed on the retry.
+  //
+  // Scoped to the endpoint, not to the status: a 404 anywhere else is still a spec failure.
+  /status of 404\b.*\/v1\/letterheads\/[^/]+:image/i,
 ];
 
 // The relay's own path. A failed resource load is logged against the url that failed, so a console error
@@ -95,7 +109,11 @@ type Fixtures = {
   as: (who: Role | { email: string }) => Promise<Page>;
 };
 
-/** Stop treating console errors matching `pattern` as a failure on this page. */
+/**
+ * Stop treating console errors matching `pattern` as a failure on this page. The pattern is matched against
+ * the message and the url the browser blamed, joined as `<message> @ <url>`, so a tolerance can name the one
+ * request it is excusing rather than a whole status.
+ */
 export function allowConsoleErrors(page: Page, pattern: RegExp) {
   allowed.get(page)?.push(pattern);
 }
@@ -152,10 +170,16 @@ export const test = base.extend<Fixtures>({
       // `where` is the url the browser blames, and it is reported because without it a failed resource load
       // says only its status: "the server responded with a status of 500" names no request, so working out
       // WHICH read failed means re-running the spec with a listener attached and hoping it happens again.
-      // The tolerance patterns are still matched against the message alone, so a spec's own
-      // `allowConsoleErrors` regex is unaffected by what is appended here.
+      //
+      // The tolerance patterns are matched against the reported LINE - message and url together - because a
+      // failed resource load names no url in its message, so a pattern that could only see the message could
+      // only ever tolerate a whole STATUS. That is how wide a tolerance had to be written to excuse one
+      // endpoint, and a blanket `/status of 404/` is exactly the entry that hides the next real one. Matching
+      // the line lets a tolerance name the request instead. A pattern written against the message alone is
+      // unaffected: it matches a substring of the line either way.
       const record = (text: string, where?: string) => {
-        const skip = [...IGNORED_CONSOLE, ...(allowed.get(page) ?? [])].some((p) => p.test(text));
+        const line = `${text}${where ? ` @ ${where}` : ""}`;
+        const skip = [...IGNORED_CONSOLE, ...(allowed.get(page) ?? [])].some((p) => p.test(line));
         if (!skip) failures.push(`[${typeof who === "string" ? who : email}] ${text.slice(0, 300)}${where ? ` @ ${where}` : ""}`);
       };
       // Read before the console entry is judged - the body settles first, and the check happens after the run.

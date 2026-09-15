@@ -138,3 +138,40 @@ describe("fieldIconShouldShow - icon ONLY for a real field-level target", () => 
     expect(fieldIconShouldShow("identity.uan")).toBe(true);
   });
 });
+
+// "One department" - the tier that says WHICH department, rather than "the subject's own". It compiles to the
+// same wire scope a subtree does, because it IS one (`<deptCode>-*`); what is new is that the anchor is picked
+// by the grantor instead of taken from whatever row the modal was opened on. That distinction is the whole
+// test: an anchor must never be confused with the page's object, in either direction.
+describe("ruleScopeFor - named department", () => {
+  it("compiles to a subtree pinned to the PICKED department, not the page's object", () => {
+    const t = { collection: "leave-requests", objectPath: "leave-requests/req-1", anchorPath: "departments/sales", scope: "named-dept" };
+    expect(ruleScopeFor(t)).toEqual({ scope: "subtree", scope_ref: "departments/sales" });
+  });
+
+  it("carries a field token like every other tier", () => {
+    const t = { collection: "employees", anchorPath: "departments/sales", field: "bank-account", scope: "named-dept" };
+    expect(ruleScopeFor(t)).toEqual({ scope: "subtree", scope_ref: "departments/sales", field: "bank-account" });
+  });
+
+  it("with no department picked it does NOT silently pin to the page's object", () => {
+    // Degrading to org-wide is the existing behaviour for an unanchored subtree, and the modal blocks the
+    // write in this state - but the one outcome that must never happen is pinning to `objectPath`, which
+    // would author a rule about a single leave request while the admin believed they granted a department.
+    const t = { collection: "leave-requests", objectPath: "leave-requests/req-1", scope: "named-dept" };
+    expect(ruleScopeFor(t)).toEqual({ scope: "all" });
+  });
+});
+
+describe("ruleMatchesTarget - named department", () => {
+  const t = { collection: "leave-requests", objectPath: "leave-requests/req-1", anchorPath: "departments/sales", scope: "named-dept" };
+  it("matches the rule on the same department only", () => {
+    expect(ruleMatchesTarget({ collection: "leave-requests", scope: "subtree", scope_ref: "departments/sales" }, t)).toBe(true);
+    expect(ruleMatchesTarget({ collection: "leave-requests", scope: "subtree", scope_ref: "departments/eng" }, t)).toBe(false);
+  });
+  it("never matches the page's object or the subject-relative dept rule", () => {
+    expect(ruleMatchesTarget({ collection: "leave-requests", scope: "subtree", scope_ref: "leave-requests/req-1" }, t)).toBe(false);
+    expect(ruleMatchesTarget({ collection: "leave-requests", scope: "dept" }, t)).toBe(false);
+    expect(ruleMatchesTarget({ collection: "leave-requests", scope: "all" }, t)).toBe(false);
+  });
+});

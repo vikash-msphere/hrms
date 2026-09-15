@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { positiveMoney } from "../http/moneyField";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import {
@@ -17,7 +18,7 @@ const createSchema = z
   .object({
     employee: z.string().nullable().optional(),
     category: z.string().nullable().optional(),
-    amount: z.number().positive(),
+    amount: positiveMoney(),
     incurred_on: z.string().nullable().optional(),
     description: z.string().nullable().optional(),
   })

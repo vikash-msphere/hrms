@@ -11,6 +11,7 @@ export function systemActor(): AppUser {
     uuid: "system",
     email: "system@automation",
     role: "super_admin",
+    roles: ["super_admin"],
     status: "active",
     employeeId: null,
     employeeCode: null,

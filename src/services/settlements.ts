@@ -14,7 +14,7 @@ import {
 } from "./taxProjection";
 import { encashmentRateConfig } from "./leaveEncashments";
 import { orgToday, dayStartMs } from "./orgDay";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, lopDayUnits, eventCreditByDay } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, lopDayUnits, eventCreditByDay, sessionWorkedMinutes } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidReimbursements, markReimbursementsSettledStmt, releaseReimbursementsSettledStmt } from "./reimbursements";
 import { unpaidBonuses, markBonusesSettledStmt, releaseBonusesSettledStmt } from "./bonuses";
@@ -182,7 +182,9 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
     const ms = +new Date(s.clockIn);
     if (ms < fromMs || ms > toMs + 86_400_000) continue;
     const day = localDay(ms, tz);
-    const minutes = s.clockOut ? Math.max(0, Math.round((+new Date(s.clockOut) - ms) / 60000)) : 0;
+    // Same reading as the payroll build's - one implementation, because this payout has no later run to
+    // correct it (domain/attendance.ts#sessionWorkedMinutes).
+    const minutes = sessionWorkedMinutes(ms, s.clockOut ? +new Date(s.clockOut) : null, +deps.clock.now(), tz);
     workedByDay.set(day, (workedByDay.get(day) ?? 0) + minutes);
   }
   // Same event credit the payroll build applies, so a leaver's final settlement doesn't dock days they spent

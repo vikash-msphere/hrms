@@ -12,6 +12,7 @@ import { etagOf } from "../http/serialize";
 import { has, type CrudSpec, type SetOf } from "./crud";
 import { orgToday, dayStartMs } from "./orgDay";
 import { atVersion, checkEtag, versionConflict } from "./versionGuard";
+import { liveEmployee } from "./liveEmployee";
 
 export type ApprovalDelegationInput = {
   delegator?: string | null;
@@ -36,10 +37,17 @@ const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 // `dayStartMs` (its documented inverse) rather than by building a Date out of local parts.
 export async function activeDelegatesFor(deps: Deps, delegatorId: string): Promise<string[]> {
   const t = new Date(dayStartMs(await orgToday(deps)));
+  // THE DELEGATE HAS TO STILL BE HERE. This matched on the date window alone, and a delegation is exactly the
+  // arrangement that outlives the person: it is set up in advance, it is never revoked when somebody leaves,
+  // and it is the COVER path for an absent manager - so a delegation to somebody who has since left copied
+  // every nudge into a second mailbox nobody can open (middleware/auth.ts#assertLive refuses them a session),
+  // on top of the manager's own. Bound in SQL as a join rather than filtered after the read, the way
+  // services/liveEmployee.ts argues for: the dead rows are never read.
   const rows = await deps.db
     .select({ delegateId: schema.approvalDelegations.delegateId })
     .from(schema.approvalDelegations)
-    .where(and(eq(schema.approvalDelegations.delegatorId, delegatorId), lte(schema.approvalDelegations.fromDate, t), gte(schema.approvalDelegations.toDate, t)));
+    .innerJoin(schema.employees, eq(schema.employees.uuid, schema.approvalDelegations.delegateId))
+    .where(and(eq(schema.approvalDelegations.delegatorId, delegatorId), lte(schema.approvalDelegations.fromDate, t), gte(schema.approvalDelegations.toDate, t), ...liveEmployee()));
   return [...new Set(rows.map((r) => r.delegateId))];
 }
 

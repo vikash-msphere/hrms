@@ -7,6 +7,15 @@ export type AppUser = {
   uuid: string;
   email: string;
   role: Role;
+  // EVERY role this caller holds - the primary above plus any secondary ones (db/schema.ts `user_roles`), with
+  // the primary first and no duplicates. `role` stays the point-in-time one the audit trail records and the UI
+  // labels people by; this is what per-object ROLE rules have to fan out over (middleware/authz.ts
+  // `roleSubjects`), or a rule written for somebody's second role silently stops applying to them.
+  roles: Role[];
+  // Per-rule THRESHOLDS this caller's rules carry, keyed by grant pattern (domain/ruleCondition.ts). Consulted
+  // by the authz middleware AFTER `decide()` has allowed, and only ever to refuse - a condition can subtract
+  // from a grant, never add to one. Empty for almost everybody.
+  conditions?: import("./domain/ruleCondition").ConditionIndex;
   status: "active" | "disabled";
   employeeId: string | null;
   employeeCode: string | null; // the caller's employee code (the dept-scope key), joined at auth - free for authz
@@ -21,13 +30,29 @@ export type AppUser = {
   // decision is made and recorded on every audit row the request writes. Absent on a denial - the refusal
   // names its own pattern in the problem detail instead.
   authorizedBy?: string;
+  // How far that pattern actually REACHED on this request: the caller's own record (`self`), inside their own
+  // department (`dept`), or beyond it (`wider`). Counted per pattern in `rule_usage` so an access review can
+  // distinguish a rule that genuinely needs org-wide breadth from one nobody has ever used beyond their team.
+  // Absent on a denial, and on any request that resolved to no item (there is no row to classify).
+  authorizedScope?: "self" | "dept" | "wider";
   // Set true by audit() (request-actor path) so the authz write backstop knows the handler already logged this
   // request and skips its generic activity row. Reset per request in authz (batch reuses one user object).
   audited?: boolean;
   // Present ONLY on a "view as" simulation (lib/viewAs.ts): this whole AppUser is the SIMULATED subject, and
   // this field carries the real access admin driving it. Audit rows are written against the real human (with
   // the simulated email as `viewing_as` meta), so the trail never credits a read to the person being watched.
-  simulatedBy?: { uuid: string; email: string; employeeId: string | null; name: string | null; sessionId?: string };
+  // `grant` + `employeeCode` are the REAL caller's own authority, carried so the authz middleware can ask them
+  // the same question it just answered for the subject: a simulation may never read what the admin driving it
+  // could not have read as themselves (lib/viewAs.ts, rail 2).
+  simulatedBy?: {
+    uuid: string;
+    email: string;
+    employeeId: string | null;
+    employeeCode: string | null;
+    name: string | null;
+    sessionId?: string;
+    grant: import("./domain/permissions").Grant;
+  };
   // Present ONLY when the caller authenticated with an API key (middleware/auth.ts). The principal is still
   // the key's OWNER - `grant` above has already been narrowed by the key's scope - so nothing downstream has
   // to special-case machine callers to be safe. This field exists for the three places that legitimately
@@ -146,6 +171,11 @@ export type Variables = {
   // The internal code the middleware resolved the path's item to (null on collection/create paths). Set so a
   // handler can do per-field read redaction off the SAME code the decision used - no second uuid->code lookup.
   itemCode: string | null;
+  // The OWNER's employee code for that item, when the collection is flat-coded with an owner column (assets,
+  // users - services/codeCascade.ts OWNER_COLUMN_COLLECTIONS). It is the second key the decision was made on
+  // (domain/permissions.ts Resolved#ownerResource), carried so the access hint can be computed on the same pair
+  // and never advertises less than the request itself allows. Null everywhere else.
+  itemOwnerCode: string | null;
 };
 
 export type AppEnv = { Bindings: Bindings; Variables: Variables };

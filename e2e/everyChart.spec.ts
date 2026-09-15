@@ -83,6 +83,13 @@ test.describe("every chart", () => {
       // Charts are rendered by one primitive as `<figure><figcaption>…</figcaption>…</figure>`, so the figures
       // on the page ARE its charts - no page-specific selector to keep in step.
       const figures = page.locator("figure").filter({ has: page.locator("figcaption") });
+      // A page's charts arrive with its DATA, and `gotoRoute` returns as soon as the <h1> is up - a beat
+      // before the first read lands. Counting there is a race the sweep loses WHOLESALE rather than one page
+      // at a time: seventeen pages judged empty in 2.6 seconds, reported as "no page drew a single chart"
+      // about an app that draws them all (2026-09-15, when one dropped `batch:run` was enough to start it).
+      // So each page gets a bounded chance to paint its first chart before it is judged. A page that has
+      // nothing to chart waits this out and still counts as zero, which is what the sweep already allows for.
+      await figures.first().waitFor({ state: "visible", timeout: 15_000 }).catch(() => undefined);
       // A page can legitimately draw nothing (a module with no data yet), so the count is not asserted; what
       // is asserted is that whatever it DID draw is whole.
       const count = await figures.count();

@@ -68,7 +68,7 @@ export function makeDocumentRoutes(lc: LcCfg, svc: Svc, serialize: (r: any) => a
     },
     // `?employee=employees/<id>` narrows personal-documents to one person (org-documents have no owner and
     // ignore it). The ref arrives already wire-decoded, like every other inbound ref.
-    list: (c, page) => svc.list(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.get("user"), c.req.query("employee") || undefined),
+    list: (c, page) => svc.list(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.get("user"), c.req.query("employee") || undefined, page.deletedOnly),
     verbs: {
       // The signatory name comes from the employee's legal name on file (not the request) - see the service.
       acknowledge: { run: (deps, user, id) => svc.acknowledge(deps, user, id) },

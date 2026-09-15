@@ -14,7 +14,7 @@ import { etagOf } from "../http/serialize";
 import { emitEvent } from "./eventBus";
 import { notify, notifyMany, managerIdOf } from "./notifications";
 import { notifyMentions } from "./mentions";
-import { softDeleteRow, restoreRow } from "./softDelete";
+import { deleteStateFilter, softDeleteRow, restoreRow } from "./softDelete";
 import { getSettingValue } from "./settings";
 import { DEFAULT_PERFORMANCE, type PerformanceFramework } from "../domain/performance";
 import { round2 } from "../domain/money";
@@ -267,7 +267,7 @@ export async function lastCommentAtFor(deps: Deps, goalIds: string[]): Promise<M
   return out;
 }
 
-export async function listGoals(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false, cycleFilter?: string, withBurnup = false, stageFilter?: string, employeeFilter?: string) {
+export async function listGoals(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false, cycleFilter?: string, withBurnup = false, stageFilter?: string, employeeFilter?: string, deletedOnly = false) {
   // Visibility was decided in the middleware (scopeFor over the grant); here we only bind it to columns.
   const conds = [applyScope(scope, schema.goals.code, schema.goals.employeeId)];
   if (statusFilter) conds.push(eq(schema.goals.status, statusFilter as Status));
@@ -282,7 +282,7 @@ export async function listGoals(deps: Deps, scope: ListScope, maxPageSize: numbe
   // WHOLE set rather than a page of the org's: rebalancing weights across the owner's open goals is arithmetic
   // whose answer is wrong, not merely short, if a goal is missing from it.
   if (employeeFilter) conds.push(eq(schema.goals.employeeId, idFromPath(employeeFilter)!));
-  if (!showDeleted) conds.push(isNull(schema.goals.deleteTime));
+  conds.push(deleteStateFilter(schema.goals.deleteTime, showDeleted, deletedOnly));
   const page = await keysetPage(deps, schema.goals, "goals", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
   // `?cycle=<path>&burnup=true` adds the cycle's attainment curve to the answer. It rides the list rather than
   // living at its own endpoint because it is the same question, over the same rows, under the same scope: a
