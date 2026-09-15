@@ -199,13 +199,11 @@ export const LIST_OWNER_COLUMNS: Record<string, string> = {
  * own code and a second key could only add reach).
  *
  * WRITTEN OUT RATHER THAN COMPUTED, deliberately. Computing it needs `HIERARCHICAL_TABLES`, which lives in
- * `services/codeCascade.ts` because it pairs collections with drizzle tables - and importing a service from
- * this module (or from `middleware/authz.ts` and `http/collectionRoute.ts`, which read this set on the hot
- * path) adds an import edge into a graph that already carries ~157 cycles through `deps.ts -> index.ts`. One
- * such edge was enough to reorder module initialisation and leave `DEFAULT_POLICY` undefined at request time,
- * which surfaced as every factory-built route answering 500. So the set is data here, in a leaf module, and
- * `test/reparenting.test.ts` asserts it is exactly the complement described above - the same
- * registry-plus-tripwire shape `LIST_OWNER_COLUMNS` itself uses.
+ * `services/codeCascade.ts` because it pairs collections with drizzle tables - so a leaf module like this one
+ * would have to import a service, as would `middleware/authz.ts` and `http/collectionRoute.ts`, which read the
+ * set on the hot path. That is a layering inversion in a graph `madge` already reports ~157 cycles in, and it
+ * buys nothing: `test/reparenting.test.ts` asserts this set is exactly the complement described above, so the
+ * derivation is checked without the edge - the same registry-plus-tripwire shape `LIST_OWNER_COLUMNS` uses.
  *
  * Getting it wrong is asymmetric: a collection wrongly IN gets a widened item lane, one wrongly OUT keeps the
  * split-brain grant the owner key exists to close. The tripwire covers both directions.

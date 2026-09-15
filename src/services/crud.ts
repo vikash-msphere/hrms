@@ -179,11 +179,11 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
       // State-gated visibility, bound the same way the breadth is: the middleware already decided whether this
       // caller may see restricted rows (`scope.seeRestricted`), and this maps that onto the collection's own
       // columns. Undefined for the collections with no state rule, which is almost all of them.
-      // `actor.policy?` - a principal assembled without a manifest yields no rule and so no filter. That is a
-      // narrowing that goes missing, not a gate that opens: the ITEM lane is the enforcement point and decides
-      // from the same manifest (middleware/authz.ts), so a restricted row can never be OPENED this way, only
-      // listed. Throwing here instead would take out every list on the collection.
-      conds.push(publicStateFilter(actor.policy?.state_visibility?.[collection], table, scope?.seeRestricted ?? false));
+      // Read STRICTLY off the manifest. A principal without one is a bug, not a case to tolerate: every auth
+      // lane sets `policy`, and softening this to `actor.policy?.` would silently drop the filter, which is a
+      // visibility leak in its own right - a draft's title in a list is the disclosure, whether or not the row
+      // can then be opened.
+      conds.push(publicStateFilter(actor.policy.state_visibility?.[collection], table, scope?.seeRestricted ?? false));
       // Three states, not two: exclude the trash (the default), include it, or ask for it ALONE - the last is
       // what makes a "Deleted" view a fetch of its own instead of a filter over a page of mostly-live rows.
       if (table.deleteTime) {

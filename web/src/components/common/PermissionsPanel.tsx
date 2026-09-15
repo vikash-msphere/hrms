@@ -536,7 +536,10 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // template they cannot be responsible for.
   const templateDialog = template && (
     <Dialog open onOpenChange={(o) => !o && setTemplate(null)}>
-      <DialogContent className="max-h-[85dvh] max-w-2xl overflow-y-auto">
+      {/* `sm:` on the height ceiling: unprefixed it overrides the phone bottom-sheet geometry in ui/dialog.tsx,
+          which insets the panel and gives up height to the on-screen keyboard - so the footer ends up behind the
+          keys. `max-w-2xl` needs no prefix; the sheet's own inset already bounds the width on a phone. */}
+      <DialogContent className="sm:max-h-[85dvh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-primary" /> Start from a template

@@ -141,9 +141,9 @@ describe("re-parenting: coverage tripwire", () => {
 
   // The OWNER KEY's registry, kept honest from the other side. `OWNER_COLUMN_COLLECTIONS` (lib/authzResolve.ts)
   // is the set of collections whose rows are FLAT-coded but carry a real owner column, and it is written out
-  // rather than computed because computing it would mean importing a service into two hot-path modules, in a
-  // graph that already carries ~157 cycles - one such edge already reordered module init and left
-  // `DEFAULT_POLICY` undefined at request time. So the derivation lives here instead, as an assertion.
+  // rather than computed because computing it would mean importing a service into a leaf module and into two
+  // hot-path ones, inverting the layering in a graph that already carries ~157 cycles. So the derivation lives
+  // here instead, as an assertion - which checks the same thing without the import edge.
   //
   // Both directions matter: a collection wrongly IN the set gets a widened item lane, one wrongly OUT keeps the
   // split-brain grant the owner key exists to close.

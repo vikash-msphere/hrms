@@ -11,10 +11,11 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { createAccessRule, deleteAccessRule, decideAccessRule, purgeExpiredAccessRules, cloneAccessRules } from "../src/services/accessRules";
 import { previewAccess } from "../src/services/accessPreview";
-import { loadRoleGrant, loadRoleGrantUncached } from "../src/lib/policyLoad";
+import { loadRoleGrant, loadRoleGrantUncached, loadRoleGuards } from "../src/lib/policyLoad";
 import { DEFAULT_POLICY } from "../src/domain/manifests";
 import { clearCachePrefix } from "../src/lib/cache";
 import { invalidateCodeCache } from "../src/lib/authzResolve";
+import { guardAllows } from "../src/domain/ruleCondition";
 
 // Rule LIFECYCLE, against real D1: a rule only decides while it is active and unexpired. Two features ride
 // that one predicate (lib/policyLoad `isLive`), and both are the kind of thing that silently fails open or
@@ -38,7 +39,11 @@ const ids = { anaEmp: genId(), boEmp: genId(), carlaEmp: genId(), ana: genId(), 
 
 // Two access admins: `ana` authors, `bo` approves (four eyes needs two humans).
 const actor = (uuid: string, email: string, employeeId: string): AppUser =>
-  ({ uuid, email, role: "hr_admin", roles: ["hr_admin"], status: "active", employeeId, employeeCode: null, name: email, grant: { levels: {}, denies: [], customs: [] } as never, policy: DEFAULT_POLICY }) as AppUser;
+  // The grant is EMPTY_GRANT's shape, not a hand-rolled one: `{denies, customs}` named fields `Grant` has never
+  // had (they are `deny` and `allow`), and the `as never` cast is what let that compile. `isSuperGrant` reads
+  // `g.allow`, so every call through this fixture threw "Cannot read properties of undefined (reading
+  // 'includes')" instead of reaching the self-widening guard it was written to prove.
+  ({ uuid, email, role: "hr_admin", roles: ["hr_admin"], status: "active", employeeId, employeeCode: null, name: email, grant: { levels: {}, allow: [] }, policy: DEFAULT_POLICY }) as AppUser;
 const ana = () => actor(ids.ana, "ana@test.example", ids.anaEmp);
 const bo = () => actor(ids.bo, "bo@test.example", ids.boEmp);
 
@@ -366,5 +371,60 @@ describe("a rule author cannot widen themselves", () => {
     const from = { subject_kind: "role", subject: "employee" };
     await expect(cloneAccessRules(deps, ana(), { from, to: { subject_kind: "user", subject: `users/${ids.ana}` } })).rejects.toThrow(/rules for your own user/);
     await expect(cloneAccessRules(deps, ana(), { from, to: { subject_kind: "role", subject: "everyone" } })).rejects.toThrow(/'everyone' role includes you/);
+  });
+});
+
+// THE GUARD ROUND-TRIP: authored -> stored -> loaded -> enforced.
+//
+// WHY THIS EXISTS. `guardAllows` is unit-tested against hand-built guards, and those tests all passed while the
+// network fence was completely INERT in the running app: `from_ip` had been added to the schema, the validator
+// and the writer, but never to `RULE_COLUMNS` in lib/policyLoad.ts - so the loader never selected it and every
+// fence silently evaporated between the row and the decision. Nothing caught it. It typechecks (`CompiledRule`
+// declares the guard columns optional, which is what lets a row that lacks them compile), the unit tests
+// construct the guard directly rather than loading one, and a fence that does not fence looks exactly like a
+// fence that was never hit.
+//
+// So this asserts the WIRING rather than the predicate: author a real rule through the real service, load it
+// back through the loader middleware/auth.ts calls, and check the guard survived the trip.
+describe("per-rule guards survive the trip from the rules table to the decision", () => {
+  const capped = (extra: Record<string, unknown>) => ({
+    subject_kind: "role",
+    subject: "employee",
+    collection: "expenses",
+    scope: "all",
+    verb: "approve",
+    ...extra,
+  });
+  // The CACHED loader - the one middleware/auth.ts actually calls, so this covers the real path.
+  const guardsFor = async (pattern: string) => (await loadRoleGuards(deps, "employee")).get(pattern) ?? [];
+
+  it("carries a threshold through to the loaded guard", async () => {
+    await createAccessRule(deps, ana(), capped({ condition: { field: "amount", op: "lte", value: 50_000 } }));
+    const [g] = await guardsFor("expenses.**.approve");
+    expect(g?.condition, "the loader must SELECT `condition`, not just the writer store it").toEqual({ field: "amount", op: "lte", value: 50_000 });
+    expect(guardAllows(new Map([["expenses.**.approve", [g!]]]), "expenses.**.approve", { row: { amount: 500 } })).toBe(true);
+    expect(guardAllows(new Map([["expenses.**.approve", [g!]]]), "expenses.**.approve", { row: { amount: 500_000 } })).toBe(false);
+  });
+
+  it("carries a network fence through - the one that shipped inert", async () => {
+    await createAccessRule(deps, ana(), capped({ from_ip: "198.51.100.0/24" }));
+    const [g] = await guardsFor("expenses.**.approve");
+    expect(g?.fromIp, "the loader must SELECT `from_ip`").toBeTruthy();
+    expect(guardAllows(new Map([["expenses.**.approve", [g!]]]), "expenses.**.approve", { ip: "198.51.100.7" })).toBe(true);
+    expect(guardAllows(new Map([["expenses.**.approve", [g!]]]), "expenses.**.approve", { ip: "203.0.113.9" })).toBe(false);
+  });
+
+  it("carries a time window through", async () => {
+    await createAccessRule(deps, ana(), capped({ window: { field: "incurred_on", within_days: 30 } }));
+    const [g] = await guardsFor("expenses.**.approve");
+    expect(g?.window, "the loader must SELECT `window`").toEqual({ field: "incurred_on", within_days: 30 });
+  });
+
+  // An ordinary rule must come back with nothing attached, or every unguarded grant in the app would start
+  // being measured against a guard it never carried.
+  it("leaves an ordinary rule unguarded", async () => {
+    await createAccessRule(deps, ana(), capped({}));
+    const [g] = await guardsFor("expenses.**.approve");
+    expect(g).toEqual({ condition: null, fromIp: null, window: null });
   });
 });

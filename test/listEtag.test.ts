@@ -6,6 +6,7 @@ const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query:
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
 import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
+import { DEFAULT_POLICY } from "../src/domain/manifests";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { lastWriteAt, listEtag, etagMatches } from "../src/http/listEtag";
@@ -34,13 +35,15 @@ const caller = (over: Partial<AppUser> = {}) =>
     uuid: "u",
     email: "a@b.c",
     role: "super_admin",
+    roles: ["super_admin"],
     status: "active",
     employeeId: null,
     employeeCode: null,
     name: null,
     grant: { levels: { "**": "admin" }, allow: ["**"] },
+    policy: DEFAULT_POLICY,
     ...over,
-  }) as unknown as AppUser;
+  }) as AppUser;
 
 const URL_A = "https://x.test/v1/holidays?max_page_size=100";
 const now = 1_800_000_000_000; // fixed, so the time window never flips mid-test

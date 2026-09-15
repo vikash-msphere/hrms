@@ -10,6 +10,7 @@ import { z } from "zod";
 import * as schema from "../src/db/schema";
 import type { AppEnv, AppUser, Bindings } from "../src/env";
 import type { ListScope } from "../src/domain/access";
+import { DEFAULT_POLICY } from "../src/domain/manifests";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { app } from "../src/index";
@@ -330,8 +331,23 @@ describe("a collection's own rules ride on the same surface", () => {
 // mounted directly over the holidays table: no middleware, so what is under test is the factory itself rather
 // than the request pipeline the suites above already cover end to end.
 describe("spec dimensions", () => {
-  const principal = () =>
-    ({ uuid: "u", email: DEV_EMAIL, role: "super_admin", status: "active", employeeId: null, employeeCode: null, name: null, grant: grantFor("super_admin") }) as unknown as AppUser;
+  // A COMPLETE principal, and typed as one. The harness stands in for the auth middleware, so whatever it omits
+  // the factory sees as missing - and `as unknown as AppUser` silenced exactly that. `policy` was the field it
+  // dropped: once serialization began reading it for per-field redaction, every route the factory builds threw
+  // "Cannot read properties of undefined (reading 'redacted_fields')" here while behaving correctly in the app,
+  // where all three auth lanes set it. A single cast keeps the type honest about future additions.
+  const principal = (): AppUser => ({
+    uuid: "u",
+    email: DEV_EMAIL,
+    role: "super_admin",
+    roles: ["super_admin"],
+    status: "active",
+    employeeId: null,
+    employeeCode: null,
+    name: null,
+    grant: grantFor("super_admin"),
+    policy: DEFAULT_POLICY,
+  });
 
   // The row filter the authz middleware puts on every list request. The harness stands in for that middleware,
   // so it supplies one: the generic list binds `c.get("scope")` and answers NOTHING when it is absent.

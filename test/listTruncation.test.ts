@@ -6,6 +6,7 @@ const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query:
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
 import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
+import { DEFAULT_POLICY } from "../src/domain/manifests";
 import type { ListScope } from "../src/domain/access";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
@@ -35,7 +36,21 @@ beforeEach(async () => {
   await deps.db.delete(schema.holidays);
 });
 
-const actor = { uuid: "u", email: "a@b.c", role: "super_admin", status: "active", employeeId: null, employeeCode: null, name: null } as unknown as AppUser;
+// A COMPLETE principal. `as unknown as AppUser` hid that this was missing `grant`, `roles` and `policy` - the
+// last of which the generic list now reads to bind state-gated visibility, so an incomplete fixture fails here
+// while the app, where every auth lane sets it, is fine.
+const actor: AppUser = {
+  uuid: "u",
+  email: "a@b.c",
+  role: "super_admin",
+  roles: ["super_admin"],
+  status: "active",
+  employeeId: null,
+  employeeCode: null,
+  name: null,
+  grant: { levels: { "**": "admin" }, allow: ["**"] },
+  policy: DEFAULT_POLICY,
+};
 // The row filter the authz middleware hands a list request. Org-wide here, which is what every seeded role
 // resolves to on the holiday catalog - the cap is what these tests are about, not the scope.
 const ALL: ListScope = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true };
