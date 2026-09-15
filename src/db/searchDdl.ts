@@ -60,6 +60,11 @@ function deletedExpr(entry: SearchEntry, prefix: string): string {
 // the query can hide it from callers without the editing level. Built from the typed default in
 // domain/manifests.ts - a collection whose state rule is edited at RUNTIME needs its index rebuilt, which is
 // why STATE_VISIBILITY is treated as structural (it is seed data, guarded by test/manifestSeedDrift).
+// A single-quoted SQL literal. The values come from the typed manifest in this repo, never from a request, so
+// this is about generating valid DDL rather than about injection - but doubling the quote is what makes a state
+// like `o'brien` produce a working index instead of a syntax error at migration time.
+const sqlStr = (v: string) => `'${v.replace(/'/g, "''")}'`;
+
 function restrictedExpr(entry: SearchEntry, prefix: string): string {
   const rule = STATE_VISIBILITY[entry.collection];
   if (!rule) return "0";
@@ -68,7 +73,14 @@ function restrictedExpr(entry: SearchEntry, prefix: string): string {
   const clauses = Object.entries(rule.public_when)
     .map(([field, want]) => {
       const c = col(entry.table, field.replace(/_([a-z])/g, (_m, ch: string) => ch.toUpperCase()));
-      return c ? `coalesce(${qualify(prefix, c)}, 0) <> ${want ? 1 : 0}` : null;
+      if (!c) return null;
+      const q = qualify(prefix, c);
+      // A boolean clause keeps the original numeric form (SQLite stores them as 0/1). A STRING clause compares
+      // as text, and a NULL status must read as restricted - `coalesce` to a value no status can equal, rather
+      // than to 0, which a string comparison would never match anyway and which reads as a copy-paste slip.
+      if (typeof want === "boolean") return `coalesce(${q}, 0) <> ${want ? 1 : 0}`;
+      const wanted = (Array.isArray(want) ? want : [want]).map(sqlStr);
+      return `coalesce(${q}, '') NOT IN (${wanted.join(", ")})`;
     })
     .filter(Boolean);
   return clauses.length === 0 ? "0" : `(${clauses.join(" OR ")})`;

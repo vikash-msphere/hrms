@@ -107,6 +107,8 @@ access_rules(
   level        text   -- read|write|admin for level rules; NULL for verb/deny rules
   effect       text   -- 'allow' | 'deny'
   condition    text   -- optional JSON {field,op,value} threshold on the ROW (section 8); NULL for most rules
+  window       text   -- optional JSON {field,within_days} date window on the ROW; NULL for most rules
+  from_ip      text   -- optional comma-separated address/CIDR fence on the REQUEST; NULL for most rules
 )
   INDEX (subject, namespace, match_code)   -- serves all reads (a left-prefix superset)
 ```
@@ -312,6 +314,30 @@ lane one extra question on a `DELETE` - `denyingPattern(grant, { verb: "delete" 
 - and refuses if a deny matches. This is **subtractive only**: it is the deny pass (`denyingPattern`, the same
 loop `decide` runs first), never an allow, so no grant needs a verb it did not need before and nothing is
 widened. The `access.can` hint mirrors it, so a row never offers a Delete that would 403.
+
+**State-gated visibility.** `policy.state_visibility` names, per collection, the state a row must be in to be
+readable by the collection grant alone; a row outside it needs `requires` on the item. `public_when` compares a
+boolean flag, one string, or any of a set - so a draft run, a cancelled requisition or an offer still in
+negotiation are all sayable, not just the published/disabled flags this started with. A NULL string status is
+NOT public, which is the fail-closed direction. One predicate (`isPublicState`) backs both the item gate
+(`stateReadAllowed`) and the list filter (`services/stateFilter.ts`, bound by the collection factory), so the
+lane that decides and the lane that filters cannot drift - which they had, the list filter having been
+hand-written for one collection while the manifest looked general.
+
+**Per-rule guards.** Beyond its pattern a rule may carry up to three constraints, all of them SUBTRACTIVE and
+all evaluated by one pass (`domain/ruleCondition.ts` `guardAllows`) after `decide()` has already allowed:
+
+| Guard | Column | Predicate on | Applies to |
+|---|---|---|---|
+| threshold | `condition` | the row's money field | item requests |
+| time window | `window` | the row's date field | item requests |
+| network fence | `from_ip` | the caller's address | every request under the rule |
+
+The fence is the odd one out because it constrains the REQUEST rather than a row, so it holds on collection
+paths too; the other two have nothing to measure there and fail closed, which is what stops a capped rule
+authorizing a collection-level call. All three share one union rule: a guard constrains only when EVERY rule
+behind the pattern carries one, so an unguarded rule on the same pattern wins and granting somebody an extra
+rule can never remove access.
 
 **The threshold axis.** A rule may carry a `condition` - `{field, op, value}` on a money column the collection
 declares (`domain/ruleCondition.ts` `CONDITION_FIELDS`) - which is how "approve expenses up to 50,000" is said.

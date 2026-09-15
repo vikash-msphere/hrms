@@ -5,7 +5,7 @@ import { invalidArgument } from "../lib/errors";
 import { COLLECTIONS } from "./collections";
 import type { Level } from "./permissions";
 import { isFieldScopeTarget, supportedScopesOf, type Policy } from "./manifests";
-import { CONDITION_OPS, conditionFieldsOf, parseCondition, type RuleCondition } from "./ruleCondition";
+import { CONDITION_OPS, conditionFieldsOf, parseCondition, parseFromIp, parseWindow, windowFieldsOf, type RuleCondition, type RuleWindow } from "./ruleCondition";
 
 const LEVELS = new Set<Level>(["read", "write", "admin"]);
 // `create` is the collection-level CREATE gate: it compiles to the 1-token `<collection>` pattern (matches the
@@ -24,6 +24,8 @@ export type AccessRuleInput = {
   collection: string;
   scope: AccessRuleScope;
   condition?: RuleCondition;
+  fromIp?: string;
+  window?: RuleWindow;
   scopeRef?: string; // "{collection}/{id}" for scope exact/subtree
   field?: string;
   level?: Level; // present only for an allow level rule
@@ -123,11 +125,35 @@ export function validateAccessRule(body: unknown, policy: Policy, now: Date = ne
     if (scope === "create") throw invalidArgument("a create rule has no row to measure, so it cannot carry a condition");
     condition = parsed;
   }
+  // An optional NETWORK fence. Validated by parsing it: an allow-list that yields no usable rule is a typo, and
+  // a typo here is a rule that silently refuses every request rather than one that fences it.
+  let fromIp: string | undefined;
+  if (b.from_ip !== undefined && b.from_ip !== null && String(b.from_ip).trim() !== "") {
+    const raw = String(b.from_ip).trim();
+    if (!parseFromIp(raw)?.length) throw invalidArgument("from_ip must be a comma-separated list of IP addresses or CIDR blocks");
+    fromIp = raw;
+  }
+  // An optional relative TIME WINDOW, validated against the collection's declared date fields for the same
+  // reason a threshold is: an unlisted field would be a rule that silently refuses everything.
+  let window: RuleWindow | undefined;
+  if (b.window !== undefined && b.window !== null && b.window !== "") {
+    const parsed = parseWindow(b.window);
+    if (!parsed) throw invalidArgument("window must be {field, within_days} with a positive number of days");
+    const allowed = windowFieldsOf(collection);
+    if (!allowed[parsed.field]) {
+      const names = Object.keys(allowed);
+      throw invalidArgument(names.length ? `window field must be one of ${names.join("/")} for ${collection}` : `${collection} rules cannot carry a time window`);
+    }
+    if (scope === "create") throw invalidArgument("a create rule has no row to date, so it cannot carry a time window");
+    window = parsed;
+  }
   return {
     subjectKind,
     subject,
     collection,
     condition,
+    fromIp,
+    window,
     scope: scope as AccessRuleScope,
     scopeRef: typeof b.scope_ref === "string" ? b.scope_ref : undefined,
     field: typeof field === "string" ? field : undefined,

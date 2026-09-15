@@ -15,8 +15,8 @@ import type { Grant } from "../domain/permissions";
 import type { Policy } from "../domain/manifests";
 import { DEFAULT_POLICY } from "../domain/manifests";
 import { EMPTY_GRANT, EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
-import { rulesToGrant, mergeGrants, conditionsOf, mergeConditions, type CompiledRule } from "../domain/compileGrants";
-import type { ConditionIndex } from "../domain/ruleCondition";
+import { rulesToGrant, mergeGrants, guardsOf, mergeGuards, type CompiledRule } from "../domain/compileGrants";
+import type { GuardIndex } from "../domain/ruleCondition";
 import { cached } from "./cache";
 import { byIdChunks } from "./dbBatch";
 
@@ -58,6 +58,8 @@ const RULE_COLUMNS = {
   // The per-rule threshold (domain/ruleCondition.ts). Selected with every other decision column so the
   // condition index is built from the SAME cached rows the grant is, rather than a second read per request.
   condition: schema.accessRules.condition,
+  fromIp: schema.accessRules.fromIp,
+  window: schema.accessRules.window,
 } as const;
 
 // Per-object EXCEPTION rules for one request: the caller's USER exceptions AND any exact ROLE rules in this
@@ -235,15 +237,15 @@ export async function loadRoleGrant(deps: Deps, role: string): Promise<Grant> {
  * Reads the SAME cached rows `loadRoleGrant` just reduced, so it costs no read of its own, and applies the same
  * liveness cut - an expired rule must stop constraining exactly when it stops granting.
  */
-export async function loadRoleConditions(deps: Deps, role: string): Promise<ConditionIndex> {
+export async function loadRoleGuards(deps: Deps, role: string): Promise<GuardIndex> {
   const rows = await cached(`grant:${role}`, TTL_MS, () => roleRulesUncached(deps, role));
-  return conditionsOf(rows.filter(isLive(deps.clock.now())));
+  return guardsOf(rows.filter(isLive(deps.clock.now())));
 }
 
 /** The same, for the caller's own broad user rules. */
-export async function loadUserConditions(deps: Deps, userUuid: string): Promise<ConditionIndex> {
+export async function loadUserGuards(deps: Deps, userUuid: string): Promise<GuardIndex> {
   const rows = await cached(`userGrant:${userUuid}`, TTL_MS, () => userRulesUncached(deps, userUuid));
-  return conditionsOf(rows.filter(isLive(deps.clock.now())));
+  return guardsOf(rows.filter(isLive(deps.clock.now())));
 }
 
 // A USER's BROAD grant - the user's own scope rules (match_code IS NULL), symmetric with the role grant, so a

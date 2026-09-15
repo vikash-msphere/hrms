@@ -206,6 +206,15 @@ export const accessRules = sqliteTable("access_rules", {
   // this is a predicate on a column. Keeping them apart is what lets `decide()` stay the sole authority with the
   // condition as a second, subtractive pass - the same shape the delete-verb deny already has.
   condition: text("condition"),
+  // An optional NETWORK fence, in the same comma-separated address/CIDR form as the attendance clock's deploy
+  // var (lib/ipAllow.ts): "this payroll grant only from the office range". Like `condition` it can only ever
+  // SUBTRACT, and like it the pattern stays untouched - but it is a predicate on the REQUEST rather than a row,
+  // so it applies to collection paths as well as items.
+  fromIp: text("from_ip"),
+  // An optional relative TIME WINDOW on a date field, as JSON `{field, within_days}` - "attendance from around
+  // now", which a rule's own `expires_at` cannot say because that bounds when the RULE lives, not which rows it
+  // reaches. Subtractive like the two guards above.
+  window: text("window"),
   source: text("source", { enum: ["acl", "ticket-share"] }).notNull().default("acl"),
   // Row lifecycle, for orgs that want four-eyes on permission changes (settings key `access-approval`).
   // A rule awaiting approval to be ADDED (`pending`) is inert; a rule awaiting approval to be REMOVED

@@ -12,10 +12,11 @@ export type AppUser = {
   // labels people by; this is what per-object ROLE rules have to fan out over (middleware/authz.ts
   // `roleSubjects`), or a rule written for somebody's second role silently stops applying to them.
   roles: Role[];
-  // Per-rule THRESHOLDS this caller's rules carry, keyed by grant pattern (domain/ruleCondition.ts). Consulted
+  // Per-rule GUARDS this caller's rules carry - an approval limit, a network fence - keyed by grant pattern
+  // (domain/ruleCondition.ts). Consulted
   // by the authz middleware AFTER `decide()` has allowed, and only ever to refuse - a condition can subtract
   // from a grant, never add to one. Empty for almost everybody.
-  conditions?: import("./domain/ruleCondition").ConditionIndex;
+  guards?: import("./domain/ruleCondition").GuardIndex;
   status: "active" | "disabled";
   employeeId: string | null;
   employeeCode: string | null; // the caller's employee code (the dept-scope key), joined at auth - free for authz

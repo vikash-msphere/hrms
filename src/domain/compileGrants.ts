@@ -9,7 +9,7 @@
 // a lossless projection (round-tripped by `rulesToGrant`, differentially tested == blob decision), and the
 // P1 exact-IN narrowing is differentially tested as a correct superset. No SQL prefix/`LIKE` match ever.
 import { LVL, type Grant, type Level } from "./permissions";
-import { parseCondition, type ConditionIndex } from "./ruleCondition";
+import { parseCondition, parseFromIp, parseWindow, type GuardIndex } from "./ruleCondition";
 
 export type ScopeKind = "all" | "subtree" | "exact" | "self" | "dept" | "reports" | "org";
 export type Effect = "allow" | "deny";
@@ -27,35 +27,37 @@ export type CompiledRule = {
   // Optional per-rule threshold, as stored (JSON text) - carried through so a caller's condition index can be
   // built from the same rows their grant is. Never affects the pattern or the compiled Grant.
   condition?: string | null;
+  fromIp?: string | null;
+  window?: string | null;
 };
 
 /**
- * The conditions each ALLOW pattern carries, for one caller's rule set (domain/ruleCondition.ts ConditionIndex).
+ * The guards each ALLOW pattern carries, for one caller's rule set (domain/ruleCondition.ts ConditionIndex).
  *
  * Built beside the Grant rather than inside it: the Grant is the decision input and must stay exactly what it
  * was, or every consumer of it - mergeGrants, the API-key clamp, the capability set - would have to learn about
  * a concept that decides nothing. Deny rules are skipped: a deny already refuses outright, and a "deny only
  * above ₹50,000" is a different feature (it would have to GRANT below the line, which conditions never do).
  *
- * A rule with no condition contributes `null`, which is what makes an unconditional rule beat a capped one on
- * the same pattern - see the union note in ruleCondition.ts.
+ * A rule with no guards contributes an entry with both halves null, which is what makes an unguarded rule beat
+ * a guarded one on the same pattern - see the union note in ruleCondition.ts.
  */
-export function conditionsOf(rules: CompiledRule[]): ConditionIndex {
-  const out: ConditionIndex = new Map();
+export function guardsOf(rules: CompiledRule[]): GuardIndex {
+  const out: GuardIndex = new Map();
   for (const r of rules) {
     if (r.effect !== "allow") continue;
     const list = out.get(r.pattern) ?? [];
-    list.push(parseCondition(r.condition ?? null));
+    list.push({ condition: parseCondition(r.condition ?? null), fromIp: parseFromIp(r.fromIp ?? null), window: parseWindow(r.window ?? null) });
     out.set(r.pattern, list);
   }
   return out;
 }
 
-/** Merge two condition indexes the way grants merge: a pattern's entries from both sides, concatenated. */
-export function mergeConditions(a: ConditionIndex, b: ConditionIndex): ConditionIndex {
+/** Merge two guard indexes the way grants merge: a pattern's entries from both sides, concatenated. */
+export function mergeGuards(a: GuardIndex, b: GuardIndex): GuardIndex {
   if (!a.size) return b;
   if (!b.size) return a;
-  const out: ConditionIndex = new Map(a);
+  const out: GuardIndex = new Map(a);
   for (const [pattern, list] of b) out.set(pattern, [...(out.get(pattern) ?? []), ...list]);
   return out;
 }

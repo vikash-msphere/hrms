@@ -10,6 +10,8 @@ CREATE TABLE `access_rules` (
 	`level` text,
 	`effect` text NOT NULL,
 	`condition` text,
+	`from_ip` text,
+	`window` text,
 	`source` text DEFAULT 'acl' NOT NULL,
 	`status` text DEFAULT 'active' NOT NULL,
 	`requested_by` text,

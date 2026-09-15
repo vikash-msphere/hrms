@@ -22,6 +22,7 @@ import { etagOf } from "../http/serialize";
 import { softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import { keysetPage } from "./keysetPage";
 import { applyScope } from "./listScope";
+import { publicStateFilter } from "./stateFilter";
 import type { ListScope } from "../domain/access";
 import { assertNotLocked } from "./lockGuard";
 
@@ -175,6 +176,14 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
     // fail closed, rather than the whole table a missing scope check used to hand back.
     async list(deps, actor, scope, maxPageSize, pageToken, showDeleted = false, deletedOnly = false) {
       const conds = [applyScope(scope, table.code, undefined)];
+      // State-gated visibility, bound the same way the breadth is: the middleware already decided whether this
+      // caller may see restricted rows (`scope.seeRestricted`), and this maps that onto the collection's own
+      // columns. Undefined for the collections with no state rule, which is almost all of them.
+      // `actor.policy?` - a principal assembled without a manifest yields no rule and so no filter. That is a
+      // narrowing that goes missing, not a gate that opens: the ITEM lane is the enforcement point and decides
+      // from the same manifest (middleware/authz.ts), so a restricted row can never be OPENED this way, only
+      // listed. Throwing here instead would take out every list on the collection.
+      conds.push(publicStateFilter(actor.policy?.state_visibility?.[collection], table, scope?.seeRestricted ?? false));
       // Three states, not two: exclude the trash (the default), include it, or ask for it ALONE - the last is
       // what makes a "Deleted" view a fetch of its own instead of a filter over a page of mostly-live rows.
       if (table.deleteTime) {

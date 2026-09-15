@@ -15,6 +15,8 @@
 // it carries one: hold an unconditional `expenses.my-dept.approve` alongside a capped one and the unconditional
 // rule wins, exactly as two levels resolve to the higher. Anything else would make adding a rule remove access.
 
+import { ipMatchesAny, parseIpAllowList, type IpRule } from "../lib/ipAllow";
+
 /** The comparisons a threshold needs. Numeric only: a limit is a magnitude, and `eq` on money is a trap. */
 export const CONDITION_OPS = ["lte", "lt", "gte", "gt"] as const;
 export type ConditionOp = (typeof CONDITION_OPS)[number];
@@ -45,6 +47,53 @@ export const CONDITION_FIELDS: Record<string, Record<string, string>> = {
   loans: { principal: "principal" },
 };
 
+/**
+ * A relative TIME WINDOW on a date field: the row's date must be within `within_days` of now, in EITHER
+ * direction.
+ *
+ * `expires_at` on a rule bounds when the RULE is alive; nothing bounded which ROWS it reaches, so "read
+ * attendance for the current period" could not be said at all. Symmetric rather than backward-looking because
+ * the collections that want it point both ways: attendance is recent, leave is upcoming, and one number that
+ * means "near now" is easier to reason about than two that mean "not too old" and "not too far ahead".
+ *
+ * RELATIVE, not an absolute range: an absolute window goes stale silently, and "until 31 March" is what a
+ * rule's own `expires_at` is for.
+ */
+export type RuleWindow = { field: string; within_days: number };
+
+/** Date fields a rule may be windowed on, wire name -> drizzle column. Same shape as CONDITION_FIELDS above. */
+export const WINDOW_FIELDS: Record<string, Record<string, string>> = {
+  attendance: { clock_in: "clockIn" },
+  "leave-requests": { start_date: "startDate" },
+  expenses: { incurred_on: "incurredOn" },
+};
+
+export function windowFieldsOf(collection: string): Record<string, string> {
+  return WINDOW_FIELDS[collection] ?? {};
+}
+
+/** Parse a stored/authored window, or null when absent or unusable. */
+export function parseWindow(value: unknown): RuleWindow | null {
+  const w = typeof value === "string" ? safeJson(value) : value;
+  if (!w || typeof w !== "object" || Array.isArray(w)) return null;
+  const { field, within_days: days } = w as Record<string, unknown>;
+  if (typeof field !== "string" || !field) return null;
+  if (typeof days !== "number" || !Number.isFinite(days) || days <= 0) return null;
+  return { field, within_days: days };
+}
+
+/**
+ * Is the row's date inside the window? FAILS CLOSED on an absent or unreadable date, for the same reason a
+ * threshold does: "I could not tell when this happened" must not read as "recently".
+ */
+export function inWindow(w: RuleWindow, row: Record<string, unknown> | null | undefined, now: number): boolean {
+  if (!row) return false;
+  const raw = row[w.field];
+  const t = raw instanceof Date ? raw.getTime() : typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Date.parse(raw) : NaN;
+  if (!Number.isFinite(t)) return false;
+  return Math.abs(t - now) <= w.within_days * 86_400_000;
+}
+
 export function conditionFieldsOf(collection: string): Record<string, string> {
   return CONDITION_FIELDS[collection] ?? {};
 }
@@ -54,6 +103,22 @@ export function conditionFieldsOf(collection: string): Record<string, string> {
  * offer a limit box on exactly the collections that support one, instead of guessing from a parallel list.
  * Same reasoning as `grantableScopes`: the UI must reflect what the engine honours, never a second copy.
  */
+/** The window fields each collection offers, for the ACL - same shape and purpose as `conditionableFields`. */
+export function windowableFields(): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const [collection, fields] of Object.entries(WINDOW_FIELDS)) out[collection] = Object.keys(fields);
+  return out;
+}
+
+/** Parse a stored network fence into matchable rules, or null when there is none / none of it is usable. */
+export function parseFromIp(raw: string | null | undefined): IpRule[] | null {
+  if (!raw || !raw.trim()) return null;
+  const rules = parseIpAllowList(raw);
+  // An unparseable fence is NOT "no fence": a rule whose allow-list is a typo would otherwise silently become
+  // reachable from anywhere. An empty result means nothing can match, which is the fail-closed reading.
+  return rules;
+}
+
 export function conditionableFields(): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   for (const [collection, fields] of Object.entries(CONDITION_FIELDS)) out[collection] = Object.keys(fields);
@@ -101,25 +166,49 @@ export function satisfies(c: RuleCondition, row: Record<string, unknown> | null 
 }
 
 /**
- * The conditions attached to each grant PATTERN, as loaded for one caller.
+ * Everything ONE rule constrains beyond its pattern. Both fields null is the ordinary rule, which constrains
+ * nothing further.
  *
- * A pattern maps to one entry per rule that compiled to it: `null` for an unconditional rule, a condition for a
- * capped one. That distinction is the whole union story - see the header - so the nulls are carried rather than
- * filtered out.
+ * `fromIp` is a NETWORK fence in the same comma-separated form the attendance clock's deploy var uses
+ * (lib/ipAllow.ts): "this payroll grant only from the office range". Unlike a threshold it is a predicate on the
+ * REQUEST rather than on a row, so it applies to collection paths too - there is nothing to measure, only where
+ * the caller is.
  */
-export type ConditionIndex = Map<string, (RuleCondition | null)[]>;
+export type RuleGuard = { condition: RuleCondition | null; fromIp: IpRule[] | null; window: RuleWindow | null };
 
 /**
- * Is a request authorized by `pattern` allowed to proceed, given the row it is about?
+ * The guards attached to each grant PATTERN, as loaded for one caller.
  *
- * `true` when the pattern carries no conditions at all (the overwhelming case, and the fast path), when any rule
- * behind it is unconditional, or when at least one condition is satisfied. The level a rule granted is not
+ * A pattern maps to one entry per rule that compiled to it, guarded or not. The unguarded ones are carried
+ * rather than filtered out: they are the whole union story - see the header - because an unguarded rule on the
+ * same pattern has to win.
+ */
+export type GuardIndex = Map<string, RuleGuard[]>;
+
+/** What a guard is evaluated against: the row (if any), where the caller is, and the clock a window uses. */
+export type GuardContext = { row?: Record<string, unknown> | null; ip?: string | null; now?: number };
+
+/** Does ONE rule's guards let this request through? Both halves must hold; an absent half constrains nothing. */
+function guardSatisfied(g: RuleGuard, ctx: GuardContext): boolean {
+  if (g.condition && !satisfies(g.condition, ctx.row)) return false;
+  // FAILS CLOSED on an unestablishable address, exactly as the attendance fence does: a network-fenced grant
+  // whose caller has no resolvable IP must not fall back to "anywhere".
+  if (g.fromIp && !ipMatchesAny(ctx.ip, g.fromIp)) return false;
+  if (g.window && !inWindow(g.window, ctx.row, ctx.now ?? Date.now())) return false;
+  return true;
+}
+
+/**
+ * Is a request authorized by `pattern` allowed to proceed?
+ *
+ * `true` when the pattern carries no guards at all (the overwhelming case, and the fast path), when any rule
+ * behind it is unguarded, or when at least one rule's guards are all satisfied. The level a rule granted is not
  * consulted: `decide()` already settled that this pattern authorizes this request, and re-deciding it here would
  * be the second authority this file exists not to become.
  */
-export function conditionAllows(index: ConditionIndex | undefined, pattern: string | undefined, row: Record<string, unknown> | null | undefined): boolean {
+export function guardAllows(index: GuardIndex | undefined, pattern: string | undefined, ctx: GuardContext): boolean {
   if (!index || !pattern) return true;
   const list = index.get(pattern);
   if (!list?.length) return true;
-  return list.some((c) => c === null || satisfies(c, row));
+  return list.some((g) => guardSatisfied(g, ctx));
 }

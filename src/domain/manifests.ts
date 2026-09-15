@@ -352,7 +352,34 @@ export function grantableScopes(policy: Policy): Record<string, ScopeTier[]> {
 // `requires` on the collection (the editors). The middleware decides "may see restricted rows" from the
 // grant; a list service binds the column filter (decides nothing); item-GET is gated by the same rule with
 // the row state riding the id->code resolve. Pure data - which collections gate, and how, is configurable.
-export type StateRule = { requires: Level; public_when: Record<string, boolean> };
+/**
+ * A value a `public_when` clause compares against: a boolean flag, one string, or any of several.
+ *
+ * Booleans were the only shape when this existed for `announcements` (published/disabled). Every other state
+ * the app would want to gate is a STRING status - a draft payroll run, a cancelled requisition, an offer in
+ * negotiation, a closed ticket, a terminated employee - so a boolean-only rule could not express any of them.
+ * The array form is what makes "public while it is extended OR accepted" sayable without two rules.
+ */
+export type StateValue = boolean | string | string[];
+export type StateRule = { requires: Level; public_when: Record<string, StateValue> };
+
+/**
+ * Is a row in its collection's PUBLIC state? The one definition, shared by the item gate
+ * (domain/access.ts stateReadAllowed) and the list predicate (services/stateFilter.ts), so the lane that
+ * decides and the lane that filters can never disagree about what "public" means.
+ *
+ * A boolean clause coerces (the original semantics, unchanged: a null flag is false). A string clause compares
+ * as a string, and a null column never equals one - so an unset status reads as NOT public, which is the
+ * fail-closed direction for a gate.
+ */
+export function isPublicState(state: Record<string, unknown>, rule: StateRule): boolean {
+  return Object.entries(rule.public_when).every(([k, want]) => {
+    const got = state[k];
+    if (typeof want === "boolean") return Boolean(got) === want;
+    if (Array.isArray(want)) return got != null && want.includes(String(got));
+    return got != null && String(got) === want;
+  });
+}
 export const STATE_VISIBILITY: Record<string, StateRule> = {
   announcements: { requires: "write", public_when: { published: true, disabled: false } },
 };

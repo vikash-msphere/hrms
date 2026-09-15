@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { grantFor } from "../src/domain/grants";
 import { resolveRequest, decide, withOwnerResource } from "../src/domain/permissions";
-import { OWNER_REFS } from "../src/domain/manifests";
-import { conditionAllows, parseCondition, type ConditionIndex } from "../src/domain/ruleCondition";
+import { OWNER_REFS, isPublicState } from "../src/domain/manifests";
+import { guardAllows, parseCondition, parseFromIp, type GuardIndex } from "../src/domain/ruleCondition";
 
 // DoD #3 acceptance suite: free of BOLA. Every owner-scoped item decision resolves the object's code and
 // matches it against the caller's scope (me / my-dept). These assert object-level isolation directly on the
@@ -22,38 +22,129 @@ const d = (role: string, method: string, path: string, self: string | null = SEL
 
 const OWNED_COLLECTIONS = ["leave-requests", "payslips", "personal-documents", "operations", "leave-balances"] as const;
 
+// STATE-GATED VISIBILITY, widened past booleans. `public_when` could only compare flags, so every state the app
+// would actually want to gate - a draft payroll run, a cancelled requisition, an offer in negotiation, a
+// terminated employee - was inexpressible. These pin the semantics the item gate and the list filter now SHARE,
+// because the two disagreeing is the failure this mechanism keeps producing in other lanes.
+describe("state visibility - public_when compares flags, strings and sets alike", () => {
+  it("keeps the original boolean semantics, NULL included", () => {
+    const rule = { requires: "write" as const, public_when: { published: true, disabled: false } };
+    expect(isPublicState({ published: true, disabled: false }, rule)).toBe(true);
+    expect(isPublicState({ published: false, disabled: false }, rule)).toBe(false);
+    // A null flag coerces to false, so it is public only where the rule wants false.
+    expect(isPublicState({ published: null, disabled: null }, rule)).toBe(false);
+    expect(isPublicState({ published: true, disabled: null }, rule)).toBe(true);
+  });
+
+  it("compares a string status, and any of a set", () => {
+    const one = { requires: "write" as const, public_when: { status: "published" } };
+    expect(isPublicState({ status: "published" }, one)).toBe(true);
+    expect(isPublicState({ status: "draft" }, one)).toBe(false);
+    const many = { requires: "write" as const, public_when: { status: ["extended", "accepted"] } };
+    expect(isPublicState({ status: "extended" }, many)).toBe(true);
+    expect(isPublicState({ status: "accepted" }, many)).toBe(true);
+    expect(isPublicState({ status: "negotiating" }, many)).toBe(false);
+  });
+
+  // FAIL CLOSED. An unset status is not a public one: a gate that treated "no value" as public would expose
+  // exactly the half-created rows it exists to hide.
+  it("treats an absent or null string status as restricted", () => {
+    const rule = { requires: "write" as const, public_when: { status: "published" } };
+    for (const state of [{}, { status: null }, { status: undefined }]) expect(isPublicState(state, rule)).toBe(false);
+  });
+
+  it("needs EVERY clause to hold, not any", () => {
+    const rule = { requires: "write" as const, public_when: { status: "open", disabled: false } };
+    expect(isPublicState({ status: "open", disabled: false }, rule)).toBe(true);
+    expect(isPublicState({ status: "open", disabled: true }, rule)).toBe(false);
+    expect(isPublicState({ status: "closed", disabled: false }, rule)).toBe(false);
+  });
+});
+
 // PER-RULE THRESHOLDS (domain/ruleCondition.ts). The property that matters is not "a limit works" but that a
 // limit can only ever SUBTRACT: it is consulted after decide() has allowed, it never turns a refusal into an
 // allow, and holding an unconditional rule alongside a capped one leaves the unconditional one winning - or
 // granting somebody an extra rule would take access away.
 describe("per-rule conditions subtract from a grant and never add to it", () => {
   const PATTERN = "expenses.my-dept.approve";
-  const capped = (value: number): ConditionIndex => new Map([[PATTERN, [{ field: "amount", op: "lte" as const, value }]]]);
+  const capped = (value: number): GuardIndex => new Map([[PATTERN, [{ condition: { field: "amount", op: "lte" as const, value }, fromIp: null, window: null }]]]);
 
   it("allows a row inside the limit and refuses one over it", () => {
-    expect(conditionAllows(capped(50_000), PATTERN, { amount: 500 })).toBe(true);
-    expect(conditionAllows(capped(50_000), PATTERN, { amount: 50_000 })).toBe(true); // lte is inclusive
-    expect(conditionAllows(capped(50_000), PATTERN, { amount: 500_000 })).toBe(false);
+    expect(guardAllows(capped(50_000), PATTERN, { row: { amount: 500 } })).toBe(true);
+    expect(guardAllows(capped(50_000), PATTERN, { row: { amount: 50_000 } })).toBe(true); // lte is inclusive
+    expect(guardAllows(capped(50_000), PATTERN, { row: { amount: 500_000 } })).toBe(false);
   });
 
   it("leaves a pattern with no condition untouched - the fast path for almost every request", () => {
-    expect(conditionAllows(capped(50_000), "expenses.me.**", { amount: 500_000 })).toBe(true);
-    expect(conditionAllows(undefined, PATTERN, { amount: 500_000 })).toBe(true);
+    expect(guardAllows(capped(50_000), "expenses.me.**", { row: { amount: 500_000 } })).toBe(true);
+    expect(guardAllows(undefined, PATTERN, { row: { amount: 500_000 } })).toBe(true);
   });
 
   // THE UNION PROPERTY. Authority in this app unions - roles, `everyone`, the user's own rules - so a second
   // rule must never make a caller worse off. An unconditional rule on the same pattern wins outright.
   it("lets an unconditional rule beat a capped one on the same pattern", () => {
-    const both: ConditionIndex = new Map([[PATTERN, [{ field: "amount", op: "lte", value: 50_000 }, null]]]);
-    expect(conditionAllows(both, PATTERN, { amount: 500_000 })).toBe(true);
+    const both: GuardIndex = new Map([[PATTERN, [{ condition: { field: "amount", op: "lte", value: 50_000 }, fromIp: null, window: null }, { condition: null, fromIp: null, window: null }]]]);
+    expect(guardAllows(both, PATTERN, { row: { amount: 500_000 } })).toBe(true);
   });
 
   // FAIL CLOSED. "I could not check the limit" has to mean the same as "over the limit", or a cap evaporates
   // exactly when the value is missing - which is when a caller would most want it to.
   it("refuses when the value is absent, unparseable, or the row never loaded", () => {
     for (const row of [{}, { amount: null }, { amount: "" }, { amount: "abc" }, null, undefined]) {
-      expect(conditionAllows(capped(50_000), PATTERN, row)).toBe(false);
+      expect(guardAllows(capped(50_000), PATTERN, { row })).toBe(false);
     }
+  });
+
+  // A NETWORK fence is the other half of the same gate, and the shape differs in one way that matters: it is a
+  // predicate on the REQUEST, so it applies with or without a row.
+  it("fences a rule to an address range, with or without a row to measure", () => {
+    const fenced: GuardIndex = new Map([[PATTERN, [{ condition: null, fromIp: parseFromIp("198.51.100.0/24"), window: null }]]]);
+    expect(guardAllows(fenced, PATTERN, { ip: "198.51.100.7" })).toBe(true);
+    expect(guardAllows(fenced, PATTERN, { ip: "203.0.113.9" })).toBe(false);
+    // No row at all - a collection-level request - is still fenced, unlike a threshold.
+    expect(guardAllows(fenced, PATTERN, { row: null, ip: "198.51.100.7" })).toBe(true);
+  });
+
+  // FAIL CLOSED, matching the attendance clock's fence: an address the edge could not establish is not "inside".
+  it("refuses a fenced rule when the caller's address is unknown", () => {
+    const fenced: GuardIndex = new Map([[PATTERN, [{ condition: null, fromIp: parseFromIp("198.51.100.0/24"), window: null }]]]);
+    for (const ip of [undefined, null, ""]) expect(guardAllows(fenced, PATTERN, { ip })).toBe(false);
+  });
+
+  it("needs BOTH halves of a rule that carries a limit and a fence", () => {
+    const both: GuardIndex = new Map([
+      [PATTERN, [{ condition: { field: "amount", op: "lte", value: 50_000 }, fromIp: parseFromIp("198.51.100.0/24"), window: null }]],
+    ]);
+    expect(guardAllows(both, PATTERN, { row: { amount: 500 }, ip: "198.51.100.7" })).toBe(true);
+    expect(guardAllows(both, PATTERN, { row: { amount: 500 }, ip: "203.0.113.9" })).toBe(false); // wrong network
+    expect(guardAllows(both, PATTERN, { row: { amount: 500_000 }, ip: "198.51.100.7" })).toBe(false); // over the limit
+  });
+
+  // A TIME WINDOW bounds which ROWS a rule reaches, which a rule's own `expires_at` cannot say - that bounds
+  // when the rule is alive. Symmetric, so recent and upcoming both qualify.
+  it("reaches rows dated near now, in either direction, and nothing further out", () => {
+    const now = Date.parse("2026-06-01T00:00:00Z");
+    const DAY = 86_400_000;
+    const windowed: GuardIndex = new Map([[PATTERN, [{ condition: null, fromIp: null, window: { field: "incurred_on", within_days: 30 } }]]]);
+    const at = (offsetDays: number) => guardAllows(windowed, PATTERN, { row: { incurred_on: now + offsetDays * DAY }, now });
+    expect(at(0)).toBe(true);
+    expect(at(-29)).toBe(true);
+    expect(at(29)).toBe(true); // upcoming counts - a scheduled row is not "old"
+    expect(at(-31)).toBe(false);
+    expect(at(31)).toBe(false);
+  });
+
+  it("reads a windowed date however the row carries it, and fails closed when it cannot", () => {
+    const now = Date.parse("2026-06-01T00:00:00Z");
+    const windowed: GuardIndex = new Map([[PATTERN, [{ condition: null, fromIp: null, window: { field: "incurred_on", within_days: 30 } }]]]);
+    for (const v of [new Date(now), now, "2026-06-01T00:00:00Z"]) {
+      expect(guardAllows(windowed, PATTERN, { row: { incurred_on: v }, now })).toBe(true);
+    }
+    for (const v of [null, undefined, "", "not a date"]) {
+      expect(guardAllows(windowed, PATTERN, { row: { incurred_on: v }, now })).toBe(false);
+    }
+    // No row at all - a collection-level request - has no date to be inside the window.
+    expect(guardAllows(windowed, PATTERN, { row: null, now })).toBe(false);
   });
 
   it("refuses a malformed stored condition rather than treating it as absent", () => {

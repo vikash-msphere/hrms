@@ -431,6 +431,12 @@ components:
               additionalProperties:
                 type: array
                 items: { type: string }
+            window_fields:
+              type: object
+              description: Per-collection date fields a rule may carry a time window on. Only collections listed here can take a rule `window`; drives the ACL window box the same way condition_fields drives the limit box.
+              additionalProperties:
+                type: array
+                items: { type: string }
       x-aep-resource:
         singular: user
         plural: users
@@ -3860,6 +3866,13 @@ components:
             op: { type: string, description: "lte | lt | gte | gt." }
             value: { type: number, description: "The limit." }
           description: "Optional THRESHOLD on the row the rule is exercised against, e.g. approve expenses up to a limit. Fields: field (a money field the collection declares - amount, or principal on loans), op (lte | lt | gte | gt), value (a number). It can only SUBTRACT: a request the rule would not have authorized is not authorized by adding one, and an unconditional rule on the same pattern wins. Item requests only - a threshold bounds acting on a record, never seeing it in a list. Not available on a create rule, which has no row to measure."
+        window:
+          type: object
+          properties:
+            field: { type: string, description: "The date field the window is measured on." }
+            within_days: { type: number, description: "How many days either side of now the row's date may fall." }
+          description: "Optional relative TIME WINDOW on the row's date, e.g. attendance from around now. `expires_at` bounds when the RULE is alive; this bounds which ROWS it reaches. Symmetric - a row dated within `within_days` of now in either direction, so recent and upcoming both qualify. Relative rather than an absolute range, which would go stale silently. Item requests only, and not available on a create rule."
+        from_ip: { type: string, description: "Optional NETWORK fence: a comma-separated list of IP addresses and/or CIDR blocks (IPv4 and IPv6 may be mixed) the rule may be exercised from - e.g. the office range on a payroll grant. Like `condition` it can only SUBTRACT. Unlike it this is a predicate on the REQUEST rather than a row, so it applies to collection paths too, and a caller whose address cannot be established is refused." }
         scope_ref: { type: string, description: "For scope=exact: the {collection}/{id} the rule is anchored to (server resolves to a code)." }
         field: { type: string, description: "Optional protected field this rule governs (field-level write)." }
         level: { type: string, description: "Standard-method level (read|write|admin). Mutually exclusive with verb; omit when effect=deny." }

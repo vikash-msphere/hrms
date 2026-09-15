@@ -5,7 +5,7 @@
 import { capabilitiesOf, decide, resolveRequest } from "./permissions";
 import { hasCapability } from "./capabilityMatch";
 import type { Grant, SelfContext } from "./permissions";
-import type { StateRule } from "./manifests";
+import { isPublicState, type StateRule } from "./manifests";
 import type { AppUser } from "../env";
 
 // The matching rule itself lives in domain/capabilityMatch.ts - a dependency-free leaf the SPA imports too, so
@@ -158,7 +158,8 @@ function seeRestrictedFor(actor: Pick<AppUser, "grant" | "employeeCode" | "polic
 // resource grant (return true); a non-public row (draft/disabled) needs `requires` on the item. The row
 // state is passed in (it rode the id->code resolve), so this stays pure. Used by the authz middleware.
 export function stateReadAllowed(grant: Grant, itemResource: string, state: Record<string, unknown>, rule: StateRule, self: SelfContext): boolean {
-  const isPublic = Object.entries(rule.public_when).every(([k, v]) => Boolean(state[k]) === v);
+  // One definition of "public", shared with the list predicate (domain/manifests.ts isPublicState).
+  const isPublic = isPublicState(state, rule);
   if (isPublic) return true;
   return decide(grant, { kind: "standard", resource: itemResource, level: rule.requires }, self).allow;
 }

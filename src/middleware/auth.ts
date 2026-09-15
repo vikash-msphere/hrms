@@ -7,9 +7,9 @@ import type { AppEnv, AppUser } from "../env";
 import type { Deps } from "../deps";
 import type { Grant } from "../domain/permissions";
 import type { Policy } from "../domain/manifests";
-import { mergeGrants, mergeConditions } from "../domain/compileGrants";
-import type { ConditionIndex } from "../domain/ruleCondition";
-import { loadRoleGrant, loadUserGrant, loadUserRoles, loadManifest, loadRoleConditions, loadUserConditions } from "../lib/policyLoad";
+import { mergeGrants, mergeGuards } from "../domain/compileGrants";
+import type { GuardIndex } from "../domain/ruleCondition";
+import { loadRoleGrant, loadUserGrant, loadUserRoles, loadManifest, loadRoleGuards, loadUserGuards } from "../lib/policyLoad";
 import { resolveViewAs, VIEW_AS_HEADER } from "../lib/viewAs";
 import { unauthenticated, forbidden, isUserEmailCollision, isUserEmployeeCollision } from "../lib/errors";
 import { getCookie } from "hono/cookie";
@@ -104,13 +104,13 @@ function assertLive(user: UserRow): void {
  * Nothing caches the merged grant, so there is no combined key that could be served to the wrong caller when
  * somebody's role set changes - the failure mode a per-role cache of a per-user answer would have.
  */
-async function loadAuthority(deps: Deps, user: UserRow): Promise<{ grant: Grant; policy: Policy; roles: string[]; conditions: ConditionIndex }> {
-  const [primary, extraRoles, userGrant, policy, userConds] = await Promise.all([
+async function loadAuthority(deps: Deps, user: UserRow): Promise<{ grant: Grant; policy: Policy; roles: string[]; guards: GuardIndex }> {
+  const [primary, extraRoles, userGrant, policy, userGuards] = await Promise.all([
     loadRoleGrant(deps, user.role),
     loadUserRoles(deps, user.uuid),
     loadUserGrant(deps, user.uuid),
     loadManifest(deps),
-    loadUserConditions(deps, user.uuid),
+    loadUserGuards(deps, user.uuid),
   ]);
   // The primary can also appear in the join table (an admin ticking the box they already hold); holding a role
   // twice must not mean loading it twice, and the set is what `roleSubjects` fans out over downstream.
@@ -119,12 +119,12 @@ async function loadAuthority(deps: Deps, user: UserRow): Promise<{ grant: Grant;
   // The thresholds ride alongside, merged the same way and off the same cached rows. They decide nothing on
   // their own (domain/ruleCondition.ts): the middleware consults them only after `decide()` has already allowed,
   // and only ever to refuse.
-  const roleConds = await Promise.all(roles.map((r) => loadRoleConditions(deps, r)));
+  const roleGuards = await Promise.all(roles.map((r) => loadRoleGuards(deps, r)));
   return {
     grant: secondary.reduce(mergeGrants, mergeGrants(primary, userGrant)),
     policy,
     roles,
-    conditions: roleConds.reduce(mergeConditions, userConds),
+    guards: roleGuards.reduce(mergeGuards, userGuards),
   };
 }
 
@@ -164,7 +164,7 @@ async function authenticateApiKey(c: Parameters<MiddlewareHandler<AppEnv>>[0], d
   if (!user) throw unauthenticated("API key owner no longer exists");
   assertLive(user);
 
-  const { grant, policy, roles, conditions } = await loadAuthority(deps, user);
+  const { grant, policy, roles, guards } = await loadAuthority(deps, user);
 
   // Convenience column, not an audit record: written at most once per throttle window so a busy integration
   // does not add a D1 write to every call. Off the response path, and never fatal.
@@ -189,7 +189,7 @@ async function authenticateApiKey(c: Parameters<MiddlewareHandler<AppEnv>>[0], d
     email: user.email,
     role: user.role,
     roles,
-    conditions,
+    guards,
     status: user.status,
     employeeId: user.employeeId,
     employeeCode: user.employeeCode,
@@ -396,14 +396,14 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   // is EMPTY_GRANT, so mergeGrants is a no-op.
   // The role grant already includes the `everyone` pseudo-role (unioned inside loadRoleGrant in the SAME query,
   // super-exempt), so the broad authority is just role + the caller's own user rules - no extra `everyone` read.
-  const { grant, policy, roles, conditions } = await loadAuthority(deps, user);
+  const { grant, policy, roles, guards } = await loadAuthority(deps, user);
 
   const caller: AppUser = {
     uuid: user.uuid,
     email: user.email,
     role: user.role,
     roles,
-    conditions,
+    guards,
     status: user.status,
     employeeId: user.employeeId,
     employeeCode: user.employeeCode,

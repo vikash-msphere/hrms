@@ -3,7 +3,7 @@
 import type { Wire } from "./wire";
 import type { AppUser } from "../env";
 import { RESOURCE_COLLECTIONS } from "../lib/authzResolve";
-import { parseCondition } from "../domain/ruleCondition";
+import { parseCondition, parseWindow } from "../domain/ruleCondition";
 import { round2 } from "../domain/money";
 import { parseIllustrationLayout, parseRecipientLayout } from "../domain/illustration";
 import { parseScope, scopeToWire } from "../domain/keyScope";
@@ -402,6 +402,8 @@ export function toAccessRuleResource(r: any, objectUuid: string | null): Wire<"a
     // fails closed on it at decision time, but the UI showing a limit the engine ignores would be worse than
     // showing none).
     ...(parseCondition(r.condition) ? { condition: parseCondition(r.condition)! } : {}),
+    ...(r.fromIp ? { from_ip: r.fromIp as string } : {}),
+    ...(parseWindow(r.window) ? { window: parseWindow(r.window)! } : {}),
     effect: r.effect,
     // Lifecycle: `active` decides; `pending` / `pending_delete` are four-eyes changes awaiting a second
     // admin, and `requested_by` names who asked (they may not approve it themselves).

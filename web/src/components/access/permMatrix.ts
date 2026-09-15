@@ -24,6 +24,10 @@ export type AccessRule = {
   // An approval LIMIT on the row the rule is exercised against (server-set, authored at create time). Absent on
   // almost every rule; present only where the collection declares a field the engine can measure.
   condition?: { field: string; op: string; value: number };
+  // A relative time window on the row's date, and a network fence on the request - the other two per-rule
+  // guards. Server-set, authored at create time, absent on almost every rule.
+  window?: { field: string; within_days: number };
+  from_ip?: string;
   create_time?: string;
 };
 
@@ -109,6 +113,15 @@ export async function fetchConditionFields(): Promise<Record<string, string[]>> 
   const me = await fetchMeRaw();
   conditionFieldsCache = (me?.caller_access as { condition_fields?: Record<string, string[]> } | undefined)?.condition_fields ?? {};
   return conditionFieldsCache;
+}
+
+/** The date fields each collection may carry a time WINDOW on. Same payload, same purpose as the two above. */
+let windowFieldsCache: Record<string, string[]> | null = null;
+export async function fetchWindowFields(): Promise<Record<string, string[]>> {
+  if (windowFieldsCache) return windowFieldsCache;
+  const me = await fetchMeRaw();
+  windowFieldsCache = (me?.caller_access as { window_fields?: Record<string, string[]> } | undefined)?.window_fields ?? {};
+  return windowFieldsCache;
 }
 
 export async function fetchScopeCapabilities(): Promise<Record<string, string[]>> {

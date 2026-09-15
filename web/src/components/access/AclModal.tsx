@@ -27,7 +27,7 @@ type ScopeCount = { count: number; capped: boolean };
 import type { AccessTargetRef } from "./AccessModeProvider";
 import { ruleScopeFor, ruleMatchesTarget } from "./accessRuleScope";
 import { customMethodsFor } from "./customMethods";
-import { scopesForCollection, fetchScopeCapabilities, fetchConditionFields } from "./permMatrix";
+import { scopesForCollection, fetchScopeCapabilities, fetchConditionFields, fetchWindowFields } from "./permMatrix";
 import { metaFor } from "./collectionMeta";
 import { verbInfo } from "./verbMeta";
 import { PreviewPanel, fetchPreview } from "./PreviewPanel";
@@ -126,6 +126,12 @@ export function AclModal({
   // one, never from a second list here that could drift from CONDITION_FIELDS.
   const [condFields, setCondFields] = React.useState<Record<string, string[]>>({});
   const [limit, setLimit] = React.useState("");
+  // The other two per-rule guards. `windowFields` decides where a window box is offered, exactly as
+  // `condFields` does for the limit; a network fence needs no capability lookup because it constrains the
+  // REQUEST rather than a row, so it applies to any rule.
+  const [windowFields, setWindowFields] = React.useState<Record<string, string[]>>({});
+  const [withinDays, setWithinDays] = React.useState("");
+  const [fromIp, setFromIp] = React.useState("");
   // Bumped after every rule reload -> the preview panel re-asks the engine for the person it is showing.
   const [rulesVersion, setRulesVersion] = React.useState(0);
   // Recent access-rule changes from the audit trail: who authored which rule and when. Loaded once per open
@@ -136,6 +142,7 @@ export function AclModal({
     fetchScopeCapabilities().then(setScopeCaps).catch(() => setScopeCaps({}));
     // Same single `/users/me` payload as the scopes above, so this adds no request.
     fetchConditionFields().then(setCondFields).catch(() => setCondFields({}));
+    fetchWindowFields().then(setWindowFields).catch(() => setWindowFields({}));
   }, []);
   // Departments are fetched when the "one department" chip is first OPENED, not on mount: most rules are
   // never anchored, and this modal opens on every key icon in the app, so loading the org chart up front
@@ -172,6 +179,14 @@ export function AclModal({
   // loading; keep the current selection if it's still a valid option (don't yank a choice mid-edit).
   React.useEffect(() => {
     setScopeSel((cur) => (scopeOpts.some((o) => o.value === cur) ? cur : scopeOpts[0]?.value ?? "all"));
+    // The per-rule GUARDS are cleared outright, not kept like the scope above. A scope is a property of the
+    // target and the narrowest valid one is a sane carry-over; a limit, a window and a network fence are
+    // properties of the RULE BEING WRITTEN, and carrying one into the next grant is how a fence typed for a
+    // payroll rule silently rides along to something unrelated. The fence is the dangerous one - it has no
+    // per-collection capability to fall back on, so nothing else would have stopped it.
+    setLimit("");
+    setWithinDays("");
+    setFromIp("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collection, objectPath, field, createMode, activeVerb, scopeCaps]);
   // HOW MUCH each scope actually covers. The modal names the target and warns about denies but could never say
@@ -310,6 +325,19 @@ export function AclModal({
   // `lte` - "approve up to and including this much" is what an approval limit means to the person setting it.
   const conditionBody = (): Record<string, unknown> =>
     limitField && limitValid ? { condition: { field: limitField, op: "lte", value: limitNum } } : {};
+  // A time WINDOW bounds which rows the rule reaches; a rule's own expiry bounds how long it lives. Same
+  // create-mode exclusion as the limit: a create gate has no row to date.
+  const windowField = (createMode ? [] : windowFields[collection ?? ""] ?? [])[0];
+  const daysNum = Number(withinDays);
+  const daysValid = withinDays.trim() !== "" && Number.isFinite(daysNum) && daysNum > 0;
+  const windowBody = (): Record<string, unknown> =>
+    windowField && daysValid ? { window: { field: windowField, within_days: daysNum } } : {};
+  // A network FENCE is free-text (addresses and/or CIDR blocks); the server refuses a list it cannot parse, so
+  // the only check here is that something was typed.
+  const fenceBody = (): Record<string, unknown> => (fromIp.trim() ? { from_ip: fromIp.trim() } : {});
+  // Everything a rule constrains beyond its pattern, in one place so the three create paths below cannot
+  // disagree about which guards they carry.
+  const guardBody = (): Record<string, unknown> => ({ ...conditionBody(), ...windowBody(), ...fenceBody() });
 
   const roleAll = (name: string) => rules.filter((r) => r.subject_kind === "role" && r.subject === name && matchesTarget(r));
   // Same subject + same target dimension, but at ANOTHER scope tier - shown as context so "HR already has
@@ -474,7 +502,7 @@ export function AclModal({
       // rides on a grant.
       let gate: string | null = null;
       if (value !== "none") {
-        await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...levelBody(value), ...(value === "deny" ? {} : { ...expiryBody(), ...conditionBody() }) });
+        await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...levelBody(value), ...(value === "deny" ? {} : { ...expiryBody(), ...guardBody() }) });
         // Paired after the rule it serves - see ensureListGate. A role's scoped grant is exactly as unusable
         // without it as a person's.
         gate = await ensureListGate("role", name);
@@ -520,7 +548,7 @@ export function AclModal({
         await remove(r.path, r.etag);
         removed.push(r);
       }
-      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...verbBody(v, value as "allow" | "deny"), ...(value === "deny" ? {} : { ...expiryBody(), ...conditionBody() }) });
+      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...verbBody(v, value as "allow" | "deny"), ...(value === "deny" ? {} : { ...expiryBody(), ...guardBody() }) });
       undoable(`Updated ${roleLabel(name)} · ${v}`, async () => {
         for (const r of (await fetchAllAccessRules()).filter((x) => x.subject_kind === "role" && x.subject === name && matchesTarget(x) && x.verb === v)) await remove(r.path, r.etag);
         for (const r of before) await recreate(r);
@@ -624,7 +652,7 @@ export function AclModal({
       let gated = 0;
       for (const subject of subjects) {
         try {
-          const row = await create<AccessRule>("access-rules", { subject_kind: "user", subject, collection, ...scopeBody(), ...body, ...expiryBody(), ...(addAccess === "deny" ? {} : conditionBody()) });
+          const row = await create<AccessRule>("access-rules", { subject_kind: "user", subject, collection, ...scopeBody(), ...body, ...expiryBody(), ...(addAccess === "deny" ? {} : guardBody()) });
           added.push(row.path);
           // Paired AFTER the rule it serves, so a failure to author the grant never leaves a lone list gate
           // behind. Undo takes both back out (it walks `added`).
@@ -1111,7 +1139,26 @@ export function AclModal({
                       />
                     </div>
                   )}
-                  <Button disabled={busy || !addUsers.length || scopeIncomplete || (limit.trim() !== "" && !limitValid)} onClick={addUserRule}>
+                  {/* TIME WINDOW. Bounds which ROWS the rule reaches; the expiry beside it bounds how long the
+                      rule itself lives. Offered only where the collection declares a date the engine can read. */}
+                  {windowField && addAccess !== "deny" && (
+                    <div className="w-36">
+                      <label className="mb-1 block text-xs font-medium" title="Leave empty to reach rows of any date.">Within days (optional)</label>
+                      <Input type="number" min="1" inputMode="numeric" className="h-9" placeholder="e.g. 30" value={withinDays} onChange={(e) => setWithinDays(e.target.value)} />
+                    </div>
+                  )}
+                  {/* NETWORK FENCE. Unlike the two boxes before it this constrains the REQUEST, not a row, so it
+                      needs no per-collection capability and holds on collection paths too. */}
+                  {addAccess !== "deny" && (
+                    <div className="w-52">
+                      <label className="mb-1 block text-xs font-medium" title="Leave empty to allow any network.">Only from (optional)</label>
+                      <Input className="h-9" placeholder="203.0.113.7, 198.51.100.0/24" value={fromIp} onChange={(e) => setFromIp(e.target.value)} />
+                    </div>
+                  )}
+                  <Button
+                    disabled={busy || !addUsers.length || scopeIncomplete || (limit.trim() !== "" && !limitValid) || (withinDays.trim() !== "" && !daysValid)}
+                    onClick={addUserRule}
+                  >
                     <Plus className="h-4 w-4" /> Add{addUsers.length > 1 ? ` ${addUsers.length}` : ""}
                   </Button>
                 </div>

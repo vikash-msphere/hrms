@@ -52,12 +52,23 @@ export function wherePhrase(r: Pick<AccessRule, "collection" | "scope" | "scope_
  * `subjectLabel` omitted it reads as a bare predicate ("can read …"), which is what the commit line on the
  * modal's Add button wants ("Grant: <sentence>").
  */
-/** ", up to 50,000" for a rule carrying an approval limit, or "" for the overwhelming majority that do not. */
+/**
+ * The per-rule GUARDS, in words: ", up to 50,000, within 30 days, from 198.51.100.0/24".
+ *
+ * Empty for the overwhelming majority of rules, which carry none. Read in the rule LIST rather than only in the
+ * form that set them - a constraint nobody reviewing permissions can see is one nobody will notice is wrong.
+ */
 function limitPhrase(r: AccessRule): string {
-  const c = r.condition as { field?: string; op?: string; value?: number } | undefined;
-  if (!c || typeof c.value !== "number") return "";
-  const word = c.op === "lt" ? "under" : c.op === "gte" ? "from" : c.op === "gt" ? "over" : "up to";
-  return `, ${word} ${c.value.toLocaleString()}`;
+  const parts: string[] = [];
+  const c = r.condition as { op?: string; value?: number } | undefined;
+  if (c && typeof c.value === "number") {
+    const word = c.op === "lt" ? "under" : c.op === "gte" ? "from" : c.op === "gt" ? "over" : "up to";
+    parts.push(`${word} ${c.value.toLocaleString()}`);
+  }
+  const w = r.window as { within_days?: number } | undefined;
+  if (w && typeof w.within_days === "number") parts.push(`within ${w.within_days} days`);
+  if (r.from_ip) parts.push(`from ${r.from_ip}`);
+  return parts.length ? `, ${parts.join(", ")}` : "";
 }
 
 export function ruleSentence(r: AccessRule, subjectLabel?: string): string {

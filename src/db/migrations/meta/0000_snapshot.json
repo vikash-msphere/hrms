@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "3a95195f-e602-4f65-9cf8-6ee3b6e5b2fc",
+  "id": "7a957427-9d3d-4531-9a14-a33a23b974af",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -80,6 +80,20 @@
         },
         "condition": {
           "name": "condition",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "from_ip": {
+          "name": "from_ip",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "window": {
+          "name": "window",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

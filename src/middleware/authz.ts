@@ -29,7 +29,7 @@ import { audit } from "../lib/audit";
 import { isJsonBody } from "../http/jsonRequest";
 import { queryParam } from "../http/query";
 import { selfContextFor } from "../lib/selfContext";
-import { conditionAllows, conditionFieldsOf } from "../domain/ruleCondition";
+import { guardAllows, conditionFieldsOf, windowFieldsOf } from "../domain/ruleCondition";
 
 // Field-level + reference access control on write bodies (docs/archive/plan.txt 11C). For a POST/PATCH whose
 // resource-level write already passed, each PROTECTED field present in the body needs write on
@@ -455,7 +455,7 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // The columns a per-rule THRESHOLD could be evaluated against (domain/ruleCondition.ts). Selected only
       // when this caller actually holds a conditioned rule, and read on the SAME statement as the code - so a
       // threshold costs no read, and a caller without one changes nothing about the query.
-      const condFields = user.conditions?.size ? conditionFieldsOf(collection) : {};
+      const condFields = user.guards?.size ? { ...conditionFieldsOf(collection), ...windowFieldsOf(collection) } : {};
       const condCols = Object.values(condFields);
       const resolveId = stateRule || ownerProp || condCols.length
         ? async (col: string, id: string) => {
@@ -529,16 +529,23 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // it consults the pattern THAT decision named (`via`), and its only possible outcome is a refusal. There
       // is no branch here that turns a no into a yes, which is what keeps `decide()` the single authority.
       //
-      // ITEM PATHS ONLY, and deliberately so. A list has no single row to measure, and a threshold is about
+      // A NETWORK fence rides the same gate but is a predicate on the REQUEST, not a row - "this payroll grant
+      // only from the office range" - so unlike a threshold it applies on collection paths as well as items.
+      // That asymmetry is why the gate runs whenever the caller holds ANY guard, and the row half simply has
+      // nothing to measure when there is no item.
+      //
+      // A THRESHOLD is item-only, and deliberately so. A list has no single row to measure, and a limit is about
       // ACTING rather than seeing: a manager may look at every expense in their department and still be unable
       // to approve the large ones. Making it a list predicate would silently hide rows they are meant to review.
-      if (decision.allow && itemCode && user.conditions?.size) {
+      // `satisfies` fails closed on an absent row, which is exactly that - a capped rule cannot authorize a
+      // collection-level request, because there is nothing to check the cap against.
+      if (decision.allow && user.guards?.size) {
         // The condition names the WIRE field an admin authored; the row bag is keyed by drizzle column. One
         // translation here rather than a second spelling of the map in the evaluator.
         const byWire: Record<string, unknown> = {};
         for (const [wire, col] of Object.entries(condFields)) byWire[wire] = itemRow?.[col];
-        if (!conditionAllows(user.conditions, decision.via, byWire)) {
-          decision = { allow: false, reason: `outside the limit on "${decision.via}"` };
+        if (!guardAllows(user.guards, decision.via, { row: itemCode ? byWire : null, ip: user.reqMeta?.ip, now: +deps.clock.now() })) {
+          decision = { allow: false, reason: `outside the limits on "${decision.via}"` };
         }
       }
       // Resource-level write allowed -> additionally gate protected fields + body references.

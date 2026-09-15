@@ -323,6 +323,8 @@ export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown
     expiresAt: r.expiresAt ?? null,
     // The threshold, stored as JSON beside the pattern rather than compiled into it - see db/schema.ts.
     condition: r.condition ? JSON.stringify(r.condition) : null,
+    fromIp: r.fromIp ?? null,
+    window: r.window ? JSON.stringify(r.window) : null,
     source: "acl" as const, // authored by a person here; services/ticketShares.ts owns the "ticket-share" rows
   };
 

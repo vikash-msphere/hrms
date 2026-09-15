@@ -4,7 +4,7 @@ import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { capabilitiesOf } from "../domain/permissions";
 import { grantableScopes } from "../domain/manifests";
-import { conditionableFields } from "../domain/ruleCondition";
+import { conditionableFields, windowableFields } from "../domain/ruleCondition";
 import { collectionRoutes } from "../http/collectionRoute";
 import { getUser, listUsers, updateUser, type UserInput, decorateUserRoles } from "../services/users";
 import { toUserResource } from "../http/serialize";
@@ -88,7 +88,7 @@ export const users = new Hono<AppEnv>()
         ...(sessionId ? { session_id: sessionId } : {}),
         // `grantableScopes`, not the raw manifest map: a tier the UI must offer can be DERIVED from another
         // (named-dept from dept), and the chips have to reflect what the engine honours, not what the row stores.
-        caller_access: { capabilities: capabilitiesOf(u.grant), scopes: grantableScopes(u.policy), condition_fields: conditionableFields() },
+        caller_access: { capabilities: capabilitiesOf(u.grant), scopes: grantableScopes(u.policy), condition_fields: conditionableFields(), window_fields: windowableFields() },
       });
     // A "view as" subject can be someone who has never signed in: lib/viewAs.ts grades them as the account they
     // WOULD get on first login, so there is no users row to read. Synthesize the identity from the simulated
