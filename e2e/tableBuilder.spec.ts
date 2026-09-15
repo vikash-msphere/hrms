@@ -18,7 +18,10 @@ test("a saved table mixes fields from three collections, and comes back the same
   try {
     await gotoRoute(page, "tables", "Tables");
 
-    await page.getByRole("button", { name: "New table" }).click();
+    // `.first()`, as everywhere else this suite presses a page's create button: a list with nothing in it yet
+    // offers the same action twice - once in the page header, once inside the empty state - so an unscoped
+    // locator is a strict-mode violation on exactly the runs where no other spec's table happens to exist.
+    await page.getByRole("button", { name: "New table" }).first().click();
     const dialog = page.getByRole("dialog");
     await dialog.getByPlaceholder("e.g. Salary sheet - March").fill(name);
     // "One row is": the base picker, filled from GET /v1/table-fields - the bases this caller may list. Its
@@ -75,7 +78,7 @@ test("the picker follows a reference into another collection, and its fields bec
 
   try {
     await gotoRoute(page, "tables", "Tables");
-    await page.getByRole("button", { name: "New table" }).click();
+    await page.getByRole("button", { name: "New table" }).first().click();
     const create = page.getByRole("dialog");
     await create.getByPlaceholder("e.g. Salary sheet - March").fill(name);
     await create.getByRole("combobox").click();
@@ -126,7 +129,7 @@ test("the base of a saved table can be changed, and the columns are cleared with
 
   try {
     await gotoRoute(page, "tables", "Tables");
-    await page.getByRole("button", { name: "New table" }).click();
+    await page.getByRole("button", { name: "New table" }).first().click();
     const create = page.getByRole("dialog");
     await create.getByPlaceholder("e.g. Salary sheet - March").fill(name);
     await create.getByRole("combobox").click();
@@ -177,7 +180,7 @@ test("a table deleted from the list disappears from it", async ({ as }) => {
   const name = `E2E doomed ${Date.now() % 100000}`;
 
   await gotoRoute(page, "tables", "Tables");
-  await page.getByRole("button", { name: "New table" }).click();
+  await page.getByRole("button", { name: "New table" }).first().click();
   const dialog = page.getByRole("dialog");
   await dialog.getByPlaceholder("e.g. Salary sheet - March").fill(name);
   await dialog.getByRole("combobox").click();

@@ -81,6 +81,9 @@ export default function Timesheets({ me }: { me: Me }) {
   const [cell, setCell] = useState<{ projectId: string; date: string; existing?: TimeEntry } | null>(null);
 
   const activeProjects = useMemo(() => projects.filter((p) => p.status !== "archived"), [projects]);
+  // The projects an hour can still be logged against, by id - what "copy last week" checks last week's rows
+  // against before it re-creates them.
+  const activeProjectIds = useMemo(() => new Set(activeProjects.map((p) => idOf(p.path))), [activeProjects]);
   const projectById = useMemo(() => new Map(projects.map((p) => [idOf(p.path), p])), [projects]);
   // The caller's own undelivered board tasks, so an hour can name the task it went into. Read only once the
   // log dialog is actually open - a timesheet grid has no use for it, and this app does not load a collection
@@ -275,27 +278,51 @@ export default function Timesheets({ me }: { me: Me }) {
       const to = addDaysYmd(weekStart, -1);
       const r = await getAllPages<TimeEntry>(`time-entries?employee=${encodeURIComponent(meRef)}&from=${from}&to=${to}`, ENTRY_ROW_CAP);
       const source = r.results.filter((e) => e.project && e.date);
-      const todo = source
+      const free = source
         .map((e) => ({ e, date: addDaysYmd(e.date!, 7) }))
         .filter(({ e, date }) => days.includes(date) && !byCell.get(`${idOf(e.project!)}|${date}`));
+      // An hour logged last week against a project that has since been archived or deleted cannot be logged
+      // again - the server refuses the create outright ("project not found"). Those rows are dropped here
+      // rather than sent: one of them left in the list turned the whole press into an error toast, and every
+      // other day it would have filled was lost with it. Skipped only once the project list has actually
+      // arrived, since while it is loading every project looks equally unknown.
+      const todo = projectsState === "loading" ? free : free.filter(({ e }) => activeProjectIds.has(idOf(e.project!)));
+      const skipped = free.length - todo.length;
+      const gone = (n: number) => `${n} ${n === 1 ? "entry is" : "entries are"} on a project that is no longer available.`;
       if (todo.length === 0) {
-        toast({ title: source.length ? "Nothing to copy" : "Last week is empty", description: source.length ? "Every day last week already has an entry here." : undefined });
+        toast({
+          title: source.length ? "Nothing to copy" : "Last week is empty",
+          description: skipped ? gone(skipped) : source.length ? "Every day last week already has an entry here." : undefined,
+        });
         return;
       }
       // Same shape as submitWeek above: count what landed, report it on the failure path too, and reload
       // whenever anything was written. The "safe to run twice" guard is `byCell`, which is derived from the
       // loaded week - so a partial failure that skipped the reload would leave the guard describing the grid
       // as it was BEFORE the copy, and the next press would create the landed entries a second time.
-      try {
-        for (const { e, date } of todo) {
+      //
+      // Each day is attempted on its own: a row the server still refuses (a project archived between this
+      // read and the write, a day another tab has just taken) costs that day only, not the rest of the week.
+      let failure: string | undefined;
+      for (const { e, date } of todo) {
+        try {
           await create("time-entries", { project: e.project, date, hours: e.hours, description: e.description || undefined, billable: e.billable });
           made++;
+        } catch (err) {
+          failure ??= (err as Error).message;
         }
-        toast({ title: `Copied ${made} ${made === 1 ? "entry" : "entries"}`, variant: "success" });
-      } catch (e) {
+      }
+      if (made) {
+        toast({
+          title: `Copied ${made} ${made === 1 ? "entry" : "entries"}`,
+          description: skipped ? gone(skipped) : undefined,
+          variant: "success",
+        });
+      }
+      if (failure) {
         toast({
           title: made ? `Copied ${made} of ${todo.length}` : "Couldn't copy last week",
-          description: (e as Error).message,
+          description: failure,
           variant: "destructive",
         });
       }

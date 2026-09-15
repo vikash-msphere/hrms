@@ -21,6 +21,14 @@ test("Request access on a page the caller cannot read fails gracefully when the 
   await expect(request).toBeVisible();
   await request.click();
 
+  // The button opens the ask rather than sending it: the request carries a reason and a duration for the
+  // admin to act on (web/src/components/common/NoAccess.tsx), and nothing leaves the browser until Send.
+  // Both are left at their defaults here - an empty reason and "Permanently" are what the plainest ask looks
+  // like, and the refusal this spec is about does not depend on either.
+  const send = page.getByRole("button", { name: "Send", exact: true });
+  await expect(send).toBeVisible();
+  await send.click();
+
   await expect(toast(page, "Couldn't send the request")).toBeVisible({ timeout: 15_000 });
   await expect(toast(page, "aren't enabled here yet")).toBeVisible();
 });

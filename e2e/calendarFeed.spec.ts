@@ -42,7 +42,15 @@ test("the holiday page offers a personal feed URL that really serves a calendar"
     expect(body.startsWith("BEGIN:VCALENDAR"), `the feed served something else: ${body.slice(0, 80)}`).toBe(true);
     expect(body).toContain("END:VCALENDAR");
   } finally {
-    await setHolidaysPolicy(admin, before);
+    // Put back the ONE field this spec threw, not the blob it read at the start. `settings/holidays` holds
+    // the optional-holiday allowance, the pick deadline and the comp-off switch alongside this one, a whole
+    // -blob write is how any of them is changed, and the server takes a write with no `If-Match` as
+    // last-write-wins on purpose (src/services/settings.ts). So restoring the opening snapshot verbatim
+    // reverted whatever another spec had saved to a different field in the meantime - `settingsPanels.spec.ts`
+    // flipping the comp-off toggle, which then read its own change back missing and reported the panel as one
+    // that does not save.
+    const now = await holidaysPolicy(admin);
+    await setHolidaysPolicy(admin, { ...now, feed_enabled: before.feed_enabled ?? false });
   }
 });
 
