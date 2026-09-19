@@ -2,6 +2,7 @@ import { and, or, eq, ne, gte, lte, lt, inArray, isNull, isNotNull, sql, asc, ty
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import * as schema from "../db/schema";
 import { applyScope } from "./listScope";
+import { byIdChunks } from "../lib/dbBatch";
 import { STALE_AFTER_DAYS } from "../domain/goals";
 import { getSettingValue } from "./settings";
 import type { ListScope } from "../domain/access";
@@ -57,6 +58,17 @@ export type AnalyticsQuery = {
   to: string; // "YYYY-MM-DD" inclusive
   departmentId?: string; // internal uuid (the wire id was decoded at the edge)
   employeeId?: string; // one person's report (internal uuid), still gated by the caller's employees scope
+  /**
+   * The EXACT people to report on (internal uuids), for a caller that already has a page of them - the custom
+   * grid's measure columns are the one such caller. Narrowing only, like `employeeId`: the scope predicate
+   * still decides who may be seen, so naming somebody else's id returns nobody.
+   *
+   * Without it the roster is the first `maxPeople` employees in name order, chosen with no reference to the
+   * page being rendered - so a grid showing people 201-300 of an org asked for measures about the first 200
+   * and got a blank cell for every row it was actually displaying, with `truncated` (the one signal that
+   * anything had been left out) discarded by the caller.
+   */
+  employeeIds?: readonly string[];
   maxPeople?: number;
   /** Also return that ONE person's day-by-day attendance - what a calendar heatmap draws. */
   series?: boolean;
@@ -152,34 +164,43 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
   // ---- The roster: the people this caller may list, in the window ----------------------------------------
   // Somebody who left before the window opened is not in this report; somebody who joins after it closes is
   // not either. Both are still employees - they simply have no work inside these dates.
-  const roster = await db
-    .select({
-      uuid: t.employees.uuid,
-      firstName: t.employees.firstName,
-      lastName: t.employees.lastName,
-      employeeNumber: t.employees.employeeNumber,
-      jobTitle: t.employees.jobTitle,
-      departmentId: t.employees.departmentId,
-      managerId: t.employees.managerId,
-      startDate: t.employees.startDate,
-      endDate: t.employees.endDate,
-    })
-    .from(t.employees)
-    .where(and(...([
-      applyScope(empScope, t.employees.code, t.employees.uuid),
-      isNull(t.employees.deleteTime),
-      q.departmentId ? eq(t.employees.departmentId, q.departmentId) : undefined,
-      // Naming one person NARROWS the report; it never widens it. The scope predicate above still decides
-      // whether this caller may see them at all, so asking for somebody else's id returns nobody.
-      q.employeeId ? eq(t.employees.uuid, q.employeeId) : undefined,
-      or(isNull(t.employees.endDate), gte(t.employees.endDate, new Date(from))),
-      or(isNull(t.employees.startDate), lt(t.employees.startDate, new Date(toExclusive))),
-    ].filter(Boolean) as SQL[])))
-    .orderBy(asc(t.employees.firstName), asc(t.employees.lastName))
-    .limit(limit + 1);
+  const rosterCols = {
+    uuid: t.employees.uuid,
+    firstName: t.employees.firstName,
+    lastName: t.employees.lastName,
+    employeeNumber: t.employees.employeeNumber,
+    jobTitle: t.employees.jobTitle,
+    departmentId: t.employees.departmentId,
+    managerId: t.employees.managerId,
+    startDate: t.employees.startDate,
+    endDate: t.employees.endDate,
+  };
+  const rosterWhere = (extra?: SQL) => and(...([
+    applyScope(empScope, t.employees.code, t.employees.uuid),
+    isNull(t.employees.deleteTime),
+    q.departmentId ? eq(t.employees.departmentId, q.departmentId) : undefined,
+    // Naming one person NARROWS the report; it never widens it. The scope predicate above still decides
+    // whether this caller may see them at all, so asking for somebody else's id returns nobody.
+    q.employeeId ? eq(t.employees.uuid, q.employeeId) : undefined,
+    extra,
+    or(isNull(t.employees.endDate), gte(t.employees.endDate, new Date(from))),
+    or(isNull(t.employees.startDate), lt(t.employees.startDate, new Date(toExclusive))),
+  ].filter(Boolean) as SQL[]));
 
-  const truncated = roster.length > limit;
-  const people = roster.slice(0, limit);
+  // A NAMED roster is exact, so it is neither capped nor truncated: the caller is asking about the people it
+  // already has, and `limit` exists to bound a report that chose its own. Chunked because an id list spends one
+  // bound parameter each and the scope predicate binds alongside it (lib/dbBatch.ts#PARAM_CAP).
+  const named = q.employeeIds ?? null;
+  const roster = named
+    ? (await byIdChunks([...new Set(named)], (ids) =>
+        db.select(rosterCols).from(t.employees).where(rosterWhere(inArray(t.employees.uuid, ids))),
+      )).sort((a, b) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`))
+    : await db.select(rosterCols).from(t.employees).where(rosterWhere())
+        .orderBy(asc(t.employees.firstName), asc(t.employees.lastName))
+        .limit(limit + 1);
+
+  const truncated = !named && roster.length > limit;
+  const people = named ? roster : roster.slice(0, limit);
   const allIds = people.map((p) => p.uuid);
   if (allIds.length === 0) {
     return { window: { from: q.from, to: q.to, timezone: sched.timezone, working_days: 0 }, groups, metrics, people: [], team: {}, truncated: false };

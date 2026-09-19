@@ -5,7 +5,8 @@ import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf } from "@/lib/utils";
-import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
+import { daysBetweenYmd, thisMonthStr, todayStr } from "@/lib/orgDay";
+import { BLANK } from "@/lib/tableFilter";
 import type { ComplianceEvent, ComplianceRule, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
@@ -16,6 +17,7 @@ import { topSlices } from "@/lib/chartTheme";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { type TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { RowActions, type RowAction } from "@/components/common/RowActions";
@@ -189,7 +191,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
     });
     setProof(null);
     setOpen(true);
-    // Put the open item in the hash so a due date can be pasted to whoever has to file it. `useDeepOpen`
+    // Put the open item in the path so a due date can be pasted to whoever has to file it. `useDeepOpen`
     // above was already reading this - nothing wrote it.
     setRouteRecord(idOf(c.path));
   }
@@ -311,15 +313,17 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
         </div>
       ),
     },
-    { id: "category", header: "Authority", filter: "select", accessor: (c) => c.category ?? "", cell: (c) => c.category || <span className="text-muted-foreground">-</span> },
-    { id: "frequency", header: "Frequency", filter: "select", accessor: (c) => freqLabel(c.frequency), cell: (c) => <Badge variant="secondary">{freqLabel(c.frequency)}</Badge> },
-    { id: "due", header: "Due", accessor: (c) => c.due_date, cell: (c) => <span className={c.overdue ? "font-medium text-destructive" : undefined}>{formatDate(c.due_date)}</span> },
+    { id: "category", header: "Authority", filter: "select", groupBy: true, accessor: (c) => c.category ?? "", cell: (c) => c.category || <span className="text-muted-foreground">-</span> },
+    { id: "frequency", header: "Frequency", filter: "select", groupBy: true, accessor: (c) => freqLabel(c.frequency), cell: (c) => <Badge variant="secondary">{freqLabel(c.frequency)}</Badge> },
+    // A calendar of obligations is read forwards: "what is due this month" is the whole job of this page.
+    { id: "due", header: "Due", filter: "date", dateHint: "future", accessor: (c) => c.due_date, cell: (c) => <span className={c.overdue ? "font-medium text-destructive" : undefined}>{formatDate(c.due_date)}</span> },
     {
-      id: "status", header: "Status", filter: "select",
+      id: "status", header: "Status", filter: "select", groupBy: true,
       accessor: (c) => (c.status === "pending" && c.overdue ? "Overdue" : c.status === "filed" ? "Filed" : c.status === "waived" ? "Waived" : "Pending"),
       cell: (c) => <StatusBadge c={c} />,
     },
-    { id: "assignee", header: "Owner", defaultHidden: true, accessor: (c) => empName(c.assignee), cell: (c) => empName(c.assignee) || <span className="text-muted-foreground">-</span> },
+    // Blank here is an obligation nobody owns, which is the one that gets missed.
+    { id: "assignee", header: "Owner", defaultHidden: true, filter: "select", groupBy: true, accessor: (c) => empName(c.assignee), cell: (c) => empName(c.assignee) || <span className="text-muted-foreground">-</span> },
     { id: "reference", header: "Reference", defaultHidden: true, accessor: (c) => c.reference ?? "", cell: (c) => c.reference || "-" },
     stateColumn<ComplianceEvent>(),
     ...metaColumns<ComplianceEvent>(),
@@ -341,12 +345,52 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
     },
   ];
 
+  // A compliance register is read for three things, and none of them is "how many rows are there": what has
+  // already slipped, what lands this month, and what nobody has been made responsible for.
+  const eventInsights = (cs: ComplianceEvent[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const live = cs.filter((c) => !c.delete_time);
+    const overdue = live.filter((c) => c.status === "pending" && c.overdue);
+    if (overdue.length > 0) {
+      out.push({
+        id: "overdue",
+        label: `${overdue.length} overdue`,
+        tone: "destructive",
+        hint: "Past their due date and still unfiled. Earliest first.",
+        filters: { status: "Overdue" },
+        sort: "due.asc",
+      });
+    }
+    const month = thisMonthStr();
+    const dueSoon = live.filter((c) => c.status === "pending" && !c.overdue && (c.due_date ?? "").slice(0, 7) === month);
+    if (dueSoon.length > 0) {
+      out.push({
+        id: "due-this-month",
+        label: `${dueSoon.length} due this month`,
+        tone: "warning",
+        filters: { status: "Pending", due: "thismonth" },
+        sort: "due.asc",
+      });
+    }
+    const unowned = live.filter((c) => c.status === "pending" && !empName(c.assignee));
+    if (unowned.length > 0) {
+      out.push({
+        id: "unowned",
+        label: `${unowned.length} with no owner`,
+        tone: "warning",
+        hint: "Nobody is named on these, so nobody is reminded about them.",
+        filters: { status: "Pending", assignee: BLANK },
+      });
+    }
+    return out;
+  };
+
   const ruleColumns: Column<ComplianceRule>[] = [
     { id: "title", header: "Obligation", accessor: (r) => r.title, cell: (r) => <span className="font-medium">{r.title}</span> },
-    { id: "category", header: "Authority", filter: "select", accessor: (r) => r.category ?? "", cell: (r) => r.category || <span className="text-muted-foreground">-</span> },
-    { id: "schedule", header: "Schedule", accessor: (r) => scheduleLabel(r), cell: (r) => <span className="inline-flex items-center gap-1.5"><Repeat className="h-3.5 w-3.5 text-muted-foreground" /> {scheduleLabel(r)}</span> },
-    { id: "owner", header: "Owner", accessor: (r) => empName(r.assignee), cell: (r) => empName(r.assignee) || <span className="text-muted-foreground">-</span> },
-    { id: "active", header: "State", filter: "select", accessor: (r) => (r.delete_time ? "Deleted" : r.active ? "Active" : "Paused"), cell: (r) => r.delete_time ? <Badge variant="muted">Deleted</Badge> : r.active ? <Badge variant="secondary">Active</Badge> : <Badge variant="warning">Paused</Badge> },
+    { id: "category", header: "Authority", filter: "select", groupBy: true, accessor: (r) => r.category ?? "", cell: (r) => r.category || <span className="text-muted-foreground">-</span> },
+    { id: "schedule", header: "Schedule", filter: "select", groupBy: true, accessor: (r) => scheduleLabel(r), cell: (r) => <span className="inline-flex items-center gap-1.5"><Repeat className="h-3.5 w-3.5 text-muted-foreground" /> {scheduleLabel(r)}</span> },
+    { id: "owner", header: "Owner", filter: "select", groupBy: true, accessor: (r) => empName(r.assignee), cell: (r) => empName(r.assignee) || <span className="text-muted-foreground">-</span> },
+    { id: "active", header: "State", filter: "select", groupBy: true, accessor: (r) => (r.delete_time ? "Deleted" : r.active ? "Active" : "Paused"), cell: (r) => r.delete_time ? <Badge variant="muted">Deleted</Badge> : r.active ? <Badge variant="secondary">Active</Badge> : <Badge variant="warning">Paused</Badge> },
     ...metaColumns<ComplianceRule>(),
     {
       id: "actions", header: "", sortable: false, filter: "none", align: "right",
@@ -439,7 +483,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
             ) : (
               <>
                 <ChartFilterNote label={cf.activeLabel} shown={shownEvents.length} total={rows.length} onClear={cf.clear} />
-                <DataTable columns={eventColumns} tableId="compliance-events" rows={shownEvents} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle={cf.activeLabel ? `Nothing in ${cf.activeLabel}` : kf.activeLabel ? `No ${kf.activeLabel}` : "No items match"} accessCollection="compliance-events" accessTargetOf={(c) => ({ objectPath: c.path, label: c.title, can: c.access?.can })} />
+                <DataTable columns={eventColumns} insights={eventInsights} tableId="compliance-events" rows={shownEvents} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle={cf.activeLabel ? `Nothing in ${cf.activeLabel}` : kf.activeLabel ? `No ${kf.activeLabel}` : "No items match"} accessCollection="compliance-events" accessTargetOf={(c) => ({ objectPath: c.path, label: c.title, can: c.access?.can })} />
               </>
             )}
           </DataState>

@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import { Megaphone, Plus, Pencil, Trash2, MessageCircle, SmilePlus, Eye, ChevronDown, Trophy, Award, BarChart3, MessageSquare, Send, CalendarClock, Pin, PinOff, Link2, Maximize2, X, CheckCheck, Users, Mail, BellOff, Search, ArrowUp, ArrowLeft, ChevronUp, FilterX, Loader2 } from "lucide-react";
-import { patch, invoke, get } from "@/api";
+import { patch, invoke, get, ApiError } from "@/api";
 import { navigate, recordUrl, pagePath } from "@/router";
 import { useCollection, type LoadState } from "@/hooks/useCollection";
 import { useDebounced } from "@/hooks/useDebounced";
@@ -13,6 +13,7 @@ import { cn, colorFromString, formatDate, idOf, relativeFuture } from "@/lib/uti
 import { todayStr, thisMonthStr } from "@/lib/orgDay";
 import type { Announcement, Department, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
+import { FilterChip } from "@/components/common/FilterChips";
 import { Chart, ChartCard } from "@/components/common/Chart";
 import { useChartFocus } from "@/lib/chartFocus";
 import { monthlyTotals, topSlices } from "@/lib/chartTheme";
@@ -171,7 +172,7 @@ function applyReaction(groups: ReactionGroup[] | undefined, emoji: string, me: s
 }
 
 export default function Announcements({ me, openId, solo }: { me: Me; openId?: string; solo?: boolean }) {
-  // `solo` is one post on a page of its own (`#/announcements/<id>/view`). The board list is not read at all
+  // `solo` is one post on a page of its own (`/announcements/<id>/view`). The board list is not read at all
   // there - the single row is fetched by id below - so a popped-out post costs one read, not a hundred.
   const { rows, setRows, state, error, reload, hasMore, loadMore } = useCollection<Announcement>("announcements", { enabled: !solo, max: FEED_PAGE_SIZE });
   // Free-text search. Not persisted (a search is a question you are asking now, not a view you curated). A list
@@ -216,7 +217,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   const viewState = solo ? soloState : state;
   const viewError = solo ? soloError : error;
   const viewReload = solo ? () => setSoloTick((t) => t + 1) : reload;
-  // A deep link (`#/announcements/<id>` - a copied card link, a search hit, the activity feed) shows the
+  // A deep link (`/announcements/<id>` - a copied card link, a search hit, the activity feed) shows the
   // post on the board: switch to the list it lives in, scroll, highlight. Editing stays behind the pencil.
   // Solo mode is already showing that one post, so there is nothing to scroll to and nothing to switch.
   useDeepOpen(solo ? undefined : openId, source, openView);
@@ -290,19 +291,26 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   };
 
   // Record the caller's read receipt for a post: clear the dot locally, then fire the (idempotent) server call
-  // and fold its reserialized row back in (keeps the read-by count honest without refetching the board). A
-  // missing markRead grant - or any failure - restores the dot rather than lying about the receipt.
+  // and fold its reserialized row back in (keeps the read-by count honest without refetching the board).
+  //
+  // A TRANSIENT failure restores the dot rather than lying about the receipt, so the next dwell tries again. A
+  // REFUSAL does not: 404 is a post somebody deleted while this board was on screen and 403 is a viewer with no
+  // markRead grant, and neither becomes true by asking again. Restoring the dot on those made the post unread,
+  // which re-armed the dwell observer that had just fired, which asked again - a post deleted under a reader
+  // fired :markRead every 2.5 seconds for as long as the page stayed open, each one a console error.
   function markRead(path: string) {
     setReadHere((s) => (s.has(path) ? s : new Set(s).add(path)));
     invoke<Announcement>("announcements/" + idOf(path), "markRead")
       .then(fold)
-      .catch(() =>
+      .catch((e: unknown) => {
+        const status = e instanceof ApiError ? e.status : 0;
+        if (status >= 400 && status < 500) return;
         setReadHere((s) => {
           const n = new Set(s);
           n.delete(path);
           return n;
-        })
-      );
+        });
+      });
   }
 
   // Fold / unfold a post in place (opening one folds any other). Expanding it the first time records the
@@ -392,8 +400,10 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     }
   }
 
-  async function submitReply(a: Announcement) {
-    const text = (replyDrafts[a.path] ?? "").trim();
+  // `body` arrives from the box in STORED form: the reply composer holds display text (`@Ananya Reddy`) and
+  // turns its mentions back into tokens on the way out (see lib/mentionText.ts).
+  async function submitReply(a: Announcement, body: string) {
+    const text = body.trim();
     if (!text) return;
     try {
       const updated = await invoke<Announcement>("announcements/" + idOf(a.path), "reply", undefined, { body: text });
@@ -710,7 +720,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     setAuthorFilter(null);
     setTargetPath(a.path);
   }
-  // A card's shareable address - the same `#/announcements/<id>` deep link search results and the activity
+  // A card's shareable address - the same `/announcements/<id>` deep link search results and the activity
   // feed use, so the recipient lands on the post scrolled-to and highlighted.
   function copyLink(a: Announcement) {
     navigator.clipboard.writeText(recordUrl("announcements", idOf(a.path))).then(
@@ -920,15 +930,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
               ] as const)
                 .filter(([k, , n]) => k === "all" || n > 0)
                 .map(([k, label, n]) => (
-                  <button
-                    key={k}
-                    onClick={() => setFilter(k as typeof filter)}
-                    className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                      filter === k ? "border-primary bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-muted dark:hover:bg-muted"
-                    }`}
-                  >
-                    {label} <span className="tabular-nums opacity-70">{n}</span>
-                  </button>
+                  <FilterChip key={k} active={filter === k} count={n} onClick={() => setFilter(k as typeof filter)}>{label}</FilterChip>
                 ))}
               {authorFilter && (
                 <button
@@ -1348,7 +1350,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
                           <ReplyBox
                             value={replyDrafts[a.path] ?? ""}
                             onChange={(next) => setReplyDrafts((d) => ({ ...d, [a.path]: next }))}
-                            onSubmit={() => submitReply(a)}
+                            onSubmit={(body) => submitReply(a, body)}
                             employees={employees}
                           />
                         )}
@@ -1412,9 +1414,8 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
           onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
           aria-label="Back to the top of the board"
           title="Back to the top"
-          // Lifted clear of the phone's bottom nav (and the home indicator under it); back to the corner
-          // from `md` up, where there is no bottom bar.
-          className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-4 z-30 h-10 w-10 rounded-full shadow-lg md:bottom-6 md:right-6"
+          // Lifted clear of the phone's home indicator; back to the corner from `md` up, where there is none.
+          className="fixed bottom-[calc(2rem+env(safe-area-inset-bottom))] right-4 z-30 h-10 w-10 rounded-full shadow-lg md:bottom-6 md:right-6"
         >
           <ArrowUp className="h-4 w-4" />
         </Button>
@@ -1639,9 +1640,10 @@ function ReadIndicator({ count, names }: { count: number; names: string[] }) {
 
 // The reply composer under an opened post. Its own component because it owns a hook (the @mention picker),
 // which a row inside the feed's map cannot.
-function ReplyBox({ value, onChange, onSubmit, employees }: { value: string; onChange: (next: string) => void; onSubmit: () => void; employees: Employee[] }) {
+function ReplyBox({ value, onChange, onSubmit, employees }: { value: string; onChange: (next: string) => void; onSubmit: (body: string) => void; employees: Employee[] }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const mentions = useMentions({ value, onChange, textareaRef: ref, employees });
+  const send = () => onSubmit(mentions.toWire(value));
   return (
     <div className="mt-4 flex items-end gap-2" onClick={(e) => e.stopPropagation()}>
       <div className="relative flex-1">
@@ -1658,12 +1660,12 @@ function ReplyBox({ value, onChange, onSubmit, employees }: { value: string; onC
           // it did NOT take sends the reply.
           onKeyDown={(e) => {
             if (mentions.onKeyDown(e)) return;
-            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSubmit(); }
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
           }}
         />
         {mentions.menu}
       </div>
-      <Button size="sm" onClick={onSubmit} disabled={!value.trim()}>Reply</Button>
+      <Button size="sm" onClick={send} disabled={!value.trim()}>Reply</Button>
     </div>
   );
 }

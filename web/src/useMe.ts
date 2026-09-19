@@ -27,6 +27,12 @@ const toMe = (u: User | null): Me | null =>
         role: u.role,
         employee_id: u.employee ? idOf(u.employee) : null,
         capabilities: u.caller_access?.capabilities ?? [],
+        // Absent on an old/partial response means "own or nothing" for every collection, which is the
+        // fail-closed direction: no per-record affordance renders until the server says how far the grant reaches.
+        scopes: {
+          read: (u.caller_access?.read_scopes ?? {}) as Me["scopes"]["read"],
+          write: (u.caller_access?.write_scopes ?? {}) as Me["scopes"]["write"],
+        },
         holiday_feed_token: u.holiday_feed_token ?? null,
         session_id: u.session_id ?? null,
       }

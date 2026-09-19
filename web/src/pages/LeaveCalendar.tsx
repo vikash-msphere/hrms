@@ -10,7 +10,7 @@ import { useApprovals } from "@/lib/approvals";
 import { usePermission, useCanExport } from "@/lib/perm";
 import { idOf, cn } from "@/lib/utils";
 import { leaveColor } from "@/lib/leaveColors";
-import { readHashQuery, writeHashQuery } from "@/lib/urlQuery";
+import { readUrlQuery, writeUrlQuery } from "@/lib/urlQuery";
 import { leaveSummary, leaveDecisionContext } from "@/lib/leaveApproval";
 import { exportTable } from "@/lib/exportTable";
 import { buildIcs, downloadIcs } from "@/lib/ics";
@@ -60,9 +60,9 @@ type View = (typeof VIEWS)[number][0];
 const isView = (v: string | null): v is View => VIEWS.some(([k]) => k === v);
 
 export default function LeaveCalendar({ me }: { me: Me }) {
-  // ---- View state, all of it in the hash query so a reload, a back press and a pasted link agree ----------
+  // ---- View state, all of it in the URL query so a reload, a back press and a pasted link agree -----------
   const [view, setView] = useState<View>(() => {
-    const v = readHashQuery("view");
+    const v = readUrlQuery("view");
     if (isView(v)) return v;
     // A 7-column month grid at phone width is unreadable, so small screens open on the agenda instead.
     return typeof window !== "undefined" && window.matchMedia("(max-width: 639px)").matches ? "list" : "month";
@@ -71,20 +71,20 @@ export default function LeaveCalendar({ me }: { me: Me }) {
     // `m=YYYY-MM` is this page's own month param. `d=YYYY-MM-DD` is what links from elsewhere carry (the
     // holiday calendar's "open this day" is one), and a day names its month - without this those links
     // landed on the CURRENT month, which is never the month the reader clicked.
-    const m = readHashQuery("m") ?? readHashQuery("d")?.slice(0, 7);
+    const m = readUrlQuery("m") ?? readUrlQuery("d")?.slice(0, 7);
     return m && /^\d{4}-\d{2}$/.test(m) ? new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7) - 1, 1)) : monthStart(new Date());
   });
-  const [dept, setDept] = useState(() => readHashQuery("dept") ?? "all");
-  const [typeFilter, setTypeFilter] = useState(() => readHashQuery("type") ?? "all");
-  const [query, setQuery] = useState(() => readHashQuery("q") ?? "");
-  const [showPending, setShowPending] = useState(() => readHashQuery("pending") === "1");
-  const [compact, setCompact] = useState(() => readHashQuery("compact") === "1");
+  const [dept, setDept] = useState(() => readUrlQuery("dept") ?? "all");
+  const [typeFilter, setTypeFilter] = useState(() => readUrlQuery("type") ?? "all");
+  const [query, setQuery] = useState(() => readUrlQuery("q") ?? "");
+  const [showPending, setShowPending] = useState(() => readUrlQuery("pending") === "1");
+  const [compact, setCompact] = useState(() => readUrlQuery("compact") === "1");
   // Optional layers, each one an extra read - off by default, so the page costs what it shows.
-  const [layers, setLayers] = useState<Set<string>>(() => new Set((readHashQuery("layers") ?? "").split(",").filter(Boolean)));
+  const [layers, setLayers] = useState<Set<string>>(() => new Set((readUrlQuery("layers") ?? "").split(",").filter(Boolean)));
   const [selected, setSelected] = useState<string | null>(() => {
-    const d = readHashQuery("d");
+    const d = readUrlQuery("d");
     if (d) return d;
-    const m = readHashQuery("m");
+    const m = readUrlQuery("m");
     const t = todayStr();
     return !m || m === t.slice(0, 7) ? t : `${m}-01`;
   });
@@ -92,15 +92,15 @@ export default function LeaveCalendar({ me }: { me: Me }) {
   const [rejecting, setRejecting] = useState<RejectTarget | null>(null);
   const [decided, setDecided] = useState<Set<string>>(() => new Set());
 
-  useEffect(() => { writeHashQuery("view", view); }, [view]);
-  useEffect(() => { writeHashQuery("m", ymOf(cursor)); }, [cursor]);
-  useEffect(() => { writeHashQuery("dept", dept === "all" ? null : dept); }, [dept]);
-  useEffect(() => { writeHashQuery("type", typeFilter === "all" ? null : typeFilter); }, [typeFilter]);
-  useEffect(() => { writeHashQuery("q", query.trim() || null); }, [query]);
-  useEffect(() => { writeHashQuery("pending", showPending ? "1" : null); }, [showPending]);
-  useEffect(() => { writeHashQuery("compact", compact ? "1" : null); }, [compact]);
-  useEffect(() => { writeHashQuery("layers", layers.size ? [...layers].sort().join(",") : null); }, [layers]);
-  useEffect(() => { writeHashQuery("d", selected); }, [selected]);
+  useEffect(() => { writeUrlQuery("view", view); }, [view]);
+  useEffect(() => { writeUrlQuery("m", ymOf(cursor)); }, [cursor]);
+  useEffect(() => { writeUrlQuery("dept", dept === "all" ? null : dept); }, [dept]);
+  useEffect(() => { writeUrlQuery("type", typeFilter === "all" ? null : typeFilter); }, [typeFilter]);
+  useEffect(() => { writeUrlQuery("q", query.trim() || null); }, [query]);
+  useEffect(() => { writeUrlQuery("pending", showPending ? "1" : null); }, [showPending]);
+  useEffect(() => { writeUrlQuery("compact", compact ? "1" : null); }, [compact]);
+  useEffect(() => { writeUrlQuery("layers", layers.size ? [...layers].sort().join(",") : null); }, [layers]);
+  useEffect(() => { writeUrlQuery("d", selected); }, [selected]);
 
   const today = todayStr();
   const showRemote = layers.has("remote");

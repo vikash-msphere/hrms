@@ -62,7 +62,11 @@ const PER_COLLECTION: Record<string, Record<string, VerbInfo>> = {
     preview: { label: "Preview", description: "Open the payslip in the app." },
     download: { label: "Download", description: "Keep a PDF copy." },
   },
-  employees: { enrollDefaultBenefits: { label: "Enrol default benefits", description: "Put a new hire into the default benefit plans." } },
+  employees: {
+    enrollDefaultBenefits: { label: "Enrol default benefits", description: "Put a new hire into the default benefit plans." },
+    uploadPhoto: { label: "Set profile photo", description: "Upload or replace the photo on somebody's record. Everyone holds it for their own; granting it here means doing it for other people." },
+    clearPhoto: { label: "Remove profile photo", description: "Take the photo off somebody's record. Paired with setting one - a moderation action when granted beyond your own." },
+  },
   announcements: {
     post: { label: "Post", description: "Publish a new board post." },
     giveKudos: { label: "Give kudos", description: "Post praise about a teammate." },

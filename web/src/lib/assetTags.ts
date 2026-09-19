@@ -309,7 +309,7 @@ export function buildScanPayload(mode: QrMode, a: { id: string; tag?: string | n
   if (mode === "tag" && a.tag) return a.tag;
   if (mode === "tag_serial" && a.tag) return a.serial ? `${a.tag} | SN:${a.serial}` : a.tag;
   if (mode === "found") return `${origin}/found/${a.id}`;
-  return `${origin}/#/assets/${a.id}${a.secret ? `?s=${a.secret}` : ""}`;
+  return `${origin}/assets/${a.id}${a.secret ? `?s=${a.secret}` : ""}`;
 }
 
 // Inverse of buildScanPayload for the scanners: whatever shape the sticker encodes (deep link, found URL,
@@ -321,7 +321,9 @@ export function parseScanPayload(text: string): ScanRef | null {
   const t = text.trim();
   if (!t) return null;
   const secret = t.match(/[?&]s=([A-Za-z0-9]+)/)?.[1];
-  const deepLink = t.match(/#\/assets\/([A-Za-z0-9_-]+)(?:\?[^\s]*)?\s*$/);
+  // `#/assets/<id>` as well as `/assets/<id>`: the app moved off hash routes, but a sticker is a physical
+  // object with its own URL printed on it, and one already on a laptop lid has to keep scanning.
+  const deepLink = t.match(/(?:#)?\/assets\/([A-Za-z0-9_-]+)(?:\?[^\s]*)?\s*$/);
   if (deepLink) return { id: deepLink[1]!, ...(secret ? { secret } : {}) };
   const foundUrl = t.match(/\/found\/([A-Za-z0-9_-]+)(?:\?[^\s]*)?\s*$/);
   if (foundUrl) return { id: foundUrl[1]!, ...(secret ? { secret } : {}) };

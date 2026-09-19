@@ -18,7 +18,7 @@ import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { useKpiFocus } from "@/lib/kpiFocus";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { AccessAction } from "@/components/access/AccessAction";
-import { usePermission } from "@/lib/perm";
+import { usePermission, useCanWriteOthers } from "@/lib/perm";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -50,13 +50,9 @@ function group<T extends Approvable>(g: { key: string; label: string; icon: Luci
 // its own inbox section with a Verify/Reject that PATCHes employees/<id>/tax - the server still enforces the
 // maker-checker (you can't verify your own). Hidden for callers without the tax-verifications capability (the
 // endpoint 403s -> empty rows).
-function TaxVerificationsCard({ rows, money, onDone }: { rows: TaxVerification[]; money: (n: number) => string; onDone: () => void }) {
+function TaxVerificationsCard({ rows, money, canDecide, onDone }: { rows: TaxVerification[]; money: (n: number) => string; canDecide: boolean; onDone: () => void }) {
   const { toast } = useToast();
   const [busy, setBusy] = useState<string | null>(null);
-  // The decision is a PATCH of employees/<id>/tax, so that is the capability it needs. Reading the queue and
-  // deciding on it are separate grants: a reader who cannot write the sub-resource gets the list without the
-  // two buttons, rather than buttons that can only 403.
-  const canDecide = usePermission("employees.tax.write");
   const confirm = useConfirm();
   async function decide(v: TaxVerification, action: "verify" | "reject") {
     // A rejection un-applies the declared prior-employer income and TDS from this person's tax projection -
@@ -135,6 +131,10 @@ function TaxVerificationsCard({ rows, money, onDone }: { rows: TaxVerification[]
 // approval rights simply sees an empty inbox (and the nav item is hidden for them).
 export default function Approvals({ me }: { me: Me }) {
   void me;
+  // Deciding a prior-employer tax declaration is a PATCH of `employees/<id>/tax` about somebody else - the
+  // server's maker-checker refuses the subject's own - so the gate is the caller's write breadth past their
+  // own rows, never the stripped `employees.tax.write` that every employee holds for their own declaration.
+  const canDecideTax = useCanWriteOthers("employees.tax");
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
 
@@ -209,6 +209,22 @@ export default function Approvals({ me }: { me: Me }) {
     const times = r.sessions.length === 0 ? "remove punches" : r.sessions.map((s) => `${t(s.clock_in)}–${t(s.clock_out)}`).join(", ");
     return `${formatDate(r.date)} · ${times}${r.reason ? ` · ${r.reason}` : ""}`;
   };
+  // Decision context for an attendance correction: the log it is about to rewrite. The times on the row are
+  // only half the question - whether they fit the days around them is the other half, and that is a click away
+  // rather than a memory test. Pending only; a decided one needs no aid.
+  const regContext = (r: AttendanceRegularization): React.ReactNode => {
+    const empId = r.employee ? idOf(r.employee) : undefined;
+    if (!empId) return null;
+    return (
+      <button
+        type="button"
+        className="font-medium text-primary underline-offset-2 hover:underline"
+        onClick={() => navigate(`employees/${empId}/attendance`)}
+      >
+        See their attendance around {formatDate(r.date)}
+      </button>
+    );
+  };
   const sumLeave = (r: LeaveRequest) => leaveSummary(r, (ref) => typeName(ref) ?? "Leave");
   const sumReimb = (r: Reimbursement) => `${money(r.amount)}${r.category ? ` · ${catName(r.category)}` : ""}${r.description ? ` · ${r.description}` : ""}`;
   const sumOt = (r: OvertimeRequest) => `${formatDate(r.date)} · ${Math.round(r.minutes / 6) / 10}h${r.reason ? ` · ${r.reason}` : ""}`;
@@ -235,7 +251,7 @@ export default function Approvals({ me }: { me: Me }) {
       group({ key: "reimb", label: "Reimbursements", icon: ReceiptText, collection: "reimbursements", items: items(b.reimbs), summary: sumReimb }),
       group({ key: "overtime", label: "Overtime", icon: Hourglass, collection: "overtime-requests", items: items(b.overtimes), summary: sumOt }),
       group({ key: "remote", label: "Remote work", icon: House, collection: "remote-work-requests", items: items(b.remotes), summary: sumRemote }),
-      group({ key: "regularization", label: "Attendance", icon: Clock, collection: "attendance-regularizations", items: items(b.regularizations), summary: sumReg }),
+      group({ key: "regularization", label: "Attendance", icon: Clock, collection: "attendance-regularizations", items: items(b.regularizations), summary: sumReg, context: forHistory ? undefined : regContext }),
       group({ key: "encashment", label: "Leave encashment", icon: Coins, collection: "leave-encashments", items: items(b.encashments), summary: sumEncash }),
       group({ key: "loan", label: "Loans & advances", icon: Banknote, collection: "loans", items: items(b.loans), summary: sumLoan }),
       group({ key: "timesheet", label: "Timesheets", icon: Timer, collection: "time-entries", items: items(b.timeEntries), summary: sumTime }),
@@ -447,7 +463,15 @@ export default function Approvals({ me }: { me: Me }) {
               <EmptyState icon={CheckCheck} title="You're all caught up" description="All pending requests have been decided." />
             ) : (
               <>
-                {taxVerifications.length > 0 && <TaxVerificationsCard rows={taxVerifications} money={money} onDone={reload} />}
+                {/* Reading this queue and DECIDING on it are separate grants, and the decision is a PATCH of
+                    `employees/<id>/tax`. Not the stripped capability: `employees.me.tax.**` is a write grant
+                    every employee holds, so `employees.tax.write` is true for all of them - and this queue is
+                    never one's own declaration (the server's maker-checker refuses that outright). The
+                    caller's write BREADTH past their own rows is the grant that can actually decide here; a
+                    queue spans many people, so there is no one subject to ask `access.subject` about. */}
+                {taxVerifications.length > 0 && (
+                  <TaxVerificationsCard rows={taxVerifications} money={money} canDecide={canDecideTax} onDone={reload} />
+                )}
                 {queueTotal > 0 && (
                   <>
                     <SummaryStrip

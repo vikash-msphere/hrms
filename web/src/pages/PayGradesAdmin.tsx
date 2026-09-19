@@ -127,7 +127,7 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
   }
 
   const columns: Column<PayGrade>[] = [
-    { id: "level", header: "Level", align: "right", accessor: (g) => g.level ?? 0 },
+    { id: "level", header: "Level", align: "right", filter: "number", accessor: (g) => g.level ?? 0 },
     { id: "name", header: "Grade", accessor: (g) => g.display_name, cell: (g) => <span className="font-medium">{g.display_name}</span> },
     {
       id: "band",

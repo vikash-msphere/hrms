@@ -217,6 +217,32 @@ describe("a soft-deleted cycle takes its reviews with it", () => {
   });
 });
 
+// The profile's Performance tab asks for one person's reviews across every cycle. Without the filter it would
+// have to read a page of the collection and sift it client-side, and reviews are created a whole cycle at a
+// time - so one person's are a handful of rows scattered through hundreds, mostly past the first page.
+describe("one person's reviews", () => {
+  it("lists only theirs, across cycles, and still drops a deleted cycle's", async () => {
+    const manager = await seedActor();
+    const employee = await seedActor(manager.employeeId);
+    const colleague = await seedActor(manager.employeeId);
+    const first = await launchFor(manager, employee.employeeId, "H1 2026");
+    await launchFor(manager, colleague.employeeId, "H1 2026 (colleague)");
+    const second = await createReviewCycle(deps, manager, { name: "H2 2026", period_start: "2026-07-01", period_end: "2026-12-31" });
+    await launchReviewCycle(deps, manager, second.uuid, [`employees/${employee.employeeId}`]);
+
+    const mine = (await listReviews(deps, ALL, 100, undefined, undefined, undefined, `employees/${employee.employeeId}`)).items;
+    expect(mine).toHaveLength(2);
+    expect(mine.every((r) => r.employeeId === employee.employeeId)).toBe(true);
+    expect(new Set(mine.map((r) => r.cycleId))).toEqual(new Set([first.cycle.uuid, second.uuid]));
+
+    // The cycle-level soft delete still applies underneath the filter: a person's list must not keep a review
+    // for a cycle that no longer exists.
+    await deleteReviewCycle(deps, manager, first.cycle.uuid);
+    const left = (await listReviews(deps, ALL, 100, undefined, undefined, undefined, `employees/${employee.employeeId}`)).items;
+    expect(left.map((r) => r.cycleId)).toEqual([second.uuid]);
+  });
+});
+
 // Who writes a review, and who gets asked for 360 feedback. Both used to have exactly one answer - the
 // manager chain, and the manager's own nomination list - and both broke on ordinary org shapes.
 describe("the reviewer override", () => {

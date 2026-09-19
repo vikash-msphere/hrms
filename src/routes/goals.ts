@@ -121,7 +121,23 @@ export const goals = collectionRoutes<GoalInput, typeof schema.goals>({
     remove: (deps, actor, id, ifMatch) => deleteGoal(deps, actor, id, ifMatch),
     restore: (deps, actor, id) => restoreGoal(deps, actor, id),
   },
-  list: (c, page) => listGoals(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted, c.req.query("cycle"), c.req.query("burnup") === "true", c.req.query("stage"), c.req.query("employee") || undefined, page.deletedOnly),
+  // The filters are an options object rather than fourteen positional arguments, and `state` is the one that
+  // matters most: the chips above a goals list used to narrow the rows a browser already held, which made every
+  // count on the page a statement about one 100-row page rather than about the org.
+  list: (c, page) => listGoals(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, {
+    status: c.req.query("status"),
+    cycle: c.req.query("cycle"),
+    stage: c.req.query("stage"),
+    employee: c.req.query("employee") || undefined,
+    department: c.req.query("department") || undefined,
+    state: c.req.query("state") || undefined,
+    manager: c.req.query("manager") || undefined,
+    q: c.req.query("q") || undefined,
+    showDeleted: page.showDeleted,
+    deletedOnly: page.deletedOnly,
+    withBurnup: c.req.query("burnup") === "true",
+    withCounts: c.req.query("counts") === "true",
+  }),
   verbs: {
     updateProgress: { schema: progressSchema, run: (deps, user, id, body) => updateGoalProgress(deps, user, id, body.progress, body.status, body.note) },
     setConfidence: { schema: confidenceSchema, run: (deps, user, id, body) => setGoalConfidence(deps, user, id, body.confidence, body.note) },

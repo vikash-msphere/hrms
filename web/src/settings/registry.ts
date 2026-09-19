@@ -1,6 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import {
-  Building2, Landmark, SlidersHorizontal, Hash, Network, Fingerprint, LayoutDashboard, Trophy,
+  Building2, Landmark, SlidersHorizontal, Hash, Network, Fingerprint, Trophy,
   CalendarRange, Palmtree, Clock, CalendarClock,
   Coins, Layers, ListOrdered, Percent, Receipt, Wallet, FileSpreadsheet, FolderKanban,
   UserSearch, UserPlus, Target, ClipboardList, HeartPulse,
@@ -26,7 +26,7 @@ export type AccessTargetRef = { collection: string; objectPath?: string; verb?: 
 // search / command palette / the hub still surface them.
 export type SettingsScope = "org" | "object" | "user";
 export type SettingsEntry = {
-  key: string; // route segment: #/settings/<key>
+  key: string; // route segment: /settings/<key>
   title: string;
   desc: string; // one line, plain language - shown on the hub card and panel header
   group: (typeof SETTINGS_GROUPS)[number];
@@ -53,7 +53,7 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   { key: "employee-ids", title: "Employee IDs", desc: "The EMP-0042 style scheme new hires are auto-numbered with.", group: "Company", icon: Hash, keywords: ["number", "emp", "id format", "sequence"], target: { collection: "settings", objectPath: "settings/employee-number", label: "Employee IDs" } },
   { key: "departments", title: "Departments", desc: "The org's department tree - used by the directory, org chart and reporting.", group: "Company", icon: Network, perm: "departments.write", target: { collection: "departments", label: "Departments" } },
   { key: "employee-fields", title: "Employee identity fields", desc: "PAN, Aadhaar and other identity details collected per employee.", group: "Company", icon: Fingerprint, keywords: ["pan", "aadhaar", "uan", "custom fields", "sensitive"], target: { collection: "settings", objectPath: "settings/employee_fields", label: "Employee fields" } },
-  { key: "dashboard", title: "Dashboard visibility", desc: "Which roles or people see each KPI card and timeline marker, and the shortcut tiles.", group: "Company", icon: LayoutDashboard, keywords: ["kpi", "timeline markers", "widgets", "shortcuts", "tiles"], target: { collection: "settings", objectPath: "settings/dashboard", label: "Dashboard" } },
+  { key: "dashboard", title: "Dashboard visibility", desc: "Which roles or people see each KPI card and timeline marker, and the shortcut tiles.", group: "Company", icon: SlidersHorizontal, keywords: ["kpi", "timeline markers", "widgets", "shortcuts", "tiles"], target: { collection: "settings", objectPath: "settings/dashboard", label: "Dashboard" } },
   { key: "kudos", title: "Kudos levels", desc: "The recognition levels and their icons on the praise wall.", group: "Company", icon: Trophy, keywords: ["recognition", "praise", "badges"], target: { collection: "settings", objectPath: "settings/kudos", label: "Kudos levels" } },
   { key: "asset-tags", title: "Asset tags", desc: "The tag pattern, the asset categories and their tag codes, sticker-sheet formats, label content, and whether custody has to be proved by scanning the tag.", group: "Company", icon: Tag, keywords: ["sticker", "label", "qr", "print", "inventory", "a4-65", "tag format", "categories", "category", "tag code", "custody", "scan", "acknowledge", "stocktake", "verify"], target: { collection: "settings", objectPath: "settings/asset-tags", label: "Asset tags" } },
   { key: "quick-actions", title: "Quick create menu", desc: "Which items appear in the top-bar + (New) menu, and their order.", group: "Company", icon: Plus, keywords: ["new menu", "plus menu", "quick create", "shortcuts", "actions", "+ new"], target: org("Quick create menu") },

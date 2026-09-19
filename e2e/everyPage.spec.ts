@@ -24,7 +24,9 @@ const PAGES: PageCase[] = [
   { route: "dashboard", heading: null },
   { route: "approvals", heading: "Approvals" },
   { route: "notifications", heading: "Notifications" },
-  { route: "profile", heading: "My Profile" },
+  // Per-viewer, like the dashboard: `/profile` and `/employees/<id>` are ONE page now, and its `<h1>` is the
+  // person's own name rather than a page title - the same heading whichever address you arrive by.
+  { route: "profile", heading: null },
   { route: "employees", heading: "Directory" },
   { route: "org-chart", heading: "Org Chart" },
   { route: "attendance", heading: "Attendance" },

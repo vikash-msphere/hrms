@@ -64,7 +64,7 @@ export function SettingsButton({
   if (scope === "object" && !objectPath) return null;
 
   // Object scope keys the open state on both the setting AND which instance, so the gear is "open" only for the
-  // instance whose path is in the hash (switching the selected board closes a stale sheet).
+  // instance whose path is in the URL (switching the selected board closes a stale sheet).
   const open =
     route.query.setting === settingKey &&
     (scope !== "object" || route.query.settingObj === objectPath);
@@ -90,7 +90,8 @@ export function SettingsButton({
       </Button>
       {/* A two-pane panel (list rail + editor) needs more than the 760px default, or the rail starves the
           editor. Still capped by the viewport, so a laptop just gets the widest panel that fits. */}
-      <SheetContent className={entry.wide ? "sm:max-w-[min(1100px,95vw)]" : undefined}>
+      {/* `routed`: this panel's open state IS the URL (`?setting=`), so Back already closes it. */}
+      <SheetContent routed className={entry.wide ? "sm:max-w-[min(1100px,95vw)]" : undefined}>
         <SheetHeader>
           <div className="flex items-center gap-1.5">
             <SheetTitle>{entry.title}</SheetTitle>

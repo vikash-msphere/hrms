@@ -10,7 +10,7 @@ test("the Monthly/Annual toggle re-prices the CTC and its breakdown together", a
   // alone in the seeded role matrix, so on any other login the tab is correctly not offered at all. This is
   // the SELF-service card either way - payroll reading their own row, on their own profile.
   const page = await as("payroll");
-  await gotoRoute(page, "profile", "Profile");
+  await gotoRoute(page, "profile"); // one record page, two addresses: its `h1` is the person's name
   await page.getByRole("tab", { name: "Compensation" }).click();
 
   const panel = page.getByRole("tabpanel").filter({ hasText: "Cost to company" });

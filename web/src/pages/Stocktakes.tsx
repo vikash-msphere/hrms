@@ -187,27 +187,27 @@ export default function Stocktakes({ me }: { me: Me }) {
         <div className="truncate text-xs text-muted-foreground">{presetOf(r.scope)}{r.scope?.categories?.length ? ` · ${catName(r.scope.categories[0])}` : ""}</div>
       </div>
     ) },
-    { id: "closed", header: "Closed", accessor: (r) => r.closed_time ?? "", cell: (r) => (
+    { id: "closed", header: "Closed", filter: "date", dateHint: "past", accessor: (r) => r.closed_time ?? "", cell: (r) => (
       <div className="min-w-0">
         <div>{r.closed_time ? formatDate(r.closed_time.slice(0, 10)) : "-"}</div>
         <div className="truncate text-xs text-muted-foreground">by {empName(r.closed_by)}</div>
       </div>
     ) },
-    { id: "sighted", header: "Sighted", align: "right", accessor: (r) => r.result?.counts?.sighted ?? 0, cell: (r) => (
+    { id: "sighted", header: "Sighted", align: "right", filter: "number", accessor: (r) => r.result?.counts?.sighted ?? 0, cell: (r) => (
       <span className="tabular-nums">{r.result?.counts?.sighted ?? 0} <span className="text-muted-foreground">/ {r.result?.counts?.scope_total ?? 0}</span></span>
     ) },
     // Proof quality, not just coverage: a count ticked off by hand and one scanned end to end are different
     // evidence, and the difference is worth seeing without opening the count.
-    { id: "proof", header: "Scan-proved", align: "right", accessor: (r) => r.result?.counts?.scanned ?? 0, cell: (r) => {
+    { id: "proof", header: "Scan-proved", align: "right", filter: "number", accessor: (r) => r.result?.counts?.scanned ?? 0, cell: (r) => {
       const k = r.result?.counts;
       if (!k?.sighted) return <span className="text-muted-foreground">-</span>;
       return <span className="tabular-nums">{Math.round(((k.scanned ?? 0) / k.sighted) * 100)}%</span>;
     } },
-    { id: "missing", header: "Missing", align: "right", accessor: (r) => r.result?.counts?.missing ?? 0, cell: (r) => (
+    { id: "missing", header: "Missing", align: "right", filter: "number", aggregate: "sum", accessor: (r) => r.result?.counts?.missing ?? 0, cell: (r) => (
       <span className={cn("tabular-nums", (r.result?.counts?.missing ?? 0) > 0 && "font-medium text-warning")}>{r.result?.counts?.missing ?? 0}</span>
     ) },
     // The reconciled column: of what this count could not find, how much is STILL unaccounted for today.
-    { id: "still", header: "Still missing", align: "right", accessor: (r) => reconcileMissing(r, assets).stillMissing, cell: (r) => {
+    { id: "still", header: "Still missing", align: "right", filter: "number", aggregate: "sum", accessor: (r) => reconcileMissing(r, assets).stillMissing, cell: (r) => {
       const rec = reconcileMissing(r, assets);
       if (!(r.result?.counts?.missing ?? 0)) return <span className="text-muted-foreground">-</span>;
       return (
@@ -217,8 +217,8 @@ export default function Stocktakes({ me }: { me: Me }) {
         </span>
       );
     } },
-    { id: "flagged", header: "Flagged", align: "right", defaultHidden: true, accessor: (r) => r.result?.counts?.flagged ?? 0 },
-    { id: "found", header: "Unexpected", align: "right", defaultHidden: true, accessor: (r) => r.result?.counts?.found ?? 0 },
+    { id: "flagged", header: "Flagged", align: "right", defaultHidden: true, filter: "number", aggregate: "sum", accessor: (r) => r.result?.counts?.flagged ?? 0 },
+    { id: "found", header: "Unexpected", align: "right", defaultHidden: true, filter: "number", aggregate: "sum", accessor: (r) => r.result?.counts?.found ?? 0 },
     {
       id: "actions", header: "", sortable: false, filter: "none", align: "right",
       cell: (r) => <Button size="sm" variant="ghost" onClick={() => navigate(`stocktakes/${idOf(r.path)}`)}>Open</Button>,
@@ -330,7 +330,7 @@ export default function Stocktakes({ me }: { me: Me }) {
   );
 }
 
-// One count, deep-linked (`#/stocktakes/<id>`), so a colleague can be sent straight to it.
+// One count, deep-linked (`/stocktakes/<id>`), so a colleague can be sent straight to it.
 function CountDetail({
   count,
   assets,

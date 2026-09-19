@@ -26,10 +26,11 @@ export default defineConfig({
   outputDir: lane.outputDir,
   // Proves the stack is in the mode the specs assume (Google cookie auth, dev bypass off) before anything runs.
   globalSetup: "./e2e/globalSetup.ts",
-  // One local D1 file, one Worker: parallel specs writing the same rows would race each other, and a flaky
-  // browser lane is worse than no browser lane. Serial is the honest setting until the specs are sharded
-  // with per-spec data.
-  workers: 32,
+  // One local D1 file, one Worker: parallel specs writing the same rows race each other, so the number here
+  // is a measured ceiling rather than a machine count. 16 is it. Past that the Vite dev server stops
+  // answering under the load and whole swathes of the run fail with ECONNREFUSED on the SPA port - failures
+  // that say nothing about the app and make the run void. Specs sharded with per-spec data could raise it.
+  workers: 16,
   fullyParallel: false,
   // A retry earns its keep here: the failure that repeats is real, and the trace from the retry is how it
   // gets diagnosed. `forbidOnly` keeps a stray `test.only` from silently shrinking the CI run to one spec.

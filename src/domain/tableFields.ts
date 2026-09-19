@@ -50,7 +50,6 @@ export const BASES: Record<string, BaseDef> = {
   "leave-types": { label: "Leave types" },
   "leave-encashments": { label: "Leave encashments" },
   holidays: { label: "Holidays" },
-  "holiday-selections": { label: "Holiday selections" },
   "attendance-regularizations": { label: "Attendance corrections" },
   "overtime-requests": { label: "Overtime requests" },
   "remote-work-requests": { label: "Remote work requests" },
@@ -135,6 +134,14 @@ export const EXCLUDED_BASES: Record<string, string> = {
   "personal-documents": "document metadata rides its own access lane (per-document ACL + download audit)",
   "org-documents": "document metadata rides its own access lane (publication state + acknowledgement + download audit)",
   "payroll-debit-accounts": "sensitive debit configuration, private by default",
+  // The list is not a scoped list at all: services/holidaySelections.ts pins `employee_id` to the CALLER and
+  // ignores the grant, so everyone - HR included - sees only their own picks through the API. A generic
+  // scope-bound projection of the table is therefore a different query from the collection's own list, and the
+  // difference only shows up once somebody holds a wider grant: the endpoint would keep answering with their
+  // own picks while a grid handed over everybody's. Also why it never worked as a base - the table is absent
+  // from LIST_OWNER_COLUMNS (nothing generic reads it), so `applyScope` at own breadth bound no owner column
+  // and the grid was permanently empty.
+  "holiday-selections": "the list pins the caller's own picks (services/holidaySelections.ts), so it narrows by the actor and not by scope",
 };
 
 // ---- Global column rules -------------------------------------------------------------------------------

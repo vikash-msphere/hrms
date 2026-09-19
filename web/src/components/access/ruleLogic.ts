@@ -95,7 +95,12 @@ export type RuleFlag = { kind: "denied" | "shadowed" | "unlistable" | "pending" 
 // The scopes whose compiled pattern needs a second token, and so cannot match the ONE-token key a list
 // request is decided on (`leave-requests.read`). `all` compiles to `<collection>.**`, whose `**` matches zero
 // trailing tokens, and `create` IS the bare one-token rule - those two reach the list; nothing else does.
-const ROW_SCOPES = new Set(["self", "dept", "subtree", "exact"]);
+// `reports` / `org` are the MANAGER CHAIN, and they belong here for exactly the same reason `self` and `dept`
+// do: `<collection>.my-reports.**` is a two-token pattern, so it cannot match the one-token list key either.
+// They were missing, so a chain grant authored anywhere but the ACL modal (the fine-rules editor, an import,
+// the API) was the one row-scoped shape that got no warning - the rule reads every report's record and the
+// page they are on still 403s.
+const ROW_SCOPES = new Set(["self", "dept", "subtree", "exact", "reports", "org"]);
 
 /**
  * Can this subject call the collection endpoint at all - the question every row-scoped rule silently depends

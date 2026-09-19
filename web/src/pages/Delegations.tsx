@@ -92,7 +92,7 @@ export default function Delegations({ me }: { me: Me }) {
 
   const columns: Column<ApprovalDelegation>[] = [
     {
-      id: "delegate", header: "Covered by", accessor: (r) => empName(r.delegate),
+      id: "delegate", header: "Covered by", filter: "select", groupBy: true, accessor: (r) => empName(r.delegate),
       cell: (r) => (
         <span className="inline-flex items-center gap-2">
           <PhotoAvatar employeeId={r.delegate ? idOf(r.delegate) : ""} name={empName(r.delegate)} photo={emp(r.delegate)?.photo} className="h-6 w-6" />
@@ -101,7 +101,8 @@ export default function Delegations({ me }: { me: Me }) {
       ),
     },
     {
-      id: "period", header: "Period", accessor: (r) => r.from_date,
+      // Sorted and filtered on the START of the cover, which is the end a rota is planned from.
+      id: "period", header: "Period", filter: "date", accessor: (r) => r.from_date,
       cell: (r) => (
         <span className="inline-flex items-center gap-1.5 text-sm">
           {formatDate(r.from_date)} <ArrowRight className="h-3 w-3 text-muted-foreground" /> {formatDate(r.to_date)}

@@ -2,9 +2,9 @@ import { allowConsoleErrors, gotoRoute, personId, test, expect, type Role } from
 
 // Somebody else's bank account, on somebody else's record.
 //
-// The employee record is one page with eleven tabs, and two of them are the org's most sensitive data:
-// Identity (government IDs) and Bank details. They are NOT covered by a broad grant on `employees` - the
-// model deliberately splits them out as sub-resources (`employees.*.bank-account` and friends, see
+// The employee record is one page with seven tabs, and one of them holds the org's most sensitive data:
+// Identity, which carries both the government IDs and the bank account. They are NOT covered by a broad
+// grant on `employees` - the model deliberately splits them out as sub-resources (`employees.*.bank-account` and friends, see
 // src/domain/grants.ts), so HR holding `employees.*` write for the directory still reaches nobody's PII, and
 // a manager reading their team's roster reaches nobody's either. Only the owner (via `OWN_PII`) and super do.
 //
@@ -12,7 +12,7 @@ import { allowConsoleErrors, gotoRoute, personId, test, expect, type Role } from
 // Nobody has ever opened a COLLEAGUE's record as anybody else - which is precisely where the field-precise
 // split either holds or quietly does not. Three ways it can fail, and all three are checked: the tab is
 // offered, the URL serves the panel anyway, or the read behind it answers.
-const PRIVATE_TABS = ["Identity", "Bank details"] as const;
+const PRIVATE_TABS = ["Identity"] as const;
 
 /** Who each viewer looks at: a colleague, never themselves - the owner rule is a different test. */
 const SUBJECT: Record<string, Role> = {
@@ -42,6 +42,33 @@ test.describe("another person's PII", () => {
       // correct answers to "may I look at this person at all"; what follows is about the PII either way.
       await expect(profileOrDenied(page)).toBeVisible({ timeout: 30_000 });
 
+      // The Profile tab is NOT one of the private ones - anybody who may read the base record may open it - so
+      // the three cards on it are gated one at a time, on `employees.<code>.personal-info` read for THIS
+      // person. Emergency is the sharpest of them (blood group, allergies, free-text medical notes), and it is
+      // a card on that tab rather than a dialog behind a button, so "the viewer never pressed it" is no longer
+      // any part of why they cannot see it.
+      await expect(
+        page.getByText("Emergency contact name"),
+        `${viewer} was shown a colleague's emergency details`,
+      ).toHaveCount(0);
+      await expect(
+        page.getByText("Personal email"),
+        `${viewer} was shown a colleague's contact details`,
+      ).toHaveCount(0);
+      const personal = await page.request.get(`/v1/employees/${subject}/personal-info`);
+      expect(personal.status(), `${viewer} could read a colleague's personal info`).toBe(403);
+
+      // NOR A CHIP POINTING AT THEM. The completeness flags are deliberately broader than the data - the
+      // server sends HR "is there an emergency contact on file" as a record-quality signal while the contents
+      // stay owner-only - so the checklist could offer a jump to a card this viewer will never be shown. A
+      // chip that lands on a tab with nothing on it is the same dead end as an empty tab.
+      for (const chip of ["Personal details", "Contact details", "Emergency contact", "Identity", "Bank details"]) {
+        await expect(
+          page.getByRole("button", { name: chip, exact: true }),
+          `${viewer} was offered a "${chip}" chip that jumps to a section they cannot see`,
+        ).toHaveCount(0);
+      }
+
       for (const tab of PRIVATE_TABS) {
         await expect(
           page.getByRole("tab", { name: tab, exact: true }),
@@ -50,7 +77,7 @@ test.describe("another person's PII", () => {
       }
 
       // And the URL is not a way round the tab bar.
-      for (const segment of ["identity", "bank"]) {
+      for (const segment of ["identity"]) {
         await gotoRoute(page, `employees/${subject}/${segment}`);
         await expect(profileOrDenied(page)).toBeVisible({ timeout: 30_000 });
         for (const tab of PRIVATE_TABS) {
@@ -80,6 +107,9 @@ test.describe("another person's PII", () => {
       await expect(owner.getByRole("tab", { name: tab, exact: true })).toBeVisible({ timeout: 30_000 });
     }
     expect((await owner.request.get(`/v1/employees/${own}/bank-account`)).status()).toBe(200);
+    // The other half of the rule above: on their OWN record the emergency card is there to fill in.
+    await expect(owner.getByText("Emergency contact name")).toBeVisible({ timeout: 30_000 });
+    expect((await owner.request.get(`/v1/employees/${own}/personal-info`)).status()).toBe(200);
 
     const admin = await as("super");
     await gotoRoute(admin, `employees/${own}`);

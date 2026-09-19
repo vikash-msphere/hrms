@@ -61,6 +61,7 @@ export const HIERARCHICAL_TABLES: HierTable[] = [
   { table: schema.expenses, collection: "expenses" },
   { table: schema.attendanceSessions, collection: "attendance" },
   { table: schema.attendanceRegularizations, collection: "attendance-regularizations" },
+  { table: schema.attendanceDayMarks, collection: "attendance-day-marks" },
   { table: schema.overtimeRequests, collection: "overtime-requests" },
   { table: schema.remoteWorkRequests, collection: "remote-work-requests" },
   { table: schema.noticePeriods, collection: "notice-periods" },

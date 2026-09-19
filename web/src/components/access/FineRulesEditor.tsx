@@ -160,11 +160,13 @@ export function FineRulesEditor({
         );
       },
     },
-    { id: "collection", header: "Collection", filter: "select", accessor: (r) => labelOf(r.collection), cell: (r) => <span className="font-medium">{labelOf(r.collection)}</span> },
-    { id: "scope", header: "Scope", filter: "select", accessor: (r) => scopeText(r) },
+    // Grouping a rule list by collection is how it gets reviewed: every rule touching payroll, together,
+    // with the deny ones visible against the allows.
+    { id: "collection", header: "Collection", filter: "select", groupBy: true, accessor: (r) => labelOf(r.collection), cell: (r) => <span className="font-medium">{labelOf(r.collection)}</span> },
+    { id: "scope", header: "Scope", filter: "select", groupBy: true, accessor: (r) => scopeText(r) },
     { id: "field", header: "Field", filter: "select", accessor: (r) => r.field ?? "-" },
-    { id: "perm", header: "Permission", filter: "select", accessor: (r) => permText(r), cell: (r) => <Badge variant={r.effect === "deny" ? "destructive" : r.verb ? "default" : "secondary"}>{permText(r)}</Badge> },
-    { id: "state", header: "State", filter: "select", accessor: (r) => (r.status && r.status !== "active" ? "awaiting approval" : r.expire_time ? "temporary" : "live") },
+    { id: "perm", header: "Permission", filter: "select", groupBy: true, accessor: (r) => permText(r), cell: (r) => <Badge variant={r.effect === "deny" ? "destructive" : r.verb ? "default" : "secondary"}>{permText(r)}</Badge> },
+    { id: "state", header: "State", filter: "select", groupBy: true, accessor: (r) => (r.status && r.status !== "active" ? "awaiting approval" : r.expire_time ? "temporary" : "live") },
     ...(canWrite
       ? [{ id: "actions", header: "", sortable: false, filter: "none", align: "right", cell: (r: AccessRule) => <Button variant="ghost" size="icon" aria-label="Delete this rule" className="h-8 w-8" disabled={busy} onClick={() => del(r)}><Trash2 className="h-4 w-4" /></Button> } as Column<AccessRule>]
       : []),

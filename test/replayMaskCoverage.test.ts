@@ -30,7 +30,7 @@ const SENSITIVE_DIALOGS = [
   "EmployeeBonuses", // amounts
   "EmployeeIdentityDetails", // Aadhaar, UAN, passport
   "EmployeePersonalDetails", // date of birth, address, personal contact
-  "EmergencyQuickView", // blood group, allergies, medical notes - the only medical fields in the app
+  "EmployeeEmergencyDetails", // blood group, allergies, medical notes - the only medical fields in the app
   "SignDocumentDialog", // the document body and the signer's legal name, at the moment they sign
 ];
 
@@ -128,7 +128,7 @@ describe("session replay: the confidential fields on ordinary pages", () => {
 
   it("an offered salary, on the two ATS surfaces that are not masked whole", () => {
     // `offers` is in SENSITIVE_PAGES above, but the same figure is rendered beside the same candidate's name on
-    // #/candidates/<id> and on the pipeline board - routes that are mostly names and stages, so they are tagged
+    // /candidates/<id> and on the pipeline board - routes that are mostly names and stages, so they are tagged
     // per value rather than masked whole. A title attribute is NOT masked (`maskAttributes: []`), so the board
     // card's tooltip must not carry the figure at all.
     expect(page("CandidateProfile")).toMatch(/data-sentry-mask[^>]*>\{money\(o\.base_comp/);
@@ -144,9 +144,16 @@ describe("session replay: the confidential fields on ordinary pages", () => {
 
   it("an employee's personal documents, on the two routes the Documents mask does not cover", () => {
     // The Documents ROUTE is masked whole ("scanned identity documents, contracts, insurance cards"), but this
-    // panel reads the same `personal-documents` collection onto #/profile and #/employees/<id>, which are not
+    // panel reads the same `personal-documents` collection onto /profile and /employees/<id>, which are not
     // in SENSITIVE_PAGES. It is the eighth panel on that page; the other seven are in SENSITIVE_DIALOGS above.
     expect(source("EmployeeDocuments")).toMatch(/<Card className="[^"]*\bsentry-mask\b/);
+  });
+
+  it("an employee's payslips, on the record route the #/payslips mask does not cover", () => {
+    // Same argument one panel over. The payslips ROUTE is masked whole ("a table of net pay, deductions and
+    // statutory contributions"); this panel renders that table on /employees/<id>, which is not in
+    // SENSITIVE_PAGES, so the card carries the class itself.
+    expect(source("EmployeePayslips")).toMatch(/<Card [^>]*className="[^"]*\bsentry-mask\b/);
   });
 
   it("a handwritten signature - BLOCKED, in both places it renders", () => {
@@ -160,14 +167,14 @@ describe("session replay: the confidential fields on ordinary pages", () => {
   });
 
   it("the emergency panel's medical free text does not record keystrokes", () => {
-    // The dialog carries `sentry-mask` (SENSITIVE_DIALOGS above); these two boxes are typed into, and
-    // keystroke recording is the separate channel - same pairing as a leave reason.
-    const src = source("EmergencyQuickView");
+    // The card and its dialog carry `sentry-mask` (SENSITIVE_DIALOGS above); these two boxes are typed into,
+    // and keystroke recording is the separate channel - same pairing as a leave reason.
+    const src = source("EmployeeEmergencyDetails");
     expect(src.match(/<Textarea[^>]*data-sentry-ignore/g) ?? []).toHaveLength(2);
   });
 
   it("a leave reason in the calendar's hover card", () => {
-    // The same field Leaves.tsx masks in two places, rendered by EntryCard on #/leave-calendar - a route that
+    // The same field Leaves.tsx masks in two places, rendered by EntryCard on /leave-calendar - a route that
     // is deliberately NOT masked whole (who is off when is exactly what a replay of it is wanted for).
     const files = import.meta.glob("../web/src/components/calendar/*.tsx", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
     const shared = Object.entries(files).find(([path]) => path.endsWith("/shared.tsx"))![1];

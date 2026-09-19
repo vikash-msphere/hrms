@@ -155,8 +155,9 @@ test("a pending request is withdrawn from every page that lets its own filer can
   expect(asked.status(), await asked.text()).toBe(200);
   const assetPath = ((await asked.json()) as { path: string }).path;
 
-  await gotoRoute(employee, "profile", "My Profile");
-  await employee.getByRole("tab", { name: "Assets" }).click();
+  await gotoRoute(employee, "profile"); // one record page, two addresses: its `h1` is the person's name
+  // Assets rides the Employment tab on the one record page - see the note in assetRequests.spec.ts.
+  await employee.getByRole("tab", { name: "Employment" }).click();
   const panel = employee.getByRole("tabpanel");
   // `has:` page-rooted, not re-scoped from `panel` - a has-locator carries its whole ancestor chain into the
   // containment check, so `panel.getByRole(...)` would ask each row to contain another tabpanel nested

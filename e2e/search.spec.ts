@@ -22,7 +22,7 @@ test.describe("global search", () => {
     await expect(page.getByRole("button").filter({ hasText: "Vendors" }).first()).toBeVisible();
     await page.keyboard.press("Enter");
 
-    await expect(page).toHaveURL(/#\/vendors/);
+    await expect(page).toHaveURL(/\/vendors/);
     await expect(page.getByRole("main")).toContainText("Vendors");
   });
 

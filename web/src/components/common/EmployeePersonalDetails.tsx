@@ -47,7 +47,7 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
   async function save() {
     // Save the full record so emergency fields (edited in the emergency modal) are preserved - and send the
     // version it was read at, because "the full record" is exactly what makes an unversioned write dangerous:
-    // an employee editing their emergency contact on #/profile while HR corrects an address here are two
+    // an employee editing their emergency contact on /profile while HR corrects an address here are two
     // whole-blob writes racing, and without If-Match the later one silently wins.
     try {
       const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form, data?.etag);

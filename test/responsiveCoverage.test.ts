@@ -86,10 +86,13 @@ describe("responsive coverage", () => {
       "components/common/EmployeeSettlement.tsx",
       // a chart's `sr-only` data equivalent: never painted, so it has no phone layout to get wrong
       "components/common/Chart.tsx",
-      // the primitive itself, and the pages that render their own phone layout instead of a table
+      // the primitive itself, and the surfaces that render their own phone layout instead of a table
       "components/ui/table.tsx",
       "pages/Timesheets.tsx",
-      "pages/Attendance.tsx",
+      // the day-by-day history swaps its table for `DayCards` below `sm` - the phone layout is a different
+      // component, not a stacked table. (Attendance.tsx itself is no longer here: the one table left on it,
+      // the team period grid, stacks.)
+      "components/common/AttendanceHistory.tsx",
     ];
     const offenders = files
       .filter(([, src]) => /<table[\s>]/.test(code(src)))
@@ -231,12 +234,11 @@ describe("responsive coverage", () => {
     expect(offenders, "index.css already forces group-hover reveals visible on a coarse pointer").toEqual([]);
   });
 
-  // Anything docked to the bottom of the viewport on a phone has to clear the bottom nav; otherwise it lands
-  // on top of the one strip that must stay tappable. The nav itself and the safe-area padding are exempt.
-  it("bottom-docked elements clear the phone bottom nav", () => {
+  // Anything docked to the bottom of the viewport on a phone has to clear the home indicator; otherwise it
+  // lands under the gesture bar, where a tap either does nothing or leaves the app.
+  it("bottom-docked elements clear the phone home indicator", () => {
     const offenders: string[] = [];
     for (const [path, src] of files) {
-      if (name(path) === "components/layout/BottomNav.tsx") continue;
       for (const m of code(src).matchAll(/(?<![a-z:-])(?:fixed|sticky)[^"'`]*?\bbottom-(\d+|\[[^\]]+\])/g)) {
         const token = m[0].slice(m[0].lastIndexOf("bottom-"));
         // Cleared if it is a calc that reserves room, or if a md:/sm: variant states the desktop value
@@ -250,11 +252,11 @@ describe("responsive coverage", () => {
     }
     expect(
       offenders,
-      "add calc(4.75rem + env(safe-area-inset-bottom)) on a phone and md:bottom-<n> for the desktop value",
+      "add calc(1.75rem + env(safe-area-inset-bottom)) on a phone and md:bottom-<n> for the desktop value",
     ).toEqual([]);
   });
 
-  // Every `env(safe-area-inset-*)` in the app - the bottom nav's padding, the sheet footers, the dialog
+  // Every `env(safe-area-inset-*)` in the app - the docked bars' padding, the sheet footers, the dialog
   // gutters, the standalone status-bar inset - evaluates to 0 unless the viewport meta opts into painting
   // under the device's own chrome. The whole safe-area layer is written against that one attribute, and
   // dropping it would not break a build or fail any other check here: it would just quietly zero every inset

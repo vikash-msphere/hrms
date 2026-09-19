@@ -102,4 +102,9 @@ that they have no collection-level `POST /` and no DELETE. If yours grows either
 - [ ] Access is path-gated by the middleware - **no** in-service checks. Scoped collections allocate a
       `code`, are registered in `grants`/`policy` (+ seed regenerated), and lists call `applyScope(ctx.scope)`.
 - [ ] Collection mapped in `authzResolve.TABLES` + `encodeWireIds.ENCODABLE` (ids are wire-tokenized).
+- [ ] **Grantable in the UI, not just by the seed**: a row in `web/src/components/access/permMatrix.ts`
+      `COLLECTION_GROUPS` (plus a `collectionMeta.ts` entry where the kebab name reads badly or the grant needs
+      a sentence). The permissions matrix is the only place an admin DISCOVERS a resource to grant it, so a
+      scope-grantable collection missing from it is an access control the product honours and no one can
+      author - `attendance-day-marks` shipped that way. `test/collections.test.ts` fails on it now.
 - [ ] `npm run verify` green.

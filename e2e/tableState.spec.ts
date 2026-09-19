@@ -2,7 +2,7 @@ import { gotoRoute, test, expect } from "./fixtures";
 
 // A sorted, filtered table you can send to somebody.
 //
-// DataTable carries its sort and filters in the hash query as `t.<tableId>` and writes them with
+// DataTable carries its sort and filters in the URL query as `t.<tableId>` and writes them with
 // `history.replaceState` - so the URL in the bar is always the view on screen, a reload comes back to the
 // same view, and a pasted link opens what the sender was looking at. All three are properties of the URL and
 // the browser's history, and nothing outside a browser can check any of them.
@@ -10,14 +10,20 @@ import { gotoRoute, test, expect } from "./fixtures";
 // Read on DEPARTMENTS rather than on a busier table: `savedViews.spec.ts` pins a default view on vendors for
 // this same person, and a table that opens already sorted is one where "click twice for descending" lands on
 // the third state of the cycle instead. Nothing pins a view here, and the rows are the org's own departments.
+//
+// Each test starts from the built-in baseline, because sort is now kept in the person's table prefs: every
+// browser in the suite is the same `super`, so a sort left behind by the test above would decide where this
+// one's first click lands.
 test.describe("table state in the URL", () => {
   test("sorting writes the URL, and the URL restores the sort", async ({ as }) => {
     const page = await as("super");
     await gotoRoute(page, "departments", "Departments");
     await expect(page.locator("tbody tr").first()).toBeVisible({ timeout: 30_000 });
+    await resetTable(page);
 
-    // Untouched, a table adds nothing to the URL - the deep link stays clean until somebody changes something.
-    expect(page.url()).not.toContain("t.departments");
+    // On its baseline, a table adds nothing to the URL - the deep link stays clean until somebody changes
+    // something.
+    await expect.poll(() => page.url(), { timeout: 30_000 }).not.toContain("t.departments");
 
     await sortBy(page, "Name");
     await expect(header(page, "Name")).toHaveAttribute("aria-sort", "ascending", { timeout: 30_000 });
@@ -43,6 +49,7 @@ test.describe("table state in the URL", () => {
     const author = await as("super");
     await gotoRoute(author, "departments", "Departments");
     await expect(author.locator("tbody tr").first()).toBeVisible({ timeout: 30_000 });
+    await resetTable(author);
     await sortBy(author, "Name");
     await sortBy(author, "Name"); // and again, for descending
     await expect(header(author, "Name")).toHaveAttribute("aria-sort", "descending", { timeout: 30_000 });
@@ -62,6 +69,15 @@ test.describe("table state in the URL", () => {
     await expectOrdered(colleague, "desc");
   });
 });
+
+/** Put the table back on its built-in baseline, clearing any sort a previous test persisted for this user. */
+async function resetTable(page: import("@playwright/test").Page) {
+  const views = page.getByRole("button", { name: "Saved views" });
+  await views.click();
+  await page.getByRole("button", { name: "Default", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("th[aria-sort]:not([aria-sort='none'])")).toHaveCount(0, { timeout: 30_000 });
+}
 
 /** The column's header cell - the thing that carries `aria-sort`. */
 function header(page: import("@playwright/test").Page, column: string) {

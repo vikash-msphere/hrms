@@ -25,7 +25,6 @@ const EXEMPT: Record<string, string> = {
   "components/common/WriteDialog.tsx": "is the shared shell",
   "components/common/confirm.tsx": "a confirmation, not a form",
   "components/common/PhotoAvatar.tsx": "an image cropper: its 'form' is a canvas, and Save is a crop",
-  "components/common/EmergencyQuickView.tsx": "one dialog that both reads and edits; the edit pass carries the guard itself",
   "components/common/ApprovalRow.tsx": "a decision prompt (reject with a reason), not a record editor",
   "pages/Approvals.tsx": "same decision prompt, inline on the queue",
   "pages/Dashboard.tsx": "same decision prompt, inline on the widget",

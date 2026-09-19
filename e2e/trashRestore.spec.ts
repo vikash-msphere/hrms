@@ -38,8 +38,10 @@ test("a deleted row is found under Deleted and restored", async ({ as }) => {
   // The column's filter, not its sort: the header carries both, and only the funnel opens the value list.
   await page.getByRole("button", { name: "Filter by state" }).first().click();
   // Its options are plain buttons in a popover rather than a listbox - the table draws its own list so a long
-  // one can scroll inside the column header.
-  await page.getByRole("button", { name: "Deleted", exact: true }).click();
+  // one can scroll inside the column header. Each option carries its row count ("Deleted 0" here, because the
+  // trash is exactly what has not been fetched yet), so the name is matched on the value and not on the
+  // figure beside it.
+  await page.getByRole("button", { name: /^Deleted\b/ }).click();
   // Closed explicitly, not assumed: the popover picking a value does not always dismiss it before the next
   // action, and its own open content sitting over the table can intercept a click aimed at a row underneath -
   // as can a live admin-notification toast landing at the same spot (`super` gets those org-wide in real time,
@@ -63,7 +65,7 @@ test("a deleted row is found under Deleted and restored", async ({ as }) => {
 
   // Live again, which the page proves by showing it once the Deleted view is left. The filter is cleared the
   // way the table offers it rather than by reloading or re-navigating: those both come back to the SAME
-  // "Deleted" view (the filter rides in the table's own URL state, and a same-hash navigation does not remount
+  // "Deleted" view (the filter rides in the table's own URL state, and a same-route navigation does not remount
   // the page), which would hide the row that WAS restored and show one that had not been - passing for
   // exactly the wrong reason. Clearing asks the server for the live list, which is the claim being made here.
   await page.getByRole("button", { name: "Clear filters" }).first().click();

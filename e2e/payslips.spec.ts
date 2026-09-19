@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect } from "./fixtures";
+import { SPA_HEADERS, gotoRoute, personId, test, expect } from "./fixtures";
 import { approvePayrollRun } from "./payrollRun";
 import { extractPdfText } from "./pdfText";
 
@@ -7,9 +7,10 @@ import { extractPdfText } from "./pdfText";
 // `payroll.spec.ts` drives a run up to Publish and deliberately stops there - publishing cannot be undone.
 // This spec starts on the far side of that line, with a run published over the wire for a long-past period
 // (so it never collides with the month `payroll.spec` works in), and covers the surface no other spec reaches:
-// an employee's own payslip list, the figures it summarises, and the two browser-only paths - a PDF PREVIEWED
-// in a viewer and a PDF DOWNLOADED to disk through a synthetic `<a download>`.
-test("a published run reaches the employee as a payslip they can read and download", async ({ as }) => {
+// an employee's own payslip list, the figures it summarises, the two browser-only paths - a PDF PREVIEWED
+// in a viewer and a PDF DOWNLOADED to disk through a synthetic `<a download>` - and the same slips read from
+// the other end, on the employee's record, where the list is narrowed to one person server-side.
+test("a published run reaches the employee as a payslip they can read and download, and payroll finds it on their record", async ({ as }) => {
   test.setTimeout(300_000);
   const admin = await as("super");
   const employee = await as("employee");
@@ -59,6 +60,37 @@ test("a published run reaches the employee as a payslip they can read and downlo
   expect(bytes.subarray(0, 5).toString("latin1")).toBe("%PDF-");
   const text = (await extractPdfText(bytes)).replace(/[,\s]/g, "");
   expect(text).toContain(String(Math.round(net)));
+
+  // The other side of the same slips: somebody who runs payroll opening THAT person's record. The list read
+  // is the same collection narrowed with `?employee=`, so the check that matters is that it is narrowed -
+  // a panel showing the org's newest hundred slips under one person's name is the failure this replaces.
+  const empId = await personId(admin, "employee");
+  await gotoRoute(admin, `employees/${empId}/compensation`);
+  const payslips = admin.locator("#employee-payslips");
+  await expect(payslips).toBeVisible({ timeout: 60_000 });
+  await expect(payslips.locator("tbody tr").first()).toBeVisible({ timeout: 60_000 });
+  // The row offers the PDF, which is the point of putting the list here rather than describing it.
+  await expect(payslips.getByRole("button", { name: "PDF" }).first()).toBeVisible();
+  // Every row on the card belongs to this employee, which is what the server filter is for.
+  const scoped = await admin.request.get(`/v1/payslips?employee=employees/${empId}&page_size=200`);
+  expect(scoped.status(), await scoped.text()).toBe(200);
+  const { results: mine = [] } = (await scoped.json()) as { results?: { employee?: string }[] };
+  expect(mine.length).toBeGreaterThan(0);
+  expect(mine.every((s) => s.employee === `employees/${empId}`)).toBe(true);
+
+  // And the org-wide list the same person sees on #/payslips names the people it is about. The column is a
+  // wire id in the payload and has to be a NAME on the page - an admin cannot tell whose pay a row is from
+  // `9f3c...`, and the column is shown by default precisely because this list spans other people.
+  const record = await admin.request.get(`/v1/employees/${empId}`);
+  expect(record.status(), await record.text()).toBe(200);
+  const person = (await record.json()) as { first_name?: string; last_name?: string };
+  const fullName = `${person.first_name ?? ""} ${person.last_name ?? ""}`.trim();
+  expect(fullName, "the seeded employee has a name to render").toBeTruthy();
+  await gotoRoute(admin, "payslips", "Payslips");
+  await expect(admin.getByRole("columnheader", { name: "Employee" })).toBeVisible({ timeout: 60_000 });
+  // Not `exact`: the cell carries the person's avatar as well as their name, and the avatar's fallback
+  // initials are text too - so the cell's accessible name is the initials followed by the name.
+  await expect(admin.getByRole("cell", { name: fullName }).first()).toBeVisible({ timeout: 60_000 });
 });
 
 /** The `net` figure on this person's own most recent payslip - the number the KPI and the PDF both claim. */

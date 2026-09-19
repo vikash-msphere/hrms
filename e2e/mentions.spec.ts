@@ -49,9 +49,10 @@ test("a mention is offered from the caret, posts as a chip, and reaches the pers
   // the form or type a newline into the body.
   await body.press("Enter");
   await expect(composer.getByRole("button", { name: /Eve Employee/ })).toHaveCount(0);
-  // The token, written around the caret: the name the author picked plus the wire id the chip and the
-  // notification both need. Not something a person types, and the only proof the pick rewrote the field.
-  await expect(body).toHaveValue(`Handing this to [@Eve Employee](employees/${employeeId}) `);
+  // What the pick writes around the caret is the NAME, not the stored token: a wire id in the middle of a
+  // half-written sentence is machinery the author has to type around. The id it binds travels beside the
+  // draft and goes back into the text on submit (web/src/lib/mentionText.ts).
+  await expect(body).toHaveValue("Handing this to @Eve Employee ");
   // The stamp rides in the BODY, not only the title: the notification this raises carries an excerpt of the
   // body (services/mentions.ts), and that excerpt is how the person named finds this one among the many that
   // dozens of other specs land on the same seeded bell.
@@ -66,7 +67,7 @@ test("a mention is offered from the caret, posts as a chip, and reaches the pers
   await expect(card).toBeVisible({ timeout: 30_000 });
   const chip = card.getByRole("link", { name: "@Eve Employee" });
   await expect(chip).toBeVisible();
-  await expect(chip).toHaveAttribute("href", `#/employees/${employeeId}`);
+  await expect(chip).toHaveAttribute("href", `/employees/${employeeId}`);
   await expect(card.getByText("](employees/")).toHaveCount(0);
 
   // And it reaches the person who was named. Asked of THEIR OWN notifications, by the post it points at:

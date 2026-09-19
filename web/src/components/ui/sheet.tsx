@@ -4,6 +4,9 @@ import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useMedia } from "@/hooks/useMedia";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
+// A sheet is a modal layer like a dialog, so Back closes it rather than leaving the page - see
+// hooks/useHistoryClose.ts, and the `routed` prop below for the one sheet that owns a route entry already.
+import { HistoryClose } from "@/hooks/useHistoryClose";
 
 // A large overlay working surface. Same Radix a11y machinery as dialog.tsx (focus trap, Esc, scroll lock,
 // portal), sized for real panels rather than a small modal. This is the single presentation for inline
@@ -68,8 +71,13 @@ function useDragDismiss(node: HTMLElement | null, enabled: boolean) {
 
 const SheetContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(({ className, children, style, ...props }, ref) => {
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
+    // Set when the sheet's open state lives in the URL (the inline settings sheet, keyed on `?setting=`).
+    // Opening it already pushed a route entry, so Back closes it without any help from here; pushing a second
+    // entry would make one panel cost two back presses.
+    routed?: boolean;
+  }
+>(({ className, children, style, routed, ...props }, ref) => {
   const [node, setNode] = React.useState<HTMLDivElement | null>(null);
   const setRefs = React.useCallback(
     (el: HTMLDivElement | null) => {
@@ -116,6 +124,8 @@ const SheetContent = React.forwardRef<
           <span className="h-1.5 w-10 rounded-full bg-muted-foreground/30" />
         </div>
       )}
+      {/* Inside the content element, so the entry belongs to this OPENING - see hooks/useHistoryClose.ts. */}
+      <HistoryClose node={node} enabled={!routed} />
       <SheetDragContext.Provider value={phone ? drag : EMPTY_DRAG}>{children}</SheetDragContext.Provider>
     </DialogPrimitive.Content>
   </SheetPortal>

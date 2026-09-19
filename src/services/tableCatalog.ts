@@ -10,7 +10,9 @@
 import { getTableColumns } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/sqlite-core";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
-import { TABLES } from "../lib/authzResolve";
+import { TABLES, listOwnerColumn } from "../lib/authzResolve";
+import { scopeCanMatch } from "./listScope";
+import type { ListScope } from "../domain/access";
 import {
   BASES, SOURCES, SOURCE_PREFIX, columnAllowed, humanize, isMoneyColumn,
   type FieldKind, type SourceDef,
@@ -290,7 +292,17 @@ function walk(base: string, path: string[], listable: ReadonlySet<string>): Hop[
  * `path` is the dotted wire path from the base (empty for the base itself); every key this returns already
  * carries it, so a client stores what it is given and never composes a key.
  */
-export async function buildCatalogue(deps: Deps, base: string, listable: ReadonlySet<string>, path: string[] = []): Promise<Catalogue> {
+export async function buildCatalogue(
+  deps: Deps,
+  base: string,
+  listable: ReadonlySet<string>,
+  path: string[] = [],
+  // The FIELD-level read gate, supplied by the layer allowed to run the engine (http/tableFieldAccess.ts
+  // `catalogueFieldGate`). Absent means field-level access is not asked here - which is what `resolveFields`
+  // wants, because the RUNNER decides those per row, on the row's own code, and a coarse answer must never be
+  // what a saved view's columns are resolved against.
+  canRead?: (field: { collection: string; subresource?: string; fieldKey?: string; wireName?: string }) => boolean,
+): Promise<Catalogue> {
   const def = BASES[base];
   if (!def) throw new Error(`not a table base: ${base}`);
   const hops = walk(base, path, listable);
@@ -310,9 +322,17 @@ export async function buildCatalogue(deps: Deps, base: string, listable: Readonl
     if (!groups.some((g) => g.key === key)) groups.push({ key, label });
   };
 
+  // A field the caller could never read on any row they can reach is not offered at all - the same promise the
+  // collection filter above keeps one level up. `wireName` is the column as `policy.redacted_fields` spells it;
+  // a source field is judged by its sub-resource instead, and one with neither is ungated.
+  const allowed = (f: ResolvedField): boolean =>
+    !canRead || canRead({ collection: f.collection, subresource: f.subresource, fieldKey: f.fieldKey, wireName: f.source ? undefined : f.key.split(".").pop()! });
+
   // 1. This node's own columns.
-  addGroup(nodeLabel, nodeLabel);
-  fields.push(...columnFields(collection, jsPath, nodeLabel, prefix));
+  const ownColumns = columnFields(collection, jsPath, nodeLabel, prefix).filter(allowed);
+  // The group is added only if something lands in it - an empty heading is a promise of fields that are not there.
+  if (ownColumns.length) addGroup(nodeLabel, nodeLabel);
+  fields.push(...ownColumns);
 
   // 2. The per-employee sources, when this node IS an employee. A ticket's requester and its assignee are two
   //    different nodes, so each carries its own set and there is never a question of which one a column means.
@@ -324,6 +344,7 @@ export async function buildCatalogue(deps: Deps, base: string, listable: Readonl
       for (const fld of built) {
         if (!listable.has(fld.collection)) continue; // a measure's own collection
         if ((fld.needs ?? []).some((n) => !listable.has(n))) continue;
+        if (!allowed(fld)) continue; // field-level read (a PII sub-resource, or one key within it)
         addGroup(fld.group, fld.group);
         fields.push(fld);
       }
@@ -384,10 +405,23 @@ export async function resolveFields(deps: Deps, base: string, listable: Readonly
   return out;
 }
 
-/** The bases this caller may build on: registered, backed by a table, and listable by them. */
-export function basesFor(listable: ReadonlySet<string>): { collection: string; label: string }[] {
+/**
+ * The bases this caller may build on: registered, backed by a table, and REACHABLE by them.
+ *
+ * Reachable, not merely listable. Presence in the scope map is the boolean half of the verdict - "you may call
+ * `GET /v1/<collection>`" - and a collection-level capability is routinely held by a caller whose breadth then
+ * binds to nothing: own breadth on a table with no owner column, a principal with no employee record, a
+ * dept-breadth caller with no department. `scopeCanMatch` asks the second half, and a base that could only
+ * ever answer with an empty grid is not offered at all. Same rule the field catalogue already follows one
+ * level down: a builder offers what the caller can have, never a menu of empty reports.
+ */
+export function basesFor(scopes: ReadonlyMap<string, ListScope>): { collection: string; label: string }[] {
   return Object.entries(BASES)
-    .filter(([collection]) => listable.has(collection) && TABLES[collection])
+    .filter(([collection]) => {
+      const table = TABLES[collection] as (SQLiteTable & Record<string, any>) | undefined;
+      if (!table) return false;
+      return scopeCanMatch(scopes.get(collection), table.code, listOwnerColumn(collection, table));
+    })
     .map(([collection, def]) => ({ collection, label: def.label }))
     .sort((a, b) => a.label.localeCompare(b.label));
 }

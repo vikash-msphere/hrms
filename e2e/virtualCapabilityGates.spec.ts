@@ -80,7 +80,7 @@ test.describe("virtual capability gates", () => {
       expect(canSeeActivity(await capabilitiesOf(theirs), "reimbursements")).toBe(true);
 
       // A real reload, not just a re-navigation: `theirs` already loaded this page once above, and the SPA's
-      // cached capabilities survive a same-hash re-navigation - only a genuine reload re-fetches them (the
+      // cached capabilities survive a same-route re-navigation - only a genuine reload re-fetches them (the
       // capability check above is already server-true; the UI has not caught up to it yet).
       await theirs.reload();
       await gotoRoute(theirs, "reimbursements", "Reimbursements");

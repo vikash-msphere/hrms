@@ -21,10 +21,29 @@ components:
           items: { type: string }
         why:
           type: string
-          enum: [all, subtree, exact, self, dept]
+          enum: [all, subtree, exact, self, dept, reports, org]
           description: >-
             The scope by which the caller holds READ on this object, shown as provenance.
+            `reports` and `org` are the manager chain (`my-reports` / `my-org`) - subject-relative
+            like `self` and `dept`, and every bit as much an answer to "why can I see this".
             Absent when the object carries no addressable code to resolve a scope against.
+        subject:
+          type: object
+          description: >-
+            Employees only. What the caller may reach ABOUT THE PERSON this row is, decided against that
+            person's own code - so `me` answers for the owner, `my-dept` / `my-reports` / `my-org` for the
+            team, a `<code>-*` rule for a branch and a per-object share for the one record. `can` above
+            answers a different question (which verbs on THIS row); a profile's tabs each read a DIFFERENT
+            collection about this person, which only this can answer. Keys are collection names, plus
+            `employees.<sub>` for the field-precise sub-resources and `activity.<collection>` for the
+            per-entity trail. A key absent from a list means no. UX only; every request is still enforced.
+          properties:
+            read:
+              type: array
+              items: { type: string }
+            write:
+              type: array
+              items: { type: string }
     leave_restrictions:
       type: object
       description: >-
@@ -419,6 +438,26 @@ components:
             capabilities:
               type: array
               items: { type: string }
+            read_scopes:
+              type: object
+              description: >-
+                Per-collection READ breadth the caller's grant actually reaches - "dept" or "all". A capability
+                string is scope-stripped, so it cannot distinguish self-service from org-wide; this can, and it
+                is what a per-record surface (an employee profile's tabs) gates on. Collections the caller reads
+                only at "own" breadth are absent, so a missing key means no. Employee sub-resources are keyed
+                `employees.<sub>` (e.g. `employees.tax`), and the per-entity activity trail - a second,
+                independently scoped gate - is keyed `activity.<collection>` (e.g. `activity.employees`).
+              additionalProperties:
+                type: string
+                enum: [dept, all]
+            write_scopes:
+              type: object
+              description: >-
+                The same, for WRITE - what gates an edit affordance on somebody else's record. Separate from
+                read because the two breadths differ (a manager reads a report's record and edits nothing).
+              additionalProperties:
+                type: string
+                enum: [dept, all]
             scopes:
               type: object
               description: Per-collection grantable scope tiers (self/reports/org/dept/subtree/all) from the policy manifest; drives the ACL scope chips so each access icon offers the relevant scopes.
@@ -1684,6 +1723,26 @@ components:
         plural: attendance-regularizations
         patterns: ['attendance-regularizations/{attendance_regularization_id}']
         type: hrms.example.com/attendance-regularization
+    attendance-day-mark:
+      type: object
+      description: HR's decision about what one working day is worth for one employee, replacing what the punches say it was worth. Loss of pay settles on the credit rather than on the minutes clocked. Distinct from an attendance-regularization, which corrects the punches themselves and is a request the employee files.
+      required: [path, create_time, update_time, etag]
+      properties:
+        path: { type: string, readOnly: true }
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        delete_time: { type: string, format: date-time, readOnly: true, description: Set when the mark is withdrawn; the day goes back to being judged on its punches. }
+        etag: { type: string, readOnly: true }
+        employee: { type: string, description: "Resource path: employees/{employee_id}" }
+        date: { type: string, format: date, description: "The working day being marked. Must be a scheduled working day and not a holiday, since nothing is owed on any other day." }
+        credit: { type: string, enum: [full, half, absent], description: "How much of a day's work the day counts as - a whole day, half of one, or none." }
+        reason: { type: string }
+        access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
+      x-aep-resource:
+        singular: attendance-day-mark
+        plural: attendance-day-marks
+        patterns: ['attendance-day-marks/{attendance_day_mark_id}']
+        type: hrms.example.com/attendance-day-mark
     overtime-request:
       type: object
       description: An employee's request logging overtime hours for a day; a manager (own dept) or HR approves/rejects, the owner can cancel while pending.
@@ -4522,7 +4581,7 @@ paths:
                         write: { type: boolean }
                         admin: { type: boolean }
                         verb_allowed: { type: boolean }
-                        why: { type: string, enum: [all, subtree, exact, self, dept] }
+                        why: { type: string, enum: [all, subtree, exact, self, dept, reports, org] }
                         denied: { type: boolean }
                         capabilities: { type: array, items: { type: string } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -6108,7 +6167,12 @@ paths:
         - { in: query, name: cycle, schema: { type: string }, description: "review-cycles/{cycle_id} to list one cycle's goals, or `none` for the goals set outside any cycle." }
         - { in: query, name: stage, schema: { type: string, enum: [DRAFT, PROPOSED, AGREED] }, description: "Narrow to one stage of the goal-setting handshake - `PROPOSED` is a manager's approval queue." }
         - { in: query, name: employee, schema: { type: string }, description: "employees/{employee_id} to list one person's goals. Weight rebalancing needs the owner's WHOLE open set - a spread computed over part of it sums to 100 over a subset and inflates their attainment." }
+        - { in: query, name: department, schema: { type: string }, description: "departments/{department_id} to list the goals one team OWNS, or `none` for the goals that belong to a person rather than a team. The named employee stays the accountable lead either way." }
         - { in: query, name: burnup, schema: { type: boolean }, description: "With `cycle`, also return that cycle's weighted attainment week by week (`burnup`), computed over the goals this caller may see." }
+        - { in: query, name: state, schema: { type: string, enum: [active, due_soon, overdue, at_risk, quiet, unagreed, trouble, not_started, in_progress, completed, cancelled] }, description: "Narrow to one health state, computed by the server from the same rules the serializer reports per goal: `overdue` past its date, `due_soon` landing within a week, `at_risk` behind its pace or flagged by its owner, `quiet` untouched for three weeks, `unagreed` still in the goal-setting handshake, `trouble` any of overdue/at_risk/quiet. Server-side because \"how many are at risk\" is a question about every goal, not about the page a browser holds." }
+        - { in: query, name: manager, schema: { type: string }, description: "employees/{employee_id} to list the goals of the people who report to them - a team's set as a question about every goal rather than about one page." }
+        - { in: query, name: counts, schema: { type: boolean }, description: "Also return `counts`: one number per health state over the whole filtered set, plus a per-owner rollup. The state filter itself is excluded from what is counted, so each number says what pressing that chip would show." }
+        - { in: query, name: q, schema: { type: string }, description: "Text search over the whole collection through the shared index - title, description and status - rather than over the page the client holds." }
         - { in: query, name: show_deleted, schema: { type: boolean } }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
@@ -6135,6 +6199,27 @@ paths:
                         at: { type: string, format: date }
                         attained: { type: integer, description: "Weighted attainment as of that day, 0-100." }
                         expected: { type: integer, description: "Where the cycle's own straight line sits that day, 0-100." }
+                  counts:
+                    type: object
+                    description: "The numbers above a goals list, counted over the whole filtered set under the caller's own scope rather than over the page returned beside them. Present only when `counts=true`."
+                    required: [states, owners]
+                    properties:
+                      states:
+                        type: object
+                        description: "Goals matching each health state, plus `all` for the filtered set itself."
+                        additionalProperties: { type: integer }
+                      owners:
+                        type: array
+                        description: "Per-owner rollup over the OPEN goals in the set, busiest first."
+                        items:
+                          type: object
+                          required: [employee, active, overdue, weight, progress]
+                          properties:
+                            employee: { type: string, description: "employees/{employee_id}" }
+                            active: { type: integer, description: "Goals in flight." }
+                            overdue: { type: integer, description: "How many of those are past their date." }
+                            weight: { type: integer, description: "Their open goals' weights, totalled - over 100 is a spread worth rebalancing." }
+                            progress: { type: integer, description: "Mean progress across those goals, 0-100." }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
     post:
@@ -6670,6 +6755,7 @@ paths:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: board, schema: { type: string } }
+        - { in: query, name: assignee, schema: { type: string }, description: "employees/{employee_id} to list the tasks one person is doing, across every board. Filters on `assignee`, not on the owning `employee` - on a task pulled off a team backlog the two are different people." }
         - { in: query, name: show_deleted, schema: { type: boolean } }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
@@ -7424,6 +7510,7 @@ paths:
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: cycle, schema: { type: string } }
         - { in: query, name: state, schema: { type: string } }
+        - { in: query, name: employee, schema: { type: string }, description: "employees/{employee_id} to list one person's reviews across every cycle - the record's Performance tab." }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -9199,6 +9286,14 @@ paths:
           schema: { type: string }
           description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters."
         - { in: query, name: kind, schema: { type: string, enum: [announcement, post, poll, kudos] }, description: "Narrow the board to one kind of post. The recognition rollups read `kudos` this way rather than folding the feed's current window, which would redraw as the reader scrolls." }
+        - in: query
+          name: author
+          schema: { type: string }
+          description: "One author, as `employees/{employee_id}` - what a profile's Posts tab reads. ANDs onto the caller's normal visibility, so it narrows and never widens: an author's unpublished drafts stay theirs."
+        - in: query
+          name: replied_by
+          schema: { type: string }
+          description: "Posts that this person replied to, as `employees/{employee_id}` - the other half of a profile's Posts tab. A reply is not its own collection (it hangs off its post and rides along in `replies`), so the row returned is the post, and the caller picks that person's replies out of the thread. ANDs onto normal visibility: a reply on a post the caller may not see does not drag the post into view."
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -10167,6 +10262,98 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/attendance' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/attendance-day-marks:
+    get:
+      description: List method for attendance-day-mark.
+      operationId: ListAttendanceDayMarks
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: employee, schema: { type: string }, description: "employees/{id} - only this employee's day marks" }
+        - { in: query, name: from, schema: { type: string, format: date }, description: Only marks on or after this day. }
+        - { in: query, name: to, schema: { type: string, format: date }, description: Only marks on or before this day. }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/attendance-day-mark' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: Create method for attendance-day-mark.
+      operationId: CreateAttendanceDayMark
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/attendance-day-mark' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/attendance-day-mark' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/attendance-day-marks/{attendance_day_mark_id}:
+    parameters: [ { in: path, name: attendance_day_mark_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for attendance-day-mark.
+      operationId: GetAttendanceDayMark
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/attendance-day-mark' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: "Update method for attendance-day-mark. Only `credit` and `reason` are editable - which person and which day a mark is about are its identity, not fields of it, so moving one means withdrawing it and making another."
+      operationId: UpdateAttendanceDayMark
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/attendance-day-mark' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/attendance-day-mark' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: Delete method for attendance-day-mark.
+      operationId: DeleteAttendanceDayMark
+      parameters:
+        - { in: query, name: force, schema: { type: boolean } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/attendance-day-marks/{attendance_day_mark_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreAttendanceDayMark"
+      parameters: [ { in: path, name: attendance_day_mark_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/attendance-day-mark' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
   /v1/attendance-regularizations:
     get:
       description: List method for attendance-regularization.
@@ -10770,6 +10957,10 @@ paths:
         - { in: query, name: category, schema: { type: string } }
         - { in: query, name: q, schema: { type: string }, description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters." }
         - { in: query, name: show_deleted, schema: { type: boolean } }
+        - in: query
+          name: submitter
+          schema: { type: string }
+          description: "One submitter, as `employees/{employee_id}` - what a profile's Posts tab reads. Asking about anybody but yourself returns their SIGNED suggestions only: the submitter of an anonymous one is dropped from the wire, and a filter on the column behind it would hand that attribution back one employee at a time."
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -14736,6 +14927,7 @@ paths:
       parameters:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: employee, schema: { type: string } }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -15130,10 +15322,11 @@ paths:
   /v1/employees/{employee_id}:viewers:
     post:
       description: >-
-        Custom method viewers: who can currently READ the caller's own employee record, and each of its
-        sensitive sub-resources. The effective-access report aimed at the subject rather than at an admin.
-        The target is always the CALLER's own record - the path id does not choose whose record is reported -
-        so holding this discloses nothing about anybody else. Read-only; makes no access decision of its own.
+        Custom method viewers: who can currently READ each area of the caller's own data - the employee record
+        and its sensitive sub-resources, their pay, their leave and attendance, their reviews, their documents.
+        The effective-access report aimed at the subject rather than at an admin. Every target is always the
+        CALLER's own - the path id does not choose whose data is reported - so holding this discloses nothing
+        about anybody else. Read-only; makes no access decision of its own.
       operationId: ":ListEmployeeViewers"
       parameters: [ { in: path, name: employee_id, required: true, schema: { type: string } } ]
       responses:
@@ -15151,12 +15344,25 @@ paths:
                 properties:
                   roster: { type: integer, description: How many people were graded. }
                   complete: { type: boolean, description: "False when the org is larger than one page of subjects, so the lists are a sample." }
-                  reports:
+                  groups:
+                    type: array
+                    description: The sections the areas are shown in, in order.
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        label: { type: string }
+                        hint: { type: string }
+                  areas:
                     type: array
                     items:
                       type: object
                       properties:
-                        target: { type: string, description: "Empty for the base record, else the sub-resource name (bank-account, identity, tax, personal-info)." }
+                        key: { type: string, description: "The area (profile, bank-account, payslips, reviews, ...)." }
+                        group: { type: string, description: Which section it belongs to. }
+                        label: { type: string }
+                        hint: { type: string, description: "What the area holds, in words." }
+                        records: { type: integer, description: "How many rows of the caller's the area holds. Absent for the sub-resources of the employee record itself; 0 means the viewers listed are who WOULD see one." }
                         viewers:
                           type: array
                           items:
@@ -15164,8 +15370,8 @@ paths:
                             properties:
                               name: { type: string, nullable: true }
                               email: { type: string }
-                              role: { type: string }
-                              why: { type: string, description: "Why they can see it, in words." }
+                              write: { type: boolean, description: "True when they can also change it, not only read it." }
+                              why: { type: string, description: "Present only when this record was shared with them specifically. Deliberately absent for every other reason: the reader's role, and the breadth their access runs to (a department, a branch of the org, the whole company), are facts about how powerful that person is, and this report must not publish the org's access shape to every employee." }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/employees:upcomingCelebrations:

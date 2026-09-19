@@ -7,9 +7,9 @@ import { useEffect, useState } from "react";
  *  (and any browser that ignores `interactive-widget=resizes-content`) keeps the LAYOUT viewport at full
  *  height and only shrinks the VISUAL one, so `position: fixed; bottom: 0` stays pinned under the keys - and
  *  the field being typed into is the one you cannot see. visualViewport reports the difference; a bottom
- *  sheet lifts by it, and a bottom nav bar gets out of the way entirely.
+ *  sheet lifts by it, and a bar docked to the foot of the viewport gets out of the way entirely.
  *
- *  Consumers: components/ui/dialog.tsx and sheet.tsx (lift), layout/BottomNav.tsx (hide). */
+ *  Consumers: components/ui/dialog.tsx and sheet.tsx (lift), layout/CommandPalette.tsx. */
 export function useKeyboardInset(): number {
   const [inset, setInset] = useState(0);
   useEffect(() => {

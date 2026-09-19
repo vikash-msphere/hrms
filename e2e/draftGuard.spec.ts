@@ -59,7 +59,7 @@ test.describe("dialog draft guard", () => {
     }).toPass({ timeout: 30_000 });
     // Nothing was written, and the page underneath never moved.
     await expect(page.locator("tbody tr").filter({ hasText: name })).toHaveCount(0);
-    expect(page.url()).toMatch(/#\/vendors\b/);
+    expect(page.url()).toMatch(/\/vendors\b/);
   });
 
   test("an untouched form closes at once, and the back press closes the dialog rather than the page", async ({ as }) => {
@@ -87,7 +87,7 @@ test.describe("dialog draft guard", () => {
     await page.goBack();
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(page.getByRole("heading", { level: 1, name: "Vendors" })).toBeVisible();
-    expect(page.url()).toMatch(/#\/vendors\b/);
+    expect(page.url()).toMatch(/\/vendors\b/);
   });
 
   test("the back press is guarded too, so a draft cannot be swiped away", async ({ as }) => {

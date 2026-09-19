@@ -9,6 +9,7 @@ import { useIntent } from "@/lib/intent";
 import { formatDate, idOf, humanize, cn } from "@/lib/utils";
 import type { Suggestion, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
+import { FilterChip } from "@/components/common/FilterChips";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field } from "@/components/common/Field";
@@ -52,7 +53,7 @@ const STATUS_EFFECT: Record<string, string> = {
 
 export default function Suggestions({ me, openId, solo }: { me: Me; openId?: string; solo?: boolean }) {
   void me;
-  // `solo` is one suggestion on a page of its own (`#/suggestions/<id>/view`): the board list is not read
+  // `solo` is one suggestion on a page of its own (`/suggestions/<id>/view`): the board list is not read
   // there at all - the single row is fetched by id below - so a popped-out suggestion costs one read.
   const { rows, setRows, state, error, reload, hasMore, loadMore } = useCollection<Suggestion>("suggestions", { enabled: !solo, max: BOARD_PAGE_SIZE });
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
@@ -97,8 +98,8 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
   const viewError = solo ? soloError : error;
   const viewReload = solo ? () => setSoloTick((t) => t + 1) : reload;
 
-  // Opening the reply writes the suggestion's id into the hash, so the dialog is linkable and a pasted link
-  // reopens it (useDeepOpen was already reading that route - nothing wrote it). A solo page's hash already IS
+  // Opening the reply writes the suggestion's id into the path, so the dialog is linkable and a pasted link
+  // reopens it (useDeepOpen was already reading that route - nothing wrote it). A solo page's route already IS
   // that suggestion, and clearing it would navigate off the page, so there the dialog leaves the route alone.
   const openRespond = (s: Suggestion) => { setRespondFor(s); if (!solo) setRouteRecord(idOf(s.path)); };
   const closeRespond = () => { setRespondFor(null); if (!solo) setRouteRecord(null); };
@@ -235,17 +236,9 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
             // No number while the board is still a window: "All 20" is a page size rendered as a board total.
             const count = hasMore ? null : st ? statusCounts.get(st) ?? 0 : rows.length;
             return (
-              <button
-                key={st || "all"}
-                type="button"
-                onClick={() => setStatusFilter(st)}
-                className={cn(
-                  "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-                  statusFilter === st ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent",
-                )}
-              >
-                {st ? humanize(st) : "All"}{count != null && <span className="tabular-nums opacity-70"> {count}</span>}
-              </button>
+              <FilterChip key={st || "all"} active={statusFilter === st} count={count ?? undefined} onClick={() => setStatusFilter(st)}>
+                {st ? humanize(st) : "All"}
+              </FilterChip>
             );
           })}
         </div>

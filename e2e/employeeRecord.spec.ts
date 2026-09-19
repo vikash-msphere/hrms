@@ -53,12 +53,14 @@ test("HR adds an employee, and a person captures their own bank details", async 
   const dropBank = await withAllowedBank(admin, bankName);
 
   // Bank details, by their owner, on their own profile.
-  await gotoRoute(employee, "profile", "My Profile");
-  await employee.getByRole("tab", { name: "Bank details" }).click();
-  // Scoped to the open tab: a profile carries several little "Add"/"Edit" pencils (bio, contact, identity),
-  // and only the one inside this panel opens the bank editor.
+  await gotoRoute(employee, "profile"); // one record page, two addresses: its `h1` is the person's name
+  await employee.getByRole("tab", { name: "Identity" }).click();
+  // Scoped to the open tab: a profile carries several little "Add"/"Edit" pencils (bio, contact, personal),
+  // and only the ones inside this panel belong to identity, bank and signature. `.last()` of them is the
+  // bank card's: identity sits above it (and hides its own pencil when the org has configured no ID fields,
+  // so counting from the front is not safe), and the signature card below has no pencil at all.
   const bankPanel = employee.getByRole("tabpanel");
-  await bankPanel.getByRole("button", { name: /^(Add|Edit)$/ }).first().click();
+  await bankPanel.getByRole("button", { name: /^(Add|Edit)$/ }).last().click();
   const bank = employee.getByRole("dialog");
   await expect(bank.getByRole("heading", { name: /bank details/i })).toBeVisible();
   await bank.getByLabel("Bank name").click();
@@ -88,7 +90,7 @@ test("HR adds an employee, and a person captures their own bank details", async 
 
   // And an IFSC that is not an IFSC is refused before it can be saved. Currency matters here: the format is
   // only asserted for INR, the one scheme it can be asserted for.
-  await bankPanel.getByRole("button", { name: /^(Add|Edit)$/ }).first().click();
+  await bankPanel.getByRole("button", { name: /^(Add|Edit)$/ }).last().click();
   const again = employee.getByRole("dialog");
   await again.getByLabel("IFSC / routing").fill("NOPE");
   await again.getByLabel("IFSC / routing").blur();

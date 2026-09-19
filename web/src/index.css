@@ -120,6 +120,9 @@
     --sidebar: var(--neutral-100);
     --sidebar-foreground: var(--neutral-500);
     --sidebar-accent: var(--blue-700);
+    /* What is legible ON the accent. It is not always white: the dark palette's accent is a LIGHT blue, so
+       the pair has to be stated per theme like every other accent/foreground pair here. */
+    --sidebar-accent-foreground: 0 0% 100%;
     --sidebar-border: var(--neutral-200);
 
     /* The brand gradient (deep navy -> blue -> cyan), for signature surfaces (sidebar brand, hero,
@@ -175,7 +178,10 @@
 
     --sidebar: var(--neutral-900);
     --sidebar-foreground: var(--neutral-400);
+    /* Light blue, because a deep one would disappear into a neutral-900 sidebar - which is why the text on it
+       goes DARK here while the light theme's stays white. */
     --sidebar-accent: var(--blue-300);
+    --sidebar-accent-foreground: var(--blue-950);
     --sidebar-border: var(--neutral-800);
 
     /* Gradient starts lighter on the dark ground so it still carries the brand. */
@@ -406,7 +412,7 @@
      the top and bottom. Since the viewport meta opts into painting under them (`viewport-fit=cover`), the
      shell reserves those two insets for everything in the normal flow - one rule instead of a side-inset
      class on every page. Fixed chrome is positioned against the viewport, not this box, so it carries its
-     own `pl-safe-l` / `pr-safe-r` (bottom nav, drawer, toasts, docked bars). Zero on every other device. */
+     own `pl-safe-l` / `pr-safe-r` (drawer, toasts, docked bars). Zero on every other device. */
   [data-app-shell] {
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);

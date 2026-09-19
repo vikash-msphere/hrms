@@ -121,6 +121,12 @@ export type AttendanceSession = Wire<"attendance">;
 
 export type AttendanceRegularization = Wire<"attendance-regularization">;
 
+// HR's decision about what one working day is worth, replacing what the punches say. A regularization fixes
+// the punches and is the employee's to file; this is the other way round - the punches stand and the day is
+// re-valued - so it is an HR action with no approval step. Loss of pay settles on the credit.
+export type AttendanceDayMark = Wire<"attendance-day-mark">;
+export type DayCredit = NonNullable<AttendanceDayMark["credit"]>;
+
 // Effective-dated base pay; POST creates a revision (increment). `current` = the active salary.
 export type Compensation = Wire<"compensation">;
 
@@ -172,6 +178,22 @@ export type Announcement = Wire<"announcement">;
 
 export type GoalStatus = "not_started" | "in_progress" | "completed" | "cancelled";
 export type Goal = Wire<"goal">;
+
+/**
+ * The numbers that ride beside a goals list when it is read with `counts=true`.
+ *
+ * Every chip, tile and chart above a goals list used to be counted in the browser from the rows it held - one
+ * server page - so on any org past a hundred goals the page stated a window's numbers as the org's. These are
+ * counted by the server over the whole filtered set, under the caller's own scope (see `goalCounts` in
+ * src/services/goals.ts). Hand-written rather than generated because the list's `extra` is an inline shape in
+ * the spec, not a named resource schema.
+ */
+export type GoalCounts = {
+  /** Goals matching each health state, keyed as `?state=` takes them, plus `all` for the filtered set. */
+  states: Partial<Record<string, number>> & { all?: number };
+  /** Per owner, over their OPEN goals in that set. `progress` is the shared weighting rule, not a plain mean. */
+  owners: { employee: string; active: number; overdue: number; weight: number; progress: number }[];
+};
 export type GoalConfidence = "on_track" | "at_risk" | "off_track";
 export type GoalStage = "DRAFT" | "PROPOSED" | "AGREED";
 export type GoalKind = "objective" | "key_result";
@@ -320,6 +342,11 @@ export type User = Wire<"user">;
 // access. `secret` is present ONLY on the create response: it is stored one-way and can never be read back.
 export type ApiKey = Wire<"api-key">;
 
+/** Breadth past the caller's own rows. Absent from a scope map = "own or nothing", which reads as no. */
+export type OtherScope = "dept" | "all";
+/** What the caller's grant reaches beyond their own rows, per collection (and per `employees.<sub>`). */
+export type CallerScopes = { read: Record<string, OtherScope>; write: Record<string, OtherScope> };
+
 // `capabilities` is the server-computed, scope-stripped capability set (e.g. "holidays.write",
 // "leave-requests.approve"); UI gating reads it via <Can>/usePermission. The server still enforces.
 export type Me = {
@@ -327,6 +354,12 @@ export type Me = {
   role: string;
   employee_id: string | null;
   capabilities: string[];
+  // Per-collection READ and WRITE breadth beyond the caller's own rows ("dept" / "all"); a collection the
+  // caller only self-serves is ABSENT. The capability set above cannot answer this - it is scope-stripped, so
+  // the self-service grant every employee holds on attendance, goals, reviews, payslips and their own
+  // bank/identity/tax looks exactly like an org-wide one. Read it through useCanReadFor / useCanWriteFor
+  // (lib/perm.ts), never directly.
+  scopes: CallerScopes;
   // Token for the subscribable holiday calendar feed; null unless the org enabled it (see routes/holidayFeed.ts).
   holiday_feed_token: string | null;
   // Opaque id for this sitting, stable while the session lives and different after a new sign-in. The on-disk

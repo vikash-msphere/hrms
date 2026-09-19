@@ -259,6 +259,37 @@ describe("BOLA - employee: own only, never another employee", () => {
   });
 });
 
+// THE EMERGENCY CARD, which is the reason this block exists by name rather than as one more `personal-info`
+// line above. Who to call, blood group, allergies and free-text medical notes are the only medical fields in
+// the app, and they moved from a dialog behind a header button to a CARD ON THE DEFAULT TAB of a record page
+// anybody can open. What stops it being a disclosure is the sub-resource gate, decided per employee - so it is
+// pinned per role, on both halves, including the per-FIELD keys the editor writes one at a time.
+describe("BOLA - emergency details are the owner's, whoever is looking", () => {
+  const EMERGENCY_FIELDS = ["emergency_name", "emergency_phone", "emergency_relation", "blood_group", "allergies", "medical_notes"];
+
+  it("the owner reads and writes their own, field by field", () => {
+    expect(d("employee", "GET", `/v1/employees/${SELF}/personal-info`)).toBe(true);
+    expect(d("employee", "PATCH", `/v1/employees/${SELF}/personal-info`)).toBe(true);
+    for (const f of EMERGENCY_FIELDS) {
+      expect(d("employee", "PATCH", `/v1/employees/${SELF}/personal-info/${f}`), f).toBe(true);
+    }
+  });
+
+  it("nobody else does - not a teammate, not their manager, not HR, not payroll", () => {
+    for (const role of ["employee", "manager", "hr_admin", "payroll_admin"] as const) {
+      for (const victim of [PEER, OTHER]) {
+        expect(d(role, "GET", `/v1/employees/${victim}/personal-info`), `${role} read ${victim}`).toBe(false);
+        expect(d(role, "PATCH", `/v1/employees/${victim}/personal-info`), `${role} write ${victim}`).toBe(false);
+        // And not one field of it either: the editor sends only what changed, so the per-field key is the one
+        // a narrow write would actually travel on.
+        for (const f of EMERGENCY_FIELDS) {
+          expect(d(role, "PATCH", `/v1/employees/${victim}/personal-info/${f}`), `${role} write ${victim}.${f}`).toBe(false);
+        }
+      }
+    }
+  });
+});
+
 describe("BOLA - manager: own dept subtree, never cross-dept, never PII", () => {
   it("reads a dept peer's base record + dept leave, but not their PII", () => {
     expect(d("manager", "GET", `/v1/employees/${PEER}`)).toBe(true); // dept peer base record
@@ -326,6 +357,9 @@ describe("BOLA - a body-supplied owner is declared, so the middleware can gate i
     ["positions", "employee"],
     ["approval-delegations", "delegator"],
     ["background-checks", "employee"],
+    // A day mark names the person whose day it re-values, in the create body - so the owner gate is what
+    // stops a caller scoped to one department filing one against somebody outside it.
+    ["attendance-day-marks", "employee"],
   ];
   it("names the owner field of every collection that accepts one", () => {
     for (const [collection, field] of OWNER_BEARING) {

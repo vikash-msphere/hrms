@@ -1,4 +1,4 @@
-import { eq, ne, and, isNull, asc, desc, inArray, lte, sql } from "drizzle-orm";
+import { eq, ne, and, or, isNull, isNotNull, asc, desc, inArray, lt, lte, gte, sql, type SQL } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
@@ -15,10 +15,27 @@ import { emitEvent } from "./eventBus";
 import { notify, notifyMany, managerIdOf } from "./notifications";
 import { notifyMentions } from "./mentions";
 import { deleteStateFilter, softDeleteRow, restoreRow } from "./softDelete";
+import { searchFilter } from "./searchFilter";
+import { STALE_AFTER_DAYS } from "../domain/goals";
+import { orgToday, dayStartMs } from "./orgDay";
 import { getSettingValue } from "./settings";
 import { DEFAULT_PERFORMANCE, type PerformanceFramework } from "../domain/performance";
 import { round2 } from "../domain/money";
 import { checkEtag, updateAtVersion } from "./versionGuard";
+
+/**
+ * Where a notification about one goal opens: that goal, not the wall of them.
+ *
+ * `goals/<id>` is the Goals page's record route - it opens the goal's own drawer through `useDeepOpen`, and
+ * the page chases the cursor when the goal is past the first page. The outbound edge rewrites the id segment
+ * to a wire token like any other ref (middleware/encodeWireIds, whose pattern allows exactly this deep-link
+ * shape), so no internal id travels.
+ *
+ * Used by the mention notifications: being named in a goal's thread means "come and look at THIS", and
+ * landing on a hundred other people's goals is not that. The rest of the goal notifications still point at
+ * the page.
+ */
+const goalLink = (id: string) => `goals/${id}`;
 
 // Emit the progress + (when reaching 100 / completed) completion events for a goal row post-write.
 async function emitGoalProgress(deps: Deps, actor: AppUser, row: typeof schema.goals.$inferSelect) {
@@ -267,28 +284,271 @@ export async function lastCommentAtFor(deps: Deps, goalIds: string[]): Promise<M
   return out;
 }
 
-export async function listGoals(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false, cycleFilter?: string, withBurnup = false, stageFilter?: string, employeeFilter?: string, deletedOnly = false) {
+/**
+ * THE HEALTH STATES, AS SQL.
+ *
+ * `domain/goals.ts` derives a goal's pace and its silence per ROW, for the serializer; `web/src/lib/goalState.ts`
+ * asks the same questions of a row the browser already holds. Neither can answer "how many of the org's goals are
+ * behind" - and that is the question every chip, tile and chart above a goals list is really asking. Answered from
+ * the loaded page, as the SPA did, "At risk 3" means "3 of the hundred rows we happened to fetch": correct for a
+ * team of eight and simply wrong for HR, with nothing on screen to say which.
+ *
+ * So the same rules exist once more, in SQL, and this is the copy the LIST filter and the COUNTS both bind - never
+ * two expressions of one rule. `test/goalStateSql.test.ts` runs both implementations over the same seeded rows,
+ * including each boundary, so a change to the arithmetic in `domain/goals.ts` that is not made here fails there
+ * rather than in a quarterly report.
+ *
+ * The vocabulary is the client's, because a chip and a query string that disagree about what "at risk" means is
+ * the drift this is all guarding against: `at_risk` is `isBehind` (the arithmetic OR the owner's own call), not
+ * `goalPace`'s narrower `at_risk` band.
+ */
+export type GoalState =
+  | "active" | "due_soon" | "overdue" | "at_risk" | "quiet" | "unagreed"
+  // Anything a manager would want to ask about, in one state: the union `isTroubled` takes, which is what the
+  // Team goals triage is sorted and counted by.
+  | "trouble"
+  // The four plain statuses, so the state donut above a list is drawn from counts over the whole set like
+  // everything else beside it. `active` is the pair of open ones together, which is the chip people press.
+  | "not_started" | "in_progress" | "completed" | "cancelled";
+export const GOAL_STATES: GoalState[] = [
+  "active", "due_soon", "overdue", "at_risk", "quiet", "unagreed", "trouble",
+  "not_started", "in_progress", "completed", "cancelled",
+];
+export const isGoalState = (s?: string | null): s is GoalState => !!s && (GOAL_STATES as string[]).includes(s);
+
+const DAY_MS = 86_400_000;
+/** Still live: not finished, not abandoned. Every health question below is asked only of these. */
+const openSql = () => inArray(schema.goals.status, ["not_started", "in_progress"] as const);
+
+/**
+ * The condition for one state, or undefined for none.
+ *
+ * `today` is the org's calendar day at UTC midnight and `now` the request instant - both passed in, so a whole
+ * page of counts is stamped from one clock and a caller in IST is not told about yesterday for the first five and
+ * a half hours of the morning (the reason `services/dashboardSummary.ts` takes the same pair).
+ */
+export function goalStateSql(state: GoalState, today: Date, now: Date): SQL | undefined {
+  const todayMs = +today;
+  const nowMs = +now;
+  const g = schema.goals;
+  switch (state) {
+    case "active":
+      return openSql();
+    // Past its date and still open. Its own question, not one `pace` can answer: `goalPace` clamps the elapsed
+    // fraction at 1, so a goal two months late at 95% comes back on_track.
+    case "overdue":
+      return and(openSql(), isNotNull(g.dueDate), lt(g.dueDate, today));
+    // Landing inside a week, and not already late. The client's `dueRel().soon` is days 0..7 inclusive, and a
+    // due date is stored at the midnight of its day, so the window is [today, today + 7 days].
+    case "due_soon":
+      return and(openSql(), isNotNull(g.dueDate), gte(g.dueDate, today), lte(g.dueDate, new Date(todayMs + 7 * DAY_MS)));
+    // Behind where it should be - by the arithmetic, or because the owner has said so. The arithmetic half is
+    // `goalPace`: a straight line from when the goal was set to the END of its due day, the elapsed fraction
+    // clamped to [0,1], and ten points of slack. Guarded on `due_date + a day > created_at` for the same reason
+    // the domain returns null there - a back-dated goal has no line to be behind.
+    case "at_risk":
+      return and(
+        openSql(),
+        or(
+          inArray(g.confidence, ["at_risk", "off_track"] as const),
+          and(
+            isNotNull(g.dueDate),
+            sql`${g.dueDate} + ${DAY_MS} > ${g.createdAt}`,
+            sql`${g.progress} - round(min(1.0, max(0.0, (${nowMs} - ${g.createdAt}) * 1.0 / (${g.dueDate} + ${DAY_MS} - ${g.createdAt}))) * 100) <= -10`,
+          ),
+        ),
+      );
+    // Silence. `staleDays` counts from the LAST of the row's own write and its newest comment, because a comment
+    // is the goal being alive and deliberately does not touch the row (a comment must not move the etag out from
+    // under an open edit form). `floor((now - last) / day) >= 21` is `last <= now - 21 days`.
+    case "quiet":
+      return and(
+        openSql(),
+        sql`max(${g.updatedAt}, coalesce((select max(${schema.goalComments.createdAt}) from ${schema.goalComments} where ${schema.goalComments.goalId} = ${g.uuid}), 0)) <= ${nowMs - STALE_AFTER_DAYS * DAY_MS}`,
+      );
+    // Everything still in the goal-setting handshake: the owner's drafts and whatever is sitting with a manager.
+    // Not gated on being open - a cancelled draft is still unagreed, and the client's chip says the same.
+    case "unagreed":
+      return ne(g.stage, "AGREED");
+    // A missed date, a slipping goal, or one nobody has touched - the same union `isTroubled` takes, built
+    // from the three above so it cannot drift from them.
+    case "trouble":
+      return or(goalStateSql("overdue", today, now), goalStateSql("at_risk", today, now), goalStateSql("quiet", today, now));
+    case "not_started":
+      return eq(g.status, "not_started");
+    case "in_progress":
+      return eq(g.status, "in_progress");
+    case "completed":
+      return eq(g.status, "completed");
+    case "cancelled":
+      return eq(g.status, "cancelled");
+  }
+}
+
+/** Everything `listGoals` can be narrowed by. An options object because there are now fourteen of them. */
+export type GoalListFilters = {
+  status?: string;
+  cycle?: string;
+  stage?: string;
+  employee?: string;
+  department?: string;
+  /** One of the health states above - the chip the reader pressed, answered by the READ rather than in the browser. */
+  state?: string;
+  /** `?manager=employees/{id}`: the goals of the people who report to them. `employees.manager_id`, indexed. */
+  manager?: string;
+  /** `?q=`: a text search over the whole collection through the shared FTS index, not over one page of it. */
+  q?: string;
+  showDeleted?: boolean;
+  deletedOnly?: boolean;
+  withBurnup?: boolean;
+  /** `?counts=true`: the chip numbers and the per-owner rollup, over the whole filtered set. See `goalCounts`. */
+  withCounts?: boolean;
+};
+
+/**
+ * The text match, resolved once for a read that both lists and counts.
+ *
+ * `searchFilter` is a round trip of its own (an FTS lookup returning ids), so it is resolved by the caller and
+ * handed to both halves rather than run twice for one request - and it must be the SAME set of ids for both, or
+ * the chips would count a different search from the one the rows answer.
+ */
+export type GoalTextMatch = SQL | undefined;
+
+/** The WHERE every goals read shares: the caller's scope, the soft-delete state, and the caller's own filters. */
+export function goalListConds(scope: ListScope, f: GoalListFilters, today: Date, now: Date, text?: GoalTextMatch): SQL[] {
   // Visibility was decided in the middleware (scopeFor over the grant); here we only bind it to columns.
   const conds = [applyScope(scope, schema.goals.code, schema.goals.employeeId)];
-  if (statusFilter) conds.push(eq(schema.goals.status, statusFilter as Status));
+  if (f.status) conds.push(eq(schema.goals.status, f.status as Status));
   // `?cycle=review-cycles/{id}` narrows to one cycle's goals; `?cycle=none` to the ones set outside any cycle,
   // which is how the Goals page offers "assign these to the cycle" without reading every row to find them.
-  if (cycleFilter === "none") conds.push(isNull(schema.goals.cycleId));
-  else if (cycleFilter) conds.push(eq(schema.goals.cycleId, idFromPath(cycleFilter)!));
+  if (f.cycle === "none") conds.push(isNull(schema.goals.cycleId));
+  else if (f.cycle) conds.push(eq(schema.goals.cycleId, idFromPath(f.cycle)!));
   // `?stage=PROPOSED` is the manager's approval queue: the goals waiting on them, without reading everyone's.
-  if (stageFilter) conds.push(eq(schema.goals.stage, stageFilter as Stage));
+  if (f.stage) conds.push(eq(schema.goals.stage, f.stage as Stage));
   // `?employee=employees/{id}` narrows to one person's goals. The scope above still applies, so this can only
   // ever be a narrowing of what the caller could already see - it is for the readers that need somebody's
   // WHOLE set rather than a page of the org's: rebalancing weights across the owner's open goals is arithmetic
   // whose answer is wrong, not merely short, if a goal is missing from it.
-  if (employeeFilter) conds.push(eq(schema.goals.employeeId, idFromPath(employeeFilter)!));
-  conds.push(deleteStateFilter(schema.goals.deleteTime, showDeleted, deletedOnly));
-  const page = await keysetPage(deps, schema.goals, "goals", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
+  if (f.employee) conds.push(eq(schema.goals.employeeId, idFromPath(f.employee)!));
+  // `?manager=employees/{id}`: everything owned by somebody who reports to them - "my team's goals" as a
+  // question about every goal rather than about the page this browser holds. A subquery on the indexed
+  // `manager_id` rather than a join, so the keyset page stays a plain select over `goals`.
+  if (f.manager) conds.push(reportsOf(idFromPath(f.manager)!));
+  // `?department=departments/{id}` narrows to the goals one team OWNS, and `?department=none` to the ones
+  // that belong to a person rather than a team. Server-side for the same reason `cycle` is: "which goals does
+  // Engineering own" is a question about every goal, not about the page of them a browser happens to hold,
+  // and a team's set answered over the first hundred rows is wrong rather than merely short.
+  if (f.department === "none") conds.push(isNull(schema.goals.departmentId));
+  else if (f.department) conds.push(eq(schema.goals.departmentId, idFromPath(f.department)!));
+  if (isGoalState(f.state)) {
+    const s = goalStateSql(f.state, today, now);
+    if (s) conds.push(s);
+  }
+  if (text) conds.push(text);
+  conds.push(deleteStateFilter(schema.goals.deleteTime, f.showDeleted ?? false, f.deletedOnly ?? false));
+  return conds.filter(Boolean) as SQL[];
+}
+
+/** Owned by somebody who reports to them, as a subquery - `employees.manager_id` is indexed (`emp_mgr_idx`). */
+const reportsOf = (managerId: string): SQL =>
+  sql`${schema.goals.employeeId} in (select ${schema.employees.uuid} from ${schema.employees} where ${schema.employees.managerId} = ${managerId} and ${schema.employees.deleteTime} is null)`;
+
+/**
+ * One clock for a whole answer: the org's calendar day at UTC midnight, and the request instant.
+ *
+ * Both, and passed down rather than read per predicate, for the reason `services/dashboardSummary.ts` gives: in
+ * IST the org's day and the UTC one disagree between midnight and 05:30, so a page that reads the clock twice can
+ * count a goal as overdue in one number and not in the next.
+ */
+export async function goalClock(deps: Deps): Promise<{ today: Date; now: Date }> {
+  return { today: new Date(dayStartMs(await orgToday(deps))), now: deps.clock.now() };
+}
+
+export async function listGoals(deps: Deps, scope: ListScope, maxPageSize: number, pageToken: string | undefined, filters: GoalListFilters) {
+  const { today, now } = await goalClock(deps);
+  // Resolved once and shared with the counts below: one FTS lookup per request, and the same matched set
+  // behind the rows and the numbers.
+  const text = await searchFilter(deps, "goals", filters.q, schema.goals.uuid);
+  const conds = goalListConds(scope, filters, today, now, text);
+  const page = await keysetPage(deps, schema.goals, "goals", and(...conds), { max: maxPageSize, pageToken });
+  const extra: Record<string, unknown> = {};
   // `?cycle=<path>&burnup=true` adds the cycle's attainment curve to the answer. It rides the list rather than
   // living at its own endpoint because it is the same question, over the same rows, under the same scope: a
   // caller who may not see a goal must not see it move the line either.
-  if (!withBurnup || !cycleFilter || cycleFilter === "none") return page;
-  return { ...page, extra: { burnup: await cycleBurnup(deps, scope, idFromPath(cycleFilter)!) } };
+  if (filters.withBurnup && filters.cycle && filters.cycle !== "none") {
+    extra.burnup = await cycleBurnup(deps, scope, idFromPath(filters.cycle)!);
+  }
+  // `?counts=true` does the same for the numbers above the list, and for the same reason. See `goalCounts`.
+  if (filters.withCounts) extra.counts = await goalCounts(deps, scope, filters, today, now, text);
+  return Object.keys(extra).length ? { ...page, extra } : page;
+}
+
+export type GoalCounts = {
+  /** One number per chip, over the WHOLE filtered set - not over the page of rows returned beside them. */
+  states: Record<GoalState | "all", number>;
+  /** Per owner, for the team overview: how many are in flight, how many are late, and their weights' total. */
+  owners: { employee: string; active: number; overdue: number; weight: number; progress: number }[];
+};
+
+/** How many owners the rollup reports. A page-sized set of people is a summary; a thousand is a second list. */
+const MAX_COUNT_OWNERS = 50;
+
+/**
+ * THE NUMBERS ABOVE THE LIST, COUNTED OVER THE WHOLE SET.
+ *
+ * Every chip, tile and chart on the goals page used to be computed in the browser from `rows` - one server page,
+ * capped at 100. For a team of eight that is the whole collection and the numbers are right. For HR in a
+ * 500-person org the page said "At risk 3" and meant "3 of the hundred we loaded", with a truncation banner
+ * above it doing the apologising. A count that is only right on small data is a count nobody can act on.
+ *
+ * Counted here, under the caller's own list scope and their own filters, so each number equals what pressing
+ * that chip would actually show. THE STATE FILTER IS DELIBERATELY EXCLUDED from the set being counted: the chips
+ * describe what pressing them would do, so they are counted over everything the OTHER filters leave - otherwise
+ * pressing "At risk" would leave every chip reading either its own number or zero.
+ *
+ * One D1 batch: the states are conditional sums over a single pass, and the owner rollup is one grouped query.
+ */
+export async function goalCounts(deps: Deps, scope: ListScope, filters: GoalListFilters, today: Date, now: Date, text?: GoalTextMatch): Promise<GoalCounts> {
+  const base = goalListConds(scope, { ...filters, state: undefined }, today, now, text);
+  const where = and(...base);
+  const cond = (c: SQL | undefined) => sql<number>`coalesce(sum(case when ${c ?? sql`0`} then 1 else 0 end), 0)`;
+  const [totals] = (await deps.db
+    .select({
+      all: sql<number>`count(*)`,
+      ...Object.fromEntries(GOAL_STATES.map((s) => [s, cond(goalStateSql(s, today, now))])),
+    })
+    .from(schema.goals)
+    .where(where)) as unknown as Record<string, number>[];
+
+  // The per-person rollup the team overview draws, over their OPEN goals.
+  //
+  // `progress` is `lib/goalMeasure.ts#weightedProgress`, in SQL: weighted when every goal in the set carries a
+  // weight, the plain mean otherwise. Not a second opinion - that rule exists because the two disagree worst
+  // exactly where it matters (five untouched goals and one weighted goal at 100% is ~17% by the mean and 100%
+  // weighted), and `test/goalRollupDrift.test.ts` exists to keep one copy of it. `min(weight) > 0` is "every
+  // goal has a weight", given the rule floors a negative weight at zero and so falls to the mean as well.
+  const open = and(where, openSql());
+  const clamped = sql`min(100, max(0, ${schema.goals.progress}))`;
+  const owners = (await deps.db
+    .select({
+      employee: schema.goals.employeeId,
+      active: sql<number>`count(*)`,
+      overdue: cond(and(isNotNull(schema.goals.dueDate), lt(schema.goals.dueDate, today))),
+      weight: sql<number>`coalesce(sum(${schema.goals.weight}), 0)`,
+      progress: sql<number>`coalesce(case when min(${schema.goals.weight}) > 0
+        then round(sum(${schema.goals.weight} * ${clamped}) * 1.0 / sum(${schema.goals.weight}))
+        else round(avg(${clamped})) end, 0)`,
+    })
+    .from(schema.goals)
+    .where(open)
+    .groupBy(schema.goals.employeeId)
+    .orderBy(desc(sql`count(*)`))
+    .limit(MAX_COUNT_OWNERS)) as { employee: string; active: number; overdue: number; weight: number; progress: number }[];
+
+  const states = Object.fromEntries(
+    ["all", ...GOAL_STATES].map((k) => [k, Number(totals?.[k] ?? 0)]),
+  ) as GoalCounts["states"];
+  return { states, owners: owners.map((o) => ({ ...o, employee: `employees/${o.employee}` })) };
 }
 
 export type BurnupPoint = { at: string; attained: number; expected: number };
@@ -1017,6 +1277,10 @@ export async function requestGoalChanges(deps: Deps, actor: AppUser, id: string,
   await deps.db.insert(schema.goalComments).values({ goalId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
   await audit(deps, actor, "goal.requestChanges", "goals", id, stateMeta("PROPOSED", "DRAFT", { employee: `employees/${row.employeeId}`, ...noteMeta("goals", text) }), updated);
   await notify(deps, { recipient: row.employeeId, type: "goal.changes_requested", title: "Goal sent back", body: `${row.title} - ${text.slice(0, 140)}`, link: "goals", subject: `goals/${id}`, action: "respond", actorId: actor.employeeId });
+  // The note is a comment on the goal, and it is composed with the same mention picker - so a name in it has
+  // to reach that person, exactly as one written in the thread does. Without this the chip rendered, linked
+  // to their profile, and told them nothing.
+  await notifyMentions(deps, actor, { subject: `goals/${id}`, link: goalLink(id), type: "goal.mention", body: text, title: row.title });
   return updated;
 }
 
@@ -1120,7 +1384,7 @@ export async function commentGoal(deps: Deps, actor: AppUser, id: string, body?:
   const other = actor.employeeId === row.employeeId ? await managerIdOf(deps, row.employeeId) : row.employeeId;
   if (other && other !== actor.employeeId)
     await notify(deps, { recipient: other, type: "goal.comment", title: `Comment on “${row.title}”`, body: text.slice(0, 140), link: "goals", subject: `goals/${id}`, actorId: actor.employeeId });
-  await notifyMentions(deps, actor, { subject: `goals/${id}`, link: "goals", type: "goal.mention", body: text, title: row.title });
+  await notifyMentions(deps, actor, { subject: `goals/${id}`, link: goalLink(id), type: "goal.mention", body: text, title: row.title });
   await notifyGoalWatchers(deps, actor, row, {
     type: "goal.comment",
     title: `Comment on “${row.title}”`,

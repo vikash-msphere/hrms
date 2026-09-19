@@ -1,9 +1,12 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ClipboardCheck, ChevronRight, Check, SkipForward, UserPlus, MessageSquareQuote, CircleAlert, Hourglass, CheckCircle2, AlarmClock, ChevronsDownUp, ChevronsUpDown, BellRing, FileDown, Target } from "lucide-react";
 import { create, get, invoke } from "@/api";
-import { useRoute, setQueryParams } from "@/router";
+import { useRoute, setQueryParams, navigate } from "@/router";
 import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { statusForProgress } from "@/lib/goalState";
+import { GoalDueChip, GoalProgressBar, GoalStageBadge } from "@/components/common/GoalChips";
+import { FilterChip } from "@/components/common/FilterChips";
 import { todayStr } from "@/lib/orgDay";
 import { useHasPrintVersion } from "@/lib/letterheads";
 import { DEFAULT_PERFORMANCE, competenciesForCycle, competencyScore, ratingLabel, type PerformanceFramework } from "@/lib/performance";
@@ -317,17 +320,7 @@ export default function Reviews({ me }: { me: Me }) {
   latestVisible.current = visible;
 
   const filterChip = (f: Filter, label: string) => (
-    <button
-      key={f}
-      type="button"
-      onClick={() => applyFilter(f)}
-      className={cn(
-        "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-        filter === f ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent",
-      )}
-    >
-      {label} <span className="tabular-nums opacity-70">{counts[f]}</span>
-    </button>
+    <FilterChip key={f} active={filter === f} count={counts[f]} onClick={() => applyFilter(f)}>{label}</FilterChip>
   );
 
   const overdueCount = counts.overdue;
@@ -385,7 +378,7 @@ export default function Reviews({ me }: { me: Me }) {
     });
   }, [cards]);
 
-  // Deep link: #/reviews/<id> (notification clicks) opens that card and scrolls it into view.
+  // Deep link: /reviews/<id> (notification clicks) opens that card and scrolls it into view.
   useEffect(() => {
     if (!route.id) return;
     const target = reviews.find((r) => idOf(r.path) === route.id);
@@ -693,9 +686,10 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
   // Goals page moves it, so truing a goal up here doesn't leave it "not started" at 40%.
   const { toast } = useToast();
   const updateGoalProgress = async (g: CycleGoal, progress: number) => {
-    const status = progress >= 100 && g.status !== "completed" ? "completed"
-      : progress > 0 && g.status === "not_started" ? "in_progress"
-      : undefined;
+    // The shared rule. Moving progress to 100 closes a goal out and moving it off zero starts it, and this
+    // was written out by hand here and again on the Goals page - two surfaces writing through the same
+    // `:updateProgress` verb that each had their own copy of what the number means.
+    const status = statusForProgress(progress, g.status ?? "not_started");
     try {
       await invoke(`goals/${idOf(g.path ?? "")}`, "updateProgress", undefined, { progress, ...(status ? { status } : {}) });
       toast({ title: progress >= 100 ? "Goal marked complete" : `Progress set to ${progress}%`, variant: "success" });
@@ -1302,9 +1296,32 @@ function GoalsPanel({ goals, attainment, frozen, verdicts, framework, editable, 
       <ul className="space-y-2">
         {goals.map((g) => (
           <li key={g.code} className="space-y-1">
-            <div className="flex items-center gap-2 text-sm">
-              <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", g.status === "completed" ? "bg-emerald-500" : g.status === "cancelled" ? "bg-muted-foreground/40" : "bg-primary")} />
-              <span className={cn("min-w-0 flex-1 truncate", g.status === "cancelled" && "text-muted-foreground line-through")}>{g.title}</span>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              {/* The shared bar, not a private dot. Every other surface that shows a goal shows how far along
+                  it is; this one showed a coloured full stop and a percentage, so the one place the numbers
+                  are actually being judged was the hardest place to compare them. Toned by the shared rule
+                  too, which means a goal that blew its date inside the cycle now reads as one - the dot
+                  coloured by status alone called it healthy. */}
+              <GoalProgressBar goal={g} className="hidden w-16 shrink-0 sm:block" />
+              {/* Linked, because the snapshot carries `path` and always has - it was used to decide whether
+                  to offer the slider and never to get anybody to the goal. A reviewer reading "62%" had no
+                  route to the history, the comments or the measure behind it. */}
+              {g.path ? (
+                <button
+                  type="button"
+                  onClick={() => navigate(`goals/${idOf(g.path!)}`)}
+                  title={`Open “${g.title}”`}
+                  className={cn("min-w-0 flex-1 truncate text-left hover:underline", g.status === "cancelled" && "text-muted-foreground line-through")}
+                >
+                  {g.title}
+                </button>
+              ) : (
+                <span className={cn("min-w-0 flex-1 truncate", g.status === "cancelled" && "text-muted-foreground line-through")}>{g.title}</span>
+              )}
+              {/* When it was due, and whether it landed late. The snapshot has carried `due_date` since it
+                  existed and the review never said it: a goal scored 60% three weeks past its date read
+                  exactly like one scored 60% with a month still to run. */}
+              <GoalDueChip goal={g} className="shrink-0 text-xs" />
               {/* A goal nobody agreed is still scored - it is what the person worked on - but the review says
                   so on its face rather than presenting it as an objective both sides signed up to. */}
               {/* A share of somebody else's goal: the weight is already scaled, but whose work it was still
@@ -1316,12 +1333,11 @@ function GoalsPanel({ goals, attainment, frozen, verdicts, framework, editable, 
                   {g.contribution.share}% share
                 </span>
               )}
-              {g.stage && (
-                <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400" title="This goal was never agreed by a manager">
-                  {g.stage === "PROPOSED" ? "not agreed" : "draft"}
-                </span>
-              )}
-              {!!g.weight && <span className="shrink-0 text-xs tabular-nums text-muted-foreground">wt {g.weight}</span>}
+              {/* The same badge and the same words the Goals page uses. This said "not agreed" / "draft" in
+                  its own amber; the cockpit said "Awaiting you"; the card said "Awaiting approval". One
+                  stage, three vocabularies. */}
+              <GoalStageBadge goal={g} className="shrink-0" />
+              {!!g.weight && <span className="shrink-0 text-xs tabular-nums text-muted-foreground">weight {g.weight}</span>}
               {verdicts[g.code]?.rating != null && (
                 <span className="shrink-0 text-xs tabular-nums text-muted-foreground" title={ratingLabel(framework.scale, verdicts[g.code]!.rating!)}>
                   rated {verdicts[g.code]!.rating}
@@ -1345,6 +1361,15 @@ function GoalsPanel({ goals, attainment, frozen, verdicts, framework, editable, 
                 </AccessAction>
               )}
             </div>
+            {/* The owner's own account of what happened, which the snapshot has always carried and this
+                panel has never shown. It reaches the exported PDF and not the screen the rating is typed on -
+                so the manager scoring the goal was reading a percentage while the sentence explaining it sat
+                in the payload. It comes FIRST: what happened, then the verdict on it. */}
+            {g.retro && (
+              <p className="whitespace-pre-wrap pl-3.5 text-sm text-muted-foreground">
+                <span className="font-medium text-foreground/80">What happened: </span>{g.retro}
+              </p>
+            )}
             {verdicts[g.code]?.comment && <p className="pl-3.5 text-sm text-foreground/90">{verdicts[g.code]!.comment}</p>}
             {/* A measured goal's progress is its measure; offering a slider would promise a write the server
                 recomputes away. Cancelled and completed goals are settled. */}

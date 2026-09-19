@@ -17,7 +17,7 @@ import { allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
 type Catalog = {
   /** `settings/<key>` - the panel's own route. */
   key: string;
-  /** The panel's own <h1> (registry.ts `title`) - what `gotoRoute` waits on. Without it, a same-document hash
+  /** The panel's own <h1> (registry.ts `title`) - what `gotoRoute` waits on. Without it, a same-document
    *  navigation between two settings panels can resolve against the PREVIOUS panel's still-mounted <main>
    *  before the new one has actually rendered, so the very next click can land nowhere. */
   heading: string;
@@ -107,7 +107,7 @@ test("every catalog editor takes a new row", async ({ as }) => {
     // Every dialog pushes its own history entry on open and, closed normally, drops it with a REAL
     // `history.back()` (dialogHistory.ts) so the phone back-gesture still dismisses it - deferred a tick,
     // by design (the comment there: "history.back() does not pop synchronously"). Moving straight to the next
-    // catalog's own `page.goto()` can race that still-pending back(): it can land after the new hash push and
+    // catalog's own `page.goto()` can race that still-pending back(): it can land after the new entry is pushed and
     // pop THAT instead, leaving the browser wherever the stack landed (once, the settings hub) rather than
     // where this iteration finished. A brief settle covers the worst case the same file documents (its own
     // 500ms safety net in `selfBack`).

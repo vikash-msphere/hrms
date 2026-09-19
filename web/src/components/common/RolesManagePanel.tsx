@@ -87,7 +87,8 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
       cell: (r) => <span className="font-medium">{r.label}{r.protected && <Badge variant="muted" className="ml-2 px-1 py-0 text-[10px]">core</Badge>}</span>,
     },
     { id: "name", header: "Identifier", filter: "text", accessor: (r) => r.name, cell: (r) => <span className="font-mono text-xs text-muted-foreground">{r.name}</span> },
-    { id: "users", header: "Users", filter: "none", align: "right", accessor: (r) => userCount.get(r.name) ?? 0 },
+    // "=0" here is every role nobody holds, which is the list to prune.
+    { id: "users", header: "Users", filter: "number", align: "right", accessor: (r) => userCount.get(r.name) ?? 0 },
     {
       id: "actions", header: "", sortable: false, filter: "none", align: "right",
       cell: (r) =>

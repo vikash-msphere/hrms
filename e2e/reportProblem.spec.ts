@@ -120,7 +120,7 @@ test.describe("report a problem", () => {
 
     // The toast's own way back to the ticket, since the report was filed from another page entirely.
     await sent.getByRole("button", { name: "View ticket" }).click();
-    await expect.poll(() => page.url()).toMatch(/#\/tickets\//);
+    await expect.poll(() => page.url()).toMatch(/\/tickets\//);
 
     // What support actually sees: the ticket, and a link to the recording that came with it. The link proves
     // the id round-tripped - flushed in the browser, accepted by the server's 32-hex check (a rejected id is

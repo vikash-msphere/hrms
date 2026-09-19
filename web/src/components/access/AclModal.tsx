@@ -51,6 +51,11 @@ const LEVELS = ["read", "write", "admin", "deny"] as const;
 const WHY_LABEL: Record<string, string> = {
   self: "your own record",
   dept: "your department",
+  // The manager chain, and the two tiers this map was missing: the engine has had `my-reports` / `my-org`
+  // since the chain grants landed (domain/compileGrants.ts ScopeKind), so a caller who reached a record that
+  // way read "via " followed by nothing at all - the one line in this modal whose whole job is to say how.
+  reports: "the people who report to you",
+  org: "your reporting line",
   subtree: "your org subtree",
   exact: "a rule on this object",
   all: "an org-wide rule",

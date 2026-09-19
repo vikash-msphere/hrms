@@ -1,20 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Columns3, Lock, Plus, RefreshCw, Table2, Trash2, Pencil, Search, X } from "lucide-react";
+import {
+  ArrowDown, ArrowUp, BarChart3, ChevronRight, Columns3, Copy, ExternalLink, Filter, GripVertical, Link2,
+  Lock, Plus, RefreshCw, Rows3, Sigma, Table2, Trash2, Pencil, Search, X,
+} from "lucide-react";
 import { api, create, get, patch, remove } from "@/api";
 import { navigate, useRoute, setQueryParams } from "@/router";
-import { cn, formatDate, idOf } from "@/lib/utils";
+import { cn, formatDate, formatMonthYear, idOf } from "@/lib/utils";
 import { useMoney } from "@/lib/org";
 import { usePermission } from "@/lib/perm";
 import { useCollection } from "@/hooks/useCollection";
 import { useIntent } from "@/lib/intent";
+import { useKpiFocus, type FocusSpec } from "@/lib/kpiFocus";
+import { resourceRoute, opensExactRecord } from "@/lib/resourceRoute";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
-import type { Department, Me, PayPeriod, TableCatalogue, TableField, TableLink, TableRunResult, TableView } from "@/types";
+import type {
+  Department, Me, PayPeriod, TableCatalogue, TableField, TableFieldKind, TableLink, TableRunColumn,
+  TableRunResult, TableRunRow, TableView,
+} from "@/types";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { PageHeader } from "@/components/common/PageHeader";
 import { RowsSkeleton } from "@/components/common/Skeletons";
+import { SummaryStrip, type SummaryItem } from "@/components/common/SummaryStrip";
+import { Chart, ChartCard } from "@/components/common/Chart";
+import { RowActions } from "@/components/common/RowActions";
 import { WriteDialog } from "@/components/common/WriteDialog";
 import { Field } from "@/components/common/Field";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -59,10 +70,137 @@ const ROW_CEILING = 5000;
 const PAGE_TARGET = 100;
 const MAX_PAGES_PER_LOAD = 20;
 
+// The server's own caps on a saved spec: `MAX_FILTERS` in domain/tableFields.ts, and the four that
+// `cleanSort` slices to. Said here so the editor stops at the same place the API does, rather than offering a
+// control whose result is a 400.
+const MAX_FILTERS = 24;
+const MAX_SORTS = 4;
+
 type ViewSpec = {
   columns: { field: string; label?: string; hidden?: boolean }[];
   params: Record<string, string>;
 };
+
+/** One saved filter / one saved sort, as the wire contract defines them - never re-declared here. */
+type ViewFilter = NonNullable<TableView["filters"]>[number];
+type ViewSort = NonNullable<TableView["sort"]>[number];
+type FilterOp = ViewFilter["op"];
+
+/** One column of a chosen table, with the presentation the author gave it. */
+type ChosenColumn = { field: string; label?: string };
+
+// The value of one cell, for everything the page computes RATHER than renders: totals, groups, counts.
+//
+// A denied cell is not a value and is not a blank either (see `renderCell`): summing it would understate a
+// total the reader is told is a total, and grouping by it would invent a "(blank)" group out of somebody
+// else's data. It reads as absent here, and the strip counts those rows separately.
+const valueOf = (row: TableRunRow, key: string): unknown => (row.denied?.includes(key) ? undefined : row.cells[key]);
+const isBlank = (v: unknown) => v === null || v === undefined || v === "";
+const isNumericKind = (kind: TableFieldKind) => kind === "money" || kind === "number";
+// A column worth grouping BY: one whose values repeat. Not `ref` - a reference cell is the record's PATH
+// ("departments/9f3..."), so a bar chart of one is a row of identifiers; the picker's own answer to "group by
+// the department" is to follow the link and take its name.
+const isGroupableKind = (kind: TableFieldKind) => kind === "enum" || kind === "bool" || kind === "text" || kind === "date" || kind === "datetime";
+
+const BLANK_GROUP = "(blank)";
+
+// How many bars the summary draws. Past this the chart stops being a picture and becomes a hedge of
+// one-pixel bars, so the tail is said in a sentence under it instead.
+const GROUP_CAP = 12;
+
+// Which group one row falls in. A date groups by MONTH: grouping a joining date by the day gives three
+// hundred one-row groups and no picture, and the month is the bucket every other date chart in the app uses.
+function groupOf(col: TableRunColumn, row: TableRunRow): string {
+  const v = valueOf(row, col.key);
+  if (isBlank(v)) return BLANK_GROUP;
+  if (col.kind === "date" || col.kind === "datetime") return String(v).slice(0, 7);
+  if (col.kind === "bool") return v ? "Yes" : "No";
+  return String(v);
+}
+
+/** How a group reads on the chart's axis: a month as "Sep 2026", everything else as itself. */
+function groupLabel(col: TableRunColumn, key: string): string {
+  if (key === BLANK_GROUP) return BLANK_GROUP;
+  if (col.kind === "date" || col.kind === "datetime") return formatMonthYear(`${key}-01`) || key;
+  if (col.kind === "enum") return key.replace(/_/g, " ").toLowerCase();
+  return key;
+}
+
+// The operators offered per kind, in the words the reader would use. `in` takes a comma-separated list, and
+// `empty` / `not_empty` take no value at all - both are the server's own contract (domain/tableFields.ts).
+const OPS_BY_KIND: Record<TableFieldKind, { op: FilterOp; label: string }[]> = {
+  text: [
+    { op: "contains", label: "contains" }, { op: "eq", label: "is" }, { op: "ne", label: "is not" },
+    { op: "in", label: "is any of" }, { op: "empty", label: "is empty" }, { op: "not_empty", label: "is not empty" },
+  ],
+  enum: [
+    { op: "eq", label: "is" }, { op: "ne", label: "is not" }, { op: "in", label: "is any of" },
+    { op: "empty", label: "is empty" }, { op: "not_empty", label: "is not empty" },
+  ],
+  ref: [
+    { op: "eq", label: "is" }, { op: "ne", label: "is not" }, { op: "contains", label: "contains" },
+    { op: "empty", label: "is empty" }, { op: "not_empty", label: "is not empty" },
+  ],
+  bool: [{ op: "eq", label: "is" }, { op: "empty", label: "is empty" }, { op: "not_empty", label: "is not empty" }],
+  number: [
+    { op: "eq", label: "is" }, { op: "ne", label: "is not" }, { op: "gt", label: "is more than" },
+    { op: "gte", label: "is at least" }, { op: "lt", label: "is less than" }, { op: "lte", label: "is at most" },
+    { op: "empty", label: "is empty" }, { op: "not_empty", label: "is not empty" },
+  ],
+  money: [
+    { op: "eq", label: "is" }, { op: "ne", label: "is not" }, { op: "gt", label: "is more than" },
+    { op: "gte", label: "is at least" }, { op: "lt", label: "is less than" }, { op: "lte", label: "is at most" },
+    { op: "empty", label: "is empty" }, { op: "not_empty", label: "is not empty" },
+  ],
+  date: [
+    { op: "eq", label: "is on" }, { op: "gt", label: "is after" }, { op: "gte", label: "is on or after" },
+    { op: "lt", label: "is before" }, { op: "lte", label: "is on or before" },
+    { op: "empty", label: "is empty" }, { op: "not_empty", label: "is not empty" },
+  ],
+  datetime: [
+    { op: "eq", label: "is on" }, { op: "gt", label: "is after" }, { op: "gte", label: "is on or after" },
+    { op: "lt", label: "is before" }, { op: "lte", label: "is on or before" },
+    { op: "empty", label: "is empty" }, { op: "not_empty", label: "is not empty" },
+  ],
+};
+
+/** Operators that judge presence, not a value - the value input goes away for these. */
+const VALUELESS: readonly FilterOp[] = ["empty", "not_empty"];
+
+const opLabel = (kind: TableFieldKind, op: FilterOp) => OPS_BY_KIND[kind].find((o) => o.op === op)?.label ?? op;
+
+/** What a field is CALLED, from the run's own columns - falling back to the key for a filter on a column the
+ *  reader does not get (the definition is shared; the columns it resolves to are not). */
+const labelOfField = (field: string, cols: TableRunColumn[]) => cols.find((c) => c.key === field)?.label ?? field;
+const kindOfField = (field: string, cols: TableRunColumn[]): TableFieldKind => cols.find((c) => c.key === field)?.kind ?? "text";
+
+/** One saved filter as a sentence: "Status is any of open, blocked", "Annual CTC is at least 1200000". */
+function filterPhrase(f: ViewFilter, cols: TableRunColumn[]): string {
+  const kind = kindOfField(f.field, cols);
+  const phrase = `${labelOfField(f.field, cols)} ${opLabel(kind, f.op)}`;
+  if (VALUELESS.includes(f.op)) return phrase;
+  // A boolean filter is stored as the "true" the server compares against; it is READ as the Yes the editor
+  // offered, because "Confirmed is true" is not a sentence anybody wrote.
+  const value = kind === "bool" ? (String(f.value) === "true" ? "Yes" : "No") : String(f.value ?? "");
+  return `${phrase} ${value}`;
+}
+
+/** A pill that takes itself off: an active filter, a metric the reader drilled into, a chosen column. */
+function RemovableChip({ label, onRemove, removeLabel, title }: {
+  label: string;
+  onRemove: () => void;
+  removeLabel: string;
+  title?: string;
+}) {
+  return (
+    <span className="inline-flex max-w-full items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-xs" title={title ?? label}>
+      <span className="truncate">{label}</span>
+      <button type="button" onClick={onRemove} aria-label={removeLabel} className="rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground">
+        <X className="h-3 w-3" />
+      </button>
+    </span>
+  );
+}
 
 const specOf = (v: TableView): ViewSpec => ({
   columns: (v.columns ?? []).map((c) => ({ field: c.field, label: c.label, hidden: c.hidden })),
@@ -144,6 +282,28 @@ function TableList() {
     }, 300);
   }
 
+  // A table is a definition, so the cheapest way to a variant of one ("the same sheet, but for Sales") is a
+  // copy you then edit - not rebuilding a twelve-column pick by hand. Everything that makes the table what it
+  // is comes along: its columns and their headers, its filters, its sort and its saved parameters.
+  async function duplicate(view: TableView) {
+    try {
+      const copy = await create<TableView>("table-views", {
+        display_name: `${view.display_name} (copy)`,
+        description: view.description ?? null,
+        base: view.base,
+        columns: view.columns ?? [],
+        filters: view.filters ?? [],
+        sort: view.sort ?? [],
+        params: view.params ?? {},
+      });
+      reload();
+      toast({ title: "Copied", description: "Opening the copy.", variant: "success" });
+      navigate(`tables/${idOf(copy.path)}`);
+    } catch (e) {
+      toast({ title: "Couldn't copy", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
   async function del(view: TableView) {
     if (!(await confirm({ title: `Delete "${view.display_name}"?`, description: "Anyone it was shared with loses it too.", destructive: true, confirmLabel: "Delete" }))) return;
     try {
@@ -167,9 +327,9 @@ function TableList() {
       ),
       mobilePriority: 1,
     },
-    { id: "base", header: "Rows are", accessor: (r) => baseLabel.get(r.base) ?? r.base, filter: "select", mobilePriority: 2 },
-    { id: "columns", header: "Columns", accessor: (r) => (r.columns ?? []).length, align: "right" },
-    { id: "updated", header: "Updated", accessor: (r) => r.update_time, cell: (r) => formatDate(r.update_time), mobilePriority: 3 },
+    { id: "base", header: "Rows are", accessor: (r) => baseLabel.get(r.base) ?? r.base, filter: "select", groupBy: true, mobilePriority: 2 },
+    { id: "columns", header: "Columns", accessor: (r) => (r.columns ?? []).length, align: "right", filter: "number" },
+    { id: "updated", header: "Updated", accessor: (r) => r.update_time, filter: "date", dateHint: "past", cell: (r) => formatDate(r.update_time), mobilePriority: 3 },
     {
       id: "actions",
       header: "",
@@ -177,6 +337,9 @@ function TableList() {
         <div className="flex justify-end gap-1">
           <AccessAction objectPath={r.path} can={r.access?.can} verb="update" label={r.display_name}>
             <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Open" onClick={() => navigate(`tables/${idOf(r.path)}`)}><Pencil className="h-3.5 w-3.5" /></Button>
+          </AccessAction>
+          <AccessAction create label="Table">
+            <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Duplicate ${r.display_name}`} title="Duplicate" onClick={(e) => { e.stopPropagation(); void duplicate(r); }}><Copy className="h-3.5 w-3.5" /></Button>
           </AccessAction>
           <AccessAction objectPath={r.path} can={r.access?.can} verb="delete" label={r.display_name}>
             <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" aria-label="Delete" onClick={() => void del(r)}><Trash2 className="h-3.5 w-3.5" /></Button>
@@ -278,6 +441,7 @@ function OneTable({ id }: { id: string }) {
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
+  const [filtering, setFiltering] = useState(false);
   const [editing, setEditing] = useState(false);
   const [details, setDetails] = useState({ display_name: "", description: "", base: "" });
   const [loadingMore, setLoadingMore] = useState(false);
@@ -364,12 +528,50 @@ function OneTable({ id }: { id: string }) {
     }
   }
 
-  async function saveColumns(fields: string[]) {
+  // The picker hands back the columns IN ORDER, each with the header its author gave it - so the same save
+  // carries a reorder and a rename as well as a tick. `hidden` is not the picker's to touch (a hidden column
+  // is one a filter judges on and the grid does not show), so it is carried over from the stored spec.
+  async function saveColumns(chosen: ChosenColumn[]) {
     if (!view) return;
     const spec = specOf(view);
     const kept = new Map(spec.columns.map((c) => [c.field, c]));
-    const updated = await patch<TableView>(`table-views/${id}`, { columns: fields.map((f) => kept.get(f) ?? { field: f }) }, view.etag);
+    const columns = chosen.map((c) => {
+      const before = kept.get(c.field);
+      return { field: c.field, ...(c.label ? { label: c.label } : {}), ...(before?.hidden ? { hidden: true } : {}) };
+    });
+    const updated = await patch<TableView>(`table-views/${id}`, { columns }, view.etag);
     setView(updated);
+  }
+
+  /** The saved filters and sort - the report's own narrowing, applied by the server over every page. */
+  async function saveFilterSort(filters: ViewFilter[], sort: ViewSort[]) {
+    if (!view) return;
+    const updated = await patch<TableView>(`table-views/${id}`, { filters, sort }, view.etag);
+    setView(updated);
+  }
+
+  async function dropFilter(index: number) {
+    if (!view) return;
+    await saveFilterSort((view.filters ?? []).filter((_, i) => i !== index), view.sort ?? []);
+  }
+
+  async function duplicate() {
+    if (!view) return;
+    try {
+      const copy = await create<TableView>("table-views", {
+        display_name: `${view.display_name} (copy)`,
+        description: view.description ?? null,
+        base: view.base,
+        columns: view.columns ?? [],
+        filters: view.filters ?? [],
+        sort: view.sort ?? [],
+        params: view.params ?? {},
+      });
+      toast({ title: "Copied", description: "Opening the copy.", variant: "success" });
+      navigate(`tables/${idOf(copy.path)}`);
+    } catch (e) {
+      toast({ title: "Couldn't copy", description: (e as Error).message, variant: "destructive" });
+    }
   }
 
   // Name, description and - the one people get wrong first - what a row IS. Picking the wrong base used to
@@ -426,11 +628,223 @@ function OneTable({ id }: { id: string }) {
       accessor: (row) => (row.denied?.includes(col.key) ? null : (row.cells[col.key] as string | number | boolean | null | undefined)),
       cell: (row) => renderCell(col, row, money),
       ...(col.kind === "money" ? { aggregate: "sum" as const, formatTotal: (n: number) => money(n) } : {}),
-      filter: col.kind === "enum" || col.kind === "bool" ? ("select" as const) : ("text" as const),
+      // The field's KIND decides how it narrows, so a grid somebody assembled this morning out of pay,
+      // joining dates and departments arrives with a money filter on the money column, a calendar on the
+      // dates and a counted value list on the departments - without the person who built it saying so.
+      // A repeated value (an enum, a yes/no, a reference to another record) can also group the grid.
+      filter:
+        col.kind === "money" || col.kind === "number" ? ("number" as const)
+        : col.kind === "date" || col.kind === "datetime" ? ("date" as const)
+        : col.kind === "enum" || col.kind === "bool" || col.kind === "ref" ? ("select" as const)
+        : ("text" as const),
+      ...(col.kind === "enum" || col.kind === "bool" || col.kind === "ref" ? { groupBy: true } : {}),
     }));
   }, [result, money]);
 
-  const selected = useMemo(() => (view?.columns ?? []).map((c) => c.field), [view]);
+  // ---- What the grid says about itself ------------------------------------------------------------------
+  //
+  // Every number below is computed over the rows IN HAND and says so. A load follows the cursor until it has
+  // a screenful or the report ends (PAGE_TARGET above), so on most tables that is the whole report - but on a
+  // long one it is a window, and a total that quietly described a window while reading as a total would be
+  // the one figure on the page nobody could check.
+  const rows = useMemo(() => result?.rows ?? [], [result]);
+  const cols = useMemo(() => result?.columns ?? [], [result]);
+
+  const stats = useMemo(() => {
+    const totals = cols
+      .filter((c) => isNumericKind(c.kind))
+      .map((col) => {
+        let sum = 0;
+        let n = 0;
+        for (const r of rows) {
+          const v = valueOf(r, col.key);
+          if (typeof v === "number") { sum += v; n += 1; }
+        }
+        return { col, sum, n };
+      })
+      .filter((t) => t.n > 0);
+    // EMPTY is not the same as WITHHELD, so they are counted apart: "nobody filled this in" is a data problem
+    // somebody can go and fix, and "this is not yours to see" is not a problem at all.
+    const incomplete = rows.filter((r) => cols.some((c) => !r.denied?.includes(c.key) && isBlank(r.cells[c.key]))).length;
+    const restricted = rows.filter((r) => r.denied?.length).length;
+    // The commonest value of the first column that HAS common values - which is what a grid of statuses is
+    // read for, and one click away from being the filter as well.
+    let top: { col: TableRunColumn; value: string; n: number } | null = null;
+    for (const col of cols) {
+      if (col.kind !== "enum" && col.kind !== "bool") continue;
+      const tally = new Map<string, number>();
+      for (const r of rows) {
+        if (isBlank(valueOf(r, col.key))) continue;
+        const key = groupOf(col, r);
+        tally.set(key, (tally.get(key) ?? 0) + 1);
+      }
+      const best = [...tally.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (best) { top = { col, value: best[0], n: best[1] }; break; }
+    }
+    return { totals, incomplete, restricted, top };
+  }, [rows, cols]);
+
+  // Clicking a metric narrows the grid to the rows it counted - through the app's own drill-through, so the
+  // narrowed report is a link, survives a reload and closes with the back button (lib/kpiFocus.ts).
+  const focusSpecs = useMemo(() => {
+    const specs: Record<string, FocusSpec<TableRunRow>> = {
+      incomplete: { label: "rows with an empty cell", match: (r) => cols.some((c) => !r.denied?.includes(c.key) && isBlank(r.cells[c.key])) },
+      restricted: { label: "rows with a value withheld from you", match: (r) => !!r.denied?.length },
+    };
+    const top = stats.top;
+    if (top) specs.top = { label: `rows where ${top.col.label} is ${groupLabel(top.col, top.value)}`, match: (r) => groupOf(top.col, r) === top.value };
+    return specs;
+  }, [cols, stats]);
+  const focus = useKpiFocus<TableRunRow, string>(focusSpecs);
+
+  // ---- The summary ---------------------------------------------------------------------------------------
+  // One group-by and one measure, both in the URL beside the run's parameters, for the same reason they are:
+  // "spend by department" is a question somebody asks and then sends to somebody else.
+  const groupKey = route.query.group ?? "";
+  const groupCol = useMemo(() => cols.find((c) => c.key === groupKey) ?? null, [cols, groupKey]);
+  const groupable = useMemo(() => cols.filter((c) => isGroupableKind(c.kind)), [cols]);
+  const measure = route.query.measure ?? "count";
+  const measureCol = useMemo(() => (measure === "count" ? null : cols.find((c) => c.key === measure.slice(4)) ?? null), [cols, measure]);
+  const measureLabel = !measureCol ? "Rows" : `${measure.startsWith("avg:") ? "Average" : "Total"} ${measureCol.label.toLowerCase()}`;
+  const formatMeasure = useCallback(
+    (n: number) => (measureCol?.kind === "money" ? money(n) : (Math.round(n * 100) / 100).toLocaleString()),
+    [measureCol, money],
+  );
+
+  const groups = useMemo(() => {
+    if (!groupCol) return [];
+    const tally = new Map<string, { n: number; sum: number; has: number }>();
+    for (const r of rows) {
+      const key = groupOf(groupCol, r);
+      const entry = tally.get(key) ?? { n: 0, sum: 0, has: 0 };
+      entry.n += 1;
+      if (measureCol) {
+        const v = valueOf(r, measureCol.key);
+        if (typeof v === "number") { entry.sum += v; entry.has += 1; }
+      }
+      tally.set(key, entry);
+    }
+    const out = [...tally.entries()].map(([key, e]) => ({
+      key,
+      label: groupLabel(groupCol, key),
+      n: e.n,
+      value: !measureCol ? e.n : measure.startsWith("avg:") ? (e.has ? e.sum / e.has : 0) : e.sum,
+    }));
+    // Time reads in time order. Everything else reads biggest-first, which is the whole point of the picture.
+    return groupCol.kind === "date" || groupCol.kind === "datetime"
+      ? out.sort((a, b) => a.key.localeCompare(b.key))
+      : out.sort((a, b) => b.value - a.value);
+  }, [groupCol, measureCol, measure, rows]);
+
+  // A bar per group, up to a readable number of them; the tail is said in words rather than drawn as a hedge
+  // of one-pixel bars.
+  const drawnGroups = useMemo(() => groups.slice(0, GROUP_CAP), [groups]);
+  const sliceSpecs = useMemo(() => {
+    const specs: Record<string, FocusSpec<TableRunRow>> = {};
+    if (!groupCol) return specs;
+    for (const g of groups) specs[g.key] = { label: `${groupCol.label}: ${g.label}`, match: (r) => groupOf(groupCol, r) === g.key };
+    return specs;
+  }, [groupCol, groups]);
+  const slice = useKpiFocus<TableRunRow, string>(sliceSpecs, "slice");
+  // The bar the grid is currently narrowed by, so the picture says what it is filtered by. -1 when the slice
+  // in force is one of the groups past the cap - the narrowing still holds, no bar is lit.
+  const drawnSlice = drawnGroups.findIndex((g) => g.key === slice.focus);
+
+  // The rows the grid actually shows: the report, narrowed by whichever metric or bar the reader pressed.
+  const shown = slice.apply(focus.apply(rows));
+  const narrowedBy = [focus.activeLabel, slice.activeLabel].filter(Boolean) as string[];
+
+  // A handful of items off numbers that are already computed - built in the render body rather than memoized,
+  // because every part of it (the focus handlers, the narrowing) changes identity on every render anyway.
+  const summary: SummaryItem[] = (() => {
+    if (!result || !rows.length) return [];
+    const items: SummaryItem[] = [
+      {
+        label: "Rows",
+        value: shown.length.toLocaleString(),
+        icon: Rows3,
+        hint: result.next_page_token
+          ? `of ${rows.length.toLocaleString()} loaded - there are more`
+          : narrowedBy.length ? `of ${rows.length.toLocaleString()} in the report` : undefined,
+      },
+    ];
+    for (const t of stats.totals.slice(0, 2)) {
+      items.push({
+        label: `Total ${t.col.label.toLowerCase()}`,
+        value: t.col.kind === "money" ? money(t.sum) : t.sum.toLocaleString(),
+        icon: Sigma,
+        hint: `average ${t.col.kind === "money" ? money(t.sum / t.n) : (Math.round((t.sum / t.n) * 100) / 100).toLocaleString()} over ${t.n.toLocaleString()}`,
+      });
+    }
+    if (stats.top) {
+      items.push({
+        label: stats.top.col.label,
+        value: <span className="capitalize">{groupLabel(stats.top.col, stats.top.value)}</span>,
+        hint: `${stats.top.n.toLocaleString()} of ${rows.length.toLocaleString()} rows`,
+        ...focus.kpi("top"),
+      });
+    }
+    if (stats.incomplete) {
+      items.push({
+        label: "Incomplete",
+        value: stats.incomplete.toLocaleString(),
+        tone: "warning",
+        hint: "a cell nobody has filled in",
+        ...focus.kpi("incomplete"),
+      });
+    }
+    if (stats.restricted) {
+      items.push({
+        label: "Restricted",
+        value: stats.restricted.toLocaleString(),
+        tone: "muted",
+        hint: "a value withheld from you",
+        ...focus.kpi("restricted"),
+      });
+    }
+    return items;
+  })();
+
+  // Where a row's record lives. A grid built on People opens the profile; one built on a collection with no
+  // page of its own opens nothing, and says nothing about opening.
+  const recordRoute = useCallback((row: TableRunRow) => (result ? resourceRoute(result.base, row.path) : null), [result]);
+  const opensRecord = !!result && opensExactRecord(result.base);
+  // Asked of a real row rather than of the base: a grid whose base has no page anywhere in the app must not
+  // hand every row a pointer and a menu that go nowhere.
+  const rowsOpen = !!rows.length && !!recordRoute(rows[0]!);
+
+  const copyLink = useCallback(async (to: string) => {
+    try {
+      await navigator.clipboard.writeText(`${window.location.origin}/${to}`);
+      toast({ title: "Link copied", description: "Points at the record, not at this table.", variant: "success" });
+    } catch {
+      toast({ title: "Couldn't copy the link", description: "Your browser did not allow it.", variant: "destructive" });
+    }
+  }, [toast]);
+
+  // A row of a grid IS a record, and the table had no way to reach it - which is the first thing anybody
+  // wants the moment a number looks wrong. Rows whose base has no page of its own get no menu and no
+  // pointer, rather than an "Open" that goes nowhere.
+  const rowActions: Column<TableRunRow> = {
+    id: "row-actions",
+    header: "",
+    cell: (row) => {
+      const to = recordRoute(row);
+      if (!to) return null;
+      return (
+        <RowActions
+          objectPath={row.path}
+          actions={[
+            { label: opensRecord ? "Open record" : "Open in its module", icon: <ExternalLink className="h-4 w-4" />, onClick: () => navigate(to) },
+            { label: "Copy link to record", icon: <Link2 className="h-4 w-4" />, onClick: () => void copyLink(to) },
+          ]}
+        />
+      );
+    },
+  };
+
+  const chosen = useMemo<ChosenColumn[]>(() => (view?.columns ?? []).map((c) => ({ field: c.field, ...(c.label ? { label: c.label } : {}) })), [view]);
+  const selected = useMemo(() => chosen.map((c) => c.field), [chosen]);
   const usesMetrics = selected.some((f) => f.includes("@metric."));
   const usesPayslip = selected.some((f) => f.includes("@payslip."));
   // The department narrowing applies where the base row itself carries a department, which is exactly where
@@ -462,6 +876,9 @@ function OneTable({ id }: { id: string }) {
             <AccessAction objectPath={view.path} can={view.access?.can} verb="update" label={view.display_name}>
               <Button variant="outline" onClick={openEdit}><Pencil className="h-4 w-4" /> Edit</Button>
             </AccessAction>
+            <AccessAction create label="Table">
+              <Button variant="outline" onClick={() => void duplicate()}><Copy className="h-4 w-4" /> Duplicate</Button>
+            </AccessAction>
             <Button variant="outline" onClick={() => setReloadKey((k) => k + 1)}><RefreshCw className="h-4 w-4" /> Refresh</Button>
           </div>
         }
@@ -483,6 +900,83 @@ function OneTable({ id }: { id: string }) {
         </Card>
       ) : null}
 
+      {/* The report's OWN narrowing - saved on the table, applied by the server over every page, and the
+          same for everyone who opens it. Each chip says what it does in words and takes itself off. */}
+      {(view.filters ?? []).length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Filters</span>
+          {(view.filters ?? []).map((f, i) => (
+            <RemovableChip
+              key={`${f.field}-${f.op}-${i}`}
+              label={filterPhrase(f, cols)}
+              onRemove={() => void dropFilter(i)}
+              removeLabel={`Remove filter ${filterPhrase(f, cols)}`}
+            />
+          ))}
+        </div>
+      )}
+
+      {summary.length > 0 && <SummaryStrip items={summary} className="mb-0" />}
+
+      {/* What the reader is looking at, when it is not the whole report. A metric or a bar they pressed is
+          THEIR narrowing, not the table's, so it lives beside the grid rather than in the definition. */}
+      {narrowedBy.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-sm">
+          <span className="text-muted-foreground">Showing only</span>
+          {focus.activeLabel && <RemovableChip label={focus.activeLabel} onRemove={focus.clear} removeLabel="Show every row again" />}
+          {slice.activeLabel && <RemovableChip label={slice.activeLabel} onRemove={slice.clear} removeLabel="Show every group again" />}
+        </div>
+      )}
+
+      {groupCol && (
+        <ChartCard
+          title={`${measureLabel} by ${groupCol.label}`}
+          description={
+            groups.length > GROUP_CAP
+              ? `The ${GROUP_CAP} biggest of ${groups.length} groups. Click a bar to narrow the grid to it.`
+              : "Click a bar to narrow the grid to that group."
+          }
+          actions={
+            <div className="flex flex-wrap items-center gap-2">
+              <Select value={groupKey} onValueChange={(v) => setQueryParams({ group: v, slice: null })}>
+                <SelectTrigger className="h-8 w-44" aria-label="Group by"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {groupable.map((c) => <SelectItem key={c.key} value={c.key}>{c.label}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Select value={measure} onValueChange={(v) => setQueryParams({ measure: v === "count" ? null : v })}>
+                <SelectTrigger className="h-8 w-52" aria-label="Measure"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="count">Number of rows</SelectItem>
+                  {cols.filter((c) => isNumericKind(c.kind)).flatMap((c) => [
+                    <SelectItem key={`sum:${c.key}`} value={`sum:${c.key}`}>Total {c.label.toLowerCase()}</SelectItem>,
+                    <SelectItem key={`avg:${c.key}`} value={`avg:${c.key}`}>Average {c.label.toLowerCase()}</SelectItem>,
+                  ])}
+                </SelectContent>
+              </Select>
+              <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Close summary" onClick={() => setQueryParams({ group: null, measure: null, slice: null })}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          }
+        >
+          <Chart
+            type="bar"
+            labels={drawnGroups.map((g) => g.label)}
+            datasets={[{ name: measureLabel, values: drawnGroups.map((g) => g.value) }]}
+            ariaLabel={`${measureLabel} for each ${groupCol.label.toLowerCase()} in this table`}
+            height={240}
+            format={formatMeasure}
+            emptyText="Nothing to summarise yet."
+            selected={drawnSlice < 0 ? null : drawnSlice}
+            onSelect={(i) => {
+              const picked = drawnGroups[i];
+              if (picked) slice.setFocus(slice.focus === picked.key ? null : picked.key);
+            }}
+          />
+        </ChartCard>
+      )}
+
       <DataState state={state} error={error} onRetry={() => setReloadKey((k) => k + 1)}>
         {selected.length === 0 ? (
           <EmptyState
@@ -493,17 +987,49 @@ function OneTable({ id }: { id: string }) {
           />
         ) : (
           <DataTable
-            columns={columns}
-            rows={result?.rows ?? []}
+            columns={rowsOpen ? [...columns, rowActions] : columns}
+            rows={shown}
             getRowId={(r) => r.path}
             tableId={`table-view-${id}`}
             emptyTitle="No rows"
-            emptyDescription="Nothing you can see matches this table yet."
+            emptyDescription={
+              narrowedBy.length
+                ? `No ${narrowedBy[0]} in this table.`
+                : (view.filters ?? []).length
+                  ? "Nothing matches this table's filters."
+                  : "Nothing you can see matches this table yet."
+            }
             hasMore={!!result?.next_page_token && (result?.rows.length ?? 0) < ROW_CEILING}
             onLoadMore={loadMore}
+            onRowClick={rowsOpen ? (r) => { const to = recordRoute(r); if (to) navigate(to); } : undefined}
+            toolbar={
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!groupable.length}
+                  title={groupable.length ? "Group the rows and chart them" : "No column on this table has repeated values to group by"}
+                  onClick={() => setQueryParams(groupCol ? { group: null, measure: null, slice: null } : { group: groupable[0]?.key ?? null, slice: null })}
+                >
+                  <BarChart3 className="h-4 w-4" /> Summarise
+                </Button>
+                <AccessAction objectPath={view.path} can={view.access?.can} verb="update" label={view.display_name}>
+                  <Button variant="outline" size="sm" onClick={() => setFiltering(true)}>
+                    <Filter className="h-4 w-4" /> Filter & sort
+                    {(view.filters ?? []).length + (view.sort ?? []).length > 0 ? ` (${(view.filters ?? []).length + (view.sort ?? []).length})` : ""}
+                  </Button>
+                </AccessAction>
+              </>
+            }
             title={
               <span className="flex items-center gap-2">
-                <span>{(result?.rows.length ?? 0).toLocaleString()} rows</span>
+                <span>{shown.length.toLocaleString()} rows</span>
+                {(view.sort ?? []).length > 0 && (
+                  <Badge variant="muted" className="gap-1">
+                    {(view.sort ?? [])[0]!.dir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />}
+                    {labelOfField((view.sort ?? [])[0]!.field, cols)}
+                  </Badge>
+                )}
                 {result?.columns.some((c) => c.masked) && (
                   <Badge variant="muted" className="gap-1"><Lock className="h-3 w-3" /> Some values masked</Badge>
                 )}
@@ -513,12 +1039,22 @@ function OneTable({ id }: { id: string }) {
         )}
       </DataState>
 
+      <FilterSortSheet
+        open={filtering}
+        onClose={() => setFiltering(false)}
+        columns={cols}
+        filters={view.filters ?? []}
+        sort={view.sort ?? []}
+        onSave={saveFilterSort}
+      />
+
       {catalogue && (
         <ColumnPicker
           open={picking}
           onClose={() => setPicking(false)}
+          base={view.base}
           catalogue={catalogue}
-          selected={selected}
+          selected={chosen}
           onSave={saveColumns}
           canExport={canExport}
         />
@@ -652,17 +1188,219 @@ function ParamBar({ params, showWindow, showPayPeriod, showDepartment }: {
   );
 }
 
-// ---- The field picker -----------------------------------------------------------------------------------
+// ---- Filters and sort -----------------------------------------------------------------------------------
 
-function ColumnPicker({ open, onClose, catalogue, selected, onSave, canExport }: {
+/**
+ * The table's OWN narrowing and order, which the server has always taken and nothing could edit: a saved view
+ * held `filters` and `sort` that only a hand-written PATCH could reach, so every grid was the whole collection
+ * in cursor order and a reader's only recourse was DataTable's per-column boxes - which judge the rows already
+ * loaded, not the report.
+ *
+ * These are saved ON the definition, so they are the same for everyone the table is shared with, and they are
+ * applied where the rows are read: in SQL where the field is a plain column of the base, over the assembled
+ * page otherwise (services/tableRun.ts). Only columns this reader actually GOT are offered - filtering by a
+ * column is not a way to read one, and a filter on a field somebody cannot see would be exactly that.
+ */
+function FilterSortSheet({ open, onClose, columns, filters, sort, onSave }: {
   open: boolean;
   onClose: () => void;
+  columns: TableRunColumn[];
+  filters: ViewFilter[];
+  sort: ViewSort[];
+  onSave: (filters: ViewFilter[], sort: ViewSort[]) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState<ViewFilter[]>(filters);
+  const [order, setOrder] = useState<ViewSort[]>(sort);
+  const [saving, setSaving] = useState(false);
+
+  // Re-seed on OPEN only. Keyed on the props instead, a save (which replaces them) would reset the sheet
+  // under the author while they were still in it.
+  const latest = useRef({ filters, sort });
+  latest.current = { filters, sort };
+  useEffect(() => {
+    if (!open) return;
+    setDraft(latest.current.filters);
+    setOrder(latest.current.sort);
+  }, [open]);
+
+  const kindOf = (field: string) => kindOfField(field, columns);
+  const first = columns[0];
+
+  function addFilter() {
+    if (!first) return;
+    setDraft((d) => [...d, { field: first.key, op: OPS_BY_KIND[first.kind][0]!.op, value: "" }]);
+  }
+  function setFilter(i: number, next: Partial<ViewFilter>) {
+    setDraft((d) => d.map((f, n) => (n === i ? { ...f, ...next } : f)));
+  }
+  // Changing the column can leave an operator the new kind does not offer (a date has no "contains"), and the
+  // server would refuse the whole save for it. The operator falls back to that kind's first, and the value
+  // goes with it - a date typed against a text column is not a date.
+  function setFilterField(i: number, field: string) {
+    const kind = kindOf(field);
+    setDraft((d) => d.map((f, n) => {
+      if (n !== i) return f;
+      const keep = OPS_BY_KIND[kind].some((o) => o.op === f.op);
+      return { field, op: keep ? f.op : OPS_BY_KIND[kind][0]!.op, value: keep ? f.value : "" };
+    }));
+  }
+
+  // A filter with nothing in its box matches nothing and reads as a broken table, so it is not savable -
+  // said on the button rather than dropped silently on the way out.
+  const incomplete = draft.some((f) => !VALUELESS.includes(f.op) && (f.value === "" || f.value === null || f.value === undefined));
+
+  async function save() {
+    setSaving(true);
+    try {
+      await onSave(draft.map((f) => (VALUELESS.includes(f.op) ? { field: f.field, op: f.op } : f)), order);
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
+      <SheetContent className="w-full sm:max-w-xl">
+        <SheetHeader>
+          <SheetTitle>Filter & sort</SheetTitle>
+          <SheetDescription>
+            Saved on the table, so everyone who opens it reads the same report - and applied to every page, not
+            only the rows already on screen.
+          </SheetDescription>
+        </SheetHeader>
+        <SheetBody className="space-y-6">
+          {!columns.length ? (
+            <p className="text-sm text-muted-foreground">Pick some columns first - a table is filtered by the columns it shows.</p>
+          ) : (
+            <>
+              <section className="space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Rows must match all of</p>
+                {draft.length === 0 && <p className="text-sm text-muted-foreground">No filters: the table shows every row you can see.</p>}
+                {draft.map((f, i) => {
+                  const kind = kindOf(f.field);
+                  return (
+                    <div key={i} className="flex flex-wrap items-center gap-2 rounded-md border p-2">
+                      <Select value={f.field} onValueChange={(v) => setFilterField(i, v)}>
+                        <SelectTrigger className="h-9 w-full sm:w-52" aria-label="Column"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {columns.map((c) => <SelectItem key={c.key} value={c.key}>{c.label}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                      <Select value={f.op} onValueChange={(v) => setFilter(i, { op: v as FilterOp, ...(VALUELESS.includes(v as FilterOp) ? { value: "" } : {}) })}>
+                        <SelectTrigger className="h-9 w-full sm:w-40" aria-label="Condition"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {OPS_BY_KIND[kind].map((o) => <SelectItem key={o.op} value={o.op}>{o.label}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                      {!VALUELESS.includes(f.op) && <FilterValue kind={kind} op={f.op} value={f.value} onChange={(v) => setFilter(i, { value: v })} />}
+                      <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0" aria-label="Remove this filter" onClick={() => setDraft((d) => d.filter((_, n) => n !== i))}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  );
+                })}
+                <Button variant="outline" size="sm" onClick={addFilter} disabled={draft.length >= MAX_FILTERS}>
+                  <Plus className="h-4 w-4" /> Add filter
+                </Button>
+                {draft.length >= MAX_FILTERS && <p className="text-xs text-muted-foreground">A table holds at most {MAX_FILTERS} filters.</p>}
+              </section>
+
+              <section className="space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Sorted by</p>
+                {order.length === 0 && <p className="text-sm text-muted-foreground">No sort: rows come back in the order the records were created.</p>}
+                {order.map((s, i) => (
+                  <div key={i} className="flex flex-wrap items-center gap-2 rounded-md border p-2">
+                    <Select value={s.field} onValueChange={(v) => setOrder((o) => o.map((x, n) => (n === i ? { ...x, field: v } : x)))}>
+                      <SelectTrigger className="h-9 w-full sm:w-52" aria-label="Sort column"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {columns.map((c) => <SelectItem key={c.key} value={c.key}>{c.label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setOrder((o) => o.map((x, n) => (n === i ? { ...x, dir: x.dir === "asc" ? "desc" : "asc" } : x)))}
+                    >
+                      {s.dir === "asc" ? <><ArrowUp className="h-4 w-4" /> Smallest first</> : <><ArrowDown className="h-4 w-4" /> Largest first</>}
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0" aria-label="Remove this sort" onClick={() => setOrder((o) => o.filter((_, n) => n !== i))}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={order.length >= MAX_SORTS || !first}
+                  onClick={() => first && setOrder((o) => [...o, { field: first.key, dir: "desc" }])}
+                >
+                  <Plus className="h-4 w-4" /> Add sort
+                </Button>
+              </section>
+            </>
+          )}
+        </SheetBody>
+        <div className="flex items-center justify-between gap-2 border-t p-4">
+          <span className="text-xs text-muted-foreground">
+            {incomplete ? "Give every filter a value." : `${draft.length} filter${draft.length === 1 ? "" : "s"}, ${order.length} sort${order.length === 1 ? "" : "s"}`}
+          </span>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={onClose}>Cancel</Button>
+            <Button onClick={() => void save()} disabled={saving || incomplete}>{saving ? "Saving…" : "Save"}</Button>
+          </div>
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+/** The right box for what is being compared: a date picker for a date, a number for money, Yes/No for a flag. */
+function FilterValue({ kind, op, value, onChange }: {
+  kind: TableFieldKind;
+  op: FilterOp;
+  value: ViewFilter["value"];
+  onChange: (v: string) => void;
+}) {
+  const v = value === null || value === undefined ? "" : String(value);
+  const className = "h-9 w-full sm:w-44";
+  // `in` is a comma-separated LIST whatever the kind is, so it always takes free text.
+  if (op === "in") return <Input value={v} onChange={(e) => onChange(e.target.value)} placeholder="open, blocked" className={className} aria-label="Values" />;
+  if (kind === "bool") {
+    return (
+      <Select value={v} onValueChange={onChange}>
+        <SelectTrigger className={className} aria-label="Value"><SelectValue placeholder="Yes or no" /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="true">Yes</SelectItem>
+          <SelectItem value="false">No</SelectItem>
+        </SelectContent>
+      </Select>
+    );
+  }
+  if (kind === "date" || kind === "datetime") return <Input type="date" value={v} onChange={(e) => onChange(e.target.value)} className={className} aria-label="Value" />;
+  if (kind === "money" || kind === "number") return <Input type="number" value={v} onChange={(e) => onChange(e.target.value)} className={className} aria-label="Value" />;
+  return <Input value={v} onChange={(e) => onChange(e.target.value)} placeholder="Value" className={className} aria-label="Value" />;
+}
+
+// ---- The field picker -----------------------------------------------------------------------------------
+
+function ColumnPicker({ open, onClose, base, catalogue, selected, onSave, canExport }: {
+  open: boolean;
+  onClose: () => void;
+  /**
+   * What the TABLE says a row is, which is not always what the catalogue in hand describes. Changing the base
+   * re-fetches the catalogue, and until it lands the picker still holds the previous base's fields: opened in
+   * that window it offered a departments table the fields of a person, and the swap - when it came - reset the
+   * search and the trail under whoever was standing in them. It waits instead.
+   */
+  base: string;
   catalogue: TableCatalogue;
-  selected: string[];
-  onSave: (fields: string[]) => Promise<void>;
+  /** The table's columns, IN ORDER, each with the header its author gave it. */
+  selected: ChosenColumn[];
+  onSave: (columns: ChosenColumn[]) => Promise<void>;
   canExport: boolean;
 }) {
-  const [picked, setPicked] = useState<string[]>(selected);
+  const [picked, setPicked] = useState<ChosenColumn[]>(selected);
   const [query, setQuery] = useState("");
   const [saving, setSaving] = useState(false);
   // Where in the join the picker is standing. `[]` is the base; each entry is one link, in the order they
@@ -678,14 +1416,30 @@ function ColumnPicker({ open, onClose, catalogue, selected, onSave, canExport }:
   // on the identity of `selected` and `catalogue` instead, this fired on every parent render (the grid's rows
   // arriving, a column resize): the search box emptied and the trail jumped back to the base while somebody
   // was standing in it, and a tick landed on whatever row had moved under the cursor.
+  //
+  // A base ARRIVING is not a base CHANGING, and that distinction is the rest of the same bug. The catalogue is
+  // fetched after the page renders, so a picker opened promptly - or opened right after a rebase - sees `base`
+  // go from empty to the real one a moment later. Read as a change, that wiped the search box under somebody
+  // already typing into it: the faster they were, the more reliably they lost the text. Only a move between two
+  // KNOWN bases starts over.
   const latest = useRef({ selected, catalogue });
   latest.current = { selected, catalogue };
+  const shownBase = useRef<string | null>(null);
   useEffect(() => {
-    if (!open) return;
-    setPicked(latest.current.selected);
-    setQuery("");
-    setTrail([]);
-    setNode(latest.current.catalogue);
+    if (!open) {
+      shownBase.current = null; // so the next open starts over, whatever it opens on
+      return;
+    }
+    const base = latest.current.catalogue.base;
+    const prev = shownBase.current;
+    const rebased = !!base && !!prev && base !== prev;
+    if (prev === null || rebased) {
+      setPicked(latest.current.selected);
+      setQuery("");
+      setTrail([]);
+      setNode(latest.current.catalogue);
+    }
+    shownBase.current = base || prev;
   }, [open, catalogue.base]);
 
   // The base's own fields can arrive (or be re-fetched) after the picker is already open. While standing AT
@@ -753,7 +1507,22 @@ function ColumnPicker({ open, onClose, catalogue, selected, onSave, canExport }:
     return node.links.filter((l) => !q || l.label.toLowerCase().includes(q) || l.collection_label.toLowerCase().includes(q));
   }, [node, query]);
 
-  const toggle = (key: string) => setPicked((p) => (p.includes(key) ? p.filter((k) => k !== key) : [...p, key]));
+  const has = (key: string) => picked.some((c) => c.field === key);
+  const toggle = (key: string) => setPicked((p) => (p.some((c) => c.field === key) ? p.filter((c) => c.field !== key) : [...p, { field: key }]));
+  // The order of the list IS the order of the grid, so moving a column is an edit of the table like any other.
+  const move = (i: number, by: -1 | 1) =>
+    setPicked((p) => {
+      const to = i + by;
+      if (to < 0 || to >= p.length) return p;
+      const next = [...p];
+      const [row] = next.splice(i, 1);
+      next.splice(to, 0, row!);
+      return next;
+    });
+  // A blank rename is not a header called "": it is "use the catalogue's own name", which is what the
+  // placeholder says and what the stored spec means by no label at all.
+  const rename = (i: number, label: string) =>
+    setPicked((p) => p.map((c, n) => (n === i ? (label.trim() ? { field: c.field, label: label.trim() } : { field: c.field }) : c)));
 
   async function save() {
     setSaving(true);
@@ -776,6 +1545,13 @@ function ColumnPicker({ open, onClose, catalogue, selected, onSave, canExport }:
           </SheetDescription>
         </SheetHeader>
         <SheetBody className="space-y-4">
+          {catalogue.base !== base ? (
+            // A shaped placeholder, not the word "Loading": the rows are about to arrive in this geometry, and
+            // a centred line of text is a zero state's shape for something that is on its way
+            // (test/responsiveCoverage.test.ts holds the whole app to this).
+            <RowsSkeleton rows={6} />
+          ) : (
+          <>
           {/* The trail through the join, and the way back up it. */}
           <nav className="flex flex-wrap items-center gap-1 text-sm" aria-label="Field path">
             <button className={cn("rounded px-1.5 py-0.5 hover:bg-muted", !trail.length && "font-medium")} onClick={() => void goTo(0)}>
@@ -794,12 +1570,33 @@ function ColumnPicker({ open, onClose, catalogue, selected, onSave, canExport }:
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input value={query} onChange={(e) => setQuery(e.target.value)} disabled={loadingNode} placeholder={`Search ${trail.length ? trail[trail.length - 1]!.label.toLowerCase() : (catalogue.label ?? "").toLowerCase()} fields`} className="pl-8" />
           </div>
+          {/* THE TABLE AS IT WILL READ. A row of chips said which fields were on it and nothing else: not what
+              order they came in (the order of picking, which nobody chose), and not what their headers say
+              (the catalogue's mechanical name - "Ctc annual" over a salary sheet's main column). Both are
+              stored on the view and neither could be edited from anywhere. */}
           {picked.length > 0 && (
-            <div className="flex flex-wrap gap-1">
-              {picked.map((key) => (
-                <button key={key} onClick={() => toggle(key)} className="inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-xs hover:bg-muted">
-                  {labels[key] ?? key} <X className="h-3 w-3" />
-                </button>
+            <div className="space-y-1">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">On the table, in order</p>
+              {picked.map((col, i) => (
+                <div key={col.field} className="flex items-center gap-1 rounded-md border p-1.5">
+                  <GripVertical className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <Input
+                    value={col.label ?? ""}
+                    placeholder={labels[col.field] ?? col.field}
+                    aria-label={`Header for ${labels[col.field] ?? col.field}`}
+                    onChange={(e) => rename(i, e.target.value)}
+                    className="h-8 min-w-0 flex-1 border-0 bg-transparent px-1 shadow-none focus-visible:ring-1"
+                  />
+                  <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" disabled={i === 0} aria-label={`Move ${labels[col.field] ?? col.field} earlier`} onClick={() => move(i, -1)}>
+                    <ArrowUp className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" disabled={i === picked.length - 1} aria-label={`Move ${labels[col.field] ?? col.field} later`} onClick={() => move(i, 1)}>
+                    <ArrowDown className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" aria-label={`Remove ${labels[col.field] ?? col.field}`} onClick={() => toggle(col.field)}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
               ))}
             </div>
           )}
@@ -839,8 +1636,8 @@ function ColumnPicker({ open, onClose, catalogue, selected, onSave, canExport }:
                 <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{group}</p>
                 <div className="grid gap-1 sm:grid-cols-2">
                   {fields.map((f) => (
-                    <label key={f.key} className={cn("flex cursor-pointer items-start gap-2 rounded-md border p-2 text-sm", picked.includes(f.key) && "border-primary/40 bg-primary/5")}>
-                      <Checkbox className="mt-0.5" checked={picked.includes(f.key)} onCheckedChange={() => toggle(f.key)} />
+                    <label key={f.key} className={cn("flex cursor-pointer items-start gap-2 rounded-md border p-2 text-sm", has(f.key) && "border-primary/40 bg-primary/5")}>
+                      <Checkbox className="mt-0.5" checked={has(f.key)} onCheckedChange={() => toggle(f.key)} />
                       <span className="min-w-0">
                         <span className="block truncate">{f.label}</span>
                         <span className="block truncate text-xs text-muted-foreground">
@@ -855,6 +1652,8 @@ function ColumnPicker({ open, onClose, catalogue, selected, onSave, canExport }:
             ))}
           </div>
           )}
+          </>
+          )}
         </SheetBody>
         <div className="flex items-center justify-between gap-2 border-t p-4">
           <span className="text-xs text-muted-foreground">
@@ -863,7 +1662,7 @@ function ColumnPicker({ open, onClose, catalogue, selected, onSave, canExport }:
           </span>
           <div className="flex gap-2">
             <Button variant="outline" onClick={onClose}>Cancel</Button>
-            <Button onClick={save} disabled={saving}>{saving ? "Saving…" : "Save columns"}</Button>
+            <Button onClick={save} disabled={saving || catalogue.base !== base}>{saving ? "Saving…" : "Save columns"}</Button>
           </div>
         </div>
       </SheetContent>

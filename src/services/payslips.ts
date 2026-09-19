@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -7,10 +7,17 @@ import type { AppUser } from "../env";
 import { notFound } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 
-export async function listPayslips(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string) {
-  // Visibility was decided in the middleware (scopeFor over the grant); here we only bind it to columns.
-  const where = applyScope(scope, schema.payslips.code, schema.payslips.employeeId);
-  return keysetPage(deps, schema.payslips, "payslips", where, { max: maxPageSize, pageToken });
+const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
+
+export async function listPayslips(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string) {
+  // Visibility was decided in the middleware (scopeFor over the grant); here we only bind it to columns. The
+  // optional `?employee=` narrows WITHIN that visibility - it is a filter, never a widening: a caller scoped to
+  // their own slips who asks for somebody else's gets an empty page rather than a 403, the same way every other
+  // per-employee list on a profile behaves (bonuses, loans, compensation). `payslip_emp_idx` covers it.
+  const conds = [applyScope(scope, schema.payslips.code, schema.payslips.employeeId)];
+  const empId = idFromPath(employee);
+  if (empId) conds.push(eq(schema.payslips.employeeId, empId));
+  return keysetPage(deps, schema.payslips, "payslips", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 
 // Read the stored PDF for a payslip. Access (own vs hr/payroll/super) is enforced by the middleware on

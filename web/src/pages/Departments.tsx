@@ -113,12 +113,14 @@ export default function Departments({ embedded, title }: { me?: Me; embedded?: b
   const columns: Column<Department>[] = [
     { id: "name", header: "Name", accessor: (d) => d.display_name, cell: (d) => <span className="font-medium">{d.display_name}</span> },
     // Sorted and filtered on the readable name, not the opaque id it's stored as.
-    { id: "parent", header: "Parent", accessor: (d) => (d.parent ? deptName(d.parent) : ""), cell: (d) => (d.parent ? deptName(d.parent) : <span className="text-muted-foreground">-</span>) },
+    { id: "parent", header: "Parent", filter: "select", groupBy: true, accessor: (d) => (d.parent ? deptName(d.parent) : ""), cell: (d) => (d.parent ? deptName(d.parent) : <span className="text-muted-foreground">-</span>) },
     {
       id: "managers",
       header: "Managers",
       sortable: false,
-      filter: "none",
+      // Filtered as a count, so "=0" is every department with nobody running it - the gap that quietly
+      // breaks approval routing.
+      filter: "number",
       accessor: (d) => (d.managers ?? []).length,
       cell: (d) => ((d.managers ?? []).length ? (d.managers ?? []).map(empName).join(", ") : <span className="text-muted-foreground">-</span>),
     },

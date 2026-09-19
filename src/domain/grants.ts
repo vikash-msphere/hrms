@@ -64,6 +64,14 @@ const OWN_ATTENDANCE: Record<string, Level> = {
   "attendance.me.**": "read", // own sessions (items)
   "attendance-regularizations": "write", // create + list own
   "attendance-regularizations.me.**": "write", // own requests
+  // READ, never write: a day mark decides what one of your days is worth, so you are owed the sight of it -
+  // and a self-write rule here would be a grant to re-value your own attendance.
+  //
+  // BOTH TOKENS, like `attendance` two lines up. The bare one is the LIST capability and the `.me.**` one is
+  // the rows; the attendance grid reads marks as a list, so the row grant alone left every badge invisible to
+  // the person whose pay the mark had changed - the half of this feature they are the audience for.
+  "attendance-day-marks": "read", // list my own marks
+  "attendance-day-marks.me.**": "read", // marks on my own days
 };
 const OWN_ATTENDANCE_ALLOW = ["attendance.me.clockIn", "attendance.me.clockOut", "attendance-regularizations.me.cancel"];
 
@@ -280,6 +288,10 @@ const manager: Grant = {
     "leave-balances.my-dept.**": "read", // dept's leave balances
     "attendance.my-dept.**": "read", // dept's attendance (sessions + presence)
     "attendance-regularizations.my-dept.**": "read", // dept's regularization requests (to review)
+    // READ only. A manager sees why a report's short day was counted the way it was; re-valuing it is a pay
+    // decision, and the seeded default leaves that with HR. An org that wants its managers doing it grants
+    // write through the ACL, which is what that UI is for.
+    "attendance-day-marks.my-dept.**": "read", // marks on the dept's days
     "overtime-requests.my-dept.**": "read", // dept's overtime requests (to review)
     "remote-work-requests.my-dept.**": "read", // dept's remote-work requests (to review)
     "asset-requests.my-dept.**": "read", // dept's asset requests (to review; handing the kit over is HR/IT's step)
@@ -403,6 +415,7 @@ const hr_admin: Grant = {
     "goal-templates.**": "write", // HR curates the goal blueprint catalogue (a Settings entry)
     "attendance.**": "read", // HR sees all attendance (presence, history)
     "attendance-regularizations.**": "read", // HR reviews all regularization requests
+    "attendance-day-marks.**": "write", // HR decides what a day counts as, org-wide (and withdraws its own marks)
     "overtime-requests.**": "read", // HR reviews + decides these org-wide (verbs below)
     "remote-work-requests.**": "read",
     "asset-requests.**": "read", // HR decides these org-wide and hands the kit over (verbs below)

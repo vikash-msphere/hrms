@@ -25,7 +25,7 @@ const STATUSES = ["new", "under_review", "planned", "implemented", "declined"] a
 type Status = (typeof STATUSES)[number];
 
 
-// Where a bell about one suggestion lands: that suggestion alone, on its own page (`#/suggestions/<id>/view`),
+// Where a bell about one suggestion lands: that suggestion alone, on its own page (`/suggestions/<id>/view`),
 // not the box it sits in - a notification is about a specific idea, so the click has to arrive AT it. The
 // leading `suggestions/<id>` is what the outbound wire-id encoder rewrites, so no internal id reaches a client.
 const suggestionLink = (id: string) => `suggestions/${id}/view`;
@@ -69,8 +69,28 @@ export async function decorate(deps: Deps, actor: AppUser | undefined, rows: any
   return rows.map((r) => ({ ...r, upCount: up.get(r.uuid) ?? 0, downCount: down.get(r.uuid) ?? 0, myVote: mine.get(r.uuid) ?? 0, own: !!actor?.employeeId && r.submitterId === actor.employeeId }));
 }
 
-export async function listSuggestions(deps: Deps, scope: ListScope, maxPageSize: number, opts: { pageToken?: string; status?: string; category?: string; showDeleted?: boolean; deletedOnly?: boolean; q?: string } = {}) {
+export async function listSuggestions(
+  deps: Deps,
+  scope: ListScope,
+  maxPageSize: number,
+  opts: { pageToken?: string; status?: string; category?: string; showDeleted?: boolean; deletedOnly?: boolean; q?: string; submitter?: string; actorEmployeeId?: string | null } = {},
+) {
   const conds = [applyScope(scope, schema.suggestions.code, schema.suggestions.submitterId)];
+  // One submitter, as `employees/{employee_id}` (the edge decoded the token, so this is an internal id) - what
+  // the profile's Posts tab asks for.
+  //
+  // AND THE ANONYMITY GUARD, which is the whole reason this filter needs care. The box's promise is that an
+  // anonymous suggestion is not attributable, and `toSuggestionResource` keeps it by dropping `submitter` from
+  // the wire (http/serialize.ts). A filter on the column behind that dropped field would hand the attribution
+  // straight back: ask for each employee in turn and the anonymous rows sort themselves by author, without a
+  // single response ever naming one. So filtering by SOMEBODY ELSE returns their signed suggestions only.
+  // Asking about yourself is not an attack on your own anonymity - you already know - and `own` is true on
+  // those rows either way, so the self view keeps showing them.
+  const submitterId = idFromPath(opts.submitter);
+  if (submitterId) {
+    conds.push(eq(schema.suggestions.submitterId, submitterId));
+    if (!opts.actorEmployeeId || opts.actorEmployeeId !== submitterId) conds.push(eq(schema.suggestions.anonymous, false));
+  }
   // Server-side text filter over the whole collection (FTS, the same index global search uses). It only ever
   // narrows the caller's scope. This is what makes the composer's duplicate guard worth anything: the
   // suggestion somebody is about to re-file was filed BEFORE, which is precisely what a twenty-row feed

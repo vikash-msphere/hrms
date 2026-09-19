@@ -17,7 +17,7 @@ test("the directory finds one person, and their profile deep-links to a section"
 
   // The profile, at its own address - which is what makes it linkable.
   await expect(page.getByRole("heading", { level: 1, name: /Eve Employee/ })).toBeVisible();
-  await expect.poll(() => page.url()).toMatch(/#\/employees\/[a-z0-9]+/);
+  await expect.poll(() => page.url()).toMatch(/\/employees\/[a-z0-9]+/);
   const profileUrl = page.url();
 
   // The sections are tabs, and the open one rides in the URL: a link to somebody's Documents opens on their
@@ -31,5 +31,5 @@ test("the directory finds one person, and their profile deep-links to a section"
   await expect(colleague.getByRole("main")).toBeVisible();
   await expect(colleague.getByRole("tab", { name: "Documents" })).toHaveAttribute("aria-selected", "true");
 
-  expect(profileUrl).toContain("#/employees/");
+  expect(profileUrl).toContain("/employees/");
 });

@@ -20,7 +20,10 @@ test("assigning an asset moves it out of stock and waits for the holder to confi
   const form = it.getByRole("dialog");
   await form.getByLabel("Name").fill(name);
   await form.getByLabel("Category").click();
-  await it.getByRole("option").first().click();
+  // NOT `exact`: this picker labels each option with the category's auto-assigned tag code after the name
+  // ("E2E assets category 1789… (E2E)"), so an exact match never lands. The generated name carries a
+  // timestamp, which is what makes the substring unambiguous.
+  await it.getByRole("option", { name: category.name }).click();
 
   // Who is holding it. Picking somebody flips the status out of "in stock" by itself - the form keeps the
   // two fields consistent so an asset can never be both assigned and in stock.
@@ -39,24 +42,29 @@ test("assigning an asset moves it out of stock and waits for the holder to confi
   await expect(row).toContainText(/Awaiting|Pending|scan/i);
 
   await purge(it, await assetPath(it, name));
-  if (category.created) await purge(it, category.path);
+  await purge(it, category.path);
 });
 
-/** The category an asset has to be filed under - the org's own if it has one, otherwise a fresh one. */
-async function assetCategory(page: import("@playwright/test").Page): Promise<{ path: string; created: boolean }> {
-  // A page of them, and the first that does not demand a serial: `assetSerialRequired.spec.ts` keeps a
-  // `requires_serial` category in the table for the length of its own run, and picking that one refuses the
-  // asset ("a serial number is required for …") for a reason nothing here is about.
-  const existing = await page.request.get("/v1/asset-categories?page_size=100");
-  const rows = ((await existing.json()) as { results?: { path: string; requires_serial?: boolean }[] }).results ?? [];
-  const found = rows.find((r) => !r.requires_serial)?.path;
-  if (found) return { path: found, created: false };
+/**
+ * The category an asset has to be filed under - ALWAYS a fresh one this spec owns.
+ *
+ * It used to reuse the first listed category that did not demand a serial, and the dialog then picked
+ * `option.first()` regardless, which is not necessarily the row this resolved. Both halves were unsafe: the
+ * asset catalogue in this lane is mostly other specs' fixtures (`assetRequests`, `assetTagPdf`,
+ * `assetTagPrinterQueue` and `cancelOwnRequest` each create an `E2E …` category and purge it when they
+ * finish), so the pick could be a row about to be deleted, or `assetSerialRequired`'s `requires_serial` one -
+ * the exact category the comment below exists to avoid. Owning the row and picking it BY NAME settles both.
+ */
+async function assetCategory(page: import("@playwright/test").Page): Promise<{ path: string; name: string }> {
+  // `requires_serial: false` deliberately: a category that demands one refuses the asset
+  // ("a serial number is required for …") for a reason nothing here is about.
+  const name = `E2E assets category ${Date.now()}`;
   const made = await page.request.post("/v1/asset-categories", {
     headers: SPA_HEADERS,
-    data: { display_name: `E2E asset category ${Date.now()}`, requires_serial: false },
+    data: { display_name: name, requires_serial: false },
   });
   expect(made.status(), await made.text()).toBe(200);
-  return { path: ((await made.json()) as { path: string }).path, created: true };
+  return { path: ((await made.json()) as { path: string }).path, name };
 }
 
 /** The wire path of the asset this spec added. */

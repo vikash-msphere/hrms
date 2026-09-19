@@ -115,9 +115,9 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
 
   const columns: Column<Vendor>[] = [
     { id: "name", header: "Vendor", accessor: (v) => v.display_name, cell: (v) => <span className="font-medium">{v.display_name}</span> },
-    { id: "category", header: "Default category", accessor: (v) => catName(v.default_category) },
+    { id: "category", header: "Default category", filter: "select", groupBy: true, accessor: (v) => catName(v.default_category) },
     { id: "tax", header: "Tax ID", accessor: (v) => v.tax_id ?? "", cell: (v) => v.tax_id || <span className="text-muted-foreground">-</span>, defaultHidden: true },
-    { id: "terms", header: "Terms", accessor: (v) => v.payment_terms ?? "", cell: (v) => v.payment_terms || <span className="text-muted-foreground">-</span> },
+    { id: "terms", header: "Terms", filter: "select", groupBy: true, accessor: (v) => v.payment_terms ?? "", cell: (v) => v.payment_terms || <span className="text-muted-foreground">-</span> },
     { id: "email", header: "Contact", accessor: (v) => v.contact_email ?? "", cell: (v) => v.contact_email || <span className="text-muted-foreground">-</span> },
     stateColumn<Vendor>(),
     ...metaColumns<Vendor>(),

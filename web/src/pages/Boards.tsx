@@ -10,6 +10,7 @@ import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { useRefetchOnFocus } from "@/hooks/useRefetchOnFocus";
 import { useRoute, setQueryParam, setRouteRecord, recordUrl } from "@/router";
 import { DataTable, type BulkAction, type Column } from "@/components/common/DataTable";
+import { type TableInsight } from "@/components/common/TableInsights";
 import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from "@/components/ui/dropdown-menu";
 import { idOf, cn, initials } from "@/lib/utils";
@@ -68,10 +69,10 @@ function useFillHeight() {
     const el = ref.current;
     if (!el) return;
     const recompute = () => {
-      // Below `md` the fixed bottom nav (plus the home indicator under it) covers the last ~5rem of the
-      // viewport, so a board sized to `innerHeight` would put its bottom cards - and the drop zone at the end
-      // of a column - underneath the navigation. Stop above it instead.
-      const bottomChrome = window.matchMedia("(min-width: 768px)").matches ? 16 : 88;
+      // Below `md` the home indicator covers the last ~34px of the viewport, so a board sized to
+      // `innerHeight` would put its bottom cards - and the drop zone at the end of a column - under the
+      // gesture bar. Stop above it instead.
+      const bottomChrome = window.matchMedia("(min-width: 768px)").matches ? 16 : 48;
       setHeight(Math.max(240, window.innerHeight - el.getBoundingClientRect().top - bottomChrome));
     };
     recompute();
@@ -83,8 +84,8 @@ function useFillHeight() {
 
 // Which task is open, in one place for all three views (kanban, list, scrum).
 //
-// Opening writes the id into the hash path, so the task on screen has a URL to paste at somebody: the inbound
-// half of that contract (`useDeepOpen`, `#/boards/<cardId>` from the activity feed and notifications) has
+// Opening writes the id into the route path, so the task on screen has a URL to paste at somebody: the inbound
+// half of that contract (`useDeepOpen`, `/boards/<cardId>` from the activity feed and notifications) has
 // always existed, while nothing ever wrote it, which is why no task in this app has been linkable.
 function useOpenCard(openId: string | undefined, cards: CardT[]) {
   const [editing, setEditing] = useState<CardT | null>(null);
@@ -419,16 +420,17 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
     setSelectedId(fromUrl ?? valid(lastKey ? readLocal(lastKey) : null) ?? idOf(boards[0]!.path));
   }, [boards, selectedId, route.query.board, boardsHasMore]);
 
-  // Remember the selection and keep the URL shareable. Query-only hash writes don't add history entries here
-  // (setQueryParam preserves the path), and the unsaved-changes guard ignores them.
+  // Remember the selection and keep the URL shareable. Written in place rather than pushed: which board is on
+  // screen is view state, not a step the reader took, so it has no business spending a back press - and the
+  // unsaved-changes guard ignores query-only changes either way.
   function selectBoard(id: string) {
     setSelectedId(id);
     const lastKey = LAST_BOARD_KEY();
     if (lastKey) writeLocal(lastKey, id);
-    setQueryParam("board", id);
+    setQueryParam("board", id, { replace: true });
   }
 
-  // Deep link `#/boards/<cardId>` (from the activity feed): select that card's board so the view can open it.
+  // Deep link `/boards/<cardId>` (from the activity feed): select that card's board so the view can open it.
   useEffect(() => {
     if (!openId) return;
     const c = navCards.find((x) => idOf(x.path) === openId);
@@ -628,6 +630,13 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     if (board.hide_empty_lanes && !laneHasCards(l.key)) return false;
     return true;
   });
+
+  // WHAT ‹ › AND j/k WALK: the tasks on screen, in the order they are drawn - column by column, lane by lane,
+  // by rank. The dialog was handed every card on the board instead, unfiltered and in whatever order the read
+  // returned, under a comment claiming it was "already filtered and in the order it draws". So with "My
+  // tasks" on, `j` stepped to a task that was not on the board in front of the reader, and the "3 of 48"
+  // beside it counted a set nothing had drawn. Cheap: these are the buckets `cells` already sorted.
+  const screenQueue = cols.flatMap((col) => visibleLanes.flatMap((lane) => cardsIn(col.key, lane.key)));
 
   // Where a card would actually land if dropped in cell (colKey, laneKey): within a column any lane is allowed,
   // but a cross-column drop keeps the card's own lane unless the board opts into swimlane change. Used for both
@@ -844,8 +853,12 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
         })}
       </div>
 
-      {addTo && <CardDialog board={board} column={addTo} employees={employees} goals={goals} departments={departments} onClose={() => setAddTo(null)} onSaved={() => { setAddTo(null); reload(); }} />}
-      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
+      {/* `boardCards` and `meId` on the CREATE path too. Without the first, the duplicate-title warning and
+          the WIP note - both written for the moment work is filed, and the second of which early-returns on an
+          empty list - could never render on the one dialog they were for. Without the second, "Me" was missing
+          from the Assignee row exactly where somebody files work they are about to pick up. */}
+      {addTo && <CardDialog board={board} column={addTo} employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onClose={() => setAddTo(null)} onSaved={() => { setAddTo(null); reload(); }} />}
+      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} queue={screenQueue} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
     </TooltipProvider>
   );
 }
@@ -1044,14 +1057,19 @@ function QuickAddCard({ board, column, onClose, onCreated }: { board: Board; col
 
 // ---- Create / edit a card -----------------------------------------------------------------------------------
 
-function CardDialog({ board, card, column, employees, goals, departments, boardCards = [], onOpenCard, meId, onClose, onSaved }: {
+function CardDialog({ board, card, column, employees, goals, departments, boardCards = [], queue: queueIn, onOpenCard, meId, onClose, onSaved }: {
   board: Board;
   card?: CardT;
   column?: string;
   employees: Employee[];
   goals: Goal[];
   departments: Department[];
+  /** Every task on this board: what the duplicate guard, the WIP note and the blocker pickers ask about. */
   boardCards?: CardT[];
+  /** The tasks ON SCREEN, in the order the view draws them - what ‹ › and j/k walk. Distinct from
+   *  `boardCards` on purpose: a filtered board draws a handful of a hundred, and stepping has to follow the
+   *  handful. Falls back to the whole board for a view that has no order of its own to hand over. */
+  queue?: CardT[];
   onOpenCard?: (c: CardT) => void;
   /** The caller, for "assign to me". */
   meId?: string | null;
@@ -1158,7 +1176,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
 
   // Triage without closing. The queue is whatever the view handed over - already filtered and in the order it
   // draws - so "next" here means the next task on screen, not the next row in some other ordering.
-  const queue = useMemo(() => boardCards.filter((c) => !c.delete_time), [boardCards]);
+  const queue = useMemo(() => (queueIn ?? boardCards).filter((c) => !c.delete_time), [queueIn, boardCards]);
   const qIndex = card ? queue.findIndex((c) => idOf(c.path) === idOf(card.path)) : -1;
   const step = (delta: number) => {
     const next = queue[qIndex + delta];
@@ -1314,7 +1332,8 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
     if (!commentText.trim()) return;
     setBusy(true);
     try {
-      const res = await invoke<CardT>(`cards/${idOf(card!.path)}`, "comment", undefined, { body: commentText.trim() });
+      // The box holds display text; mentions go back to their stored form on the way out (lib/mentionText.ts).
+      const res = await invoke<CardT>(`cards/${idOf(card!.path)}`, "comment", undefined, { body: mentions.toWire(commentText.trim()) });
       setComments(res.comments ?? []);
       setEtag(res.etag);
       setCommentText("");
@@ -1732,7 +1751,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
               <div className="flex flex-wrap gap-1.5">
                 {docs.map((id) => (
                   <span key={id} className="inline-flex items-center gap-1 rounded-md border bg-muted/30 py-1 pl-2 pr-1 text-sm">
-                    <a href={`#/${resourceRoute("org-documents", `org-documents/${id}`) ?? "documents"}`} className="inline-flex items-center gap-1 hover:underline">
+                    <a href={`/${resourceRoute("org-documents", `org-documents/${id}`) ?? "documents"}`} className="inline-flex items-center gap-1 hover:underline">
                       {docTitle(id)} <ExternalLink className="h-3 w-3 text-muted-foreground" />
                     </a>
                     {canEdit && (
@@ -2131,6 +2150,11 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
   const boardId = idOf(board.path);
   const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
   const { editing, openCard, closeCard } = useOpenCard(undefined, cards);
+  // What ‹ › and j/k walk in the dialog: the rows the TABLE is showing, in the order it sorted them. The
+  // filtering and the sort live inside DataTable, so the page cannot work this out for itself - it is handed
+  // over. Without it the dialog stepped through every card on the board, in read order, while the table in
+  // front of the reader showed eight of them sorted by due date.
+  const [tableRows, setTableRows] = useState<CardT[]>([]);
   // The list shows one name column (Assignee); goals and departments are the task dialog's pickers, so they
   // are read when a row is actually opened. Same rule as the board grid.
   const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: !!editing || cards.some((c) => c.assignee) });
@@ -2145,18 +2169,42 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
   const columns: Column<CardT>[] = useMemo(() => [
     { id: "key", header: "Key", accessor: (c) => taskKey(c), cell: (c) => <span className="font-mono text-xs text-muted-foreground">{taskKey(c)}</span>, mobilePriority: 2 },
     { id: "title", header: "Title", accessor: (c) => c.title, mobilePriority: 1 },
-    { id: "status", header: "Status", accessor: (c) => colLabel.get(c.column_key) ?? c.column_key, filter: "select", mobilePriority: 3 },
-    { id: "assignee", header: "Assignee", accessor: (c) => (c.assignee ? empName(c.assignee) : "Unassigned"), filter: "select", mobilePriority: 4 },
+    // Grouping the list by status is the board's own shape, in a surface you can sort and total; by
+    // assignee it is a workload sheet. Both are a click apart from here.
+    { id: "status", header: "Status", accessor: (c) => colLabel.get(c.column_key) ?? c.column_key, filter: "select", groupBy: true, mobilePriority: 3 },
+    { id: "assignee", header: "Assignee", accessor: (c) => (c.assignee ? empName(c.assignee) : "Unassigned"), filter: "select", groupBy: true, mobilePriority: 4 },
     // Hidden by default: it is the column you go looking for ("what did I file", "everything Ops raised"),
     // not one the table needs to be wider for by default.
-    { id: "reporter", header: "Reporter", accessor: (c) => (c.reporter ? empName(c.reporter) : ""), filter: "select", defaultHidden: true },
-    { id: "priority", header: "Priority", accessor: (c) => c.priority, filter: "select", cell: (c) => <span className="flex items-center gap-1 capitalize"><PriorityIcon p={c.priority} /> {c.priority}</span> },
-    { id: "points", header: "Points", accessor: (c) => c.size ?? null, align: "right", filter: "none" },
-    { id: "due", header: "Due", accessor: (c) => c.due_date ?? null, filter: "none" },
+    { id: "reporter", header: "Reporter", accessor: (c) => (c.reporter ? empName(c.reporter) : ""), filter: "select", groupBy: true, defaultHidden: true },
+    { id: "priority", header: "Priority", accessor: (c) => c.priority, filter: "select", groupBy: true, cell: (c) => <span className="flex items-center gap-1 capitalize"><PriorityIcon p={c.priority} /> {c.priority}</span> },
+    // Points total under the column, and per fold when the list is grouped: the sprint arithmetic nobody
+    // should be doing in their head.
+    { id: "points", header: "Points", accessor: (c) => c.size ?? null, align: "right", filter: "number", aggregate: "sum" },
+    { id: "due", header: "Due", accessor: (c) => c.due_date ?? null, filter: "date", dateHint: "future" },
     { id: "labels", header: "Labels", accessor: (c) => (c.labels ?? []).map((k) => board.labels.find((l) => l.key === k)?.label ?? k).join(", "), cell: (c) => <span className="flex flex-wrap gap-1"><LabelChips keys={c.labels} catalog={board.labels} max={3} /></span>, defaultHidden: board.labels.length === 0 },
     { id: "blocked", header: "Blocked", accessor: (c) => (c.blocked ? "Blocked" : ""), filter: "select", cell: (c) => (c.blocked ? <span className="inline-flex items-center gap-1 text-destructive"><Ban className="h-3.5 w-3.5" /> Blocked</span> : null), defaultHidden: true },
-    { id: "updated", header: "Updated", accessor: (c) => c.update_time ?? "", cell: (c) => (c.update_time ? new Date(c.update_time).toLocaleDateString() : ""), defaultHidden: true },
+    { id: "updated", header: "Updated", accessor: (c) => c.update_time ?? "", filter: "date", dateHint: "past", cell: (c) => (c.update_time ? new Date(c.update_time).toLocaleDateString() : ""), defaultHidden: true },
   ], [colLabel, empName, board.labels]);
+
+  // What a backlog is asked about when it stops being a wall of cards: what has gone past its date, what
+  // nobody owns, and what is stuck behind something else.
+  const cardInsights = (cs: CardT[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const today = todayStr();
+    const overdue = cs.filter((c) => c.due_date && c.due_date < today);
+    if (overdue.length > 0) {
+      out.push({ id: "overdue", label: `${overdue.length} past their due date`, tone: "destructive", filters: { due: "past" }, sort: "due.asc" });
+    }
+    const unassigned = cs.filter((c) => !c.assignee);
+    if (unassigned.length > 0) {
+      out.push({ id: "unassigned", label: `${unassigned.length} unassigned`, tone: "warning", filters: { assignee: "Unassigned" } });
+    }
+    const blocked = cs.filter((c) => c.blocked);
+    if (blocked.length > 0) {
+      out.push({ id: "blocked", label: `${blocked.length} blocked`, tone: "destructive", hint: "Waiting on something else before they can move.", filters: { blocked: "Blocked" } });
+    }
+    return out;
+  };
 
   // Bulk actions on the list, because the board is a drag surface and re-assigning a departing person's
   // twelve tasks there is twelve drags. Every one of these is an existing per-card verb applied across the
@@ -2248,9 +2296,11 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
     <TooltipProvider delayDuration={150}>
       <DataTable
         columns={columns}
+        insights={cardInsights}
         rows={cards}
         getRowId={(c) => c.path}
         onRowClick={openCard}
+        onVisibleRows={setTableRows}
         tableId="board-list"
         accessCollection="cards"
         accessTargetOf={(c) => ({ objectPath: c.path, can: c.access?.can, label: "Manage task access" })}
@@ -2260,7 +2310,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
         emptyTitle="No tasks on this board"
         emptyDescription="Tasks you add on the Board tab show up here as a sortable, exportable list."
       />
-      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
+      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} queue={tableRows} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
     </TooltipProvider>
   );
 }
@@ -2326,6 +2376,16 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const backlog = useMemo(() => cards.filter((c) => !c.sprint).sort(byRank), [cards]);
   const sprintCards = useMemo(() => (sprint ? cards.filter((c) => c.sprint && idOf(c.sprint) === idOf(sprint.path)) : []), [cards, sprint]);
   const pts = (list: CardT[]) => list.reduce((s, c) => s + (c.size ?? 0), 0);
+  // The backlog then each sprint column, filtered and ranked exactly as they are drawn below - see the note on
+  // the board grid's own `screenQueue`. The dialog used to step through every card on the board.
+  const matchCard = filter.match;
+  const screenQueue = useMemo(
+    () => [
+      ...backlog.filter(matchCard),
+      ...board.columns.flatMap((col) => sprintCards.filter((c) => c.column_key === col.key && matchCard(c)).sort(byRank)),
+    ],
+    [backlog, sprintCards, board.columns, matchCard],
+  );
 
   async function dropOnColumn(colKey: string) {
     const id = dragId.current; dragId.current = null; setOverZone(null);
@@ -2544,7 +2604,15 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                   </div>
                   {(() => {
                     const perAssignee = col.limitScope === "assignee";
-                    const atWip = col.wipLimit != null && !perAssignee && items.length >= col.wipLimit;
+                    // The column's REAL load, not the filtered view of it. A WIP limit is a statement about
+                    // the work in the column, and counting `items` made it move with the board's own filter -
+                    // so turning on "My tasks" took a column from 6/5 to 1/5 and the warning with it. The
+                    // kanban grid counts the column itself; this one did not.
+                    const held = sprintCards.filter((c) => c.column_key === col.key).length;
+                    const atWip = col.wipLimit != null && !perAssignee && held >= col.wipLimit;
+                    // Over the limit is its own state, as it is on the kanban grid - at the limit is a warning
+                    // not to start another, past it is a breach, and scrum drew both the same.
+                    const overWip = col.wipLimit != null && !perAssignee && held > col.wipLimit;
                     const offenders = perAssignee && col.wipLimit != null
                       ? (() => {
                           const byAssignee = new Map<string, number>();
@@ -2562,8 +2630,8 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                             <TooltipContent>{empName(`employees/${id}`)}: {n} here — over the {col.wipLimit}-per-person limit</TooltipContent>
                           </Tooltip>
                         ))}
-                        <Badge variant="secondary" className={atWip ? "border-warning text-warning" : ""} title={perAssignee && col.wipLimit != null ? `Max ${col.wipLimit} per assignee` : undefined}>
-                          {items.length}{col.wipLimit != null ? (perAssignee ? ` (≤${col.wipLimit}/ea)` : ` / ${col.wipLimit}`) : ""}
+                        <Badge variant={overWip ? "destructive" : "secondary"} className={atWip && !overWip ? "border-warning text-warning" : ""} title={perAssignee && col.wipLimit != null ? `Max ${col.wipLimit} per assignee` : undefined}>
+                          {held}{col.wipLimit != null ? (perAssignee ? ` (≤${col.wipLimit}/ea)` : ` / ${col.wipLimit}`) : ""}
                         </Badge>
                       </div>
                     );
@@ -2604,8 +2672,10 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
       )}
 
       {newSprint && <NewSprintDialog board={board} sprints={sprints} cards={cards} onClose={() => setNewSprint(false)} onSaved={(id) => { setSelId(id); reloadSprints(); }} />}
-      {addBacklog && <CardDialog board={board} column={board.columns[0]?.key} employees={employees} goals={goals} departments={departments} onClose={() => setAddBacklog(false)} onSaved={() => { setAddBacklog(false); reload(); }} />}
-      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
+      {/* `boardCards` and `meId` on the create path for the reason the kanban grid gives: the duplicate-title
+          warning, the WIP note and the "Me" shortcut are all for the moment a task is filed. */}
+      {addBacklog && <CardDialog board={board} column={board.columns[0]?.key} employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onClose={() => setAddBacklog(false)} onSaved={() => { setAddBacklog(false); reload(); }} />}
+      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} queue={screenQueue} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
     </TooltipProvider>
   );
 }
@@ -2769,7 +2839,11 @@ function VelocityChart({ sprints, cards, selectedId, onPick }: {
   onPick: (id: string) => void;
 }) {
   const done = sprints.filter((s) => s.state === "completed");
-  const data = done.map((s) => ({ name: s.name, points: cards.filter((c) => c.sprint && idOf(c.sprint) === idOf(s.path)).reduce((x, c) => x + (c.size ?? 0), 0) }));
+  // DELIVERED points, which is what the series is called and what the planning dialog's "the last 3 sprints
+  // delivered …" line counts. This summed every point still attached to the sprint, so a task that sat in the
+  // box unfinished was counted as velocity - and the same board quoted two different numbers for the same
+  // sprint, one here and one in New sprint.
+  const data = done.map((s) => ({ name: s.name, points: cards.filter((c) => c.sprint && idOf(c.sprint) === idOf(s.path) && c.deliver_time).reduce((x, c) => x + (c.size ?? 0), 0) }));
   // The average is the point of a velocity chart - it is what the next sprint gets planned against - so it
   // rides along as a marker rather than being left for the reader to eyeball across the bars.
   const avg = data.length ? Math.round(data.reduce((s, d) => s + d.points, 0) / data.length) : 0;

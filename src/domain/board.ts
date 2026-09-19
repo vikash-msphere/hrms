@@ -42,7 +42,7 @@ export function postedTitle(kind: string): string {
  * Where a bell about one post lands: that post alone, on its own page - not the board it sits on. A
  * notification is about a specific post, so the click has to arrive AT it; dropping someone on the feed
  * makes them hunt for what they were told about. The `/view` tail is the pop-out route the web app already
- * serves (`#/announcements/<id>/view`), and the leading `<collection>/<id>` is what the outbound wire-id
+ * serves (`/announcements/<id>/view`), and the leading `<collection>/<id>` is what the outbound wire-id
  * encoder rewrites, so the stored internal id never reaches a client.
  */
 export function boardPostLink(id: string): string {

@@ -67,7 +67,7 @@ export async function requestAccess(
     type: "access.requested",
     title: `${user.name || user.email} is asking for access`,
     body: `${user.email} asked for ${what}${forHow}.${note ? ` "${note}"` : ""} Turn on access mode and open a key icon on that page to grant it${hours ? ", and set the expiry when you do" : ""}.`,
-    link: `#/${collection}`,
+    link: collection,
     actorId: user.employeeId,
   });
   return { notified: empIds.length };

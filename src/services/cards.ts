@@ -350,9 +350,13 @@ async function columnCards(deps: Deps, boardId: string, columnKey: string) {
     .where(and(eq(schema.cards.boardId, boardId), eq(schema.cards.columnKey, columnKey), isNull(schema.cards.deleteTime)));
 }
 
-export async function listCards(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, boardId?: string, showDeleted = false, deletedOnly = false) {
+export async function listCards(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, boardId?: string, showDeleted = false, deletedOnly = false, assigneeId?: string) {
   const conds = [applyScope(scope, schema.cards.code, schema.cards.employeeId)];
   if (boardId) conds.push(eq(schema.cards.boardId, boardId));
+  // The work one person is doing, across every board - the profile's Performance tab. Filtered on the
+  // ASSIGNEE, not on `employee_id`: the owner is who the row is authz-scoped by, and on a task a manager filed
+  // for somebody else the two are the same person while on a task pulled off a team backlog they are not.
+  if (assigneeId) conds.push(eq(schema.cards.assigneeId, assigneeId));
   conds.push(deleteStateFilter(schema.cards.deleteTime, showDeleted, deletedOnly));
   const page = await keysetPage<typeof schema.cards.$inferSelect>(deps, schema.cards, "cards", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
   // Attach compact checklist progress (done/total) per row so the board tile shows it without loading items.

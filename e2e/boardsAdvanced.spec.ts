@@ -32,7 +32,7 @@ test("a board's WIP limit, swimlanes and flow metrics", async ({ as }) => {
   // Navigated by hand rather than through `gotoRoute`: this address opens a modal sheet, and a modal takes
   // the page out of the accessibility tree - so waiting for `<main>` here is a race against the panel the
   // link exists to open. The panel itself is what says the route arrived.
-  await page.goto(`/#/boards?board=${boardId}&setting=board-config&settingObj=boards/${boardId}`);
+  await page.goto(`/boards?board=${boardId}&setting=board-config&settingObj=boards/${boardId}`);
   const columnsTab = page.getByRole("tab", { name: "Columns" });
   await expect(columnsTab).toBeVisible({ timeout: 30_000 });
   await columnsTab.click();

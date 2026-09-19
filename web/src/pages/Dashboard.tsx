@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 // KPI-card icons live in lib/kpiIcons (shared with Settings); only icons used elsewhere on the page (clock
 // widget, section headers, my-day tiles) are imported here; shortcut tiles carry their own icons.
 import {
@@ -18,10 +18,9 @@ import {
   Pin,
   Check,
   X,
-  ArrowUp,
-  ArrowDown,
+  GripVertical,
   RotateCcw,
-  SlidersHorizontal,
+  LayoutDashboard,
   Plane,
   Banknote,
   ListTodo,
@@ -31,6 +30,7 @@ import {
 import { useCollection } from "@/hooks/useCollection";
 import { useEmployee } from "@/hooks/useEmployee";
 import { useCelebrations } from "@/hooks/useCelebrations";
+import { useSortable } from "@/hooks/useSortable";
 import { useVisibleRegions } from "@/hooks/useInView";
 import { usePermission } from "@/lib/perm";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -92,8 +92,8 @@ const CAT_ACCENT: Record<KpiCategory, string> = {
 // the Approvals inbox.
 const REJECT_NOTE = new Set(["overtime-requests", "remote-work-requests"]);
 
-// The dashboard's movable sections, in default order. The viewer reorders/hides them in the "Customize
-// layout" popover (hero row); the choice persists per user via preferences/dashboard. Rendering uses CSS
+// The dashboard's movable sections, in default order. The viewer drags them into order, or hides them, in the
+// "Customize layout" popover (hero row); the choice persists per user via preferences/dashboard. Rendering uses CSS
 // `order` on a flex column, so a reorder never remounts a section (the team timeline keeps its state).
 type SectionKey = "shortcuts" | "myday" | "kpis" | "approvals" | "timeline" | "calendar" | "board";
 const DASH_SECTIONS: { key: SectionKey; label: string }[] = [
@@ -273,6 +273,18 @@ export default function Dashboard({ me }: { me: Me }) {
   const toggleSection = (k: SectionKey) =>
     updatePrefs({ hiddenSections: hiddenSections.has(k) ? [...hiddenSections].filter((x) => x !== k) : [...hiddenSections, k] });
   const layoutCustomized = (prefs.sectionOrder?.length ?? 0) > 0 || hiddenSections.size > 0;
+  // One write per drop, like every other control in this popover. The index is measured against the list as
+  // it looks now, so a section moving DOWN has to account for its own removal.
+  const dropSection = (k: SectionKey, index: number) => {
+    const rest = sectionOrderResolved.filter((x) => x !== k);
+    const from = sectionOrderResolved.indexOf(k);
+    const at = Math.max(0, Math.min(rest.length, index - (from < index ? 1 : 0)));
+    updatePrefs({ sectionOrder: [...rest.slice(0, at), k, ...rest.slice(at)] });
+  };
+  // Reordering is the grip: dragged with any pointer, or nudged with the arrow keys once it has focus. There
+  // are no up/down buttons - see hooks/useSortable.ts for why the gesture is pointer-based rather than the
+  // native HTML5 drag, which would have left this list unreorderable on a phone.
+  const sortable = useSortable("data-dash-section", (id, t) => dropSection(id as SectionKey, t.index));
 
   // KPI visibility. A configured KPI follows its explicit role/user audience. An UNCONFIGURED one falls back to
   // its default audience: everyone, HR admins only (HR-related cards), or none (hidden until shared).
@@ -882,7 +894,10 @@ export default function Dashboard({ me }: { me: Me }) {
     referrals_open: { value: referralsOpenV, tone: referralsOpenV > 0 ? "primary" : "muted", hint: referralsOpenV === 0 ? "None in flight" : "In progress", target: { collection: "referrals", label: "Referrals" }, onClick: () => navigate("referrals?focus=progress") },
     reviews_open: { value: reviewsOpenV, tone: reviewsOpenV > 0 ? "primary" : "muted", hint: reviewsOpenV === 0 ? "All closed out" : "Not yet acknowledged", target: { collection: "reviews", label: "Reviews" }, onClick: () => navigate("reviews") },
     assets_assigned: { value: assetsAssignedV, tone: assetsAssignedV > 0 ? "primary" : "muted", hint: `of ${assetsTotalV} total`, target: { collection: "assets", label: "Assets" }, onClick: () => navigate("assets") },
-    goals_active: { value: goalsActiveV, tone: goalsOverdueV > 0 ? "warning" : goalsActiveV > 0 ? "primary" : "muted", hint: goalsActiveV === 0 ? "None in flight" : goalsOverdueV > 0 ? `${goalsOverdueV} past due` : "In progress", target: { collection: "goals", label: "Goals" }, onClick: () => navigate("goals") },
+    goals_active: { value: goalsActiveV, tone: goalsOverdueV > 0 ? "warning" : goalsActiveV > 0 ? "primary" : "muted", hint: goalsActiveV === 0 ? "None in flight" : goalsOverdueV > 0 ? `${goalsOverdueV} past due` : "In progress", target: { collection: "goals", label: "Goals" },
+      // To the goals the number is about, not to the whole list: the tile says "3 past due", and the Goals
+      // page reads its chip filter off the address, so the press can land on exactly those three.
+      onClick: () => navigate(goalsOverdueV > 0 ? "goals?filter=overdue" : goalsActiveV > 0 ? "goals?filter=active" : "goals") },
     loans_outstanding: { value: loansOutstandingV, tone: loansOutstandingV > 0 ? "primary" : "muted", hint: loansOutstandingV === 0 ? "Nothing owed" : money(loansTotalV), target: { collection: "loans", label: "Loans" }, onClick: () => navigate("loans") },
     benefits_enrolled: { value: benefitsV, tone: benefitsV > 0 ? "primary" : "muted", hint: `across ${people}`, target: { collection: "benefit-enrollments", label: "Benefit enrollments" }, onClick: () => navigate("benefits") },
     team_hours_week: { value: Math.round(teamHoursV * 10) / 10, tone: teamHoursV > 0 ? "primary" : "muted", hint: "across your team", target: { collection: "time-entries", label: "Time entries" }, onClick: () => navigate("timesheets") },
@@ -948,7 +963,7 @@ export default function Dashboard({ me }: { me: Me }) {
             <Popover>
               <PopoverTrigger asChild>
                 <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground" title="Customize layout" aria-label="Customize dashboard layout">
-                  <SlidersHorizontal className="h-4 w-4" />
+                  <LayoutDashboard className="h-4 w-4" />
                 </Button>
               </PopoverTrigger>
               <PopoverContent align="start" className="w-72 p-2">
@@ -958,22 +973,43 @@ export default function Dashboard({ me }: { me: Me }) {
                     const def = DASH_SECTIONS.find((s) => s.key === k)!;
                     const hidden = hiddenSections.has(k);
                     return (
-                      <div key={k} className={cn("flex items-center gap-1 rounded-md px-2 py-1 hover:bg-accent/50", hidden && "opacity-50")}>
+                      <Fragment key={k}>
+                      {sortable.target?.index === i && <div aria-hidden className="mx-2 h-0.5 rounded-full bg-primary" />}
+                      <div
+                        {...sortable.slot("sections", i)}
+                        className={cn(
+                          "flex items-center gap-1 rounded-md px-2 py-1 hover:bg-accent/50",
+                          hidden && "opacity-50",
+                          sortable.dragId === k && "opacity-40",
+                        )}
+                      >
+                        {/* The only reorder control. A real button, so it takes focus and answers the arrow
+                            keys; `touch-none` is what stops a touch drag scrolling the popover instead of
+                            moving the row. Reordering the dashboard is a phone-friendly job (it is where the
+                            layout matters most), hence the full touch target on a coarse pointer. */}
+                        <button
+                          type="button"
+                          {...sortable.start(k)}
+                          onKeyDown={(e) => {
+                            if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+                            e.preventDefault();
+                            moveSection(k, e.key === "ArrowUp" ? -1 : 1);
+                          }}
+                          aria-label={`Reorder ${def.label}`}
+                          title="Drag, or use the arrow keys, to reorder"
+                          className="flex h-6 w-5 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground/40 hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:h-9 coarse:w-7"
+                        >
+                          <GripVertical className="h-3.5 w-3.5" />
+                        </button>
                         <span className="flex-1 truncate text-sm">{def.label}</span>
-                        {/* Reordering the dashboard is a phone-friendly job (it is where the layout matters
-                            most), so these three keep a real target on touch. */}
-                        <Button variant="ghost" size="icon" className="h-6 w-6 coarse:h-9 coarse:w-9" disabled={i === 0} onClick={() => moveSection(k, -1)} aria-label={`Move ${def.label} up`}>
-                          <ArrowUp className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-6 w-6 coarse:h-9 coarse:w-9" disabled={i === sectionOrderResolved.length - 1} onClick={() => moveSection(k, 1)} aria-label={`Move ${def.label} down`}>
-                          <ArrowDown className="h-3.5 w-3.5" />
-                        </Button>
                         <Button variant="ghost" size="icon" className="h-6 w-6 coarse:h-9 coarse:w-9" onClick={() => toggleSection(k)} aria-label={hidden ? `Show ${def.label}` : `Hide ${def.label}`} title={hidden ? "Show" : "Hide"}>
                           {hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                         </Button>
                       </div>
+                      </Fragment>
                     );
                   })}
+                  {sortable.target?.index === sectionOrderResolved.length && <div aria-hidden className="mx-2 h-0.5 rounded-full bg-primary" />}
                 </div>
                 {layoutCustomized && (
                   <Button variant="ghost" size="sm" className="mt-1 w-full justify-start text-muted-foreground" onClick={() => updatePrefs({ sectionOrder: [], hiddenSections: [] })}>

@@ -42,12 +42,12 @@ test("the record pager steps to the neighbour, and the way back is the directory
   // A different record, one place along - the two halves of "this arrow went to the neighbour". Read off the
   // one counter rather than matched as text, because the pager's wrapper carries the same words as the span
   // inside it and both would match.
-  await expect.poll(() => page.url()).not.toContain(`#/employees/${id}`);
+  await expect.poll(() => page.url()).not.toContain(`/employees/${id}`);
   await expect(counter).toHaveText(at1(String(at + (forward ? 1 : -1))), { timeout: 30_000 });
 
   // And back, which is the same arrow the other way round.
   await (forward ? previous : next).click();
-  await expect.poll(() => page.url()).toContain(`#/employees/${id}`);
+  await expect.poll(() => page.url()).toContain(`/employees/${id}`);
   await expect(counter).toHaveText(at1(String(at)), { timeout: 30_000 });
 
   // The pager is a detour, not a dead end: the record says how to get back to the list it came from.

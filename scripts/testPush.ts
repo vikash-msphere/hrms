@@ -82,7 +82,7 @@ async function main() {
       const result = await sender.send(sub, {
         title: "HRMS push test",
         body: `Web push is configured correctly. ${new Date().toISOString()}`,
-        link: "#/notifications",
+        link: "/notifications",
       });
       console.log(`  ${result === "ok" ? "ok  " : result === "gone" ? "gone"  : "FAIL"}  ${row.email}  ${new URL(sub.endpoint).origin}`);
       result === "ok" ? ok++ : failed++;

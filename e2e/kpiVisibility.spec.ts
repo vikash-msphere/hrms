@@ -183,7 +183,7 @@ test.describe("KPI card visibility", () => {
     // and its accessible name is everything written on it - including "Hide Open tickets". A substring match
     // therefore finds the card first, and pressing it navigates instead of hiding.
     await page.getByRole("button", { name: "Hide Open tickets", exact: true }).click();
-    await expect(page).toHaveURL(/#\/dashboard/);
+    await expect(page).toHaveURL(/\/dashboard/);
     await expect(page.getByText("Open tickets", { exact: true })).toHaveCount(0, { timeout: 30_000 });
 
     // Hidden, not lost: the count of what this reader has put away is offered back as one press.

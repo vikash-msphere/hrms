@@ -161,7 +161,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `letterPdf` | a generated letter comes back through the blob/`<a download>` chain as a file that starts `%PDF-` |
 | `kanban` | a card moves column through its actions menu and is still there after a reload |
 | `sessionExpiry` | a session that dies mid-form gets the in-place "Signed out" overlay, with what was typed still in the form |
-| `phone` (phone project) | six routes do not scroll sideways at 390px, the bottom bar opens the drawer and navigates from it, and a dialog's submit is wholly on screen at a real touch size |
+| `phone` (phone project) | six routes do not scroll sideways at 390px, the top bar's Menu button opens the drawer and navigates from it, and a dialog's submit is wholly on screen at a real touch size |
 | `requestBudget` | how MANY times the app talks to the server: a cold load and a page change stay inside a ceiling, boot reads go through `/v1/batch:run` rather than collection by collection, every role's dashboard stays inside the budget, and the audit trail is not read until somebody opens it |
 | `theme` | a theme choice repaints, survives a reload from the local cache, and reaches a second browser through the per-user preference row - the cross-device half of the feature |
 | `clock` | the top bar, the dashboard card and the Attendance page are one clock: punching in on one is immediately true on the others, with no reload |
@@ -231,7 +231,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `backgroundChecks` | the switch that turns "add a check" into "add the standard set", with the button counting what it will create |
 | `workflows` | the builder blank (with the reason it cannot be saved), a recipe filling it, and the preview reading the rule back as a sentence |
 | `directory` | server-side search finding one person past the first page, and the profile deep-linking to a section from cold |
-| `kudos` | the always-visible top-bar action navigating AND handing the board an intent it picks up on mount |
+| `kudos` | the quick-create menu's kudos entry navigating AND handing the board an intent it picks up on mount |
 | `assets` | assigning moves the asset out of stock by itself, and the register says it is waiting on the holder's scan rather than "done" |
 | `operations` | a scheduled task forced by hand, and the card reading back the tick it produced instead of still saying "never run" |
 | `payslipDesign` | the payslip block editor: stock design restored, a block added, the PDF preview re-rendered, saved and taken back out |
@@ -242,7 +242,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `compensation` | a CTC revision read back off the timeline in the unit it was entered in, and a bonus recorded against the person |
 | `profilePii` | an org declares an identity field, its OWNER fills it in, and a joiner's previous-employer income moves the tax projection |
 | `boardsAdvanced` | a WIP limit set in the board's own settings panel, read back on the column, said in the task editor - plus swimlanes and the flow metrics |
-| `payslips` | the far side of a published run: an employee's own payslip list, and the PDF handed over as a file |
+| `payslips` | the far side of a published run: an employee's own payslip list, the PDF handed over as a file, and the same slips on their record for payroll |
 | `referrals` | what each referral status means for the bonus, said beside the picker, and the hand-off that turns a referral into a candidate |
 | `employeeRecord` | a hire numbered by the org's own ID format, and bank details captured by their owner behind the double-entry check |
 | `ticketWork` | the conversation and the checklist ON a ticket - the side tables that roll up onto the row the requester watches |
@@ -253,7 +253,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `assetRequests` | asking for kit from your own profile, and the ask arriving in the approver's queue |
 | `settlement` | a leaver's full & final: HR's three judgement inputs, the itemised breakdown, and the stored snapshot coming back from cold |
 | `letterheads` | the company page documents print on, designed against a live PDF preview of itself |
-| `personalDetails` | contact details kept by their owner (`OWN_PII`), with the emergency contact as its own editor |
+| `personalDetails` | contact and emergency details kept by their owner (`OWN_PII`), as two cards on the Profile tab |
 | `timesheetApproval` | the far side of a submitted week: the manager's own page carries the queue, and a decision asks before it commits |
 | `rejection` | saying NO, across kinds: the reject dialog, the note the API relays, and the row leaving the inbox - one spec because it is one shared row |
 | `loanLifecycle` | approve, disburse, record a repayment - each offered only in the state it belongs to, and the ledger moving |
@@ -261,7 +261,9 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `transitionTasks` | the onboarding checklist as work: ticked, put back, added to, and the process closed with a way back |
 | `suggestionVotes` | opening the box to `everyone` with an ACL, then the arrows: a vote, a vote withdrawn, and the score other readers see |
 | `form16` | the official TRACES copy refused unless it is a PDF, uploaded, badged as the one to file - and the generated copy for that year marked superseded beside it |
-| `mentions` | `@` offered from the caret (and not inside an email address), the token written around it, the chip that links to the person, and their bell |
+| `insuranceCard` | the health-insurance e-card filed from the Documents tab and landing in the list, and the owner - who holds `personal-documents` read only - not offered the control at all |
+| `employeeDocumentsFilter` | the profile Documents card's search + type picker over a file long enough to need them: crossed, counted ("Showing N of M"), and cleared from the empty state |
+| `mentions` | `@` offered from the caret (and not inside an email address), the name written around it, the chip that links to the person, and their bell |
 | `makeTask` | a checklist item promoted onto a board, carrying a line back to the ticket - and still on the ticket afterwards |
 | `roleHistory` | a promotion as history: what the change moves ("Engineer → Senior Engineer"), a backdate refused, and one row current |
 | `profileNudges` | the completeness meter as a nudge that can be followed - a chip opens the section it names, and filling it in makes the chip go away |
@@ -270,7 +272,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `teamTimeline` | the dashboard's heaviest widget: mounted only when scrolled to, a filed leave on the person's row, and the fortnight paged |
 | `sprints` | the scrum board: planned out of the backlog, started, the burndown drawn once tasks are estimated, and completing it returning the unfinished work |
 | `postSticker` | the picture on a post: suggestions matched to the words, the two dials, the catalogue behind Browse, and the art on the card |
-| `attendanceViews` | the same window as a list or a month grid, several days ticked for ONE correction, the view remembered, and the manager's team panel |
+| `attendanceViews` | the same window as a list or a month grid, several days ticked for ONE correction, the view remembered, the manager's team panel and the per-person log it drills into, the attendance tab on an employee's record (read-only, and the chart `everyChart` cannot reach), and HR marking what a day counts as - set, changed, read back and withdrawn, with the employee able to read the decision and not make one |
 | `workflowLog` | the read-only half of Workflows - runs, waiting workflows and the event log, each its own lazy read - and an action taken now appearing in the log on Refresh |
 | `pendingCorrections` | the correction queue drawn on the approver's OWN attendance page: named, dated, asking first, and gone when answered - and absent for somebody who decides nothing |
 | `announcementDraft` | a post staged rather than sent: the publishing chips rename the submit, the draft lands on its own list, and it is invisible to everyone else until Publish is pressed |
@@ -341,7 +343,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `accessModeGating` | who is offered the keys at all - the access-management toggle appears exactly for `access-rules.write`, no key icons exist without it, and an admin can open the rules that govern who manages access |
 | `viewAsReadOnly` | the rail that makes simulation safe: mid-simulation the create buttons the admin would otherwise keep are gone, and a write carrying the view-as header is refused as read-only before it reaches a handler |
 | `disabledAccountRefused` | the promise the disable confirm makes, held to a live session: a working browser is locked out on its very next request, with no shell and no data behind it |
-| `piiTabAccess` | the field-precise split, from four other people's browsers: nobody but the owner and super is offered a colleague's Identity or Bank tabs, the URL is not a way round the tab bar, and the read behind them refuses |
+| `piiTabAccess` | the field-precise split, from four other people's browsers: nobody but the owner and super is offered a colleague's Identity or Bank tabs or the personal/contact/emergency cards on their Profile tab, the URL is not a way round the tab bar, and the reads behind them refuse |
 | `rowScoping` | the half of access that is not "may I open this page": an employee's claims and expenses are theirs alone on the page AND on the wire, while finance can read the row they cannot |
 | `approvalScope` | a manager's inbox is their own team's: a request from outside every department is not in it, and asking for that row by path is refused - approve included |
 | `virtualCapabilityGates` | the two capabilities that are not a collection - the Export control following `export.read` for every role, and the per-record activity icon appearing only once the independent activity gate is granted |
@@ -407,9 +409,10 @@ Traps worth knowing before writing another one:
   that tidies up as HR silently leaves its rows behind and breaks its own next run (this happened to
   `holidays`, `holidayBulk` and `reviewStages`). Take a `super` page for the housekeeping.
 
-- **A second `gotoRoute` to a route the browser is already on re-reads nothing.** The hash does not change,
-  so the page keeps its cached rows - and a write made in another person's session is invisible. Use
-  `page.reload()` when the point of the assertion is that somebody ELSE's write arrived.
+- **Navigating inside the app re-reads nothing.** A link click, a `navigate()` and a `gotoRoute` to a route
+  the page can reach without leaving the document all keep the SPA's cached rows and its cached capabilities -
+  so a write made in another person's session is invisible. Use `page.reload()` when the point of the
+  assertion is that somebody ELSE's write arrived; the specs that need it say so at the call.
 
 - **An unknown route key renders the dashboard** rather than failing, and the dashboard offers shortcuts
   ("Request leave", "New reimbursement") with the same names as the buttons on the pages they lead to - so a

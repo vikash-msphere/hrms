@@ -27,7 +27,7 @@ test("a card takes a checklist and a comment, and the tile counts them", async (
   });
   expect(cardRes.status(), await cardRes.text()).toBe(200);
 
-  await page.goto(`/#/boards?board=${boardId}`);
+  await page.goto(`/boards?board=${boardId}`);
   await expect(page.getByRole("main")).toBeVisible();
   await page.getByText(title).first().click();
 
@@ -66,7 +66,7 @@ test("a card takes a checklist and a comment, and the tile counts them", async (
 
   // Read back from cold, on the card and on the wall behind it: the tile carries the checklist count, which
   // is the whole reason a checklist is worth having on a board.
-  // Reloaded rather than re-navigated: opening a card writes its id into the hash, so a reload lands back on
+  // Reloaded rather than re-navigated: opening a card writes its id into the path, so a reload lands back on
   // the card. Navigating to the board alone would drop that and there would be nothing open to read.
   // The dialog is what is waited for, not `<main>`: a modal takes the page out of the accessibility tree, so
   // the reload that lands back ON the card hides `<main>` the moment it opens - which makes "the page came

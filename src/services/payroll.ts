@@ -34,6 +34,7 @@ import { payslipTemplateOrDefault, type PayslipTemplate } from "../domain/paysli
 import { etagOf } from "../http/serialize";
 import { keysetPage } from "./keysetPage";
 import { refDepartments, refHolidays, refPayComponents, refPayPeriods } from "../lib/refData";
+import { marksForPeriod } from "./attendanceDayMarks";
 
 // Resolve user ids to a display name: the linked employee's full name, else the user's email.
 //
@@ -263,8 +264,13 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
     workedByEmp.set(empId, worked);
   }
 
+  // HR's day marks for the period. A mark replaces what the punches say a day was worth, so it is read
+  // alongside them rather than folded into `workedByEmp` - the minutes stay the minutes (the payslip's
+  // attendance strip and every other reader still want them), and only the VALUE of the day changes.
+  const marksByEmp = await marksForPeriod(deps, startMs, endMs);
+
   const workingDaysInPeriod = workingDaysInRange(startYmd, periodEndYmd, att.work_days, holidays);
-  return { startYmd, endYmd, holidays, leaveByEmp, workedByEmp, workingDaysInPeriod };
+  return { startYmd, endYmd, holidays, leaveByEmp, workedByEmp, marksByEmp, workingDaysInPeriod };
 }
 
 export async function createRun(deps: Deps, actor: AppUser, payPeriodPath: string) {
@@ -594,6 +600,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
         holidays: lop.holidays,
         leaveRanges: lop.leaveByEmp.get(e.uuid) ?? [],
         workedByDay: lop.workedByEmp.get(e.uuid) ?? new Map<string, number>(),
+        marksByDay: lop.marksByEmp.get(e.uuid),
         fullDayMinutes: att.full_day_minutes ?? 480,
         halfDayMinutes: att.half_day_minutes ?? 240,
       });
@@ -1380,6 +1387,7 @@ async function payslipDataForItem(deps: Deps, ctx: PayslipRunContext, it: typeof
     const lopDays = lopDayUnits({
       startYmd: wStart, endYmd: wEnd, workDays: att.work_days, holidays: lop.holidays,
       leaveRanges: lop.leaveByEmp.get(emp.uuid) ?? [], workedByDay: lop.workedByEmp.get(emp.uuid) ?? new Map<string, number>(),
+      marksByDay: lop.marksByEmp.get(emp.uuid),
       fullDayMinutes: att.full_day_minutes ?? 480, halfDayMinutes: att.half_day_minutes ?? 240,
     });
     const workingDays = workingDaysInRange(wStart, wEnd, att.work_days, lop.holidays);

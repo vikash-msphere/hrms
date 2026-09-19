@@ -29,7 +29,7 @@ export function AccessItem({
   field?: string;
   verb?: string;
   can?: string[];
-  why?: "all" | "subtree" | "exact" | "self" | "dept";
+  why?: "all" | "subtree" | "exact" | "self" | "dept" | "reports" | "org"; // the engine's full ScopeKind - chain tiers included
   label?: string;
   className?: string; // applied to the positioning wrapper
   iconClassName?: string; // applied to the corner icon (override placement if a card has its own top-right control)

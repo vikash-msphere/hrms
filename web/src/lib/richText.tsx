@@ -260,7 +260,7 @@ function renderInline(text: string, keyPrefix = "i", depth = 0): ReactNode[] {
 function Mention({ name, employeeId }: { name: string; employeeId: string }) {
   return (
     <a
-      href={`#/employees/${employeeId}`}
+      href={`/employees/${employeeId}`}
       onClick={(e) => e.stopPropagation()} // board cards expand on click; following a mention must not also toggle the post
       className="rounded bg-primary/10 px-1 font-medium text-primary transition-colors hover:bg-primary/20"
     >

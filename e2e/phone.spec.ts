@@ -34,17 +34,19 @@ test.describe("phone", () => {
     });
   }
 
-  test("the bottom bar is the way around, and it opens the drawer", async ({ as }) => {
+  test("the top bar's Menu button is the way around, and it opens the drawer", async ({ as }) => {
     const page = await as("super");
     await gotoRoute(page, "dashboard");
 
-    // The phone's primary nav. The desktop sidebar is not on screen here - the bar is the only route to
-    // everything that is not one of its slots, which is why the drawer behind "Menu" matters so much.
-    const bar = page.getByRole("navigation", { name: "Primary" });
-    await expect(bar).toBeVisible();
-    await expect(bar.getByRole("button", { name: "Home" })).toBeVisible();
+    // The desktop sidebar is not on screen here, so this one button is the route to every destination that
+    // is not on the current page - which is why the drawer behind it matters so much.
+    const menu = page.getByRole("button", { name: "Menu", exact: true });
+    await expect(menu).toBeVisible();
+    // Create sits beside search in the same bar, and is the only "+" on a phone. Icon-only there, but it
+    // keeps the name it has on a desktop - the word is `sr-only`, not dropped.
+    await expect(page.getByRole("button", { name: "New", exact: true })).toBeVisible();
 
-    await bar.getByRole("button", { name: "Menu" }).click();
+    await menu.click();
     // Open, the sidebar IS a modal drawer and says so (role=dialog + aria-modal, web/src/components/layout/
     // Sidebar.tsx); docked on a desktop it is a plain complementary landmark instead.
     const drawer = page.getByRole("dialog", { name: "Navigation" });
@@ -55,7 +57,7 @@ test.describe("phone", () => {
     await expect(payroll).toBeVisible();
 
     await payroll.click();
-    await expect(page).toHaveURL(/#\/payroll-runs/);
+    await expect(page).toHaveURL(/\/payroll-runs/);
   });
 
   test("the drawer freezes the page behind it, and Escape gives both back", async ({ as }) => {
@@ -68,8 +70,7 @@ test.describe("phone", () => {
     const before = await overflowY();
     expect(before, "the page starts unlocked").not.toBe("hidden");
 
-    const bar = page.getByRole("navigation", { name: "Primary" });
-    await bar.getByRole("button", { name: "Menu" }).click();
+    await page.getByRole("button", { name: "Menu", exact: true }).click();
     const drawer = page.getByRole("dialog", { name: "Navigation" });
     await expect(drawer).toBeVisible();
     await expect.poll(overflowY).toBe("hidden");
@@ -85,8 +86,7 @@ test.describe("phone", () => {
     const page = await as("super");
     await gotoRoute(page, "dashboard");
 
-    const bar = page.getByRole("navigation", { name: "Primary" });
-    await bar.getByRole("button", { name: "Menu" }).click();
+    await page.getByRole("button", { name: "Menu", exact: true }).click();
     const drawer = page.getByRole("dialog", { name: "Navigation" });
     await expect(drawer).toBeVisible();
 
@@ -170,11 +170,12 @@ test.describe("phone", () => {
   });
 
   test("the app boots on a phone for an ordinary employee", async ({ as }) => {
-    // The role with the fewest capabilities, and so the one whose nav has the most to get wrong: the bottom
-    // bar's second slot is picked from what the caller actually holds (web/src/components/layout/BottomNav.tsx).
+    // The role with the fewest capabilities, and so the one whose chrome has the most to get wrong: the top
+    // bar's create menu is built from what the caller actually holds (web/src/components/layout/TopBar.tsx),
+    // and the drawer button is what is left when every other control drops away.
     const page = await as("employee");
     await gotoRoute(page, "dashboard");
     await expect(page.getByRole("main")).not.toBeEmpty();
-    await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Menu", exact: true })).toBeVisible();
   });
 });

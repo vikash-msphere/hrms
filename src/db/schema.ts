@@ -2595,6 +2595,36 @@ export const attendanceRegularizations = sqliteTable("attendance_regularizations
   updatedAt: updated(),
 }, (t) => ({ pageIdx: index("attendance_regularizations_page_idx").on(t.createdAt, t.uuid), empIdx: index("attreg_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("attreg_state_idx").on(t.state) }));
 
+// Attendance day mark: HR's decision about what ONE day is worth, replacing what the punches say.
+//
+// A regularization fixes the PUNCHES ("the times were wrong, here are the right ones") and is a request the
+// employee files. This is the other half of the same problem and the opposite shape: the punches are right
+// and the day still should not count the way they make it count - a short afternoon agreed in advance that
+// should be paid in full, or eight hours clocked by somebody who was not working. So it is an HR ACTION, not
+// a request: no state machine, no approval, and the person it is about does not file it.
+//
+// `credit` is the same scale `lopDayUnits` settles on (domain/attendance.ts), which is what makes a mark a
+// substitute for the derived value rather than a second mechanism stacked on it. Soft-deletable: removing the
+// mark is how a day goes back to being judged on its punches, and the trail of what was decided stays.
+export const attendanceDayMarks = sqliteTable("attendance_day_marks", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  date: integer("date", { mode: "timestamp_ms" }).notNull(), // the calendar day being marked (UTC midnight)
+  credit: text("credit", { enum: ["full", "half", "absent"] }).notNull(),
+  reason: text("reason"),
+  createdAt: created(),
+  updatedAt: updated(),
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete: the day goes back to its punches
+}, (t) => ({
+  pageIdx: index("attendance_day_marks_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("attmark_emp_idx").on(t.employeeId, t.date),
+  // ONE LIVE MARK PER PERSON PER DAY. Two marks on one day is not a state the readers can settle - payroll
+  // would take whichever the query returned first - so the database refuses it rather than leaving the answer
+  // to row order. Deleted ones are excluded, so a day can be re-marked after its mark is withdrawn.
+  liveDayUniq: uniqueIndex("attmark_live_day_idx").on(t.employeeId, t.date).where(sql`${t.deleteTime} is null`),
+}));
+
 // Overtime request: an employee logs extra hours worked on a day for approval. Employee-owned + code-scoped
 // (own/dept/all, like leave-requests): the employee files, a manager (own dept) or HR approves/rejects, the
 // owner can cancel while pending. Private by default - granted via the ACL. Hours are decimal (e.g. 1.5).

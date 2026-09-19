@@ -1,6 +1,6 @@
 import { idOf } from "./utils";
 
-// Collections whose page deep-opens a SPECIFIC record via the hash route `#/<page>/<id>` (the page reads the
+// Collections whose page deep-opens a SPECIFIC record via the route `/<page>/<id>` (the page reads the
 // id and opens that record). Only these truly "open the resource"; everything else lands on the list page.
 const DEEP_OPEN: Record<string, string> = {
   employees: "employees", // EmployeeProfile
@@ -17,7 +17,7 @@ const DEEP_OPEN: Record<string, string> = {
   stocktakes: "stocktakes", // one count, read in place on its own page route
   // The three routes that take an `openId` in App.tsx and were missing here, so a link from the activity feed,
   // the approvals inbox or search landed one level too shallow - or, for a saved table, nowhere at all.
-  applications: "pipeline", // `#/pipeline/<id>` opens that application's drawer, not just the board
+  applications: "pipeline", // `/pipeline/<id>` opens that application's drawer, not just the board
   "table-views": "tables", // "a saved table is a record people link to, not a dialog" (App.tsx)
   "expense-budgets": "expense-budgets", // opens that budget rather than the list
 };
@@ -56,7 +56,7 @@ const PAGE_OF: Record<string, string> = {
   holidays: "holidays", automations: "workflows",
 };
 
-// Admin catalogs live inside Settings panels; a record deep-links to `#/settings/<panel>/<id>` (3rd route
+// Admin catalogs live inside Settings panels; a record deep-links to `/settings/<panel>/<id>` (3rd route
 // segment), where the panel opens its editor for that row. Value = the Settings panel key.
 const SETTINGS_PANEL: Record<string, string> = {
   "leave-types": "leave-types", shifts: "shifts",
@@ -66,7 +66,7 @@ const SETTINGS_PANEL: Record<string, string> = {
   "asset-categories": "asset-tags",
 };
 
-// The hash route to reach a record from the activity feed / approvals inbox: the record inside its Settings
+// The route to reach a record from the activity feed / approvals inbox: the record inside its Settings
 // panel, else a deep record page, else the collection's list page, else null (no destination).
 export function resourceRoute(collection: string, ref?: string): string | null {
   if (ref && collection in SETTINGS_PANEL) return `settings/${SETTINGS_PANEL[collection]}/${idOf(ref)}`;

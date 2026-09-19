@@ -4,7 +4,10 @@
 // A custom method is fail-closed: allowed ONLY by an explicit verb-allow grant; a verb-deny always wins.
 export const CUSTOM_METHODS: Record<string, string[]> = {
   "api-keys": ["revoke"],
-  employees: ["enrollDefaultBenefits"],
+  // `uploadPhoto` / `clearPhoto` are grantable verbs like any other (`employees.me.uploadPhoto` for the owner,
+  // HR's broad rule for everyone), so the modal offers them by name and the avatar's own gate reads them out
+  // of the row's `access.can`. Mirrors src/http/accessHint.ts ACCESS_VERBS (test/customMethodsDrift.test.ts).
+  employees: ["enrollDefaultBenefits", "uploadPhoto", "clearPhoto"],
   departments: [],
   attendance: ["clockIn", "clockOut"],
   "attendance-regularizations": ["approve", "reject", "cancel"],

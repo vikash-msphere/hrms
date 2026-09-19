@@ -204,19 +204,23 @@ export default function Reimbursements({ me }: { me: Me }) {
   const getReceipt = (r: Reimbursement) => download("reimbursements/" + idOf(r.path), `receipt-${idOf(r.path)}`);
 
   // ---- columns -------------------------------------------------------------
-  const empCol: Column<Reimbursement> = { id: "employee", header: "Employee", accessor: (r) => empName(r.employee), cell: (r) => <span className="font-medium">{empName(r.employee)}</span> };
+  const empCol: Column<Reimbursement> = { id: "employee", header: "Employee", filter: "select", groupBy: true, accessor: (r) => empName(r.employee), cell: (r) => <span className="font-medium">{empName(r.employee)}</span> };
   const baseCols: Column<Reimbursement>[] = [
-    { id: "category", header: "Category", filter: "select", accessor: (r) => catName(r.category) },
-    { id: "amount", header: "Amount", align: "right", accessor: (r) => r.amount, cell: (r) => <span className="tabular-nums">{money(r.amount)}</span> },
-    { id: "incurred", header: "Incurred", accessor: (r) => r.incurred_on ?? "", cell: (r) => (r.incurred_on ? formatDate(r.incurred_on) : "-") },
+    { id: "category", header: "Category", filter: "select", groupBy: true, accessor: (r) => catName(r.category) },
+    // Totalled under the column and over any selection: "how much is this queue worth" is the question the
+    // person approving it is about to be asked.
+    { id: "amount", header: "Amount", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => money(n), accessor: (r) => r.amount, cell: (r) => <span className="tabular-nums">{money(r.amount)}</span> },
+    { id: "incurred", header: "Incurred", filter: "date", dateHint: "past", accessor: (r) => r.incurred_on ?? "", cell: (r) => (r.incurred_on ? formatDate(r.incurred_on) : "-") },
     // PAID is the terminal happy state - show it green and say how/when the money went out (payroll run sets paid_run).
-    { id: "state", header: "Status", filter: "select", accessor: (r) => r.state, cell: (r) => upper(r.state) === "PAID" ? (
+    { id: "state", header: "Status", filter: "select", groupBy: true, accessor: (r) => r.state, cell: (r) => upper(r.state) === "PAID" ? (
       <span className="inline-flex items-center gap-1.5">
         <Badge variant="success">Paid</Badge>
         <span className="text-xs text-muted-foreground">{r.paid_run ? "via payroll" : ""}{r.paid_time ? `${r.paid_run ? " · " : ""}${formatDate(r.paid_time)}` : ""}</span>
       </span>
     ) : <StatusBadge state={r.state} /> },
-    { id: "receipt", header: "Receipt", sortable: false, filter: "none", accessor: (r) => (r.has_receipt ? "yes" : ""), cell: (r) => (r.has_receipt ? (
+    // Filterable on whether there is a receipt at all: "(Blank)" is every claim with nothing attached,
+    // which is the one an approver should look at before the amount.
+    { id: "receipt", header: "Receipt", sortable: false, filter: "select", accessor: (r) => (r.has_receipt ? "Attached" : ""), cell: (r) => (r.has_receipt ? (
       <Button size="sm" variant="ghost" onClick={() => getReceipt(r)}><Download className="h-4 w-4" /> Receipt</Button>
     ) : <span className="text-muted-foreground">-</span>) },
     { id: "description", header: "Description", defaultHidden: true, accessor: (r) => r.description ?? "", cell: (r) => r.description || "-" },

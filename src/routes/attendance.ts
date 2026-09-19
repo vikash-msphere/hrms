@@ -7,9 +7,11 @@ import { toAttendanceSessionResource } from "../http/serialize";
 
 // Attendance clock sessions. Self clock in/out is `attendance/me:clockIn` / `:clockOut` (the caller acts on
 // their own record, so the verbs ignore the path id). `GET /?open=true` lists who's currently clocked in
-// (scoped to the caller's visibility), which drives the live presence indicator. A session is written by a
-// punch and corrected by an attendance-regularization, never edited or deleted directly - and the table has no
-// delete_time - so the factory mounts list, get and the two punches, nothing else.
+// (scoped to the caller's visibility), which drives the live presence indicator. `?employee=` narrows the
+// list to one person WITHIN that visibility - the scope predicate is still ANDed in `listSessions`, so this
+// is a filter and never a widening. It is what the per-employee attendance log reads. A session is written by
+// a punch and corrected by an attendance-regularization, never edited or deleted directly - and the table has
+// no delete_time - so the factory mounts list, get and the two punches, nothing else.
 // The client address the punches are fenced against (ATTENDANCE_ALLOWED_IPS, see src/env.ts). ONLY
 // `cf-connecting-ip` - the address Cloudflare itself observed - is trusted here. `x-forwarded-for` is a
 // client-supplied header that anyone can write, so accepting it (as the audit trail does, where a spoofed
@@ -28,10 +30,14 @@ export const attendance = collectionRoutes({
   list: (c, page) => {
     const from = c.req.query("from") ? Date.parse(c.req.query("from")!) : undefined;
     const to = c.req.query("to") ? Date.parse(c.req.query("to")!) : undefined;
+    // The inbound edge (decodeWireIds) already decoded the query ref, so take the id off the tail of the
+    // path and decode nothing here - same shape as routes/attendanceRegularizations.ts.
+    const emp = c.req.query("employee");
     return listSessions(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, {
       open: c.req.query("open") === "true",
       from: Number.isNaN(from) ? undefined : from,
       to: Number.isNaN(to) ? undefined : to,
+      employeeId: emp ? emp.split("/").pop()! : undefined,
     });
   },
   verbs: {

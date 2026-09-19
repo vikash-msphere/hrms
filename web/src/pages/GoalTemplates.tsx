@@ -61,7 +61,13 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
   // COMPLETE: the picker applies a template onto the people chosen here, so a window drops people silently.
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
 
-  const groups = useMemo(() => [...new Set(rows.map((t) => t.group_name).filter(Boolean) as string[])].sort(), [rows]);
+  // Only the sets that still have something in them. Built from every row including the deleted and disabled
+  // ones, it kept offering a set long after its last template had gone - and `{ showDeleted: true }` on the
+  // read above means those rows never leave.
+  const groups = useMemo(
+    () => [...new Set(rows.filter((t) => !t.delete_time && !t.disabled).map((t) => t.group_name).filter(Boolean) as string[])].sort(),
+    [rows],
+  );
   const deptName = (ref?: string | null) => departments.find((d) => idOf(d.path) === idOf(ref ?? ""))?.display_name;
 
   function openCreate() { setEditing(null); setForm(EMPTY); setOpen(true); }
@@ -82,6 +88,16 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
   }
 
   const num = (v: string) => (v.trim() === "" || Number.isNaN(Number(v)) ? null : Number(v));
+  // The same three guards the goal form itself applies. A template is a goal stamped out N times, and none of
+  // these were checked here: `min`/`max` on a number input constrain the spinner and nothing else, so a
+  // weight of 500 or a negative interval went straight through - and a due date computed from a negative
+  // interval lands in the past, which is thirty goals that are overdue the moment they are created. A target
+  // equal to the baseline is the third: it measures nothing, and the goal form refuses it by name.
+  const tplWeight = num(form.weight);
+  const weightInvalid = tplWeight != null && (tplWeight < 0 || tplWeight > 100);
+  const dueDays = num(form.dueInDays);
+  const dueInvalid = dueDays != null && dueDays < 0;
+  const targetEqualsBaseline = num(form.target) != null && num(form.target) === (num(form.baseline) ?? 0);
 
   // Throws to fail: WriteDialog pins the message in the form and keeps what was typed.
   async function submit() {
@@ -115,6 +131,7 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
     setApplyBusy(true);
     let created = 0;
     let skipped = 0;
+    let done = 0;
     try {
       for (const t of applying.templates) {
         const res = await invoke<GoalTemplate>(`goal-templates/${idOf(t.path)}`, "apply", undefined, {
@@ -123,6 +140,7 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
         });
         created += res.applied_count ?? 0;
         skipped += res.skipped_count ?? 0;
+        done++;
       }
       toast({
         title: `${created} goal${created === 1 ? "" : "s"} created`,
@@ -131,7 +149,16 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
       });
       setApplying(null);
     } catch (e) {
-      toast({ title: "Couldn't apply", description: (e as Error).message, variant: "destructive" });
+      // One :apply per template, so a set that fails on the third has already written real goals for the
+      // first two - and "Couldn't apply" said nothing about them. Somebody reading that would press it again
+      // and, for the templates that DID land, be saved only by the server's own skip rule. Say what landed.
+      toast({
+        title: done === 0 ? "Couldn't apply" : `Stopped after ${done} of ${applying.templates.length} templates`,
+        description: done === 0
+          ? (e as Error).message
+          : `${created} goal${created === 1 ? "" : "s"} were created before this failed: ${(e as Error).message}`,
+        variant: "destructive",
+      });
     } finally {
       setApplyBusy(false);
     }
@@ -144,15 +171,16 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
         {t.description && <p className="truncate text-xs text-muted-foreground">{t.description}</p>}
       </div>
     ) },
-    { id: "group", header: "Set", filter: "select", accessor: (t) => t.group_name ?? "-", cell: (t) => (t.group_name ? <Badge variant="secondary">{t.group_name}</Badge> : <span className="text-muted-foreground">-</span>) },
-    { id: "weight", header: "Weight", align: "right", accessor: (t) => t.weight ?? 0, cell: (t) => <span className="tabular-nums">{t.weight || "-"}</span> },
-    { id: "due", header: "Due", align: "right", accessor: (t) => t.due_in_days ?? 0, cell: (t) => <span className="tabular-nums text-muted-foreground">{t.due_in_days != null ? `${t.due_in_days}d` : "-"}</span> },
+    { id: "group", header: "Set", filter: "select", groupBy: true, accessor: (t) => t.group_name ?? "-", cell: (t) => (t.group_name ? <Badge variant="secondary">{t.group_name}</Badge> : <span className="text-muted-foreground">-</span>) },
+    // Weights are meant to add up to 100 across a set, so the footer total is the check that they do.
+    { id: "weight", header: "Weight", align: "right", filter: "number", aggregate: "sum", accessor: (t) => t.weight ?? 0, cell: (t) => <span className="tabular-nums">{t.weight || "-"}</span> },
+    { id: "due", header: "Due", align: "right", filter: "number", formatTotal: (n) => `${n} days`, accessor: (t) => t.due_in_days ?? 0, cell: (t) => <span className="tabular-nums text-muted-foreground">{t.due_in_days != null ? `${t.due_in_days}d` : "-"}</span> },
     { id: "measure", header: "Measure", accessor: (t) => (t.target_value != null ? `${t.baseline_value ?? 0}-${t.target_value}` : ""), cell: (t) => (
       t.target_value != null
         ? <span className="tabular-nums text-muted-foreground">{t.baseline_value ?? 0} → {t.target_value}{t.unit ? ` ${t.unit}` : ""}</span>
         : <span className="text-muted-foreground">-</span>
     ) },
-    { id: "department", header: "Suggested for", filter: "select", accessor: (t) => deptName(t.department) ?? "Everyone", cell: (t) => <span className="text-muted-foreground">{deptName(t.department) ?? "Everyone"}</span> },
+    { id: "department", header: "Suggested for", filter: "select", groupBy: true, accessor: (t) => deptName(t.department) ?? "Everyone", cell: (t) => <span className="text-muted-foreground">{deptName(t.department) ?? "Everyone"}</span> },
     stateColumn<GoalTemplate>(),
     ...metaColumns<GoalTemplate>(),
     {
@@ -197,10 +225,13 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
             {groups.length > 0 && (
               <div className="mb-3 flex flex-wrap items-center gap-2">
                 <span className="text-xs font-medium text-muted-foreground">Apply a set:</span>
+                {/* A set whose every template has been deleted or disabled drew a greyed-out "(0)" button
+                    that could never do anything - the set is gone, so the affordance goes with it. */}
                 {groups.map((g) => {
                   const set = rows.filter((t) => t.group_name === g && !t.delete_time && !t.disabled);
+                  if (!set.length) return null;
                   return (
-                    <Button key={g} variant="outline" size="sm" disabled={!set.length} onClick={() => setPicking({ templates: set, label: g })}>
+                    <Button key={g} variant="outline" size="sm" onClick={() => setPicking({ templates: set, label: g })}>
                       {g} <span className="tabular-nums text-muted-foreground">({set.length})</span>
                     </Button>
                   );
@@ -235,8 +266,13 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
         applyDraft={(d) => setForm(d)}
         onStartOver={editing ? undefined : () => setForm({ ...EMPTY })}
         submitLabel={editing ? "Save changes" : "Create template"}
-        canSubmit={!!form.title.trim()}
-        whyNot={[!form.title.trim() && "Give the template a title."]}
+        canSubmit={!!form.title.trim() && !weightInvalid && !dueInvalid && !targetEqualsBaseline}
+        whyNot={[
+          !form.title.trim() && "Give the template a title.",
+          weightInvalid && "Weight has to be between 0 and 100.",
+          dueInvalid && "Due in days cannot be negative - the goals would be created already overdue.",
+          targetEqualsBaseline && "The target and the baseline are the same number.",
+        ]}
         onSubmit={submit}
         addAnother={editing ? undefined : () => setForm({ ...EMPTY, group: form.group })}
         addAnotherLabel="Save & add another"
@@ -251,16 +287,16 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
           <Textarea rows={2} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What does success look like?" />
         </Field>
         <FieldRow>
-          <Field label="Weight" field="weight" hint="Relative importance 0-100.">
+          <Field label="Weight" field="weight" hint="Relative importance 0-100." error={weightInvalid ? "Weight must be between 0 and 100." : undefined}>
             <Input type="number" min={0} max={100} value={form.weight} onChange={(e) => setForm({ ...form, weight: e.target.value })} placeholder="0" />
           </Field>
-          <Field label="Due in (days)" field="due_in_days" hint="Counted from the day it is applied. Blank leaves the goal undated.">
+          <Field label="Due in (days)" field="due_in_days" hint="Counted from the day it is applied. Blank leaves the goal undated." error={dueInvalid ? "An interval counts forward from the day it is applied, so it cannot be negative." : undefined}>
             <Input type="number" min={0} value={form.dueInDays} onChange={(e) => setForm({ ...form, dueInDays: e.target.value })} placeholder="e.g. 30" />
           </Field>
         </FieldRow>
         <FieldRow>
           <Field label="Baseline" field="baseline_value" hint="Where it starts."><Input type="number" value={form.baseline} onChange={(e) => setForm({ ...form, baseline: e.target.value })} placeholder="0" /></Field>
-          <Field label="Target" field="target_value" hint="With a target, the applied goal measures itself."><Input type="number" value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })} placeholder="e.g. 60" /></Field>
+          <Field label="Target" field="target_value" hint="With a target, the applied goal measures itself." error={targetEqualsBaseline ? "Target and baseline are the same, so there is nothing to measure." : undefined}><Input type="number" value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })} placeholder="e.g. 60" /></Field>
           <Field label="Unit" field="unit"><Input value={form.unit} maxLength={24} onChange={(e) => setForm({ ...form, unit: e.target.value })} placeholder="customers" /></Field>
         </FieldRow>
         <FieldRow>
@@ -289,7 +325,11 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
           employees={employees}
           departments={departments}
           onClose={() => setPicking(null)}
-          onConfirm={(refs) => { setApplying({ ...picking, refs }); setPicking(null); }}
+          // The cycle resets with every new apply. It is component state that outlived the dialog, so the
+          // cycle chosen for a new-hire set was still selected the next time somebody applied an unrelated
+          // one - and worse, once that cycle CLOSED the option vanished from the list below while the value
+          // stayed, leaving a picker showing nothing and a cycle still going out on the request.
+          onConfirm={(refs) => { setApplyCycle("none"); setApplying({ ...picking, refs }); setPicking(null); }}
         />
       )}
 

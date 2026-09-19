@@ -21,14 +21,40 @@ import { useAccessMode } from "@/components/access/AccessModeProvider";
 // so every value here resolves through the theme (see web/src/index.css) and the card stays legible in both.
 // Sizes, weights, tracking and spacing are the mock's.
 
-// The header's buttons. One weight for every action, labelled, never an unexplained icon.
+// The header's buttons. One weight for every action - no action is quieter chrome than its neighbour. Labelled
+// wherever there is room for the label; below `sm` a SECONDARY action shows its icon alone, with the label kept
+// for screen readers (HEADER_BTN_LABEL). The icon is never unexplained: it keeps its accessible name and its
+// `title`, and the primary action never loses its text.
 //
-// `coarse:min-h-11` on both: at 13.5px with 9px of padding these are ~32px tall, and the 44px touch floor
-// (docs/06-responsive-ui.md rule 1) is applied centrally only to small SQUARE icon controls and Radix rows -
-// a bespoke labelled button has to say it itself.
+// `coarse:min-h-11` on both, plus `coarse:min-w-11` on the secondary: at 13.5px with 9px of padding these are
+// ~32px tall, and the 44px touch floor (docs/06-responsive-ui.md rule 1) is applied centrally only to small
+// SQUARE icon controls and Radix rows - a bespoke button has to say it itself, and the secondary one BECOMES a
+// small square control on a phone.
 export const HEADER_BTN =
-  "inline-flex items-center justify-center gap-[7px] rounded-[10px] border bg-card px-[13px] py-[9px] text-[13.5px] font-semibold leading-none text-muted-foreground shadow-sm transition-colors hover:border-muted-foreground/40 hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50 coarse:min-h-11";
-/** The one filled action per view. */
+  "inline-flex items-center justify-center gap-[7px] rounded-[10px] border bg-card px-[13px] py-[9px] text-[13.5px] font-semibold leading-none text-muted-foreground shadow-sm transition-colors hover:border-muted-foreground/40 hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50 coarse:min-h-11 coarse:min-w-11";
+
+/**
+ * Wrap a SECONDARY header action's label in this to collapse the button to its icon on a phone.
+ *
+ * The row is `flex-wrap`, so four labelled buttons do not clip - they take a second and third line, and the
+ * header grows tall enough to push the facts band and the tabs off a 360px screen. Dropping the labels below
+ * `sm` puts the same four actions on one line: an icon button is ~44px against ~120px labelled.
+ *
+ * `sr-only`, NOT `hidden`. The label is the button's accessible name, so hiding it outright would leave a
+ * screen reader announcing an unlabelled button; `sr-only` keeps it in the accessibility tree and only takes it
+ * out of the visual flow (it is absolutely positioned, so the button's `gap` collapses with it). `not-sr-only`
+ * puts it back at `sm`.
+ *
+ * The PRIMARY action deliberately keeps its label - see HEADER_BTN_PRIMARY. `coarse:min-w-11` on the button
+ * above is the other half of this: once it is icon-only it is a small square control, and rule 1 of
+ * docs/06-responsive-ui.md puts a 44px floor under those.
+ */
+export const HEADER_BTN_LABEL = "sr-only sm:not-sr-only";
+/**
+ * The one filled action per view. It keeps its label at every width: it is the thing the page is FOR ("Edit
+ * profile", "Schedule a 1:1"), and an unlabelled icon is exactly the wrong thing to make somebody guess at.
+ * One labelled button plus three icons is what fits a phone.
+ */
 export const HEADER_BTN_PRIMARY =
   "inline-flex items-center justify-center gap-2 rounded-[10px] bg-primary px-4 py-[10px] text-[13.5px] font-semibold leading-none text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50 coarse:min-h-11";
 
@@ -65,7 +91,8 @@ export function ProfileView({
   bio?: string;
   onEditBio?: () => void;
   avatar?: React.ReactNode;
-  // The action row: labelled buttons, every one of them visible. No overflow menu.
+  // The action row: every action visible, no overflow menu. Labelled at `sm` and up; on a phone a secondary
+  // action may collapse to its icon (HEADER_BTN_LABEL) so the row stays one line.
   actions?: React.ReactNode;
   // What the person currently is - on leave, inactive, on probation. Sits next to the name.
   status?: React.ReactNode;

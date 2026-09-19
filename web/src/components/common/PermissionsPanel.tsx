@@ -50,7 +50,10 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   const [rules, setRules] = React.useState<AccessRule[]>([]);
   const [roles, setRoles] = React.useState<Role[]>([]);
   const [users, setUsers] = React.useState<{ path: string; email: string }[]>([]);
-  const [busy, setBusy] = React.useState(false);
+  // Starts BUSY: the panel loads on mount, so the first paint is a load in progress, not an idle panel with
+  // nothing in it. Everything that reads `busy` - the disabled cells, the matrix's own placeholder - would
+  // otherwise spend that first frame claiming the org has no roles and offering editors over it.
+  const [busy, setBusy] = React.useState(true);
   const [subjectKind, setSubjectKind] = React.useState<"role" | "user">("role");
   const [view, setView] = React.useState<"matrix" | "rules">("matrix");
 
@@ -588,7 +591,13 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
                     {r.verb ? `"${r.verb}" on ` : r.scope === "create" && r.level === "read" ? "open the list of " : r.scope === "create" ? "create " : `${r.level ?? "read"} `}
                     {labelOf(r.collection)}
                     {r.field ? ` (${r.field})` : ""}
-                    {r.scope === "dept" ? " - their department's" : r.scope === "self" ? " - their own" : ""}
+                    {/* WHOSE rows, for every subject-relative tier - the manager chain included. Without the
+                        last two a `my-reports` rule read exactly like an org-wide one in this list. */}
+                    {r.scope === "dept" ? " - their department's"
+                      : r.scope === "self" ? " - their own"
+                      : r.scope === "reports" ? " - their reports'"
+                      : r.scope === "org" ? " - their reporting line's"
+                      : ""}
                   </li>
                 ))}
               </ul>
@@ -689,6 +698,15 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
               </Button>
               <span className="text-xs text-muted-foreground">{groupedCollections.reduce((n, [, c]) => n + c.length, 0)} of {collections.length} collections</span>
             </div>
+            {/* The same reasoning as `reload`'s two stages, one step earlier. The collection list needs no
+                server answer at all, so the matrix can paint its rows before the ROLES have landed - and a
+                grid with a Collection column and no role columns beside it does not read as "still loading"
+                either, it reads as "this org has no roles". Say which it is instead of drawing the table. */}
+            {roles.length === 0 ? (
+              <p className="rounded-lg border px-3 py-6 text-center text-sm text-muted-foreground">
+                {busy ? "Loading roles…" : "No roles to show."}
+              </p>
+            ) : (
             <div className="scroll-shadow-x overflow-x-auto rounded-lg border">
               <table className="w-full border-collapse text-sm">
                 <thead>
@@ -727,6 +745,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
                 </tbody>
               </table>
             </div>
+            )}
           </div>
         )}
       </CardContent>

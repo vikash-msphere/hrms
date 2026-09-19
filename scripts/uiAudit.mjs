@@ -71,10 +71,9 @@ const ACCEPTED = {
   // scrollers with a scroll-shadow affordance; the min-width is what keeps the cells legible inside them.
   "components/calendar/TeamGrid.tsx:wide-fixed": "people × days matrix, in its own scroller",
   "components/common/TeamTimeline.tsx:wide-fixed": "people × days timeline, in its own scroller",
-  // Three columns of TEXT. A grid only breaks a phone when its tracks state widths; these are 1fr label +
+  // Three columns of TEXT. A grid only breaks a phone when its tracks state widths; this is 1fr label +
   // 2fr value, and text wraps.
-  "components/common/EmergencyQuickView.tsx:grid-3-no-step": "label/value detail rows, no stated track widths",
-  "components/common/Skeletons.tsx:grid-3-no-step": "the placeholder for those same rows",
+  "components/common/Skeletons.tsx:grid-3-no-step": "the placeholder for label/value detail rows",
   // Small square tiles whose stated size already fits: 3 × 96px in a popover, 6 × 28px + gaps = 208px.
   "components/common/KudosArtPicker.tsx:grid-3-no-step": "3 art tiles in a popover, fits a phone",
   "pages/LeaveTypes.tsx:grid-3-no-step": "6 colour swatches at 28px = 208px, fits a phone",

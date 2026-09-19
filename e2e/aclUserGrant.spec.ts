@@ -70,7 +70,7 @@ test.describe("per-user access rules", () => {
       expect(rule?.level).toBe("read");
 
       // The end of the story: their browser, reloaded, is served the page instead of the wall. A real reload
-      // is required - `theirs` already loaded vendors once above, and re-navigating to the SAME hash route
+      // is required - `theirs` already loaded vendors once above, and re-navigating to the SAME route
       // is a same-document jump the SPA's cached capabilities survive; only a genuine reload re-fetches them.
       await theirs.reload();
       await gotoRoute(theirs, "vendors", "Vendors");
@@ -80,7 +80,7 @@ test.describe("per-user access rules", () => {
       // The navigation agrees with the page. Vendors is a TAB of the Expenses workspace (which this person
       // could already open, for their own expenses), so the honest question is whether the tab appeared -
       // a page reachable only by typing its URL is a page nobody finds.
-      await expect(theirs.locator('a[href="#/vendors"]').first()).toBeVisible({ timeout: 30_000 });
+      await expect(theirs.locator('a[href="/vendors"]').first()).toBeVisible({ timeout: 30_000 });
 
       // Taken away again through the control that authored it, confirm and all.
       await editor.getByRole("button", { name: "Remove this access rule" }).first().click();

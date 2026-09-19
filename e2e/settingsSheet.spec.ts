@@ -7,7 +7,7 @@ import { gotoRoute, test, expect } from "./fixtures";
 //
 //   - the panel bodies live in a lazily imported chunk (`SettingsPanelContent`), so "the sheet opens" and "the
 //     chunk actually loaded and rendered" are different claims, and only the second one is worth anything;
-//   - the open state is deep-linked as `?setting=<key>` on the page hash, so a pasted link opens straight into
+//   - the open state is deep-linked as `?setting=<key>` on the page's URL, so a pasted link opens straight into
 //     the panel and closing it leaves a clean URL behind;
 //   - the gate is hide-never-disable: a caller who may not open the panel must not be shown the gear at all.
 //
@@ -40,14 +40,14 @@ test.describe("inline settings", () => {
     const page = await as("super");
 
     // What a colleague receives: the page, plus which panel was open on it.
-    await page.goto("/#/attendance?setting=attendance");
+    await page.goto("/attendance?setting=attendance");
     await expect(page.getByRole("main")).toBeVisible();
     const sheet = page.getByRole("dialog");
     await expect(sheet.getByText("Shift start")).toBeVisible();
 
     // The org-scope escape hatch: the same panel, full width, at its own address.
     await sheet.getByRole("button", { name: "Open full settings" }).click();
-    await expect.poll(() => page.url()).toMatch(/#\/settings\/attendance\b/);
+    await expect.poll(() => page.url()).toMatch(/\/settings\/attendance\b/);
     await expect(page.getByText("Shift start")).toBeVisible();
   });
 

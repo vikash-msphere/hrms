@@ -18,19 +18,21 @@ test("an employee asks for kit from their own profile, and it lands in the appro
   // which is the whole difference between a request and an assignment.
   const category = await assetCategory(approver);
 
-  await gotoRoute(employee, "profile", "My Profile");
-  await employee.getByRole("tab", { name: "Assets" }).click();
+  await gotoRoute(employee, "profile"); // one record page, two addresses: its `h1` is the person's name
+  // Assets is a card on Employment now, not a tab of its own: the kit somebody holds is part of the terms of
+  // the job, and the one record page carries it there for every viewer (pages/EmployeeProfile.tsx).
+  await employee.getByRole("tab", { name: "Employment" }).click();
 
   const panel = employee.getByRole("tabpanel");
-  // Retried as one whole unit: the category picker's own list is org-wide and unowned by this test (see
-  // `assetCategory` below) - another spec's own cleanup purging whichever one this picked, in the window
-  // between the pick and the submit, 400s the submit ("category not found") on a category this test never
-  // controlled to begin with. Reopening the dialog fresh and picking again is what recovers.
+  // Retried as one whole unit so a submit that loses a race reopens the dialog and goes again, rather than
+  // failing the spec on the first slow round trip. What it no longer covers for is the picked category being
+  // deleted underneath: this spec owns its category now (see `assetCategory` below), so it is picked BY NAME
+  // rather than taking whatever sits first in an org-wide list full of other specs' fixtures.
   await expect(async () => {
     if (!(await employee.getByRole("dialog").count())) await panel.getByRole("button", { name: "Request an asset" }).click();
     const form = employee.getByRole("dialog");
     await form.getByLabel("What do you need").click();
-    await employee.getByRole("option").first().click();
+    await employee.getByRole("option", { name: category.name, exact: true }).click();
     await form.getByLabel("Why you need it").fill(why);
     await form.getByRole("button", { name: "Send request" }).click();
     await expect(employee.getByRole("dialog")).toHaveCount(0, { timeout: 10_000 });
@@ -44,24 +46,29 @@ test("an employee asks for kit from their own profile, and it lands in the appro
   await expect(approver.getByText(why).first()).toBeVisible({ timeout: 30_000 });
 
   await purgeRequests(approver, why);
-  if (category.created) await purge(approver, category.path);
+  await purge(approver, category.path);
 });
 
-/** The category an ask is made within - the org's own if it has one, otherwise a fresh one. */
-async function assetCategory(page: import("@playwright/test").Page): Promise<{ path: string; created: boolean }> {
-  // A page of them, and the first that does not demand a serial: `assetSerialRequired.spec.ts` keeps a
-  // `requires_serial` category in the table for the length of its own run, and picking that one refuses the
-  // asset ("a serial number is required for …") for a reason nothing here is about.
-  const existing = await page.request.get("/v1/asset-categories?page_size=100");
-  const rows = ((await existing.json()) as { results?: { path: string; requires_serial?: boolean }[] }).results ?? [];
-  const found = rows.find((r) => !r.requires_serial)?.path;
-  if (found) return { path: found, created: false };
+/**
+ * The category this ask is made within - ALWAYS a fresh one this spec owns.
+ *
+ * It used to reuse the first listed category that did not demand a serial, and only create one if the org had
+ * none. But "the org's categories" in this lane are mostly other specs' fixtures: `assets`, `assetTagPdf`,
+ * `assetTagPrinterQueue` and `cancelOwnRequest` each create an `E2E …` category and purge it when they
+ * finish. Reusing whichever was listed first meant asking within a row another spec was about to delete, and
+ * the create then 400s "asset category not found" - repeatedly, since the next spec's fixture takes the same
+ * place in the list. Owning the row removes the whole class: nothing else knows this name.
+ */
+async function assetCategory(page: import("@playwright/test").Page): Promise<{ path: string; name: string }> {
+  // `requires_serial: false` deliberately - a category that demands a serial refuses the asset later
+  // ("a serial number is required for …") for a reason nothing here is about.
+  const name = `E2E asset request category ${Date.now()}`;
   const made = await page.request.post("/v1/asset-categories", {
     headers: SPA_HEADERS,
-    data: { display_name: `E2E asset category ${Date.now()}`, requires_serial: false },
+    data: { display_name: name, requires_serial: false },
   });
   expect(made.status(), await made.text()).toBe(200);
-  return { path: ((await made.json()) as { path: string }).path, created: true };
+  return { path: ((await made.json()) as { path: string }).path, name };
 }
 
 /** Drop the request this spec filed. */

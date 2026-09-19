@@ -4,7 +4,7 @@ import { allowConsoleErrors, gotoRoute, personId, test, expect } from "./fixture
 // Every tab on an employee's record, opened.
 //
 // The record page is one route, so `everyPage` walks it once and sees the Profile tab. Everything else on it
-// - eleven panels, each its own read, each with its own access gate - is behind a tab nothing in the lane
+// - a panel per tab, each its own read, each with its own access gate - is behind a tab nothing in the lane
 // clicks. That is a lot of surface to leave unopened: a panel that throws on mount takes the whole record
 // down for whoever opens that tab, and the tab bar in front of it looks perfectly healthy.
 //
@@ -19,38 +19,34 @@ import { allowConsoleErrors, gotoRoute, personId, test, expect } from "./fixture
 /** The tabs the record page can render, as `<AccessTab value="…">` names them. */
 const TABS = [
   "profile",
-  "contact",
   "employment",
   "leave",
+  "attendance",
   "identity",
-  "bank",
-  "tax",
+  "performance",
+  "posts",
   "compensation",
-  "assets",
   "documents",
   "activity",
 ] as const;
 
 /**
- * The tabs an admin must be offered on somebody else's record.
- *
- * `leave` is deliberately not in here: that tab appears only once the person has a balance or a request, and
- * whether the seeded HR person has either is not this spec's business. Everything else is either
- * unconditional or gated on a grant super holds, so its absence would be a real failure.
+ * The tabs an admin must be offered on somebody else's record. Every one of them is either unconditional or
+ * gated on a grant super holds, so an absence is a real failure - including `leave` and `attendance`, which
+ * are exactly the two that exist on SOMEBODY ELSE's record and not on one's own.
  */
-const REQUIRED = TABS.filter((t) => t !== "leave");
+const REQUIRED = TABS;
 
 /** The tab bar's labels, which are what a browser can actually click. */
 const LABEL: Record<(typeof TABS)[number], string> = {
   profile: "Profile",
-  contact: "Contact",
   employment: "Employment",
   leave: "Leave",
+  attendance: "Attendance",
   identity: "Identity",
-  bank: "Bank details",
-  tax: "Tax",
+  performance: "Performance",
+  posts: "Posts",
   compensation: "Compensation",
-  assets: "Assets",
   documents: "Documents",
   activity: "Activity",
 };
@@ -67,10 +63,10 @@ test.describe("the employee record's tabs", () => {
   });
 
   test("every tab an admin is offered mounts, on its own panel and inside the window", async ({ as }) => {
-    // Eleven panels in one browser, several of them their own lazy chunk.
+    // Every panel in one browser, several of them their own lazy chunk.
     test.setTimeout(300_000);
     const page = await as("super");
-    // Eleven panels' worth of reads on a busy lane: the same transient 5xx the per-panel collector below
+    // Every panel's worth of reads on a busy lane: the same transient 5xx the per-panel collector below
     // tolerates has to be tolerated by the suite-wide gate too, or the run fails on it after the walk passed.
     allowConsoleErrors(page, /status of 503|status of 500/i);
     // Which tab the walk is on, so an error caught here names the panel that logged it rather than "somewhere
@@ -87,8 +83,8 @@ test.describe("the employee record's tabs", () => {
     });
     page.on("pageerror", (e) => logged.push(`${current}: threw ${e.message}`));
 
-    // Somebody else's record, not super's own: `contact` / `identity` / `bank` are offered to an OWNER as
-    // well as to an admin, and driving them on your own record proves only the ownership half.
+    // Somebody else's record, not super's own: `identity` (which carries the bank panel too) is offered to an
+    // OWNER as well as to an admin, and driving it on your own record proves only the ownership half.
     const id = await personId(page, "hr");
     await gotoRoute(page, `employees/${id}`);
     await expect(page.getByRole("tab", { name: "Profile", exact: true })).toBeVisible({ timeout: 30_000 });
@@ -102,7 +98,7 @@ test.describe("the employee record's tabs", () => {
     const failures: string[] = [];
     for (const key of TABS) {
       const label = LABEL[key];
-      if (!offered.has(label)) continue; // `leave`, on a person with no leave - see REQUIRED.
+      if (!offered.has(label)) continue;
       current = key;
       const tab = page.getByRole("tab", { name: label, exact: true });
       try {
@@ -130,7 +126,7 @@ test.describe("the employee record's tabs", () => {
     // the record has room to lay its title and its action button out in one row. Narrow is where those rows
     // stop fitting, and nothing in the lane looked: `everyViewport` walks every route at four widths but
     // lands on whichever tab a route opens with, which on the record page is always Profile. So the record's
-    // other ten panels - the ones with the buttons on them - were measured at one width only, and the
+    // other panels - the ones with the buttons on them - were measured at one width only, and the
     // Compensation tab's "Revise" button hung off the right edge of a phone with the whole page panning to
     // follow it.
     test.setTimeout(300_000);
@@ -150,14 +146,16 @@ test.describe("the employee record's tabs", () => {
 
       for (const key of TABS) {
         const label = LABEL[key];
-        if (!offered.has(label)) continue; // `leave`, on a person with no leave - see REQUIRED.
+        if (!offered.has(label)) continue;
         const tab = page.getByRole("tab", { name: label, exact: true });
         try {
           // The tab bar itself scrolls sideways at these widths, so the tab has to be brought into view
           // before it can be pressed. Re-pressed on a miss for the reason `everyTab` gives: these panels
-          // re-render as their reads land, and a click that arrives mid-replacement selects nothing.
-          await tab.scrollIntoViewIfNeeded();
+          // re-render as their reads land, and a click that arrives mid-replacement selects nothing. The
+          // scroll is inside the retry for the same reason - a re-render between it and the click detaches
+          // the element it just scrolled to, and a scroll left outside fails the whole walk on that.
           await expect(async () => {
+            await tab.scrollIntoViewIfNeeded({ timeout: 5_000 });
             if ((await tab.getAttribute("data-state")) !== "active") await tab.click({ timeout: 5_000 });
             await expect(tab).toHaveAttribute("data-state", "active", { timeout: 5_000 });
           }).toPass({ timeout: 30_000 });
@@ -192,7 +190,7 @@ test.describe("the employee record's tabs", () => {
     // Documents: on every viewer's record, and far enough from Profile that landing on the wrong one is
     // obvious rather than subtle.
     await page.getByRole("tab", { name: "Documents", exact: true }).click();
-    await expect.poll(() => page.url()).toContain(`#/employees/${id}/documents`);
+    await expect.poll(() => page.url()).toContain(`/employees/${id}/documents`);
 
     // From cold, through the URL alone - which is the half a click cannot prove: the tab segment is read on
     // mount, not just written on click.
@@ -210,16 +208,16 @@ test.describe("the employee record's tabs", () => {
     // Their own record: PII is `OWN_PII`, so the owner is offered the tabs an ordinary colleague is not -
     // which is what makes the guard below a statement about the URL rather than about this person's grants.
     await gotoRoute(page, `employees/${id}`);
-    await expect(page.getByRole("tab", { name: "Bank details", exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("tab", { name: "Identity", exact: true })).toBeVisible({ timeout: 30_000 });
 
     const offered = new Set((await page.getByRole("tab").allInnerTexts()).map((t) => t.trim()).filter(Boolean));
     // A segment no viewer has (a stale link, a typo, a route key that was renamed), plus whichever real tabs
     // this person is not offered - the case the guard actually exists for, taken from what the browser drew
     // rather than assumed from the seed.
-    // `leave` is left out of the probe: it appears once this person's balances arrive, so a tab bar read a
-    // moment too early reports it hidden and the deep link then correctly lands on Leave - a race, not a
-    // finding. Every other tab's presence is decided by grants, which are known by the time the page renders.
-    const hidden = TABS.filter((t) => t !== "leave" && !offered.has(LABEL[t]));
+    // Every tab's presence is decided before the page renders - by a grant, or (for `leave` and `attendance`)
+    // by this being the viewer's own record, where those two are deliberately not tabs at all. So both of
+    // them land in `hidden` here, and the deep link to either has to fall back like any other.
+    const hidden = TABS.filter((t) => !offered.has(LABEL[t]));
     for (const sub of ["bogus", ...hidden]) {
       await gotoRoute(page, `employees/${id}/${sub}`);
       // Profile, not an empty frame and not the panel they may not read.

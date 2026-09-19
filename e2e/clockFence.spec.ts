@@ -79,7 +79,7 @@ test("an off-network punch offers the remote-work request and opens the form", a
   // Confirming lands in the FORM, not merely on the page - the intent has to outlive the navigation.
   // Asserted by URL rather than by the page's <h1>: the form is a modal, so the page behind it is
   // `aria-hidden` and its heading is (correctly) out of the accessibility tree while the dialog is open.
-  await expect(page).toHaveURL(/#\/remote-work$/);
+  await expect(page).toHaveURL(/\/remote-work$/);
   const form = page.getByRole("dialog").filter({ hasText: "Request remote work" });
   await expect(form).toBeVisible();
 

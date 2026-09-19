@@ -373,7 +373,7 @@ export type AepResource = {
   published?: boolean;
   // Per-object access hint (server-computed; UX only). `can` = verbs the caller may perform on this row;
   // `why` = the SCOPE by which they hold read access (self/dept/subtree/exact/all), shown as provenance.
-  access?: { can?: string[]; why?: "all" | "subtree" | "exact" | "self" | "dept" };
+  access?: { can?: string[]; why?: "all" | "subtree" | "exact" | "self" | "dept" | "reports" | "org" };
 };
 
 export type ListResponse<T> = { results: T[]; next_page_token?: string };

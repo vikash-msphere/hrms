@@ -34,21 +34,23 @@ test("a bare-new employee's record reads 0% complete, and each missing chip open
     const bar = page.getByRole("progressbar", { name: "Profile completeness" });
     await expect(bar).toHaveAttribute("aria-valuenow", "0");
 
-    // A tab, reached by a real navigation - not just a local tab switch that a reload would lose.
+    // A tab, reached by a real navigation - not just a local tab switch that a reload would lose. The bank
+    // panel shares the Identity tab, so the chip lands there.
     await page.getByRole("button", { name: "Bank details", exact: true }).click();
-    await expect(page).toHaveURL(new RegExp(`employees/${id}/bank$`));
-    await expect(page.getByRole("tab", { name: /Bank details/ })).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(new RegExp(`employees/${id}/identity$`));
+    await expect(page.getByRole("tab", { name: /Identity/ })).toHaveAttribute("aria-selected", "true");
 
-    // Emergency contact opens its own dialog instead - a chip is not one shape throughout. Back to the
-    // overview through the Profile tab rather than the browser's Back: the chip's own navigation is already
-    // proven by the URL assertion above, and `page.goBack()` on this hash route fires no `hashchange` at all
-    // (verified against the app's own listener), so the spec would be asserting against a page that never
-    // navigated.
+    // Emergency contact lands on the Profile tab, where its card is - the chip is on that tab too, so what it
+    // has to prove is the card the reader is being sent to, not a URL change. Back to the overview through the
+    // Profile tab rather than the browser's Back: the chip's own navigation is already proven by the URL
+    // assertion above, and this half is reached by the tab the reader would use, not by unwinding the history
+    // stack the chips just wrote.
     await page.getByRole("tab", { name: "Profile", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`employees/${id}$`));
     await expect(page.getByText("This record is incomplete")).toBeVisible({ timeout: 30_000 });
     await page.getByRole("button", { name: "Emergency contact", exact: true }).click();
-    await expect(page.getByRole("dialog").filter({ hasText: "Emergency details" })).toBeVisible({ timeout: 15_000 });
+    await expect(page).toHaveURL(new RegExp(`employees/${id}$`));
+    await expect(page.getByRole("tabpanel").getByText("Emergency contact name")).toBeVisible({ timeout: 15_000 });
   } finally {
     const got = await page.request.get(`/v1/${employee.path}`);
     if (got.ok()) {

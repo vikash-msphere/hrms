@@ -25,7 +25,7 @@ test("a ticket is assigned, routed and prioritised from its own drawer", async (
   const department = await someDepartment(page);
 
   try {
-    // Straight to the ticket: `#/tickets/<id>` is the link a notification and a copied URL both hand out, and
+    // Straight to the ticket: `/tickets/<id>` is the link a notification and a copied URL both hand out, and
     // it opens the drawer these controls live in.
     await gotoRoute(page, `tickets/${path.split("/")[1]}`);
     const drawer = page.getByRole("dialog").filter({ hasText: subject });

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { navigate } from "@/router";
-import { workspaceForKey, navPerm, pageVisible } from "@/nav";
+import { workspaceForKey, navAdmits, pageVisible } from "@/nav";
 import { hasCapability } from "@/lib/perm";
 import type { Me } from "@/useMe";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
@@ -35,7 +35,7 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // Whether a chord destination is visible to this user - the route gate the router itself applies, so a chord
 // can only land where the sidebar would have taken them.
 function canGo(route: string, me: Me): boolean {
-  return pageVisible(route, (p) => hasCapability(me.capabilities, p));
+  return pageVisible(route, (p) => hasCapability(me.capabilities, p), (c) => !!me.scopes.read[c]);
 }
 
 /** Global keyboard layer: `?` opens the shortcut reference, `g`+letter jumps between pages, `[`/`]` walk the
@@ -80,7 +80,7 @@ export function ShortcutLayer({ me, page }: { me: Me; page: string }) {
       if (e.key === "[" || e.key === "]") {
         const ws = workspaceForKey(page);
         if (!ws?.tabs) return;
-        const tabs = ws.tabs.filter((t) => { const p = navPerm(t); return !p || hasCapability(me.capabilities, p); });
+        const tabs = ws.tabs.filter((t) => navAdmits(t, (p) => hasCapability(me.capabilities, p), (c) => !!me.scopes.read[c]));
         const i = tabs.findIndex((t) => t.key === page);
         if (i < 0 || tabs.length < 2) return;
         e.preventDefault();

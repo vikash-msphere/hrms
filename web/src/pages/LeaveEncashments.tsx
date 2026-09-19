@@ -193,13 +193,14 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
   }
 
   // ---- columns -------------------------------------------------------------
-  const empCol: Column<LeaveEncashment> = { id: "employee", header: "Employee", accessor: (r) => empName(r.employee), cell: (r) => <span className="font-medium">{empName(r.employee)}</span> };
+  const empCol: Column<LeaveEncashment> = { id: "employee", header: "Employee", filter: "select", groupBy: true, accessor: (r) => empName(r.employee), cell: (r) => <span className="font-medium">{empName(r.employee)}</span> };
   const baseCols: Column<LeaveEncashment>[] = [
-    { id: "leave_type", header: "Leave type", filter: "select", accessor: (r) => ltName(r.leave_type) },
-    { id: "days", header: "Days", align: "right", accessor: (r) => r.days, cell: (r) => <span className="tabular-nums">{r.days}</span> },
-    { id: "rate", header: "Rate/day", align: "right", defaultHidden: true, accessor: (r) => r.rate_per_day ?? 0, cell: (r) => <span className="tabular-nums">{r.rate_per_day != null ? money(r.rate_per_day) : "-"}</span> },
-    { id: "amount", header: "Amount", align: "right", accessor: (r) => r.amount ?? 0, cell: (r) => <span className="tabular-nums">{r.amount != null ? money(r.amount) : "-"}</span> },
-    { id: "state", header: "Status", filter: "select", accessor: (r) => r.state, cell: (r) => <StatusBadge state={r.state} /> },
+    { id: "leave_type", header: "Leave type", filter: "select", groupBy: true, accessor: (r) => ltName(r.leave_type) },
+    { id: "days", header: "Days", align: "right", filter: "number", aggregate: "sum", accessor: (r) => r.days, cell: (r) => <span className="tabular-nums">{r.days}</span> },
+    { id: "rate", header: "Rate/day", align: "right", defaultHidden: true, filter: "number", formatTotal: (n) => money(n), accessor: (r) => r.rate_per_day ?? 0, cell: (r) => <span className="tabular-nums">{r.rate_per_day != null ? money(r.rate_per_day) : "-"}</span> },
+    // The payout this queue commits the company to, under the column.
+    { id: "amount", header: "Amount", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => money(n), accessor: (r) => r.amount ?? 0, cell: (r) => <span className="tabular-nums">{r.amount != null ? money(r.amount) : "-"}</span> },
+    { id: "state", header: "Status", filter: "select", groupBy: true, accessor: (r) => r.state, cell: (r) => <StatusBadge state={r.state} /> },
   ];
 
   const decideCol: Column<LeaveEncashment> = {

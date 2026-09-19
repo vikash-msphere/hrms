@@ -105,7 +105,7 @@ test.describe("every quick action", () => {
           await row.click();
 
           // It went where it said it would...
-          await expect.poll(() => page.url(), { timeout: 30_000 }).toContain(`#/${action.route}`);
+          await expect.poll(() => page.url(), { timeout: 30_000 }).toContain(`/${action.route}`);
           // ...and the page picked the intent up on mount: something to fill in is open. A press that navigates
           // and then does nothing is the failure this walk exists for, and it looks identical to a slow page
           // until the dialog never comes.

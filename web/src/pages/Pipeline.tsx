@@ -66,7 +66,7 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
   const [advancing, setAdvancing] = useState<string | null>(null);
   // The hired card's one action converts the candidate first when nobody accepted an offer, so it can spin.
   const [hiring, setHiring] = useState<string | null>(null);
-  // The card that is open in the drawer. Linkable: `#/pipeline/<applicationId>`.
+  // The card that is open in the drawer. Linkable: `/pipeline/<applicationId>`.
   const [detail, setDetail] = useState<Application | null>(null);
   useDeepOpen(openId, apps, setDetail);
   // Bulk selection, by application path. "Position filled" means rejecting nine people, and doing that one
@@ -497,8 +497,8 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
 
       {/* One bar for the whole selection: the alternative is nine dialogs and a half-tidied board. */}
       {selected.size > 0 && (
-        // Docked above the phone's bottom nav; 16px from the viewport edge from `md` up, where there is none.
-        <div className="sticky bottom-[calc(4.75rem+env(safe-area-inset-bottom))] z-20 mx-auto flex w-fit max-w-full flex-wrap items-center gap-2 rounded-full border bg-background/95 px-3 py-2 shadow-lg backdrop-blur md:bottom-4">
+        // Docked above the phone's home indicator; 16px from the viewport edge from `md` up, where there is none.
+        <div className="sticky bottom-[calc(1.75rem+env(safe-area-inset-bottom))] z-20 mx-auto flex w-fit max-w-full flex-wrap items-center gap-2 rounded-full border bg-background/95 px-3 py-2 shadow-lg backdrop-blur md:bottom-4">
           <span className="px-1 text-sm font-medium tabular-nums">{selected.size} selected</span>
           <Select value="" onValueChange={(v) => void bulkMove(v)}>
             <SelectTrigger className="h-8 w-40" disabled={bulkBusy}><SelectValue placeholder="Move to stage…" /></SelectTrigger>

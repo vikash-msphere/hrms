@@ -31,10 +31,13 @@ test("sections reorder and hide, survive a reload, and reset", async ({ as }) =>
     .poll(async () => (await topOf(holidays)) < (await topOf(board)), { timeout: 15_000 })
     .toBe(true); // holidays ship above the board
 
-  // Move the board above it, and the page redraws in the new order without reloading. Press until the board
-  // really is drawn higher rather than exactly once: "up" swaps with the previous entry in the saved ORDER,
-  // where a section with nothing to show still holds its slot while drawing no pixels, so one press only
-  // clears the holidays while the two are neighbours in that order.
+  // Move the board above it, and the page redraws in the new order without reloading. The reorder control is
+  // the row's grip: dragged with a pointer, or nudged with the arrow keys once focused - there are no up/down
+  // buttons (web/src/hooks/useSortable.ts). The keyboard path is the one driven here, because it is the same
+  // one-step-per-press move the drag commits and needs no synthesised pointer stream.
+  // Pressed until the board really is drawn higher rather than exactly once: a nudge swaps with the previous
+  // entry in the saved ORDER, where a section with nothing to show still holds its slot while drawing no
+  // pixels, so one press only clears the holidays while the two are neighbours in that order.
   await expect
     .poll(
       async () => {
@@ -46,9 +49,10 @@ test("sections reorder and hide, survive a reload, and reset", async ({ as }) =>
         // 30s across several intervals, so a swallowed miss here just costs it one of those, tried again
         // fresh on the next - stacking a second retry loop on top only fragments that same budget.
         try {
-          const up = page.getByRole("button", { name: "Move Board & announcements up" });
-          if (!(await up.isVisible())) await page.getByRole("button", { name: "Customize dashboard layout" }).click();
-          if (await up.isEnabled()) await up.click();
+          const grip = page.getByRole("button", { name: "Reorder Board & announcements" });
+          if (!(await grip.isVisible())) await page.getByRole("button", { name: "Customize dashboard layout" }).click();
+          await grip.focus();
+          await page.keyboard.press("ArrowUp");
           await page.keyboard.press("Escape");
         } catch { /* a detached button here just means this interval's click missed - the next one retries it */ }
         return (await topOf(board)) < (await topOf(holidays));

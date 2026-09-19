@@ -15,7 +15,11 @@ export const payslips = collectionRoutes({
   serialize: toPayslipResource,
   list: async (c, page) => {
     // Visibility (own / my-dept / org-wide) was decided in middleware; the service only binds it to columns.
-    return listPayslips(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken);
+    // Optional `?employee=employees/<token>` narrows to one person - what the Compensation tab of an employee
+    // record asks for. The inbound edge (decodeWireIds) already decoded the query ref to its internal id, so
+    // just take the id segment - do NOT decode again (that drops the filter).
+    const emp = c.req.query("employee");
+    return listPayslips(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, emp ? emp.split("/").pop()! : undefined);
   },
   // Both answer with PDF bytes rather than the resource, so they own their whole response (`raw`). Separate
   // verbs so the two can be granted independently: :preview renders the slip inline in the app, :download

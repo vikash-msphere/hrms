@@ -49,8 +49,8 @@ function armed(): boolean {
  * - Inside a box that clips or scrolls horizontally: that is exactly what a wide surface is REQUIRED to say
  *   for itself (a kanban board, a roster grid, a wide table). `html`'s own clip is deliberately NOT counted -
  *   leaning on that backstop is the bug this looks for.
- * - Fixed, or inside something fixed: the app bar, the bottom nav and the off-canvas drawer are positioned
- *   against the viewport, and the drawer is translated clear of it on purpose.
+ * - Fixed, or inside something fixed: the app bar and the off-canvas drawer are positioned against the
+ *   viewport, and the drawer is translated clear of it on purpose.
  * - `sr-only`: a screen-reader-only table measures wide because a table cannot shrink below its min-content
  *   (it ignores the `width: 1px`), while `clip: rect(0,0,0,0)` paints none of it.
  */

@@ -48,7 +48,7 @@ test.describe("holidays", () => {
     const discardBtn = discard.getByRole("button", { name: /Discard|Leave/ });
     if (await discardBtn.count()) await discardBtn.first().click();
 
-    // The employee's half: an optional holiday is theirs to take. The year rides in the hash query, so the
+    // The employee's half: an optional holiday is theirs to take. The year rides in the URL query, so the
     // page can be linked straight to the year the holiday is in.
     await gotoRoute(employee, `holidays?year=${date.slice(0, 4)}`, "Holiday Calendar");
     // The list view: the same holidays as rows, where a pick belongs to exactly one of them.

@@ -6,7 +6,7 @@ import { useTabActivity, markTabSeen } from "@/lib/tabActivity";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { useScrollActiveIntoView } from "@/hooks/useScrollActiveIntoView";
 
-// Renders a workspace's tab bar above the active page. Tabs are plain hash links to each sibling route, so
+// Renders a workspace's tab bar above the active page. Tabs are plain links to each sibling route, so
 // switching between related pages (e.g. Attendance → Overtime) is one click instead of a sidebar hunt, and
 // deep links / back-forward keep working. The bar is suppressed when the caller can see at most one tab.
 // In access-management mode each tab that maps to a collection carries its own "manage access" key (right on
@@ -51,7 +51,7 @@ export function Workspace({
           const fresh = on || unread > 0 ? 0 : activity[t.key] ?? 0;
           const link = (
             <a
-              href={`#/${t.key}`}
+              href={`/${t.key}`}
               aria-current={on ? "page" : undefined}
               className={cn(
                 // min-h-11 on touch: a 40px tab in a scrolling strip is a target you miss, and missing it
@@ -66,7 +66,7 @@ export function Workspace({
             >
               {t.label}
               {unread > 0 ? (
-                <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none tabular-nums text-white">
+                <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none tabular-nums text-primary-foreground">
                   {unread > 99 ? "99+" : unread}
                 </span>
               ) : fresh > 0 ? (

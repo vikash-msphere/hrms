@@ -26,7 +26,11 @@
 
 export type TemplateRule = {
   collection: string;
-  scope: "all" | "self" | "dept" | "create";
+  // The subject-relative tiers the engine honours, plus `create` (the bare collection gate). `reports`/`org`
+  // are the manager chain: no bundled template asks for them today - the seeded `manager` role is written
+  // against the department, and these templates mirror the seeded roles - but they are as authorable here as
+  // in the modal, and leaving them out of the type made them unsayable rather than undecided.
+  scope: "all" | "self" | "dept" | "reports" | "org" | "create";
   level?: "read" | "write" | "admin";
   verb?: string;
   /** A read-gated base field (`policy.redacted_fields`) or a PII sub-resource, for a field-level rule. */
@@ -97,6 +101,11 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
       { collection: "leave-requests", scope: "dept", verb: "reject" },
       list("leave-balances"), { collection: "leave-balances", scope: "dept", level: "read" },
       list("attendance"), { collection: "attendance", scope: "dept", level: "read" },
+      // The marks that decide what a short day COUNTED as, read-only - the seeded `manager` role holds exactly
+      // this (grants.ts `attendance-day-marks.my-dept.**`: read). Without it the attendance a team lead does
+      // hold shows counts with no explanation of why HR scored a day the way they did, and re-valuing a day
+      // stays a pay decision, which is not this bundle's.
+      list("attendance-day-marks"), { collection: "attendance-day-marks", scope: "dept", level: "read" },
       list("time-entries"), { collection: "time-entries", scope: "dept", level: "read" },
       { collection: "time-entries", scope: "dept", verb: "approve" },
       { collection: "time-entries", scope: "dept", verb: "reject" },
@@ -105,6 +114,16 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
       { collection: "expenses", scope: "dept", verb: "reject" },
       list("goals"), { collection: "goals", scope: "dept", level: "write" },
       list("check-ins"), { collection: "check-ins", scope: "dept", level: "write" },
+      // The review half of the same job, which this bundle simply did not carry: goals and 1:1s were here and
+      // the cycle they feed was not, so a team lead built from this template could open a report's Performance
+      // tab and see no reviews - and could not write the manager assessment the cycle waits on them for. READ
+      // plus the manager's own stage verbs, exactly the seeded `manager` role's shape (grants.ts): the verdict
+      // is written through the stage verbs, never by editing the review row.
+      list("reviews"), { collection: "reviews", scope: "dept", level: "read" },
+      { collection: "reviews", scope: "dept", verb: "submitManager" },
+      { collection: "reviews", scope: "dept", verb: "nominate" },
+      { collection: "reviews", scope: "dept", verb: "nudge" },
+      { collection: "reviews", scope: "dept", verb: "pdf" },
     ],
   },
   {
@@ -139,6 +158,9 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
     summary: "Watches attendance and fixes punches. No leave decisions, no pay, no PII.",
     rules: [
       list("attendance"), all("attendance", "read"),
+      // Read of the day marks for the same reason the team lead gets them, and read only for the reason this
+      // bundle's own summary gives: a mark is what a day is PAID as, and that decision stays HR's.
+      list("attendance-day-marks"), all("attendance-day-marks", "read"),
       list("attendance-regularizations"), all("attendance-regularizations", "write"),
       verb("attendance-regularizations", "approve"), verb("attendance-regularizations", "reject"),
       list("shifts"), all("shifts"),

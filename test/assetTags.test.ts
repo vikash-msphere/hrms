@@ -302,7 +302,7 @@ describe("scan payloads", () => {
   const origin = "https://hrms.example.com";
 
   it("builds each mode", () => {
-    expect(buildScanPayload("link", a, origin)).toBe("https://hrms.example.com/#/assets/abc123");
+    expect(buildScanPayload("link", a, origin)).toBe("https://hrms.example.com/assets/abc123");
     expect(buildScanPayload("found", a, origin)).toBe("https://hrms.example.com/found/abc123");
     expect(buildScanPayload("tag", a, origin)).toBe("MS-LAP-004");
     expect(buildScanPayload("tag_serial", a, origin)).toBe("MS-LAP-004 | SN:SN99");
@@ -310,7 +310,7 @@ describe("scan payloads", () => {
   });
 
   it("tag modes fall back to the deep link when the asset has no tag yet", () => {
-    expect(buildScanPayload("tag", { id: "x", tag: null }, origin)).toBe(`${origin}/#/assets/x`);
+    expect(buildScanPayload("tag", { id: "x", tag: null }, origin)).toBe(`${origin}/assets/x`);
   });
 
   it("parse inverts every build mode", () => {
@@ -318,6 +318,13 @@ describe("scan payloads", () => {
     expect(parseScanPayload(buildScanPayload("found", a, origin))).toEqual({ id: "abc123" });
     expect(parseScanPayload(buildScanPayload("tag", a, origin))).toEqual({ tag: "MS-LAP-004" });
     expect(parseScanPayload(buildScanPayload("tag_serial", a, origin))).toEqual({ tag: "MS-LAP-004" });
+  });
+
+  // A sticker is a physical object: one printed while the app still used hash routes is on a laptop lid
+  // somewhere and has to keep resolving.
+  it("still reads a deep link printed in the old hash form", () => {
+    expect(parseScanPayload(`${origin}/#/assets/abc123`)).toEqual({ id: "abc123" });
+    expect(parseScanPayload(`${origin}/#/assets/abc123?s=7KQ3NBX2WD`)).toEqual({ id: "abc123", secret: "7KQ3NBX2WD" });
   });
 
   it("handles hand-typed tags, junk and foreign URLs", () => {
@@ -330,7 +337,7 @@ describe("scan payloads", () => {
   // older sticker printed before secrets existed still has to resolve to its asset.
   it("carries the tag secret through the deep link and back", () => {
     const withSecret = { ...a, secret: "7KQ3NBX2WD" };
-    expect(buildScanPayload("link", withSecret, origin)).toBe("https://hrms.example.com/#/assets/abc123?s=7KQ3NBX2WD");
+    expect(buildScanPayload("link", withSecret, origin)).toBe("https://hrms.example.com/assets/abc123?s=7KQ3NBX2WD");
     expect(parseScanPayload(buildScanPayload("link", withSecret, origin))).toEqual({ id: "abc123", secret: "7KQ3NBX2WD" });
     expect(parseScanPayload(buildScanPayload("link", a, origin))).toEqual({ id: "abc123" });
     expect(parseScanPayload(`${origin}/found/abc123?s=7KQ3NBX2WD`)).toEqual({ id: "abc123", secret: "7KQ3NBX2WD" });

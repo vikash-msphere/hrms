@@ -99,7 +99,10 @@ describe("ruleFlags - unlistable", () => {
   it("flags a row-scoped rule with nothing that opens the collection", () => {
     const r = rule({ scope: "self" });
     expect(unlistable(ruleFlags(r, [r]))?.note).toMatch(/open the list/);
-    for (const scope of ["dept", "subtree", "exact"]) {
+    // The manager chain is in this list too, and was the one row-scoped shape the lint did not know about:
+    // `<collection>.my-reports.**` is a two-token pattern like every other one here, so it decides each
+    // report's record and leaves the page they are on refusing the caller.
+    for (const scope of ["dept", "subtree", "exact", "reports", "org"]) {
       const s = rule({ scope, scope_ref: "departments/abc" });
       expect(unlistable(ruleFlags(s, [s])), `scope ${scope}`).toBeTruthy();
     }

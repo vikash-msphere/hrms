@@ -108,6 +108,9 @@ export const EVENT_TYPES: EventTypeDef[] = [
   // Attendance & scheduling
   { type: "attendanceRegularization.requested", label: "Regularization requested", module: "Attendance", subjectCollection: "attendance-regularizations", fields: [{ name: "date", type: "date" }] },
   { type: "attendanceRegularization.approved", label: "Regularization approved", module: "Attendance", subjectCollection: "attendance-regularizations", fields: [{ name: "date", type: "date" }] },
+  // A day re-valued by HR. `credit` is on the payload because it is what a rule would branch on - "tell the
+  // payroll channel whenever a day is marked absent" is the obvious first rule anybody writes against this.
+  { type: "dayMark.set", label: "Day marked", module: "Attendance", subjectCollection: "attendance-day-marks", fields: [{ name: "date", type: "date" }, { name: "credit", type: "string" }] },
   { type: "overtime.requested", label: "Overtime requested", module: "Attendance", subjectCollection: "overtime-requests", fields: [{ name: "hours", type: "number" }] },
   { type: "overtime.approved", label: "Overtime approved", module: "Attendance", subjectCollection: "overtime-requests", fields: [{ name: "hours", type: "number" }] },
   { type: "remoteWork.requested", label: "Remote work requested", module: "Attendance", subjectCollection: "remote-work-requests", fields: [{ name: "from", type: "date" }, { name: "to", type: "date" }] },

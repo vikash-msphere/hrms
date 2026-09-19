@@ -1,25 +1,22 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Clock, LogIn, LogOut, CircleDot, Pencil, ChevronLeft, ChevronRight, AlertTriangle, Plus, Trash2, CalendarDays, List, Coffee, Timer, CalendarCheck, AlarmClock, Users, Check, X, Zap, CheckSquare, TrendingUp } from "lucide-react";
-import { create, get, invoke } from "@/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Clock, LogIn, LogOut, CircleDot, Pencil, AlertTriangle, Plus, Trash2, Users, Check, X, ChevronRight, Coffee } from "lucide-react";
+import { create, invoke } from "@/api";
 import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
-import { useMedia } from "@/hooks/useMedia";
 import { useApprovals } from "@/lib/approvals";
 import { useClock, listAllSessions } from "@/lib/clock";
-import { usePermission, useCanExport } from "@/lib/perm";
+import { usePermission, useCanExport, useCanWriteOthers } from "@/lib/perm";
 import { fireIntent, useIntent } from "@/lib/intent";
 import { navigate } from "@/router";
 import { exportTable } from "@/lib/exportTable";
 import { cn, idOf, formatDate } from "@/lib/utils";
-import { dateFormat } from "@/lib/intl";
 import {
-  summarizeByDay, buildAttendanceRows, fmtHM, fmtDuration, fmtDurationShort, fmtMinOfDay, localDay, localMinutes, zonedInstant,
-  weekdayOf, weekStartOf, monthStartOf, monthEndOf, monthGridDays, weekdayOrder, addMonths, hhmmToMin, STATUS_UI,
-  type DayStatus, type AttendanceRow, type AttendanceSchedule,
+  summarizeByDay, buildAttendanceRows, statsOf, fmtDay, fmtHM, fmtHM24, fmtDuration, fmtDurationShort,
+  localDay, localMinutes, zonedInstant, weekdayOf, hhmmToMin, signedDuration, STATUS_UI,
+  type DayStatus, type AttendanceRow, type AttendanceSchedule, type LeaveRange, type WindowStats,
 } from "@/lib/attendance";
+import { useAttendanceWindow } from "@/hooks/useAttendanceWindow";
+import { AttendanceHistory } from "@/components/common/AttendanceHistory";
 import type { AttendanceSession, AttendanceRegularization, Department, Employee, Holiday, LeaveRequest, LeaveType, Me } from "@/types";
-import { Chart } from "@/components/common/Chart";
-import { heatmapDays } from "@/lib/chartTheme";
-import type { AttendanceSeriesDay } from "@/lib/analytics";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { ExportButton } from "@/components/common/ExportButton";
@@ -32,91 +29,16 @@ import { Field } from "@/components/common/Field";
 import { FormError } from "@/components/common/FormError";
 import { useDiscardGuard } from "@/hooks/useDiscardGuard";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
-import { SummaryStrip } from "@/components/common/SummaryStrip";
-import { useKpiFocus } from "@/lib/kpiFocus";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 
-// Wall-clock "HH:MM" (24h) of an instant in the org timezone, for prefilling the correction modal's time inputs.
-// `hourCycle: "h23"` because this fills an `<input type="time">`, which accepts 00-23 and rejects "24:15" - and
-// `hour12: false` leaves the cycle to the locale, where h24 spells midnight that way.
-const hhmm = (iso: string, tz: string) =>
-  dateFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
-// "Thu, Jun 12" for the history table's day column (the range caption above carries the year). One row per day
-// of the range, so the formatter is shared rather than rebuilt per cell (see lib/intl.ts).
-const DAY_OPTS: Intl.DateTimeFormatOptions = { weekday: "short", month: "short", day: "numeric" };
-const fmtDay = (ymd: string) => dateFormat(undefined, DAY_OPTS).format(new Date(`${ymd}T00:00:00`));
-// "Thursday, 12 June" for the calendar's selected-day panel, which has room to spell it out.
-const fmtDayLong = (ymd: string) => new Date(`${ymd}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
-const monthLabel = (ymd: string) => new Date(`${ymd}T00:00:00Z`).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
-const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DAY_MS = 86400000;
 const upper = (s?: string) => (s ?? "").toUpperCase();
-const signed = (min: number) => `${min >= 0 ? "+" : "-"}${fmtDurationShort(Math.abs(min))}`;
-
-// How the history is shown: a list of days (with weekly subtotals) or a month grid. Attendance is
-// calendar-shaped, so the grid is the pattern view; the list is the detail view. Remembered per user.
-type View = "list" | "calendar";
-const viewKey = (email: string) => `hrms.attendance.view:${email}`;
-const loadView = (email: string): View => {
-  try { return localStorage.getItem(viewKey(email)) === "calendar" ? "calendar" : "list"; } catch { return "list"; }
-};
-
-// One week of the history list: its days plus the subtotal shown on the week's header row.
-type WeekGroup = { start: string; rows: AttendanceRow[]; minutes: number; days: number };
-// The half-day session flags ride along: a leave request can cover one session of its boundary day, and the
-// grid has to see that or it calls a half-covered day "On leave" while payroll docks half of it. Shape (and
-// the rule that reads it) comes from the server - see lib/attendance.ts.
-type LeaveRange = { start: string; end: string; startSession?: number; endSession?: number };
-
-// Everything the summary strip, the ledger and the period comparison read off a window of days.
-type WindowStats = {
-  worked: number; late: number; absent: number; minutes: number; workingDays: number;
-  avgDay: number; onTimePct: number | null; avgIn: number | null; avgOut: number | null;
-  // The ledger counts COMPLETED days only - today is still being worked, so counting it as a full expected
-  // day would show a deficit all morning.
-  doneMinutes: number; expectedMinutes: number;
-};
-
-function statsOf(rows: AttendanceRow[], tz: string, fullDayMinutes: number, todayYmd: string): WindowStats {
-  let worked = 0, late = 0, absent = 0, minutes = 0, workingDays = 0, judged = 0, punctual = 0;
-  let arrSum = 0, arrN = 0, depSum = 0, depN = 0, doneMinutes = 0, expectedDays = 0;
-  for (const r of rows) {
-    // A day nobody was rostered on is not a working day, whether it was worked or not: `worked_off_day` joins
-    // holiday and on_leave here. Counted, it added a whole `full_day_minutes` of EXPECTATION for voluntary
-    // work - so coming in on a Saturday moved the "done vs expected" bar backwards - and put that day's
-    // arrival into the punctuality score for a shift window that did not apply to it. The minutes it earned
-    // still count below; the day was simply not owed. (`workingDaysInRange` on the server skips it too.)
-    const counts = r.status !== "holiday" && r.status !== "on_leave" && r.status !== "worked_off_day";
-    if (counts) workingDays++;
-    if (counts && r.day < todayYmd) expectedDays++;
-    const s = r.summary;
-    if (s) {
-      worked++;
-      minutes += s.workedMinutes;
-      if (r.day < todayYmd) doneMinutes += s.workedMinutes;
-      if (s.arrival) { arrSum += localMinutes(s.arrival, tz); arrN++; }
-      if (s.departure) { depSum += localMinutes(s.departure, tz); depN++; }
-      if (counts && !s.open) { judged++; if (!s.late) punctual++; } // a still-open day hasn't earned a verdict yet
-    }
-    if (r.status === "late" || r.status === "late_early") late++;
-    else if (r.status === "absent") absent++;
-  }
-  return {
-    worked, late, absent, minutes, workingDays,
-    avgDay: worked ? Math.round(minutes / worked) : 0,
-    onTimePct: judged ? Math.round((punctual / judged) * 100) : null,
-    avgIn: arrN ? arrSum / arrN : null,
-    avgOut: depN ? depSum / depN : null,
-    doneMinutes,
-    expectedMinutes: expectedDays * fullDayMinutes,
-  };
-}
 
 export default function Attendance({ me }: { me: Me }) {
   const { toast } = useToast();
@@ -126,11 +48,6 @@ export default function Attendance({ me }: { me: Me }) {
   const tz = sched.timezone;
   const [pageSessions, setPageSessions] = useState<AttendanceSession[]>([]); // sessions for the visible history window
   const [recentSessions, setRecentSessions] = useState<AttendanceSession[]>([]); // last couple of days, for "today"
-  const [expanded, setExpanded] = useState<Set<string>>(new Set()); // history days whose punch detail is unfolded
-  const [view, setView] = useState<View>(() => loadView(me.email));
-  const [selectedDay, setSelectedDay] = useState<string | null>(null); // month grid: the day whose detail is open
-  const [picked, setPicked] = useState<Set<string>>(new Set()); // month grid: days ticked for a bulk correction
-  const [page, setPage] = useState(0); // 0 = the current window; each higher page steps one window further back
   const [pageLoading, setPageLoading] = useState(true); // history window fetch in flight (skeleton, not "no data")
   const [now, setNow] = useState(Date.now());
   const [correctionBusy, setCorrectionBusy] = useState(false); // a correction submit in flight
@@ -138,9 +55,6 @@ export default function Attendance({ me }: { me: Me }) {
   const filedThisDialog = useRef<Set<string>>(new Set()); // days the open correction dialog already filed
   // Closing is the one moment the already-filed set stops being true, so every open starts clean.
   const closeCorrection = () => { filedThisDialog.current = new Set(); setCorrecting(null); };
-  const [compare, setCompare] = useState(false); // opt-in: fetch the previous window to show deltas
-  const [prevStats, setPrevStats] = useState<WindowStats | null>(null);
-  const compactViewport = useMedia("(max-width: 639px)"); // phones get day cards; the day table needs a wide viewport
   // Org display switches (Settings → Attendance). Absent means shown, so an org that never touched them keeps
   // the bar; the projection is a sub-toggle of the bar it sits on.
   const showDayProgress = sched.show_day_progress !== false;
@@ -148,6 +62,10 @@ export default function Attendance({ me }: { me: Me }) {
   const canApprove = me.capabilities.includes("attendance-regularizations.approve");
   const canExport = useCanExport("attendance");
   const canLogOvertime = usePermission("overtime-requests.write");
+  // Re-valuing a day, for the teammate logs this page opens from the roster. A roster spans everybody, so
+  // there is no one subject to ask about: the caller-level question ("is there anybody but me whose day I
+  // could mark") is the honest one here, and the server still refuses any row the grant does not reach.
+  const canMarkDays = useCanWriteOthers("attendance-day-marks");
   // `all: true` on the roster: this is the grid's list of PEOPLE, one row each, with no "load more" for a
   // reader to press - the shape `all` exists for. On one page, an org past a hundred simply had rows missing.
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
@@ -201,27 +119,10 @@ export default function Attendance({ me }: { me: Me }) {
   // The device's zone, when it differs from the org's: every time on this page is org-local, so say so once.
   const deviceTz = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone, []);
 
-  // The visible window (YYYY-MM-DD). The list pages by 30 days from today; the grid pages by calendar month,
-  // so the month it draws is exactly the month it fetched.
-  const { fromYmd, toYmd } = useMemo(() => {
-    if (view === "calendar") {
-      const month = addMonths(monthStartOf(orgToday), -page);
-      return { fromYmd: month, toYmd: monthEndOf(month) };
-    }
-    const toMs = Date.parse(orgToday + "T00:00:00Z") - page * 30 * DAY_MS;
-    return { fromYmd: new Date(toMs - 29 * DAY_MS).toISOString().slice(0, 10), toYmd: new Date(toMs).toISOString().slice(0, 10) };
-  }, [view, page, orgToday]);
-  // The window immediately before this one, for the opt-in comparison.
-  const prevWindow = useMemo(() => {
-    if (view === "calendar") {
-      const month = addMonths(fromYmd, -1);
-      return { from: month, to: monthEndOf(month) };
-    }
-    const to = new Date(Date.parse(fromYmd + "T00:00:00Z") - DAY_MS);
-    return { from: new Date(+to - 29 * DAY_MS).toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
-  }, [view, fromYmd]);
-  const windowLabel = view === "calendar" ? monthLabel(fromYmd) : `${formatDate(fromYmd)} – ${formatDate(toYmd)}`;
-  const prevLabel = view === "calendar" ? "last month" : "the previous 30 days";
+  // The visible window, shared with the history below it: the team panel promises "the same days the history
+  // shows", and one object is the only way that stays true through a view switch or a page back.
+  const win = useAttendanceWindow(me.email, orgToday);
+  const { fromYmd, toYmd, prevWindow, windowLabel } = win;
 
   // Leave is fetched for the DAYS ON SCREEN, not as "the 100 most recently created requests in the org".
   //
@@ -242,32 +143,6 @@ export default function Attendance({ me }: { me: Me }) {
   }, [prevWindow.from, prevWindow.to, fromYmd, toYmd, orgToday]);
   const { rows: leaves } = useCollection<LeaveRequest>("leave-requests", { all: true, params: { from: leaveWindow.from, to: leaveWindow.to } });
 
-  const toggleDay = useCallback((day: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      next.has(day) ? next.delete(day) : next.add(day);
-      return next;
-    });
-  }, []);
-  // Switching view re-bases the window (30 days vs a calendar month), so start again at the current one.
-  const switchView = (v: View) => {
-    setView(v);
-    setPage(0);
-    setSelectedDay(null);
-    setPicked(new Set());
-    try { localStorage.setItem(viewKey(me.email), v); } catch { /* private mode - the toggle just won't stick */ }
-  };
-  const goPage = (next: number) => { setPage(next); setSelectedDay(null); setPicked(new Set()); };
-  // Pressing a bar in the hours chart opens that day, in whichever shape the view has for a day: the month
-  // grid's detail panel on the calendar, the unfolded punch row in the history list. Not a view switch -
-  // the two views are different WINDOWS (a calendar month against the last thirty days), so a day picked in
-  // one of them is not always in the other.
-  const pickDay = useCallback((day: string) => {
-    if (view === "calendar") { setSelectedDay(day); return; }
-    setExpanded((prev) => new Set(prev).add(day));
-    requestAnimationFrame(() => document.getElementById(`att-day-${day}`)?.scrollIntoView({ block: "center", behavior: "smooth" }));
-  }, [view]);
-
   // Shared inputs for building per-day rows (holidays + approved leave).
   const holidayByDay = useMemo(() => {
     const m = new Map<string, Holiday>();
@@ -283,13 +158,12 @@ export default function Attendance({ me }: { me: Me }) {
   );
   // The approved leave covering a given day (for the expanded "why no punches" detail).
   const leaveForDay = useCallback((day: string) => myApprovedLeaves.find((l) => l.start_date <= day && day <= l.end_date), [myApprovedLeaves]);
-  const leaveTypeName = useMemo(() => {
-    const m = new Map(leaveTypes.map((t) => [idOf(t.path), t]));
-    return (ref?: string) => (ref ? m.get(idOf(ref)) : undefined);
-  }, [leaveTypes]);
+  // Everything the history needs to describe a day it has no punches for. Handed over rather than re-read:
+  // the leave feed above is already on this page for the team panel, so the history fetches none of its own.
+  const myLeave = useMemo(() => ({ ranges: leaveRanges, forDay: leaveForDay }), [leaveRanges, leaveForDay]);
 
-  // One way to turn a set of punches into per-day rows, reused for my window, the previous window and every
-  // teammate's window (each with their own leave + join date).
+  // One way to turn a set of punches into per-day rows, reused for today's row and every teammate's window
+  // (each with their own leave + join date).
   const buildRows = useCallback(
     (sessions: AttendanceSession[], opts: { from: string; to: string; leaves: LeaveRange[]; joined?: string }) =>
       buildAttendanceRows({
@@ -305,60 +179,6 @@ export default function Attendance({ me }: { me: Me }) {
     () => buildRows(recentSessions.filter((s) => mine(s.employee)), { from: orgToday, to: orgToday, leaves: leaveRanges, joined: joinedYmd })[0],
     [recentSessions, buildRows, leaveRanges, joinedYmd, mine, orgToday],
   );
-
-  // The history window: punches + holidays + my approved leave, with absent-day detection.
-  const rows = useMemo(
-    () => buildRows(pageSessions.filter((s) => mine(s.employee)), { from: fromYmd, to: toYmd, leaves: leaveRanges, joined: joinedYmd }),
-    [pageSessions, buildRows, leaveRanges, fromYmd, toYmd, joinedYmd, mine],
-  );
-  const rowByDay = useMemo(() => new Map(rows.map((r) => [r.day, r])), [rows]);
-
-  // Every figure in the strip above is a set of days, so clicking one narrows the history list to exactly those
-  // days. The month grid has to stay whole to read as a calendar, so a metric click lands in the list view.
-  const isLateRow = (r: AttendanceRow) => r.status === "late" || r.status === "late_early";
-  const isShortRow = (r: AttendanceRow) =>
-    !!r.summary && r.summary.workedMinutes > 0 && r.summary.workedMinutes < sched.full_day_minutes;
-  const isLongRow = (r: AttendanceRow) => !!r.summary && r.summary.workedMinutes > sched.full_day_minutes + 30;
-  // Punctuality is judged on CLOSED days only, the way the on-time percentage above is: a day still being
-  // worked hasn't earned a verdict yet, so it belongs to neither side.
-  const isOnTimeRow = (r: AttendanceRow) => !!r.summary && !r.summary.open && !r.summary.late;
-  // One key per metric, even where two metrics count the same rows (days and hours worked): the key IS the
-  // selection, so sharing one would light both segments off a single click.
-  type DayFocus = "worked" | "hours" | "onTime" | "late" | "absent" | "short" | "long";
-  const kf = useKpiFocus<AttendanceRow, DayFocus>({
-    worked: { label: "days with punches", match: (r) => !!r.summary && r.summary.workedMinutes > 0 },
-    hours: { label: "days with punches", match: (r) => !!r.summary && r.summary.workedMinutes > 0 },
-    onTime: { label: "on-time days", match: isOnTimeRow },
-    late: { label: "late arrivals", match: isLateRow },
-    absent: { label: "days with no punches", match: (r) => r.status === "absent" },
-    short: { label: "short days", match: isShortRow },
-    long: { label: "days over a full shift", match: isLongRow },
-  });
-  // A metric click in the month view switches to the list, which is the shape that can show a filtered subset.
-  const dayKpi = (key: DayFocus) => {
-    const base = kf.kpi(key);
-    return { ...base, onClick: () => { if (view !== "list") switchView("list"); base.onClick(); } };
-  };
-  const listRows = useMemo(() => kf.apply(rows), [rows, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // The list groups days into weeks so a long window has rhythm and each week carries its own total.
-  const weeks = useMemo(() => {
-    const out: WeekGroup[] = [];
-    for (const r of listRows) {
-      const start = weekStartOf(r.day);
-      let g = out[out.length - 1];
-      if (!g || g.start !== start) { g = { start, rows: [], minutes: 0, days: 0 }; out.push(g); }
-      g.rows.push(r);
-      if (r.summary) { g.minutes += r.summary.workedMinutes; g.days++; }
-    }
-    return out;
-  }, [listRows]);
-
-  const stats = useMemo(() => statsOf(rows, tz, sched.full_day_minutes, orgToday), [rows, tz, sched.full_day_minutes, orgToday]);
-  // Absent days in the visible window, surfaced above the table so a missed punch is one click from a fix.
-  const absentRows = useMemo(() => rows.filter((r) => r.status === "absent"), [rows]);
-  const shortDays = useMemo(() => rows.filter(isShortRow).length, [rows, sched.full_day_minutes]); // eslint-disable-line react-hooks/exhaustive-deps
-  const longDays = useMemo(() => rows.filter(isLongRow).length, [rows, sched.full_day_minutes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const myOpen = clock.mine;
   const openMin = myOpen ? Math.max(0, Math.round((now - +new Date(myOpen.clock_in)) / 60000)) : 0;
@@ -434,27 +254,6 @@ export default function Attendance({ me }: { me: Me }) {
     const t = setInterval(() => setNow(Date.now()), 15000);
     return () => clearInterval(t);
   }, []);
-  // The grid opens on the day you're most likely to be looking for: today, else the newest day with a record.
-  useEffect(() => {
-    if (view !== "calendar" || pageLoading || selectedDay) return;
-    setSelectedDay(rowByDay.has(orgToday) ? orgToday : rows[0]?.day ?? null);
-  }, [view, pageLoading, selectedDay, rowByDay, rows, orgToday]);
-  // The previous window is only ever fetched when the comparison is switched on (an extra read has to be asked for).
-  useEffect(() => {
-    if (!compare) { setPrevStats(null); return; }
-    let live = true;
-    void (async () => {
-      try {
-        const sessions = await listAllSessions(`attendance?from=${encodeURIComponent(`${prevWindow.from}T00:00:00.000Z`)}&to=${encodeURIComponent(`${prevWindow.to}T23:59:59.999Z`)}`);
-        if (!live) return;
-        const prevRows = buildRows(sessions.filter((s) => mine(s.employee)), { from: prevWindow.from, to: prevWindow.to, leaves: leaveRanges, joined: joinedYmd });
-        setPrevStats(statsOf(prevRows, tz, sched.full_day_minutes, orgToday));
-      } catch {
-        if (live) setPrevStats(null);
-      }
-    })();
-    return () => { live = false; };
-  }, [compare, prevWindow, buildRows, leaveRanges, joinedYmd, tz, sched.full_day_minutes, orgToday, mine]);
 
   async function punch(verb: "clockIn" | "clockOut") {
     await clock.punch(verb);
@@ -501,10 +300,7 @@ export default function Attendance({ me }: { me: Me }) {
         variant: "success",
       });
       reloadRegs();
-      if (!failure) {
-        closeCorrection();
-        setPicked(new Set());
-      }
+      if (!failure) closeCorrection();
     }
     const done = filedThisDialog.current.size;
     return failure && done ? `Filed ${done} of ${days.length}. ${failure}` : failure;
@@ -523,30 +319,16 @@ export default function Attendance({ me }: { me: Me }) {
     });
   }
 
-  function exportMine(format: "csv" | "xlsx") {
-    const headers = ["Date", "Day", "Status", "First in", "Last out", "Worked", "Worked minutes", "Late by (min)", "Left early by (min)"];
-    const data = [...rows].reverse().map((r) => {
-      const s = r.summary;
-      return [
-        r.day,
-        new Date(`${r.day}T00:00:00`).toLocaleDateString(undefined, { weekday: "long" }),
-        STATUS_UI[r.status].label,
-        s?.arrival ? fmtHM(s.arrival, tz) : "",
-        s?.departure ? fmtHM(s.departure, tz) : "",
-        s ? fmtDuration(s.workedMinutes) : "",
-        s?.workedMinutes ?? 0,
-        s?.lateByMin ?? 0,
-        s?.earlyByMin ?? 0,
-      ];
-    });
-    void exportTable(`attendance-${fromYmd}-to-${toYmd}`, headers, data, format, "attendance");
-  }
-
   // Manager/HR: everyone's standing right now, from the sessions already fetched for the clock card (no extra
   // reads). People the caller can see but whose punches they can't read simply read as "not in yet".
   const roster = useMemo(
     () => employees.filter((e) => !e.delete_time && (!e.start_date || e.start_date.slice(0, 10) <= orgToday)),
     [employees, orgToday],
+  );
+  // Anybody's join date, for the per-person log the team table opens.
+  const joinedOf = useCallback(
+    (id: string) => employees.find((e) => idOf(e.path) === id)?.start_date,
+    [employees],
   );
   const approvedLeaveByEmp = useMemo(() => {
     const m = new Map<string, LeaveRange[]>();
@@ -623,29 +405,6 @@ export default function Attendance({ me }: { me: Me }) {
       .sort((a, b) => b.stats.absent - a.stats.absent || b.stats.late - a.stats.late || a.name.localeCompare(b.name));
   }, [canApprove, roster, pageSessions, buildRows, approvedLeaveByEmp, fromYmd, toYmd, tz, sched.full_day_minutes, orgToday]);
 
-  const selectedRow = selectedDay ? rowByDay.get(selectedDay) : undefined;
-  const overtimeMinutes = (r: AttendanceRow) => {
-    const dep = r.summary?.departure;
-    if (!dep || !r.summary || r.summary.open) return 0;
-    return Math.max(0, localMinutes(dep, tz) - hhmmToMin(sched.shift_end));
-  };
-  const dayDetailProps = (r: AttendanceRow) => ({
-    row: r,
-    punches: r.summary?.sessions ?? [],
-    now,
-    tz,
-    // A half-day-leave row is about the leave too - it is the half that WAS excused - so the detail panel gets
-    // the same request to describe.
-    leave: r.status === "on_leave" || r.status === "half_day_leave" ? leaveForDay(r.day) : undefined,
-    leaveType: r.status === "on_leave" || r.status === "half_day_leave" ? leaveTypeName(leaveForDay(r.day)?.leave_type) : undefined,
-    holiday: r.status === "holiday" ? holidayByDay.get(r.day) : undefined,
-    onCorrect: () => setCorrecting([r]),
-    // Offer the overtime hand-off only for a day that actually ran well past the shift (and only to callers
-    // who may file one), so it stays a real signal rather than a button on every row.
-    onLogOvertime: canLogOvertime && overtimeMinutes(r) >= 30 ? () => logOvertime(r) : undefined,
-    overtimeMinutes: overtimeMinutes(r),
-  });
-
   return (
     <div>
       <PageHeader
@@ -710,8 +469,11 @@ export default function Attendance({ me }: { me: Me }) {
                   variant="ghost"
                   className="h-7 px-2"
                   onClick={() => {
+                    // The day the forgotten punch belongs to, built from the recent fetch rather than read off
+                    // the history: the history may be paged back to a window that does not contain it.
                     const day = localDay(staleOpen.clock_in, tz);
-                    setCorrecting([rowByDay.get(day) ?? todayRow ?? { day, status: "absent" as DayStatus }]);
+                    const [row] = buildRows(recentSessions.filter((s) => mine(s.employee)), { from: day, to: day, leaves: leaveRanges, joined: joinedYmd });
+                    setCorrecting([row ?? { day, status: "absent" as DayStatus }]);
                   }}
                 >
                   Fix the times
@@ -745,275 +507,34 @@ export default function Attendance({ me }: { me: Me }) {
           </CardContent>
         </Card>
 
-        {/* Hours per day across the window, the running balance against the schedule, and (on request) how it
-            compares with the window before. */}
-        {!pageLoading && rows.length > 1 && (
-          <HoursTrend
-            rows={rows}
-            full={sched.full_day_minutes}
-            stats={stats}
-            prev={prevStats}
-            prevLabel={prevLabel}
-            comparing={compare}
-            onToggleCompare={() => setCompare((c) => !c)}
-            selectedDay={view === "calendar" ? selectedDay : null}
-            onPickDay={pickDay}
+        {/* My attendance: the hours trend, the year, the window summary and the day-by-day history. The same
+            component an approver reads somebody else's record with - it is handed the punches this page has
+            already fetched (they are everyone's; it keeps mine) and the leave feed, so it reads nothing of its
+            own, and the correction affordances are wired up because this is my own record. */}
+        {me.employee_id && (
+          <AttendanceHistory
+            employeeId={me.employee_id}
+            joinedYmd={joinedYmd}
+            win={win}
+            sched={sched}
+            orgToday={orgToday}
+            now={now}
+            title="My attendance"
+            // Never on your own log, whatever the grant says: a day mark is what the day is PAID as, so
+            // re-valuing your own is not an affordance this page offers. (grants.ts says the same in the other
+            // direction - the self tier on day marks is read.)
+            canMark={false}
+            canExport={canExport}
+            exportName="attendance"
+            sessions={pageSessions}
+            loading={pageLoading}
+            leave={myLeave}
+            liveMinutes={openMin}
+            onCorrect={setCorrecting}
+            onLogOvertime={canLogOvertime ? logOvertime : undefined}
+            emptyText="No attendance yet. Clock in above to record your first day."
           />
         )}
-
-        {/* A year at a glance. Folded away and fetched only when it is opened: a year of punches is a server
-            aggregate (GET /v1/people-analytics with a series), and nobody should pay for it to look at
-            this month. */}
-        {!pageLoading && me.employee_id && <YearHeatmap employeeId={me.employee_id} tz={tz} onPickDay={pickDay} inWindow={(d) => d >= fromYmd && d <= toYmd} />}
-
-        {/* The visible window at a glance: days/hours, punctuality with average in-out, and what needs fixing.
-            Every metric narrows the history below, so the strip rides directly on top of it - under the charts,
-            which are only there to be read. */}
-        {!pageLoading && rows.length > 0 && (
-          <SummaryStrip
-            className="mb-0"
-            items={[
-              { label: "Days worked", value: stats.worked, icon: CalendarCheck, hint: `of ${stats.workingDays} working`, ...dayKpi("worked") },
-              { label: "Hours worked", value: fmtDuration(stats.minutes + (page === 0 ? openMin : 0)), icon: Clock, hint: stats.avgDay ? `avg ${fmtDurationShort(stats.avgDay)} a day` : "nothing logged yet", ...dayKpi("hours") },
-              {
-                label: "On time",
-                value: stats.onTimePct === null ? "-" : `${stats.onTimePct}%`,
-                icon: Timer,
-                tone: stats.onTimePct === null ? "muted" : stats.onTimePct >= 90 ? "success" : stats.onTimePct >= 75 ? "warning" : "destructive",
-                hint: stats.avgIn !== null ? `in ${fmtMinOfDay(stats.avgIn)}${stats.avgOut !== null ? ` · out ${fmtMinOfDay(stats.avgOut)}` : ""}` : "no clock-ins yet",
-                ...dayKpi("onTime"),
-              },
-              { label: "Late arrivals", value: stats.late, icon: AlarmClock, tone: stats.late > 0 ? "warning" : "muted", hint: stats.late ? "after shift start" : "all on time", ...dayKpi("late") },
-              // Short and long days are what a timesheet argument turns on, and neither shows in a day count.
-              ...(shortDays ? [{ label: "Short days", value: shortDays, icon: Clock, tone: "warning" as const, hint: "under a full shift", ...dayKpi("short") }] : []),
-              ...(longDays ? [{ label: "Long days", value: longDays, icon: Clock, tone: "default" as const, hint: "over a full shift", ...dayKpi("long") }] : []),
-              { label: "Absent", value: stats.absent, icon: AlertTriangle, tone: stats.absent > 0 ? "destructive" : "muted", hint: stats.absent ? "fix with a correction" : "none missed", ...dayKpi("absent") },
-            ]}
-          />
-        )}
-
-        {/* Misses that need regularizing, pulled out of the history so they're impossible to overlook. */}
-        {!pageLoading && absentRows.length > 0 && (
-          <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" aria-hidden />
-              <div className="min-w-0 space-y-2">
-                <p className="text-sm font-medium">
-                  {absentRows.length === 1 ? "1 working day here has" : `${absentRows.length} working days here have`} no punches
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  If you worked or forgot to clock, request a correction - your manager or HR approves it and the day is fixed.
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {absentRows.map((r) => (
-                    <button
-                      key={r.day}
-                      type="button"
-                      onClick={() => setCorrecting([r])}
-                      className="inline-flex items-center gap-1.5 rounded-full border bg-background px-2.5 py-1 text-xs font-medium hover:border-foreground/30 hover:bg-muted"
-                      title={`Request a correction for ${formatDate(r.day)}`}
-                    >
-                      <Pencil className="h-3 w-3 text-muted-foreground" aria-hidden /> {fmtDay(r.day)}
-                    </button>
-                  ))}
-                  {absentRows.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => setCorrecting(absentRows)}
-                      className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-background px-2.5 py-1 text-xs font-medium text-destructive hover:bg-destructive/10"
-                    >
-                      <CheckSquare className="h-3 w-3" aria-hidden /> Fix all {absentRows.length} with the same times
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* My history: a week-grouped list of days, or the same days as a month grid (each day folds open to its punches) */}
-        <Card>
-          <CardHeader className="flex-col items-start gap-3 space-y-0 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-3">
-              <CardTitle className="text-base">My attendance</CardTitle>
-              <div className="inline-flex rounded-lg bg-muted p-0.5" role="group" aria-label="History view">
-                {([["list", "List", List], ["calendar", "Month", CalendarDays]] as const).map(([v, label, Icon]) => (
-                  <button
-                    key={v}
-                    type="button"
-                    onClick={() => switchView(v)}
-                    aria-pressed={view === v}
-                    className={cn(
-                      "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-                      view === v ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    <Icon className="h-3.5 w-3.5" /> {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {/* Export + a prev/label/next pager + Today. The window label alone reserves 11rem, which with
-                the export control is already past a phone's width - so the row wraps, and the label's own
-                floor drops to something that still fits a line of its own on the narrowest screen. */}
-            <div className="flex flex-wrap items-center gap-1.5">
-              <ExportButton canExport={canExport} label={`Export ${rows.length} day${rows.length === 1 ? "" : "s"}`} onExport={exportMine} disabled={rows.length === 0} />
-              <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => goPage(page + 1)} aria-label={view === "calendar" ? "Previous month" : "Older 30 days"}><ChevronLeft className="h-4 w-4" /></Button>
-              <span className="min-w-[7rem] text-center text-xs tabular-nums text-muted-foreground sm:min-w-[11rem]">{windowLabel}</span>
-              <Button variant="outline" size="icon" className="h-7 w-7" disabled={page === 0} onClick={() => goPage(Math.max(0, page - 1))} aria-label={view === "calendar" ? "Next month" : "Newer 30 days"}><ChevronRight className="h-4 w-4" /></Button>
-              {page > 0 && <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => goPage(0)}>Today</Button>}
-            </div>
-          </CardHeader>
-          <CardContent>
-            {pageLoading ? (
-              <div className="space-y-2 py-1">
-                {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className={cn("w-full", view === "calendar" ? "h-16" : "h-8")} />)}
-              </div>
-            ) : view === "calendar" ? (
-              <div className="space-y-4">
-                {/* Bulk correction: tick several days, fix them all with one set of times (a whole week of
-                    missed punches is one request per day, not one dialog per day). */}
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-xs text-muted-foreground">
-                    {picked.size > 0 ? `${picked.size} day${picked.size === 1 ? "" : "s"} ticked` : "Click a day for its punches, or tick several to correct them together."}
-                  </p>
-                  {picked.size > 0 && (
-                    <div className="flex items-center gap-1.5">
-                      <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setPicked(new Set())}>Clear</Button>
-                      <Button size="sm" className="h-7" onClick={() => setCorrecting([...picked].sort().map((d) => rowByDay.get(d) ?? { day: d, status: "absent" as DayStatus }))}>
-                        <Pencil className="h-3 w-3" /> Correct {picked.size} day{picked.size === 1 ? "" : "s"}
-                      </Button>
-                    </div>
-                  )}
-                </div>
-                <MonthGrid
-                  monthYmd={fromYmd}
-                  rowByDay={rowByDay}
-                  orgToday={orgToday}
-                  workDays={sched.work_days}
-                  weekStart={sched.week_start ?? 0}
-                  selected={selectedDay}
-                  picked={picked}
-                  onSelect={setSelectedDay}
-                  onTick={(d) => setPicked((prev) => {
-                    const next = new Set(prev);
-                    next.has(d) ? next.delete(d) : next.add(d);
-                    return next;
-                  })}
-                />
-                {selectedRow ? (
-                  <div className="rounded-xl border p-4">
-                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium">{fmtDayLong(selectedRow.day)}</span>
-                        {selectedRow.day === orgToday && <Badge variant="info">Today</Badge>}
-                        <StatusPill status={selectedRow.status} lateBy={selectedRow.summary?.lateByMin} earlyBy={selectedRow.summary?.earlyByMin} />
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {selectedRow.summary && (
-                          <span className="text-xs tabular-nums text-muted-foreground">
-                            {selectedRow.summary.arrival ? fmtHM(selectedRow.summary.arrival, tz) : "-"} – {selectedRow.summary.departure ? fmtHM(selectedRow.summary.departure, tz) : selectedRow.summary.open ? "open" : "-"} · {fmtDuration(selectedRow.summary.workedMinutes)}
-                          </span>
-                        )}
-                        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={() => setCorrecting([selectedRow])}>
-                          <Pencil className="h-3 w-3" /> Correct
-                        </Button>
-                      </div>
-                    </div>
-                    <DayDetail {...dayDetailProps(selectedRow)} />
-                  </div>
-                ) : (
-                  <p className="py-2 text-center text-sm text-muted-foreground">Pick a day to see its punches.</p>
-                )}
-              </div>
-            ) : rows.length === 0 ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">{page === 0 ? "No attendance yet. Clock in above to record your first day." : "No attendance in this period."}</p>
-            ) : compactViewport ? (
-              <DayCards weeks={weeks} orgToday={orgToday} tz={tz} expanded={expanded} onToggle={toggleDay} detail={dayDetailProps} />
-            ) : (
-              <div className="scroll-shadow-x [--scroll-ground:hsl(var(--card))] overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead><tr className="border-b text-left text-muted-foreground"><th className="w-7 py-2" /><th className="py-2 pr-3 font-medium">Day</th><th className="py-2 pr-3 font-medium">In</th><th className="py-2 pr-3 font-medium">Out</th><th className="py-2 pr-3 text-right font-medium">Worked</th><th className="py-2 font-medium">Status</th><th className="w-9 py-2" /></tr></thead>
-                  <tbody>
-                    {listRows.length === 0 && (
-                      <tr><td colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
-                        No {kf.activeLabel ?? "days"} in this window.{" "}
-                        {kf.focus && <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={kf.clear}>Show every day</button>}
-                      </td></tr>
-                    )}
-                    {weeks.map((w) => (
-                      <Fragment key={w.start}>
-                        <tr className="border-b bg-muted/40">
-                          <td />
-                          <td colSpan={6} className="py-1.5 pr-3">
-                            <div className="flex items-center justify-between gap-3 text-xs">
-                              <span className="font-medium uppercase tracking-wide text-muted-foreground">Week of {fmtDay(w.start)}</span>
-                              <span className="tabular-nums text-muted-foreground">{w.days} {w.days === 1 ? "day" : "days"} · <span className="font-semibold text-foreground">{fmtDuration(w.minutes)}</span></span>
-                            </div>
-                          </td>
-                        </tr>
-                        {w.rows.map((r) => {
-                          const d = r.summary;
-                          const isOpen = expanded.has(r.day);
-                          return (
-                            <Fragment key={r.day}>
-                              {/* Expanding a day is the row's own action, so it needs a tab stop and
-                                  Enter/Space - the chevron is decoration, not the control. The key handler
-                                  ignores events from inside the row so the correction pencil keeps its own. */}
-                              <tr
-                                id={`att-day-${r.day}`}
-                                className={cn("group cursor-pointer border-b last:border-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring", isOpen && "bg-muted/30")}
-                                tabIndex={0}
-                                aria-expanded={isOpen}
-                                onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleDay(r.day); } }}
-                                onClick={() => toggleDay(r.day)}
-                              >
-                                <td className="py-1.5 align-middle">
-                                  <button type="button" onClick={(e) => { e.stopPropagation(); toggleDay(r.day); }} className="text-muted-foreground hover:text-foreground" aria-label={isOpen ? `Collapse ${r.day}` : `Expand ${r.day}`} aria-expanded={isOpen}>
-                                    <ChevronRight className={cn("h-4 w-4 transition-transform", isOpen && "rotate-90")} />
-                                  </button>
-                                </td>
-                                <td className="py-1.5 pr-3 font-medium">
-                                  <span className="flex items-center gap-2">
-                                    <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", STATUS_UI[r.status].dot)} aria-hidden />
-                                    {fmtDay(r.day)}
-                                    {r.day === orgToday && <span className="text-xs font-normal text-primary">Today</span>}
-                                  </span>
-                                </td>
-                                <td className="py-1.5 pr-3 tabular-nums">{d?.arrival ? fmtHM(d.arrival, tz) : "-"}</td>
-                                <td className="py-1.5 pr-3 tabular-nums">{d?.departure ? fmtHM(d.departure, tz) : d?.open ? "open" : "-"}</td>
-                                <td className="py-1.5 pr-3 text-right tabular-nums">{d ? fmtDuration(d.workedMinutes) : "-"}</td>
-                                <td className="py-1.5"><StatusPill status={r.status} lateBy={d?.lateByMin} earlyBy={d?.earlyByMin} /></td>
-                                <td className="py-1.5 text-right">
-                                  <button
-                                    type="button"
-                                    onClick={(e) => { e.stopPropagation(); setCorrecting([r]); }}
-                                    className="text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus:opacity-100 group-hover:opacity-100"
-                                    title={`Request a correction for ${formatDate(r.day)}`}
-                                    aria-label={`Request a correction for ${formatDate(r.day)}`}
-                                  >
-                                    <Pencil className="h-3.5 w-3.5" />
-                                  </button>
-                                </td>
-                              </tr>
-                              {isOpen && (
-                                <tr className="border-b bg-muted/30 last:border-0">
-                                  <td />
-                                  <td colSpan={6} className="pb-3 pr-3"><DayDetail {...dayDetailProps(r)} /></td>
-                                </tr>
-                              )}
-                            </Fragment>
-                          );
-                        })}
-                      </Fragment>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
         {/* My correction requests: the audit trail of what I've asked to fix + where each stands. */}
         {myRegs.length > 0 && (
           <Card>
@@ -1053,7 +574,11 @@ export default function Attendance({ me }: { me: Me }) {
             off={todayOff}
             fullDay={sched.full_day_minutes}
             canExport={canExport}
+            canMark={canMarkDays}
             truncated={rosterTruncated}
+            sched={sched}
+            orgToday={orgToday}
+            joinedOf={joinedOf}
           />
         )}
       </div>
@@ -1117,314 +642,6 @@ function DayProgress({ worked, full, half, shift, projection, breaks }: {
     </div>
   );
 }
-
-// Hours per day across the window: one bar per recorded day against a full-day reference line, plus the
-// running balance and (on request) the same window a period earlier. One measure, one hue - the day's STATUS
-// is the calendar's job, so the bars stay a magnitude read and don't get repainted per state.
-// The last twelve months of this person's attendance as a calendar: one cell per day, shaded by how long they
-// worked, with the late days countable beside it. The window view above answers "what happened this month";
-// this answers the questions a month cannot - when the long stretches were, where the gaps are, whether the
-// late mornings cluster.
-//
-// It is CLOSED until asked for. The year comes from the people-analytics series (one request, one aggregate,
-// the caller's own attendance access), and an unopened panel costs nothing.
-function YearHeatmap({ employeeId, tz, onPickDay, inWindow }: {
-  employeeId: string;
-  tz: string;
-  /** Open a day the window below already holds. A year of squares reaches back past it - see the press handler. */
-  onPickDay: (day: string) => void;
-  inWindow: (day: string) => boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const [days, setDays] = useState<AttendanceSeriesDay[] | null>(null);
-  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
-  const [stale, setStale] = useState<string | null>(null); // a day pressed that the window below does not hold
-
-  const today = localDay(new Date().toISOString(), tz);
-  const from = new Date(Date.parse(`${today}T00:00:00Z`) - 364 * 86_400_000).toISOString().slice(0, 10);
-
-  useEffect(() => {
-    if (!open || days || state === "loading") return;
-    setState("loading");
-    get<{ series?: AttendanceSeriesDay[] }>(`people-analytics?employee=employees/${employeeId}&from=${from}&to=${today}&series=true`)
-      .then((r) => { setDays(r.series ?? []); setState("idle"); })
-      .catch(() => setState("error"));
-  }, [open, days, state, employeeId, from, today]);
-
-  const points = useMemo(() => heatmapDays(new Map((days ?? []).map((d) => [d.day, Math.round((d.worked_minutes / 60) * 10) / 10]))), [days]);
-  const lateDays = (days ?? []).filter((d) => d.late).length;
-
-  return (
-    <Card>
-      <CardContent className="p-4 sm:p-4">
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          aria-expanded={open}
-          className="flex min-h-[36px] w-full items-center justify-between gap-2 text-left coarse:min-h-[44px]"
-        >
-          <span className="text-sm font-medium">The last year</span>
-          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            {open ? "Hide" : "Show"} <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-90")} />
-          </span>
-        </button>
-        {open && (
-          <div className="mt-3">
-            {state === "loading" && !days && <Skeleton className="h-32 w-full rounded-lg" />}
-            {state === "error" && <p className="text-sm text-muted-foreground">Couldn't load the year just now.</p>}
-            {days && (
-              <>
-                <Chart
-                  type="heatmap"
-                  height={180}
-                  points={points}
-                  start={new Date(`${from}T00:00:00Z`)}
-                  end={new Date(`${today}T00:00:00Z`)}
-                  countLabel="hours"
-                  format={(v) => `${v}h`}
-                  ariaLabel="Hours worked on each day of the last year"
-                  emptyText="No punches in the last year."
-                  // A square outside the window the page is currently showing has nothing to open - the day's
-                  // punches are not loaded, and silently paging the history back a year under the reader is a
-                  // worse answer than doing nothing. So the press is offered only where it can be honoured.
-                  onSelectDay={(ymd) => { if (inWindow(ymd)) { onPickDay(ymd); setStale(null); } else setStale(ymd); }}
-                />
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {days.length} day{days.length === 1 ? "" : "s"} with punches · {lateDays} late arrival{lateDays === 1 ? "" : "s"} · darker is a longer day
-                </p>
-                {stale && (
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {fmtDayLong(stale)} is outside the window above - step the history back to open it.
-                  </p>
-                )}
-              </>
-            )}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function HoursTrend({ rows, full, stats, prev, prevLabel, comparing, onToggleCompare, selectedDay, onPickDay }: {
-  rows: AttendanceRow[];
-  full: number;
-  stats: WindowStats;
-  prev: WindowStats | null;
-  prevLabel: string;
-  comparing: boolean;
-  onToggleCompare: () => void;
-  /** The day the page has open, so the bar for it stays lit while the rest are dimmed. */
-  selectedDay: string | null;
-  onPickDay: (day: string) => void;
-}) {
-  const days = [...rows].reverse(); // rows are newest-first; a time axis runs the other way
-  const balance = stats.doneMinutes - stats.expectedMinutes;
-  const deltaPts = prev && stats.onTimePct !== null && prev.onTimePct !== null ? stats.onTimePct - prev.onTimePct : null;
-  return (
-    <Card>
-      <CardContent className="space-y-3 p-4 sm:p-4">
-        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm">
-            <span className="font-medium">Daily hours</span>
-            <span className="text-xs text-muted-foreground">
-              <span className="font-semibold tabular-nums text-foreground">{fmtDuration(stats.doneMinutes)}</span> worked vs {fmtDurationShort(stats.expectedMinutes)} expected ·{" "}
-              <span className={cn("font-semibold tabular-nums", balance >= 0 ? "text-success" : "text-destructive")}>{signed(balance)}</span>
-            </span>
-          </div>
-          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={onToggleCompare} aria-pressed={comparing}>
-            <TrendingUp className="h-3.5 w-3.5" /> {comparing ? "Hide comparison" : `Compare with ${prevLabel}`}
-          </Button>
-        </div>
-
-        {/* Hours per day against the full-day line. A real axis and a tooltip rather than the hand-drawn
-            strip this used to be: the marker says what a full day is without a caption explaining a dash,
-            and hovering a day names it instead of relying on a <title> nobody finds on a phone. */}
-        <Chart
-          type="bar"
-          height={150}
-          labels={days.map((d) => fmtDay(d.day))}
-          datasets={[{ name: "Worked", values: days.map((d) => Math.round(((d.summary?.workedMinutes ?? 0) / 60) * 100) / 100) }]}
-          markers={[{ label: `Full day (${fmtDurationShort(full)})`, value: Math.round((full / 60) * 100) / 100 }]}
-          format={(v) => fmtDuration(Math.round(v * 60))}
-          ariaLabel={`Hours worked on each of ${days.length} days in this window`}
-          // A bar is one day, and the page already has a place to put a day: pressing one opens that day's
-          // detail, the same thing pressing its cell in the month grid does.
-          onSelect={(i) => { const d = days[i]; if (d) onPickDay(d.day); }}
-          selected={selectedDay && days.findIndex((d) => d.day === selectedDay) >= 0 ? days.findIndex((d) => d.day === selectedDay) : null}
-        />
-
-        {comparing && (
-          <p className="border-t pt-2 text-xs text-muted-foreground">
-            {prev === null ? (
-              `Loading ${prevLabel}…`
-            ) : (
-              <>
-                vs {prevLabel}:{" "}
-                <Delta label="hours" value={stats.minutes - prev.minutes} format={(v) => fmtDurationShort(Math.abs(v))} />{" · "}
-                {deltaPts !== null && <><Delta label="on time" value={deltaPts} format={(v) => `${Math.abs(v)} pts`} />{" · "}</>}
-                <Delta label="late" value={stats.late - prev.late} format={(v) => String(Math.abs(v))} lowerIsBetter />{" · "}
-                <Delta label="absent" value={stats.absent - prev.absent} format={(v) => String(Math.abs(v))} lowerIsBetter />
-              </>
-            )}
-          </p>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-// One "▲ 3h 10m more hours" style delta. Direction is stated in words as well as the arrow, so the sign is
-// never carried by colour alone.
-function Delta({ label, value, format, lowerIsBetter }: { label: string; value: number; format: (v: number) => string; lowerIsBetter?: boolean }) {
-  if (value === 0) return <span>{label} unchanged</span>;
-  const good = lowerIsBetter ? value < 0 : value > 0;
-  return (
-    <span className={good ? "text-success" : "text-destructive"}>
-      {value > 0 ? "▲" : "▼"} {format(value)} {value > 0 ? "more" : "fewer"} {label}
-    </span>
-  );
-}
-
-// The month grid: one cell per day, tinted by that day's status, with its hours. Clicking opens the day;
-// the checkbox in the corner ticks it for a bulk correction. Days with no record are inert.
-function MonthGrid({ monthYmd, rowByDay, orgToday, workDays, weekStart, selected, picked, onSelect, onTick }: {
-  monthYmd: string;
-  rowByDay: Map<string, AttendanceRow>;
-  orgToday: string;
-  workDays: number[];
-  weekStart: number;
-  selected: string | null;
-  picked: Set<string>;
-  onSelect: (day: string) => void;
-  onTick: (day: string) => void;
-}) {
-  const month = monthYmd.slice(0, 7);
-  const cells = monthGridDays(monthYmd, weekStart);
-  // Only the statuses actually on screen make the legend, so it stays short.
-  const shown = Array.from(new Set(cells.map((d) => rowByDay.get(d)?.status).filter((s): s is DayStatus => !!s)));
-  return (
-    <div className="space-y-3">
-      <div className="overflow-hidden rounded-xl border">
-        <div className="grid grid-cols-7 border-b bg-muted/30 text-center text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          {weekdayOrder(weekStart).map((wd) => (
-            <div key={wd} className={cn("py-2", !workDays.includes(wd) && "text-muted-foreground/60")}>
-              <span className="sm:hidden">{DOW[wd][0]}</span>
-              <span className="hidden sm:inline">{DOW[wd]}</span>
-            </div>
-          ))}
-        </div>
-        <div className="grid grid-cols-7">
-          {cells.map((day, i) => {
-            const inMonth = day.slice(0, 7) === month;
-            const r = inMonth ? rowByDay.get(day) : undefined;
-            const ui = r ? STATUS_UI[r.status] : undefined;
-            const isToday = day === orgToday;
-            const isSel = selected === day;
-            const isPicked = picked.has(day);
-            const shell = cn(
-              "relative min-h-[58px] border-b border-r p-1 text-left align-top transition-colors sm:min-h-[76px] sm:p-1.5",
-              i % 7 === 6 && "border-r-0",
-              i >= 35 && "border-b-0",
-              !inMonth ? "bg-muted/20 text-muted-foreground/40" : ui?.cell,
-              isSel && "ring-2 ring-inset ring-primary",
-              isPicked && "ring-2 ring-inset ring-foreground/40",
-            );
-            const body = (
-              <>
-                <div className="flex items-center justify-between gap-1">
-                  <span className={cn("flex h-5 w-5 items-center justify-center rounded-full text-xs tabular-nums sm:h-6 sm:w-6 sm:text-sm", isToday && "bg-primary font-semibold text-primary-foreground")}>
-                    {Number(day.slice(8))}
-                  </span>
-                  {ui && <span className={cn("h-2 w-2 shrink-0 rounded-full", ui.dot)} aria-hidden />}
-                </div>
-                {r && <p className="mt-1 truncate text-[11px] font-medium tabular-nums text-foreground/80">{r.summary ? fmtDurationShort(r.summary.workedMinutes) : ui!.label}</p>}
-              </>
-            );
-            if (!r) return <div key={day} className={shell}>{body}</div>;
-            return (
-              <div key={day} className={cn(shell, "group")}>
-                <button type="button" onClick={() => onSelect(day)} className="absolute inset-0 hover:bg-accent/40" aria-label={`${fmtDayLong(day)} · ${ui!.label}`} aria-pressed={isSel} />
-                <div className="pointer-events-none relative">{body}</div>
-                <button
-                  type="button"
-                  onClick={() => onTick(day)}
-                  aria-label={`${isPicked ? "Untick" : "Tick"} ${fmtDayLong(day)} for a bulk correction`}
-                  aria-pressed={isPicked}
-                  className={cn(
-                    "absolute bottom-1 right-1 flex h-4 w-4 items-center justify-center rounded border bg-card transition-opacity",
-                    isPicked ? "border-foreground/50 opacity-100" : "opacity-0 focus:opacity-100 group-hover:opacity-100",
-                  )}
-                >
-                  {isPicked && <Check className="h-3 w-3" />}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-      {shown.length > 0 && (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
-          {shown.map((s) => (
-            <span key={s} className="flex items-center gap-1.5">
-              <span className={cn("h-2.5 w-2.5 rounded-full", STATUS_UI[s].dot)} aria-hidden /> {STATUS_UI[s].label}
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// The history list on a phone: the same week grouping as the table, each day a tappable card (a table would
-// force a horizontal scroll for the one column that matters).
-function DayCards({ weeks, orgToday, tz, expanded, onToggle, detail }: {
-  weeks: WeekGroup[];
-  orgToday: string;
-  tz: string;
-  expanded: Set<string>;
-  onToggle: (day: string) => void;
-  detail: (row: AttendanceRow) => React.ComponentProps<typeof DayDetail>;
-}) {
-  return (
-    <div className="space-y-4">
-      {weeks.map((w) => (
-        <div key={w.start} className="space-y-1.5">
-          <div className="flex items-center justify-between gap-3 text-xs">
-            <span className="font-medium uppercase tracking-wide text-muted-foreground">Week of {fmtDay(w.start)}</span>
-            <span className="tabular-nums text-muted-foreground">{w.days} {w.days === 1 ? "day" : "days"} · <span className="font-semibold text-foreground">{fmtDuration(w.minutes)}</span></span>
-          </div>
-          {w.rows.map((r) => {
-            const d = r.summary;
-            const isOpen = expanded.has(r.day);
-            return (
-              <div key={r.day} className={cn("rounded-lg border", isOpen && "bg-muted/30")}>
-                <button type="button" onClick={() => onToggle(r.day)} className="flex w-full items-center gap-2 p-2.5 text-left" aria-expanded={isOpen}>
-                  <span className={cn("h-2 w-2 shrink-0 rounded-full", STATUS_UI[r.status].dot)} aria-hidden />
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-1.5 text-sm font-medium">
-                      {fmtDay(r.day)}
-                      {r.day === orgToday && <span className="text-xs font-normal text-primary">Today</span>}
-                    </span>
-                    <span className="block text-xs tabular-nums text-muted-foreground">
-                      {d ? <>{d.arrival ? fmtHM(d.arrival, tz) : "-"} – {d.departure ? fmtHM(d.departure, tz) : d.open ? "open" : "-"} · {fmtDuration(d.workedMinutes)}</> : STATUS_UI[r.status].label}
-                    </span>
-                  </span>
-                  <StatusPill status={r.status} lateBy={d?.lateByMin} earlyBy={d?.earlyByMin} />
-                  <ChevronRight className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", isOpen && "rotate-90")} aria-hidden />
-                </button>
-                {isOpen && <div className="border-t p-2.5"><DayDetail {...detail(r)} /></div>}
-              </div>
-            );
-          })}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// CSV / Excel of whatever the caller is looking at. Same gate as the DataTable export (`export` capability),
-// so who may take data out of the app is one policy, not a per-page decision.
 
 // Corrections awaiting THIS caller's decision, from the shared approvals queue - decided here so a manager
 // looking at attendance doesn't have to go to the inbox to unblock a day they're already looking at.
@@ -1501,7 +718,7 @@ const TEAM_GROUPS: { key: TeamGroup; label: string; dot: string }[] = [
 
 // Manager/HR view: today's standing (derived from data the clock card already fetched) and the same window
 // the history shows, per person - the pre-payroll check that attendance actually supports what will be paid.
-function TeamPanel({ today, period, departments, windowLabel, tz, now, off, fullDay, canExport, truncated }: {
+function TeamPanel({ today, period, departments, windowLabel, tz, now, off, fullDay, canExport, canMark, truncated, sched, orgToday, joinedOf }: {
   today: TeamEntry[];
   period: TeamPeriodRow[];
   departments: Department[];
@@ -1511,11 +728,18 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
   off: string | null;
   fullDay: number;
   canExport: boolean;
+  /** The caller's own write breadth on day marks, for the teammate log this panel opens - see PersonAttendance. */
+  canMark: boolean;
   truncated: boolean;
+  sched: AttendanceSchedule;
+  orgToday: string;
+  /** That person's join date, so their log doesn't flag the days before they started. */
+  joinedOf: (employeeId: string) => string | undefined;
 }) {
   const [tab, setTab] = useState<"today" | "period">("today");
   const [dept, setDept] = useState("all");
   const [picked, setPicked] = useState<TeamGroup>("in");
+  const [opened, setOpened] = useState<TeamPeriodRow | null>(null); // the person whose own log is open
 
   // `useCallback` so both row memos below name the filter they apply rather than the state it reads.
   const inDept = useCallback((d?: string) => dept === "all" || d === dept, [dept]);
@@ -1548,7 +772,7 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
       r.stats.onTimePct ?? "",
       fmtDuration(r.stats.minutes),
       r.stats.avgDay ? fmtDurationShort(r.stats.avgDay) : "",
-      signed(r.stats.doneMinutes - r.stats.expectedMinutes),
+      signedDuration(r.stats.doneMinutes - r.stats.expectedMinutes),
     ]);
     void exportTable(`team-attendance-${windowLabel.replace(/\s+/g, "-").toLowerCase()}`, headers, data, format, "attendance");
   }
@@ -1652,13 +876,23 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
                   <th className="py-2 pr-3 text-right font-medium">Hours</th>
                   <th className="py-2 pr-3 text-right font-medium">Balance</th>
                   <th className="hidden py-2 font-medium lg:table-cell">Pattern</th>
+                  <th className="w-8 py-2" />
                 </tr>
               </thead>
               <tbody>
                 {periodRows.map((r) => {
                   const balance = r.stats.doneMinutes - r.stats.expectedMinutes;
                   return (
-                    <tr key={r.id} className="border-b last:border-0">
+                    // The whole row opens that person's own attendance - these totals are the summary of a
+                    // log, and the question they raise ("which days?") has to be answerable from here. A tab
+                    // stop and Enter/Space, the same shape a day row in the history has.
+                    <tr
+                      key={r.id}
+                      className="group cursor-pointer border-b last:border-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring hover:bg-muted/40"
+                      tabIndex={0}
+                      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setOpened(r); } }}
+                      onClick={() => setOpened(r)}
+                    >
                       {/* Name only, no avatar: this table can run to the whole org, and one photo fetch per
                           row would be a large fan-out for a figure nobody identifies people by. */}
                       <td className="py-1.5 pr-3 font-medium">{r.name}</td>
@@ -1666,7 +900,7 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
                       <td data-label="Absent" className={cn("py-1.5 pr-3 text-right tabular-nums", r.stats.absent > 0 && "font-semibold text-destructive")}>{r.stats.absent}</td>
                       <td data-label="Late" className={cn("py-1.5 pr-3 text-right tabular-nums", r.stats.late > 0 && "font-semibold text-warning")}>{r.stats.late}</td>
                       <td data-label="Hours" className="py-1.5 pr-3 text-right tabular-nums">{fmtDuration(r.stats.minutes)}</td>
-                      <td data-label="Balance" className={cn("py-1.5 pr-3 text-right tabular-nums", balance >= 0 ? "text-success" : "text-destructive")}>{signed(balance)}</td>
+                      <td data-label="Balance" className={cn("py-1.5 pr-3 text-right tabular-nums", balance >= 0 ? "text-success" : "text-destructive")}>{signedDuration(balance)}</td>
                       <td data-label="Pattern" className="hidden py-1.5 lg:table-cell">
                         {/* One dot per recorded day, oldest first: the shape of the month at a glance. */}
                         <span className="flex flex-wrap gap-0.5">
@@ -1674,6 +908,16 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
                             <span key={d.day} className={cn("h-2 w-2 rounded-[2px]", STATUS_UI[d.status].dot)} title={`${fmtDay(d.day)} · ${d.summary ? fmtDuration(d.summary.workedMinutes) : STATUS_UI[d.status].label}`} />
                           ))}
                         </span>
+                      </td>
+                      <td className="py-1.5 text-right">
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setOpened(r); }}
+                          className="text-muted-foreground transition-colors hover:text-foreground"
+                          aria-label={`Open ${r.name}'s attendance`}
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </button>
                       </td>
                     </tr>
                   );
@@ -1683,18 +927,71 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
           </div>
         )}
       </CardContent>
+
+      {/* One person's own log, over the same window the table summarises. It reads its own punches (narrowed
+          to them by the server) rather than being handed the page's set, because it pages independently -
+          stepping back a month here must not move the table underneath it. Read-only: an approver does not
+          file somebody else's correction, they answer the one that person filed. */}
+      <Sheet open={!!opened} onOpenChange={(o) => { if (!o) setOpened(null); }}>
+        <SheetContent className="sm:max-w-[860px]">
+          <SheetHeader>
+            <SheetTitle>{opened?.name}</SheetTitle>
+          </SheetHeader>
+          <SheetBody>
+            {opened && (
+              <PersonAttendance
+                employeeId={opened.id}
+                name={opened.name}
+                joinedYmd={joinedOf(opened.id)}
+                sched={sched}
+                orgToday={orgToday}
+                now={now}
+                canExport={canExport}
+                // A teammate's log, opened from the roster table - and the place HR actually re-values a day,
+                // which is why this is passed rather than read from a subject provider: this page has none
+                // (no one subject spans a roster), so the component asking for itself answered "no" here and
+                // the affordance was missing from the surface the feature is used on. The caller's own write
+                // breadth is the honest answer; the server still refuses any row that grant does not reach.
+                canMark={canMark}
+              />
+            )}
+          </SheetBody>
+        </SheetContent>
+      </Sheet>
     </Card>
   );
 }
 
-function StatusPill({ status, lateBy, earlyBy }: { status: DayStatus; lateBy?: number; earlyBy?: number }) {
-  const ui = STATUS_UI[status];
-  const label =
-    status === "late" ? `Late ${lateBy}m`
-    : status === "left_early" ? `Left early ${earlyBy}m`
-    : status === "late_early" ? `Late ${lateBy}m · early ${earlyBy}m`
-    : ui.label;
-  return <Badge variant={ui.badge}>{label}</Badge>;
+// One teammate's attendance, in the sheet the period table opens. Its own window (`useAttendanceWindow` keyed
+// on the person, so the view choice is remembered per record) and its own punches - see the note at the call
+// site for why it does not borrow the page's.
+function PersonAttendance({ employeeId, name, joinedYmd, sched, orgToday, now, canExport, canMark }: {
+  employeeId: string;
+  name: string;
+  joinedYmd?: string;
+  sched: AttendanceSchedule;
+  orgToday: string;
+  now: number;
+  canExport: boolean;
+  /** The caller's own write breadth on day marks - see the prop's note in AttendanceHistory. */
+  canMark: boolean;
+}) {
+  const win = useAttendanceWindow(`emp:${employeeId}`, orgToday);
+  return (
+    <AttendanceHistory
+      employeeId={employeeId}
+      joinedYmd={joinedYmd}
+      win={win}
+      sched={sched}
+      orgToday={orgToday}
+      now={now}
+      title="Attendance"
+      canExport={canExport}
+      canMark={canMark}
+      exportName={`attendance-${name.toLowerCase().replace(/\s+/g, "-")}`}
+      emptyText={`No attendance recorded for ${name} yet.`}
+    />
+  );
 }
 
 // State of one of my correction requests (attendance-regularization).
@@ -1705,133 +1002,6 @@ function RegStatePill({ state }: { state?: string }) {
     case "CANCELLED": return <Badge variant="muted">Cancelled</Badge>;
     default: return <Badge variant="warning">Pending</Badge>;
   }
-}
-
-// The unfolded detail for a day: its punch log when there are clock-ins, otherwise why there are none
-// (the leave taken + its reason, the holiday's name, or a plain absent note).
-function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect, onLogOvertime, overtimeMinutes = 0 }: {
-  row: AttendanceRow;
-  punches: AttendanceSession[];
-  now: number;
-  tz: string;
-  leave?: LeaveRequest;
-  leaveType?: LeaveType;
-  holiday?: Holiday;
-  onCorrect?: () => void;
-  onLogOvertime?: () => void;
-  overtimeMinutes?: number;
-}) {
-  if (punches.length > 0) {
-    return (
-      <div className="space-y-1.5">
-        {/* `max-w-full` and a tighter phone gap: In + Out + Duration at gap-8 comes to 352px inside a 328px
-            content column, and the box is `w-fit`, so it would size to the columns and push the page. */}
-        <div className="w-fit max-w-full rounded-lg border bg-background px-3 py-1 text-sm tabular-nums sm:px-4">
-          <div className="flex items-center gap-4 border-b py-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground sm:gap-8">
-            <span className="flex w-24 items-center gap-2"><span className="h-1.5 w-1.5 shrink-0" aria-hidden />In</span>
-            <span className="flex w-24 items-center gap-2"><span className="h-1.5 w-1.5 shrink-0" aria-hidden />Out</span>
-            <span className="w-16 text-right">Duration</span>
-          </div>
-          {punches.map((s, i) => {
-            const mins = Math.max(0, Math.round(((s.clock_out ? +new Date(s.clock_out) : now) - +new Date(s.clock_in)) / 60000));
-            // The gap since the previous punch-out is a break, shown between the rows it separates.
-            const prev = punches[i - 1];
-            const gap = prev?.clock_out ? Math.max(0, Math.round((+new Date(s.clock_in) - +new Date(prev.clock_out)) / 60000)) : 0;
-            return (
-              <Fragment key={i}>
-                {gap > 0 && (
-                  <div className="flex items-center gap-2 border-t py-1 text-[11px] text-muted-foreground">
-                    <Coffee className="h-3 w-3" aria-hidden /> {fmtDurationShort(gap)} break
-                  </div>
-                )}
-                <div className={cn("flex flex-wrap items-center gap-4 py-1.5 sm:gap-8", i > 0 && !gap && "border-t")}>
-                  <span className="flex w-24 items-center gap-2">
-                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" aria-hidden />
-                    {fmtHM(s.clock_in, tz)}
-                  </span>
-                  <span className="flex w-24 items-center gap-2">
-                    {s.clock_out ? (
-                      <>
-                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-muted-foreground/40" aria-hidden />
-                        {fmtHM(s.clock_out, tz)}
-                      </>
-                    ) : (
-                      <span className="flex items-center gap-1.5 text-xs font-medium text-success"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />Open</span>
-                    )}
-                  </span>
-                  <span className={cn("w-16 text-right font-medium", s.clock_out ? "text-foreground" : "text-success")}>{fmtDuration(mins)}</span>
-                  {s.source === "correction" && <Badge variant="muted">Corrected</Badge>}
-                </div>
-              </Fragment>
-            );
-          })}
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {onCorrect && (
-            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={onCorrect}>
-              <Pencil className="h-3 w-3" /> Wrong times? Request a correction
-            </Button>
-          )}
-          {onLogOvertime && (
-            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={onLogOvertime}>
-              <Zap className="h-3 w-3" /> Log {fmtDurationShort(overtimeMinutes)} past the shift as overtime
-            </Button>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  if ((row.status === "on_leave" || row.status === "half_day_leave") && leave) {
-    // For a multi-day leave that starts/ends on a half-day, only the boundary day is partial.
-    const half =
-      row.day === leave.start_date && leave.start_session === 2 ? "Second half (PM)"
-      : row.day === leave.end_date && leave.end_session === 1 ? "First half (AM)"
-      : leave.days % 1 !== 0 ? "Half day"
-      : undefined;
-    return (
-      <div className="space-y-2 text-sm">
-        <div className="flex flex-wrap items-center gap-2">
-          {leaveType?.color && <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: leaveType.color }} aria-hidden />}
-          <span className="font-medium">{leaveType?.display_name ?? "Leave"}</span>
-          {leaveType && <Badge variant={leaveType.paid ? "secondary" : "muted"}>{leaveType.paid ? "Paid" : "Unpaid"}</Badge>}
-          {half && <Badge variant="warning">{half}</Badge>}
-        </div>
-        <p className="text-xs tabular-nums text-muted-foreground">
-          {leave.start_date === leave.end_date ? leave.start_date : `${leave.start_date} – ${leave.end_date}`} · {leave.days} day{leave.days === 1 ? "" : "s"}
-        </p>
-        {leave.reason ? (
-          // The leave reason is masked in session replay wherever it renders (Leaves.tsx says why: it is
-          // routinely a diagnosis or a bereavement, and `leave-requests: ["reason"]` is in REDACTED_FIELDS for
-          // that reason). The label stays readable; only the value is hidden.
-          <p className="text-muted-foreground"><span className="font-medium text-foreground">Reason:</span> <span data-sentry-mask>{leave.reason}</span></p>
-        ) : (
-          <p className="text-xs italic text-muted-foreground">No reason provided.</p>
-        )}
-      </div>
-    );
-  }
-
-  if (row.status === "holiday") {
-    return (
-      <div className="flex flex-wrap items-center gap-2 text-sm">
-        <span className="font-medium">{holiday?.display_name ?? "Holiday"}</span>
-        {holiday?.kind === "optional" && <Badge variant="muted">Optional</Badge>}
-      </div>
-    );
-  }
-
-  if (row.status === "absent") {
-    // The one place a correction is most likely wanted, so the affordance is a visible button (not a hover pencil).
-    return (
-      <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-        <span>No punches recorded, and no approved leave or holiday on record for this day.</span>
-        {onCorrect && <Button variant="outline" size="sm" onClick={onCorrect}><Pencil className="h-3 w-3" /> Request correction</Button>}
-      </div>
-    );
-  }
-
-  return <p className="text-sm text-muted-foreground">No punch detail for this day.</p>;
 }
 
 type PunchRow = { in: string; out: string };
@@ -1866,7 +1036,7 @@ function CorrectionDialog({ rows, tz, sched, pendingDays, busy, onClose, onSubmi
 }) {
   const guardClose = useDiscardGuard();
   const single = rows.length === 1 ? rows[0] : undefined;
-  const seeded = (single?.summary?.sessions ?? []).map((s) => ({ in: hhmm(s.clock_in, tz), out: s.clock_out ? hhmm(s.clock_out, tz) : "" }));
+  const seeded = (single?.summary?.sessions ?? []).map((s) => ({ in: fmtHM24(s.clock_in, tz), out: s.clock_out ? fmtHM24(s.clock_out, tz) : "" }));
   const [punches, setPunches] = useState<PunchRow[]>(seeded.length ? seeded : [{ in: "", out: "" }]);
   // null = every selected day takes the shared times above; a record = each day carries its own.
   const [perDay, setPerDay] = useState<Record<string, PunchRow[]> | null>(null);

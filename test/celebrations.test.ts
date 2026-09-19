@@ -11,6 +11,7 @@ import { genId } from "../src/lib/idCodec";
 import { grantFor } from "../src/domain/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 import { upcomingCelebrations } from "../src/services/celebrations";
+import { orgToday } from "../src/services/orgDay";
 
 // The dashboard celebrations feed is a collection-level custom method on employees. It is company-wide (every
 // signed-in role may read it), so the grant must allow `employees.upcomingCelebrations` for all five roles.
@@ -62,12 +63,19 @@ beforeEach(async () => {
 });
 
 let n = 0;
-/** An employee whose birthday is today in UTC, so the feed always has a reason to name them. */
+/**
+ * An employee whose birthday is today, so the feed always has a reason to name them.
+ *
+ * "Today" comes from `orgToday`, which is what the SERVICE asks - not `new Date().getUTCDate()`, which is
+ * what this used to build the date of birth from. The two are the same date for most of the day and a
+ * different one between org-local midnight and UTC midnight, so in an org ahead of UTC these four tests
+ * failed for the first hours of every local day and passed for the rest of it. Same rule as everywhere else
+ * in the app: the org's day is the only "today" there is (services/orgDay.ts).
+ */
 async function celebrant(over: Partial<typeof schema.employees.$inferInsert> = {}) {
   n += 1;
   const uuid = genId();
-  const today = new Date();
-  const dob = `1990-${String(today.getUTCMonth() + 1).padStart(2, "0")}-${String(today.getUTCDate()).padStart(2, "0")}`;
+  const dob = `1990-${(await orgToday(deps)).slice(5)}`;
   await deps.db.insert(schema.employees).values({
     uuid,
     code: `04-002-${String(n).padStart(3, "0")}`,

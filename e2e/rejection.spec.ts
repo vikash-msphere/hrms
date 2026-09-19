@@ -233,7 +233,7 @@ test("a request of each kind is rejected from the inbox, with the reason it take
 
     await gotoRoute(manager, "approvals", "Approvals");
     // Reloaded, not just navigated: the shared read cache serves the inbox it fetched a moment ago, and the
-    // request this iteration just filed would not be in it - a hash change does not clear an in-memory cache.
+    // request this iteration just filed would not be in it - a route change does not clear an in-memory cache.
     await manager.reload();
     await expect(manager.getByRole("main")).toBeVisible();
     // The inbox is grouped by KIND, one tab each, because the decisions read differently: leave is about

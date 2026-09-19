@@ -117,16 +117,42 @@ export async function listAnnouncements(
   q?: string,
   kind?: "announcement" | "post" | "poll" | "kudos",
   deletedOnly = false,
+  authorFilter?: string,
+  repliedByFilter?: string,
 ) {
   // Server-side text filter (FTS over title, body, category, kind). It ANDs onto the visibility above and can
   // never widen it, so an author still finds their own drafts and nobody else starts seeing them.
   const textMatch = await searchFilter(deps, "announcements", q, schema.announcements.uuid);
   const visible = visibleWhere(scope, showDeleted, deletedOnly);
+  // One author, as `employees/{employee_id}` (the edge decoded the token, so this is an internal id) - what the
+  // profile's Posts tab asks for. It ANDs onto `visible` like every other filter here, so it narrows and never
+  // widens: somebody's unpublished drafts stay theirs (state_visibility), and a reader who may not see the
+  // board sees nothing through this either.
+  const authorId = idFromPath(authorFilter);
+  // Posts this person REPLIED to - the other half of "what they wrote on the board", and the reason it is a
+  // filter on announcements rather than its own endpoint: a reply is not a wire collection (it hangs off its
+  // post, like ticket_comments), and the thread already rides along on the post it belongs to. So the row a
+  // profile shows is the CONVERSATION, which is also the thing worth clicking through to. Reusing this list
+  // means it reuses `announcements.read` and the visibility above: a reply on a post the caller may not see
+  // does not drag that post into view.
+  const repliedById = idFromPath(repliedByFilter);
+  const repliedTo = repliedById
+    ? inArray(
+        schema.announcements.uuid,
+        deps.db.select({ id: schema.announcementReplies.announcementId }).from(schema.announcementReplies).where(eq(schema.announcementReplies.authorId, repliedById)),
+      )
+    : undefined;
   // `?kind=kudos` narrows the board to one kind. The board itself is a FEED - a window by design - but the
   // recognition rollups beside it (a month's podium, six months of who was recognized, twelve months of how
   // often) are aggregates, and an aggregate folded over whatever the feed happens to have loaded redraws as
   // the reader scrolls. This is what lets them be their own bounded read instead.
-  const where = and(visible, textMatch ?? undefined, kind ? eq(schema.announcements.kind, kind) : undefined);
+  const where = and(
+    visible,
+    textMatch ?? undefined,
+    kind ? eq(schema.announcements.kind, kind) : undefined,
+    authorId ? eq(schema.announcements.authorEmployeeId, authorId) : undefined,
+    repliedTo,
+  );
   // Paged in the board's OWN order (pinned first, then when the post went live), not by when the row was
   // written: a feed that pages on one key and is read in another can put an "older" page's post at the top of
   // the board and hide a pinned post behind the cursor. See domain/board.ts - the web mirrors this key.

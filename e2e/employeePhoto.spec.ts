@@ -18,7 +18,7 @@ test("an employee sets their profile photo, and takes it off again", async ({ as
   const page = await as("employee");
   const id = await personId(page, "employee");
 
-  await gotoRoute(page, "profile", "My Profile");
+  await gotoRoute(page, "profile"); // one record page, two addresses: its `h1` is the person's name
   await page.getByRole("button", { name: "Change photo" }).first().click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("Profile photo")).toBeVisible({ timeout: 30_000 });

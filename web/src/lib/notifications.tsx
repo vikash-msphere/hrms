@@ -12,9 +12,9 @@ import type { Notification } from "@/types";
 /**
  * The PAGE KEY a notification's `link` points at.
  *
- * `link` is documented as "Web route to open (page key, optional /id)" - but four server-built links store the
- * hash form (`#/settings/permissions`, src/services/accessRules.ts). `router.navigate` strips that deliberately,
- * so CLICKING one has always worked; the two readers that split the string did not, and both failed silently:
+ * `link` is documented as "Web route to open (page key, optional /id)", and rows written before the app moved
+ * off hash routes may still carry a leading `#/` or `/`. `router.navigate` strips either deliberately, so
+ * CLICKING one has always worked; the two readers that split the string did not, and both failed silently:
  * `unreadByPage` bucketed them under `"#"`, which no nav item carries, so they badged nothing, and the
  * leave-a-page sweep compared `"#" === "settings"`, so they were never auto-marked-read and sat unread in the
  * bell indefinitely. Normalising here means all three readers agree whichever form the row holds.

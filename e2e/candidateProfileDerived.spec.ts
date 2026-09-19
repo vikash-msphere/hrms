@@ -1,7 +1,7 @@
 import { SPA_HEADERS, allowConsoleErrors, gotoRoute, personPath, purge, test, expect } from "./fixtures";
 
 // Two small, derived facts on a candidate's own page - never opened by any other spec (nothing here
-// navigates to `#/candidates/<id>` at all), so neither has ever rendered.
+// navigates to `/candidates/<id>` at all), so neither has ever rendered.
 test.describe("candidate profile", () => {
   // Who sent them in: the "Referred by" badge is the one place a referral surfaces on the candidate
   // themselves, distinct from the referral record's own page.

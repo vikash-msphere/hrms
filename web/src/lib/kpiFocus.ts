@@ -3,7 +3,7 @@ import { useRoute, setQueryParam } from "@/router";
 // KPI drill-through. A metric the user can click is worth more than one they have to translate into a filter
 // by hand: clicking narrows the list below to exactly the rows the number counted, clicking again clears it.
 //
-// The focus lives in the hash query (`?focus=<key>`) rather than component state, so a narrowed page is
+// The focus lives in the URL query (`?focus=<key>`) rather than component state, so a narrowed page is
 // shareable, survives a reload and closes with the back button. Pages declare one spec per clickable metric
 // (a label for empty states plus the predicate that produced the number), spread `kpi("key")` onto the
 // SummaryStrip item, and run their rows through `apply()` before handing them to the table.

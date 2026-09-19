@@ -89,6 +89,11 @@ const records = collectionRoutes<EmployeeWrite, typeof schema.employees>({
   auditName: "employee",
   notFound: "employee not found",
   param: "employee_id",
+  // The item response carries `access.subject`: what the caller may reach ABOUT THIS PERSON, per collection.
+  // The profile is a page of per-person surfaces (their attendance, their goals, their pay), and each is a
+  // DIFFERENT collection's grant decided against THIS person's code - a question neither `access.can` (verbs
+  // on the employee row) nor the caller's scope-stripped capability set can answer.
+  subjectScopes: true,
   writeSchema,
   serialize: (row, user) => {
     const res = empResource(user?.employeeId, row);
@@ -123,10 +128,11 @@ const records = collectionRoutes<EmployeeWrite, typeof schema.employees>({
     // Auto-enrol the employee in default benefit plans (idempotent). Used by the new-hire automation, and
     // callable by HR directly. Answers with a count, not the employee.
     enrollDefaultBenefits: { raw: async (c, id) => c.json(await enrollDefaultBenefits(c.get("deps"), c.get("user"), id)) },
-    // "Who can see my record?" - the effective-access report aimed at the person asking rather than at an
-    // admin. The middleware gates it as `employees.me.viewers`, which every role holds for THEMSELVES only
-    // (grants.ts OWN_PII_ALLOW); the service additionally nails the target to the caller's own employee id,
-    // so the path id is never what decides whose record is reported. Answers with the report, not an employee.
+    // "Who can see my data?" - the effective-access report aimed at the person asking rather than at an
+    // admin, over every area of theirs (the record and its sensitive sub-resources, pay, leave, reviews,
+    // documents). The middleware gates it as `employees.me.viewers`, which every role holds for THEMSELVES
+    // only (grants.ts OWN_PII_ALLOW); the service additionally nails every target to the caller's own employee
+    // id, so the path id is never what decides whose data is reported. Answers with the report, not an employee.
     viewers: { raw: async (c) => c.json(await whoCanSeeMe(c.get("deps"), c.get("user"))) },
   },
 });

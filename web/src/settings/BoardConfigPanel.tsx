@@ -24,7 +24,7 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(
 //
 // READ BY ID, not by scanning the shared boards cache. That cache is one server page, so an org past a
 // hundred boards got a flat "This board is no longer available." for a board that was open behind the sheet -
-// and the panel is reachable by deep link (`#/boards?setting=board-config`) with the Boards page never having
+// and the panel is reachable by deep link (`/boards?setting=board-config`) with the Boards page never having
 // mounted, where the cache holds nothing at all. One id, one indexed read, always the right board.
 export function BoardConfigPanel({ objectPath, onClose }: { objectPath: string; onClose?: () => void }) {
   const { row: board, state, reload } = useResource<Board>("boards", idOf(objectPath));

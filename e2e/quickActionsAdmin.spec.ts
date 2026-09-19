@@ -45,9 +45,10 @@ test("a new section is added to the quick-create menu and an action is moved int
         }
         // "Set a goal" already sits in a built-in section (every configurable action does by default) - moved
         // here by its own row's Select, not by dragging it out of "Not in the menu" (nothing starts there).
-        // Deliberately not one of the STANDALONE_ACTION_IDS (give kudos, raise a ticket, report a problem,
-        // clock in/out): those get their own top-bar button and the org menu never governs them, so the
-        // editor has no row for them at all - see web/src/lib/quickActions.ts.
+        // Deliberately not one of the STANDALONE_ACTION_IDS (raise a ticket, report a problem, clock in/out):
+        // those have their own top-bar affordance and the org menu never governs them, so the editor has no
+        // row for them at all - see web/src/lib/quickActions.ts. Give kudos IS configurable and does have a
+        // row, since it has no button of its own.
         await goalRow.getByRole("combobox").click();
         await page.getByRole("option", { name: groupLabel, exact: true }).click();
         await page.getByRole("button", { name: "Save menu" }).click();

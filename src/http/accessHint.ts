@@ -8,6 +8,7 @@
 import { decide, denyingPattern, matchingPattern, withOwnerResource, type Grant, type Resolved } from "../domain/permissions";
 import { deriveNarrowing, type ScopeKind } from "../domain/compileGrants";
 import { redactedFieldsOf } from "../domain/manifests";
+import type { SubjectScopes } from "../domain/access";
 import type { AppUser } from "../env";
 
 type Self = { employeeCode: string | null };
@@ -22,7 +23,13 @@ const STANDARD_LEVEL: Record<string, "write" | "admin"> = { update: "write", del
 // (which shows e.g. Disable OR Enable by row state) gets a hint either way; they share one grant pattern, so
 // it costs only an extra in-memory decide(). Every entry must be a real method on the route (drift test).
 export const ACCESS_VERBS: Record<string, string[]> = {
-  employees: ["update", "delete", "enrollDefaultBenefits"],
+  // `uploadPhoto` / `clearPhoto`: the avatar's own gate, and a grant of its own (`employees.me.uploadPhoto`
+  // for the owner, the broad `employees.**` for HR). The pencil on the avatar was gated on WRITE of the
+  // personal-info sub-resource instead - a different rule that happens to coincide for the seeded roles and
+  // parts company the moment an org grants one without the other, offering an editor that 403s or hiding one
+  // that would work. A verb the hint does not list cannot be asked about, which is why they belong here.
+  // (The signature verbs deliberately do NOT: they are owner-only at the service level, not grantable.)
+  employees: ["update", "delete", "enrollDefaultBenefits", "uploadPhoto", "clearPhoto"],
   departments: ["update", "delete"],
   attendance: ["clockIn", "clockOut"],
   "attendance-regularizations": ["approve", "reject", "cancel"],
@@ -150,6 +157,7 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "invite", // ATS: mail the candidate their interview slot, with a calendar attachment (interviews)
   "letter", // ATS: render an offer's own letter as a PDF, inline, nothing persisted (offers)
   "enrollDefaultBenefits", // auto-enrol a new hire in default benefit plans (employees; wired via automation)
+  "uploadPhoto", "clearPhoto", // the profile avatar (employees) - own via `employees.me.*`, org-wide for HR
   "test", // dry-run an automation rule against a sample event (automations)
   "requestAccess", // ask access admins for a missing grant (access-rules)
   "clone", // copy every rule one subject holds onto another, as one act (access-rules)
@@ -200,7 +208,17 @@ export function computeWhy(grant: Grant, self: Self, collection: string, code: s
   return pat ? deriveNarrowing(pat).scopeKind : null;
 }
 
-export type AccessHint = { can: string[]; why?: ScopeKind };
+export type AccessHint = {
+  can: string[];
+  why?: ScopeKind;
+  /**
+   * Employees only: what the caller may reach ABOUT THE PERSON this row is, across every collection
+   * (`domain/access.ts subjectScopes`). `can` answers "which verbs on THIS row"; a profile's tabs ask the
+   * other question - "may I see this person's goals, their attendance, their pay" - and each of those is a
+   * different collection whose own grant decides it, against this person's code.
+   */
+  subject?: SubjectScopes;
+};
 
 // The hint for one object, computed BEFORE it is serialized. That order matters for a resource whose SHAPE
 // depends on what the caller may do - a board post carries its read receipts only for someone who may edit it -

@@ -26,7 +26,7 @@ test("blocking a card names the blocker, links to it, and shows the reverse edge
   expect(madeB.status(), await madeB.text()).toBe(200);
 
   try {
-    await page.goto(`/#/boards?board=${boardId}`);
+    await page.goto(`/boards?board=${boardId}`);
     await expect(page.getByRole("main")).toBeVisible();
 
     // B is blocked by A, with a note.

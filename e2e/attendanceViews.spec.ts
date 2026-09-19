@@ -1,4 +1,4 @@
-import { SPA_HEADERS, allowConsoleErrors, gotoRoute, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, personId, test, expect } from "./fixtures";
 
 // The two ways to read attendance, and the manager's view of the same days.
 //
@@ -151,6 +151,30 @@ test.describe("attendance views", () => {
     await expect(teamView.getByRole("button").nth(1)).toHaveAttribute("aria-pressed", "true");
     await expect(manager.getByRole("main")).not.toBeEmpty();
 
+    // A row in the period table is a summary of somebody's log, and the question it raises - which days? -
+    // is answered by opening it. The sheet reads that person's own punches, so the totals in the row and the
+    // days in the sheet are the same window.
+    const periodRow = manager.locator("tbody tr").filter({ has: manager.getByRole("button", { name: /^Open .+'s attendance$/ }) }).first();
+    await expect(periodRow).toBeVisible({ timeout: 30_000 });
+    const opener = periodRow.getByRole("button", { name: /^Open .+'s attendance$/ });
+    // The person the row is about, taken off the affordance that opens them rather than off a cell: the table
+    // is sorted worst-first, so which name leads is data.
+    const who = (await opener.getAttribute("aria-label"))!.replace(/^Open /, "").replace(/'s attendance$/, "");
+    await opener.click();
+
+    const sheet = manager.getByRole("dialog").filter({ hasText: who });
+    await expect(sheet).toBeVisible({ timeout: 30_000 });
+    // It is the same history component the reader gets for themselves - the view switch and the window pager
+    // are the proof it is the log and not another summary.
+    await expect(sheet.getByRole("group", { name: "History view" })).toBeVisible({ timeout: 30_000 });
+    await expect(sheet.getByRole("button", { name: "Older 30 days" }).or(sheet.getByRole("button", { name: "Previous month" }))).toBeVisible();
+    // Read-only: an approver reads somebody else's days, they do not file that person's correction. Nothing
+    // in here offers to.
+    await expect(sheet.getByRole("button", { name: /Correct/ })).toHaveCount(0);
+    await expect(sheet.getByRole("button", { name: /Request a correction/ })).toHaveCount(0);
+    await manager.keyboard.press("Escape");
+    await expect(manager.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+
     // An ordinary employee is offered none of it: nothing the caller cannot use may render.
     const employee = await as("employee");
     await gotoRoute(employee, "attendance", "Attendance");
@@ -159,5 +183,143 @@ test.describe("attendance views", () => {
 
     // Punched back out, so the next spec reads the day this one found.
     await manager.request.post("/v1/attendance/me:clockOut", { headers: SPA_HEADERS });
+  });
+
+  test("an employee's record carries their attendance, read-only", async ({ as }) => {
+    test.setTimeout(180_000);
+    // HR reads a record. The tab is the collection grant (`attendance.read`), not the approver capability -
+    // reading somebody's log is a read. It is a tab on SOMEBODY ELSE's record only: on one's own, the
+    // Attendance page is the place, so HR reading a colleague is what this walks.
+    const hr = await as("hr");
+    // Straight to the record, by id. The directory is reached by clicking a row, and this spec does not care
+    // which person it lands on - it cares that their record carries the log, so it names one.
+    const subject = await personId(hr, "employee");
+    await gotoRoute(hr, `employees/${subject}`);
+    await expect(hr.getByRole("heading", { level: 1 })).toBeVisible({ timeout: 30_000 });
+
+    const tab = hr.getByRole("tab", { name: "Attendance" });
+    await expect(tab).toBeVisible({ timeout: 30_000 });
+    await tab.click();
+    const panel = hr.getByRole("tabpanel");
+    await expect(panel.getByRole("group", { name: "History view" })).toBeVisible({ timeout: 30_000 });
+
+    // Deep-linked, so the tab survives a reload and can be sent to somebody - the same contract every other
+    // tab on this record has.
+    expect(hr.url()).toContain("/attendance");
+    await hr.reload();
+    await expect(hr.getByRole("tab", { name: "Attendance" })).toHaveAttribute("aria-selected", "true", { timeout: 30_000 });
+
+    // Read-only here too, for the same reason as the manager's drill-in above.
+    await expect(hr.getByRole("tabpanel").getByRole("button", { name: /Request a correction/ })).toHaveCount(0);
+
+    // The hours chart comes with the history, which is why `everyChart.spec.ts` names this spec for this
+    // page: its walk arrives on static routes and this one lives behind a tab on a record. So the same two
+    // things that walk asserts are asserted here - a picture with real pixels, and the numbers in a table
+    // under it for a reader who cannot see it. A window with fewer than two recorded days draws nothing at
+    // all, which is allowed; what is not allowed is a figure with one half missing.
+    const figure = hr.getByRole("tabpanel").locator("figure").filter({ has: hr.locator("figcaption") }).first();
+    await figure.waitFor({ state: "visible", timeout: 15_000 }).catch(() => undefined);
+    if (await figure.count()) {
+      const svg = figure.locator("svg").first();
+      await expect(svg).toBeAttached({ timeout: 30_000 });
+      await expect.poll(async () => {
+        const b = await svg.boundingBox();
+        return (b?.width ?? 0) > 0 && (b?.height ?? 0) > 0;
+      }, { timeout: 10_000 }).toBe(true);
+      await expect(figure.locator("table")).toHaveCount(1);
+    }
+
+    // And the same two tabs are gone from the reader's OWN record: a person's leave and attendance live on
+    // the pages that can act on them, not as a second copy on the profile.
+    await gotoRoute(hr, "profile");
+    await expect(hr.getByRole("tab", { name: "Profile", exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(hr.getByRole("tab", { name: "Attendance" })).toHaveCount(0);
+    await expect(hr.getByRole("tab", { name: "Leave" })).toHaveCount(0);
+  });
+
+  // HR decides what a day is worth, and the employee is shown the decision without being able to make it.
+  //
+  // The arithmetic and the payroll wiring are pinned in `test/` (attendanceLop, moneyFlow). What only exists
+  // in a browser is the handover between the two people: that the action is on the record at all, that it is
+  // a full round trip (set, read back, withdraw) rather than a form that posts into nothing, and that it is
+  // offered to exactly one of them.
+  test("HR marks what a day counts as, and the employee sees it but cannot set it", async ({ as }) => {
+    test.setTimeout(240_000);
+    const hr = await as("hr");
+    const subject = await personId(hr, "employee");
+    await gotoRoute(hr, `employees/${subject}/attendance`);
+    await expect(hr.getByRole("tab", { name: "Attendance" })).toHaveAttribute("aria-selected", "true", { timeout: 30_000 });
+
+    // The month grid is where a day is picked deliberately; the list's own affordance is a hover icon, which
+    // is not a thing to hang a spec on.
+    const panel = hr.getByRole("tabpanel");
+    await panel.getByRole("group", { name: "History view" }).getByRole("button", { name: "Month" }).click();
+    await expect(panel.getByText("Click a day for its punches", { exact: false })).toBeVisible({ timeout: 30_000 });
+
+    // Any day the grid drew - which day it is does not matter, only that it is one with a standing. Stepping
+    // back a month rather than asserting against whatever today happens to be, the way the bulk-correction
+    // read above does.
+    const days = panel.getByRole("button", { name: /·/ }).filter({ hasNotText: /Tick|Untick/ });
+    let opened = false;
+    for (let back = 0; back < 6 && !opened; back++) {
+      if (await days.count()) { await days.first().click(); opened = true; break; }
+      await panel.getByRole("button", { name: "Previous month" }).click({ timeout: 10_000 });
+      await hr.waitForTimeout(800);
+    }
+    expect(opened, "no month in the last six drew a day to mark").toBe(true);
+
+    const counts = panel.getByRole("button", { name: "Counts as" });
+    await expect(counts).toBeVisible({ timeout: 30_000 });
+    await counts.click();
+
+    // Three answers, all on screen at once: this changes somebody's pay, so it is not hidden behind a select.
+    const form = hr.getByRole("dialog");
+    await expect(form.getByRole("heading", { name: /^What does .* count as\?$/ })).toBeVisible({ timeout: 30_000 });
+    const group = form.getByRole("radiogroup", { name: "Counts as" });
+    await expect(group.getByRole("radio")).toHaveCount(3);
+    await group.getByRole("radio", { name: "Half day" }).click();
+    await expect(group.getByRole("radio", { name: "Half day" })).toHaveAttribute("aria-checked", "true");
+    await form.getByLabel("Reason").fill("E2E: agreed short day");
+    // "Mark day" on a fresh day, "Save" on one an interrupted earlier run left marked - this spec withdraws
+    // its own mark at the end, but a run killed between the two would otherwise poison every run after it.
+    await form.getByRole("button", { name: "Mark day" }).or(form.getByRole("button", { name: "Save", exact: true })).click();
+    await expect(form).toHaveCount(0, { timeout: 30_000 });
+
+    // Read back on the day itself, BESIDE what the punches earned rather than instead of it - both facts are
+    // what makes a marked day answerable later.
+    await expect(panel.getByText("Counted as half day").first()).toBeVisible({ timeout: 30_000 });
+
+    // CHANGED, not just made. The factory mounts a PATCH lane only when the spec supplies a patch mapper, so
+    // an editor that offers Save on an existing mark can ship with nothing behind that button - which is
+    // exactly what happened, and what nothing in the first version of this spec would have noticed.
+    await counts.click();
+    await expect(form.getByRole("radio", { name: "Half day" })).toHaveAttribute("aria-checked", "true", { timeout: 30_000 });
+    await form.getByRole("radio", { name: "Full day" }).click();
+    await form.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(form).toHaveCount(0, { timeout: 30_000 });
+    await expect(panel.getByText("Counted as full day").first()).toBeVisible({ timeout: 30_000 });
+    await expect(panel.getByText("Counted as half day")).toHaveCount(0);
+
+    const employee = await as("employee");
+    // The employee can READ the decision about their own days. Asserted over the API rather than by hunting
+    // the marked day in their own grid, because which day HR just marked is whatever the month offered: what
+    // this pins is the CAPABILITY, which is the half that was missing - the row grant shipped without the
+    // bare list token, so the badge was invisible to the one person the notification is addressed to and
+    // nothing 403'd to say so.
+    const mine = await employee.request.get("/v1/attendance-day-marks", { headers: SPA_HEADERS });
+    expect(mine.status(), "an employee must be able to list marks on their own days").toBe(200);
+
+    // And is offered no way to make one: nothing the caller cannot use may render, and re-valuing your own
+    // attendance is the thing this grant exists to keep away from you.
+    await gotoRoute(employee, "attendance", "Attendance");
+    await expect(employee.getByRole("button", { name: "Counts as" })).toHaveCount(0);
+    await expect(employee.getByRole("button", { name: /Set what .* counts as/ })).toHaveCount(0);
+
+    // Withdrawn, so the next run starts where this one found it - and the badge goes with it, which is the
+    // assertion that the day really did go back to being judged on its punches.
+    await counts.click();
+    await form.getByRole("button", { name: "Remove mark" }).click();
+    await expect(form).toHaveCount(0, { timeout: 30_000 });
+    await expect(panel.getByText(/^Counted as /)).toHaveCount(0, { timeout: 30_000 });
   });
 });

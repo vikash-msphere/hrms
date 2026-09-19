@@ -155,6 +155,12 @@ export const COLLECTION_META: Record<string, CollectionMeta> = {
   },
   bonuses: { label: "Bonuses", singular: "bonus", plural: "bonuses" },
   attendance: { label: "Attendance", singular: "attendance record", plural: "attendance records" },
+  "attendance-day-marks": {
+    label: "Day marks",
+    singular: "day mark",
+    plural: "day marks",
+    note: "What one person's day COUNTS AS - a full day, half a day, or absent - decided by HR instead of derived from their punches. A mark changes what the payroll run treats as unpaid absence, so write is a pay decision: the seeded grants give managers read (they see why a report's short day was counted the way it was) and leave the writing with HR. Self-scoped read is the employee's own: they are the person the decision is about.",
+  },
   compensation: { label: "Compensation", singular: "compensation record", plural: "compensation records" },
   "leave-balances": {
     label: "Leave balances",

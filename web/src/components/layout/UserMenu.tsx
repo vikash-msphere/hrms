@@ -1,4 +1,4 @@
-import { KeyRound, LogOut, ShieldCheck, ChevronDown, Sun, Moon, Monitor, Check } from "lucide-react";
+import { KeyRound, LogOut, ShieldCheck, ChevronDown, Sun, Moon, Monitor } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { roleLabel } from "@/lib/roles";
 import { useTheme, type Theme } from "@/lib/theme";
@@ -7,12 +7,13 @@ import { useConfirm, type ConfirmFn } from "@/components/common/confirm";
 import { useEmployee } from "@/hooks/useEmployee";
 import { useAccessMode } from "@/components/access/AccessModeProvider";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import type { Me } from "@/types";
 
-// The signed-in user's avatar + menu, anchored in the top bar. Opens (downward) with the profile link, sign-out,
-// and - for those who may manage access - the access-management mode toggle and a shortcut to manage WHO can
-// manage access. Avatar-only trigger to stay compact next to the rest of the top-bar chrome.
+// The signed-in user's avatar + menu, anchored in the top bar. Opens (downward) with the profile link, the
+// appearance control, sign-out, and - for those who may manage access - the access-management mode toggle and
+// a shortcut to manage WHO can manage access. Avatar-only trigger to stay compact next to the rest of the
+// top-bar chrome.
 
 // Sign-out is mode-agnostic: the server clears its own session (a no-op cookie delete under Cloudflare
 // Access) and says where signing in again happens - the Google login route, or Access's edge logout. If the
@@ -51,7 +52,8 @@ async function signOut(confirm: ConfirmFn) {
     window.location.href = "/";
   }
 }
-// Same three options as the top bar's ThemeToggle, listed rather than cycled so "System" stays selectable.
+// All three modes offered explicitly rather than cycled, so "System" - follow the device - stays selectable
+// instead of being the state you land on by accident.
 const THEMES: { value: Theme; label: string; icon: typeof Sun }[] = [
   { value: "light", label: "Light", icon: Sun },
   { value: "dark", label: "Dark", icon: Moon },
@@ -113,29 +115,48 @@ export function UserMenu({ me }: { me: Me }) {
           </>
         )}
         <DropdownMenuItem asChild>
-          <a href="#/profile">View my profile</a>
+          <a href="/profile">View my profile</a>
         </DropdownMenuItem>
-        {/* Appearance. The top bar carries a dedicated theme button from `md` up; on a phone that row is
-            reserved for things that must be reachable per page, so the preference lives here instead. */}
-        <div className="md:hidden">
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Appearance</DropdownMenuLabel>
+        {/* Appearance, at every width - this is the only theme control in the app. A preference, not a page
+            action: it belongs with the person rather than in a row of per-page chrome, and a dedicated top-bar
+            button spent a permanent 36px on a choice most people make once.
+            A three-position segmented control rather than three list rows, because the options are mutually
+            exclusive and the whole set is worth seeing at once: the current mode is the filled segment, so
+            what is on and what else is available read in one glance instead of a tick to hunt for. */}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Appearance</DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={theme}
+          onValueChange={(v) => setTheme(v as Theme)}
+          // The track. Inset from the menu's own padding so the control reads as one object rather than as
+          // three rows that happen to sit in a line.
+          // `bg-background` + a border, NOT `bg-muted`: this control sits on a POPOVER, and `--muted` is the
+          // same neutral-800 as `--popover` in the dark palette, so a muted track is invisible there. The two
+          // tokens used here are a step apart in both palettes, and the border carries the edge either way.
+          className="mx-1 mb-1 flex items-stretch gap-1 rounded-lg border bg-background p-1"
+        >
           {THEMES.map((t) => (
-            <DropdownMenuItem
+            <DropdownMenuRadioItem
               key={t.value}
-              onClick={(e) => {
-                // Keep the menu open: picking a theme is a preview-and-adjust choice, and re-opening the
-                // menu to try the next one is three taps for a decision that takes one.
-                e.preventDefault();
-                setTheme(t.value);
-              }}
+              value={t.value}
+              // Keep the menu open: picking a theme is a preview-and-adjust choice, and re-opening the menu
+              // to try the next one is three gestures for a decision that takes one.
+              onSelect={(e) => e.preventDefault()}
+              className={cn(
+                "flex-1 flex-col justify-center gap-1 rounded-md px-1 py-1.5 text-[11px] font-medium text-muted-foreground",
+                // The selection IS the raised segment. `data-[state=checked]` is Radix's own flag, so it
+                // tracks the group's value rather than a second copy of it kept in this file.
+                // `bg-card` sits one step LIGHTER than the track in both palettes (white on neutral-50,
+                // neutral-900 on neutral-950), so "raised" means the same thing in dark as in light - which a
+                // `bg-background` fill did not: it was darker than its own surroundings in the dark theme.
+                "data-[state=checked]:bg-card data-[state=checked]:text-foreground data-[state=checked]:shadow-sm",
+              )}
             >
               <t.icon className="h-4 w-4" />
               {t.label}
-              <Check className={cn("ml-auto h-4 w-4", theme === t.value ? "opacity-100" : "opacity-0")} />
-            </DropdownMenuItem>
+            </DropdownMenuRadioItem>
           ))}
-        </div>
+        </DropdownMenuRadioGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={() => void signOut(confirm)}>
           <LogOut className="h-4 w-4" />

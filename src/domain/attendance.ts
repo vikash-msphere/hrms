@@ -248,13 +248,39 @@ export function leaveCover(d: string, ranges: LeaveRange[]): number {
   return (am ? 0.5 : 0) + (pm ? 0.5 : 0);
 }
 
-// Unexcused loss-of-pay DAY-UNITS over the period for one employee (fractional). For each scheduled working
-// day that is not a holiday and not covered by approved leave: no punch is a full absence (1.0); worked below
-// the half-day minimum is also a full absence (the session is too short to count); worked from the half-day
-// minimum up to a full day is a half day (0.5); a full day adds nothing.
+/**
+ * How much of a day's work a day counts as: a whole day, half of one, or none at all.
+ *
+ * Ordinarily this is DERIVED from the minutes punched (`derivedCredit` below). A day mark is an HR decision
+ * that replaces that derivation for one employee on one day - the short afternoon that was agreed in advance
+ * and should count in full, the eight hours clocked by somebody who was not actually working. The two are the
+ * same scale on purpose, so a mark substitutes for the derivation rather than being a second mechanism
+ * stacked on top of it.
+ */
+export type DayCredit = "full" | "half" | "absent";
+/** A credit as day-units of work: the scale `lopDayUnits` settles up on. */
+export const creditUnits = (c: DayCredit): number => (c === "full" ? 1 : c === "half" ? 0.5 : 0);
+
+/**
+ * What the punches alone say a day is worth. `undefined` (never punched) is kept distinct from 0 so a
+ * configured `half_day_minutes` of 0 still reads a no-show as a no-show rather than as a satisfied half day.
+ */
+function derivedCredit(worked: number | undefined, fullDayMinutes: number, halfDayMinutes: number): number {
+  if (worked === undefined || worked < halfDayMinutes) return 0; // no punch, or too short to earn a half day
+  return worked < fullDayMinutes ? 0.5 : 1;
+}
+
+// Unexcused loss-of-pay DAY-UNITS over the period for one employee (fractional).
 //
-// A day HALF covered by leave owes half a day of work, so it is judged on the same ladder one notch down: a
-// punch worth at least the half-day minimum discharges it, anything less leaves 0.5 unexcused.
+// Every scheduled working day that is not a holiday OWES a day of work, less whatever approved leave excuses
+// (a half-day leave leaves half a day owed). Against that sits what the day was WORTH: normally the minutes
+// punched, on the half-day ladder `derivedCredit` states - and where HR has marked the day, the mark instead.
+// What is left over is unexcused, and a day worth more than it owed settles at zero rather than going
+// negative (voluntary overtime does not bank against another day's absence).
+//
+// Stated as owed-minus-credit rather than as a ladder per leave case, because it IS one subtraction: the
+// nested form had the same arithmetic written twice, and a day mark would have had to be threaded through
+// both copies.
 export function lopDayUnits(opts: {
   startYmd: string;
   endYmd: string;
@@ -262,26 +288,20 @@ export function lopDayUnits(opts: {
   holidays: Set<string>;
   leaveRanges: LeaveRange[];
   workedByDay: Map<string, number>; // day -> worked minutes; absent if no entry
+  /** HR's decision for a day, which replaces what the punches say it was worth. */
+  marksByDay?: Map<string, DayCredit>;
   fullDayMinutes: number;
   halfDayMinutes: number;
 }): number {
-  const { startYmd, endYmd, workDays, holidays, leaveRanges, workedByDay, fullDayMinutes, halfDayMinutes } = opts;
+  const { startYmd, endYmd, workDays, holidays, leaveRanges, workedByDay, marksByDay, fullDayMinutes, halfDayMinutes } = opts;
   let units = 0;
   for (const d of enumerate(startYmd, endYmd)) {
     if (!workDays.includes(weekdayOf(d)) || holidays.has(d)) continue;
-    const excused = leaveCover(d, leaveRanges);
-    if (excused >= 1) continue; // whole day on leave
-    // `undefined` (never punched) is kept distinct from 0 so a configured `half_day_minutes` of 0 still reads
-    // a no-show as a no-show rather than as a satisfied half day.
-    const worked = workedByDay.get(d);
-    if (excused > 0) {
-      // Half-day leave: the other half still has to be worked, and a half day's work is what discharges it.
-      units += worked !== undefined && worked >= halfDayMinutes ? 0 : 0.5;
-      continue;
-    }
-    if (worked === undefined || worked < halfDayMinutes) units += 1; // no punch, or too short to earn a half day
-    else if (worked < fullDayMinutes) units += 0.5; // earned a half day
-    // else: a full day, nothing deducted
+    const owed = 1 - leaveCover(d, leaveRanges);
+    if (owed <= 0) continue; // whole day on leave
+    const mark = marksByDay?.get(d);
+    const credit = mark ? creditUnits(mark) : derivedCredit(workedByDay.get(d), fullDayMinutes, halfDayMinutes);
+    units += Math.max(0, owed - credit);
   }
   return Math.round(units * 2) / 2; // stay on the half-day grid
 }

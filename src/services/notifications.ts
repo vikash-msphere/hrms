@@ -26,14 +26,15 @@ const loadNotifConfig = (deps: Deps) => getSettingValue<NotificationConfig>(deps
 
 // A stored `link` is an INTERNAL path ("reviews/<internal-id>", "announcements/<internal-id>/view"): the JSON
 // response encoder rewrites the id on the way out, so the feed is fine. Web push does not pass through that
-// edge - it leaves as an outbound fetch - so the pushed link is encoded here, and prefixed "#/" because the
-// push service worker navigates hash routes (a bare "approvals" resolved against the origin, not the router).
+// edge - it leaves as an outbound fetch - so the pushed link is encoded here, and given a leading "/" because
+// the service worker navigates an absolute URL (a bare "approvals" resolves against whatever path the open
+// window happens to be on, not against the app root).
 async function pushLink(deps: Deps, link?: string | null): Promise<string | undefined> {
   const raw = link?.trim();
   if (!raw) return undefined;
   const m = /^([a-z][a-z-]*)\/([0-9a-hj-km-np-tv-z]{13})((?::[a-zA-Z]+|\/[a-z][a-z-]*)?)$/.exec(raw);
-  if (!m || !ENCODABLE.has(m[1]!)) return `#/${raw.replace(/^#\/?/, "")}`;
-  return `#/${m[1]}/${await deps.idCodec.encode(m[1]!, m[2]!)}${m[3]}`;
+  if (!m || !ENCODABLE.has(m[1]!)) return `/${raw.replace(/^\/+/, "")}`;
+  return `/${m[1]}/${await deps.idCodec.encode(m[1]!, m[2]!)}${m[3]}`;
 }
 
 // Audience for a broadcast emission. `everyone` = all active employees; `department` = direct members of a dept

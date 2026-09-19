@@ -5,7 +5,12 @@ import { type Ctx, T0, HOLIDAY_YEAR, q, code2, rows } from "../lib";
 
 type HolidaySeed = { name: string; kind: "fixed" | "optional"; month: number; day: number };
 
-const HOLIDAYS: HolidaySeed[] = [
+/**
+ * Exported because a date is only a WORKING day if it is neither a weekend nor one of these: the browser specs
+ * pick days to file leave on, and every one of these dates is priced at zero. Both kinds count - the leave
+ * forms charge against every holiday the org has not disabled, not just the company-wide ones.
+ */
+export const HOLIDAYS: HolidaySeed[] = [
   { name: "New Year's Day", kind: "optional", month: 1, day: 1 },
   { name: "Makar Sankranti / Pongal", kind: "optional", month: 1, day: 14 },
   { name: "Republic Day", kind: "fixed", month: 1, day: 26 },

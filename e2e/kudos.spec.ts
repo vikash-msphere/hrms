@@ -7,14 +7,16 @@ import { gotoRoute, personId, purge, test, expect, toast } from "./fixtures";
 // mode. That hand-off - a global action that navigates AND hands the destination an intent it picks up on
 // mount - is the browser-only half (`quickCreate` pins the same mechanism for the "+" menu). `test/kudos.ts`
 // owns the points and the wall.
-test("kudos is given from the top bar and lands on the board", async ({ as }) => {
+test("kudos is given from the quick-create menu and lands on the board", async ({ as }) => {
   const giver = await as("hr");
   const message = `E2E kudos ${Date.now()}`;
 
   await gotoRoute(giver, "dashboard");
 
-  // The top-bar button, from a page that has nothing to do with the board.
-  await giver.getByRole("button", { name: "Give kudos" }).click();
+  // The top bar's "+" menu, from a page that has nothing to do with the board. Kudos is an ordinary
+  // configurable entry there (/settings/quick-actions), in the "Create" section the default menu puts it in.
+  await giver.getByRole("button", { name: "New", exact: true }).click();
+  await giver.getByRole("menuitem", { name: "Give kudos" }).click();
 
   // It navigated to the board AND opened the composer in kudos mode - the intent survived the navigation.
   const form = giver.getByRole("dialog");
@@ -50,7 +52,7 @@ test("kudos given from a profile arrives with that person already filled in", as
 
   await gotoRoute(giver, `employees/${eve}`);
   // "Kudos" on the record page, not "Give kudos": the header's action row is a set of short labels sharing
-  // one width (Kudos / Emergency / Org chart), and the verb is in the tooltip.
+  // one width (Kudos / Org chart), and the verb is in the tooltip.
   await giver.getByRole("main").getByRole("button", { name: "Kudos", exact: true }).click();
 
   const form = giver.getByRole("dialog");

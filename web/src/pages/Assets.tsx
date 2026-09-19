@@ -14,6 +14,9 @@ import { useChartFocus } from "@/lib/chartFocus";
 import { topSlices } from "@/lib/chartTheme";
 import { DataState } from "@/components/common/DataState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { type TableInsight } from "@/components/common/TableInsights";
+import { BLANK } from "@/lib/tableFilter";
+import { addDaysYmd, todayStr } from "@/lib/orgDay";
 import { metaColumns } from "@/components/common/metaColumns";
 import { Field, FieldRow } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -114,7 +117,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
   const [scanSerial, setScanSerial] = useState(false);
   const myId = me.employee_id ?? undefined;
 
-  // A tag's QR is a deep link carrying the asset's secret (`#/assets/<id>?s=…`), so pointing a phone at the
+  // A tag's QR is a deep link carrying the asset's secret (`/assets/<id>?s=…`), so pointing a phone at the
   // sticker lands here with the proof already in hand. Open the one action that scan makes possible for THIS
   // viewer - confirm receipt if it is theirs to confirm, count it in if they may verify - rather than
   // dropping them on a list they then have to search.
@@ -127,13 +130,13 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
       asset.assigned_to && idOf(asset.assigned_to) === myId && asset.status === "pending_ack" ? "acknowledge"
       : asset.access?.can?.includes("verify") ? "verify"
       : null;
-    if (mode) setCustody({ asset, mode, scan: `${window.location.origin}/#/assets/${route.id}?s=${secret}` });
+    if (mode) setCustody({ asset, mode, scan: `${window.location.origin}/assets/${route.id}?s=${secret}` });
     // Scanning a tag should never look like nothing happened: say what was scanned and why there is no action.
     else toast({ title: `Scanned ${asset.name}`, description: asset.status === "pending_ack" ? "It is waiting on the person it was assigned to." : "Nothing to confirm on this one right now." });
     // The SECRET COMES OUT OF THE ADDRESS BAR once it has been taken into state - the same thing the stocktake
     // param gets further down this file, and for a much stronger reason. The tag secret is sighting-grade proof
     // (`requireProof` in src/services/assets.ts accepts a secret-tier scan on its own), and it is meant to live
-    // "on the physical label and nowhere a normal reader of the app can see". Left in the hash it stayed in the
+    // "on the physical label and nowhere a normal reader of the app can see". Left in the query it stayed in the
     // address bar for the rest of the visit, was rebuilt into every `replaceState` the page makes, went into
     // browser history on a shared machine, and reached session replay intact - ten characters of base32 matches
     // none of instrument.ts's last-resort scrubs, and "Report a problem" attaches that recording to a ticket.
@@ -350,23 +353,73 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
     }
   }
 
+  // What a register is actually asked about: what nobody has laid eyes on, and what is stuck waiting for a
+  // person to scan it. Both are custody questions, and neither is visible in a list sorted by name.
+  const assetInsights = (rs: Asset[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const stalest = addDaysYmd(todayStr(), -180);
+    const unseen = rs.filter((r) => !r.last_verified_time);
+    const stale = rs.filter((r) => r.last_verified_time && r.last_verified_time.slice(0, 10) < stalest);
+    if (unseen.length > 0) {
+      out.push({
+        id: "never-verified",
+        label: `${unseen.length} never verified`,
+        tone: "warning",
+        hint: "No sighting on record at all. A stocktake starts here.",
+        filters: { last_verified: BLANK },
+      });
+    }
+    if (stale.length > 0) {
+      out.push({
+        id: "stale-verified",
+        label: `${stale.length} unseen for 6 months`,
+        tone: "warning",
+        hint: `Last sighted before ${formatDate(stalest)}.`,
+        filters: { last_verified: `..${stalest}` },
+        sort: "last_verified.asc",
+      });
+    }
+    // One chip per waiting status rather than one for both: a chip's filter has to leave exactly the rows
+    // it counted, and a select filter cannot say "either of these two".
+    for (const [status, label, hint] of [
+      ["pending_ack", "waiting on the holder", "Handed over, but the person has not scanned to confirm they have it."],
+      ["pending_verification", "waiting on check-in", "Sent back to stock, but nobody has scanned it in."],
+    ] as const) {
+      const n = rs.filter((r) => r.status === status).length;
+      if (n > 0) out.push({ id: status, label: `${n} ${label}`, hint, filters: { status: ASSET_STATUS_LABEL[status] ?? status } });
+    }
+    const spare = rs.filter((r) => !r.assigned_to && r.status === "in_stock");
+    if (spare.length > 0) {
+      out.push({
+        id: "in-stock",
+        label: `${spare.length} free in stock`,
+        tone: "success",
+        hint: "Available to issue to the next request.",
+        filters: { status: ASSET_STATUS_LABEL.in_stock ?? "In stock", assigned_to: BLANK },
+      });
+    }
+    return out;
+  };
+
   const columns: Column<Asset>[] = [
     { id: "asset_tag", header: "Tag", accessor: (r) => r.asset_tag ?? "", cell: (r) => <span className="font-mono text-xs">{r.asset_tag || "-"}</span> },
     { id: "name", header: "Name", accessor: (r) => r.name, cell: (r) => <span className="font-medium">{r.name}</span> },
-    { id: "category", header: "Category", filter: "select", accessor: (r) => (r.category ? catName(r.category) : "-") },
+    { id: "category", header: "Category", filter: "select", groupBy: true, accessor: (r) => (r.category ? catName(r.category) : "-") },
     { id: "serial", header: "Serial", defaultHidden: true, accessor: (r) => r.serial_number ?? "", cell: (r) => r.serial_number || "-" },
-    { id: "status", header: "Status", filter: "select", accessor: (r) => ASSET_STATUS_LABEL[r.status] ?? r.status, cell: (r) => (
+    { id: "status", header: "Status", filter: "select", groupBy: true, accessor: (r) => ASSET_STATUS_LABEL[r.status] ?? r.status, cell: (r) => (
       <span className="flex items-center gap-1.5">
         <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium", ASSET_STATUS_TONE[r.status])}>{ASSET_STATUS_LABEL[r.status] ?? r.status}</span>
         {r.condition && r.condition !== "good" && <span className="text-xs text-amber-600 dark:text-amber-400">{ASSET_CONDITION_LABEL[r.condition] ?? r.condition}</span>}
       </span>
     ) },
-    { id: "assigned_to", header: "Assigned to", filter: "select", accessor: (r) => (r.assigned_to ? empName(r.assigned_to) : ""), cell: (r) => (r.assigned_to ? empName(r.assigned_to) : <span className="text-muted-foreground">-</span>) },
-    { id: "assigned_on", header: "Assigned", defaultHidden: true, accessor: (r) => r.assigned_on ?? "", cell: (r) => (r.assigned_on ? formatDate(r.assigned_on) : "-") },
-    { id: "purchase_date", header: "Purchased", defaultHidden: true, accessor: (r) => r.purchase_date ?? "", cell: (r) => (r.purchase_date ? formatDate(r.purchase_date) : "-") },
-    { id: "tag_printed", header: "Tag printed", defaultHidden: true, accessor: (r) => r.tag_printed_time ?? "", cell: (r) => (r.tag_printed_time ? formatDate(r.tag_printed_time.slice(0, 10)) : "-") },
+    // "(Blank)" in this column's filter is every unassigned asset - the stock list, without a status to
+    // stand in for it.
+    { id: "assigned_to", header: "Assigned to", filter: "select", groupBy: true, accessor: (r) => (r.assigned_to ? empName(r.assigned_to) : ""), cell: (r) => (r.assigned_to ? empName(r.assigned_to) : <span className="text-muted-foreground">-</span>) },
+    { id: "assigned_on", header: "Assigned", defaultHidden: true, filter: "date", dateHint: "past", accessor: (r) => r.assigned_on ?? "", cell: (r) => (r.assigned_on ? formatDate(r.assigned_on) : "-") },
+    { id: "purchase_date", header: "Purchased", defaultHidden: true, filter: "date", dateHint: "past", accessor: (r) => r.purchase_date ?? "", cell: (r) => (r.purchase_date ? formatDate(r.purchase_date) : "-") },
+    { id: "tag_printed", header: "Tag printed", defaultHidden: true, filter: "date", dateHint: "past", accessor: (r) => r.tag_printed_time ?? "", cell: (r) => (r.tag_printed_time ? formatDate(r.tag_printed_time.slice(0, 10)) : "-") },
     // A sighting is worth only as much as its evidence, so the date says whether a scan proved it.
-    { id: "last_verified", header: "Last verified", defaultHidden: true, accessor: (r) => r.last_verified_time ?? "", cell: (r) => (
+    { id: "last_verified", header: "Last verified", defaultHidden: true, filter: "date", dateHint: "past", accessor: (r) => r.last_verified_time ?? "", cell: (r) => (
       r.last_verified_time ? (
         <span className="flex items-center gap-1.5">
           {formatDate(r.last_verified_time.slice(0, 10))}
@@ -374,7 +427,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
         </span>
       ) : "-"
     ) },
-    { id: "last_verified_by", header: "Sighted by", defaultHidden: true, accessor: (r) => (r.last_verified_by ? empName(r.last_verified_by) : ""), cell: (r) => (r.last_verified_by ? empName(r.last_verified_by) : "-") },
+    { id: "last_verified_by", header: "Sighted by", defaultHidden: true, filter: "select", groupBy: true, accessor: (r) => (r.last_verified_by ? empName(r.last_verified_by) : ""), cell: (r) => (r.last_verified_by ? empName(r.last_verified_by) : "-") },
     ...metaColumns<Asset>(),
     {
       id: "actions", header: "", sortable: false, filter: "none", align: "right",
@@ -530,6 +583,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
             )
           }
           columns={columns}
+          insights={assetInsights}
           rows={shown}
           getRowId={(r) => r.path}
           accessCollection="assets"

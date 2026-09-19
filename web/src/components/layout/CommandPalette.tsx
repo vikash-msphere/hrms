@@ -3,7 +3,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Search, CornerDownLeft, ArrowUp, ArrowDown, User, Loader2, KeyRound, X } from "lucide-react";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { useAccessMode } from "@/components/access/AccessModeProvider";
-import { NAV, itemVisible, navPerm } from "@/nav";
+import { NAV, itemVisible, navAdmits } from "@/nav";
 import { SETTINGS_REGISTRY } from "@/settings/registry";
 import { hasCapability } from "@/lib/perm";
 import { navigate } from "@/router";
@@ -28,7 +28,7 @@ type Item = {
   badge: string; // the type word shown on the right: "Action", "Page", "Leave request", ...
   tone: Tone;
   icon: LucideIcon;
-  route?: string; // hash route to navigate to
+  route?: string; // app route to navigate to
   run?: () => void; // ...or an action to fire instead
 };
 type Section = { label: string; items: Item[] };
@@ -49,10 +49,10 @@ function buildLocal(me: Me, quickCfg?: OrgSettings["quick_actions"]): { actions:
     g.items.flatMap((i): Item[] => {
       if (i.tabs) {
         return i.tabs
-          .filter((t) => { const p = navPerm(t); return !p || hasCapability(me.capabilities, p); })
+          .filter((t) => navAdmits(t, (p) => hasCapability(me.capabilities, p), (c) => !!me.scopes.read[c]))
           .map((t) => ({ key: t.key, label: `${i.label}: ${t.label}`, detail: g.label, badge: "Page", tone: "page", icon: i.icon, route: t.key }));
       }
-      if (!itemVisible(i, (p) => hasCapability(me.capabilities, p))) return [];
+      if (!itemVisible(i, (p) => hasCapability(me.capabilities, p), (c) => !!me.scopes.read[c])) return [];
       return [{ key: i.key, label: i.label, detail: g.label, badge: "Page", tone: "page", icon: i.icon, route: i.key }];
     }),
   );

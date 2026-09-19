@@ -175,7 +175,7 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
   const columns: Column<PayComponent>[] = [
     { id: "name", header: "Name", accessor: (pc) => pc.display_name, cell: (pc) => <span className="font-medium">{pc.display_name}</span> },
     {
-      id: "kind", header: "Kind", filter: "select",
+      id: "kind", header: "Kind", filter: "select", groupBy: true,
       // Employer contributions carry their CTC side here: the two states differ in every CTC figure, so the
       // catalog says which one this row is rather than making you open it.
       accessor: (pc) => (pc.kind === "employer_contribution" && pc.in_ctc === false ? "Employer contribution (over & above CTC)" : KIND_LABEL[pc.kind] ?? "Earning"),
@@ -186,13 +186,14 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
         </div>
       ),
     },
-    { id: "method", header: "Method", filter: "select", accessor: (pc) => METHOD_LABEL[pc.method] ?? pc.method },
+    { id: "method", header: "Method", filter: "select", groupBy: true, accessor: (pc) => METHOD_LABEL[pc.method] ?? pc.method },
     {
       id: "amount",
       header: "Amount",
       align: "right",
       // Signed + coloured: earnings (+, green), deductions (−, red), employer contributions (+, blue - a company
       // cost, not paid to the employee). income_tax has no fixed rate (computed per employee); show "computed".
+      filter: "number",
       accessor: (pc) => (pc.method === "income_tax" ? null : pc.rate ?? null),
       cell: (pc) => {
         if (pc.method === "income_tax") return <span className="text-muted-foreground">computed</span>;
@@ -204,7 +205,7 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
         return <span className={cls}>{isDeduction ? "−" : "+"}{pc.rate}{unit}</span>;
       },
     },
-    { id: "recurring", header: "Recurring", defaultHidden: true, filter: "select", accessor: (pc) => (pc.recurring ? "Yes" : "No"), cell: (pc) => <Badge variant={pc.recurring ? "secondary" : "muted"}>{pc.recurring ? "Yes" : "No"}</Badge> },
+    { id: "recurring", header: "Recurring", defaultHidden: true, filter: "select", groupBy: true, accessor: (pc) => (pc.recurring ? "Yes" : "No"), cell: (pc) => <Badge variant={pc.recurring ? "secondary" : "muted"}>{pc.recurring ? "Yes" : "No"}</Badge> },
     stateColumn<PayComponent>(),
     ...metaColumns<PayComponent>(),
     {

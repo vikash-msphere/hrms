@@ -3,10 +3,11 @@ import { Banknote, CalendarDays, Download, Eye, Sigma } from "lucide-react";
 import { RupeeCircle } from "@/components/icons/RupeeCircle";
 import { download } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { cn, formatDate, formatMoney, idOf } from "@/lib/utils";
+import { cn, formatDate, formatMoney, idOf, personName } from "@/lib/utils";
 import { orgDayOf, thisYearStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
-import type { Me, Payslip } from "@/types";
+import { usePermission } from "@/lib/perm";
+import type { Employee, Me, PayPeriod, Payslip, PayrollRun } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
@@ -15,9 +16,11 @@ import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { Chart, ChartCard } from "@/components/common/Chart";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { FilterChip } from "@/components/common/FilterChips";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreviewDialog";
+import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { useToast } from "@/components/ui/use-toast";
 
 export default function Payslips({ me }: { me: Me }) {
@@ -32,7 +35,42 @@ export default function Payslips({ me }: { me: Me }) {
     () => [...raw].sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? "")),
     [raw],
   );
-  const latest = rows[0];
+  // WHOSE SLIPS ARE THESE. The same page serves two callers: an employee, whose every row is their own, and
+  // payroll, whose grant is org-wide and whose list is therefore everybody. Everything on the page that is
+  // phrased in the first person - the latest-payslip buttons, the pay chart, the year-to-date totals - is
+  // computed from `mine` rather than from the whole list, because summing the company's net pay under a tile
+  // labelled "Net paid in 2026" is not a smaller version of the right answer, it is a different number.
+  const mine = useMemo(
+    () => (me.employee_id ? rows.filter((s) => s.employee && idOf(s.employee) === me.employee_id) : []),
+    [rows, me.employee_id],
+  );
+  // True once the list reaches past the viewer: the page is then a payroll view of other people, which is what
+  // turns the employee column on and what pays for the directory read below.
+  const spansOthers = rows.length > mine.length;
+  // Names for that column. Read only when there is somebody else to name - an employee looking at their own
+  // dozen slips should not pull the whole directory for a column that would say their own name.
+  const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: spansOthers });
+  // Named through the shared `personName`, not a fallback written here: it is what makes an unresolvable ref
+  // read as a word instead of the raw uuid. The index is the whole employee row rather than `personIndex`'s
+  // PersonRef because the cell shows a face too, and it is built once - a column accessor runs per row per
+  // compare during a sort (lib/utils.ts).
+  const empIdx = useMemo(() => new Map(employees.map((e) => [idOf(e.path), e])), [employees]);
+  const empName = (ref?: string) => personName(empIdx, ref, "Employee");
+  const emp = (ref?: string) => (ref ? empIdx.get(idOf(ref)) : undefined);
+  // WHICH RUN PAID A SLIP, in the words a run is known by rather than its id. Only for a caller who can read
+  // payroll runs - an employee cannot, and a uuid in a column headed "Pay run" answered nothing for them
+  // anyway, so the column is not offered at all there. Both reads are ordinary collection pages (a run and a
+  // period per month) and are shared with the Payroll page through the resource store.
+  const canRuns = usePermission("payroll-runs.read");
+  const { rows: runs } = useCollection<PayrollRun>("payroll-runs", { enabled: canRuns });
+  const { rows: periods } = useCollection<PayPeriod>("pay-periods", { enabled: canRuns });
+  const runLabel = useMemo(() => {
+    const periodName = new Map(periods.map((p) => [idOf(p.path), p.display_name || p.period_start || ""]));
+    const m = new Map(runs.map((r) => [idOf(r.path), (r.pay_period && periodName.get(idOf(r.pay_period))) || ""]));
+    // The id is the honest fallback: a run whose period was purged, or one past the page these reads loaded.
+    return (ref?: string) => (ref ? m.get(idOf(ref)) || idOf(ref) : "-");
+  }, [runs, periods]);
+  const latest = mine[0];
   // WHICH YEAR A PAYSLIP BELONGS TO, on the org's clock. One definition, used by the YTD figures, the year
   // chips, the table filter and the chart labels, so the four cannot disagree about the same slip.
   //
@@ -43,10 +81,10 @@ export default function Payslips({ me }: { me: Me }) {
   // clickable tile that filtered the table to nothing. West of UTC it runs the other way and lasts all evening.
   // `orgDayOf` (lib/orgDay) is the instant-to-org-day conversion that already existed for exactly this.
   const yearOf = (s: Payslip) => (s.create_time ? orgDayOf(s.create_time).slice(0, 4) : "");
-  // Net paid so far this calendar year (across however many slips the caller can see of their own).
+  // Net paid so far this calendar year - the VIEWER's own, never the org's (see `mine` above).
   const ytd = useMemo(() => {
     const year = thisYearStr();
-    const slips = rows.filter((s) => yearOf(s) === year);
+    const slips = mine.filter((s) => yearOf(s) === year);
     const net = slips.reduce((sum, s) => sum + (s.net ?? 0), 0);
     return {
       net,
@@ -55,7 +93,7 @@ export default function Payslips({ me }: { me: Me }) {
       tax: slips.reduce((sum, s) => sum + (s.tax ?? 0), 0),
       avgNet: slips.length ? Math.round(net / slips.length) : 0,
     };
-  }, [rows]);
+  }, [mine]);
   const thisYear = thisYearStr();
   // Year filter chips - only shown once the history spans more than one calendar year.
   const years = useMemo(
@@ -65,7 +103,7 @@ export default function Payslips({ me }: { me: Me }) {
   // The last two years at most: a pay history chart is read for the trend, and thirty labels on a phone is
   // no trend at all. Oldest first, because time runs that way even though the table below does not.
   const payChart = useMemo(() => {
-    const recent = [...rows].reverse().slice(-24);
+    const recent = [...mine].reverse().slice(-24);
     return {
       // Each point IS a payslip, so pressing one opens that slip rather than filtering a list down to it.
       slips: recent,
@@ -75,13 +113,21 @@ export default function Payslips({ me }: { me: Me }) {
       gross: recent.map((s) => Math.round(s.gross ?? 0)),
       net: recent.map((s) => Math.round(s.net ?? 0)),
     };
-  }, [rows]);
+  }, [mine]);
 
   const [year, setYear] = useState<string>("all");
+  // Whose rows the table shows. Only ever moves off "all" for a caller whose list reaches past themselves -
+  // it is what the year-to-date tiles drill into, since those are summed from the viewer's OWN slips and a
+  // drill-through that landed on everybody's would not be the set the figure came from.
+  const [who, setWho] = useState<"all" | "mine">("all");
+  const mineIds = useMemo(() => new Set(mine.map((s) => s.path)), [mine]);
   const visible = useMemo(
-    () => (year === "all" ? rows : rows.filter((s) => yearOf(s) === year)),
-    [rows, year],
+    () => rows.filter((s) => (year === "all" || yearOf(s) === year) && (who === "all" || mineIds.has(s.path))),
+    [rows, year, who, mineIds],
   );
+  /** What a year-to-date tile drills into: this year, and only the slips the tile was summed from. */
+  const focusYtd = () => { setYear(thisYear); setWho("mine"); };
+  const ytdActive = year === thisYear && (!spansOthers || who === "mine");
 
   // Read it in the app instead of saving a copy. `preview` is its own custom method with its own scope, so a
   // caller may hold one, both, or neither - the row's access.can hint says which.
@@ -113,13 +159,31 @@ export default function Payslips({ me }: { me: Me }) {
   }
 
   const columns: Column<Payslip>[] = [
-    { id: "date", header: "Issued", accessor: (s) => s.create_time, cell: (s) => formatDate(s.create_time) },
-    { id: "gross", header: "Gross", align: "right", accessor: (s) => s.gross, cell: (s) => money(s.gross) },
-    { id: "deductions", header: "Deductions", align: "right", accessor: (s) => s.total_deductions, cell: (s) => `− ${money(s.total_deductions)}` },
-    { id: "tax", header: "TDS", align: "right", defaultHidden: true, accessor: (s) => s.tax ?? 0, cell: (s) => money(s.tax ?? 0) },
-    { id: "net", header: "Net pay", align: "right", accessor: (s) => s.net, cell: (s) => <span className="font-semibold">{money(s.net)}</span> },
-    { id: "payroll_run", header: "Pay run", defaultHidden: true, accessor: (s) => (s.payroll_run ? idOf(s.payroll_run) : ""), cell: (s) => (s.payroll_run ? idOf(s.payroll_run) : "-") },
-    { id: "employee", header: "Employee", defaultHidden: true, accessor: (s) => (s.employee ? idOf(s.employee) : ""), cell: (s) => (s.employee ? idOf(s.employee) : "-") },
+    { id: "date", header: "Issued", filter: "date", dateHint: "past", accessor: (s) => s.create_time, cell: (s) => formatDate(s.create_time) },
+    // Shown by default exactly when it says something: on a payroll caller's list, whose rows are other
+    // people. On an employee's own list every row would read their own name, so it stays in the column picker.
+    {
+      id: "employee",
+      header: "Employee",
+      defaultHidden: !spansOthers,
+      filter: "select",
+      groupBy: true,
+      accessor: (s) => empName(s.employee),
+      // Face and name, the way every other per-person table in the app names somebody (Overtime, Remote work).
+      cell: (s) => (
+        <span className="inline-flex items-center gap-2">
+          <PhotoAvatar employeeId={s.employee ? idOf(s.employee) : ""} name={empName(s.employee)} photo={emp(s.employee)?.photo} className="h-6 w-6" />
+          {empName(s.employee)}
+        </span>
+      ),
+    },
+    // Summed under the columns, so a year of payslips answers "what did I earn, and what came off it"
+    // without anyone exporting to a spreadsheet to add it up. Grouping by pay run does the same per run.
+    { id: "gross", header: "Gross", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => money(n), accessor: (s) => s.gross, cell: (s) => money(s.gross) },
+    { id: "deductions", header: "Deductions", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => money(n), accessor: (s) => s.total_deductions, cell: (s) => `− ${money(s.total_deductions)}` },
+    { id: "tax", header: "TDS", align: "right", defaultHidden: true, filter: "number", aggregate: "sum", formatTotal: (n) => money(n), accessor: (s) => s.tax ?? 0, cell: (s) => money(s.tax ?? 0) },
+    { id: "net", header: "Net pay", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => money(n), accessor: (s) => s.net, cell: (s) => <span className="font-semibold">{money(s.net)}</span> },
+    ...(canRuns ? [{ id: "payroll_run", header: "Pay run", defaultHidden: true, filter: "select" as const, groupBy: true, accessor: (s: Payslip) => runLabel(s.payroll_run), cell: (s: Payslip) => runLabel(s.payroll_run) }] : []),
     {
       id: "actions",
       header: "",
@@ -147,7 +211,9 @@ export default function Payslips({ me }: { me: Me }) {
     <div>
       <PageHeader
         title="Payslips"
-        description="Your published payslips, ready to download."
+        /* The list is whatever the caller's grant reaches, so the sentence under the title has to be too -
+           "Your published payslips" over a table of the whole company's is a claim about whose money this is. */
+        description={spansOthers ? "Published payslips, ready to read or download." : "Your published payslips, ready to download."}
         actions={
           <>
             {latest && (
@@ -179,7 +245,7 @@ export default function Payslips({ me }: { me: Me }) {
           {/* Pay over time, which a list of downloadable PDFs cannot show at all. Gross against net says
               where a raise actually landed, and where a month of extra deductions quietly ate one. */}
           {payChart.labels.length > 2 && (
-            <ChartCard className="mb-4" title="Your pay over time" description="Gross and take-home on each payslip you can see, oldest first.">
+            <ChartCard className="mb-4" title="Your pay over time" description="Gross and take-home on each of your own payslips, oldest first.">
               <Chart
                 type="axis-mixed"
                 height={200}
@@ -202,27 +268,26 @@ export default function Payslips({ me }: { me: Me }) {
                 // table, under the chart.
                 { label: "Latest net pay", value: money(latest.net), icon: Banknote, tone: "primary", hint: `Issued ${formatDate(latest.create_time)}`, onClick: () => onPreview(latest) },
                 { label: "Latest gross", value: money(latest.gross), icon: Sigma, hint: `${money(latest.total_deductions)} deducted`, onClick: () => onPreview(latest) },
-                { label: `Net paid in ${thisYear}`, value: money(ytd.net), icon: CalendarDays, hint: `${ytd.count} payslip${ytd.count === 1 ? "" : "s"}`, onClick: () => setYear(thisYear), active: year === thisYear },
-                ...(ytd.count > 1 ? [{ label: "Average month", value: money(ytd.avgNet), icon: Sigma, hint: `net, over ${ytd.count} slips`, onClick: () => setYear(thisYear), active: year === thisYear }] : []),
-                ...(ytd.tax > 0 ? [{ label: `TDS in ${thisYear}`, value: money(ytd.tax), icon: CalendarDays, tone: "muted" as const, hint: "tax withheld so far", onClick: () => setYear(thisYear), active: year === thisYear }] : []),
+                { label: `Net paid in ${thisYear}`, value: money(ytd.net), icon: CalendarDays, hint: `${ytd.count} payslip${ytd.count === 1 ? "" : "s"}`, onClick: focusYtd, active: ytdActive },
+                ...(ytd.count > 1 ? [{ label: "Average month", value: money(ytd.avgNet), icon: Sigma, hint: `net, over ${ytd.count} slips`, onClick: focusYtd, active: ytdActive }] : []),
+                ...(ytd.tax > 0 ? [{ label: `TDS in ${thisYear}`, value: money(ytd.tax), icon: CalendarDays, tone: "muted" as const, hint: "tax withheld so far", onClick: focusYtd, active: ytdActive }] : []),
               ]}
             />
           )}
-          {years.length > 1 && (
+          {(years.length > 1 || spansOthers) && (
             <div className="mb-4 flex flex-wrap items-center gap-1.5">
-              {["all", ...years].map((y) => (
-                <button
-                  key={y}
-                  type="button"
-                  onClick={() => setYear(y)}
-                  aria-pressed={year === y}
-                  className={cn(
-                    "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-                    year === y ? "border-primary bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                >
-                  {y === "all" ? "All years" : y}
-                </button>
+              {/* Whose slips, for the caller who can see other people's - and the visible home of the state a
+                  year-to-date tile puts the table into, so it can be read and cleared rather than just felt. */}
+              {/* The shared chip. These two rows were the app's outlier: an unselected chip here carried
+                  `bg-background` and lit up `hover:bg-muted hover:text-foreground`, where the same control on
+                  every other page is transparent and lights up `hover:bg-accent`. Nobody chose that - it is
+                  what nine hand-written copies of one control drift into. */}
+              {spansOthers && (["all", "mine"] as const).map((w) => (
+                <FilterChip key={w} active={who === w} onClick={() => setWho(w)}>{w === "all" ? "Everyone" : "Mine"}</FilterChip>
+              ))}
+              {spansOthers && years.length > 1 && <span aria-hidden className="mx-1 h-4 w-px bg-border" />}
+              {years.length > 1 && ["all", ...years].map((y) => (
+                <FilterChip key={y} active={year === y} onClick={() => setYear(y)}>{y === "all" ? "All years" : y}</FilterChip>
               ))}
             </div>
           )}

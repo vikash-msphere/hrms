@@ -182,7 +182,7 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
   const [year, setYear] = useState(Number(thisYearStr()));
   const [groupBy, setGroupBy] = useState<"department" | "category">("department");
   const [detailPath, setDetail] = useState<string | null>(null);
-  // A deep link (#/expense-budgets/<id>) opens that cap's detail panel.
+  // A deep link (/expense-budgets/<id>) opens that cap's detail panel.
   useDeepOpen(openId, rows, (b) => setDetail(b.path));
 
   // The "at risk" line is the same threshold the daily budget-alert cron fires on (settings/expenses
@@ -514,12 +514,16 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
         </div>
       );
     } },
-    { id: "amount", header: "Budget", align: "right", mobilePriority: 3, accessor: (b) => b.amount, aggregate: "sum", formatTotal: money, cell: (b) => <span className="tabular-nums">{money(b.amount)}</span> },
-    { id: "spent", header: "Spent", align: "right", accessor: (b) => b.spent ?? 0, aggregate: "sum", formatTotal: money, cell: (b) => <span className="tabular-nums">{money(b.spent ?? 0)}</span> },
-    { id: "pending", header: "Pending", align: "right", accessor: (b) => b.pending ?? 0, aggregate: "sum", formatTotal: money, cell: (b) => (
+    // Cost centre on its own, beside the combined Scope column: a budget sheet is read department by
+    // department, and grouping by it puts every cap for one team together with its own subtotals.
+    { id: "cost_centre", header: "Cost centre", defaultHidden: true, filter: "select", groupBy: true, accessor: (b) => (b.department ? deptName(b.department) : "Org-wide") },
+    { id: "amount", header: "Budget", align: "right", mobilePriority: 3, filter: "number", accessor: (b) => b.amount, aggregate: "sum", formatTotal: money, cell: (b) => <span className="tabular-nums">{money(b.amount)}</span> },
+    { id: "spent", header: "Spent", align: "right", filter: "number", accessor: (b) => b.spent ?? 0, aggregate: "sum", formatTotal: money, cell: (b) => <span className="tabular-nums">{money(b.spent ?? 0)}</span> },
+    { id: "pending", header: "Pending", align: "right", filter: "number", accessor: (b) => b.pending ?? 0, aggregate: "sum", formatTotal: money, cell: (b) => (
       (b.pending ?? 0) > 0 ? <span className="tabular-nums text-muted-foreground">{money(b.pending ?? 0)}</span> : <span className="text-muted-foreground">-</span>
     ) },
-    { id: "remaining", header: "Remaining", align: "right", accessor: (b) => b.remaining ?? b.amount - (b.spent ?? 0), aggregate: "sum", formatTotal: money, cell: (b) => {
+    // A negative remaining is an overspend, so "< 0" in this column is the overspend list.
+    { id: "remaining", header: "Remaining", align: "right", filter: "number", accessor: (b) => b.remaining ?? b.amount - (b.spent ?? 0), aggregate: "sum", formatTotal: money, cell: (b) => {
       const left = b.remaining ?? b.amount - (b.spent ?? 0);
       return <span className={`tabular-nums ${left < 0 ? "text-destructive" : ""}`}>{money(left)}</span>;
     } },
@@ -538,10 +542,10 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
         </span>
       );
     } },
-    { id: "repeats", header: "Repeats", filter: "select", defaultHidden: true, accessor: (b) => (b.recurring ? "Yes" : "No") },
+    { id: "repeats", header: "Repeats", filter: "select", groupBy: true, defaultHidden: true, accessor: (b) => (b.recurring ? "Yes" : "No") },
     // No `hideValueByDefault`: the fetch decides whether deleted caps are present. "Deleted" is offered as a
     // filter value regardless, because its rows arrive only once it is picked.
-    { id: "status", header: "Status", filter: "select", filterOptions: ["Deleted"], accessor: healthOf, cell: (b) => {
+    { id: "status", header: "Status", filter: "select", groupBy: true, filterOptions: ["Deleted"], accessor: healthOf, cell: (b) => {
       const h = healthOf(b);
       return (
         <span className="inline-flex items-center gap-1.5">

@@ -64,7 +64,7 @@ test("a count is opened, a tag is logged into it, and closing it leaves a report
   // Closing hands the walker its own report - the walk is over, and what is worth looking at now is what it
   // found, so the app takes them there rather than back to the register.
   await expect(it.getByRole("heading", { level: 1, name: new RegExp(label) })).toBeVisible({ timeout: 30_000 });
-  await expect(it).toHaveURL(/#\/stocktakes\/\w+/);
+  await expect(it).toHaveURL(/\/stocktakes\/\w+/);
 
   // And it is on the Stocktakes page too, with the sighting this walk produced.
   await gotoRoute(it, "stocktakes", "Stocktakes");

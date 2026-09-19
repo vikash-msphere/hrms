@@ -276,7 +276,11 @@ describe("the limiter in the request chain", () => {
   // The budget is denominated in SUB-READS, not in envelopes. Charged one unit each, it bounded nothing on the
   // fan-out side while being the tightest ceiling anywhere on the SPA's read path - so coalescing reads, which
   // is what the transport exists for, ran a client out of budget sooner than not coalescing did.
-  it("charges a batch envelope its sub-read count, not one per envelope", async () => {
+  // 20s, not the 5s default: this case drives a real budget to exhaustion through the whole request chain,
+  // which is dozens of round trips - about 4s on an idle machine and past the default under any parallel load
+  // (a full `vitest run`, a dev server, an e2e lane). It failed as a timeout rather than an assertion, which
+  // reads as a broken limiter and is nothing of the kind.
+  it("charges a batch envelope its sub-read count, not one per envelope", { timeout: 20_000 }, async () => {
     const { limit } = budgetFor("POST", "/v1/batch:run");
     const requests = Array.from({ length: 20 }, () => ({ path: "/v1/holidays" }));
     let sent = 0;

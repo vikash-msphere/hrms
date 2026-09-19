@@ -4,6 +4,7 @@ import { create, invoke, patch } from "@/api";
 import { cn, idOf } from "@/lib/utils";
 import type { Announcement, Department, Employee, RecipientLayout, StickerLayout } from "@/types";
 import { type BodyValign, DEFAULT_VALIGN, DEFAULT_WRAP, KUDOS_RECIPIENT_LAYOUT, KUDOS_STICKER_LAYOUT, POST_STICKER_LAYOUT, withWrap } from "@/components/common/CardSticker";
+import { FilterChip, filterChipClass } from "@/components/common/FilterChips";
 import { WrapPicker } from "@/components/common/WrapSelect";
 import { FoldSection } from "@/components/common/FoldSection";
 import { CategoryIcon } from "@/lib/categoryIcons";
@@ -20,6 +21,7 @@ import { KudosCardBody } from "@/components/common/KudosCardBody";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { EmojiPicker } from "@/components/common/EmojiPicker";
 import { useMentions } from "@/components/common/MentionPicker";
+import { collapseMentions } from "@/lib/mentionText";
 import { useConfirm } from "@/components/common/confirm";
 import { FormError } from "@/components/common/FormError";
 import { describeError } from "@/lib/formError";
@@ -326,7 +328,9 @@ export function PostComposer({
       : {
           ...EMPTY,
           title: editing.title,
-          body: editing.body,
+          // The box holds display text, so a stored mention comes back as the name alone; `submit` puts the
+          // ids back (see lib/mentionText.ts).
+          body: collapseMentions(editing.body).text,
           kind: (editing.kind ?? "announcement") as Kind,
           recipient: editing.recipient ?? "",
           recipientDept: editing.recipient_department ?? "",
@@ -494,7 +498,11 @@ export function PostComposer({
     onChange: (next) => setForm((f) => ({ ...f, body: next })),
     textareaRef: bodyRef,
     employees,
+    initial: editing?.body,
   });
+  // The preview is the card as it will be stored, so the mentions in it are drawn as chips rather than as the
+  // bare names the box is holding.
+  const previewBody = mentions.toWire(form.body);
   function insertEmoji(emoji: string) {
     const el = bodyRef.current;
     if (!el) {
@@ -553,7 +561,7 @@ export function PostComposer({
   async function submit() {
     if (!canSubmit || busy) return;
     const title = form.title.trim();
-    const body = form.body.trim();
+    const body = mentions.toWire(form.body.trim());
     const illustration = form.illustration || null;
     // A placement is only worth storing when the card actually shows something, and only when the author put it
     // somewhere: a card with no placement of its own renders the default its kind is built around (for the kudos
@@ -702,7 +710,7 @@ export function PostComposer({
         recipientPhoto={previewRecipEmp?.photo}
         recipientFirstName={previewRecipEmp?.first_name}
         recipientLastName={previewRecipEmp?.last_name}
-        message={form.body}
+        message={previewBody}
         artUrl={artUrl}
         stickerLayout={form.layout}
         onStickerLayoutChange={setLayout}
@@ -719,7 +727,7 @@ export function PostComposer({
         title={form.title}
         titleAlign={form.titleAlign}
         bodyValign={form.bodyValign}
-        body={form.body}
+        body={previewBody}
         artUrl={artUrl}
         stickerLayout={form.layout}
         onStickerLayoutChange={setLayout}
@@ -1117,17 +1125,9 @@ export function PostComposer({
                 <>
                   <div className="flex flex-wrap gap-1.5">
                     {[...POLL_DURATIONS.map((d) => ({ key: d.key as PollDuration, label: d.label })), { key: "custom" as PollDuration, label: "Pick a date" }].map((d) => (
-                      <button
-                        key={d.key}
-                        type="button"
-                        onClick={() => setForm((f) => ({ ...f, closes: d.key }))}
-                        className={cn(
-                          "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-                          form.closes === d.key ? "border-primary bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-muted",
-                        )}
-                      >
+                      <FilterChip key={d.key} active={form.closes === d.key} onClick={() => setForm((f) => ({ ...f, closes: d.key }))}>
                         {d.label}
-                      </button>
+                      </FilterChip>
                     ))}
                   </div>
                   {form.closes === "custom" && (
@@ -1156,17 +1156,13 @@ export function PostComposer({
                 <>
                   <div className="flex flex-wrap gap-1.5">
                     {(["now", "draft", "schedule"] as const).map((p) => (
-                      <button
+                      <FilterChip
                         key={p}
-                        type="button"
+                        active={form.publishing === p}
                         onClick={() => setForm((f) => ({ ...f, publishing: p, publishAt: p === "schedule" && !f.publishAt ? localInputNow() : f.publishAt }))}
-                        className={cn(
-                          "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-                          form.publishing === p ? "border-primary bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-muted",
-                        )}
                       >
                         {PUBLISHING_LABELS[p]}
-                      </button>
+                      </FilterChip>
                     ))}
                   </div>
                   {form.publishing === "schedule" && (
@@ -1203,10 +1199,10 @@ export function PostComposer({
                       underneath was two decisions for one answer. */}
                   <div className="flex flex-wrap items-center gap-1.5">
                     {AUDIENCE_CHOICES.map((c) => (
-                      <button
+                      <FilterChip
                         key={c.value}
-                        type="button"
                         title={c.hint}
+                        active={form.audienceScope === c.value}
                         onClick={() => setForm((f) => ({
                           ...f,
                           audienceScope: c.value,
@@ -1215,13 +1211,9 @@ export function PostComposer({
                           // server refuses the pair; the box unticks itself here so nobody has to be refused.
                           emailIt: c.value === "none" ? false : f.emailIt,
                         }))}
-                        className={cn(
-                          "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-                          form.audienceScope === c.value ? "border-primary bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-muted",
-                        )}
                       >
                         {c.label}
-                      </button>
+                      </FilterChip>
                     ))}
                     {/* Picking a department here selects the department AND the mode in one move; the chip then
                         carries the name, so the row reads as the answer rather than as a setting plus a field. */}
@@ -1231,12 +1223,10 @@ export function PostComposer({
                     >
                       <SelectTrigger
                         title="Notify one department. Everyone else can still read the post on the board."
-                        className={cn(
-                          "h-auto w-auto gap-1 rounded-full border px-3 py-1 text-xs font-medium shadow-none transition-colors",
-                          form.audienceScope === "department"
-                            ? "border-primary bg-primary text-primary-foreground"
-                            : "bg-background text-muted-foreground hover:bg-muted",
-                        )}
+                        // The chip's own appearance, taken from the one definition rather than copied - this
+                        // is a Select because picking a department chooses the department and the mode in one
+                        // move, but it sits in a row of chips and has to read as the third one.
+                        className={cn("h-auto w-auto gap-1 shadow-none", filterChipClass(form.audienceScope === "department"))}
                       >
                         <SelectValue placeholder="A department" />
                       </SelectTrigger>

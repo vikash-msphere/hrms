@@ -35,7 +35,7 @@ test("a ticket's copied link opens that exact ticket", async ({ as }) => {
 
     await expect
       .poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 15_000 })
-      .toMatch(new RegExp(`#/tickets/${ticketId}$`));
+      .toMatch(new RegExp(`/tickets/${ticketId}$`));
   } finally {
     await purge(page, ticket.path);
   }

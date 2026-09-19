@@ -10,7 +10,7 @@ import { useIntent } from "@/lib/intent";
 import { formatDate, idOf, cn, personIndex, personName, round2 } from "@/lib/utils";
 import { todayStr, daysBetweenYmd } from "@/lib/orgDay";
 import { leaveColor } from "@/lib/leaveColors";
-import { readHashQuery, writeHashQuery } from "@/lib/urlQuery";
+import { readUrlQuery, writeUrlQuery } from "@/lib/urlQuery";
 import { useRoutedTab } from "@/lib/routedTabs";
 import { DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
 import { forecastBalance, accrualEntriesThisYear, DEFAULT_CARRY_FORWARD, type CarryForwardMode } from "@/lib/leaveForecast";
@@ -31,6 +31,7 @@ import { ActivitySection } from "@/components/common/ActivitySection";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { withNewBadge } from "@/components/common/NewBadge";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { type TableInsight } from "@/components/common/TableInsights";
 import { metaColumns } from "@/components/common/metaColumns";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { RequestLeaveDialog } from "@/components/common/RequestLeaveDialog";
@@ -121,9 +122,9 @@ export default function Leaves({ me }: { me: Me }) {
   // so it reaches rows past the 100-row page this list would otherwise window - a client filter of the cached
   // rows would quietly answer "none" for a request that exists. The unfiltered read stays cached alongside it,
   // so toggling the filter off is instant and the summary above keeps counting everything.
-  // Deep-linked: the filter lives in the hash query, so a reload, a back button or a pasted link all keep it.
-  const [typeFilter, setTypeFilter] = useState<string | null>(() => readHashQuery("leave_type"));
-  useEffect(() => { writeHashQuery("leave_type", typeFilter); }, [typeFilter]);
+  // Deep-linked: the filter lives in the URL query, so a reload, a back button or a pasted link all keep it.
+  const [typeFilter, setTypeFilter] = useState<string | null>(() => readUrlQuery("leave_type"));
+  useEffect(() => { writeUrlQuery("leave_type", typeFilter); }, [typeFilter]);
   const filteredRead = useCollection<LeaveRequest>("leave-requests", { params: typeFilter ? { leave_type: typeFilter } : undefined, enabled: !!typeFilter });
   const tabRows = typeFilter ? filteredRead.rows : rows;
   const tabState = typeFilter ? filteredRead.state : state;
@@ -320,15 +321,15 @@ export default function Leaves({ me }: { me: Me }) {
 
   const onLeaveNow = !!nextLeave && nextLeave.start_date <= today;
   // Which tab the tables below are showing, so the metric that opens a tab is marked active while that tab is
-  // the one on screen (RequestsHistoryTabs owns the tabs; the hash is what the two agree on).
+  // the one on screen (RequestsHistoryTabs owns the tabs; the URL is what the two agree on).
   const openTab = useRoutedTab("leave-requests", "requests");
   // The strip is ONE selection: clicking a metric lights that segment and darkens the rest, and the lit segment
   // is only ever the one whose scope the tables below are actually showing. The metrics act on two different
   // dimensions (a tab, or the type narrowing), so the light is the metric last picked INTERSECTED with the state
   // that metric asked for - switching tabs by hand or narrowing to a leave type drops it rather than leaving a
   // segment lit over a view it no longer describes. Deep-linkable as `?metric=`.
-  const [picked, setPicked] = useState<StripFocus>(() => stripFocus(readHashQuery("metric")));
-  // A tab metric writes the tab to the hash, and `openTab` only catches up on the next hashchange, so a click
+  const [picked, setPicked] = useState<StripFocus>(() => stripFocus(readUrlQuery("metric")));
+  // A tab metric writes the tab to the URL, and `openTab` only catches up on the next route change, so a click
   // would briefly look like a tab the pick doesn't match. This holds the tab a click asked for until it lands.
   const pendingTab = useRef<string | null>(null);
   const litTab = (tab: string) => openTab === tab || pendingTab.current === tab;
@@ -338,7 +339,7 @@ export default function Leaves({ me }: { me: Me }) {
     : picked === "available" ? (typeFilter ? null : picked)
     : null;
   useEffect(() => { if (pendingTab.current === openTab) pendingTab.current = null; }, [openTab]);
-  useEffect(() => { writeHashQuery("metric", stripActive); }, [stripActive]);
+  useEffect(() => { writeUrlQuery("metric", stripActive); }, [stripActive]);
   // Spread onto a SummaryStrip item: the metric's own click plus its share of the single selection. `tab` is the
   // tab that click lands on, if any. Clicking the lit segment again puts the strip back to unselected.
   const metric = (key: NonNullable<StripFocus>, act: () => void, tab?: string) => ({
@@ -507,18 +508,20 @@ export default function Leaves({ me }: { me: Me }) {
   const getDocument = (lr: LeaveRequest) => download("leave-requests/" + idOf(lr.path), `leave-${idOf(lr.path)}`);
 
   // ---- columns -------------------------------------------------------------
-  const empCol: Column<LeaveRequest> = { id: "employee", header: "Employee", accessor: (lr) => empName(lr.employee), cell: (lr) => <span className="font-medium">{empName(lr.employee)}</span> };
+  const empCol: Column<LeaveRequest> = { id: "employee", header: "Employee", groupBy: true, accessor: (lr) => empName(lr.employee), cell: (lr) => <span className="font-medium">{empName(lr.employee)}</span> };
   const baseCols: Column<LeaveRequest>[] = [
-    { id: "type", header: "Type", filter: "select", accessor: (lr) => typeName(lr.leave_type),
+    { id: "type", header: "Type", filter: "select", groupBy: true, accessor: (lr) => typeName(lr.leave_type),
       cell: (lr) => (
         <span className="inline-flex items-center gap-2">
           <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: typeColor(lr.leave_type) }} />
           {typeName(lr.leave_type)}
         </span>
       ) },
-    { id: "start", header: "From", accessor: (lr) => lr.start_date, cell: (lr) => formatDate(lr.start_date) },
-    { id: "end", header: "To", accessor: (lr) => lr.end_date, cell: (lr) => formatDate(lr.end_date) },
-    { id: "days", header: "Days", align: "right", accessor: (lr) => lr.days, cell: (lr) => {
+    // Leave is asked about in both directions - "who is off next week" and "what did she take last month" -
+    // so neither end of the range gets a hint; the windows are offered in calendar order.
+    { id: "start", header: "From", filter: "date", accessor: (lr) => lr.start_date, cell: (lr) => formatDate(lr.start_date) },
+    { id: "end", header: "To", filter: "date", accessor: (lr) => lr.end_date, cell: (lr) => formatDate(lr.end_date) },
+    { id: "days", header: "Days", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => fmtDays(n), accessor: (lr) => lr.days, cell: (lr) => {
       const h = halfLabel(lr);
       const skip = nonWorking(lr.start_date, lr.end_date);
       const skipped = skip.weekends + skip.holidays.length;
@@ -533,7 +536,7 @@ export default function Leaves({ me }: { me: Me }) {
         </span>
       );
     } },
-    { id: "state", header: "Status", filter: "select", accessor: (lr) => lr.state,
+    { id: "state", header: "Status", filter: "select", groupBy: true, accessor: (lr) => lr.state,
       cell: (lr) => (
         <span className="inline-flex items-center gap-1.5">
           <StatusBadge state={lr.state} />
@@ -571,7 +574,7 @@ export default function Leaves({ me }: { me: Me }) {
   };
   // On the caller's own Requests tab, "From" also says how far away the leave is (starts in 3 days / ongoing).
   const startWhenCol: Column<LeaveRequest> = {
-    id: "start", header: "From", accessor: (lr) => lr.start_date,
+    id: "start", header: "From", filter: "date", accessor: (lr) => lr.start_date,
     cell: (lr) => {
       const w = whenLabel(lr, today);
       return <span className="inline-flex items-baseline gap-1.5">{formatDate(lr.start_date)}{w && <span className="text-xs text-muted-foreground">{w}</span>}</span>;
@@ -656,7 +659,7 @@ export default function Leaves({ me }: { me: Me }) {
   // on this page - hence the truncation notice when that list is only its first page.
   const teamBalanceCols: Column<LeaveBalance>[] = [
     {
-      id: "employee", header: "Employee", filter: "select", accessor: (b) => empName(b.employee),
+      id: "employee", header: "Employee", filter: "select", groupBy: true, accessor: (b) => empName(b.employee),
       cell: (b) => (
         <span className="inline-flex items-center gap-2">
           <PhotoAvatar employeeId={b.employee ? idOf(b.employee) : ""} name={empName(b.employee)} photo={empOf(b.employee)?.photo} className="h-6 w-6" />
@@ -665,7 +668,7 @@ export default function Leaves({ me }: { me: Me }) {
       ),
     },
     {
-      id: "type", header: "Leave type", filter: "select", accessor: (b) => typeName(b.leave_type),
+      id: "type", header: "Leave type", filter: "select", groupBy: true, accessor: (b) => typeName(b.leave_type),
       cell: (b) => (
         <span className="inline-flex items-center gap-2">
           <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: typeColor(b.leave_type) }} />
@@ -673,23 +676,61 @@ export default function Leaves({ me }: { me: Me }) {
         </span>
       ),
     },
-    { id: "left", header: "Days left", align: "right", accessor: (b) => b.balance_days, cell: (b) => <span className="font-medium tabular-nums">{fmtDays(b.balance_days)}</span> },
-    { id: "used", header: "Used this year", align: "right", accessor: (b) => usageOf(b).used, cell: (b) => <span className="tabular-nums">{fmtDays(usageOf(b).used)}</span> },
+    { id: "left", header: "Days left", align: "right", filter: "number", formatTotal: (n) => fmtDays(n), accessor: (b) => b.balance_days, cell: (b) => <span className="font-medium tabular-nums">{fmtDays(b.balance_days)}</span> },
+    { id: "used", header: "Used this year", align: "right", filter: "number", formatTotal: (n) => fmtDays(n), accessor: (b) => usageOf(b).used, cell: (b) => <span className="tabular-nums">{fmtDays(usageOf(b).used)}</span> },
     {
-      id: "pending", header: "Pending", align: "right", accessor: (b) => usageOf(b).pending,
+      id: "pending", header: "Pending", align: "right", filter: "number", formatTotal: (n) => fmtDays(n), accessor: (b) => usageOf(b).pending,
       cell: (b) => { const p = usageOf(b).pending; return <span className={cn("tabular-nums", !p && "text-muted-foreground")}>{fmtDays(p)}</span>; },
     },
     {
-      id: "entitled", header: "Entitled/yr", align: "right", accessor: (b) => typeOf(b.leave_type)?.accrual_days_per_year ?? 0,
+      id: "entitled", header: "Entitled/yr", align: "right", filter: "number", formatTotal: (n) => fmtDays(n), accessor: (b) => typeOf(b.leave_type)?.accrual_days_per_year ?? 0,
       cell: (b) => { const e = typeOf(b.leave_type)?.accrual_days_per_year; return <span className="tabular-nums text-muted-foreground">{e ? fmtDays(e) : "-"}</span>; },
     },
+    // Balance measured against the year's own accrual, so "a lot of leave banked" is a comparable figure
+    // across leave types instead of a number the reader has to hold two columns in their head to judge. It
+    // is also what makes the "carrying more than a year" chip above the table narrow to exactly its rows.
+    {
+      id: "surplus", header: "Over a year's accrual", align: "right", defaultHidden: true, filter: "number", formatTotal: (n) => fmtDays(n),
+      accessor: (b) => round2(b.balance_days - (typeOf(b.leave_type)?.accrual_days_per_year ?? 0)),
+      cell: (b) => {
+        const over = round2(b.balance_days - (typeOf(b.leave_type)?.accrual_days_per_year ?? 0));
+        return <span className={cn("tabular-nums", over > 0 ? "font-medium text-warning" : "text-muted-foreground")}>{over > 0 ? `+${fmtDays(over)}` : fmtDays(over)}</span>;
+      },
+    },
   ];
+  // A manager's two standing questions about a balance sheet, neither of which a sorted column answers:
+  // who has not taken anything, and who has banked more than they earn in a year.
+  const balanceInsights = (bs: LeaveBalance[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const untaken = bs.filter((b) => usageOf(b).used === 0 && (typeOf(b.leave_type)?.accrual_days_per_year ?? 0) > 0);
+    if (untaken.length > 0) {
+      out.push({
+        id: "untaken",
+        label: `${untaken.length} have taken none this year`,
+        tone: "warning",
+        hint: "Entitlement that nobody has used yet. Worth a word before it all lands in December.",
+        filters: { used: "=0" },
+      });
+    }
+    const banked = bs.filter((b) => b.balance_days - (typeOf(b.leave_type)?.accrual_days_per_year ?? 0) > 0);
+    if (banked.length > 0) {
+      out.push({
+        id: "banked",
+        label: `${banked.length} carrying over a year's accrual`,
+        hint: "More days banked than the type accrues in a year - the encashment and carry-forward conversations.",
+        filters: { surplus: ">0" },
+        sort: "surplus.desc",
+      });
+    }
+    return out;
+  };
   const teamBalancesTab = (
     <div className="space-y-3">
       <TruncationNotice collection="leave-requests" what="leave requests" />
       <DataTable
         tableId="lv-team-balances"
         columns={teamBalanceCols}
+        insights={balanceInsights}
         rows={teamBalances}
         getRowId={(b) => b.path}
         emptyTitle="No team balances"
@@ -721,7 +762,7 @@ export default function Leaves({ me }: { me: Me }) {
         title="Leaves"
         actions={
           <>
-            <Button variant="outline" asChild><a href="#/leave-calendar"><CalendarRange className="h-4 w-4" /> Calendar</a></Button>
+            <Button variant="outline" asChild><a href="/leave-calendar"><CalendarRange className="h-4 w-4" /> Calendar</a></Button>
             {requestBtn}
             <PageSettings me={me} host="leave-requests" />
           </>
@@ -946,7 +987,7 @@ export default function Leaves({ me }: { me: Me }) {
             ))}
             {outToday.length > 6 && <span className="text-sm text-muted-foreground">+{outToday.length - 6} more</span>}
           </span>
-          <a href="#/leave-calendar" className="ml-auto text-sm font-medium text-primary hover:underline">Leave calendar</a>
+          <a href="/leave-calendar" className="ml-auto text-sm font-medium text-primary hover:underline">Leave calendar</a>
         </Card>
       )}
 

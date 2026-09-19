@@ -55,11 +55,10 @@ const ToastViewport = React.forwardRef<
   <ToastPrimitives.Viewport
     ref={mergeRefs(ref, own)}
     className={cn(
-      // On a phone the toast stack has to clear the fixed bottom nav (and the home indicator below it),
-      // otherwise every confirmation lands on top of the navigation - the one strip that must stay tappable.
-      // From `md` up there is no bottom bar, so it returns to the corner.
+      // On a phone the toast stack has to clear the home indicator, otherwise every confirmation lands under
+      // the gesture bar. From `md` up there is no inset, so it returns to the corner.
       // The side insets are the landscape notch: a full-width stack would otherwise start under it.
-      "fixed inset-x-0 bottom-[calc(4rem+env(safe-area-inset-bottom))] z-[100] flex max-h-screen w-full flex-col gap-2 p-4 pl-[calc(1rem+env(safe-area-inset-left))] pr-[calc(1rem+env(safe-area-inset-right))] md:inset-x-auto md:bottom-0 md:right-0 md:max-w-[400px]",
+      "fixed inset-x-0 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-[100] flex max-h-screen w-full flex-col gap-2 p-4 pl-[calc(1rem+env(safe-area-inset-left))] pr-[calc(1rem+env(safe-area-inset-right))] md:inset-x-auto md:bottom-0 md:right-0 md:max-w-[400px]",
       className
     )}
     {...props}

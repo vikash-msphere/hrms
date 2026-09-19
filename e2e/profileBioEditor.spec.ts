@@ -14,7 +14,7 @@ test("the bio editor cleans whitespace on save, and offers to clear an existing 
   const original = before.ok() ? ((await before.json()) as { bio?: string }).bio ?? null : null;
 
   try {
-    await gotoRoute(page, "profile", "Profile");
+    await gotoRoute(page, "profile"); // one record page, two addresses: its `h1` is the person's name
     const opener = page.getByRole("button", { name: "Edit bio" }).or(page.getByRole("button", { name: "Add a short bio" }));
     await opener.first().click();
     const dialog = page.getByRole("dialog").filter({ hasText: "About me" });

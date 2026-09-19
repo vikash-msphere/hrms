@@ -5,12 +5,12 @@ import { SPA_HEADERS, allowConsoleErrors, gotoRoute, personId, test, expect } fr
 // The meter is the only nudge in the app: the server computes which sections of a person's record are still
 // empty (`profile_completeness` rides the employee row - no extra request), and the page turns each missing
 // one into a chip that JUMPS to where it is filled in. That jump is pure browser - a chip switches a tab, or
-// opens a dialog that lives in the page header - and so is the thing it is for: filling the section in has to
-// make the chip go away without a reload, or the nudge is a list that never shrinks.
+// opens a dialog - and so is the thing it is for: filling the section in has to make the chip go away without
+// a reload, or the nudge is a list that never shrinks.
 //
-// `personalDetails.spec.ts` opens the emergency editor from the Contact tab and leaves it alone. This drives
-// the OTHER way in (the heart-pulse quick view, which is both the read view and the editor), the half-filled
-// warning that is the mistake people actually make - a name with no number - and the e-card filed beside it.
+// `personalDetails.spec.ts` reaches the emergency card from the Profile tab directly. This drives the OTHER
+// way in (the nudge chip) and the half-filled warning that is the mistake people actually make - a name with
+// no number.
 test("a missing section is nudged, jumped to, filled in, and the nudge goes away", async ({ as }) => {
   test.setTimeout(240_000);
   const page = await as("employee");
@@ -27,7 +27,7 @@ test("a missing section is nudged, jumped to, filled in, and the nudge goes away
   // the state it is about, keeping every other field of the record as it found it.
   await clearEmergency(page, id);
 
-  await gotoRoute(page, "profile", "My Profile");
+  await gotoRoute(page, "profile"); // one record page, two addresses: its `h1` is the person's name
   // The meter is a real progressbar with the score on it, not a decorative bar.
   const meter = page.getByRole("progressbar", { name: "Profile completeness" });
   // Read from cold if the first paint arrived without it: the meter rides the employee record the page
@@ -46,13 +46,17 @@ test("a missing section is nudged, jumped to, filled in, and the nudge goes away
   await expect(chip).toBeVisible();
   await chip.click();
 
-  // The jump: the chip opens the emergency dialog, which lives in the page header rather than in the tab
-  // strip - a nudge that only scrolled you near the right place would be a nudge nobody follows.
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("heading", { name: "Emergency details" })).toBeVisible({ timeout: 30_000 });
-  await expect(dialog.getByText("No emergency details on file.")).toBeVisible();
+  // The jump: the chip lands on the Profile tab, where the Emergency card is - a nudge that only scrolled you
+  // near the right place would be a nudge nobody follows. The card reads the section back empty, which is the
+  // state this spec set up.
+  const panel = page.getByRole("tabpanel");
+  await expect(panel.getByText("Emergency contact name")).toBeVisible({ timeout: 30_000 });
 
-  await dialog.getByRole("button", { name: "Add" }).click();
+  // `.nth(2)`: three cards on this tab carry the same unlabelled pencil - Personal, Contact, Emergency, in
+  // that order. The dialog's own title is asserted below, so a card that moves takes the spec with it.
+  await panel.getByRole("button", { name: /^(Add|Edit)$/ }).nth(2).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Edit emergency details")).toBeVisible({ timeout: 30_000 });
   // Half filled is the mistake worth catching: a contact needs both halves to be worth calling, and the form
   // says so while it is still being typed rather than saving something useless.
   await dialog.getByLabel("Name").first().fill(contact);
@@ -63,29 +67,22 @@ test("a missing section is nudged, jumped to, filled in, and the nudge goes away
 
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   // No assertion on the toast: it lives for a few seconds, and a browser sharing a machine with fifteen
-  // others can be looking the other way for longer than that. The read view below is the better evidence
-  // that the save landed - it is the contact itself, come back from the server.
-  // Back to the read view in place - the same dialog is both, because "who to call" is read far more often
-  // than it is edited.
+  // others can be looking the other way for longer than that. The card below is the better evidence that the
+  // save landed - it is the contact itself, come back from the server.
   //
   // Retried through the CONFLICT, because this save is a compare-and-swap over the whole personal-info blob
-  // and the specs sharing this employee write that same row. Losing that race is the app being right: it
-  // re-reads the record, keeps what was typed, and says "check them and save again" - so this does what the
-  // message asks. Left alone it read as a 30s hang, because the read view correctly never arrived and this
-  // spec deliberately asserts no toast (see above), so the one thing that said what happened went unwatched.
+  // and the specs sharing this employee write that same row. Losing that race is the app being right: the
+  // dialog stays open with what was typed still in it, re-reads the record and says "check them and save
+  // again" - so this does what the message asks. Left alone it read as a 30s hang, because the card correctly
+  // never updated and this spec deliberately asserts no toast (see above), so the one thing that said what
+  // happened went unwatched.
   const conflict = dialog.getByText(/Somebody else changed these details/);
   await expect(async () => {
     if (await conflict.count()) await dialog.getByRole("button", { name: "Save", exact: true }).click();
-    await expect(dialog.getByText(contact)).toBeVisible({ timeout: 10_000 });
+    await expect(panel.getByText(contact)).toBeVisible({ timeout: 10_000 });
   }).toPass({ timeout: 60_000 });
-  await expect(dialog.getByText("Spouse")).toBeVisible();
-
-  // The e-card is filed here too: a personal document typed INSURANCE, which is what a paramedic's question
-  // "are they covered?" actually needs.
-  await expect(dialog.getByText("Health insurance card")).toBeVisible();
-
-  await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+  await expect(panel.getByText("Spouse")).toBeVisible();
 
   // And the nudge moved, without a reload: saving re-reads the employee row the flags ride on. The tile for
   // the section that was just filled stays on the checklist and flips to "Added" - a checklist that deletes

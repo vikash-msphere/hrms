@@ -13,10 +13,18 @@ import { gotoRoute, test, expect, toast } from "./fixtures";
 // Signed in as the employee, because this is self-service: the person's own signature on their own profile.
 test("an employee uploads their signature, sees it, and takes it off again", async ({ as }) => {
   const page = await as("employee");
-  await gotoRoute(page, "profile", "My Profile");
-  await page.getByRole("tab", { name: "Signature" }).click();
+  await gotoRoute(page, "profile"); // one record page, two addresses: its `h1` is the person's name
+  await page.getByRole("tab", { name: "Identity" }).click();
 
-  const panel = page.getByRole("tabpanel");
+  // The signature card, not the whole panel: it shares the Identity tab with the identity and bank cards now,
+  // and the identity card carries a hidden file input of its own (its supporting-document picker), so a
+  // panel-wide `input[type="file"]` matches two elements. `has:` page-rooted for the reason
+  // `cancelOwnRequest` gives - a re-scoped one would ask each div to contain another tabpanel.
+  // `.first()` is the card root: the only inner div holding this heading wraps the title and its blurb,
+  // without the picture or the buttons.
+  const signatureCard = (root: import("@playwright/test").Page) =>
+    root.getByRole("tabpanel").locator("div").filter({ has: root.getByRole("heading", { name: "Signature", exact: true }) }).first();
+  const panel = signatureCard(page);
   await expect(panel.getByText("No signature uploaded yet.")).toBeVisible();
 
   await panel.locator('input[type="file"]').setInputFiles({
@@ -34,14 +42,14 @@ test("an employee uploads their signature, sees it, and takes it off again", asy
   // A fresh page: the marker on the employee record is what tells the panel to go and fetch at all.
   await page.reload();
   await expect(page.getByRole("main")).toBeVisible();
-  await page.getByRole("tab", { name: "Signature" }).click();
-  await expect(page.getByRole("tabpanel").getByRole("img", { name: "Your signature" })).toBeVisible();
+  await page.getByRole("tab", { name: "Identity" }).click();
+  await expect(signatureCard(page).getByRole("img", { name: "Your signature" })).toBeVisible();
 
   // And off again, so a rerun starts from the same empty sheet - and so the letters and acknowledgements
   // that render a seeded employee's signature are not quietly changed by this spec.
-  await page.getByRole("tabpanel").getByRole("button", { name: "Remove" }).click();
+  await signatureCard(page).getByRole("button", { name: "Remove" }).click();
   await expect(toast(page, "Signature removed")).toBeVisible();
-  await expect(page.getByRole("tabpanel").getByText("No signature uploaded yet.")).toBeVisible();
+  await expect(signatureCard(page).getByText("No signature uploaded yet.")).toBeVisible();
 });
 
 // A 1x1 transparent PNG - the smallest real image a browser will decode, so `naturalWidth` is a fact about

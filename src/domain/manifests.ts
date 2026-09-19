@@ -165,6 +165,7 @@ export const OWNER_REFS: Record<string, Record<string, OwnerRef>> = {
   "leave-requests": { employee: { collection: "employees" } },
   "personal-documents": { employee: { collection: "employees" } },
   "attendance-regularizations": { employee: { collection: "employees" } },
+  "attendance-day-marks": { employee: { collection: "employees" } },
   "overtime-requests": { employee: { collection: "employees" } },
   "remote-work-requests": { employee: { collection: "employees" } },
   "asset-requests": { employee: { collection: "employees" } },
@@ -281,6 +282,10 @@ export const SUPPORTED_SCOPES: Record<string, ScopeTier[]> = {
   "leave-encashments": ["self", "reports", "org", "dept", "all"],
   attendance: ["self", "reports", "org", "dept", "all"],
   "attendance-regularizations": ["self", "reports", "org", "dept", "all"],
+  // "self" is here for READING: a mark decides what one of your days is worth, so you are owed the sight of
+  // it on your own attendance. It is a scope tier, not a level - whether a self rule is read or write is the
+  // policy's call, and a self-WRITE rule would be a grant to re-value your own attendance.
+  "attendance-day-marks": ["self", "reports", "org", "dept", "all"],
   "overtime-requests": ["self", "reports", "org", "dept", "all"],
   "remote-work-requests": ["self", "reports", "org", "dept", "all"],
   "asset-requests": ["self", "reports", "org", "dept", "all"],
@@ -396,8 +401,8 @@ export type AuditPolicy = {
 export const AUDIT: AuditPolicy = {
   // Field-bearing PII sub-resources whose read IS an accountability event: bank details (payout fraud),
   // statutory ids (PAN/Aadhaar/UAN), tax declarations. `personal-info` is deliberately NOT here: it is the
-  // contact / emergency / blood-group card that the profile page and the emergency quick-view load on every
-  // open, so auditing it logs routine colleague lookups by the hundred and buries the real signal. Its
+  // personal / contact / emergency cards on the profile's default tab, loaded on every open of a record the
+  // caller can already read, so auditing it logs routine lookups by the hundred and buries the real signal. Its
   // per-field access control is unchanged (still read-redacted + write-gated); only the read row is dropped.
   sensitive_subresources: ["bank-account", "identity", "tax"],
   // Whole-item-sensitive collections: reading one row exposes salary / PII / medical, so an item GET is

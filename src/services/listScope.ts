@@ -86,3 +86,31 @@ export function applyScope(
 
   return pred;
 }
+
+/**
+ * COULD `applyScope` match anything at all for this caller, on a table with these columns?
+ *
+ * The same branches as above, read as a boolean instead of as SQL: true when the predicate it would build can
+ * select a row, false when it is the constant `1 = 0`. It decides nothing - it is a question ABOUT the
+ * predicate, asked where a surface has to choose what to OFFER rather than what to return.
+ *
+ * The builder's base picker is the caller: presence in the listable set only says the caller may call
+ * `GET /v1/<collection>`, and a collection-level capability is routinely held by someone whose breadth then
+ * binds to nothing - an own-breadth caller on a table with no owner column, a caller with no employee record
+ * at all, a dept-breadth caller with no department. Offering those is a menu of bases that answer with an
+ * empty grid and no reason, which is the same "menu of future 403s" the field catalogue exists to avoid.
+ */
+export function scopeCanMatch(
+  scope: ListScope | undefined,
+  code: AnySQLiteColumn | undefined,
+  owner: AnySQLiteColumn | undefined,
+): boolean {
+  if (!scope) return false;
+  // Deny-wins, and a deny with no column to bind it to means no rows (see the note above) - so it answers
+  // first, exactly as it does there.
+  if ((scope.denies ?? []).length && !code) return false;
+  if (scope.breadth === "all") return true;
+  // A share or a subtree grant is authority of its own, and both are matched against the code column.
+  if ([...(scope.shares ?? []), ...(scope.subtrees ?? [])].length && code) return true;
+  return scope.breadth === "dept" ? !!(scope.deptCode && code) : !!(scope.ownerId && owner);
+}

@@ -99,15 +99,17 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
 
   const columns: Column<User>[] = [
     { id: "email", header: "Email", accessor: (u) => u.email, cell: (u) => <CopyEmail email={u.email} className="font-medium" /> },
-    { id: "role", header: "Role", filter: "select", accessor: (u) => roleLabel(u.role), cell: (u) => <Badge variant={roleVariant(u.role)}>{roleLabel(u.role)}</Badge> },
+    { id: "role", header: "Role", filter: "select", groupBy: true, accessor: (u) => roleLabel(u.role), cell: (u) => <Badge variant={roleVariant(u.role)}>{roleLabel(u.role)}</Badge> },
     {
       id: "status",
       header: "Status",
       filter: "select",
+      groupBy: true,
       accessor: (u) => (u.status === "active" ? "Active" : "Disabled"),
       cell: (u) => <Badge variant={u.status === "active" ? "success" : "destructive"}>{u.status === "active" ? "Active" : "Disabled"}</Badge>,
     },
-    { id: "employee", header: "Linked employee", accessor: (u) => empName(u.employee) },
+    // Blank is a login with no employee behind it - the account that gets missed when somebody leaves.
+    { id: "employee", header: "Linked employee", filter: "select", accessor: (u) => empName(u.employee) },
     ...metaColumns<User>(),
     {
       id: "actions",

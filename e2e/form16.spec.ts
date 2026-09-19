@@ -152,7 +152,9 @@ test.describe("Form 16", () => {
     // The buttons are `personal-documents.write` (HR + super). Hide-never-disable means the person whose
     // Form 16 it is must not be offered the controls that file it - they read their copy, they do not issue it.
     const page = await as("employee");
-    await gotoRoute(page, "profile", "My Profile");
+    // No heading argument: `/profile` and `/employees/<id>` are one page now, and its `h1` is the person's
+    // NAME, not "My Profile" - that title belonged to the second implementation of this page.
+    await gotoRoute(page, "profile");
     await page.getByRole("tab", { name: "Documents" }).click();
     await expect(page.getByRole("tabpanel")).toBeVisible();
     await expect(page.getByRole("button", { name: "Upload official Form 16" })).toHaveCount(0);

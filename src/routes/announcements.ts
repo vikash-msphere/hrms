@@ -215,7 +215,7 @@ export const announcements = collectionRoutes<AnnouncementInput, typeof schema.a
   // alongside the caller's scope. `?kind=` narrows to one kind and is matched against the known set rather
   // than passed through, so an unknown value is simply no filter instead of a query that matches nothing.
   list: (c, page) =>
-    listAnnouncements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q"), KINDS.find((k) => k === c.req.query("kind")), page.deletedOnly),
+    listAnnouncements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q"), KINDS.find((k) => k === c.req.query("kind")), page.deletedOnly, c.req.query("author"), c.req.query("replied_by")),
   verbs: {
     // Idempotent self-action: record that the caller opened this post.
     markRead: { run: (deps, user, id) => markAnnouncementRead(deps, user, id) },

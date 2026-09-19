@@ -31,7 +31,7 @@ test.describe("holidays in bulk", () => {
     await purgeLeftovers(admin, "E2E BulkAdd");
 
     // On the year the paste is dated, so the rows it writes are on screen rather than filtered out of the
-    // view - the page's year filter rides the hash (`?year=`).
+    // view - the page's year filter rides the URL query (`?year=`).
     await gotoRoute(page, `holidays?year=${year}`, "Holiday Calendar");
     await openBulk(page);
     const form = page.getByRole("dialog");

@@ -15,6 +15,15 @@ import { runTableView } from "../src/services/tableRun";
 import { tableViewSpec, parseSpec } from "../src/services/tableViews";
 import { buildCatalogue } from "../src/services/tableCatalog";
 import { MAX_FILTERS, TABLE_SOURCE_COLLECTIONS, type ViewFilter } from "../src/domain/tableFields";
+import { DEFAULT_POLICY, type Policy } from "../src/domain/manifests";
+import { decide, resolveRequest } from "../src/domain/permissions";
+import { GRANTS } from "../src/domain/grants";
+import { scopeFor } from "../src/domain/access";
+import { listableCollectionsFor } from "../src/middleware/authz";
+import { basesFor } from "../src/services/tableCatalog";
+import { scopeCanMatch } from "../src/services/listScope";
+import { catalogueFieldGate } from "../src/http/tableFieldAccess";
+import { TABLES as TABLE_REGISTRY, listOwnerColumn } from "../src/lib/authzResolve";
 
 // Real-D1 test for the custom-grid runner. What it pins is the access story, because that is the whole design:
 // the runner is handed the middleware's per-collection verdicts and may do nothing outside them, a column
@@ -34,7 +43,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.auditLog, schema.compensation, schema.employees, schema.departments, schema.users, schema.roles, schema.payComponents, schema.leaveTypes, schema.settings];
+const TABLES = [schema.auditLog, schema.applications, schema.jobRequisitions, schema.candidates, schema.tickets, schema.compensation, schema.employees, schema.departments, schema.users, schema.roles, schema.payComponents, schema.leaveTypes, schema.settings];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
 });
@@ -72,8 +81,11 @@ async function seed() {
   return { deptId, people };
 }
 
-const hrUser = (grantPatterns: CompiledRule[], employeeCode: string | null = null): AppUser =>
-  ({ uuid: genId(), email: "hr@test.example", role: "hr_admin", status: "active", employeeId: null, employeeCode, name: "HR", grant: rulesToGrant(grantPatterns) }) as unknown as AppUser;
+// `policy` is part of the fixture, not an optional extra: the runner reads `redacted_fields` and
+// `state_visibility` off it exactly as every list does, and a principal without one is a bug rather than a
+// case to tolerate (services/crud.ts says so beside the same read). See [[test-fixtures-cast-away-appuser-fields]].
+const hrUser = (grantPatterns: CompiledRule[], employeeCode: string | null = null, policy: Policy = DEFAULT_POLICY): AppUser =>
+  ({ uuid: genId(), email: "hr@test.example", role: "hr_admin", status: "active", employeeId: null, employeeCode, name: "HR", policy, grant: rulesToGrant(grantPatterns) }) as unknown as AppUser;
 
 // A grant that allows everything, which is what a super-equivalent caller carries.
 const SUPER = () => hrUser([rule("**.**", "admin"), rule("**.**.**", "admin")]);
@@ -572,5 +584,261 @@ describe("the caps on a saved view", () => {
       filters: Array.from({ length: MAX_FILTERS + 10 }, () => ({ field: "first_name", op: "eq", value: "Ada" })),
     }));
     expect(spec.filters).toHaveLength(MAX_FILTERS);
+  });
+});
+
+describe("a base field the caller may not READ is not a column of the grid either", () => {
+  // `policy.redacted_fields` is the per-field read gate for plain columns - the one http/accessHint.ts applies
+  // to every serialized resource in the app. The grid projects raw columns, so it went round it: a deny on
+  // `tickets.*.description` took the field out of the tickets list and out of the ticket itself, and left it
+  // fully readable as a column of a saved grid, on the same rows, to the same caller.
+  const ticketSheet = (columns: string[]) => ({ base: "tickets", columns: columns.map((field) => ({ field })) });
+  const SECRET = "the note says what the ticket is really about";
+
+  async function seedTicket() {
+    const { people } = await seed();
+    await deps.db.insert(schema.tickets).values({
+      uuid: genId(), code: "04-001-001", employeeId: people[0]!.id, subject: "Laptop won't boot", description: SECRET,
+    });
+    return people;
+  }
+
+  it("blanks the redacted column on the row and names it in `denied`", async () => {
+    await seedTicket();
+    const user = hrUser([rule("**.**", "admin"), rule("**.**.**", "admin"), rule("tickets.*.description.**", null, "deny")]);
+    const result = await runTableView(deps, user, allScopes(), ticketSheet(["subject", "description"]), { maxPageSize: 50 });
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]!.cells.subject).toBe("Laptop won't boot");
+    expect(result.rows[0]!.cells.description).toBeNull();
+    expect(result.rows[0]!.denied).toEqual(["description"]);
+  });
+
+  it("leaves it alone for a caller with no deny - the manifest takes a field away, it never hands one over", async () => {
+    await seedTicket();
+    const result = await runTableView(deps, SUPER(), allScopes(), ticketSheet(["subject", "description"]), { maxPageSize: 50 });
+    expect(result.rows[0]!.cells.description).toBe(SECRET);
+    expect(result.rows[0]!.denied).toBeUndefined();
+  });
+
+  it("does not let a hidden FILTER read the value it may not show", async () => {
+    await seedTicket();
+    const user = hrUser([rule("**.**", "admin"), rule("**.**.**", "admin"), rule("tickets.*.description.**", null, "deny")]);
+    // Filtering by a column is not a way to read it: the cell the predicate judges is the denied one, so the
+    // probe cannot come back "matched" and confirm a guess at the text.
+    const probe = { ...ticketSheet(["subject"]), filters: [{ field: "description", op: "contains", value: "really about" }] as ViewFilter[] };
+    const result = await runTableView(deps, user, allScopes(), probe, { maxPageSize: 50 });
+    expect(result.rows).toEqual([]);
+    // ...and the same probe by a caller who may read it does match, so the filter itself still works.
+    const allowed = await runTableView(deps, SUPER(), allScopes(), probe, { maxPageSize: 50 });
+    expect(allowed.rows).toHaveLength(1);
+  });
+});
+
+describe("state-gated rows stay out of the grid", () => {
+  // `policy.state_visibility` is org-editable policy DATA. Every list in the app binds it (services/crud.ts
+  // via publicStateFilter, announcements through its own visibleWhere) off the `seeRestricted` the middleware
+  // resolved; the grid bound only the breadth, so a saved view answered with rows the collection's own list
+  // hides - the restricted half of a state-gated collection, to whoever could list the public half.
+  const gatedPolicy: Policy = {
+    ...DEFAULT_POLICY,
+    state_visibility: { ...DEFAULT_POLICY.state_visibility, tickets: { requires: "write", public_when: { state: ["OPEN"] } } },
+  };
+  const restricted = (): ListScope => ({ breadth: "all", deptCode: null, ownerId: null, seeRestricted: false });
+
+  async function seedTwoTickets() {
+    const { people } = await seed();
+    await deps.db.insert(schema.tickets).values([
+      { uuid: genId(), code: "04-001-001", employeeId: people[0]!.id, subject: "Public one", state: "OPEN" },
+      { uuid: genId(), code: "04-001-002", employeeId: people[0]!.id, subject: "Restricted one", state: "CLOSED" },
+    ]);
+  }
+
+  it("hides the non-public rows from a caller who may not see restricted ones", async () => {
+    await seedTwoTickets();
+    const scopes = new Map<string, ListScope>(TABLE_SOURCE_COLLECTIONS.map((c) => [c, restricted()]));
+    const user = hrUser([rule("**.**", "admin"), rule("**.**.**", "admin")], null, gatedPolicy);
+    const result = await runTableView(deps, user, scopes, { base: "tickets", columns: [{ field: "subject" }] }, { maxPageSize: 50 });
+    expect(result.rows.map((r) => r.cells.subject)).toEqual(["Public one"]);
+  });
+
+  it("shows them to a caller the middleware resolved `seeRestricted` for", async () => {
+    await seedTwoTickets();
+    const user = hrUser([rule("**.**", "admin"), rule("**.**.**", "admin")], null, gatedPolicy);
+    const result = await runTableView(deps, user, allScopes(), { base: "tickets", columns: [{ field: "subject" }] }, { maxPageSize: 50 });
+    expect(result.rows.map((r) => r.cells.subject).sort()).toEqual(["Public one", "Restricted one"]);
+  });
+});
+
+describe("a saved view belongs to the person who saved it", () => {
+  // The object-level half of the same question, pinned because the seeded grant reads like it could go either
+  // way: `table-views` is held at ALL scope (so the list and create endpoints can be called at all) and only
+  // `table-views.me.**` / `table-views.me.run` name rows. The bare capability carries no trailing tokens, so it
+  // matches no item path - which is what keeps "may build a grid" from meaning "may open, edit, delete or run
+  // everybody else's".
+  const self = { employeeCode: "04-001" };
+  const mine = "04-001-0001"; // an owned code: the author's employee code plus one segment
+  const theirs = "04-002-0001";
+  const asks = (method: string, code: string, verb = "") =>
+    decide(GRANTS.employee, resolveRequest(method, `/v1/table-views/${code}${verb}`), self).allow;
+
+  it("lets an employee run their own view and refuses a colleague's", () => {
+    expect(asks("POST", mine, ":run")).toBe(true);
+    expect(asks("POST", theirs, ":run")).toBe(false);
+  });
+
+  it("refuses reading, editing and deleting a colleague's view", () => {
+    for (const method of ["GET", "PATCH", "DELETE"]) {
+      expect([method, asks(method, mine)]).toEqual([method, true]);
+      expect([method, asks(method, theirs)]).toEqual([method, false]);
+    }
+  });
+
+  it("scopes the LIST to own rows, so the grid picker never names a colleague's table", () => {
+    const actor = { grant: GRANTS.employee, employeeCode: "04-001", employeeId: "emp1", policy: DEFAULT_POLICY };
+    expect(scopeFor(actor, "table-views").breadth).toBe("own");
+  });
+});
+
+describe("a redacted field is gated on the row it LIVES on, not on the base row", () => {
+  // The linked half. A grid based on Applications reaches the candidate's contact details through
+  // `candidate_id`, and `candidates: ["email", "phone", "notes"]` is in REDACTED_FIELDS - so the decision has
+  // to be taken against the CANDIDATE's code, not the application's. Taking it on the base row would decide a
+  // candidates rule against an applications code and allow whatever happened not to match.
+  async function seedApplication() {
+    await seed();
+    const candidateId = genId();
+    const reqId = genId();
+    await deps.db.insert(schema.candidates).values({ uuid: candidateId, code: "cn-001", name: "Alan", email: "alan@candidate.example" });
+    await deps.db.insert(schema.jobRequisitions).values({ uuid: reqId, code: "jr-001", title: "Engineer" });
+    await deps.db.insert(schema.applications).values({ uuid: genId(), code: "ap-001", candidateId, requisitionId: reqId, stage: "applied" });
+  }
+
+  const sheet = { base: "applications", columns: [{ field: "stage" }, { field: "candidate_id.email" }] };
+
+  it("blanks the linked field for a caller denied it on the candidate", async () => {
+    await seedApplication();
+    const user = hrUser([rule("**.**", "admin"), rule("**.**.**", "admin"), rule("candidates.*.email.**", null, "deny")]);
+    const result = await runTableView(deps, user, allScopes(), sheet, { maxPageSize: 50 });
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]!.cells.stage).toBe("applied");
+    expect(result.rows[0]!.cells["candidate_id.email"]).toBeNull();
+    expect(result.rows[0]!.denied).toEqual(["candidate_id.email"]);
+    // The deny is about the CANDIDATE's field: a deny written against the application's own namespace must not
+    // be what happens to catch it, and a caller with neither deny keeps the column.
+    const wide = await runTableView(deps, SUPER(), allScopes(), sheet, { maxPageSize: 50 });
+    expect(wide.rows[0]!.cells["candidate_id.email"]).toBe("alan@candidate.example");
+  });
+
+  it("does not let a filter on the linked field read it either", async () => {
+    await seedApplication();
+    const user = hrUser([rule("**.**", "admin"), rule("**.**.**", "admin"), rule("candidates.*.email.**", null, "deny")]);
+    const probe = { base: "applications", columns: [{ field: "stage" }], filters: [{ field: "candidate_id.email", op: "contains", value: "alan" }] as ViewFilter[] };
+    expect((await runTableView(deps, user, allScopes(), probe, { maxPageSize: 50 })).rows).toEqual([]);
+    expect((await runTableView(deps, SUPER(), allScopes(), probe, { maxPageSize: 50 })).rows).toHaveLength(1);
+  });
+});
+
+describe("the base picker offers only bases the caller can get a row of", () => {
+  // `GET /v1/table-fields` used to answer from the boolean half of the verdict alone - "may this caller call
+  // `GET /v1/<collection>`" - and a collection-level capability is routinely held by somebody whose breadth
+  // then binds to nothing. A principal with no employee record is the clearest case: every `me`-scoped grant
+  // they hold resolves to own breadth with no owner to bind, so `applyScope` answers `1 = 0` and the base can
+  // only ever produce an empty grid. Offering it is the menu of empty reports the field catalogue one level
+  // down already refuses to be.
+  const scopesOf = (user: AppUser) => {
+    const listable = listableCollectionsFor(user);
+    const m = new Map<string, ListScope>();
+    for (const c of TABLE_SOURCE_COLLECTIONS) if (listable.has(c)) m.set(c, scopeFor(user, c));
+    return m;
+  };
+  const employee = (employeeCode: string | null, employeeId: string | null) =>
+    ({ grant: GRANTS.employee, employeeCode, employeeId, role: "employee", policy: DEFAULT_POLICY }) as unknown as AppUser;
+
+  it("offers the own-breadth bases to an employee with a record", () => {
+    const offered = basesFor(scopesOf(employee("04-002-001", "emp1"))).map((b) => b.collection);
+    expect(offered).toContain("payslips"); // own breadth, bound by the owner column
+    expect(offered).toContain("employees"); // the directory, at whatever breadth they hold
+  });
+
+  it("drops them for a principal with no employee record, whose own breadth binds nothing", () => {
+    const withRecord = basesFor(scopesOf(employee("04-002-001", "emp1"))).map((b) => b.collection);
+    const without = basesFor(scopesOf(employee(null, null))).map((b) => b.collection);
+    expect(without).not.toContain("payslips");
+    expect(without.length).toBeLessThan(withRecord.length);
+    // Not everything goes: an org-wide catalogue is readable at `all` breadth, which needs no owner at all.
+    expect(without).toContain("holidays");
+  });
+
+  it("never offers a base whose scope predicate is the constant false", () => {
+    for (const user of [employee("04-002-001", "emp1"), employee(null, null)]) {
+      const scopes = scopesOf(user);
+      for (const b of basesFor(scopes)) {
+        const table = TABLE_REGISTRY[b.collection] as any;
+        expect([b.collection, scopeCanMatch(scopes.get(b.collection), table.code, listOwnerColumn(b.collection, table))]).toEqual([b.collection, true]);
+      }
+    }
+  });
+});
+
+describe("the column picker offers only fields the caller can read", () => {
+  // One level down from the base picker, and the same promise: the builder offers what the caller can have.
+  // Collection-level access was already asked here; FIELD-level access was not, so a caller denied `identity`
+  // was offered the whole Identity group and a caller denied `tickets.*.description` was offered that column -
+  // and found out by adding it and getting back a grid of restricted markers.
+  const listable = () => new Set(TABLE_SOURCE_COLLECTIONS);
+  const keysFor = async (user: AppUser, base = "employees") =>
+    (await buildCatalogue(deps, base, listable(), [], catalogueFieldGate(user))).fields.map((f) => f.key);
+
+  it("drops a whole PII sub-resource the caller may not read", async () => {
+    await seed();
+    const denied = hrUser([rule("**.**", "admin"), rule("**.**.**", "admin"), rule("employees.*.identity.**", null, "deny")], "04-001");
+    const keys = await keysFor(denied);
+    expect(keys).not.toContain("@identity.pan");
+    expect(keys).not.toContain("@identity.uan");
+    // The rest of the person is untouched, and so is the group that WAS readable.
+    expect(keys).toContain("first_name");
+    expect(keys).toContain("@personal.personal_email");
+    // ...and the heading goes with the fields, rather than standing empty.
+    const cat = await buildCatalogue(deps, "employees", listable(), [], catalogueFieldGate(denied));
+    expect(cat.groups.map((g) => g.label)).not.toContain("Identity");
+  });
+
+  it("drops a single key within a sub-resource and keeps its siblings", async () => {
+    await seed();
+    const keys = await keysFor(hrUser([rule("**.**", "admin"), rule("**.**.**", "admin"), rule("employees.*.identity.pan.**", null, "deny")], "04-001"));
+    expect(keys).not.toContain("@identity.pan");
+    expect(keys).toContain("@identity.uan");
+  });
+
+  it("drops a redacted base column the caller may not read", async () => {
+    await seed();
+    const denied = hrUser([rule("**.**", "admin"), rule("**.**.**", "admin"), rule("tickets.*.description.**", null, "deny")], "04-001");
+    const keys = await keysFor(denied, "tickets");
+    expect(keys).not.toContain("description");
+    expect(keys).toContain("subject");
+    // Nobody loses a field by the manifest listing it - only a deny takes one away.
+    expect(await keysFor(SUPER(), "tickets")).toContain("description");
+  });
+
+  it("keeps a field a manager reads only on their REPORTS, which needs the reporting line", async () => {
+    await seed();
+    // `my-reports` matches real codes and nothing else, so neither the unscoped sentinel nor the caller's own
+    // code can stand in for one. The matcher context the middleware already resolved is what answers it.
+    const mgr = hrUser([rule("employees", "read"), rule("employees.my-reports.**", "read")], "04-001");
+    const withChain = await buildCatalogue(deps, "employees", listable(), [], catalogueFieldGate(mgr, { employeeCode: "04-001", reportCodes: ["04-009"] }));
+    expect(withChain.fields.map((f) => f.key)).toContain("@identity.pan");
+    // Same grant, no reporting line resolved: the gate has no code their rule could match, so it withholds -
+    // which is why the route hands it the context rather than rebuilding a half of one.
+    const without = await buildCatalogue(deps, "employees", listable(), [], catalogueFieldGate(mgr));
+    expect(without.fields.map((f) => f.key)).not.toContain("@identity.pan");
+  });
+
+  it("keeps a field a `me`-scoped caller reads on their OWN row", async () => {
+    await seed();
+    // The probe that matters: an employee holds `employees.me.identity.**` and nothing unscoped, so a gate that
+    // asked only the unscoped sentinel would have hidden their own PAN from them in the builder while the run
+    // happily returned it.
+    const employee = hrUser([rule("employees", "read"), rule("employees.**", "read"), rule("employees.me.identity.**", "read")], "04-001");
+    expect(await keysFor(employee)).toContain("@identity.pan");
   });
 });

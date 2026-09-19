@@ -13,7 +13,6 @@ import { useMe, useRealMe } from "./useMe";
 import { useRoute } from "./router";
 import { Sidebar } from "./components/layout/Sidebar";
 import { TopBar } from "./components/layout/TopBar";
-import { BottomNav } from "./components/layout/BottomNav";
 import { PullToRefresh } from "./components/layout/PullToRefresh";
 import { OfflineBar } from "./components/layout/OfflineBar";
 import { CommandPalette } from "./components/layout/CommandPalette";
@@ -23,7 +22,7 @@ import { ConfirmProvider } from "./components/common/confirm";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { AccessModeProvider } from "./components/access/AccessModeProvider";
 import { AccessScope } from "./components/access/AccessScope";
-import { CapabilitiesContext, hasCapability } from "./lib/perm";
+import { CapabilitiesContext, ScopesContext, hasCapability } from "./lib/perm";
 import { OrgProvider } from "./lib/org";
 import { setTablePrefsUser } from "./lib/tablePrefs";
 import { setResourceStoreUser } from "./lib/resourceStore";
@@ -38,7 +37,7 @@ import { Workspace } from "./components/layout/Workspace";
 import { ApprovalsProvider, APPROVAL_COLLECTIONS, TAX_VERIFICATIONS_QUEUE } from "./lib/approvals";
 import { ClockProvider } from "./lib/clock";
 import { NotificationsProvider, NotificationClearOnLeave } from "./lib/notifications";
-import { workspaceForKey, navPerm, pageGate, pageVisible, APPROVAL_CAPS, pageLabel } from "./nav";
+import { workspaceForKey, navAdmits, pageGate, pageVisible, APPROVAL_CAPS, pageLabel } from "./nav";
 import { NoAccess } from "./components/common/NoAccess";
 import { Building } from "lucide-react";
 import { APP_NAME } from "./lib/brand";
@@ -159,7 +158,6 @@ const Interviews = lazy(() => import("./pages/Interviews"));
 const Offers = lazy(() => import("./pages/Offers"));
 const RecruitingAnalytics = lazy(() => import("./pages/RecruitingAnalytics"));
 const TeamAnalytics = lazy(() => import("./pages/TeamAnalytics"));
-const GoalCockpit = lazy(() => import("./pages/GoalCockpit"));
 const TableBuilder = lazy(() => import("./pages/TableBuilder"));
 const Tickets = lazy(() => import("./pages/Tickets"));
 const Assets = lazy(() => import("./pages/Assets"));
@@ -199,7 +197,8 @@ const PAGE_CHUNK: Record<string, () => Promise<unknown>> = {
   interviews: () => import("./pages/Interviews"), offers: () => import("./pages/Offers"),
   "recruiting-analytics": () => import("./pages/RecruitingAnalytics"), tickets: () => import("./pages/Tickets"),
   "team-analytics": () => import("./pages/TeamAnalytics"),
-  "team-goals": () => import("./pages/GoalCockpit"),
+  // Both goal routes are one page now, so the prefetch for either warms the same chunk.
+  "team-goals": () => import("./pages/Goals"),
   tables: () => import("./pages/TableBuilder"),
   assets: () => import("./pages/Assets"), stocktakes: () => import("./pages/Stocktakes"),
   "payroll-runs": () => import("./pages/PayrollRuns"),
@@ -271,7 +270,8 @@ function SessionExpiredDialog({ open, onSignedIn }: { open: boolean; onSignedIn:
   );
 }
 
-// What a page navigation owes a keyboard or screen-reader user, none of which a hash write does by itself:
+// What a page navigation owes a keyboard or screen-reader user, none of which a client-side route change does
+// by itself:
 // the tab/window/task-switcher title has to say which page this is (it said the app name and nothing else on
 // every one of seventy pages), focus has to leave the link that just unmounted, and the change has to be
 // announced - a silent content swap is the classic SPA failure, where the pointer user sees a new page and
@@ -316,7 +316,7 @@ export default function App() {
   const realMe = useRealMe(); // the signed-in admin (= `me` unless a simulation is running)
   const [mobileOpen, setMobileOpen] = useState(false);
   // The drawer has no meaning once the sidebar docks, and every way out of it is `md:hidden` - the scrim, the
-  // drawer's own close X, the BottomNav button that opened it - while `drawerOpen` goes false so Escape stops
+  // drawer's own close X, the top bar's Menu button that opened it - while `drawerOpen` goes false so Escape stops
   // closing it too. So opening the menu at phone width and then crossing 768px (rotating a tablet, dragging a
   // desktop window) left `mobileOpen` true with nothing on screen able to clear it, and the `inert` below took
   // the entire main column out of hit-testing, focus and the accessibility tree: a page that looks completely
@@ -529,10 +529,13 @@ export default function App() {
       case "notifications":
         return <Notifications me={gme} />;
       case "profile":
-        return <Profile me={gme} />;
+        // `route.id`, not `route.sub`: this route carries no record id (the record is the caller's), so the
+        // tab is the first segment after the page - `/profile/identity`. Profile hands it to the one record
+        // page as its `sub`.
+        return <Profile me={gme} sub={route.id ?? undefined} />;
       case "employees":
         // `key` makes a different person a different component instance. Without it, navigating
-        // #/employees/A -> #/employees/B re-rendered the SAME mounted tree with a new prop, and the profile
+        // /employees/A -> /employees/B re-rendered the SAME mounted tree with a new prop, and the profile
         // paints immediately (it resolves the employee out of the cached directory) rather than unmounting
         // its children while it fetches. The nine profile tabs that load by `employeeId` through a bespoke
         // endpoint - bank, compensation, tax, identity, personal, bonuses, settlement, role history - have no
@@ -552,8 +555,14 @@ export default function App() {
         return <Leaves me={gme} />;
       case "leave-calendar":
         return <LeaveCalendar me={gme} />;
+      // KEYED, because `/goals` and `/team-goals` render the same component in the same slot of this tree.
+      // Without a key React reuses the instance across the switch, and everything this page decides at mount -
+      // the scope (`scope="team"` is read in a `useState` initialiser), the chip, the search, the layout, all
+      // of which also read the address - simply never re-runs. So the sidebar's "Team goals", pressed from
+      // Goals, opened a page headed Team goals showing the reader's OWN goals, and a link carrying `?filter=`
+      // (the Chase up button's) was ignored because the initialiser that reads it had already run.
       case "goals":
-        return <Goals me={gme} openId={route.id ?? undefined} />;
+        return <Goals key="goals" me={gme} openId={route.id ?? undefined} />;
       case "boards":
         return <Boards me={gme} openId={route.id ?? undefined} />;
       case "reviews":
@@ -626,8 +635,12 @@ export default function App() {
         return <RecruitingAnalytics me={gme} />;
       case "team-analytics":
         return <TeamAnalytics me={gme} />;
+      // The same page as `/goals`, with the scope the sidebar entry names. It used to be its own component
+      // over nearly the same rows, with its own filters and its own copy explaining how it differed from the
+      // grid on Goals - two surfaces for one question, which is what the scope switcher replaced.
+      // Keyed apart from `/goals` above - see the note there.
       case "team-goals":
-        return <GoalCockpit me={gme} />;
+        return <Goals key="team-goals" me={gme} scope="team" />;
       // `tables/<id>` opens that grid in place: a saved table is a record people link to, not a dialog.
       case "tables":
         return <TableBuilder me={gme} openId={route.id ?? undefined} />;
@@ -668,14 +681,14 @@ export default function App() {
     // Route gate: the sidebar's answer, applied to the URL. A page the nav hides must not render just because
     // its address was typed, bookmarked or pasted by somebody who does hold the access - so the wall goes up
     // INSTEAD of the page (and without its workspace tab bar), rather than the page rendering itself empty.
-    if (!pageVisible(route.page, (p) => hasCapability(gme.capabilities, p))) {
+    if (!pageVisible(route.page, (p) => hasCapability(gme.capabilities, p), (c) => !!gme.scopes.read[c])) {
       const gate = pageGate(route.page);
       const perm = gate?.perm ?? gate?.anyPerm?.[0];
       return <NoAccess collection={perm?.split(".").slice(0, -1).join(".")} />;
     }
     const ws = workspaceForKey(route.page);
     if (!ws?.tabs) return renderPage();
-    const tabs = ws.tabs.filter((t) => { const p = navPerm(t); return !p || hasCapability(gme.capabilities, p); });
+    const tabs = ws.tabs.filter((t) => navAdmits(t, (p) => hasCapability(gme.capabilities, p), (c) => !!gme.scopes.read[c]));
     return (
       <Workspace tabs={tabs} active={route.page}>
         {renderPage()}
@@ -685,6 +698,7 @@ export default function App() {
 
   return (
     <CapabilitiesContext.Provider value={gme.capabilities}>
+    <ScopesContext.Provider value={gme.scopes}>
     <ConfirmProvider>
     <OrgProvider>
     <AccessModeProvider userEmail={realMe?.email ?? me.email} capabilities={realMe?.capabilities ?? []}>
@@ -702,12 +716,19 @@ export default function App() {
             OVERLAY, and belt-and-braces with the effect above - the effect clears the flag, this makes a frame
             in which both are true impossible to get stuck in. */}
         <div className="flex min-w-0 flex-1 flex-col" {...(mobileOpen && !sidebarDocked ? ({ inert: "" } as React.HTMLAttributes<HTMLDivElement>) : {})}>
-          <TopBar me={gme} page={route.page} sub={route.id ?? undefined} onOpenSearch={() => setPaletteOpen(true)} />
+          <TopBar
+            me={gme}
+            page={route.page}
+            sub={route.id ?? undefined}
+            onOpenSearch={() => setPaletteOpen(true)}
+            onOpenMenu={() => setMobileOpen(true)}
+            menuOpen={mobileOpen}
+          />
           {/* Renders nothing while the connection is up. */}
           <OfflineBar />
-          {/* The bottom padding clears the phone's fixed bottom nav (plus the home indicator) so the last row
-              of a list is never parked under it; from `md` up there is no bottom bar and the normal rhythm
-              applies. Vertical padding is tighter on a phone, where 32px of chrome is a sixth of the screen. */}
+          {/* The bottom padding clears the phone's home indicator so the last row of a list is never parked
+              under it; from `md` up there is no inset and the normal rhythm applies. Vertical padding is
+              tighter on a phone, where 32px of chrome is a sixth of the screen. */}
           {/* Focus target for a navigation (see useRouteAnnounce). `tabIndex={-1}` makes the landmark
               focusable programmatically without adding it to the tab sequence, and `outline-none` keeps
               that focus silent for the pointer user who never asked for a ring around the page. */}
@@ -726,7 +747,7 @@ export default function App() {
             // give it `sentry-mask`, or `data-sentry-block` for an image, the way the compensation, bank, tax,
             // identity, personal, emergency, documents and signature panels each do for themselves.
             data-page={route.page}
-            className="mx-auto w-full max-w-screen-2xl flex-1 px-4 pb-[calc(5rem+env(safe-area-inset-bottom))] pt-5 outline-none sm:px-6 sm:pt-8 md:pb-8 lg:px-8"
+            className="mx-auto w-full max-w-screen-2xl flex-1 px-4 pb-[calc(2rem+env(safe-area-inset-bottom))] pt-5 outline-none sm:px-6 sm:pt-8 md:pb-8 lg:px-8"
           >
             {/* Ambient access scope for the whole page: collection = the route key (the collection for most
                 pages), object = the detail id when on an item page. Shared primitives (Field, Detail, ...)
@@ -743,9 +764,6 @@ export default function App() {
             </RouteAccessScope>
           </main>
         </div>
-        {/* Phone-only primary nav. Outside the scrolling column (it is `fixed`), and after <main> in the DOM
-            so the tab order runs page-then-nav rather than making every keyboard user pass the bar first. */}
-        <BottomNav me={gme} current={route.page} menuOpen={mobileOpen} onOpenMenu={() => setMobileOpen(true)} />
         {/* Pull down from the top of any page to re-read it (touch only; renders nothing until pulled). */}
         <PullToRefresh />
         {/* Speaks the page a navigation landed on. Off-screen rather than hidden: `display:none` content is
@@ -762,6 +780,7 @@ export default function App() {
     </AccessModeProvider>
     </OrgProvider>
     </ConfirmProvider>
+    </ScopesContext.Provider>
     </CapabilitiesContext.Provider>
   );
 }

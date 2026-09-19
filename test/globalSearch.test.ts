@@ -14,6 +14,7 @@ import type { Grant } from "../src/domain/permissions";
 import { globalSearch } from "../src/services/globalSearch";
 import { SEARCH_INDEX, SEARCHABLE_COLLECTIONS } from "../src/domain/searchIndex";
 import { searchScopesFor } from "../src/middleware/authz";
+import { redactionGateFor } from "../src/http/fieldAccess";
 
 // Real-D1 (miniflare) test for global search. The point of interest is ACCESS: the same query run by an
 // employee, a colleague and an admin must return exactly the rows each of them could have listed.
@@ -66,8 +67,11 @@ const kinds = (hits: { collection: string }[]) => [...new Set(hits.map((h) => h.
 
 // Exercise the real pair: the middleware decides which collections are listable and with what scope, the
 // service binds those scopes. Anything the middleware withholds is unreachable from the service.
+// The gate goes in because the ROUTE always passes it: search renders text copied out of rows, so the per-field
+// read gate every serializer applies has to be applied here too, and a helper that left it out would be
+// testing a call shape the app never makes.
 const search = (user: AppUser, q: string) =>
-  searchScopesFor(deps, user).then((scopes) => globalSearch(deps, user, scopes, q));
+  searchScopesFor(deps, user).then((scopes) => globalSearch(deps, user, scopes, q, redactionGateFor(user)));
 
 describe("global search", () => {
   it("finds people, and matches on name / email / job title", async () => {
@@ -300,5 +304,65 @@ describe("a review's manager assessment is not searchable", () => {
         expect(indexed, `${collection}.${c} is withheld by the serializer but indexed for search`).not.toContain(c);
       }
     }
+  });
+});
+
+describe("a field the caller may not read is not searchable text either", () => {
+  // `policy.redacted_fields` is enforced where resources are serialized (http/accessHint.ts). Search does not
+  // serialize a resource - it renders text the INDEX copied out of the row - so the gate never reached it: a
+  // deny on `leave-requests.*.reason` hid the reason on the request, in its list and in every export, and left
+  // it rendering as the title of the search result. `tickets.description` was not shown but was still matched,
+  // which is the same probe a hidden filter was on a custom grid.
+  const DENY_REASON: Grant = {
+    levels: { "employees.**": "read", "leave-requests": "write", "leave-requests.me.**": "write" },
+    allow: [],
+    deny: ["leave-requests.*.reason.**"],
+  };
+  const TICKETS_NO_DESCRIPTION: Grant = { levels: { "**": "admin" }, allow: ["**"], deny: ["tickets.*.description.**"] };
+
+  it("does not render a denied field as the hit's title", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", DENY_REASON);
+    await leaveFor(alice, "04-a01-l1", "Ski trip to Gulmarg");
+    // The request is still theirs and still findable by what they may read (its state) - but the reason, which
+    // is the only thing the title is built from, is withheld rather than printed.
+    const byState = await search(alice, "pending");
+    expect(byState.map((h) => h.collection)).toEqual(["leave-requests"]);
+    expect(byState[0]!.title).toBeNull();
+  });
+
+  it("does not let the query match on a denied field", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", DENY_REASON);
+    await leaveFor(alice, "04-a01-l1", "Ski trip to Gulmarg");
+    // Guessing at the text is how a withheld field gets read a word at a time. The row matched in the index;
+    // nothing the caller may read explains that match, so the hit does not come back.
+    expect(await search(alice, "gulmarg")).toEqual([]);
+    // ...and the same query for somebody who may read the field still finds it.
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    expect((await search(admin, "gulmarg")).map((h) => h.title)).toEqual(["Ski trip to Gulmarg"]);
+  });
+
+  it("judges each row on its own verdict when the deny names one record", async () => {
+    // A deny can be scoped to a code, so two rows of one collection can differ in what they withhold. Both
+    // tickets carry the same word in their description; only the named one is withheld.
+    const admin = await seedPerson("04-z01", "Root", "Admin", {
+      levels: { "**": "admin" }, allow: ["**"], deny: ["tickets.04-z01-t1.description.**"],
+    }, "super_admin");
+    await deps.db.insert(schema.tickets).values([
+      { uuid: genId(), code: "04-z01-t1", employeeId: admin.employeeId!, subject: "Hidden one", description: "the Dhanbad incident" },
+      { uuid: genId(), code: "04-z01-t2", employeeId: admin.employeeId!, subject: "Visible one", description: "the Dhanbad incident" },
+    ] as never);
+    expect((await search(admin, "dhanbad")).map((h) => h.title)).toEqual(["Visible one"]);
+  });
+
+  it("keeps a hit the caller's own readable text explains", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", TICKETS_NO_DESCRIPTION, "super_admin");
+    await deps.db.insert(schema.tickets).values({
+      uuid: genId(), code: "04-z01-t1", employeeId: admin.employeeId!,
+      subject: "Laptop battery swollen", description: "escalated after the Dhanbad incident",
+    } as never);
+    // The subject is readable and contains the term, so the hit stands, title and all.
+    expect((await search(admin, "swollen")).map((h) => h.title)).toEqual(["Laptop battery swollen"]);
+    // The description is not readable, and nothing else on the row carries the word.
+    expect(await search(admin, "dhanbad")).toEqual([]);
   });
 });

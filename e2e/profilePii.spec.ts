@@ -24,6 +24,11 @@ test.describe("own PII", () => {
     // And the 409 the identity save retries through, on the employee's page: the refusal is the app being
     // right, but the browser logs every non-2xx fetch as a console error either way.
     allowConsoleErrors(page, /status of 409 \(Conflict\)/);
+    // The signature card shares the Identity tab now, and it fetches whenever the employee record carries a
+    // signature marker. `signature.spec.ts` uploads and then removes one on this same seeded employee, so a
+    // page that read the record between those two moments asks storage for a file that is already gone. The
+    // 404 is the stale marker, not a broken panel - and nothing this test asserts goes anywhere near it.
+    allowConsoleErrors(page, /:getSignature/);
 
     // The identity card has no fields of its own: an org declares what it collects (PAN, Aadhaar, a passport
     // number), and the card is that list. So the field is declared first, by the only role that may.
@@ -46,7 +51,7 @@ test.describe("own PII", () => {
     }).toPass({ timeout: 120_000 });
 
     // And the owner fills it in - nobody else may, `OWN_PII` being the point.
-    await gotoRoute(page, "profile", "My Profile");
+    await gotoRoute(page, "profile"); // one record page, two addresses: its `h1` is the person's name
     await page.getByRole("tab", { name: "Identity" }).click();
     const panel = page.getByRole("tabpanel");
     await expect(panel.getByText(label)).toBeVisible({ timeout: 30_000 });
@@ -105,8 +110,9 @@ test.describe("own PII", () => {
   test("a joiner declares last year's employer income and the projection takes it", async ({ as }) => {
     test.setTimeout(180_000);
     const page = await as("employee");
-    await gotoRoute(page, "profile", "My Profile");
-    await page.getByRole("tab", { name: "Tax", exact: true }).click();
+    await gotoRoute(page, "profile"); // one record page, two addresses: its `h1` is the person's name
+    // Tax is a card on the Compensation tab: the declarations and the withholding they move are read together.
+    await page.getByRole("tab", { name: "Compensation", exact: true }).click();
 
     const panel = page.getByRole("tabpanel");
     // Somebody who joined mid-year has already been taxed elsewhere this financial year, and the projection
@@ -130,7 +136,7 @@ test.describe("own PII", () => {
     // shown right there.
     await expect(panel.getByText(/previous employer/).first()).toBeVisible({ timeout: 30_000 });
     await page.reload();
-    await page.getByRole("tab", { name: "Tax", exact: true }).click();
+    await page.getByRole("tab", { name: "Compensation", exact: true }).click();
     await expect(page.getByRole("tabpanel").getByText(/previous employer/).first()).toBeVisible({ timeout: 30_000 });
 
     // Declared, not verified: an employee's own figure does not lower withholding until payroll has seen the

@@ -53,6 +53,10 @@ export function weightedProgress(goals: { weight?: number | null; progress?: num
 /** A number the reader typed, or undefined when they typed nothing. "0" is a real value and must survive. */
 export const numOrNone = (s: string): number | undefined => (s.trim() === "" || Number.isNaN(Number(s)) ? undefined : Number(s));
 
-/** The measure as a person would say it: "42 of 60 customers". Null when the goal has no measure. */
-export const measureLabel = (g: Goal) =>
+/**
+ * The measure as a person would say it: "42 of 60 customers". Null when the goal has no measure.
+ *
+ * Takes the three fields rather than a whole `Goal`, so it also reads the narrower snapshot a review froze.
+ */
+export const measureLabel = (g: Pick<Goal, "target_value" | "current_value" | "unit">) =>
   g.target_value == null ? null : `${g.current_value ?? 0} of ${g.target_value}${g.unit ? ` ${g.unit}` : ""}`;

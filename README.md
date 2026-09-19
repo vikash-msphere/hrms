@@ -59,6 +59,7 @@ push; PWA install; CSV/Excel export; saved table views; API keys for machine cal
 │  ├─ 04-testing.md       the suite, what each family gates, how to run it
 │  ├─ 05-add-esign-provider.md   the e-sign driver contract
 │  ├─ 06-responsive-ui.md  what changes at each breakpoint, and the touch rules UI must meet
+│  ├─ 07-table-interactions.md  what a page declares about its table: typed filters, grouping, insights
 │  ├─ authz.md            authorization end to end (engine, grants, scope, BOLA)
 │  ├─ access-ui.md        how the web app surfaces and edits access, and what keeps it covered
 │  ├─ architecture-decisions.md   the "why" behind the stack and its boundaries
@@ -87,7 +88,8 @@ One command brings up the whole stack (D1, Worker, Prism contract proxy, Vite):
 
 ```bash
 npm install
-scripts/start.sh --demo      # fresh local DB: production catalog + demo people, logs you in as super_admin
+scripts/start.sh --demo      # fresh local DB: production catalog + demo people, kudos, goals and boards,
+                             #   logs you in as super_admin
 scripts/start.sh             # subsequent runs, acting as super@example.com
 scripts/start.sh hr@example.com   # act as another seeded role
 ```

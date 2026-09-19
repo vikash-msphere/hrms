@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { Network, Building2, ChevronDown, ChevronRight, ChevronUp, Crosshair, Search, Users, X, GripVertical, CornerDownRight, ArrowUpToLine, ZoomIn, ZoomOut, Maximize2, Minimize2, LocateFixed, ListTree, Briefcase, CalendarClock, ImageDown, Printer } from "lucide-react";
 import { patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { usePermission } from "@/lib/perm";
+import { usePermission, useCanReadOthers } from "@/lib/perm";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 import { idOf, cn, tenureLabel } from "@/lib/utils";
@@ -93,7 +93,16 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
   // and the toggles only render for callers who can read the backing collection at all.
   const [showLeave, setShowLeave] = useState(false);
   const [showVacancies, setShowVacancies] = useState(false);
-  const canSeeLeaves = usePermission("leave-requests.read");
+  // The caller's BREADTH, not the stripped string. This overlay is about OTHER PEOPLE by definition - it marks
+  // who across the chart is off today - and `leave-requests.read` is true for every employee, because everybody
+  // files their own leave. Gated on that, the toggle appeared for all of them and could only ever mark the one
+  // node that is their own (the list is scoped server-side): a control that is visible and cannot work.
+  //
+  // The CALLER-level breadth (`caller_access.read_scopes`), not the per-subject answer an employee record
+  // carries: a chart-wide overlay has no ONE subject to ask about - the question here is "is there anybody
+  // but me whose leave I could mark at all", which is exactly what this hook answers. A surface about a NAMED
+  // person asks `access.subject` instead (see pages/EmployeeProfile.tsx).
+  const canSeeLeaves = useCanReadOthers("leave-requests");
   const canSeeReqs = usePermission("job-requisitions.read");
   // Narrowed to TODAY at the server, which is the only day this overlay asks about. `max: 500` was a fiction -
   // the server caps a page at 100 (api.ts says so now) - so the overlay marked whoever happened to be in the

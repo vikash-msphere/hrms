@@ -13,6 +13,7 @@ import { cn, humanize, idOf } from "@/lib/utils";
 import { todayStr } from "@/lib/orgDay";
 import type { Automation, AutomationRun, EventLogEntry, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
+import { FilterChip } from "@/components/common/FilterChips";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Button } from "@/components/ui/button";
@@ -120,15 +121,10 @@ function EnableToggle({ on, onClick, label }: { on: boolean; onClick: () => void
   );
 }
 
+// The shared chip. This was the app's fourth appearance of one control: a transparent border when active, a
+// `bg-card` ground when not, and the count wrapped in a pill of its own - none of which any other page did.
 function ModuleChip({ active, onClick, label, count }: { active: boolean; onClick: () => void; label: string; count: number }) {
-  return (
-    <button type="button" onClick={onClick}
-      className={cn("inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-        active ? "border-transparent bg-primary text-primary-foreground" : "bg-card text-foreground hover:bg-accent hover:text-accent-foreground")}>
-      {label}
-      <span className={cn("rounded-full px-1.5 text-[10px] leading-4", active ? "bg-primary-foreground/20" : "bg-muted text-muted-foreground")}>{count}</span>
-    </button>
-  );
+  return <FilterChip active={active} count={count} onClick={onClick}>{label}</FilterChip>;
 }
 
 type StatusFilter = "all" | "enabled" | "disabled";
@@ -140,7 +136,7 @@ function RulesTab({ canWrite, openId }: { canWrite: boolean; openId?: string }) 
   const confirm = useConfirm();
   const [editing, setEditing] = useState<Automation | "new" | null>(null);
   // A rule being argued about over chat is pasteable, and the link reopens exactly this rule: the outbound
-  // half (writing the id into the hash) is `openRule`, the inbound half is `useDeepOpen`.
+  // half (writing the id into the path) is `openRule`, the inbound half is `useDeepOpen`.
   useDeepOpen(openId, rows, (r) => setEditing(r));
   // A new rule that starts as a copy of an existing one. The commonest second rule is a variant of the first
   // (the same chain for another department, another threshold), and the only way to write one was to read the
@@ -222,7 +218,7 @@ function RulesTab({ canWrite, openId }: { canWrite: boolean; openId?: string }) 
   );
 
   return (
-    <DataState state={state} error={error}>
+    <DataState state={state} error={error} onRetry={reload}>
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="relative min-w-[12rem] flex-1">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />

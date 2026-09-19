@@ -136,7 +136,7 @@ describe("re-parenting: coverage tripwire", () => {
     // rewritten, but it has no wire collection, so no access rule can name it.
     for (const c of cols) if (c !== null) expect(RESOURCE_COLLECTIONS).toContain(c);
     // Tripwire: bump this when a new employee-owned (allocOwnedCode) collection is added AND wired into the cascade.
-    expect(cols.length).toBe(45);
+    expect(cols.length).toBe(46);
   });
 
   // The OWNER KEY's registry, kept honest from the other side. `OWNER_COLUMN_COLLECTIONS` (lib/authzResolve.ts)

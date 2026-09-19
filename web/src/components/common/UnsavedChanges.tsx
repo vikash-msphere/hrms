@@ -5,7 +5,7 @@ import { reportUnsaved } from "@/router";
 
 // Shared unsaved-changes machinery for draft-style settings forms (edit local state, persist on Save).
 // A form tracks its dirtiness with useUnsaved/useUnsavedTracker, which feeds two consumers:
-//   - the router's global registry (hash-navigation confirm + beforeunload), and
+//   - the router's global registry (route-change confirm + beforeunload), and
 //   - the nearest <UnsavedScope>, which shows a sticky "Unsaved changes" banner with its own Save button,
 //     so the save affordance is visible from the top of a long panel, not only at the bottom.
 

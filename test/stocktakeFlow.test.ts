@@ -47,7 +47,7 @@ async function seedActor(role = "hr_admin"): Promise<AppUser> {
   return { uuid, email: `${uuid}@test.example`, role, status: "active", employeeId, employeeCode: null } as unknown as AppUser;
 }
 
-const scanFor = (asset: { tagSecret: string | null }) => `https://hr.example/#/assets/x?s=${asset.tagSecret}`;
+const scanFor = (asset: { tagSecret: string | null }) => `https://hr.example/assets/x?s=${asset.tagSecret}`;
 const start = (actor: AppUser, scope?: { statuses?: string[]; categories?: string[] }) =>
   counts.create(deps, actor, { label: "Q3 count", ...(scope ? { scope } : {}) });
 const resultOf = (row: { resultJson: string | null }) => JSON.parse(row.resultJson!) as StocktakeResult;

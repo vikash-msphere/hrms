@@ -184,6 +184,8 @@ const fieldSurfaces = () => {
 const FIELD_EXEMPT: Record<string, string> = {
   "web/src/pages/LeaveCalendar.tsx leave-requests.reason":
     "copies `reason` onto the calendar entry and never renders it - the only other mention in the file is the .ics exporter deliberately leaving it out (LeaveCalendar.tsx:369)",
+  "web/src/pages/Attendance.tsx leave-requests.reason":
+    "reads leave-requests to mark which days were excused, but never renders a leave reason: both `.reason` mentions in the file are an attendance-regularization's own (the correction the employee filed, and the one an approver is deciding). The leave reason renders in components/common/AttendanceHistory.tsx, which masks it",
 };
 
 describe("session replay: REDACTED_FIELDS values are masked wherever they render", () => {

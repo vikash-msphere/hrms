@@ -44,14 +44,39 @@ const PAGES: ChartPage[] = [
 // same two things this file does: a picture with a box, and a table under it.
 const ELSEWHERE: Record<string, string> = {
   "ReviewCycles.tsx": "reviewGoals.spec.ts (the cycle's attainment curve, inside the calibration panel)",
+  "EmployeeProfile.tsx": "attendanceViews.spec.ts (the attendance tab's hours chart, on somebody's record)",
 };
+
+/** Does this source draw charts itself? */
+const drawsDirectly = (src: string) => /from "@\/components\/common\/Chart"/.test(src);
 
 test.describe("every chart", () => {
   test("the page list covers every page that draws a chart", () => {
     const dir = new URL("../web/src/pages/", import.meta.url);
+    // A page can draw through a SHARED COMPONENT rather than importing the primitive itself - the attendance
+    // history is one component on two surfaces (the reader's own page and an employee's record), and it
+    // carries the hours chart with it. A scan that only read the page file called both of them chart-free,
+    // which is how a page silently leaves this walk: not by deleting a chart, but by moving one.
+    const componentDir = new URL("../web/src/components/", import.meta.url);
+    const componentDraws = new Map<string, boolean>();
+    const drawsVia = (spec: string): boolean => {
+      const file = spec.replace(/^@\/components\//, "");
+      const cached = componentDraws.get(file);
+      if (cached !== undefined) return cached;
+      let answer = false;
+      try {
+        answer = drawsDirectly(readFileSync(new URL(`${file}.tsx`, componentDir), "utf8"));
+      } catch { /* an import that is not a component file of ours */ }
+      componentDraws.set(file, answer);
+      return answer;
+    };
     const drawing = readdirSync(dir)
       .filter((f) => f.endsWith(".tsx"))
-      .filter((f) => /from "@\/components\/common\/Chart"/.test(readFileSync(new URL(f, dir), "utf8")));
+      .filter((f) => {
+        const src = readFileSync(new URL(f, dir), "utf8");
+        if (drawsDirectly(src)) return true;
+        return [...src.matchAll(/from "(@\/components\/[\w/-]+)"/g)].some((m) => drawsVia(m[1]!));
+      });
     const covered = new Set([...PAGES.map((p) => p.file), ...Object.keys(ELSEWHERE)]);
     expect(drawing.filter((f) => !covered.has(f)), "these pages draw charts that no browser test opens").toEqual([]);
     expect(PAGES.map((p) => p.file).filter((f) => !drawing.includes(f)), "these pages are listed here but draw no charts").toEqual([]);
@@ -104,9 +129,23 @@ test.describe("every chart", () => {
         const caption = ((await figure.locator("figcaption").first().textContent()) ?? "").trim();
         try {
           // The picture, with real pixels: an SVG the library never painted has no box.
+          //
+          // Polled, not measured once. Being ATTACHED is not being painted: `Chart` is lazy and frappe-charts
+          // sizes its SVG a frame or more after it lands in the DOM, so a single `boundingBox()` taken the
+          // instant the element attaches reads 0x0 on a loaded machine and reports a chart that draws
+          // perfectly well as one that drew nothing (seen on `goals · Goals by state`, 2026-09-15). The window
+          // stays short on purpose: a chart that has not painted within it is still a failure, which is the
+          // thing this sweep exists to catch.
           const svg = figure.locator("svg").first();
           await expect(svg).toBeAttached({ timeout: 30_000 });
-          const box = await svg.boundingBox();
+          const box = await expect
+            .poll(async () => {
+              const b = await svg.boundingBox();
+              return (b?.width ?? 0) > 0 && (b?.height ?? 0) > 0;
+            }, { timeout: 5_000 })
+            .toBe(true)
+            .then(() => svg.boundingBox())
+            .catch(() => null);
           if ((box?.width ?? 0) <= 0 || (box?.height ?? 0) <= 0) {
             failures.push(`${route} · ${caption}: the chart drew no picture`);
             continue;

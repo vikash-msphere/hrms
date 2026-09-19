@@ -20,11 +20,16 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 type State = typeof schema.reviews.$inferSelect.state;
 const NEXT: Record<State, State | null> = { SELF: "MANAGER", MANAGER: "SHARED", SHARED: "ACKNOWLEDGED", ACKNOWLEDGED: null };
 
-export async function listReviews(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, cycle?: string, stateFilter?: string) {
+export async function listReviews(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, cycle?: string, stateFilter?: string, employee?: string) {
   const conds = [applyScope(scope, schema.reviews.code, schema.reviews.employeeId)];
   const cycleId = idFromPath(cycle);
   if (cycleId) conds.push(eq(schema.reviews.cycleId, cycleId));
   if (stateFilter) conds.push(eq(schema.reviews.state, stateFilter as State));
+  // One person's reviews across every cycle - the profile's Performance tab. Server-filtered rather than a
+  // client pass over a page of the collection: reviews are launched a whole cycle at a time, so one person's
+  // are a handful of rows scattered through hundreds and mostly outside the first page.
+  const employeeId = idFromPath(employee);
+  if (employeeId) conds.push(eq(schema.reviews.employeeId, employeeId));
   // Reviews have no delete_time of their own: they live and die with their cycle. Soft-deleting a cycle must
   // therefore take its reviews off the list too, or every enrolled employee keeps a nameless, un-dated review
   // card for a cycle that no longer exists (restoring the cycle brings them back).

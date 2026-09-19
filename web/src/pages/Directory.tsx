@@ -8,7 +8,8 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf, reportsUnder } from "@/lib/utils";
-import { daysBetweenYmd, todayStr, thisMonthStr } from "@/lib/orgDay";
+import { addDaysYmd, daysBetweenYmd, todayStr, thisMonthStr } from "@/lib/orgDay";
+import { BLANK } from "@/lib/tableFilter";
 import { navigate } from "@/router";
 import type { Department, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -17,6 +18,7 @@ import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { type TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -476,6 +478,47 @@ export default function Directory({ me }: { me: Me }) {
     reload();
   }
 
+  // The two dates HR is chased about, and the gap that makes an org chart wrong. Each chip turns on the
+  // column it is about, because all three live in the column picker rather than on screen by default.
+  const directoryInsights = (es: Employee[]): TableInsight[] => {
+    const live = es.filter((e) => !e.delete_time && !e.disabled);
+    const out: TableInsight[] = [];
+    const monthEnd = addDaysYmd(todayStr(), 30);
+    const probation = live.filter((e) => e.probation_end_date && e.probation_end_date >= todayStr() && e.probation_end_date <= monthEnd);
+    if (probation.length > 0) {
+      out.push({
+        id: "probation",
+        label: `${probation.length} finishing probation in 30 days`,
+        tone: "warning",
+        hint: "Confirmation conversations to have before the date passes.",
+        filters: { probation_end_date: `${todayStr()}..${monthEnd}` },
+        sort: "probation_end_date.asc",
+      });
+    }
+    const joined = live.filter((e) => e.start_date && e.start_date >= addDaysYmd(todayStr(), -30) && e.start_date <= todayStr());
+    if (joined.length > 0) {
+      out.push({
+        id: "joined",
+        label: `${joined.length} joined in the last 30 days`,
+        tone: "success",
+        filters: { start_date: "last30" },
+        sort: "start_date.desc",
+      });
+    }
+    const unmanaged = live.filter((e) => !empName(e.manager));
+    // One person at the top of the tree reports to nobody and that is correct, so this only speaks up
+    // when there are several.
+    if (unmanaged.length > 1) {
+      out.push({
+        id: "no-manager",
+        label: `${unmanaged.length} with no manager`,
+        hint: "Approvals route up the manager chain, so these have nowhere to send a request.",
+        filters: { manager: BLANK },
+      });
+    }
+    return out;
+  };
+
   const columns: Column<Employee>[] = [
     {
       id: "name",
@@ -500,8 +543,8 @@ export default function Directory({ me }: { me: Me }) {
       },
     },
     { id: "employee_number", header: "Employee ID", accessor: (e) => e.employee_number ?? "", cell: (e) => e.employee_number ? <span className="font-mono text-xs">{e.employee_number}</span> : "-" },
-    { id: "title", header: "Title", accessor: (e) => e.job_title ?? "", cell: (e) => e.job_title ?? "-" },
-    { id: "department", header: "Department", filter: "select", accessor: (e) => deptName(e.department) || "-" },
+    { id: "title", header: "Title", filter: "select", groupBy: true, accessor: (e) => e.job_title ?? "", cell: (e) => e.job_title ?? "-" },
+    { id: "department", header: "Department", filter: "select", groupBy: true, accessor: (e) => deptName(e.department) || "-" },
     {
       id: "email",
       header: "Email",
@@ -520,9 +563,14 @@ export default function Directory({ me }: { me: Me }) {
       accessor: (e) => e.bio ?? "",
       cell: (e) => (e.bio ? <span className="line-clamp-1 max-w-[36ch] text-muted-foreground">{e.bio}</span> : "-"),
     },
-    { id: "manager", header: "Manager", defaultHidden: true, filter: "select", accessor: (e) => empName(e.manager) || "-" },
-    { id: "start_date", header: "Start date", defaultHidden: true, filter: "none", accessor: (e) => e.start_date ?? "", cell: (e) => (e.start_date ? formatDate(e.start_date) : "-") },
-    { id: "probation_end_date", header: "Probation ends", defaultHidden: true, filter: "none", accessor: (e) => e.probation_end_date ?? "", cell: (e) => (e.probation_end_date ? formatDate(e.probation_end_date) : "-") },
+    // Grouping the directory by manager is an org chart in list form, and the one most people reach for.
+    // The accessor is EMPTY when there is no manager rather than "-": blank is a filterable value
+    // ("(Blank)" in the picker, which is how the no-manager chip narrows), a dash is a made-up one.
+    { id: "manager", header: "Manager", defaultHidden: true, filter: "select", groupBy: true, accessor: (e) => empName(e.manager), cell: (e) => empName(e.manager) || <span className="text-muted-foreground">-</span> },
+    // Both are calendar questions, and both were unaskable: "who joined this quarter" and "whose probation
+    // ends before the end of the month" are the two dates HR is chased for.
+    { id: "start_date", header: "Start date", defaultHidden: true, filter: "date", dateHint: "past", accessor: (e) => e.start_date ?? "", cell: (e) => (e.start_date ? formatDate(e.start_date) : "-") },
+    { id: "probation_end_date", header: "Probation ends", defaultHidden: true, filter: "date", dateHint: "future", accessor: (e) => e.probation_end_date ?? "", cell: (e) => (e.probation_end_date ? formatDate(e.probation_end_date) : "-") },
     // Fetched on demand: the column offers "Deleted" with none loaded, and must not hide the value it just
     // went and got.
     stateColumn<Employee>({ hideDeleted: false, filterOptions: ["Deleted"] }),
@@ -705,6 +753,7 @@ export default function Directory({ me }: { me: Me }) {
             {view === "table" ? (
               <DataTable
                 columns={columns}
+                insights={directoryInsights}
                 tableId="employees"
                 rows={monthRows}
                 getRowId={(e) => e.path}

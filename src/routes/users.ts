@@ -3,6 +3,8 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { capabilitiesOf } from "../domain/permissions";
+import { callerScopes } from "../domain/access";
+import { selfContextFor } from "../lib/selfContext";
 import { grantableScopes } from "../domain/manifests";
 import { conditionableFields, windowableFields } from "../domain/ruleCondition";
 import { collectionRoutes } from "../http/collectionRoute";
@@ -81,15 +83,30 @@ export const users = new Hono<AppEnv>()
     // has nothing for a cache to outlive, and inventing a value would make the namespace change on every
     // request. `simulatedBy` carries the real admin's sitting, so a simulation is scoped to it too.
     const sessionId = u.simulatedBy?.sessionId ?? u.sessionId;
-    const withCallerAccess = async <T extends object>(res: T) =>
-      c.json({
+    const withCallerAccess = async <T extends object>(res: T) => {
+      const scopes = callerScopes(u, await selfContextFor(c.get("deps"), u));
+      return c.json({
         ...res,
         holiday_feed_token: await feedToken(),
         ...(sessionId ? { session_id: sessionId } : {}),
         // `grantableScopes`, not the raw manifest map: a tier the UI must offer can be DERIVED from another
         // (named-dept from dept), and the chips have to reflect what the engine honours, not what the row stores.
-        caller_access: { capabilities: capabilitiesOf(u.grant), scopes: grantableScopes(u.policy), condition_fields: conditionableFields(), window_fields: windowableFields() },
+        //
+        // `read_scopes`/`write_scopes` are the half `capabilities` cannot carry: the capability set is
+        // scope-STRIPPED, so it cannot tell "my own attendance" from "everybody's" - and every per-record
+        // surface (the tabs of an employee's profile) has to ask exactly that. The self context is resolved the
+        // same way a real request resolves it, so a manager-chain grant counts here too; it costs nothing
+        // unless the grant uses the tokens (lib/selfContext.ts).
+        caller_access: {
+          capabilities: capabilitiesOf(u.grant),
+          read_scopes: scopes.read,
+          write_scopes: scopes.write,
+          scopes: grantableScopes(u.policy),
+          condition_fields: conditionableFields(),
+          window_fields: windowableFields(),
+        },
       });
+    };
     // A "view as" subject can be someone who has never signed in: lib/viewAs.ts grades them as the account they
     // WOULD get on first login, so there is no users row to read. Synthesize the identity from the simulated
     // principal instead of 404ing the whole shell - it is the same information a real row would carry, and the

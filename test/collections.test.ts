@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
 import { COLLECTIONS, isGrantCollection } from "../src/domain/collections";
+import { SUPPORTED_SCOPES } from "../src/domain/manifests";
 
 // The gate `domain/collections.ts` names in its own header, and did not have.
 //
@@ -89,6 +90,25 @@ describe("collections registry", () => {
     expect(names.length, "no collections parsed out of COLLECTION_GROUPS - the shape changed").toBeGreaterThan(70);
     const phantom = [...new Set(names)].filter((c) => !COLLECTIONS.has(c));
     expect(phantom, "offered as a row in the permissions matrix but not a collection, so every rule authored there is rejected as unknown").toEqual([]);
+  });
+
+  // The other direction, for the one set where absence IS a defect. `SUPPORTED_SCOPES` is the list of
+  // collections an org can author a SCOPED rule on - self / dept / reports / org - which is to say the ones
+  // the product means an admin to tune per subject. The matrix is the only place an admin discovers them, so a
+  // collection that is scope-grantable and not offered there is a permission the engine honours and the UI
+  // cannot author: `attendance-day-marks` shipped that way, seeded grants and all, and the only route to it
+  // was the raw API. The plumbing exemption above still stands - it applies to names that are in COLLECTIONS
+  // and in nobody's scope table.
+  it("every scope-grantable collection is offered in the web permissions matrix", () => {
+    const matrix = Object.values(
+      import.meta.glob("../web/src/components/access/permMatrix.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>,
+    )[0]!;
+    const groups = matrix.slice(matrix.indexOf("COLLECTION_GROUPS"), matrix.indexOf("export const BASE_COLLECTIONS"));
+    const offered = new Set(
+      [...groups.matchAll(/collections:\s*\[([^\]]*)\]/g)].flatMap((m) => [...m[1]!.matchAll(/"([a-z0-9-]+)"/g)].map((n) => n[1]!)),
+    );
+    const missing = Object.keys(SUPPORTED_SCOPES).filter((c) => !offered.has(c));
+    expect(missing, "scope-grantable but absent from COLLECTION_GROUPS, so no admin can find it to grant it").toEqual([]);
   });
 
   it("accepts the super wildcard and refuses an unknown token", () => {

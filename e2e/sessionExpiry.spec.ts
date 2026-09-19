@@ -35,5 +35,5 @@ test("a session that dies mid-form keeps the form", async ({ as }) => {
   // through `dialog`: the overlay is modal, so Radix hides everything outside it from the accessibility tree
   // and a role-based lookup would find nothing even though the form is still mounted and filled in.
   await expect(page.getByPlaceholder("Vendor or supplier name")).toHaveValue(typed);
-  await expect(page).toHaveURL(/#\/vendors/);
+  await expect(page).toHaveURL(/\/vendors/);
 });

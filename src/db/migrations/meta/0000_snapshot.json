@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "7a957427-9d3d-4531-9a14-a33a23b974af",
+  "id": "ce49b64f-5bcc-4f2e-9d70-18d9360b8acf",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -2110,6 +2110,126 @@
           "tableTo": "users",
           "columnsFrom": [
             "uploaded_by"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "attendance_day_marks": {
+      "name": "attendance_day_marks",
+      "columns": {
+        "uuid": {
+          "name": "uuid",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "employee_id": {
+          "name": "employee_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "date": {
+          "name": "date",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "credit": {
+          "name": "credit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "delete_time": {
+          "name": "delete_time",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "attendance_day_marks_code_unique": {
+          "name": "attendance_day_marks_code_unique",
+          "columns": [
+            "code"
+          ],
+          "isUnique": true
+        },
+        "attendance_day_marks_page_idx": {
+          "name": "attendance_day_marks_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
+        "attmark_emp_idx": {
+          "name": "attmark_emp_idx",
+          "columns": [
+            "employee_id",
+            "date"
+          ],
+          "isUnique": false
+        },
+        "attmark_live_day_idx": {
+          "name": "attmark_live_day_idx",
+          "columns": [
+            "employee_id",
+            "date"
+          ],
+          "isUnique": true,
+          "where": "\"attendance_day_marks\".\"delete_time\" is null"
+        }
+      },
+      "foreignKeys": {
+        "attendance_day_marks_employee_id_employees_uuid_fk": {
+          "name": "attendance_day_marks_employee_id_employees_uuid_fk",
+          "tableFrom": "attendance_day_marks",
+          "tableTo": "employees",
+          "columnsFrom": [
+            "employee_id"
           ],
           "columnsTo": [
             "uuid"

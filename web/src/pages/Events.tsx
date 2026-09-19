@@ -289,7 +289,8 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
         <span className="inline-block h-3 w-5 rounded-full" style={{ backgroundColor: e.color || leaveColor(undefined, idOf(e.path)) }} /> {e.title}
       </span>
     ) },
-    { id: "when", header: "When", accessor: (e) => e.start_time, cell: (e) => {
+    // An events list is read forwards, so the date filter leads with "next 7 days" and "next month".
+    { id: "when", header: "When", filter: "date", dateHint: "future", accessor: (e) => e.start_time, cell: (e) => {
       // Same-day events show the date once; all-day events say so instead of repeating times.
       const sameDay = e.all_day
         ? e.start_time.slice(0, 10) === e.end_time.slice(0, 10)
@@ -309,13 +310,13 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
         </div>
       );
     } },
-    { id: "counts", header: "Counts as work", filter: "select", accessor: (e) => (e.count_as_work ? "Yes" : "No"), cell: (e) => (e.count_as_work ? <Badge variant="secondary">Worked time</Badge> : <span className="text-muted-foreground">-</span>) },
-    { id: "attendees", header: "Attendees", sortable: false, filter: "none", accessor: (e) => e.attendees?.length ?? 0, cell: (e) => (
+    { id: "counts", header: "Counts as work", filter: "select", groupBy: true, accessor: (e) => (e.count_as_work ? "Yes" : "No"), cell: (e) => (e.count_as_work ? <Badge variant="secondary">Worked time</Badge> : <span className="text-muted-foreground">-</span>) },
+    { id: "attendees", header: "Attendees", sortable: false, filter: "number", accessor: (e) => e.attendees?.length ?? 0, cell: (e) => (
       <span className="flex items-center gap-1.5 text-sm"><Users className="h-3.5 w-3.5 text-muted-foreground" /> {e.attendees?.length ?? 0}</span>
     ) },
     // Who is actually coming, and the caller's own answer where they can give one. Being on the list was never
     // the same as turning up, and an organiser counting heads for an off-site was counting the invitation.
-    { id: "rsvp", header: "Coming", sortable: false, filter: "none", accessor: (e) => e.going_count ?? 0, cell: (e) => {
+    { id: "rsvp", header: "Coming", sortable: false, filter: "number", accessor: (e) => e.going_count ?? 0, cell: (e) => {
       const invited = (e.attendees ?? []).length === 0 || (e.attendees ?? []).some((a) => idOf(a) === me.employee_id);
       const mayAnswer = invited && (e.access?.can ?? []).includes("respond") && endMs(e) >= Date.now() && !e.delete_time;
       return (

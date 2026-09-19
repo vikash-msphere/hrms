@@ -14,7 +14,9 @@ test("picking a kudos category seeds the card with one of its own stickers, unpr
   const message = `E2E kudos art ${Date.now()}`;
 
   await gotoRoute(giver, "dashboard");
-  await giver.getByRole("button", { name: "Give kudos" }).click();
+  // Kudos is a configurable "+" menu entry, not a top-bar button of its own (see kudos.spec.ts).
+  await giver.getByRole("button", { name: "New", exact: true }).click();
+  await giver.getByRole("menuitem", { name: "Give kudos" }).click();
   const form = giver.getByRole("dialog");
   await expect(form.getByRole("heading", { name: /kudos/i })).toBeVisible();
 

@@ -82,15 +82,15 @@ test.describe("sidebar access matrix", () => {
       const sidebar = page.getByRole("complementary");
       // The entry is found by its href, not its name: an entry with unread work carries a badge INSIDE the
       // anchor ("Approvals 3"), so an exact-name match would report a missing link that is on screen.
-      await expect(sidebar.locator('a[href="#/dashboard"]')).toHaveCount(1);
+      await expect(sidebar.locator('a[href="/dashboard"]')).toHaveCount(1);
 
       const wrong: string[] = [];
       for (const entry of navEntries()) {
         const expected = entry.needs.length === 0 || entry.needs.some((p) => hasCapability(caps, p));
-        const shown = (await sidebar.locator(`a[href="#/${entry.key}"]`).count()) > 0;
+        const shown = (await sidebar.locator(`a[href="/${entry.key}"]`).count()) > 0;
         if (shown !== expected) {
           wrong.push(
-            `${entry.label} (#/${entry.key}): ${shown ? "offered to" : "hidden from"} a caller who ${expected ? "holds" : "does not hold"} ${entry.needs.join(" / ") || "(no gate)"}`,
+            `${entry.label} (/${entry.key}): ${shown ? "offered to" : "hidden from"} a caller who ${expected ? "holds" : "does not hold"} ${entry.needs.join(" / ") || "(no gate)"}`,
           );
         }
       }
@@ -111,13 +111,13 @@ test.describe("sidebar access matrix", () => {
 
     const served: string[] = [];
     for (const entry of hidden) {
-      await expect(sidebar.locator(`a[href="#/${entry.key}"]`)).toHaveCount(0);
+      await expect(sidebar.locator(`a[href="/${entry.key}"]`)).toHaveCount(0);
       await gotoRoute(page, entry.key);
       const wall = page.getByText("You don't have access to this");
       try {
         await expect(wall).toBeVisible({ timeout: 20_000 });
       } catch {
-        served.push(`${entry.label} (#/${entry.key}) rendered for a caller the sidebar hides it from`);
+        served.push(`${entry.label} (/${entry.key}) rendered for a caller the sidebar hides it from`);
       }
     }
     expect(served, `routes served past their own gate:\n${served.join("\n")}`).toEqual([]);

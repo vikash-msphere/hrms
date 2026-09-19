@@ -429,9 +429,13 @@ function PersonReport({ person, data, deptName, me }: {
           <Button variant="outline" size="sm" onClick={() => navigate(`employees/${id}`)}>
             {mine ? "My profile" : "Open profile"} <ChevronRight className="ml-1 h-3.5 w-3.5" />
           </Button>
-          <Button variant="outline" size="sm" onClick={() => navigate(`employees/${id}/leave`)}>
-            Leave history <ChevronRight className="ml-1 h-3.5 w-3.5" />
-          </Button>
+          {/* The record's Leave tab, which exists on somebody ELSE's record only - one's own leave lives on
+              the Leaves page, so this door is not offered on one's own row. */}
+          {!mine && (
+            <Button variant="outline" size="sm" onClick={() => navigate(`employees/${id}/leave`)}>
+              Leave history <ChevronRight className="ml-1 h-3.5 w-3.5" />
+            </Button>
+          )}
           {person.manager && <Badge variant="secondary">Reports to {idOf(person.manager) === me.employee_id ? "you" : "a manager you can see"}</Badge>}
         </div>
       </SheetBody>

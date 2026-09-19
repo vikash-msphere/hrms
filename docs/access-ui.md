@@ -94,8 +94,12 @@ Wiring is ambient-first so a page opts in once and everything inside lights up:
   gear Sheet on feature pages, where the ambient collection is the host page's.
 - `PageHeader accessCollection` resets the scope around its icon, so the whole-collection icon never pins
   to a deep-linked row.
-- `Profile` rebinds its content to `employees/<self>` so the shared section components (identity, bank,
-  tax, …) target exactly what they target on `employees/<id>`.
+- `/profile` and `/employees/<id>` are ONE page (`pages/EmployeeProfile.tsx`); `pages/Profile.tsx` is a route
+  wrapper that passes `basePath="profile"` and handles the one case that never reaches it (an account with no
+  employee record). The page binds its OWN `<AccessScope collection="employees" objectPath={empPath}>` rather
+  than inheriting the route's, because `ROUTE_SCOPE.profile` is null - so every section affordance targets the
+  same record whichever address the reader arrived by, and the tab set, order and names cannot diverge between
+  the two.
 
 `test/webAccessCoverage.test.ts` enforces the mechanical halves of this: every page references an access
 affordance; every file calling `invoke()`/`upload()` references `AccessAction`/`RowActions`; every
@@ -180,10 +184,37 @@ pre-selected chip that reads as a broken picker.
   90 days. It only reminds - no access is ever changed for anyone - and due-ness lives on the setting, so a
   skipped tick runs late rather than being missed. Toggled beside four-eyes: the two halves of governing a
   rule's life, one guarding how it is made and one asking whether it is still wanted.
-- **"Who can see this"** (profile → Privacy): the effective-access report aimed at the subject instead of an
-  admin - who can currently read their record, contact details, identity, bank and tax sections, and why.
-  It is `previewAccess` with the target nailed to the caller's own employee id, which is what makes
-  `employees.me.viewers` safe to hold for everyone.
+- **"Who can see your data"** (profile → Privacy): the effective-access report aimed at the subject instead of
+  an admin - who can currently read each area of their data, whether they can also change it, and why. The
+  areas are a catalogue in `services/myViewers.ts`, in four groups: the employee record and its sensitive
+  sub-resources, pay and money, work and performance, documents and cover. A sub-resource area is graded as
+  `employees.<code>.<field>`; an area that lives in its own collection is graded on one row the caller owns, or
+  - with no rows yet - on a code that WOULD be theirs, so the answer is "who would see one" and the record
+  count beside it says none exist. It is `previewAccessMany` with every target nailed to the caller's own
+  records, which is what makes `employees.me.viewers` safe to hold for everyone. It runs WITHOUT the
+  subject-scope bound the ACL panel's `:preview` carries: that bound asks whether the caller may read each
+  *reader's* user record, which no ordinary employee can, so it refused the one report written for them. The
+  disclosure it would have guarded is narrower here by construction - only people who can already read
+  something of the caller's, and only the name and work email the directory shows anyway.
+  NOTHING ABOUT THE READER BUT THEIR NAME. No role is in the payload, and the only `why` it sends is `exact` -
+  "shared with them specifically", which is a fact about the caller's own record. Every scope-derived reason
+  (`dept`, `subtree`, `all`) is dropped rather than reworded: each one describes how far that person's access
+  runs, and on a page every employee can open those sentences add up to a survey of who is powerful. No reason
+  at all is the safe answer. The role-level view is the access screens' job.
+  The web side (`components/common/MyViewers.tsx`) is MASTER-DETAIL: a dense list of areas on the left (in
+  foldable sections), the selected area's readers in a sticky pane on the right. It was a column of accordion
+  cards, which wasted the right half of the tab on every row and pushed the page down whenever one opened, so
+  two areas could not be compared without scrolling between them. Each list row carries two tallies - an eye
+  for people who can only look, a pencil for people who can change it - and the two buckets are DISJOINT, the
+  same split the detail pane sorts every name into. An eye that meant "readers, editors included" would be two
+  numbers silently sharing members. An area nobody else reaches shows a lock rather than a pair of zeroes. Below `lg` there is no second column, so the same
+  `AreaDetail` mounts in a Sheet instead; the pane is one function either way. Up/Down move the selection
+  through what is on screen, skipping folded sections, on top of normal Tab order.
+  It has ONE axis and it is the data. A per-person pivot (one row per colleague, expanded to every area of
+  yours they reach) existed briefly and was removed for the reason the roles were: rolled up per person it
+  stops being a fact about your data and becomes a profile of that colleague's reach, which any employee could
+  page through to map who is powerful. The headline counts stay - they say how exposed you are and name
+  nobody - but a per-person breakdown must not come back.
 - **App-wide view-as**: with access mode on, the floating pill offers "view as…" (preview-capability
   holders): pick a person and the whole shell re-gates on THEIR server-computed capability set + role
   (`include_capabilities` on `:preview` returns the same scope-stripped set `/users/me` carries). The
@@ -244,9 +275,53 @@ Every layer that shows or fetches is capability-gated, each at ONE central place
   Access mode overrides both, except mid-simulation, where the simulated user's own answer must show.
 - **Row actions**: `RowActions` drops any verb-carrying action the row's server-computed `access.can`
   does not include (callers still pre-filter; this is the backstop).
-- **Never `disabled`**: a permission answer belongs in the render decision. `disabled` is for STATE (busy,
-  invalid, a locked row); an action the caller may never perform is absent, not greyed out. The exception is
-  a control that IS the data (a checklist tick-box showing what is done) - it stays, read-only.
+- **Per-record panels** (a tab or card about ONE named employee): `useSubjectCanRead(collection)` /
+  `useSubjectCanWrite(...)`, reading `access.subject` off the employee resource - never a capability, never a
+  breadth, and never `isSelf`. THE CLIENT HOLDS NO POLICY HERE. It does not know that an employee sees their
+  own record, that a manager sees their team, or that HR sees everyone: those are rows in `access_rules`,
+  editable at runtime, and a real deployment's roles will not resemble the seeded ones.
+  - Why not the capability: it is scope-STRIPPED (`domain/permissions.ts` `stripScope`), so `attendance.me.**`
+    and `attendance.**` both arrive as `attendance.read`. Every employee clocks in, owns goals, reads their own
+    payslips and holds their own bank/identity/tax, so the string is true for everybody about everybody.
+  - Why not a per-collection breadth either: a breadth is probed with synthetic codes belonging to nobody, so
+    it reports a TIER. A tier cannot say whether THIS person is the caller, is in their department, is in their
+    reporting chain, or is the subject of a per-object share - `my-reports` could only be reported as the
+    blanket `dept` (tab for everyone, rows for the reports alone) and a share vanished entirely.
+  - The answer comes from `domain/access.ts` `subjectScopes(grant, self, subjectCode)`, which probes
+    `<collection>.<subjectCode>-<leaf>` - a row OWNED BY that person - so `me`, `my-dept`, `my-reports`,
+    `my-org`, `<code>-*` and a merged share each match on their own terms with no case analysis. It runs on the
+    employee item, where `ctx.objectGrant` already carries the shares, and ships as `access.subject`
+    (`{read, write}` key lists; keys are collection names, `employees.<sub>`, `activity.<collection>`; absent
+    means no). Both profile pages provide it through `SubjectScopesContext`, so a card nested deep inside reads
+    the same decision the tab did.
+- **Caller-level breadth** (`useCanReadOthers` / `useCanWriteOthers`, from `caller_access.read_scopes` /
+  `write_scopes`) answers the DIFFERENT question "is there anybody but me I could do this for at all" - should
+  the org chart offer a who-is-off overlay, should the approvals page show a queue whose premise is deciding
+  for someone else. It names nobody, so it is never a per-record gate.
+- Gates: `test/subjectScopes.test.ts` proves each rule shape reaches the right person from SYNTHETIC grants
+  (never seeded role names - the mechanism is what must hold); `test/callerScopes.test.ts` scans the per-record
+  sources and fails on a stripped capability, a caller-level tier or the retired `useCanReadFor`.
+- **One tab, several grants**: a merged tab carries ONE `AccessTab` target, so every card under it that is a
+  separate grant carries its own `AccessAction` key. The tab names a single collection while the tab holds
+  several - Performance is goals + cards + reviews behind a `goals` tab, Posts is announcements + suggestions
+  behind an `announcements` one, Compensation holds the `employees.tax` sub-resource beside `compensation` -
+  so without the per-card keys an admin asked for sight of somebody's reviews opens the only key on screen and
+  grants goals: the ACL says yes, the tab does not change, and nothing says why. A `RevealCard` takes a
+  `target` for the same reason one step on - the panel that owns the key is not mounted while it is closed.
+  `test/webAccessCoverage.test.ts` fails a per-record panel that references no affordance at all.
+- **A collection nobody can find is a permission nobody can grant**: every collection in `SUPPORTED_SCOPES`
+  (the ones the engine honours a scoped rule for) has a row in `permMatrix.ts` `COLLECTION_GROUPS` and, where
+  the kebab name reads badly or the grant needs explaining, an entry in `collectionMeta.ts`. The matrix is the
+  only place an admin discovers a grantable resource; `attendance-day-marks` shipped with seeded grants and no
+  row, so the only way to author one was the raw API. `test/collections.test.ts` pins both directions (phantom
+  rows, missing rows). Starter bundles in `roleTemplates.ts` are held to the seeded role they mirror: a
+  template for the line manager that omits what `manager` holds is a suggestion that quietly under-grants.
+- **Every tier the engine has, everywhere a tier is read**: the manager chain (`my-reports` / `my-org`, stored
+  as `reports` / `org`) is a scope like any other, and the places that enumerate tiers by hand have to carry
+  it - the modal's provenance labels, the `unlistable` lint's row-scoped set, the rule sentences in the audit
+  trail and the permissions panel, and the `why` unions on the client. Each one that missed it failed quietly:
+  a chain rule with no list gate drew no warning, and "via " rendered with nothing after it.
+
 - **Bell**: the notifications provider treats the read capability (not just fetch errors) as
   `available`, so the bell disappears for holders of nothing.
 - Settings gear (`settings.write` + per-entry perm), export button (`export.read` / per-collection), activity

@@ -58,8 +58,8 @@ function selfBack(): void {
 }
 
 /**
- * Add this dialog's history entry and return the token identifying it. Same URL, so the hash router (and its
- * unsaved-changes guard) is untouched.
+ * Add this dialog's history entry and return the token identifying it. Same URL, so the router (and its
+ * unsaved-changes guard) is untouched - it skips a pop that lands on the address it was already showing.
  */
 // The address each dialog entry was pushed OVER, by token. The entry underneath keeps that address forever,
 // while the app may replace the current one while the dialog is open (closing a record dialog clears the
@@ -103,7 +103,8 @@ export function dropDialogEntry(token: number): void {
     // record id with `setRouteRecord`, which rewrites the CURRENT entry only, so the entry underneath still
     // names the record. Landing back on it puts the id in the URL again and the page reopens the dialog that
     // was just closed: a dialog that cannot be closed. So the address is corrected on the way through -
-    // `popstate` fires before `hashchange`, so the route parse that follows reads the corrected URL.
+    // the router defers its own popstate handling to a microtask, so every correction made here has landed
+    // before the route is parsed.
     //
     // Narrow on purpose. Only a landing on EXACTLY the address this entry was pushed over is corrected, and
     // only when the app has moved off it; anything else - the reader navigated while the dialog was open, a

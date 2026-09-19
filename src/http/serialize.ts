@@ -1311,6 +1311,16 @@ export function toAttendanceRegularizationResource(r: any): Wire<"attendance-reg
   };
 }
 
+export function toAttendanceDayMarkResource(r: any): Wire<"attendance-day-mark"> {
+  return {
+    ...baseResource(r, "attendance-day-marks"),
+    employee: ref("employees", r.employeeId),
+    date: iso(r.date).slice(0, 10),
+    credit: r.credit,
+    reason: r.reason ?? undefined,
+  };
+}
+
 export function toOvertimeRequestResource(r: any): Wire<"overtime-request"> {
   const minutes = Math.max(0, Math.round((+new Date(r.endTime) - +new Date(r.startTime)) / 60000));
   return {
@@ -1899,6 +1909,10 @@ export function toPayslipResource(r: any): Wire<"payslip"> {
     employee: ref("employees", r.employeeId),
     gross: r.gross,
     total_deductions: r.totalDeductions,
+    // The column has always been there (schema.payslips.tax) and the wire schema has always declared it; the
+    // serializer was the one place it dropped out, so every `tax` on a payslip read as undefined - the TDS
+    // column and the year's withholding tile on #/payslips summed zero over slips that had withheld tax.
+    tax: r.tax,
     net: r.net,
   };
 }

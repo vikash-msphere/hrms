@@ -1,8 +1,8 @@
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, Suspense, useEffect, useMemo, useRef, useState } from "react";
 // lazyPage, not React.lazy: a failed import must stay retryable (see lib/lazyPage.tsx and the crash boundary).
 import { lazyPage as lazy } from "@/lib/lazyPage";
-import { navigate, setQueryParam, useRoute } from "@/router";
-import { Plus, Trash2, Save, Building, X, ChevronDown, Users, User, Search, ArrowLeft, ArrowUp, ArrowDown, Check, Globe, Palette, Type, Image as ImageIcon } from "lucide-react";
+import { navigate, redirect, setQueryParam, useRoute } from "@/router";
+import { Plus, Trash2, Save, Building, X, ChevronDown, Users, User, Search, ArrowLeft, ArrowUp, ArrowDown, Check, Globe, Palette, Type, GripVertical, Image as ImageIcon } from "lucide-react";
 import { get, patch, create, remove, list, dataUrl } from "@/api";
 import { SETTINGS_REGISTRY, SETTINGS_GROUPS, SETTINGS_LEGACY, settingsEntry, entryScope, type SettingsEntry } from "@/settings/registry";
 import { hasCapability } from "@/lib/perm";
@@ -19,6 +19,7 @@ import { LetterheadDesigner } from "@/components/settings/LetterheadDesigner";
 import { RestrictionsEditor } from "@/components/leave/RestrictionsEditor";
 import { storedLeaves } from "../../../src/domain/leaveRestrictions";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
+import { useSortable } from "@/hooks/useSortable";
 import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
 import { cn, idOf, formatMoney } from "@/lib/utils";
 import { useRowKeys } from "@/lib/rowKeys";
@@ -301,10 +302,14 @@ export default function Settings({ me, tab, openId }: { me: Me; tab?: string; op
   return <SettingsPanel me={me} entry={entry} toast={toast} openId={openId} />;
 }
 
-// A direct hit on #/settings/<non-org-key> has no instance to configure; send the user to the host page where
+// A direct hit on /settings/<non-org-key> has no instance to configure; send the user to the host page where
 // the real inline gear lives (opening the setting there once a board is selected).
+//
+// `redirect`, not `navigate`: this address exists only to bounce off. Pushed, it stayed in the history, and
+// Back from the host page landed on it and was thrown straight forward again - a back button that did nothing,
+// twice, for as long as the reader kept pressing it.
 function SettingsRedirect({ entry }: { entry: SettingsEntry }) {
-  useEffect(() => { navigate(entry.hostPage ?? "dashboard"); }, [entry.hostPage]);
+  useEffect(() => { redirect(entry.hostPage ?? "dashboard"); }, [entry.hostPage]);
   return null;
 }
 
@@ -788,7 +793,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
         <Card>
           <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/ctc" label="CTC provisions"><span>CTC provisions</span></AccessAction></CardTitle></CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-sm text-muted-foreground">How an entered CTC splits into pay. Basic is set as a % of CTC; the rest becomes a Special Allowance after employer contributions are added on top. The employer contributions themselves (gratuity, employer PF/ESI, or any you add) are <a href="#/settings/pay-components" className="underline">pay components</a> of kind "employer contribution" - configured there, not here, including whether each one counts inside CTC or is paid over and above it.</p>
+            <p className="text-sm text-muted-foreground">How an entered CTC splits into pay. Basic is set as a % of CTC; the rest becomes a Special Allowance after employer contributions are added on top. The employer contributions themselves (gratuity, employer PF/ESI, or any you add) are <a href="/settings/pay-components" className="underline">pay components</a> of kind "employer contribution" - configured there, not here, including whether each one counts inside CTC or is paid over and above it.</p>
             <SplitStaleBanner staleCount={staleCount} skippedCount={skippedCount} reapplying={reapplying} canReapply={canReapply} onReapply={doReapply} />
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Basic % of CTC" hint="Basic = this % of monthly CTC. New wage code wants ≥ 50%."><Input type="number" step="1" value={ctc.basic_pct} onChange={(e) => setCtc((c) => ({ ...c, basic_pct: Number(e.target.value) }))} /></Field>
@@ -806,7 +811,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
               </Field>
             </div>
             {ctc.pf_wage_basis === "basic_plus" && (
-              <p className="text-xs text-muted-foreground">Which allowances count is per component: tick "Counts as PF wages" on each one in <a href="#/settings/pay-components" className="underline">pay components</a>. HRA, overtime and bonus are excluded by statute - leave them off.</p>
+              <p className="text-xs text-muted-foreground">Which allowances count is per component: tick "Counts as PF wages" on each one in <a href="/settings/pay-components" className="underline">pay components</a>. HRA, overtime and bonus are excluded by statute - leave them off.</p>
             )}
             <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" onClick={saveCtc}><Save className="h-4 w-4" /> Save</Button>
@@ -1979,7 +1984,11 @@ function useOrgBlob(toast: Toast) {
 
 // Org-wide config for the top-bar "+" (quick create) menu. The menu is a list of custom named sections, each
 // holding an ordered list of enabled actions; sections and membership are fully editable. Stored in the org
-// blob as quick_actions.groups. give-kudos is excluded (its own top-bar button). Per-user capability gating
+// blob as quick_actions.groups. The standalone actions are excluded - raise-a-ticket and report-a-problem have
+// the Support button, the clock its own chip (lib/quickActions.ts).
+// Ordering is by dragging a row's grip - no up/down buttons. The drag is pointer-based (hooks/useSortable.ts),
+// so it works on touch as well as with a mouse, and the grip is a button that takes the arrow keys, which is
+// the keyboard path those buttons used to be. Per-user capability gating
 // still applies at render, so a person only sees the enabled actions they can actually perform. Any action not
 // placed in a section is "Not in the menu" (disabled).
 function QuickActionsTab({ toast }: { toast: Toast }) {
@@ -2022,12 +2031,62 @@ function QuickActionsTab({ toast }: { toast: Toast }) {
       const stripped = g.items.filter((x) => x !== id);
       return g.id === targetGid ? { ...g, items: [...stripped, id] } : { ...g, items: stripped };
     }));
+  // Drop an action AT a position: the same strip-then-insert as `assign`, but at an index rather than at the
+  // end, which is what a drag can express and a Select cannot. The index is computed against the list as it
+  // looked before the strip, so moving a row DOWN within its own section has to account for its own removal.
+  const dropItem = (id: string, targetGid: string, index: number) =>
+    setGroups((gs) => {
+      const from = gs.find((g) => g.items.includes(id));
+      const shift = from?.id === targetGid && from.items.indexOf(id) < index ? 1 : 0;
+      return gs.map((g) => {
+        const stripped = g.items.filter((x) => x !== id);
+        if (g.id !== targetGid) return { ...g, items: stripped };
+        const at = Math.max(0, Math.min(stripped.length, index - shift));
+        return { ...g, items: [...stripped.slice(0, at), id, ...stripped.slice(at)] };
+      });
+    });
+  const dropGroup = (gid: string, index: number) =>
+    setGroups((gs) => {
+      const from = gs.findIndex((g) => g.id === gid);
+      if (from < 0) return gs;
+      const rest = gs.filter((g) => g.id !== gid);
+      const at = Math.max(0, Math.min(rest.length, index - (from < index ? 1 : 0)));
+      return [...rest.slice(0, at), gs[from]!, ...rest.slice(at)];
+    });
 
   const { markSaved } = useUnsaved(groups, ready, onSave);
   async function onSave() {
     const cleaned = groups.map((g) => ({ id: g.id, label: g.label.trim() || "Untitled", items: g.items }));
     if (await save({ quick_actions: { groups: cleaned, order: undefined } }, "Quick create menu saved")) markSaved();
   }
+
+  // Drag to reorder, by the grip on each row. Two independent sortables - actions and whole sections - which
+  // is why they use different data attributes: the rows live INSIDE the section cards, so one attribute
+  // would have a section drag land on whichever row happened to be under the pointer.
+  // Both are pointer-driven rather than HTML5 `draggable` (hooks/useSortable.ts says why): that is what keeps
+  // them working on touch, and the grip is a button, so the arrow keys reorder without buttons on screen.
+  const itemSort = useSortable("data-qa-item", (id, t) =>
+    t.container === "__off__" ? assign(id, "__off__") : dropItem(id, t.container, t.index));
+  const groupSort = useSortable("data-qa-group", (id, t) => dropGroup(id, t.index));
+  const dropLine = <div aria-hidden className="h-0.5 rounded-full bg-primary" />;
+  // The grip, shared by both lists. `touch-none` is what stops a touch drag scrolling the page instead of
+  // moving the row.
+  const grip = (label: string, sort: typeof itemSort, id: string, onNudge: (dir: -1 | 1) => void) => (
+    <button
+      type="button"
+      {...sort.start(id)}
+      onKeyDown={(e) => {
+        if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+        e.preventDefault();
+        onNudge(e.key === "ArrowUp" ? -1 : 1);
+      }}
+      aria-label={`Reorder ${label}`}
+      title="Drag, or use the arrow keys, to reorder"
+      className="flex h-7 w-5 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground/40 hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:h-9 coarse:w-7"
+    >
+      <GripVertical className="h-4 w-4" />
+    </button>
+  );
 
   if (!blob) return panelLoading;
 
@@ -2039,7 +2098,18 @@ function QuickActionsTab({ toast }: { toast: Toast }) {
     const Icon = a.icon;
     const inGroup = !!opts.gid;
     return (
-      <div key={id} className="flex items-center gap-2 rounded-md border px-3 py-2 sm:gap-3">
+      <div
+        key={id}
+        // Every row is a drop target, which is what makes the insertion point precise. The unplaced rows are
+        // drag SOURCES too: dragging one into a section is the same thing as picking that section from its
+        // Select, and the obvious gesture to try first.
+        {...(inGroup ? itemSort.slot(opts.gid!, opts.index!) : {})}
+        className={cn(
+          "flex items-center gap-2 rounded-md border bg-card px-3 py-2 sm:gap-3",
+          itemSort.dragId === id && "opacity-40",
+        )}
+      >
+        {grip(a.label, itemSort, id, (dir) => inGroup && moveItem(opts.gid!, opts.index!, dir))}
         <Icon className={cn("h-4 w-4 shrink-0", inGroup ? "text-foreground" : "text-muted-foreground")} />
         <span className={cn("min-w-0 flex-1 truncate text-sm", !inGroup && "text-muted-foreground")}>{a.label}</span>
         {/* Narrower on a phone: this control plus the label plus the two reorder buttons is the whole
@@ -2051,12 +2121,6 @@ function QuickActionsTab({ toast }: { toast: Toast }) {
             {groupOptions.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
           </SelectContent>
         </Select>
-        {inGroup && (
-          <div className="flex items-center gap-0.5">
-            <Button variant="ghost" size="icon" className="h-7 w-7" disabled={opts.index === 0} onClick={() => moveItem(opts.gid!, opts.index!, -1)} aria-label="Move up"><ArrowUp className="h-3.5 w-3.5" /></Button>
-            <Button variant="ghost" size="icon" className="h-7 w-7" disabled={opts.index === (opts.count ?? 0) - 1} onClick={() => moveItem(opts.gid!, opts.index!, 1)} aria-label="Move down"><ArrowDown className="h-3.5 w-3.5" /></Button>
-          </div>
-        )}
       </div>
     );
   };
@@ -2064,35 +2128,72 @@ function QuickActionsTab({ toast }: { toast: Toast }) {
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Build the sections of the top-bar + (New) menu: rename them, reorder them, and place actions where you
-        want. Everyone shares this menu, but a person only sees actions they have access to.
+        Build the sections of the top-bar + (New) menu: rename them, and drag actions and whole sections into
+        the order you want. Everyone shares this menu, but a person only sees actions they have access to.
       </p>
 
       {groups.map((g, gi) => (
-        <Card key={g.id}>
+        <Fragment key={g.id}>
+        {groupSort.target?.index === gi && dropLine}
+        <Card
+          {...groupSort.slot("sections", gi)}
+          className={cn(groupSort.dragId === g.id && "opacity-40")}
+        >
           <CardContent className="space-y-2 pt-4">
             <div className="mb-1 flex items-center gap-2">
+              {grip(`section ${g.label || "Untitled"}`, groupSort, g.id, (dir) => moveGroup(gi, dir))}
               <Input value={g.label} onChange={(e) => renameGroup(g.id, e.target.value)} placeholder="Section name" className="h-8 max-w-xs font-medium" />
               <div className="ml-auto flex items-center gap-0.5">
-                <Button variant="ghost" size="icon" className="h-7 w-7" disabled={gi === 0} onClick={() => moveGroup(gi, -1)} aria-label="Move section up"><ArrowUp className="h-3.5 w-3.5" /></Button>
-                <Button variant="ghost" size="icon" className="h-7 w-7" disabled={gi === groups.length - 1} onClick={() => moveGroup(gi, 1)} aria-label="Move section down"><ArrowDown className="h-3.5 w-3.5" /></Button>
                 <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => deleteGroup(g.id)} aria-label="Delete section"><Trash2 className="h-3.5 w-3.5" /></Button>
               </div>
             </div>
             {g.items.length === 0
-              ? <p className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">No actions yet - add one from "Not in the menu" below.</p>
-              : <div className="space-y-1.5">{g.items.map((id, i) => actionRow(id, { gid: g.id, index: i, count: g.items.length }))}</div>}
+              ? (
+                // An empty section has no row to aim at, so the placeholder IS the target - an `end` slot,
+                // which always resolves to index 0 rather than to a before/after half of itself.
+                <p
+                  {...itemSort.slot(g.id, 0, true)}
+                  className={cn(
+                    "rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground",
+                    itemSort.target?.container === g.id && "border-primary text-primary",
+                  )}
+                >
+                  {itemSort.dragId ? "Drop it here" : 'No actions yet - drag one in, or add one from "Not in the menu" below.'}
+                </p>
+              )
+              : (
+                <div className="space-y-1.5">
+                  {g.items.map((id, i) => (
+                    <Fragment key={id}>
+                      {itemSort.target?.container === g.id && itemSort.target.index === i && dropLine}
+                      {actionRow(id, { gid: g.id, index: i, count: g.items.length })}
+                    </Fragment>
+                  ))}
+                  {itemSort.target?.container === g.id && itemSort.target.index === g.items.length && dropLine}
+                </div>
+              )}
           </CardContent>
         </Card>
+        </Fragment>
       ))}
+      {groupSort.target?.index === groups.length && dropLine}
 
       <Button variant="outline" size="sm" onClick={addGroup}><Plus className="h-4 w-4" /> Add section</Button>
 
-      {unplaced.length > 0 && (
-        <Card>
+      {/* Rendered even when empty, once a drag is under way: this is the way OUT of the menu, and a drop
+          target that only exists when something is already in it cannot be used to empty the last section. */}
+      {(unplaced.length > 0 || !!itemSort.dragId) && (
+        <Card
+          // Dropping here takes the action out of every section - "__off__" is no section, so `assign` strips
+          // it and places it nowhere.
+          {...itemSort.slot("__off__", 0, true)}
+          className={cn(itemSort.target?.container === "__off__" && "ring-2 ring-primary")}
+        >
           <CardContent className="space-y-2 pt-4">
             <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Not in the menu</p>
-            <div className="space-y-1.5">{unplaced.map((a) => actionRow(a.id, {}))}</div>
+            {unplaced.length === 0
+              ? <p className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">Drop an action here to take it out of the menu.</p>
+              : <div className="space-y-1.5">{unplaced.map((a) => actionRow(a.id, {}))}</div>}
           </CardContent>
         </Card>
       )}
@@ -3430,7 +3531,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
   // Which tab is showing, so the read below can wait for the one that needs it.
   //
   // DEEP-LINKED through `?tab=`, the way the inline settings sheet deep-links `?setting=` (router.ts
-  // setQueryParam: the hash path and every other param are preserved, and the back button steps out of it).
+  // setQueryParam: the path and every other param are preserved, and the back button steps out of it).
   // Without it, a link that means "the org's restrictions" lands on Carry-forward and the reader has to know
   // which of five tabs was meant - which is most of what made the two halves of a leave policy feel unrelated.
   const route = useRoute();
@@ -3451,10 +3552,10 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
   const overriddenBy = useMemo(() => {
     const out: Record<string, { label: string; href: string }[]> = {};
     for (const lt of leaveTypes) {
-      // Each name is a LINK to that type's own editor - `useDeepOpen` turns `#/settings/leave-types/<id>` into
+      // Each name is a LINK to that type's own editor - `useDeepOpen` turns `/settings/leave-types/<id>` into
       // the open dialog, which is the same route the record's own deep link uses. Naming a type you then have
       // to go and find by hand is most of the way to not naming it.
-      const entry = { label: lt.display_name, href: `#/settings/leave-types/${idOf(lt.path)}` };
+      const entry = { label: lt.display_name, href: `/settings/leave-types/${idOf(lt.path)}` };
       for (const key of storedLeaves(lt.restrictions)) {
         const group = key.split(".")[0]!;
         if (group === "soft_rules") continue;

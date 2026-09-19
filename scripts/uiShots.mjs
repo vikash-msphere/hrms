@@ -174,7 +174,7 @@ for (const vpName of vpNames) {
     page.on("pageerror", (e) => errors.push(`pageerror: ${String(e.message).slice(0, 160)}`));
 
     try {
-      await page.goto(`${BASE}/#/${route}`, { waitUntil: "networkidle2", timeout: 30000 });
+      await page.goto(`${BASE}/${route}`, { waitUntil: "networkidle2", timeout: 30000 });
     } catch {
       // A route that never goes idle (polling) still renders; measure what is there.
     }

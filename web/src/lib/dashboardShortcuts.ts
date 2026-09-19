@@ -8,7 +8,7 @@
 //   action:<quick action id>  - runs the create/request flow (lib/quickActions)
 //   page:<route key>          - navigates to a nav page or workspace tab (nav.ts)
 import type { LucideIcon } from "lucide-react";
-import { NAV, itemVisible, navPerm } from "@/nav";
+import { NAV, itemVisible, navAdmits } from "@/nav";
 import { hasCapability } from "@/lib/perm";
 import { QUICK_ACTIONS, runQuickAction } from "@/lib/quickActions";
 import { navigate } from "@/router";
@@ -50,12 +50,11 @@ export function shortcutCatalog(): ShortcutDef[] {
         run: () => navigate(key),
       });
       if (i.tabs) {
-        return i.tabs.map((t) => {
-          const p = navPerm(t);
-          return page(t.key, `${i.label}: ${t.label}`, (me) => !p || hasCapability(me.capabilities, p));
-        });
+        return i.tabs.map((t) =>
+          page(t.key, `${i.label}: ${t.label}`, (me) => navAdmits(t, (p) => hasCapability(me.capabilities, p), (c) => !!me.scopes.read[c])),
+        );
       }
-      return [page(i.key, i.label, (me) => itemVisible(i, (p) => hasCapability(me.capabilities, p)))];
+      return [page(i.key, i.label, (me) => itemVisible(i, (p) => hasCapability(me.capabilities, p), (c) => !!me.scopes.read[c]))];
     }),
   );
   return [...actions, ...pages];

@@ -84,7 +84,7 @@ test("a custom method is granted to one person, and their button appears", async
     // Their side: the capability arrives, and with it the button.
     expect(await capabilitiesOf(theirs)).toContain("assets.batchCreate");
     // A real reload, not just a re-navigation: `theirs` already loaded assets once above, and the SPA's
-    // cached capabilities survive a same-hash re-navigation - only a genuine reload re-fetches them.
+    // cached capabilities survive a same-route re-navigation - only a genuine reload re-fetches them.
     await theirs.reload();
     await gotoRoute(theirs, "assets", "Assets");
     // `.first()`: the toolbar button and a per-row "Add many" both match once assets exist to show rows for.

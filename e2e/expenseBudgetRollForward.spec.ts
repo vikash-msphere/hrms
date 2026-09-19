@@ -39,7 +39,7 @@ test("a cap is rolled forward with an uplift, and the total says what changed", 
 
       // RELOADED, not navigated. Every pass of the outer retry makes a brand-new category and cap, and this
       // is the read that has to see them - but a `gotoRoute` to the route the browser is already on is a
-      // same-hash navigation: nothing remounts and nothing re-reads, so pass two onwards would keep looking
+      // same-route navigation: nothing remounts and nothing re-reads, so pass two onwards would keep looking
       // at pass one's rows (whose category has just been purged) and could never find the new one.
       await gotoRoute(page, "expense-budgets", "Budgets");
       await page.reload();

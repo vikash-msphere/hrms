@@ -18,7 +18,7 @@ test("a card is deleted from its own dialog, and reads back soft-deleted", async
   const cardPath = ((await cardRes.json()) as { path: string }).path;
 
   try {
-    await page.goto(`/#/boards?board=${boardId}`);
+    await page.goto(`/boards?board=${boardId}`);
     await expect(page.getByRole("main")).toBeVisible();
     await page.getByText(title).first().click();
     const dialog = page.getByRole("dialog");

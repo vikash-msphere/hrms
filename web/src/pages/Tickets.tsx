@@ -22,6 +22,9 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
 import { DataTable, type BulkAction, type Column } from "@/components/common/DataTable";
+import { type TableInsight } from "@/components/common/TableInsights";
+import { BLANK } from "@/lib/tableFilter";
+import { daysBetweenYmd, orgDayOf, todayStr } from "@/lib/orgDay";
 import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
@@ -211,7 +214,7 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
     });
   }, []);
   const isUpdated = (t: Ticket) => !!t.update_time && t.update_time > (seen[t.path] ?? seen._baseline ?? "");
-  // Opening writes the ticket into the hash path, so what is on screen has a URL to hand to whoever needs to
+  // Opening writes the ticket into the route path, so what is on screen has a URL to hand to whoever needs to
   // look at it. `useDeepOpen` has always read that route; nothing ever wrote it.
   const openTicket = useCallback((t: Ticket) => { setActive(t); markSeen(t); setRouteRecord(idOf(t.path)); }, [markSeen]);
   const closeTicket = useCallback(() => { setActive(null); setRouteRecord(null); }, []);
@@ -404,16 +407,38 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
       </button>
     ),
   };
+  // How long a ticket has been alive, in days. A support queue is judged on this and on nothing else, and
+  // until now the only way to see it was to add the Created column and do the arithmetic per row. Settled
+  // tickets stop the clock at the last thing that happened to them, so a closed ticket from March does not
+  // report six months of age it did not spend waiting.
+  const ticketAge = (t: Ticket) => {
+    const settled = ["RESOLVED", "CLOSED", "CANCELLED"].includes(upper(t.state));
+    const until = settled ? orgDayOf(t.update_time ?? t.create_time ?? "") : todayStr();
+    return t.create_time ? Math.max(0, daysBetweenYmd(orgDayOf(t.create_time), until)) : 0;
+  };
   const cols: Column<Ticket>[] = [
     subjectCol,
-    { id: "category", header: "Category", filter: "select", accessor: (t) => catName(t.category) },
-    { id: "department", header: "Department", filter: "select", accessor: (t) => deptName(t.department) },
-    { id: "requester", header: "Requester", accessor: (t) => empName(t.employee) },
-    { id: "assignee", header: "Assignee", accessor: (t) => empName(t.assignee) },
-    { id: "priority", header: "Priority", filter: "select", accessor: (t) => t.priority, cell: (t) => <PriorityBadge value={t.priority} /> },
-    { id: "state", header: "Status", filter: "select", accessor: (t) => ticketStatusLabel(t.state), cell: (t) => <TicketStatusMenu ticket={t} busy={moving === t.path} onPick={(to) => moveStatus(t, to)} /> },
+    { id: "category", header: "Category", filter: "select", groupBy: true, accessor: (t) => catName(t.category) },
+    { id: "department", header: "Department", filter: "select", groupBy: true, accessor: (t) => deptName(t.department) },
+    { id: "requester", header: "Requester", filter: "select", groupBy: true, accessor: (t) => empName(t.employee) },
+    // Blank in this column is the unassigned queue - the first thing a service desk sorts out each morning.
+    { id: "assignee", header: "Assignee", filter: "select", groupBy: true, accessor: (t) => empName(t.assignee) },
+    { id: "priority", header: "Priority", filter: "select", groupBy: true, accessor: (t) => t.priority, cell: (t) => <PriorityBadge value={t.priority} /> },
+    { id: "state", header: "Status", filter: "select", groupBy: true, accessor: (t) => ticketStatusLabel(t.state), cell: (t) => <TicketStatusMenu ticket={t} busy={moving === t.path} onPick={(to) => moveStatus(t, to)} /> },
     {
-      id: "checklist", header: "Checklist", accessor: (t) => t.todo_total ?? 0,
+      id: "age", header: "Age", align: "right", filter: "number", formatTotal: (n) => `${n} days`, accessor: ticketAge,
+      cell: (t) => {
+        const d = ticketAge(t);
+        const open = !["RESOLVED", "CLOSED", "CANCELLED"].includes(upper(t.state));
+        return (
+          <span className={cn("tabular-nums text-xs", open && d >= 14 ? "font-medium text-destructive" : open && d >= 7 ? "font-medium text-warning" : "text-muted-foreground")}>
+            {d === 0 ? "today" : `${d}d`}
+          </span>
+        );
+      },
+    },
+    {
+      id: "checklist", header: "Checklist", filter: "number", accessor: (t) => t.todo_total ?? 0,
       cell: (t) => t.todo_total
         ? <span className={cn("inline-flex items-center gap-1 text-xs", t.todo_done === t.todo_total ? "text-success" : "text-muted-foreground")}><ListChecks className="h-3.5 w-3.5" /> {t.todo_done}/{t.todo_total}</span>
         : <span className="text-muted-foreground">-</span>,
@@ -467,10 +492,57 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
     },
   ];
 
+  // What a service desk reads off its own queue before it starts working it.
+  const ticketInsights = (ts: Ticket[]): TableInsight[] => {
+    // Every chip is scoped to OPEN - "waiting to be picked up" - because that is the only state where any of
+    // these is a problem, and because the chip's filter has to leave exactly the rows it counted. The status
+    // column filters on the LABEL, so that is what the chips carry.
+    const openLabel = ticketStatusLabel("OPEN");
+    const open = ts.filter((t) => ticketStatusLabel(t.state) === openLabel);
+    const out: TableInsight[] = [];
+    const unassigned = open.filter((t) => !empName(t.assignee));
+    if (unassigned.length > 0) {
+      out.push({
+        id: "unassigned",
+        label: `${unassigned.length} unassigned`,
+        tone: "warning",
+        hint: "Open and nobody has picked them up.",
+        filters: { assignee: BLANK, state: openLabel },
+        sort: "age.desc",
+      });
+    }
+    const aged = open.filter((t) => ticketAge(t) >= 7);
+    if (aged.length > 0) {
+      out.push({
+        id: "aged",
+        label: `${aged.length} open over a week`,
+        tone: aged.length > open.length / 2 ? "destructive" : "warning",
+        hint: "Oldest first.",
+        filters: { age: ">=7", state: openLabel },
+        sort: "age.desc",
+      });
+    }
+    // Matched on the value the column actually holds, so the count and the filter cannot disagree about
+    // how an org spells its top priority.
+    const topPriority = open.find((t) => upper(t.priority ?? "") === "URGENT")?.priority;
+    const urgent = topPriority ? open.filter((t) => t.priority === topPriority) : [];
+    if (urgent.length > 0) {
+      out.push({
+        id: "urgent",
+        label: `${urgent.length} urgent still open`,
+        tone: "destructive",
+        filters: { priority: topPriority!, state: openLabel },
+        sort: "age.desc",
+      });
+    }
+    return out;
+  };
+
   const renderTable = (data: Ticket[], columns: Column<Ticket>[], tableId: string, emptyTitle: string, emptyDescription?: string, withBulk?: boolean) => (
     <DataTable
       tableId={tableId}
       columns={columns}
+      insights={ticketInsights}
       // A clicked metric or chart slice narrows whichever tab is showing to the rows it counted.
       rows={cf.apply(kf.apply(data))}
       search={{ value: search, onChange: setSearch, placeholder: "Search all tickets…" }}
@@ -944,7 +1016,8 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
 
   const sendReply = async () => {
     if (!reply.trim() || busy) return;
-    if (await act("comment", { body: reply.trim() })) setReply("");
+    // The box holds display text; mentions go back to their stored form on the way out (lib/mentionText.ts).
+    if (await act("comment", { body: mentions.toWire(reply.trim()) })) setReply("");
   };
   const addTodoItem = async () => {
     if (!newTodo.trim() || busy) return;

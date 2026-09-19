@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { test as base, expect, type APIResponse, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { sealSession } from "../src/lib/session";
+import { HOLIDAYS } from "../bootstrap/collections/holidays";
+import { HOLIDAY_YEAR } from "../bootstrap/lib";
 
 // Signing in, in a browser test.
 //
@@ -269,7 +271,7 @@ export async function personPath(page: Page, role: Role): Promise<string> {
   return person.path;
 }
 
-/** The id half of `personPath` - what a hash route wants (`employees/<id>`, `org-chart/<id>`). */
+/** The id half of `personPath` - what a route wants (`employees/<id>`, `org-chart/<id>`). */
 export async function personId(page: Page, role: Role): Promise<string> {
   return (await personPath(page, role)).split("/")[1]!;
 }
@@ -426,42 +428,67 @@ export function inDays(n: number): string {
 }
 
 /**
- * The next Mon-Fri at least `after` days out, as a date input wants it.
+ * The seeded public holidays, as `YYYY-MM-DD`, taken from the bootstrap generator so the two cannot drift.
  *
- * Leave, overtime and remote work are all priced in WORKING days: a request that lands entirely on a weekend
- * costs zero days, so the forms drop it and the page never shows what the spec is asking about. A weekday is
- * the only date that behaves the same whichever day the suite happens to run on - which is why "tomorrow" is
- * not good enough (on a Friday it is Saturday, and the form is right to refuse it).
+ * A WEEKDAY IS NOT A WORKING DAY. The list covers one calendar year (`HOLIDAY_YEAR`), and both kinds are in
+ * it: the leave forms charge against every holiday the org has not disabled, so an "optional" one prices a
+ * day at zero exactly like a company-wide one does.
  */
-export function nextWeekday(after = 1): string {
-  for (let n = after; n < after + 7; n++) {
-    const day = new Date(Date.now() + n * 86_400_000);
-    if (day.getDay() !== 0 && day.getDay() !== 6) return ymd(day);
-  }
-  throw new Error("e2e: a week with no weekday in it");
+const SEEDED_HOLIDAYS = new Set(
+  HOLIDAYS.map((h) => `${HOLIDAY_YEAR}-${String(h.month).padStart(2, "0")}-${String(h.day).padStart(2, "0")}`),
+);
+
+/** A Mon-Fri that the org actually works: not a weekend, and not one of the seeded holidays. */
+function isWorkingDay(day: Date): boolean {
+  return day.getDay() !== 0 && day.getDay() !== 6 && !SEEDED_HOLIDAYS.has(ymd(day));
 }
 
 /**
- * A weekday nobody else is asking for: unique per worker and per call, a few weeks out.
+ * The next working day at least `after` days out, as a date input wants it.
+ *
+ * Leave, overtime and remote work are all priced in WORKING days: a request that lands entirely on a weekend
+ * or a holiday costs zero days, so the forms drop it and the page never shows what the spec is asking about. A
+ * working day is the only date that behaves the same whichever day the suite happens to run on - which is why
+ * "tomorrow" is not good enough (on a Friday it is Saturday, and the form is right to refuse it).
+ *
+ * Holidays are skipped as well as weekends, and that half is a CALENDAR TIME BOMB when it is missing: it fires
+ * only in the weeks where a seeded holiday happens to land on the date the arithmetic reaches, months after
+ * the spec was written and with nothing in the tree having changed.
+ */
+export function nextWeekday(after = 1): string {
+  for (let n = after; n < after + 14; n++) {
+    const day = new Date(Date.now() + n * 86_400_000);
+    if (isWorkingDay(day)) return ymd(day);
+  }
+  throw new Error("e2e: a fortnight with no working day in it");
+}
+
+/**
+ * A working day nobody else is asking for: unique per worker and per call, a few weeks out.
  *
  * `nextWeekday()` answers the same date for every spec, which is what a form-level test wants and what a
  * FILING test must not use - two specs asking the same person for the same day overlap, and the form is right
  * to refuse the second. Use this wherever a request is actually submitted.
+ *
+ * Skips holidays as well as weekends, for the reason `nextWeekday` gives: worker 0's first claim is fourteen
+ * days out, which on a run in mid-September is Gandhi Jayanti, and a form asked for one day of leave over it
+ * correctly answers zero.
  */
 export function ownWeekday(): string {
   const slot = test.info().parallelIndex * 64 + claimedWeekdays++;
-  for (let n = 14 + slot * 3; n < 14 + slot * 3 + 7; n++) {
+  const from = 14 + slot * 3;
+  for (let n = from; n < from + 14; n++) {
     const day = new Date(Date.now() + n * 86_400_000);
-    if (day.getDay() !== 0 && day.getDay() !== 6) return ymd(day);
+    if (isWorkingDay(day)) return ymd(day);
   }
-  throw new Error("e2e: a week with no weekday in it");
+  throw new Error("e2e: a fortnight with no working day in it");
 }
 
 /** How many weekdays this worker has claimed - one per filing (see ownWeekday). */
 let claimedWeekdays = 0;
 
 /**
- * Go to a hash route and wait for the shell to render it. `<main aria-label="Main content">` is the app's
+ * Go to an app route and wait for the shell to render it. `<main aria-label="Main content">` is the app's
  * own landmark (web/src/App.tsx), so this waits on the thing the app itself considers "the page", not on a
  * class name that a restyle would move.
  *
@@ -471,7 +498,12 @@ let claimedWeekdays = 0;
  * lead to. A spec can therefore drive a whole flow from the wrong page without noticing.
  */
 export async function gotoRoute(page: Page, route: string, heading?: string) {
-  await page.goto(`/#/${route}`);
+  // The navigation is inside the retry below, not in front of it. `page.goto` can fail to START - `net::
+  // ERR_ABORTED`, the shape a dropped request or a frame going away under a wide run leaves - and that is the
+  // one failure with nothing on screen to recover from, so the shell's own "Try again" is no use and the
+  // helper used to throw before reaching any of its recovery. Asked again, it lands. Re-navigating is only for
+  // a goto that threw: a page that loaded slowly is left alone to finish.
+  let landed = false;
   // 30s, not the 5s default. A first landing on a route compiles its chunk in Vite, fetches the page's data
   // and paints - and on a wide run the Worker behind it is answering two dozen browsers at once. At the
   // default this fails as "no <h1> Documents" in the middle of a spec that has nothing to do with navigation,
@@ -484,6 +516,10 @@ export async function gotoRoute(page: Page, route: string, heading?: string) {
   // in front of a real user in exactly this situation is the honest recovery - and a server that is genuinely
   // down still fails here, since the retry has to actually produce the page.
   await expect(async () => {
+    if (!landed) {
+      await page.goto(`/${route}`);
+      landed = true;
+    }
     // Only while the shell itself is missing: a "Try again" INSIDE a rendered page belongs to that page's own
     // failed panel (`failedRead.spec.ts` is about pressing it deliberately), and is none of this helper's
     // business.
@@ -491,7 +527,7 @@ export async function gotoRoute(page: Page, route: string, heading?: string) {
       const retry = page.getByRole("button", { name: "Try again" });
       if (await retry.count()) await retry.first().click({ timeout: 5_000 }).catch(() => undefined);
     }
-    // A RECORD route (`#/<page>/<id>`) opens that record's own modal as soon as its row lands, and a modal
+    // A RECORD route (`/<page>/<id>`) opens that record's own modal as soon as its row lands, and a modal
     // aria-hides the shell behind it - so `main` stops being reachable BY DESIGN, a second or so after the
     // page renders. Waiting only on the landmark therefore turns into a race the deep link loses: the
     // dialog is equally good proof that the route rendered what it was asked for.

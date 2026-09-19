@@ -7,8 +7,8 @@ Palette and design language live in `web/src/index.css`; this document is about 
 
 | Width | Sidebar | Primary nav | Tables | Dialogs |
 |---|---|---|---|---|
-| `<640` (phone) | off-canvas drawer | bottom bar (`layout/BottomNav`) | cards | bottom sheet |
-| `640-767` | off-canvas drawer | bottom bar | table | centred panel |
+| `<640` (phone) | off-canvas drawer | top bar Menu button (`layout/TopBar`) | cards | bottom sheet |
+| `640-767` | off-canvas drawer | top bar Menu button | table | centred panel |
 | `768-1023` (`md`) | docked icon rail | sidebar | table | centred panel |
 | `>=1024` (`lg`) | docked, full | sidebar | table | centred panel |
 
@@ -41,8 +41,8 @@ Plus `pb-safe` / `pt-safe-t` spacing steps for the device safe areas (zero on a 
    gestures (drag, resize) only.
 3. **Form controls are 16px on a phone.** Below that, iOS Safari zooms the page on focus and leaves it
    zoomed. Enforced globally in `index.css`; state it locally only for an input that is focused on mount.
-4. **Anything docked to the bottom of a phone screen must clear two things**: the bottom nav
-   (`calc(4.75rem + env(safe-area-inset-bottom))`) and the on-screen keyboard (`useKeyboardInset`).
+4. **Anything docked to the bottom of a phone screen must clear two things**: the home indicator
+   (`calc(1.75rem + env(safe-area-inset-bottom))`) and the on-screen keyboard (`useKeyboardInset`).
    Grep for `bottom-` before adding a fixed element.
 5. **A row of more than ~3 fixed columns does not fit a phone.** Either fold the context columns away
    (`hidden sm:table-cell`, with their content re-appearing as a sub-line) or stack the row and let each
@@ -226,7 +226,7 @@ Plus `pb-safe` / `pt-safe-t` spacing steps for the device safe areas (zero on a 
     - **`overflow-x: clip` on `html` does not make an over-wide box harmless, it makes it silent.** On a
       desktop browser the page stops scrolling sideways and `scrollWidth` quietly stays inflated; on a phone
       the *layout viewport* widens to the content anyway, and everything measured against it widens too. The
-      bottom nav stretched to 480px on a 360px screen and pushed its own last tab off the edge, which is what
+      full-width app bar stretched to 480px on a 360px screen and pushed its last control off the edge, which is what
       "the page is wider than the screen" looks like from the outside — with nothing visible anywhere near the
       right edge to blame for it.
     - **A source scan cannot find this and a desktop browser barely can.** It took `scripts/uiShots.mjs`
@@ -258,11 +258,20 @@ These are app-wide and already wired; a page neither implements nor opts into th
   real number - without it iOS letterboxes the app and every inset in the codebase reads 0. Because the app
   paints edge to edge, the shell reserves the insets: `[data-app-shell]` pads the two side insets (the
   landscape notch) for everything in the normal flow, and anything `fixed` carries its own `pl-safe-l` /
-  `pr-safe-r` (bottom nav, drawer, toasts, sheets, dialogs).
+  `pr-safe-r` (drawer, toasts, sheets, dialogs).
 - **Scroll position** (`router.ts`). A new destination starts at the top; Back returns to where you were. The
-  two are told apart by the fact that a programmatic hash write fires `hashchange` only, while back/forward
-  fires `popstate` first. Restoration re-asserts itself per frame until the page is tall enough to hold the
-  position, and abandons at the first real scroll input.
+  two are told apart by the router itself: it announces every route change on one event, and a change it
+  caused with `pushState` is flagged differently from one that arrived as `popstate`. Restoration re-asserts
+  itself per frame until the page is tall enough to hold the position, and abandons at the first real scroll
+  input.
+- **Back closes the layer** (`hooks/useHistoryClose.ts`, `lib/dialogHistory.ts`). On a phone a modal is a
+  screen, so a back press over an open dialog or sheet dismisses it instead of unmounting the page behind it:
+  the layer pushes one history entry at the address already on screen, and closing from the UI drops it again.
+  The entry belongs to the OPENING, not to the page: `HistoryClose` is mounted inside the Radix content
+  element, which exists only while the layer is open. A hook called from the `DialogContent` / `SheetContent`
+  wrapper instead fires as the page renders its markup, closed dialogs included - which is how one page load
+  came to owe ten dead back presses. A layer whose open state is already a route (`?setting=`) opts out with
+  `routed`, since its own entry does the job.
 - **Route announcement** (`App.tsx`). Each navigation sets the document title, moves focus to `<main>`, and
   names the page in a polite live region.
 - **Pull to refresh** (`hooks/usePullToRefresh.ts`). Touch only, from the top of the page, not inside a modal
@@ -273,13 +282,14 @@ These are app-wide and already wired; a page neither implements nor opts into th
 
 ## Where the shared pieces live
 
-- `components/layout/BottomNav.tsx` — the phone's primary nav: Home, a role-adaptive second slot, a raised
-  create button, Alerts, Menu. Hidden from `md` up. Hides itself while the keyboard is open. The create menu
-  leads with "On this page" — the quick actions whose route is the current one — because the page's own create
-  button lives in the header, which is several screens up as soon as the list is scrolled. Promoted, not
-  duplicated: an action shown there is removed from the group it would otherwise repeat in.
+- `components/layout/TopBar.tsx` — the app's only navigation chrome on a phone. The Menu button (leftmost,
+  `md:hidden`) opens the off-canvas drawer; quick-create sits beside search. The create menu leads with "On
+  this page" — the quick actions whose route is the current one — because the page's own create button lives
+  in the header, which is several screens up as soon as the list is scrolled. Promoted, not duplicated: an
+  action shown there is removed from the group it would otherwise repeat in. Below `md` it also folds in
+  raise-a-ticket and report-a-problem, whose Support button is not rendered at that width.
 - `hooks/useKeyboardInset.ts` — how much of the screen the on-screen keyboard covers. The single source for
-  dialogs, sheets, the command palette and the bottom nav.
+  dialogs, sheets and the command palette.
 - `hooks/useScrollActiveIntoView.ts` — keeps the active item of a scrolling tab/chip bar in view.
 - `components/ui/sheet.tsx` — bottom sheet with a grabber and drag-to-dismiss on a phone, right-docked panel
   from `sm` up.

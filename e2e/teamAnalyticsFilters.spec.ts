@@ -55,9 +55,10 @@ test.describe("team analytics: search, department and the person sheet", () => {
     // whether "12" is good - it renders right there as "team 12", one per <dd>.
     await expect(sheet.getByText(/^team /).first()).toBeVisible({ timeout: 15_000 });
 
-    // "Leave history" is a door too, off this same sheet - to THEIR leave tab, not the admin's own.
+    // "Leave history" is a door too, off this same sheet - to THEIR leave tab, which is a tab BECAUSE this is
+    // somebody else's record (on one's own the sheet offers no such button, and the record no such tab).
     await sheet.getByRole("button", { name: "Leave history" }).click();
-    await expect.poll(() => page.url()).toContain(`#/employees/${person.path.split("/")[1]}/leave`);
+    await expect.poll(() => page.url()).toContain(`/employees/${person.path.split("/")[1]}/leave`);
     // The sheet's own close (dialogHistory.ts useHistoryClose) pushes then asynchronously pops a history entry -
     // waiting for it to actually disappear here keeps that deferred pop from landing after (and undoing) the
     // gotoRoute below, which is itself another history push.

@@ -22,7 +22,10 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
 import { deniedSubresourceKeys } from "../http/tableFieldAccess";
+import { deniedRedactedFields } from "../http/fieldAccess";
 import { applyScope } from "./listScope";
+import { publicStateFilter } from "./stateFilter";
+import { redactedFieldsOf } from "../domain/manifests";
 import { keysetPage } from "./keysetPage";
 import { TABLES, listOwnerColumn } from "../lib/authzResolve";
 import { audit } from "../lib/audit";
@@ -82,6 +85,28 @@ export type RunOptions = {
 
 const INTERNAL_ID = /^[0-9a-hj-km-np-tv-z]{13}$/;
 const ymd = (d: Date | number) => new Date(d).toISOString().slice(0, 10);
+
+/**
+ * The state-visibility predicate for one collection, or undefined where the manifest has no rule for it or the
+ * caller may see restricted rows. Mechanical, exactly like `applyScope`: `seeRestricted` is the verdict the
+ * middleware already resolved, and this only maps it onto the table's own columns.
+ *
+ * Fail-closed on an absent scope, because the ListScope is where `seeRestricted` lives: no scope means the
+ * caller was never granted the collection, and `applyScope` beside this is already answering `1 = 0`.
+ */
+const stateCond = (user: AppUser, collection: string, table: SQLiteTable | undefined, scope: ListScope | undefined): SQL | undefined =>
+  table ? publicStateFilter(user.policy.state_visibility?.[collection], table, scope?.seeRestricted ?? false) : undefined;
+
+/** The wire column name a base-record field projects - the name `policy.redacted_fields` is written in. */
+const wireNameOf = (field: ResolvedField): string => field.key.split(".").pop()!;
+
+/**
+ * Is this field one `policy.redacted_fields` gates per row? True for a plain column of a base or a linked row
+ * that the manifest lists (`tickets.description`, `offers.base_comp`); never for a SOURCE field, which is
+ * gated by its sub-resource instead (`deniedSubresourceKeys`).
+ */
+const redactionGated = (user: AppUser, field: ResolvedField): boolean =>
+  !field.source && redactedFieldsOf(user.policy, field.collection).includes(wireNameOf(field));
 
 // Every id-keyed loader below reads a whole page's worth of employees in one `IN`, which sat right on D1's
 // bound-parameter cap and went over it as soon as `applyScope` bound anything alongside it - see
@@ -148,6 +173,13 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
   // lib/authzResolve.ts#LIST_OWNER_COLUMNS.
   const conds: (SQL | undefined)[] = [applyScope(scope, table.code, listOwnerColumn(base, table))];
   if (table.deleteTime) conds.push(isNull(table.deleteTime));
+  // ...and the state-visibility half of the same verdict, which the base page did not carry. Every ordinary
+  // list binds it (services/crud.ts, services/announcements.ts visibleWhere) off the SAME `seeRestricted` the
+  // middleware resolved, so a caller who may not open a restricted row does not see it listed either. The grid
+  // bound only the breadth, which made a saved view the one list in the app that answered with rows the
+  // collection's own list hides - and `state_visibility` is policy DATA, so an org that gates a second
+  // collection gets the item lane, the search index and every list narrowed, and the grid not.
+  conds.push(stateCond(user, base, table, scope));
   // The two standing narrowings a report is asked for: one department, one person. Applied only where the base
   // actually carries the column - they never WIDEN, so a base without them simply ignores them.
   const params = spec.params ?? {};
@@ -167,13 +199,22 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
   // whatever list length happened to cross it. The budget leaves room for everything else the statement binds;
   // a filter that would not fit is DEFERRED to the in-memory half rather than refused, so the view still
   // answers and still narrows - which is why that path had to be made correct for unselected fields first.
+  //
+  // A REDACTION-GATED FIELD IS NEVER PUSHED. `policy.redacted_fields` is decided per row, over the row's own
+  // code, so the only place it can be applied is in memory - and a predicate in SQL judges the REAL column
+  // before any of that runs. That is the PII probe again in the one shape the PII gate could not have covered:
+  // an `@identity`/`@bank` field carries a `source` and was never pushable, while `tickets.description` and
+  // `leave-requests.reason` are plain columns of the base and were. A hidden `contains` filter on one of them
+  // then narrowed the page by a value the caller holds no read on, and repeating the probe reads it out a
+  // letter at a time - through the very deny that was supposed to take the field away. Deferring costs a page
+  // filtered in memory and keeps the answer identical for a caller who may read the field.
   const deferred: ViewFilter[] = [];
   let paramsSpent = 0;
   for (const f of spec.filters ?? []) {
     const field = byKey.get(f.field);
     if (!field) continue;
     const cost = filterParamCost(f);
-    const pushable = field.path.length === 0 && !field.source && paramsSpent + cost <= FILTER_PARAM_BUDGET;
+    const pushable = field.path.length === 0 && !field.source && !redactionGated(user, field) && paramsSpent + cost <= FILTER_PARAM_BUDGET;
     const sqlCond = pushable ? baseFilterSql(table, field, f) : undefined;
     if (sqlCond) {
       conds.push(sqlCond);
@@ -254,6 +295,7 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
           inArray(targetTable.uuid, group),
           applyScope(targetScope, targetTable.code, listOwnerColumn(target.collection, targetTable)),
           targetTable.deleteTime ? isNull(targetTable.deleteTime) : undefined,
+          stateCond(user, target.collection, targetTable, targetScope),
         )) as PromiseLike<Record<string, any>[]>,
     );
     linked.set(path, new Map(rows.map((r) => [r.uuid as string, r])));
@@ -313,6 +355,42 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
       const bad = deniedSubresourceKeys(user.grant, emp.code as string | null, sub, keys, self);
       for (const f of ofSource) if (bad.has(f.fieldKey ?? f.leaf)) denied.add(f.key);
       if (denied.size) deniedByRow.set(rowId, denied);
+    }
+  }
+
+  // ---- Redacted base fields ------------------------------------------------------------------------------
+  //
+  // The second half of per-field access, and the half the grid did not have. The three PII SOURCES above are
+  // gated by `deniedSubresourceKeys`; a plain COLUMN of a base or a linked row is gated by
+  // `policy.redacted_fields`, which http/accessHint.ts `redactFields` applies to every serialized resource in
+  // the app - `offers.base_comp`, `candidates.email/phone/notes`, `leave-requests.reason`, `tickets.description`.
+  // Projecting the raw column went round it: a deny on `tickets.*.description` removed the field from the
+  // tickets list and the ticket itself and left it readable, on the same rows, as a column of a saved grid.
+  //
+  // Decided per ROW (the redaction is scoped by the row's own code) and memoized per (field, code), because a
+  // page of tickets from one department resolves the same linked row over and over. A field the caller may not
+  // read joins `deniedByRow` exactly as a denied PII field does, so it is nulled in the cell, listed in
+  // `denied`, and - because `gated` carries the filter-only and sort-only fields too - cannot be probed by
+  // filtering or ordering on it either.
+  const redacted = gated.filter((f) => redactionGated(user, f)).map((f) => ({ field: f, wire: wireNameOf(f) }));
+  if (redacted.length) {
+    const memo = new Map<string, boolean>();
+    for (const r of baseRows) {
+      const rowId = r.uuid as string;
+      for (const { field, wire } of redacted) {
+        // No row at the end of the link is no value to redact - the cell renders empty on its own, and a
+        // `denied` marker there would claim a restriction where there is simply nothing.
+        const on = rowAt(r, field.path);
+        if (!on) continue;
+        const code = (on.code as string | null | undefined) ?? null;
+        const memoKey = `${field.key}|${code ?? ""}`;
+        let bad = memo.get(memoKey);
+        if (bad === undefined) memo.set(memoKey, (bad = deniedRedactedFields(user.grant, field.collection, code, [wire], self).has(wire)));
+        if (!bad) continue;
+        const denied = deniedByRow.get(rowId) ?? new Set<string>();
+        denied.add(field.key);
+        deniedByRow.set(rowId, denied);
+      }
     }
   }
 
@@ -712,7 +790,12 @@ async function loadSource(
    * source, and therefore the one whose SCOPE does too.
    */
   const scopedTo = (collection: string, code: AnySQLiteColumn, owner: AnySQLiteColumn): SQL | undefined =>
-    applyScope(scopes.get(collection), code, owner);
+    and(
+      applyScope(scopes.get(collection), code, owner),
+      // The state half rides here too, for the same reason it rides on the base page and the linked rows: a
+      // source is a LIST of another collection, so the whole of that collection's list verdict applies to it.
+      stateCond(user, collection, TABLES[collection], scopes.get(collection)),
+    );
 
   switch (source) {
     // The three PII blobs already ride on the employee row this page loaded - decrypt CPU, zero extra reads.
@@ -972,7 +1055,12 @@ async function loadSource(
       const today = await orgToday(deps);
       const from = params.from || `${today.slice(0, 7)}-01`;
       const to = params.to || today;
-      const report = await peopleAnalytics(deps, scopes, { from, to, maxPeople: 200 });
+      // The people THIS PAGE is about, by name. Left to choose its own roster, peopleAnalytics takes the first
+      // `maxPeople` employees in name order - a set with no relationship to the rows being rendered - so on any
+      // org past that cap a grid showed a blank measure cell for every row outside it, and `truncated`, the one
+      // signal that anything had been dropped, was discarded here. Naming the ids only ever narrows: the
+      // caller's own `employees` scope still decides who may be in the answer at all.
+      const report = await peopleAnalytics(deps, scopes, { from, to, employeeIds: [...people.keys()] });
       const byId = new Map(report.people.map((p) => [p.employee.split("/").pop()!, p.values]));
       for (const empId of people.keys()) {
         const values = byId.get(empId);

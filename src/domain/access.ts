@@ -5,7 +5,8 @@
 import { capabilitiesOf, decide, resolveRequest } from "./permissions";
 import { hasCapability } from "./capabilityMatch";
 import type { Grant, SelfContext } from "./permissions";
-import { isPublicState, type StateRule } from "./manifests";
+import { isPublicState, SUBRESOURCE_BODY, type StateRule } from "./manifests";
+import { COLLECTIONS } from "./collections";
 import type { AppUser } from "../env";
 
 // The matching rule itself lives in domain/capabilityMatch.ts - a dependency-free leaf the SPA imports too, so
@@ -43,15 +44,37 @@ export const SCOPE_PROBE_LEAF = "zzzz";
 // a sibling under the caller's own dept (a my-dept grant reads it -> dept), else own. Drives list
 // WHERE clauses so visibility lives in the grant policy, one place, and tightens/loosens there.
 export function actorScope(actor: Pick<AppUser, "grant" | "employeeCode">, collection: string): Scope {
+  return probeScope(actor, collection, "GET");
+}
+
+// The same probe at a chosen level and, optionally, over a field-precise SUB-RESOURCE of the record
+// (`/v1/employees/<code>/tax`) rather than the record itself. A sub-resource is its OWN gate: a broad grant on
+// the base employee record does not reach it, and `employees.me.tax.**` reaches the caller's tax and nobody
+// else's. Both extras exist for `callerScopes` below - nothing in a list path needs them, because a list is
+// always a GET and a sub-resource has no list.
+function probeScope(actor: Pick<AppUser, "grant" | "employeeCode">, collection: string, method: string, sub?: string): Scope {
   const grant = actor.grant;
   const self = { employeeCode: actor.employeeCode ?? null };
-  const canRead = (code: string) => decide(grant, resolveRequest("GET", `/v1/${collection}/${code}`), self).allow;
-  if (canRead(SCOPE_PROBE_CODE)) return "all"; // a code under no real dept -> only an unscoped grant matches
+  const can = (code: string) => decide(grant, resolveRequest(method, `/v1/${collection}/${code}${sub ? `/${sub}` : ""}`), self).allow;
+  if (can(SCOPE_PROBE_CODE)) return "all"; // a code under no real dept -> only an unscoped grant matches
   // `deptOf`, not a second inline copy of the same split. The two had already drifted - this one derived the
   // dept itself while `actorVerbScope` below called the helper - and the whole point of the helper is that the
   // breadth of a list and the breadth of a verb over the same rows are decided from the same value.
   const dept = deptOf(actor);
-  if (dept && canRead(`${dept}-${SCOPE_PROBE_LEAF}`)) return "dept"; // a sibling in the caller's dept, not the caller
+  if (dept && can(`${dept}-${SCOPE_PROBE_LEAF}`)) return "dept"; // a sibling in the caller's dept, not the caller
+  return "own";
+}
+
+// The breadth of the per-entity ACTIVITY trail for one collection. Not `probeScope`: activity is not a REST
+// path of its own - middleware/authz.ts decides it as a capability whose scope sits at token[1]
+// (`activity.<code>.<collection>`), with the collection as the sub-resource - so the probe asks decide()
+// directly, with the same synthetic codes and the same reading of the answer.
+function probeActivityScope(actor: Pick<AppUser, "grant" | "employeeCode">, collection: string): Scope {
+  const self = { employeeCode: actor.employeeCode ?? null };
+  const can = (code: string) => decide(actor.grant, { kind: "standard", resource: `activity.${code}.${collection}`, level: "read" }, self).allow;
+  if (can(SCOPE_PROBE_CODE)) return "all";
+  const dept = deptOf(actor);
+  if (dept && can(`${dept}-${SCOPE_PROBE_LEAF}`)) return "dept";
   return "own";
 }
 
@@ -113,6 +136,129 @@ export function actorSubtrees(
     if (decide(actor.grant, resolveRequest(verb ? "POST" : "GET", probe), self).allow) out.push(code);
   }
   return out;
+}
+
+/** What the caller may reach ABOUT ONE PERSON: the collection keys, read and write. */
+export type SubjectScopes = { read: string[]; write: string[] };
+
+/**
+ * For ONE named employee, everything the caller may read or write about them - decided by the engine against
+ * that person's REAL code, so the answer correlates with who they are.
+ *
+ * THIS IS THE ONE HONEST ANSWER FOR A PER-RECORD SURFACE, and the reason `callerScopes` below cannot be it.
+ * That function probes with SYNTHETIC codes (`zzzzz`, `<myDept>-zzzz`) that belong to nobody, so it can only
+ * report a relative TIER - and a tier is not a relationship:
+ *
+ *   - `me` needs the subject's code to compare against. A tier says "own" and names nobody.
+ *   - `my-reports` / `my-org` match a code in the caller's reporting chain. No synthetic code is in anybody's
+ *     chain, so `callerScopes` has to report them as the blanket string `dept` - which the client then reads
+ *     as "yes, about everyone", the exact opposite of what a manager-chain grant says.
+ *   - a `<code>-*` SUBTREE names a branch that has nothing to do with where the caller sits.
+ *   - a per-object SHARE lifts the caller on one record and no other; a tier cannot express it at all.
+ *
+ * Probing `<collection>.<subjectCode>-<SCOPE_PROBE_LEAF>` - a synthetic LEAF under the subject's REAL code,
+ * i.e. "a row of this collection owned by this person" - makes every one of those match or not match on its
+ * own terms, with no case analysis here. Owner, department, reporting chain, subtree and share are decided by
+ * `decide()` exactly as a real request decides them, which is the whole point: NO POLICY LIVES HERE. Pass the
+ * per-object-merged grant (`ctx.objectGrant`) and the full `SelfContext` and the shares and the chain are in.
+ *
+ * Emitted as the keys that ARE reachable: absent means no, so a client asking about a collection this build
+ * has never heard of gets the fail-closed answer. Keys match the capability spelling - `<collection>`,
+ * `employees.<sub>` for the field-precise sub-resources, `activity.<collection>` for the per-entity trail.
+ */
+export function subjectScopes(
+  grant: Grant,
+  self: SelfContext,
+  subjectCode: string,
+  collections: Iterable<string> = COLLECTIONS,
+): SubjectScopes {
+  const read: string[] = [];
+  const write: string[] = [];
+  // A row OWNED BY this person: their code is the parent, the synthetic leaf is the row. `me` matches it when
+  // the subject is the caller, `my-dept` when they are a colleague, `my-reports`/`my-org` when they are in the
+  // chain, `<code>-*` when they are under a granted branch - each on the real hierarchy, not on a guess.
+  const owned = (collection: string, method: string) =>
+    decide(grant, resolveRequest(method, `/v1/${collection}/${subjectCode}-${SCOPE_PROBE_LEAF}`), self).allow;
+  for (const collection of collections) {
+    if (owned(collection, "GET")) read.push(collection);
+    if (owned(collection, "PATCH")) write.push(collection);
+    // The per-entity trail, the second and independent gate. Scope sits at token[1] with the collection as the
+    // sub-resource (middleware/authz.ts), so it is asked directly rather than as a REST path.
+    if (decide(grant, { kind: "standard", resource: `activity.${subjectCode}.${collection}`, level: "read" }, self).allow) {
+      read.push(`activity.${collection}`);
+    }
+  }
+  // The employee record's own sub-resources hang off the PERSON rather than off a row they own, so they are
+  // probed at the subject's code itself - no leaf. A broad `employees` grant never reaches these.
+  for (const sub of Object.keys(SUBRESOURCE_BODY)) {
+    const at = (method: string) =>
+      decide(grant, resolveRequest(method, `/v1/employees/${subjectCode}/${sub}`), self).allow;
+    if (at("GET")) read.push(`employees.${sub}`);
+    if (at("PATCH")) write.push(`employees.${sub}`);
+  }
+  return { read, write };
+}
+
+/** Read and write breadth past the caller's own rows, per collection and employee sub-resource. */
+export type CallerScopes = { read: Record<string, Scope>; write: Record<string, Scope> };
+
+/**
+ * Every collection - and every field-precise employee sub-resource - the caller may read or write BEYOND
+ * their own rows, as the breadth the engine actually grants. THE ONE THING THE CAPABILITY SET CANNOT SAY.
+ *
+ * `capabilitiesOf` strips the scope token (permissions.ts stripScope), so `attendance.me.**` and
+ * `attendance.**` both reach the SPA as `attendance.read`, and `employees.me.tax.**` and `employees.*.tax.**`
+ * both reach it as `employees.tax.write`. That is the right answer to the question the capability set exists
+ * for - "may this caller call this endpoint at all", which is what a nav item or a page gate asks - and the
+ * wrong answer to the question every PER-RECORD surface asks: "may this caller reach THIS OTHER PERSON'S
+ * rows". Every employee holds the self-service half of attendance, goals, reviews, payslips, the board and
+ * their own bank/identity/tax, so a gate written on the stripped string is true for everybody, about
+ * everybody - which is how an Edit button for somebody else's tax declarations comes to render.
+ *
+ * Entries at `own` are OMITTED rather than sent: absent has to read as no, so a client that has never heard
+ * of a collection and a client asking about one the caller only self-serves get the same answer.
+ *
+ * Per-object SHARES are deliberately not folded in. They are rows in grant-exceptions, read per list request,
+ * and the reach they give is one object rather than a person's record - a caller holding one finds it on the
+ * collection's own page. Same for the DENIES that subtract from a breadth: this says what the grant reaches,
+ * and the server re-decides every request either way, which is what keeps this a UX hint and not a gate.
+ */
+export function callerScopes(
+  actor: Pick<AppUser, "grant" | "employeeCode">,
+  self: SelfContext = { employeeCode: actor.employeeCode ?? null },
+): CallerScopes {
+  const read: Record<string, Scope> = {};
+  const write: Record<string, Scope> = {};
+  for (const collection of COLLECTIONS) {
+    const r = probeScope(actor, collection, "GET");
+    const w = probeScope(actor, collection, "PATCH");
+    if (r !== "own") read[collection] = r;
+    if (w !== "own") write[collection] = w;
+    // A subtree grant (an explicit `<code>-*` rule, or the manager chain when `self` carries it) is reach past
+    // the caller's own rows that no relative tier can express. It is reported as `dept` because that is the
+    // shape of it - a branch of the hierarchy, not the whole org - and because a client asking "may I reach
+    // somebody else's" only needs to know it is not `own`. One scan answers both lanes: `actorSubtrees` probes
+    // a GET, so a write-only subtree grant is not claimed here.
+    if (r === "own" && actorSubtrees(actor, collection, undefined, self).length > 0) read[collection] = "dept";
+    // The record's ACTIVITY trail is a second, independent gate with a scope of its own, and it is stripped the
+    // same way: `activity.me.**` (my own trail) and `activity.**` (everybody's) both reach the SPA as
+    // `activity.<collection>.read`. An Activity tab gated on that string renders on every colleague's record
+    // for a caller granted only their own - the tab the two-gate check can then only answer empty. Keyed
+    // `activity.<collection>`, the spelling the stripped capability already uses. Private by default (no
+    // seeded role holds activity at all), so for most callers this adds no key.
+    const a = probeActivityScope(actor, collection);
+    if (a !== "own") read[`activity.${collection}`] = a;
+  }
+  // The employee record's sub-resources (`/v1/employees/<code>/<sub>`), each gated by its own patterns and
+  // reached by no grant on the base record. Keyed `employees.<sub>` - the spelling the stripped capability
+  // already uses - so one key shape answers for both.
+  for (const sub of Object.keys(SUBRESOURCE_BODY)) {
+    const r = probeScope(actor, "employees", "GET", sub);
+    const w = probeScope(actor, "employees", "PATCH", sub);
+    if (r !== "own") read[`employees.${sub}`] = r;
+    if (w !== "own") write[`employees.${sub}`] = w;
+  }
+  return { read, write };
 }
 
 // How broadly the actor may perform a CUSTOM VERB on a collection's rows - the same synthetic-code probe as

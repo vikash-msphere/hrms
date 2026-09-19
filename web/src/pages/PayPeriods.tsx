@@ -102,9 +102,10 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
 
   const columns: Column<PayPeriod>[] = [
     { id: "label", header: "Label", accessor: (pp) => pp.display_name, cell: (pp) => <span className="font-medium">{pp.display_name}</span> },
-    { id: "start", header: "Period start", accessor: (pp) => pp.period_start, cell: (pp) => formatDate(pp.period_start) },
-    { id: "end", header: "Period end", accessor: (pp) => pp.period_end, cell: (pp) => formatDate(pp.period_end) },
-    { id: "pay", header: "Pay date", accessor: (pp) => pp.pay_date, cell: (pp) => formatDate(pp.pay_date) },
+    { id: "start", header: "Period start", filter: "date", accessor: (pp) => pp.period_start, cell: (pp) => formatDate(pp.period_start) },
+    { id: "end", header: "Period end", filter: "date", accessor: (pp) => pp.period_end, cell: (pp) => formatDate(pp.period_end) },
+    // The calendar this page exists for: "which run pays out this month" is one click on the date filter.
+    { id: "pay", header: "Pay date", filter: "date", dateHint: "future", accessor: (pp) => pp.pay_date, cell: (pp) => formatDate(pp.pay_date) },
     stateColumn<PayPeriod>(),
     ...metaColumns<PayPeriod>(),
     {

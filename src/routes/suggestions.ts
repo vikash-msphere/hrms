@@ -42,6 +42,9 @@ export const suggestions = collectionRoutes<SuggestionInput, typeof schema.sugge
       status: c.req.query("status"),
       category: c.req.query("category"),
       q: c.req.query("q"),
+      submitter: c.req.query("submitter"),
+      // Who is asking, so the anonymity guard in the service can tell "my own box" from "somebody else's".
+      actorEmployeeId: c.get("user").employeeId ?? null,
       showDeleted: page.showDeleted,
       deletedOnly: page.deletedOnly,
     }),

@@ -2,8 +2,9 @@ import { gotoRoute, test, expect } from "./fixtures";
 
 // A table set up the way one person works, following them to the next machine.
 //
-// A saved view is a named snapshot of a table's sort, filters, search and visible columns; the pinned one is
-// applied on mount unless the URL is more specific. It is stored twice on purpose (lib/tablePrefs.ts):
+// A saved view is a named snapshot of a table's sort, filters, search, visible columns and shape (column
+// order and widths, page size, density); the pinned one is applied on mount unless the URL is more
+// specific. It is stored twice on purpose (lib/tablePrefs.ts):
 // localStorage for an instant paint, and a per-user `preferences/table_<id>` row so the layout is the
 // person's rather than the browser's. Neither half is reachable from the server suite - one lives in a
 // browser store, and the other only matters at the moment a SECOND browser mounts the table with an empty
@@ -28,6 +29,8 @@ test("a saved view is pinned, and opens the table on another machine", async ({ 
   // <column>", and a loose match takes both.
   await page.getByRole("columnheader", { name: "Vendor" }).getByRole("button", { name: "Vendor", exact: true }).click();
   await expect.poll(() => page.url()).toContain("t.vendors");
+  // A view carries the table's SHAPE as well as which rows show, so give this one a page size to hold.
+  await setPageSize(page, "10");
 
   // Save it, and pin it.
   const views = page.getByRole("button", { name: "Saved views" });
@@ -41,6 +44,15 @@ test("a saved view is pinned, and opens the table on another machine", async ({ 
   // The server copy rides a debounce, so wait for the request rather than for a guessed number of seconds.
   // Each change restarts that timer, so the write registered here is the one carrying the pin.
   await prefWrite(page);
+
+  // Applying the view puts the shape back, not only the rows: move the page size away from what was saved
+  // and pick the view by name. A view that restored the filters into whatever layout the reader happened to
+  // be on is the failure this catches.
+  await setPageSize(page, "50");
+  await views.click();
+  await page.getByRole("button", { name: viewName, exact: true }).click();
+  await expect(page.getByRole("combobox", { name: "Rows per page" })).toHaveText("10");
+  await setPageSize(page, "25"); // back to the table's own default, for whoever runs next
 
   // A different browser for the same person: empty localStorage, no table state in the URL, so the only way
   // it can come up on this view is by reading the preference row back and applying the pin on mount.
@@ -83,6 +95,12 @@ async function resetTable(page: Page) {
   const leftovers = page.getByRole("button", { name: /^Delete view E2E view / });
   for (let n = await leftovers.count(); n > 0; n--) await leftovers.first().click();
   await page.keyboard.press("Escape");
+}
+
+/** Pick a page size from the pager's own select. */
+async function setPageSize(page: Page, size: string) {
+  await page.getByRole("combobox", { name: "Rows per page" }).click();
+  await page.getByRole("option", { name: size, exact: true }).click();
 }
 
 /** Turn a column off through the Columns popover, the way a reader would. */

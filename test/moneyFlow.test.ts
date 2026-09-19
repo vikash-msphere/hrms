@@ -18,6 +18,7 @@ import { recordBonus, unpaidBonuses } from "../src/services/bonuses";
 import { computeAndStoreEncashment, approveEncashment, rejectEncashment, cancelEncashment, approvedUnpaidEncashments } from "../src/services/leaveEncashments";
 import { createReimbursement, approveReimbursement, approvedUnpaidReimbursements, payReimbursement, markReimbursementsPaidByRun, markReimbursementsSettledStmt } from "../src/services/reimbursements";
 import { computeAndStoreSettlement } from "../src/services/settlements";
+import { DEFAULT_ATTENDANCE } from "../src/domain/attendance";
 import { createSalaryStructure } from "../src/services/salaryStructures";
 import { reviseCompensation, updateCompensation, deleteCompensation, reapplySplitCurrent, splitStatus, listCompensation, decorateCompensation } from "../src/services/compensation";
 import { toCompensationResource } from "../src/http/serialize";
@@ -53,6 +54,7 @@ const TABLES = [
   schema.taxDeclarations,
   schema.offers, schema.applications, schema.candidates, schema.jobRequisitions,
   schema.transitions, schema.jobs, schema.notifications, schema.eventLog, schema.automationRuns, schema.workflowInstances,
+  schema.attendanceDayMarks, schema.attendanceSessions,
   schema.users, schema.employees, schema.roles,
   schema.settings, // org policy blobs (e.g. settings/ctc) - a test that sets one must not leak it into the next
 ];
@@ -1585,6 +1587,107 @@ describe("payroll: statutory + tax bases are the wage actually paid", () => {
     expect(line("ESI")!.amount).toBe(120);
     // PF wages = 12000 + the 3000 basic slice = 15000 -> 1800 (the 1000 non-basic arrears carry no PF).
     expect(line("EPF")!.amount).toBe(1800);
+  });
+});
+
+// ---- Day marks: HR decides what a day is worth, and the run settles on that ------------------------------
+//
+// The domain arithmetic is pinned in attendanceLop.test.ts. What is pinned HERE is the wiring: that a mark
+// stored against an employee reaches `assembleLop` and moves a real run item's LOP line. Every other part of
+// the feature is reporting; this is the part with money on it, and it is the join that a refactor of either
+// side would break silently.
+describe("payroll: a day mark decides what an attendance day is worth", () => {
+  // One working week as the whole period, so the days NOT under test can be punched in full and the figure
+  // the assertions read comes from the one day that matters.
+  const WEEK = { start: "2026-01-05", end: "2026-01-09" }; // Mon-Fri
+  const FULL_DAYS = ["2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09"];
+
+  async function punch(employeeId: string, ymd: string, hours: number) {
+    await deps.db.insert(schema.attendanceSessions).values({
+      uuid: genId(), code: short("att"), employeeId,
+      clockIn: new Date(`${ymd}T04:00:00.000Z`), // 09:30 IST
+      clockOut: new Date(`${ymd}T${String(4 + hours).padStart(2, "0")}:00:00.000Z`),
+    });
+  }
+
+  /** A week where Monday is three hours - too short to earn even a half day - and the rest are full. */
+  async function seedShortMonday() {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 22000 });
+    await seedSetting("attendance", { ...DEFAULT_ATTENDANCE, lop_enabled: true });
+    await punch(emp, "2026-01-05", 3);
+    for (const d of FULL_DAYS) await punch(emp, d, 9);
+    return { emp, actor };
+  }
+
+  const lopLine = async (runId: string) => {
+    const item = (await listRunItems(deps, runId))[0]!;
+    return item.lines.find((l) => l.code === "LOP");
+  };
+
+  it("docks the short day when nobody has said otherwise", async () => {
+    const { emp, actor } = await seedShortMonday();
+    const period = await seedPeriodRange("W1 Jan 2026", WEEK.start, WEEK.end);
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    // Three hours is under the half-day minimum, so the punches alone make Monday a whole day's absence.
+    expect((await lopLine(run.uuid))!.units).toBe(1);
+    expect(emp).toBeTruthy();
+  });
+
+  it("pays the short day in full once HR marks it, and the LOP line disappears", async () => {
+    const { emp, actor } = await seedShortMonday();
+    await deps.db.insert(schema.attendanceDayMarks).values({
+      uuid: genId(), code: short("adm"), employeeId: emp, date: new Date("2026-01-05T00:00:00.000Z"),
+      credit: "full", reason: "Agreed short day",
+    });
+    const period = await seedPeriodRange("W1 Jan 2026", WEEK.start, WEEK.end);
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    // Nothing unexcused left in the window, so there is no deduction to state at all.
+    expect(await lopLine(run.uuid)).toBeUndefined();
+  });
+
+  it("docks half the day when HR marks it a half day", async () => {
+    const { emp, actor } = await seedShortMonday();
+    await deps.db.insert(schema.attendanceDayMarks).values({
+      uuid: genId(), code: short("adm"), employeeId: emp, date: new Date("2026-01-05T00:00:00.000Z"), credit: "half",
+    });
+    const period = await seedPeriodRange("W1 Jan 2026", WEEK.start, WEEK.end);
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    // Five working days in the period, so 22,000 of gross is 4,400 a day and half of it is 2,200.
+    const lop = (await lopLine(run.uuid))!;
+    expect(lop.units).toBe(0.5);
+    expect(lop.amount).toBe(-2200);
+  });
+
+  it("docks a fully worked day when HR marks the person absent", async () => {
+    // The override runs BOTH ways, or it is a discount button rather than a decision.
+    const { emp, actor } = await seedShortMonday();
+    await deps.db.insert(schema.attendanceDayMarks).values({
+      uuid: genId(), code: short("adm"), employeeId: emp, date: new Date("2026-01-07T00:00:00.000Z"), credit: "absent",
+    });
+    const period = await seedPeriodRange("W1 Jan 2026", WEEK.start, WEEK.end);
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    // Monday's own absence (1) plus the fully worked Wednesday now marked absent (1).
+    expect((await lopLine(run.uuid))!.units).toBe(2);
+  });
+
+  it("ignores a withdrawn mark, so the day goes back to its punches", async () => {
+    // Soft-deleted is not a mark. Read without that filter, a withdrawn decision keeps paying - the same
+    // shape of bug a superseded punch caused before payroll started filtering those.
+    const { emp, actor } = await seedShortMonday();
+    await deps.db.insert(schema.attendanceDayMarks).values({
+      uuid: genId(), code: short("adm"), employeeId: emp, date: new Date("2026-01-05T00:00:00.000Z"),
+      credit: "full", deleteTime: new Date("2026-01-20"),
+    });
+    const period = await seedPeriodRange("W1 Jan 2026", WEEK.start, WEEK.end);
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    expect((await lopLine(run.uuid))!.units).toBe(1);
   });
 });
 

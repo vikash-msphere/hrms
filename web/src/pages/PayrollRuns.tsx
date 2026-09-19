@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { PlayCircle, Plus, Hammer, Send, CheckCircle2, Rocket, Loader2, FileSpreadsheet, Trash2, Eye, ChevronRight, AlertTriangle } from "lucide-react";
-import { api, get, create, invoke, download, remove } from "@/api";
+import { api, get, create, invoke, download, remove, ApiError } from "@/api";
 import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreviewDialog";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
@@ -185,6 +185,26 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
   }
 
   // Rebuild in place from the review dialog: recompute lines from current inputs, then refresh the breakdown +
+  /**
+   * Report a refused verb - and RE-READ the run when the refusal was a lost update.
+   *
+   * Every verb on this page carries the etag the list was read with, and 409 means exactly one thing: the run
+   * moved in between - another payroll admin built or submitted it, or this page's own other tab did. The
+   * page then still holds the etag it was refused for, so pressing again sends the same stale header and is
+   * refused identically, for as long as the page stays open: the button is dead and the toast says only
+   * "etag mismatch". Re-reading is what makes the second press a different request, and the message says
+   * that is what happened rather than naming the header.
+   */
+  function staleToast(e: unknown, fallback: string) {
+    const stale = e instanceof ApiError && e.status === 409;
+    if (stale) reload();
+    toast({
+      title: stale ? "Somebody else changed this run" : fallback,
+      description: stale ? "It has been re-read - look at where it is now, then try again." : (e as Error).message,
+      variant: "destructive",
+    });
+  }
+
   // staleness. NOTE: like any build, one-off inputs (LOP, ad-hoc lines) are re-entered per build, not preserved.
   async function rebuildReview() {
     if (!reviewRun) return;
@@ -197,7 +217,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
       reload();
       await openReview(reviewRun);
     } catch (e) {
-      toast({ title: "Couldn't rebuild the run", description: (e as Error).message, variant: "destructive" });
+      staleToast(e, "Couldn't rebuild the run");
     } finally {
       setActing(null);
     }
@@ -446,17 +466,17 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
       }
     } catch (e) {
       setPublishing(null);
-      toast({ title: `Couldn't ${verb} the run`, description: (e as Error).message, variant: "destructive" });
+      staleToast(e, `Couldn't ${verb} the run`);
     } finally {
       setActing(null);
     }
   }
 
   const columns: Column<PayrollRun>[] = [
-    { id: "period", header: "Pay period", filter: "select", accessor: (r) => periodName(r.pay_period), cell: (r) => <span className="font-medium">{periodName(r.pay_period)}</span> },
-    { id: "state", header: "State", filter: "select", accessor: (r) => r.state, cell: (r) => <StatusBadge state={r.state} /> },
-    { id: "submitted_by", header: "Submitted by", defaultHidden: true, accessor: (r) => r.submitted_by_name ?? (r.submitted_by ? idOf(r.submitted_by) : ""), cell: (r) => r.submitted_by_name ?? (r.submitted_by ? idOf(r.submitted_by) : "-") },
-    { id: "approved_by", header: "Approved by", defaultHidden: true, accessor: (r) => r.approved_by_name ?? (r.approved_by ? idOf(r.approved_by) : ""), cell: (r) => r.approved_by_name ?? (r.approved_by ? idOf(r.approved_by) : "-") },
+    { id: "period", header: "Pay period", filter: "select", groupBy: true, accessor: (r) => periodName(r.pay_period), cell: (r) => <span className="font-medium">{periodName(r.pay_period)}</span> },
+    { id: "state", header: "State", filter: "select", groupBy: true, accessor: (r) => r.state, cell: (r) => <StatusBadge state={r.state} /> },
+    { id: "submitted_by", header: "Submitted by", defaultHidden: true, filter: "select", groupBy: true, accessor: (r) => r.submitted_by_name ?? (r.submitted_by ? idOf(r.submitted_by) : ""), cell: (r) => r.submitted_by_name ?? (r.submitted_by ? idOf(r.submitted_by) : "-") },
+    { id: "approved_by", header: "Approved by", defaultHidden: true, filter: "select", groupBy: true, accessor: (r) => r.approved_by_name ?? (r.approved_by ? idOf(r.approved_by) : ""), cell: (r) => r.approved_by_name ?? (r.approved_by ? idOf(r.approved_by) : "-") },
     ...metaColumns<PayrollRun>(),
     {
       id: "actions",

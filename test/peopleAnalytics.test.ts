@@ -383,3 +383,38 @@ describe("punctuality rules (pure)", () => {
     expect(expectedWorkingDays({ ...args, toYmd: "2026-06-30", todayYmd: "2026-06-10" })).toBe(8);
   });
 });
+
+describe("a named roster reports on exactly those people", () => {
+  // The caller that needed this is the custom grid's measure columns: it already holds a page of people and
+  // needs the numbers for THEM. Left to choose its own roster, this picks the first `maxPeople` employees in
+  // name order, which on any org past that cap is a different set from the one being rendered - so every row
+  // outside it got a blank measure cell, and `truncated`, the only signal that anything had been left out, was
+  // discarded by the caller.
+  it("ignores the cap that bounds a roster it chose itself", async () => {
+    await seed();
+    // A cap of one would leave exactly one person in a self-chosen roster. Naming both returns both, because
+    // the cap exists to bound a report that picked its own people.
+    const capped = await peopleAnalytics(deps, allScopes(), { ...WINDOW, maxPeople: 1 });
+    expect(capped.people).toHaveLength(1);
+    expect(capped.truncated).toBe(true);
+
+    const named = await peopleAnalytics(deps, allScopes(), { ...WINDOW, maxPeople: 1, employeeIds: [A.uuid, B.uuid] });
+    expect(named.people.map((p) => p.employee.split("/").pop()).sort()).toEqual([A.uuid, B.uuid].sort());
+    // Nothing was left out, so nothing claims it was.
+    expect(named.truncated).toBe(false);
+  });
+
+  it("narrows and never widens - the caller's own scope still decides who may be in it", async () => {
+    await seed();
+    // B's own scope, asking for A by name: the same refusal `employeeId` gets, for the same reason.
+    const scopes = new Map<string, ListScope>([["employees", own(B.uuid)], ["attendance", own(B.uuid)]]);
+    const out = await peopleAnalytics(deps, scopes, { ...WINDOW, employeeIds: [A.uuid, B.uuid] });
+    expect(out.people.map((p) => p.employee.split("/").pop())).toEqual([B.uuid]);
+  });
+
+  it("answers an empty roster with an empty report rather than everybody", async () => {
+    await seed();
+    const out = await peopleAnalytics(deps, allScopes(), { ...WINDOW, employeeIds: [] });
+    expect(out.people).toEqual([]);
+  });
+});

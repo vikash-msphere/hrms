@@ -2,10 +2,10 @@ import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
 
 // One post, on a page of its own.
 //
-// The board is a feed: a page of cards, paged as it is scrolled. The pop-out (`#/announcements/<id>/view`) is
+// The board is a feed: a page of cards, paged as it is scrolled. The pop-out (`/announcements/<id>/view`) is
 // the same post with the board taken away - reached from the card's own icon, and the address a long thread
 // gets read at. It is a genuinely different render path from the deep link the rest of the lane uses
-// (`#/announcements/<id>` scrolls the FEED to a card): the collection is not read at all, the post is fetched
+// (`/announcements/<id>` scrolls the FEED to a card): the collection is not read at all, the post is fetched
 // on its own, and the page's chrome - header, composer, filters, leaderboard - is not drawn.
 //
 // So the two things a browser has to show are that the pop-out really is alone (the other post on the board
@@ -37,7 +37,7 @@ test("a post pops out onto its own page, and the way back is on it", async ({ as
     await card.getByRole("button", { name: "Open in its own page" }).click();
 
     const id = subjectPath.split("/")[1]!;
-    await expect.poll(() => page.url()).toContain(`#/announcements/${id}/view`);
+    await expect.poll(() => page.url()).toContain(`/announcements/${id}/view`);
     await expect(page.getByText(subject).first()).toBeVisible({ timeout: 30_000 });
     // The board is gone, not scrolled: its other post, its heading and its composer are all off the page.
     await expect(page.getByText(other)).toHaveCount(0);
@@ -53,7 +53,7 @@ test("a post pops out onto its own page, and the way back is on it", async ({ as
 
     // The one thing a page with no chrome owes its reader.
     await page.getByRole("button", { name: "Back to the feed" }).click();
-    await expect.poll(() => page.url()).toMatch(/#\/announcements$/);
+    await expect.poll(() => page.url()).toMatch(/\/announcements$/);
     await expect(page.getByRole("heading", { level: 1, name: "Feed" })).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText(other).first()).toBeVisible();
   } finally {

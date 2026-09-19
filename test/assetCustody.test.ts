@@ -55,7 +55,7 @@ describe("asset custody is claimed by scanning the tag", () => {
     expect(asset.custodySince).not.toBeNull();
     expect(asset.tagSecret).toBeTruthy();
 
-    const verified = await verifyAsset(deps, admin, asset.uuid, { scan: `https://hr.example/#/assets/x?s=${asset.tagSecret}` });
+    const verified = await verifyAsset(deps, admin, asset.uuid, { scan: `https://hr.example/assets/x?s=${asset.tagSecret}` });
     expect(verified.status).toBe("in_stock");
     expect(verified.verifiedAt).not.toBeNull();
     expect(verified.custodySince).toBeNull();
@@ -221,7 +221,7 @@ describe("asset custody is claimed by scanning the tag", () => {
     const byTag = await verifyAsset(deps, admin, asset.uuid, { scan: asset.assetTag! });
     expect(byTag.status).toBe("in_stock");
     expect(byTag.verifiedScanned).toBe(false); // ...but neither is evidence
-    const byDeepLink = await verifyAsset(deps, admin, asset.uuid, { scan: `https://hr.example/#/assets/${wireId}` });
+    const byDeepLink = await verifyAsset(deps, admin, asset.uuid, { scan: `https://hr.example/assets/${wireId}` });
     expect(byDeepLink.verifiedScanned).toBe(false);
 
     const bySecret = await verifyAsset(deps, admin, asset.uuid, { scan: await secretOf(asset.uuid) });

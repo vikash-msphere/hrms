@@ -338,6 +338,12 @@ function Month({
           const ymd = addDays(first, i);
           const info = dayInfo?.(ymd);
           const nonWorking = !workDays.includes(dowOf(ymd));
+          // What KIND of day this is, in the same four words `domain/leave.ts` prices a request by: a weekend
+          // is one the org does not work, a holiday is a working weekday it has declared off, a half holiday
+          // is open for one session. It decides nothing here - the tint and the dot below are drawn from the
+          // same two facts - but it is the only spelling of "this day costs nothing" that does not move: the
+          // spoken label names the holiday in prose, and the quiet weekend is a class.
+          const kind = nonWorking ? "weekend" : info?.holiday ? (info.halfHoliday ? "half" : "holiday") : "work";
           const inRange = !!range && ymd >= range.start && ymd <= range.end;
           const isStart = range?.start === ymd;
           const isEnd = range?.end === ymd;
@@ -375,6 +381,8 @@ function Month({
                 // whoever is reading it, so it changes with the viewer's locale and cannot also serve as the
                 // grid's machine handle. Same job `data-idx` does for the combobox rows.
                 data-ymd={ymd}
+                // And what the day IS to the org, for the same reason: "weekend", "holiday", "half" or "work".
+                data-day={kind}
                 aria-pressed={inRange}
                 onFocus={() => onFocusDay(ymd)}
                 onClick={() => onPick(ymd)}

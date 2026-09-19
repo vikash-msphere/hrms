@@ -205,8 +205,10 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
         },
       },
       { id: "scope", header: "Scope", filter: "text", accessor: (k) => scopeSummary(k) },
-      { id: "expires", header: "Expires", filter: "none", accessor: (k) => k.expire_time ?? "", cell: (k) => <span className="text-muted-foreground">{k.expire_time ? fmtDate(k.expire_time) : "Never"}</span> },
-      { id: "last_used", header: "Last used", filter: "none", accessor: (k) => k.last_used_time ?? "", cell: (k) => <span className="text-muted-foreground">{fmtDate(k.last_used_time)}</span> },
+      // Two calendar questions a key list is audited on: what lapses soon, and what has not been used in
+      // months (a key nobody uses is a key nobody misses when it is revoked). Blank in either is "never".
+      { id: "expires", header: "Expires", filter: "date", dateHint: "future", accessor: (k) => k.expire_time ?? "", cell: (k) => <span className="text-muted-foreground">{k.expire_time ? fmtDate(k.expire_time) : "Never"}</span> },
+      { id: "last_used", header: "Last used", filter: "date", dateHint: "past", accessor: (k) => k.last_used_time ?? "", cell: (k) => <span className="text-muted-foreground">{fmtDate(k.last_used_time)}</span> },
       {
         id: "actions", header: "", sortable: false, filter: "none", align: "right",
         cell: (k) =>

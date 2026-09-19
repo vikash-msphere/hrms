@@ -210,14 +210,16 @@ export default function Overtime({ me }: { me: Me }) {
   }
 
   const empCol: Column<OvertimeRequest> = {
-    id: "employee", header: "Employee", filter: "select", accessor: (r) => empName(r.employee),
+    id: "employee", header: "Employee", filter: "select", groupBy: true, accessor: (r) => empName(r.employee),
     cell: (r) => { const e = emp(r.employee); return <span className="inline-flex items-center gap-2"><PhotoAvatar employeeId={r.employee ? idOf(r.employee) : ""} name={empName(r.employee)} photo={e?.photo} className="h-6 w-6" /> {empName(r.employee)}</span>; },
   };
   const baseCols: Column<OvertimeRequest>[] = [
-    { id: "date", header: "Date", accessor: (r) => orgYmd(r.start_time), cell: (r) => formatDate(orgYmd(r.start_time)) },
+    { id: "date", header: "Date", filter: "date", dateHint: "past", accessor: (r) => orgYmd(r.start_time), cell: (r) => formatDate(orgYmd(r.start_time)) },
     { id: "worked", header: "Worked", sortable: false, accessor: (r) => orgHhmm(r.start_time), cell: (r) => <span className="tabular-nums text-muted-foreground">{orgHhmm(r.start_time)}-{orgHhmm(r.end_time)}{orgYmd(r.end_time) !== orgYmd(r.start_time) && <span className="text-amber-600 dark:text-amber-400"> +1</span>}</span> },
-    { id: "duration", header: "Duration", align: "right", accessor: (r) => r.minutes, cell: (r) => <span className="font-medium tabular-nums">{fmtDuration(r.minutes)}</span> },
-    { id: "state", header: "Status", filter: "select", accessor: (r) => upper(r.state), cell: (r) => <span className="inline-flex items-center gap-1.5"><StatusBadge state={r.state} />{r.paid && <Badge variant="success">Paid</Badge>}</span> },
+    // Minutes, totalled: grouping by employee then reading the fold's subtotal is how a month of overtime
+    // gets signed off, and the total reads in hours because that is how the column's cells read.
+    { id: "duration", header: "Duration", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => fmtDuration(n), accessor: (r) => r.minutes, cell: (r) => <span className="font-medium tabular-nums">{fmtDuration(r.minutes)}</span> },
+    { id: "state", header: "Status", filter: "select", groupBy: true, accessor: (r) => upper(r.state), cell: (r) => <span className="inline-flex items-center gap-1.5"><StatusBadge state={r.state} />{r.paid && <Badge variant="success">Paid</Badge>}</span> },
     { id: "reason", header: "Reason", accessor: (r) => r.reason ?? "", cell: (r) => r.reason || <span className="text-muted-foreground">-</span> },
   ];
   // History only: the approver's note explains WHY a request landed where it did (esp. rejections).

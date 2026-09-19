@@ -61,7 +61,7 @@ test("a ticket takes a checklist and a reply, and both survive a reload", async 
 
   // From cold, on the ticket itself: a comment and a tick that live only in the open dialog are a
   // conversation nobody else can see.
-  // Opening a ticket writes its id into the hash, so a reload lands back ON the ticket rather than on the
+  // Opening a ticket writes its id into the path, so a reload lands back ON the ticket rather than on the
   // list - which is the point of the deep link, and means there is nothing to click here.
   await hr.reload();
   const again = hr.getByRole("dialog");

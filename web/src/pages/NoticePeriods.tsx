@@ -13,6 +13,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { type TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { ActivitySection } from "@/components/common/ActivitySection";
@@ -173,17 +174,50 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
   // alive - almost always a status nobody came back to change.
   const pastExit = form.status === "serving" && !!form.last_working_day && form.last_working_day < todayStr();
 
+  // An exit list is a countdown, so what matters is who leaves next and who has already gone without
+  // anyone closing the record off.
+  const noticeInsights = (ns: NoticePeriod[]): TableInsight[] => {
+    const live = ns.filter((n) => !n.delete_time);
+    const out: TableInsight[] = [];
+    const soon = live.filter((n) => n.status === "serving" && (n.days_remaining ?? 0) >= 0 && (n.days_remaining ?? 0) <= 14);
+    if (soon.length > 0) {
+      out.push({
+        id: "leaving-soon",
+        label: `${soon.length} leaving within two weeks`,
+        tone: "warning",
+        hint: "Handover, final pay and getting the kit back all hang off the last working day.",
+        filters: { status: "serving", remaining: "0..14" },
+        sort: "lwd.asc",
+      });
+    }
+    // Still "serving" with the last working day behind them: the record nobody came back to close, which
+    // leaves the login alive.
+    const overdue = live.filter((n) => n.status === "serving" && n.last_working_day < todayStr());
+    if (overdue.length > 0) {
+      out.push({
+        id: "past-exit",
+        label: `${overdue.length} past their last working day`,
+        tone: "destructive",
+        hint: "Still marked as serving. Mark them exited to close the account off.",
+        filters: { status: "serving", lwd: "past" },
+        sort: "lwd.asc",
+      });
+    }
+    return out;
+  };
+
   const columns: Column<NoticePeriod>[] = [
     {
-      id: "employee", header: "Employee", filter: "select", accessor: (n) => empName(n.employee),
+      id: "employee", header: "Employee", filter: "select", groupBy: true, accessor: (n) => empName(n.employee),
       cell: (n) => { const e = emp(n.employee); return <span className="inline-flex items-center gap-2"><PhotoAvatar employeeId={n.employee ? idOf(n.employee) : ""} name={empName(n.employee)} photo={e?.photo} className="h-6 w-6" /> {empName(n.employee)}{n.transition && <UserMinus className="h-3.5 w-3.5 text-muted-foreground" aria-label="Offboarding started" />}</span>; },
     },
-    { id: "type", header: "Type", filter: "select", accessor: (n) => humanize(n.type), cell: (n) => <Badge variant="secondary">{humanize(n.type)}</Badge> },
-    { id: "notice_date", header: "Notice given", accessor: (n) => n.notice_date, cell: (n) => formatDate(n.notice_date) },
-    { id: "lwd", header: "Last working day", accessor: (n) => n.last_working_day, cell: (n) => formatDate(n.last_working_day) },
-    { id: "remaining", header: "Remaining", accessor: (n) => (n.status === "serving" ? n.days_remaining ?? 0 : -1), cell: (n) => <RemainingBadge n={n} /> },
-    { id: "status", header: "Status", filter: "select", accessor: (n) => n.status, cell: (n) => <StatusBadge n={n} /> },
-    { id: "total", header: "Notice (days)", defaultHidden: true, align: "right", accessor: (n) => n.total_days, cell: (n) => <span className="tabular-nums">{n.total_days}</span> },
+    { id: "type", header: "Type", filter: "select", groupBy: true, accessor: (n) => humanize(n.type), cell: (n) => <Badge variant="secondary">{humanize(n.type)}</Badge> },
+    { id: "notice_date", header: "Notice given", filter: "date", dateHint: "past", accessor: (n) => n.notice_date, cell: (n) => formatDate(n.notice_date) },
+    // The date everything else hangs off: handover, the final payout, the laptop coming back.
+    { id: "lwd", header: "Last working day", filter: "date", dateHint: "future", accessor: (n) => n.last_working_day, cell: (n) => formatDate(n.last_working_day) },
+    { id: "remaining", header: "Remaining", filter: "number", formatTotal: (d) => `${d} days`, accessor: (n) => (n.status === "serving" ? n.days_remaining ?? 0 : -1), cell: (n) => <RemainingBadge n={n} /> },
+    { id: "status", header: "Status", filter: "select", groupBy: true, accessor: (n) => n.status, cell: (n) => <StatusBadge n={n} /> },
+    { id: "total", header: "Notice (days)", defaultHidden: true, align: "right", filter: "number", formatTotal: (d) => `${d} days`, accessor: (n) => n.total_days, cell: (n) => <span className="tabular-nums">{n.total_days}</span> },
     { id: "reason", header: "Reason", defaultHidden: true, accessor: (n) => n.reason ?? "", cell: (n) => n.reason || "-" },
     stateColumn<NoticePeriod>(),
     ...metaColumns<NoticePeriod>(),
@@ -232,7 +266,7 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
         {rows.length === 0 ? (
           <EmptyState icon={LogOut} title="No notice periods" description="Record an employee's notice so you can track their last working day and exit countdown." action={addBtn} />
         ) : (
-          <DataTable columns={columns} tableId="notice-periods" rows={sorted} getRowId={(n) => n.path} rowClassName={(n) => (n.delete_time ? "opacity-60" : undefined)} emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : "No records match"} accessCollection="notice-periods" accessTargetOf={(n) => ({ objectPath: n.path, label: empName(n.employee), can: n.access?.can })} />
+          <DataTable columns={columns} insights={noticeInsights} tableId="notice-periods" rows={sorted} getRowId={(n) => n.path} rowClassName={(n) => (n.delete_time ? "opacity-60" : undefined)} emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : "No records match"} accessCollection="notice-periods" accessTargetOf={(n) => ({ objectPath: n.path, label: empName(n.employee), can: n.access?.can })} />
         )}
       </DataState>
 

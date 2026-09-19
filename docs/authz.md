@@ -322,7 +322,10 @@ negotiation are all sayable, not just the published/disabled flags this started 
 NOT public, which is the fail-closed direction. One predicate (`isPublicState`) backs both the item gate
 (`stateReadAllowed`) and the list filter (`services/stateFilter.ts`, bound by the collection factory), so the
 lane that decides and the lane that filters cannot drift - which they had, the list filter having been
-hand-written for one collection while the manifest looked general.
+hand-written for one collection while the manifest looked general. The custom-grid runner
+(`services/tableRun.ts`) binds the same filter on its base page, on every linked row and on every source, for
+the same reason: a grid is a list of the collection it is based on, and a projection that skipped it would be
+the one list in the app answering with rows the collection's own list hides.
 
 **Per-rule guards.** Beyond its pattern a rule may carry up to three constraints, all of them SUBTRACTIVE and
 all evaluated by one pass (`domain/ruleCondition.ts` `guardAllows`) after `decide()` has already allowed:
@@ -451,7 +454,21 @@ On `POST` / `PATCH` / `PUT` with a JSON body, after the resource-level write pas
 
 **Read-side field gating** is the mirror of this and runs where every resource is serialized rather than on
 the body: `policy.redacted_fields` lists base-record fields whose READ is decided at
-`<collection>.<code>.<field>`, and `withAccess` (`http/accessHint.ts`) drops the ones that fail. It is
+`<collection>.<code>.<field>`, and `withAccess` (`http/accessHint.ts`) drops the ones that fail. The two
+surfaces that do not serialize a resource decide the identical key for themselves, through the same
+`deniedRedactedFields` (`http/fieldAccess.ts`):
+
+- the **custom-grid runner** projects raw columns, so it asks it per row - over the code of the row the field
+  LIVES on, base or linked - and blanks the cell. A redaction-gated field is also never pushed into the SQL
+  `WHERE`, because a predicate evaluated in the database would judge the real value and turn a hidden filter
+  into a way to read the field a letter at a time.
+- **global search** renders text the INDEX copied out of the row, which no serializer ever sees. It drops a
+  title or subtitle built from a denied field, and then re-explains the hit: a row is kept only if the columns
+  this caller MAY read still contain every token, so matching on a withheld field cannot confirm a guess at it.
+  The re-check costs one read per affected collection and only for a caller who is actually denied something.
+
+Both are per ROW, because the key is scoped by the row's own code; neither can be answered once for a
+collection. It is
 additive - a pattern's `**` matches trailing tokens, so every ordinary grant already satisfies the field key
 and nothing is narrowed by a field being listed. What it buys is the ability to take one away with a deny
 (`offers.*.base_comp.**`), scoped like any other pattern. PII sub-resources keep their own redactors
@@ -606,6 +623,33 @@ records, the field position says which kind. The client checks the broad capabil
 (`canSeeActivity` / `canExport` in `web/src/lib/perm.ts`); `isFieldScopeTarget` validates the field against
 `COLLECTIONS` for exactly these two. `unmask` is field-scoped the ordinary way instead (`unmask.*.identity.uan`),
 decided per field by `unmaskGate`.
+
+**Per-collection breadth (`read_scopes` / `write_scopes`).** The same stripping hides a coarser thing than a
+single row: whether the caller reaches ANYBODY ELSE. `attendance.me.**` and `attendance.**` both emit
+`attendance.read`, and every employee holds the self-service half of attendance, goals, reviews, payslips, the
+board and their own bank/identity/tax - so a UI that gates a surface about one named person on the string
+shows it to everybody, about everybody. `callerScopes(actor, self)` (`domain/access.ts`) answers the missing
+half by running the same synthetic-code probe `actorScope` uses over every collection in `COLLECTIONS`, plus
+every field-precise employee sub-resource (`SUBRESOURCE_BODY`) at its own path, at both the read and the write
+level. It returns `{ read, write }` maps of `<collection>` (or `employees.<sub>`) to `dept` / `all`; `own` is
+OMITTED, so a missing key is the fail-closed answer. Subtree grants and the manager chain count - the self
+context comes from `selfContextFor`, so a `my-reports` rule reports as `dept`. Per-object shares and denies do
+not: they are grant-exception rows read per request, and this describes what the grant reaches. Served on
+`GET /v1/users/me` beside `capabilities`, and consumed by `useCanReadFor` / `useCanWriteFor`
+(`web/src/lib/perm.ts`). A hint, like everything else here.
+
+**Per-subject reach (`access.subject`).** `access.can` says which VERBS the caller may run on one row.
+A profile asks a different question - "may I see this person's goals, their attendance, their pay" - and each
+of those is a DIFFERENT collection whose own grant decides it, about this person. `subjectScopes(grant, self,
+subjectCode)` (`domain/access.ts`) answers it by probing `<collection>.<subjectCode>-<SCOPE_PROBE_LEAF>`: a
+synthetic LEAF under the subject's REAL code, i.e. "a row of this collection owned by this person". Every
+scope token then matches or does not on its own terms - `me` for the owner, `my-dept` / `my-reports` /
+`my-org` for the team, `<code>-*` for a granted branch, a merged per-object share for the single record - so
+the function contains no case analysis and no policy. Computed on the employees item (`subjectScopes: true` on
+the route spec), where `ctx.objectGrant` carries the shares and `ctx.self` the reporting chain; emitted as
+`{read, write}` key lists, absent meaning no. Contrast `read_scopes` below, which is a caller-level TIER: it
+is probed with codes belonging to nobody, so it can report `my-reports` only as the blanket `dept` and cannot
+see a share at all - correct for "is there anyone but me", wrong for "may I see Asha's goals".
 
 **Per-object `access.can`.** Coarse capabilities are scope-stripped, so they can't tell the client whether the
 caller may act on a *specific* row. `computeCan(grant, self, collection, code)` (`src/http/accessHint.ts`)

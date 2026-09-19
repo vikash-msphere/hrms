@@ -20,13 +20,13 @@ test.describe("keyboard shortcuts", () => {
     // sits when they have not clicked into anything.
     await page.keyboard.press("g");
     await page.keyboard.press("l");
-    await expect.poll(() => page.url()).toMatch(/#\/leave-requests\b/);
+    await expect.poll(() => page.url()).toMatch(/\/leave-requests\b/);
 
     // `]` is the same workspace's next tab, not a jump: Directory and Org Chart are two tabs of the People
     // workspace, so this proves the layer reads the CURRENT page's tab list rather than a fixed order.
     await gotoRoute(page, "employees", "Directory");
     await page.keyboard.press("]");
-    await expect.poll(() => page.url()).toMatch(/#\/org-chart\b/);
+    await expect.poll(() => page.url()).toMatch(/\/org-chart\b/);
 
     // And the reference, which is the only place a reader learns any of this exists.
     await page.keyboard.press("?");
@@ -46,7 +46,7 @@ test.describe("keyboard shortcuts", () => {
     await search.click();
     await page.keyboard.type("gl");
     await expect(search).toHaveValue("gl");
-    expect(page.url(), "a chord fired from inside a text field").toMatch(/#\/employees\b/);
+    expect(page.url(), "a chord fired from inside a text field").toMatch(/\/employees\b/);
   });
 
   test("an open dialog owns the keyboard", async ({ as }) => {
@@ -62,6 +62,6 @@ test.describe("keyboard shortcuts", () => {
     await page.keyboard.press("g");
     await page.keyboard.press("l");
     await expect(dialog).toBeVisible();
-    expect(page.url()).toMatch(/#\/vendors\b/);
+    expect(page.url()).toMatch(/\/vendors\b/);
   });
 });

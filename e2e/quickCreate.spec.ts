@@ -19,7 +19,7 @@ test.describe("quick create", () => {
     await page.getByRole("menuitem", { name: "Set a goal" }).click();
 
     // Navigated...
-    await expect.poll(() => page.url()).toMatch(/#\/goals\b/);
+    await expect.poll(() => page.url()).toMatch(/\/goals\b/);
     // ...and the intent was picked up by the page that had not mounted yet when it was fired.
     const dialog = page.getByRole("dialog");
     await expect(dialog.getByText("New goal")).toBeVisible();

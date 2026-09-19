@@ -3,6 +3,8 @@ import { MessagesSquare, Plus, Trash2, Check, X, CalendarDays, CalendarPlus, Cal
 import { create, patch, remove, list } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { isOpen as goalIsOpen } from "@/lib/goalState";
+import { measureLabel } from "@/lib/goalMeasure";
 import { todayStr, addDaysYmd } from "@/lib/orgDay";
 import type { Board, CheckIn, CheckInActionItem, Employee, Goal, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -784,13 +786,16 @@ function NewDialog({ me, employees, initial, existing, nameOf, onClose, onCreate
       if (other) {
         // Only the subject's own goals, and only the live ones. A closed goal is not this week's business.
         const goals = (await list<Goal>("goals", { max: 100, params: { employee: `employees/${other}` } }).catch(() => null))?.results ?? [];
+        // `isOpen` and `measureLabel` from the shared goal modules, rather than this file's own copy of both:
+        // the agenda used to say "42 of 60 customers" in a phrasing it had rebuilt inline, which is exactly
+        // the kind of copy that goes on saying "of" after the Goals page starts saying something else.
         const open = goals
-          .filter((g) => !g.delete_time && (g.status === "in_progress" || g.status === "not_started"))
+          .filter((g) => !g.delete_time && goalIsOpen(g))
           .sort((a, b) => (a.due_date ?? "9999").localeCompare(b.due_date ?? "9999"));
         if (open.length) {
           lines.push("Goals:");
           for (const g of open.slice(0, 6)) {
-            const where = g.target_value != null ? `${g.current_value ?? 0} of ${g.target_value}${g.unit ? ` ${g.unit}` : ""}` : `${g.progress ?? 0}%`;
+            const where = measureLabel(g) ?? `${g.progress ?? 0}%`;
             lines.push(`- ${g.title} (${where}${g.due_date ? `, due ${formatDate(g.due_date)}` : ""})`);
           }
           lines.push("");

@@ -17,7 +17,7 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   "leave-encashments", "reimbursements", "reimbursement-categories",
   // operational/company expenses: employee-owned expense (submitter-scoped) + flat vendor/category masters + finance budgets
   "expenses", "expense-categories", "vendors", "expense-budgets",
-  "attendance", "attendance-regularizations", "overtime-requests", "remote-work-requests", "approval-delegations", "notice-periods", "suggestions", "notifications",
+  "attendance", "attendance-regularizations", "attendance-day-marks", "overtime-requests", "remote-work-requests", "approval-delegations", "notice-periods", "suggestions", "notifications",
   // compliance: per-employee acknowledgement (e-signature) of an org-document version; employee-owned, private-by-default
   "document-acknowledgements",
   // statutory compliance calendar (PF/ESI/TDS/GST/PT/returns); flat company-wide, HR-managed

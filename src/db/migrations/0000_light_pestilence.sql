@@ -285,6 +285,23 @@ CREATE TABLE `attachments` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `attach_target_idx` ON `attachments` (`collection`,`object_id`,`slot`);--> statement-breakpoint
+CREATE TABLE `attendance_day_marks` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`code` text,
+	`employee_id` text NOT NULL,
+	`date` integer NOT NULL,
+	`credit` text NOT NULL,
+	`reason` text,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	`delete_time` integer,
+	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `attendance_day_marks_code_unique` ON `attendance_day_marks` (`code`);--> statement-breakpoint
+CREATE INDEX `attendance_day_marks_page_idx` ON `attendance_day_marks` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `attmark_emp_idx` ON `attendance_day_marks` (`employee_id`,`date`);--> statement-breakpoint
+CREATE UNIQUE INDEX `attmark_live_day_idx` ON `attendance_day_marks` (`employee_id`,`date`) WHERE "attendance_day_marks"."delete_time" is null;--> statement-breakpoint
 CREATE TABLE `attendance_regularizations` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -3755,6 +3772,18 @@ END;
 --> statement-breakpoint
 CREATE TRIGGER "chg_d_attendance" AFTER DELETE ON "attendance_sessions" BEGIN
   INSERT INTO "collection_versions" ("collection", "at") VALUES ('attendance', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_i_attendance_day_marks" AFTER INSERT ON "attendance_day_marks" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('attendance-day-marks', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_u_attendance_day_marks" AFTER UPDATE ON "attendance_day_marks" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('attendance-day-marks', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_d_attendance_day_marks" AFTER DELETE ON "attendance_day_marks" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('attendance-day-marks', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
 --> statement-breakpoint
 CREATE TRIGGER "chg_i_attendance_regularizations" AFTER INSERT ON "attendance_regularizations" BEGIN

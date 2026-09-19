@@ -32,7 +32,7 @@ test("a disabled account is locked out of the app it was using a moment ago", as
   try {
     // A working session first, so what follows is a lock-out rather than an account that never worked.
     await gotoRoute(theirs, "dashboard");
-    await expect(theirs.getByRole("complementary").locator('a[href="#/dashboard"]')).toBeVisible({ timeout: 30_000 });
+    await expect(theirs.getByRole("complementary").locator('a[href="/dashboard"]')).toBeVisible({ timeout: 30_000 });
     expect((await theirs.request.get("/v1/users/me")).status()).toBe(200);
 
     // The admin turns it off, through the panel and its confirm.
@@ -61,7 +61,7 @@ test("a disabled account is locked out of the app it was using a moment ago", as
     // which is a wording question rather than an access one.)
     await theirs.reload();
     await expect(theirs.getByRole("complementary")).toHaveCount(0, { timeout: 30_000 });
-    await expect(theirs.locator('a[href="#/employees"]')).toHaveCount(0);
+    await expect(theirs.locator('a[href="/employees"]')).toHaveCount(0);
   } finally {
     // The employee goes; the login stays, disabled. Users have no delete route at all - "provisioned when an
     // employee is created, disabled rather than removed" (src/routes/users.ts) - and disabled is the resting

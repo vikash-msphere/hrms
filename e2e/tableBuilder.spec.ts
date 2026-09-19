@@ -33,7 +33,7 @@ test("a saved table mixes fields from three collections, and comes back the same
     // Landed on the table itself, empty until it has columns.
     await expect(page.getByRole("heading", { name })).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText("No columns yet")).toBeVisible({ timeout: 30_000 });
-    path = new URL(page.url()).hash.split("/")[2] ?? null;
+    path = new URL(page.url()).pathname.split("/")[2] ?? null;
 
     // Three fields, from three different collections: the employee row, the identity sub-resource (which is
     // field-access-gated and masked), and compensation (a different module entirely).
@@ -85,7 +85,7 @@ test("the picker follows a reference into another collection, and its fields bec
     await page.getByRole("option", { name: "People", exact: true }).click();
     await create.getByRole("button", { name: "Create", exact: true }).click();
     await expect(page.getByRole("heading", { name })).toBeVisible({ timeout: 30_000 });
-    path = new URL(page.url()).hash.split("/")[2] ?? null;
+    path = new URL(page.url()).pathname.split("/")[2] ?? null;
 
     await page.getByRole("button", { name: "Pick columns" }).click();
     const picker = page.getByRole("dialog");
@@ -136,7 +136,7 @@ test("the base of a saved table can be changed, and the columns are cleared with
     await page.getByRole("option", { name: "People", exact: true }).click();
     await create.getByRole("button", { name: "Create", exact: true }).click();
     await expect(page.getByRole("heading", { name })).toBeVisible({ timeout: 30_000 });
-    path = new URL(page.url()).hash.split("/")[2] ?? null;
+    path = new URL(page.url()).pathname.split("/")[2] ?? null;
 
     // One column, so the change has something to cost.
     await page.getByRole("button", { name: "Pick columns" }).click();
@@ -195,4 +195,76 @@ test("a table deleted from the list disappears from it", async ({ as }) => {
   const confirm = page.getByRole("dialog").filter({ hasText: name });
   await confirm.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(page.getByText(name)).toHaveCount(0, { timeout: 30_000 });
+});
+
+// A grid is a thing you WORK, not a screenshot: the header a column shows is the author's own word for it,
+// the rows summarise into a picture you can press, the table's own filter is saved on the definition rather
+// than typed into the browser each time, and a row leads back to the record it came from.
+//
+// All four were missing from the page while the server already took three of them: `label`, `filters` and
+// `sort` are fields of a saved view that nothing in the SPA could edit.
+test("a table renames a column, summarises its rows, saves a filter, and opens the record behind a row", async ({ as }) => {
+  test.setTimeout(240_000);
+  const page = await as("super");
+  const name = `E2E worked ${Date.now() % 100000}`;
+  let path: string | null = null;
+
+  try {
+    await gotoRoute(page, "tables", "Tables");
+    await page.getByRole("button", { name: "New table" }).first().click();
+    const create = page.getByRole("dialog");
+    await create.getByPlaceholder("e.g. Salary sheet - March").fill(name);
+    await create.getByRole("combobox").click();
+    await page.getByRole("option", { name: "People", exact: true }).click();
+    await create.getByRole("button", { name: "Create", exact: true }).click();
+    await expect(page.getByRole("heading", { name })).toBeVisible({ timeout: 30_000 });
+    path = new URL(page.url()).pathname.split("/")[2] ?? null;
+
+    // One text column and one money column: enough for a group-by, a total, and a header worth renaming.
+    await page.getByRole("button", { name: "Pick columns" }).click();
+    const picker = page.getByRole("dialog");
+    for (const field of ["First name", "Annual CTC"]) {
+      await picker.getByPlaceholder(/Search .* fields/).fill(field);
+      await picker.getByRole("checkbox").first().check();
+    }
+    // The catalogue's name for a field is mechanical; what the table calls it is the author's. Renaming it is
+    // an edit of the definition, so it is what every reader of the table sees.
+    await picker.getByLabel("Header for First name").fill("Given name");
+    await picker.getByRole("button", { name: "Save columns" }).click();
+    await expect(page.getByRole("columnheader", { name: /^Given name/ })).toBeVisible({ timeout: 30_000 });
+
+    // The strip over the grid: what one screenful of the report adds up to.
+    await expect(page.getByText("Total annual ctc")).toBeVisible({ timeout: 30_000 });
+
+    // Summarise: one bar per value of the first column that has repeated values, drawn from the rows in hand.
+    await page.getByRole("button", { name: "Summarise" }).click();
+    await expect(page.getByText("Rows by Given name")).toBeVisible({ timeout: 30_000 });
+
+    // The table's OWN filter - saved on the view, applied by the server to every page. "is not empty" needs no
+    // typed value, so what this proves is the round trip rather than one particular comparison.
+    await page.getByRole("button", { name: /^Filter & sort/ }).click();
+    const sheet = page.getByRole("dialog").filter({ hasText: "Filter & sort" });
+    await sheet.getByRole("button", { name: "Add filter" }).click();
+    await sheet.getByLabel("Condition").click();
+    await page.getByRole("option", { name: "is not empty", exact: true }).click();
+    await sheet.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.getByText("Given name is not empty")).toBeVisible({ timeout: 30_000 });
+
+    // It is on the definition, not in this browser: it comes back with the table.
+    await page.reload();
+    await expect(page.getByText("Given name is not empty")).toBeVisible({ timeout: 30_000 });
+
+    // And a row is a record. The grid is built on People, so its rows lead to the profile.
+    //
+    // Scoped to the row, not `getByRole("button", { name: "Actions" })` over the page: a clickable DataTable
+    // row IS a button, and its accessible name is everything inside it - including the row-actions trigger's
+    // own "Actions" label. An unscoped locator therefore matched the row first and pressing it navigated,
+    // which is the right behaviour arriving through the wrong element.
+    const firstRow = page.locator('tbody tr[role="button"]').first();
+    await firstRow.getByRole("button", { name: "Actions" }).click();
+    await page.getByRole("menuitem", { name: "Open record" }).click();
+    await expect(page).toHaveURL(/\/employees\//, { timeout: 30_000 });
+  } finally {
+    if (path) await purge(page, `table-views/${path}`);
+  }
 });

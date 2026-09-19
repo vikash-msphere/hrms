@@ -95,7 +95,7 @@ export const reviews = collectionRoutes({
     }
     return toReviewResource(row);
   },
-  list: (c, page) => listReviews(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("cycle"), c.req.query("state")),
+  list: (c, page) => listReviews(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("cycle"), c.req.query("state"), c.req.query("employee")),
   decorate: (deps, actor, rows) => withEvidence(deps, actor, rows),
   verbs: {
     submitSelf: { schema: selfSchema, run: (deps, user, id, body) => submitSelf(deps, user, id, body.self_comment, body.self_ratings) },

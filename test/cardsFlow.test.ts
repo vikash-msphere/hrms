@@ -235,6 +235,31 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     expect((created as { actorName?: string }).actorName).toBe("Test User");
   });
 
+  // The profile's Performance tab asks for the work one person is DOING, across every board. On the assignee,
+  // not the owner: `employee_id` is what the row is authz-scoped by and defaults to whoever filed the card, so
+  // a task a manager filed for somebody else is owned by the manager and done by the report.
+  it("lists one person's tasks by assignee, across boards, ignoring the owner", async () => {
+    const actor = await seedActor();
+    const doer = genId();
+    await deps.db.insert(schema.employees).values({ uuid: doer, code: `04-${genId().slice(0, 3)}`, firstName: "Dee", lastName: "Oer", workEmail: `${doer}@test.example`, status: "active" });
+    const one = await createBoard(deps, actor, { name: "Board one" });
+    const two = await createBoard(deps, actor, { name: "Board two" });
+    const mine = await createCard(deps, actor, { board: `boards/${one.uuid}`, title: "Filed for Dee", assignee: `employees/${doer}` });
+    const alsoMine = await createCard(deps, actor, { board: `boards/${two.uuid}`, title: "Other board, same person", assignee: `employees/${doer}` });
+    // Owned by the actor and assigned to nobody: it must not arrive on Dee's list just because Dee's tasks are
+    // being asked for on a board the actor owns.
+    await createCard(deps, actor, { board: `boards/${one.uuid}`, title: "Unassigned" });
+
+    const scope = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true } as const;
+    const page = await listCards(deps, scope, 50, undefined, undefined, false, false, doer);
+    expect(page.items.map((c) => c.uuid).sort()).toEqual([mine.uuid, alsoMine.uuid].sort());
+    expect(page.items.every((c) => c.employeeId === actor.employeeId)).toBe(true);
+
+    // Composes with the board filter rather than replacing it.
+    const onBoardTwo = await listCards(deps, scope, 50, undefined, two.uuid, false, false, doer);
+    expect(onBoardTwo.items.map((c) => c.uuid)).toEqual([alsoMine.uuid]);
+  });
+
   it("card checklist: add / toggle / remove, with list progress", async () => {
     const actor = await seedActor();
     const board = await createBoard(deps, actor, { name: "Checklist board" });

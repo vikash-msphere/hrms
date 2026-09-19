@@ -64,9 +64,9 @@ test("a leave type inherits an org rule, overrides it, or opts out of it", async
   // nothing for anybody filing leave beside it.
   await setOrgRestrictions(page, { quota: { max_days_per_year: 999 } });
   try {
-    // A full document load, not just a hash change: the org's settings are held as ONE shared snapshot in the
+    // A full document load, not just a route change: the org's settings are held as ONE shared snapshot in the
     // tab (web/src/lib/settingsStore.ts), and this spec wrote the baseline from outside the app, so nothing
-    // in the running page knows to drop it. Navigating between hash routes would keep serving the old copy.
+    // in the running page knows to drop it. Navigating between app routes would keep serving the old copy.
     await page.reload();
     await gotoRoute(page, "settings/leave-types");
     await page.getByRole("button", { name: "New leave type" }).first().click();

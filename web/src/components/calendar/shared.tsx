@@ -75,7 +75,7 @@ export function EntryCard({ en }: { en: CalEntry }) {
         {en.kind === "remote" && <p>Working remotely - not away.</p>}
         {/* Masked, like the same field on the Leaves page ("The reason is masked in session replay" there, and
             on the request textarea). A leave reason is where "hospital appointment", "bereavement" or a
-            treatment name goes; #/leave-calendar is deliberately not in SENSITIVE_PAGES - who is off when is
+            treatment name goes; /leave-calendar is deliberately not in SENSITIVE_PAGES - who is off when is
             what a replay of it is for - so the one confidential field on it carries its own tag. */}
         {en.reason && <p className="line-clamp-3 italic" data-sentry-mask>"{en.reason}"</p>}
       </div>

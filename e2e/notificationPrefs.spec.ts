@@ -74,7 +74,7 @@ test.describe("notification preferences", () => {
       // The cross-device half: a different browser, the same person, reading the server's copy. A preference
       // that only silenced the tab it was set in would pass everything above and still be the wrong feature.
       const elsewhere = await as("employee");
-      await elsewhere.goto("/#/notifications?setting=notification-prefs");
+      await elsewhere.goto("/notifications?setting=notification-prefs");
       await expect(prefs(elsewhere)).toBeVisible({ timeout: 30_000 });
       await expect(categoryBox(elsewhere, CATEGORY)).not.toBeChecked({ timeout: 30_000 });
     } finally {
@@ -94,7 +94,7 @@ test.describe("notification preferences", () => {
     // The same `?setting=` deep link every inline panel is addressed by, on a USER-scoped one: it resolves
     // against the caller's own employee id rather than an org row, which is the half that has no equivalent
     // in the org panels `settingsSheet` covers.
-    await page.goto("/#/notifications?setting=notification-prefs");
+    await page.goto("/notifications?setting=notification-prefs");
     await expect(prefs(page).getByText("Daily digest")).toBeVisible({ timeout: 30_000 });
     await expect(categoryBox(page, CATEGORY)).toBeVisible();
   });

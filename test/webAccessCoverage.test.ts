@@ -24,7 +24,13 @@ const VERB_CALL = /\b(?:invoke|upload)\(/;
 const VERB_MARK = /AccessAction|RowActions/;
 
 // path suffix -> reason. Empty today; keep it that way unless a file truly manages no grantable resource.
-const PAGE_ALLOW: Record<string, string> = {};
+const PAGE_ALLOW: Record<string, string> = {
+  // `/profile` and `/employees/<id>` are ONE page now (pages/EmployeeProfile.tsx), which carries every
+  // affordance and binds its own `<AccessScope>` so both addresses target the same record. What is left here
+  // is the address plus the one case that never reaches that page: an account with no employee record, which
+  // has no subject for an affordance to be about.
+  "pages/Profile.tsx": "a thin route wrapper around EmployeeProfile, which carries the affordances",
+};
 const VERB_ALLOW: Record<string, string> = {
   // "Who can see my record": the ONE verb in the app that is deliberately not an admin affordance. It reports
   // on the caller's OWN record - the service pins the target to their employee id, so the path id never
@@ -36,6 +42,13 @@ const VERB_ALLOW: Record<string, string> = {
 // Per-object affordances whose object was never fetched as a row, so there IS no `access.can` to pass: the
 // path is known (it makes a good ACL target) but the hint is not, and the gate falls back to the caller's
 // capability. Add a file here only when the object genuinely never arrives as a resource in that view.
+// Per-record panels with no grantable resource of their own. A panel about ONE employee is the unit an admin
+// grants, so it needs its own key: the tab it sits under names a single collection, and a merged tab holds
+// several - Performance is goals + cards + reviews, Posts is announcements + suggestions - so an admin asked
+// for sight of somebody's reviews would open the only key on screen and grant goals. Both shipped without one.
+const PANEL_ALLOW: Record<string, string> = {
+  "components/common/EmployeePicker.tsx": "a form control for choosing a person; it manages no resource of its own",
+};
 const CAN_ALLOW: Record<string, string> = {
   "pages/Operations.tsx": "cron/queue job rows are audit records, not resources - they carry no access hint",
   "pages/PayslipDesignTab.tsx": "the target is the settings/payslip blob, edited in place, never listed as a row",
@@ -51,6 +64,14 @@ describe("web access-affordance coverage", () => {
       .filter(([p, src]) => !allowed(p, PAGE_ALLOW) && !AFFORDANCE.test(src))
       .map(([p]) => p);
     expect(misses, `pages with no manage-access surface: ${misses.join(", ")}`).toEqual([]);
+  });
+
+  it("every per-record employee panel references an access affordance", () => {
+    const misses = Object.entries(common)
+      .filter(([p]) => /\/Employee[A-Z][A-Za-z]*\.tsx$/.test(p))
+      .filter(([p, src]) => !allowed(p, PANEL_ALLOW) && !AFFORDANCE.test(src))
+      .map(([p]) => p);
+    expect(misses, `per-record panels with no manage-access key of their own: ${misses.join(", ")}`).toEqual([]);
   });
 
   it("every file calling invoke()/upload() carries an AccessAction/RowActions mark", () => {

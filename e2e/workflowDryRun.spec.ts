@@ -36,7 +36,7 @@ test("the editor dry-runs the saved rule against a sample event", async ({ as })
   const path = ((await created.json()) as { path: string }).path;
 
   try {
-    // Straight into the rule's own editor: `#/workflows/<id>` is the deep link the log, the search and a
+    // Straight into the rule's own editor: `/workflows/<id>` is the deep link the log, the search and a
     // copied URL all hand out, and it saves this spec hunting a card down a list every other workflow spec
     // is also writing to.
     await gotoRoute(page, `workflows/${path.split("/")[1]}`);

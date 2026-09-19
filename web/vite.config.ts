@@ -252,7 +252,7 @@ function preloadUiFont(): Plugin {
 // checks this table against NAV so a new tab cannot quietly fall out of its workspace.
 const PAGE_GROUPS: Record<string, readonly string[]> = {
   "ws-team": ["Directory", "EmployeeProfile", "OrgChart", "TeamAnalytics", "Onboarding", "NoticePeriods", "BackgroundChecks"],
-  "ws-progress": ["Boards", "Goals", "GoalCockpit", "Reviews", "CheckIns"],
+  "ws-progress": ["Boards", "Goals", "Reviews", "CheckIns"],
   "ws-connect": ["Announcements", "Suggestions", "Events"],
   "ws-hiring": ["Pipeline", "Requisitions", "Candidates", "CandidateProfile", "Interviews", "Offers", "Referrals", "RecruitingAnalytics"],
   "ws-time": ["Attendance", "Schedule", "Timesheets", "Overtime", "RemoteWork", "Delegations"],

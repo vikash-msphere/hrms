@@ -1,6 +1,6 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ArrowUp, Bookmark, Check, ChevronsUpDown, Filter, X, SlidersHorizontal, GripVertical, ChevronLeft, ChevronRight, Download, FileSpreadsheet, FileText, Inbox, Search, Star } from "lucide-react";
+import { ArrowDown, ArrowUp, Ban, Bookmark, Check, ChevronsDownUp, ChevronsUpDown, Copy, EyeOff, Filter, Layers, X, SlidersHorizontal, GripVertical, ChevronLeft, ChevronRight, Download, FileSpreadsheet, FileText, Inbox, Search, Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,13 +19,32 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { usePermission, useCanExport } from "@/lib/perm";
 import { exportTable } from "@/lib/exportTable";
 import { useCollectionHasMore } from "@/hooks/useCollection";
-import { syncLastHash } from "@/router";
+import { syncLastUrl } from "@/router";
 import { useMedia } from "@/hooks/useMedia";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { useToast } from "@/components/ui/use-toast";
+import { BLANK, filterChipLabel, matchesFilter, numberStats, type FilterKind } from "@/lib/tableFilter";
+import { DateFilterPanel, NumberFilterPanel, SelectFilterPanel, type SelectOption } from "@/components/common/tableFilterPanels";
+import { TableInsights, type TableInsight } from "@/components/common/TableInsights";
+import { todayStr } from "@/lib/orgDay";
 
 const PAGE_SIZES = [10, 25, 50, 100, 0]; // 0 = All
 
 /** Joins column ids into one comparable key. A character no column id can contain, so the key is unambiguous. */
 const ID_SEP = String.fromCharCode(0);
+
+// Which table's search box `/` reaches. A page can hold several tables (tabs that render all their panels,
+// a page with a sub-table), and every one of them listening for `/` would race to steal the same keystroke.
+// The FIRST one mounted owns the key for as long as it is mounted, which on a tabbed page is the tab that
+// was open first - and the shortcut sheet only ever promised one search box per page.
+const slashOwners: symbol[] = [];
+
+/** The next focusable row in `dir`, stepping over group headers and anything else that cannot take focus. */
+function focusSiblingRow(from: HTMLElement, dir: 1 | -1): void {
+  let el: Element | null = dir === 1 ? from.nextElementSibling : from.previousElementSibling;
+  while (el && !el.hasAttribute("tabindex")) el = dir === 1 ? el.nextElementSibling : el.previousElementSibling;
+  (el as HTMLElement | null)?.focus();
+}
 
 export type Column<T> = {
   id: string;
@@ -35,7 +54,23 @@ export type Column<T> = {
   /** Custom cell renderer; defaults to the accessor value. */
   cell?: (row: T) => React.ReactNode;
   sortable?: boolean; // default true when accessor present
-  filter?: "text" | "select" | "none"; // default "text" when accessor present
+  // How this column is narrowed. Default "text" when an accessor is present.
+  //   text    substring match, the safe default for a name or a free-text field
+  //   select  the column's distinct values, each with a row count
+  //   number  comparisons and ranges (>, ≥, between…), with the column's own min/median/max/total offered
+  //   date    calendar windows (last 30 days, this month, before today) and an explicit from/to
+  // A money or day column left as "text" filters by SUBSTRING, which is not a question anyone asks of it -
+  // "5000" matches 15000 and misses 5000.50. See lib/tableFilter.ts for the value grammar; every kind still
+  // encodes to a plain string, so deep links and saved views carry them unchanged.
+  filter?: FilterKind;
+  // Which half of the calendar a date column lives in, so its filter panel leads with the right windows: a
+  // Created column is asked about the past, a Due column about what is coming. Ordering only - both halves
+  // stay offered.
+  dateHint?: "past" | "future";
+  // Offer this column in the group-by picker. Worth it where the column is a small set of repeated values
+  // that people compare across (department, category, status, owner); pointless on a name or an id, and
+  // actively bad on a date, which groups into a heap of one-row groups.
+  groupBy?: boolean;
   align?: "left" | "right" | "center";
   className?: string;
   headClassName?: string;
@@ -56,6 +91,10 @@ export type Column<T> = {
   // `formatTotal` so the total reads in the same units as the cells - "what am I looking at, in total" is the
   // question a finance table gets asked most, and reaching for a spreadsheet to answer it is a page failing.
   aggregate?: "sum";
+  // How a figure from this column reads. Used for the footer/selection total, and for every other figure the
+  // table prints from it: the min/median/max in a number filter's panel, and the filter chip ("Amount: >
+  // ₹5,000" rather than "Amount: >5000"). Worth setting on any numeric column that carries a unit, not only
+  // on the ones that are summed.
   formatTotal?: (n: number) => React.ReactNode;
 };
 
@@ -87,18 +126,17 @@ export type BulkAction<T> = {
   run: (rows: T[]) => void | Promise<void> | T[] | Promise<T[] | void>;
 };
 
-// --- Deep-linkable table state (sort + filters), carried in the hash query as one param per table ---------
-// Encoded as t.<key>={"s":"col.dir","f":{col:value}}. `f` is present only when the filters differ from the
+// --- Deep-linkable table state (sort + filters), carried in the URL query as one param per table ----------
+// Encoded as t.<key>={"s":"col.dir","f":{col:value},"g":"col"}. `f` is present only when the filters differ from the
 // columns' defaultFilter seed, so an untouched table adds nothing to the URL; an explicitly cleared default
 // round-trips as {"f":{}}. Written with history.replaceState (no history entry per keystroke, and the
 // unsaved-changes guard in router.ts ignores query-only changes).
-type UrlTableState = { s?: string; f?: Record<string, string> };
+type UrlTableState = { s?: string; f?: Record<string, string>; g?: string };
 
 function readUrlTableState(key: string | undefined): UrlTableState | null {
   if (!key) return null;
   try {
-    const qs = window.location.hash.split("?")[1] ?? "";
-    const raw = new URLSearchParams(qs).get(`t.${key}`);
+    const raw = new URLSearchParams(window.location.search).get(`t.${key}`);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as UrlTableState;
     return typeof parsed === "object" && parsed !== null ? parsed : null;
@@ -152,12 +190,15 @@ export function DataTable<T>({
   emptyAction,
   accessCollection,
   onFilterChange,
+  onVisibleRows,
   accessTargetOf,
   getSubRows,
   hasMore,
   search,
   bulkActions,
   onLoadMore,
+  insights,
+  defaultGroupBy,
 }: {
   columns: Column<T>[];
   rows: T[];
@@ -203,8 +244,35 @@ export function DataTable<T>({
   // value whose rows are not loaded ("Deleted"), where the page has to go and fetch them. Everything else
   // filters the rows already in hand and the page never needs to know.
   onFilterChange?: (colId: string, value: string) => void;
+  /**
+   * The rows this table is showing - filtered and sorted, in display order - whenever that set changes.
+   *
+   * For a page that opens a row in a dialog and then lets the reader step to the next one: "next" has to mean
+   * the next row in THIS table, or stepping walks off into rows the table filtered out and a "3 of 48"
+   * counts a set nobody is looking at. Every page ordering lives in here, so nothing outside can reproduce it.
+   *
+   * Pass a STABLE callback (a `useState` setter is one). `filtered` keeps its identity when the result is
+   * unchanged, so this fires only when the set really moves - not on every render.
+   */
+  onVisibleRows?: (rows: T[]) => void;
+  /**
+   * What is worth noticing about these rows, said by the page that understands them.
+   *
+   * Called with every LOADED row - not the filtered set - so a chip keeps saying how many there are after
+   * its own filter has been applied, and so the strip does not empty itself the moment it is used. Each chip
+   * carries the narrowing that isolates exactly the rows it counted; clicking applies it, clicking again
+   * puts the table back. See components/common/TableInsights.tsx for what makes a chip worth having.
+   */
+  insights?: (rows: T[]) => TableInsight[];
+  // Group the table by this column on first open (the reader can regroup or ungroup, and their choice is
+  // saved with the rest of the table's prefs). The column must carry `groupBy`.
+  defaultGroupBy?: string;
 }) {
   const am = useAccessMode();
+  const { toast } = useToast();
+  // The org's today, not the browser's: a date filter reading "last 7 days" has to mean the same seven days
+  // for a reader in London as for the office in Mumbai whose rows these are.
+  const today = todayStr();
   const autoHasMore = useCollectionHasMore(accessCollection);
   const [expanded, setExpanded] = React.useState<Set<string>>(new Set());
   const toggleExpand = React.useCallback((id: string) => {
@@ -243,6 +311,15 @@ export function DataTable<T>({
   const [widths, setWidths] = React.useState<Record<string, number>>(initial.widths ?? {});
   const [pageSize, setPageSize] = React.useState<number>(initial.pageSize ?? 25);
   const [density, setDensity] = React.useState<"comfortable" | "compact">(initial.density ?? "comfortable");
+  // A deep link's grouping wins over the saved one, like its sort and filters do (see `urlInitial`; the
+  // read is repeated here because this state is declared above that ref).
+  const [groupBy, setGroupBy] = React.useState<string>(
+    () => readUrlTableState(tableId ?? accessCollection)?.g ?? initial.groupBy ?? defaultGroupBy ?? "",
+  );
+  // Which groups are folded shut, by group value. Deliberately NOT persisted: it is a reading gesture
+  // ("put that lot away while I look at this one"), not a layout choice, and a table that reopened with
+  // four of its groups shut would look like it had lost rows.
+  const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set());
   const [views, setViews] = React.useState<SavedView[]>(initial.views ?? []);
   const [pickedView, setPickedView] = React.useState<string | null>(null); // saved view the user last applied, by name
   const [page, setPage] = React.useState(0);
@@ -256,6 +333,10 @@ export function DataTable<T>({
   // `managed` through a ref instead of listing it as a dependency.
   const managedRef = React.useRef(managed);
   managedRef.current = managed;
+  const defaultGroupByRef = React.useRef(defaultGroupBy);
+  defaultGroupByRef.current = defaultGroupBy;
+  const accessCollectionRef = React.useRef(accessCollection);
+  accessCollectionRef.current = accessCollection;
   const loadedFor = React.useRef<string | undefined>(tableId);
   React.useEffect(() => {
     let active = true;
@@ -268,6 +349,9 @@ export function DataTable<T>({
       setWidths(local.widths ?? {});
       setPageSize(local.pageSize ?? 25);
       setDensity(local.density ?? "comfortable");
+      setGroupBy(local.groupBy ?? defaultGroupByRef.current ?? "");
+      setSort(parseUrlSort(local.sort));
+      setCollapsed(new Set());
       setViews(local.views ?? []);
       setPickedView(null);
       setHydrated(false);
@@ -277,11 +361,16 @@ export function DataTable<T>({
     void fetchServerPrefs(tableId).then((sp) => {
       if (!active) return;
       if (sp) {
+        // A deep link is a more specific request than the saved layout, and this lands long after the first
+        // render read the URL - so whatever the link carries is left exactly as it was set.
+        const deep = readUrlTableState(tableId ?? accessCollectionRef.current);
         if (sp.order) setOrder(sp.order);
         setHidden(computeHidden(sp.hidden, sp.order, managedRef.current));
         setWidths(sp.widths ?? {});
         if (typeof sp.pageSize === "number") setPageSize(sp.pageSize);
         if (sp.density) setDensity(sp.density);
+        if (typeof sp.groupBy === "string" && typeof deep?.g !== "string") setGroupBy(sp.groupBy);
+        if (typeof sp.sort === "string" && !deep?.s) setSort(parseUrlSort(sp.sort));
         if (sp.views) setViews(sp.views);
       }
       setHydrated(true);
@@ -295,7 +384,8 @@ export function DataTable<T>({
   // neither simply skip URL sync.
   const urlKey = tableId ?? accessCollection;
   const urlInitial = React.useRef(readUrlTableState(urlKey));
-  const [sort, setSort] = React.useState<SortState>(() => parseUrlSort(urlInitial.current?.s));
+  // A deep link's sort wins over the saved one, like its filters and grouping do.
+  const [sort, setSort] = React.useState<SortState>(() => parseUrlSort(urlInitial.current?.s ?? initial.sort));
   // The deep link is read again if the key ARRIVES after the first render.
   //
   // `urlKey` comes from props, and a page can render its table before they have settled - while permissions
@@ -311,6 +401,7 @@ export function DataTable<T>({
     if (!carried) return;
     setSort(parseUrlSort(carried.s));
     if (carried.f) setFilters(carried.f);
+    if (typeof carried.g === "string") setGroupBy(carried.g);
   }, [urlKey]);
   const onFilterChangeRef = React.useRef(onFilterChange);
   onFilterChangeRef.current = onFilterChange;
@@ -344,11 +435,10 @@ export function DataTable<T>({
       const payload: UrlTableState = {};
       if (sort) payload.s = `${sort.id}.${sort.dir}`;
       if (JSON.stringify(active) !== JSON.stringify(defaults)) payload.f = active;
+      if (groupBy) payload.g = groupBy;
       const value = Object.keys(payload).length > 0 ? JSON.stringify(payload) : null;
 
-      const raw = window.location.hash.replace(/^#\/?/, "");
-      const [path, qs = ""] = raw.split("?");
-      const params = new URLSearchParams(qs);
+      const params = new URLSearchParams(window.location.search);
       if (params.get(`t.${urlKey}`) === value || (!params.has(`t.${urlKey}`) && value === null)) return;
       if (value === null) params.delete(`t.${urlKey}`);
       else params.set(`t.${urlKey}`, value);
@@ -356,13 +446,13 @@ export function DataTable<T>({
       // Carries the current state object through, like router.ts and urlQuery.ts: a dialog's own history entry
       // is marked `hrmsDialog: true` and `dropDialogEntry` refuses to pop one whose marker has gone, so
       // replacing the state with null while a dialog was open left a dead back-entry behind it.
-      history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}#/${path}${q ? `?${q}` : ""}`);
-      syncLastHash(); // no hashchange fires, so the guard has to be told what the address bar now says
+      history.replaceState(window.history.state, "", `${window.location.pathname}${q ? `?${q}` : ""}`);
+      syncLastUrl(); // no route change is announced, so the guard has to be told what the address bar now says
     }, 250);
     return () => clearTimeout(t);
     // `columns` is usually a fresh array per render; reading defaults inside the debounce keeps it out of deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlKey, sort, filters]);
+  }, [urlKey, sort, filters, groupBy]);
 
   // Reconcile saved order with the current columns (append new, drop stale).
   const orderedManaged = React.useMemo(() => {
@@ -441,7 +531,16 @@ export function DataTable<T>({
   // just GET'd on every page load.
   React.useEffect(() => {
     if (!hydrated) return; // don't overwrite server prefs before we've loaded them
-    const payload = { order: orderedManaged, hidden: [...hidden], widths, pageSize, density, views };
+    const payload = {
+      order: orderedManaged,
+      hidden: [...hidden],
+      widths,
+      pageSize,
+      density,
+      groupBy,
+      sort: sort ? `${sort.id}.${sort.dir}` : "",
+      views,
+    };
     const serialized = JSON.stringify(payload);
     if (savedBaseline.current === null) {
       savedBaseline.current = serialized; // first post-hydration run = the loaded layout; don't save it back
@@ -450,7 +549,7 @@ export function DataTable<T>({
     if (serialized === savedBaseline.current) return; // no real change
     savedBaseline.current = serialized;
     savePrefs(tableId, payload);
-  }, [hydrated, tableId, orderedManaged, hidden, widths, pageSize, density, views]);
+  }, [hydrated, tableId, orderedManaged, hidden, widths, pageSize, density, groupBy, sort, views]);
 
   // The filtering pass runs at a LOWER PRIORITY than the keystroke that caused it.
   //
@@ -496,13 +595,8 @@ export function DataTable<T>({
       if (!value) continue;
       const col = colById[colId];
       if (!col?.accessor) continue;
-      const needle = value.toLowerCase();
-      const isSelect = col.filter === "select";
-      out = out.filter((r) => {
-        const raw = col.accessor!(r);
-        const hay = raw == null ? "" : String(raw);
-        return isSelect ? hay === value : hay.toLowerCase().includes(needle);
-      });
+      const kind = col.filter ?? "text";
+      out = out.filter((r) => matchesFilter(kind, value, col.accessor!(r), today));
     }
     if (sort) {
       const col = colById[sort.id];
@@ -522,7 +616,10 @@ export function DataTable<T>({
     // `columns` is read for `hideValueByDefault` but is not listed: it is usually a fresh array per render,
     // and `colById` is derived from it, so it already changes whenever the columns really do.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- columns is covered by colById; see above
-  }, [rows, deferredFilters, sort, colById]);
+  }, [rows, deferredFilters, sort, colById, today]);
+
+  // Hand the page the set it is drawing, for the callers that need to walk it (see `onVisibleRows`).
+  React.useEffect(() => { onVisibleRows?.(filtered); }, [filtered, onVisibleRows]);
 
   // --- bulk selection (only when the caller passes bulkActions) --------------------------------------------
   const confirmDialog = useConfirm();
@@ -548,13 +645,41 @@ export function DataTable<T>({
   );
   const allSelected = filtered.length > 0 && selectedRows.length === filtered.length;
   const toggleAll = () => setSelected(allSelected ? new Set() : new Set(filtered.map(getRowId)));
-  const toggleOne = (id: string) =>
+  // Where the last selection gesture landed, so shift-click knows what it is extending FROM.
+  const selectAnchor = React.useRef<string | null>(null);
+  const toggleOne = (id: string) => {
+    selectAnchor.current = id;
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
+  };
+  /**
+   * Shift-click: select everything between the last click and this one, in the order the table is showing.
+   *
+   * The gesture every list in every other app has, and without it a queue of forty is selected forty clicks
+   * at a time - which is the moment people give up on the bulk bar and start approving rows one by one.
+   * It extends over `filtered`, not the page, so a range can span a page boundary the way the header's
+   * select-all already spans one.
+   */
+  const extendSelection = (id: string) => {
+    const ids = filtered.map(getRowId);
+    const to = ids.indexOf(id);
+    const from = selectAnchor.current ? ids.indexOf(selectAnchor.current) : -1;
+    selectAnchor.current = id;
+    if (to < 0 || from < 0) {
+      toggleOne(id);
+      return;
+    }
+    const [lo, hi] = from <= to ? [from, to] : [to, from];
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (let i = lo; i <= hi; i += 1) next.add(ids[i]!);
+      return next;
+    });
+  };
   // The selection is re-read AFTER the confirm dialog, not captured before it.
   //
   // `selectedRows` is a render-time value, so an awaited modal freezes it: a background refetch (a sibling
@@ -599,7 +724,45 @@ export function DataTable<T>({
   // partial. Derived from the store rather than passed per page, so this can't be forgotten on a new table;
   // the explicit prop wins when a table's rows come from elsewhere.
   const truncated = hasMore ?? autoHasMore;
-  const pageCount = pageSize > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 1;
+
+  // --- grouping ---------------------------------------------------------------------------------------------
+  // One column's value splits the table into folds, each carrying its own count and its own subtotal for
+  // every summed column. What it answers that a sort cannot: "which department is this going on", "how much
+  // of this is Travel" - questions about the SET, which a sorted list makes you count by eye.
+  const groupCol = groupBy ? colById[groupBy] : undefined;
+  const groupable = React.useMemo(() => managed.filter((c) => c.groupBy && c.accessor), [managed]);
+  const groupKeyOf = React.useCallback(
+    (r: T) => (groupCol?.accessor ? String(groupCol.accessor(r) ?? "") : ""),
+    [groupCol],
+  );
+  const groups = React.useMemo(() => {
+    if (!groupCol?.accessor) return null;
+    const buckets = new Map<string, T[]>();
+    for (const r of filtered) {
+      const k = groupKeyOf(r);
+      const bucket = buckets.get(k);
+      if (bucket) bucket.push(r);
+      else buckets.set(k, [r]);
+    }
+    // Blank last: an "Unassigned" fold is a real group, but it is never the one being compared against.
+    return [...buckets.entries()]
+      .map(([key, rs]) => ({ key, label: key || "(Blank)", rows: rs }))
+      .sort((a, b) => (a.key === "" ? 1 : b.key === "" ? -1 : compare(a.key, b.key)));
+  }, [filtered, groupCol, groupKeyOf]);
+  // A collapsed group's rows leave the paged set entirely, so folding one away shortens the table instead
+  // of leaving a page of nothing. The footer totals and the export keep covering every filtered row - what
+  // is folded is hidden, not excluded - and the pager says how many that is.
+  const shown = React.useMemo(
+    () => (groups ? groups.filter((g) => !collapsed.has(g.key)).flatMap((g) => g.rows) : filtered),
+    [groups, collapsed, filtered],
+  );
+  const foldedAway = filtered.length - shown.length;
+  // Drives the one control that folds or unfolds the lot. It reads the CURRENT groups rather than the size
+  // of `collapsed`, which can still hold keys from a grouping the reader has since changed.
+  const allFolded = !!groups && groups.length > 0 && groups.every((g) => collapsed.has(g.key));
+  const foldAll = () => setCollapsed(allFolded ? new Set() : new Set((groups ?? []).map((g) => g.key)));
+
+  const pageCount = pageSize > 0 ? Math.max(1, Math.ceil(shown.length / pageSize)) : 1;
   const safePage = Math.min(page, pageCount - 1);
   React.useEffect(() => {
     if (page !== safePage) setPage(safePage);
@@ -607,10 +770,48 @@ export function DataTable<T>({
   // Back to the first page whenever the result set or page size changes.
   React.useEffect(() => {
     setPage(0);
-  }, [filters, sort, pageSize]);
-  const paged = pageSize > 0 ? filtered.slice(safePage * pageSize, safePage * pageSize + pageSize) : filtered;
-  const from = total === 0 ? 0 : safePage * (pageSize || total) + 1;
-  const to = pageSize > 0 ? Math.min(total, (safePage + 1) * pageSize) : total;
+  }, [filters, sort, pageSize, groupBy]);
+  const pageStart = pageSize > 0 ? safePage * pageSize : 0;
+  const pageEnd = pageSize > 0 ? pageStart + pageSize : shown.length;
+  const paged = pageSize > 0 ? shown.slice(pageStart, pageEnd) : shown;
+  const from = shown.length === 0 ? 0 : pageStart + 1;
+  const to = Math.min(shown.length, pageEnd);
+
+  // What this page draws, in order: rows, with a group header wherever one opens. A header also leads a page
+  // that starts mid-group (marked "continued"), because a fold's rows are unreadable without the name of the
+  // fold they are in. A collapsed group is a header and nothing else, drawn at the position it holds.
+  type RenderItem = { kind: "group"; key: string; label: string; rows: T[]; collapsed: boolean; continued: boolean } | { kind: "row"; row: T };
+  const renderItems = React.useMemo<RenderItem[]>(() => {
+    if (!groups) return paged.map((row) => ({ kind: "row" as const, row }));
+    const items: RenderItem[] = [];
+    let offset = 0;
+    for (const g of groups) {
+      const isCollapsed = collapsed.has(g.key);
+      const start = offset;
+      const end = start + (isCollapsed ? 0 : g.rows.length);
+      offset = end;
+      if (isCollapsed) {
+        // A zero-height group sits on a boundary; it belongs to the page whose window contains it, and to
+        // the last page when it trails the final row.
+        const onPage = (start >= pageStart && start < pageEnd) || (start === pageEnd && pageEnd >= shown.length);
+        if (onPage) items.push({ kind: "group", key: g.key, label: g.label, rows: g.rows, collapsed: true, continued: false });
+        continue;
+      }
+      const sliceStart = Math.max(start, pageStart);
+      const sliceEnd = Math.min(end, pageEnd);
+      if (sliceEnd <= sliceStart) continue;
+      items.push({ kind: "group", key: g.key, label: g.label, rows: g.rows, collapsed: false, continued: sliceStart > start });
+      for (const row of g.rows.slice(sliceStart - start, sliceEnd - start)) items.push({ kind: "row", row });
+    }
+    return items;
+  }, [groups, collapsed, paged, pageStart, pageEnd, shown.length]);
+  const toggleGroup = (key: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   // --- totals ----------------------------------------------------------------------------------------------
   // Summed over the FILTERED rows, not the visible page: a total that changed when you turned the page would
@@ -635,15 +836,81 @@ export function DataTable<T>({
     );
   }
 
-  function distinctValues(col: Column<T>): string[] {
-    const set = new Set<string>();
-    for (const r of rows) {
+  // --- what one column holds, for its filter panel ----------------------------------------------------------
+  // Counted against the rows every OTHER filter leaves standing, not against all of them. On a table already
+  // narrowed to one department, "Status: Rejected 41" would be counting somebody else's rejections, and
+  // picking it would land on an empty table. Cross-filtered, the counts are a preview of the click.
+  const rowsExcept = React.useCallback(
+    (colId: string) => {
+      let out = rows;
+      for (const col of Object.values(colById)) {
+        if (col.hideValueByDefault && col.accessor && col.id !== colId && !filters[col.id]) {
+          out = out.filter((r) => String(col.accessor!(r) ?? "") !== col.hideValueByDefault);
+        }
+      }
+      for (const [id, value] of Object.entries(filters)) {
+        if (!value || id === colId) continue;
+        const col = colById[id];
+        if (!col?.accessor) continue;
+        out = out.filter((r) => matchesFilter(col.filter ?? "text", value, col.accessor!(r), today));
+      }
+      return out;
+    },
+    [rows, colById, filters, today],
+  );
+
+  function valueCounts(col: Column<T>): { options: SelectOption[]; blank: number; total: number } {
+    const base = rowsExcept(col.id);
+    const counts = new Map<string, number>();
+    let blank = 0;
+    for (const r of base) {
       const v = col.accessor?.(r);
-      if (v != null && String(v) !== "") set.add(String(v));
+      const s = v == null ? "" : String(v);
+      if (s === "") blank += 1;
+      else counts.set(s, (counts.get(s) ?? 0) + 1);
     }
-    for (const v of col.filterOptions ?? []) set.add(v);
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
+    // A declared option with no loaded rows still belongs on the list (the trash, an unused category); it
+    // reads as the empty drawer it is rather than being missing.
+    for (const v of col.filterOptions ?? []) if (!counts.has(v)) counts.set(v, 0);
+    return {
+      options: [...counts.entries()].map(([value, count]) => ({ value, count })).sort((a, b) => a.value.localeCompare(b.value)),
+      blank,
+      total: base.length,
+    };
   }
+
+  const columnNumberStats = (col: Column<T>) =>
+    numberStats(rowsExcept(col.id).map((r) => Number(col.accessor?.(r))));
+  /** How a figure from this column reads - the column's own money/day formatter where it has one. */
+  const fmtNumber = (col: Column<T>) => (n: number) => (col.formatTotal ? String(col.formatTotal(n)) : String(Math.round(n * 100) / 100));
+
+  /** The filter panel for one column, shared by the desktop header popover and the phone sheet. */
+  const filterPanel = (col: Column<T>) => {
+    const value = filters[col.id] ?? "";
+    const set = (next: string) => setFilters((f) => ({ ...f, [col.id]: next }));
+    if (col.filter === "number") return <NumberFilterPanel value={value} stats={columnNumberStats(col)} fmt={fmtNumber(col)} onChange={set} />;
+    if (col.filter === "date") return <DateFilterPanel value={value} hint={col.dateHint} onChange={set} />;
+    if (col.filter === "select") {
+      const { options, blank, total: n } = valueCounts(col);
+      return <SelectFilterPanel options={options} value={value} total={n} blankCount={blank} onPick={set} />;
+    }
+    return (
+      <div className="flex items-center gap-1.5">
+        <Input
+          autoFocus
+          value={value}
+          placeholder={`Search ${col.header.toLowerCase()}`}
+          onChange={(e) => set(e.target.value)}
+          className="h-8"
+        />
+        {value && (
+          <Button variant="ghost" size="icon" aria-label={`Clear the ${col.header.toLowerCase()} filter`} className="h-8 w-8 shrink-0" onClick={() => set("")}>
+            <X className="h-4 w-4" />
+          </Button>
+        )}
+      </div>
+    );
+  };
 
   // --- column reordering (drag a grip handle) ---
   const dragId = React.useRef<string | null>(null);
@@ -720,6 +987,103 @@ export function DataTable<T>({
     onRowClick?.(r);
   };
 
+  // --- cell menu --------------------------------------------------------------------------------------------
+  // Right-click a cell and the table offers what can be done WITH THAT VALUE, read off the column: an amount
+  // offers "above this" and "below this", a day offers "before"/"after"/"that month", a status offers only
+  // itself and its opposite. The alternative is the route everyone takes today - open the column's filter
+  // popover, retype a value that is already on screen, hope it matches - and the retyping is where it goes
+  // wrong on exactly the columns (a name with an initial, a code, an amount) where it matters.
+  const [cellMenu, setCellMenu] = React.useState<{ x: number; y: number; colId: string; raw: string } | null>(null);
+  const openCellMenu = (col: Column<T>, row: T) => (e: React.MouseEvent) => {
+    if (!col.accessor || col.filter === "none") return;
+    // A right-click inside a field is the browser's, not ours: cut/paste/spellcheck on an input in a cell
+    // is the menu the person is asking for there.
+    const t = e.target as HTMLElement | null;
+    if (t?.closest("input, textarea, [contenteditable='true']")) return;
+    e.preventDefault();
+    setCellMenu({ x: e.clientX, y: e.clientY, colId: col.id, raw: String(col.accessor(row) ?? "") });
+  };
+  const menuCol = cellMenu ? colById[cellMenu.colId] : undefined;
+  const applyFilter = (id: string, v: string) => {
+    setFilters((f) => ({ ...f, [id]: v }));
+    setCellMenu(null);
+  };
+  const cellMenuItems = () => {
+    if (!cellMenu || !menuCol) return null;
+    const { raw, colId } = cellMenu;
+    const kind = menuCol.filter ?? "text";
+    const day = raw.slice(0, 10);
+    const fmt = fmtNumber(menuCol);
+    const shown = raw.length > 32 ? `${raw.slice(0, 32)}…` : raw;
+    return (
+      <>
+        <DropdownMenuLabel className="truncate text-xs font-normal text-muted-foreground">
+          {menuCol.header}: <span className="font-medium text-foreground">{raw === "" ? "(blank)" : shown}</span>
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {raw === "" ? (
+          <>
+            <DropdownMenuItem onSelect={() => applyFilter(colId, BLANK)}><Filter /> Only blanks</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => applyFilter(colId, `!${BLANK}`)}><Ban /> Hide blanks</DropdownMenuItem>
+          </>
+        ) : kind === "number" ? (
+          <>
+            <DropdownMenuItem onSelect={() => applyFilter(colId, `=${Number(raw)}`)}><Filter /> Exactly {fmt(Number(raw))}</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => applyFilter(colId, `>${Number(raw)}`)}><ArrowUp /> More than {fmt(Number(raw))}</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => applyFilter(colId, `<${Number(raw)}`)}><ArrowDown /> Less than {fmt(Number(raw))}</DropdownMenuItem>
+          </>
+        ) : kind === "date" ? (
+          <>
+            <DropdownMenuItem onSelect={() => applyFilter(colId, day)}><Filter /> Only {day}</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => applyFilter(colId, `..${day}`)}><ArrowUp /> On or before</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => applyFilter(colId, `${day}..`)}><ArrowDown /> On or after</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => applyFilter(colId, day.slice(0, 7))}><Filter /> That month</DropdownMenuItem>
+          </>
+        ) : (
+          <>
+            <DropdownMenuItem onSelect={() => applyFilter(colId, raw)}><Filter /> Show only these</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => applyFilter(colId, `!${raw}`)}><Ban /> Exclude these</DropdownMenuItem>
+          </>
+        )}
+        <DropdownMenuSeparator />
+        {menuCol.sortable !== false && (
+          <DropdownMenuItem onSelect={() => { setSort({ id: colId, dir: "asc" }); setCellMenu(null); }}>
+            <ArrowUp /> Sort {kind === "number" || kind === "date" ? "low to high" : "A to Z"}
+          </DropdownMenuItem>
+        )}
+        {menuCol.sortable !== false && (
+          <DropdownMenuItem onSelect={() => { setSort({ id: colId, dir: "desc" }); setCellMenu(null); }}>
+            <ArrowDown /> Sort {kind === "number" || kind === "date" ? "high to low" : "Z to A"}
+          </DropdownMenuItem>
+        )}
+        {menuCol.groupBy && (
+          <DropdownMenuItem onSelect={() => { setGroupBy(groupBy === colId ? "" : colId); setCellMenu(null); }}>
+            <Layers /> {groupBy === colId ? "Ungroup" : `Group by ${menuCol.header.toLowerCase()}`}
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuItem
+          onSelect={() => {
+            setCellMenu(null);
+            navigator.clipboard
+              .writeText(raw)
+              .then(() => toast({ title: "Copied", description: raw.length > 60 ? `${raw.slice(0, 60)}…` : raw }))
+              .catch(() => {});
+          }}
+        >
+          <Copy /> Copy value
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={() => {
+            setHidden((prev) => new Set(prev).add(colId));
+            setCellMenu(null);
+          }}
+        >
+          <EyeOff /> Hide this column
+        </DropdownMenuItem>
+      </>
+    );
+  };
+
   const renderMobileCard = (r: T, isChild: boolean) => {
     const id = getRowId(r);
     const { title, meta } = mobileLayout;
@@ -748,7 +1112,12 @@ export function DataTable<T>({
             <Checkbox
               checked={selected.has(id)}
               onCheckedChange={() => toggleOne(id)}
-              onClick={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!e.shiftKey) return;
+                e.preventDefault();
+                extendSelection(id);
+              }}
               aria-label="Select row"
               className="mt-0.5"
             />
@@ -798,12 +1167,41 @@ export function DataTable<T>({
   // different jobs and compose: this one asks the server for matching records across the WHOLE collection
   // (so it reaches rows past the first page, which a column filter cannot), and the column filters then
   // narrow whatever came back. Only rendered when the page wires it up.
+  // `/` puts the cursor in this table's search box - the shortcut the help sheet already advertises as
+  // "search within the page", which until now only the feed implemented.
+  const searchRef = React.useRef<HTMLInputElement | null>(null);
+  const hasSearch = !!search;
+  const slashToken = React.useRef<symbol>(Symbol("table-search"));
+  React.useEffect(() => {
+    if (!hasSearch) return;
+    const token = slashToken.current;
+    slashOwners.push(token);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (slashOwners[0] !== token) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      // An open overlay owns the keyboard, exactly as the global shortcut layer treats it.
+      if (document.querySelector('[role="dialog"][data-state="open"], [role="listbox"][data-state="open"], [role="menu"][data-state="open"]')) return;
+      e.preventDefault();
+      searchRef.current?.focus();
+      searchRef.current?.select();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      const at = slashOwners.indexOf(token);
+      if (at >= 0) slashOwners.splice(at, 1);
+    };
+  }, [hasSearch]);
+
   const searchControl = search && (
     // Full width on a phone: search is the main way to find a row when the table is a card list, and a 208px
     // box next to nothing looks (and reads) like an afterthought.
     <div className="relative w-full sm:w-auto">
       <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
       <Input
+        ref={searchRef}
         type="search"
         value={search.value}
         onChange={(e) => search.onChange(e.target.value)}
@@ -826,12 +1224,31 @@ export function DataTable<T>({
 
   const chipsControl = (
     <>
-      {activeFilters.map(([id, v]) => (
-        <span key={id} className="inline-flex items-center gap-1 rounded-full bg-accent px-2.5 py-1 text-xs font-medium text-accent-foreground">
-          {colById[id]?.header}: {v}
-          <button onClick={() => setFilters((f) => ({ ...f, [id]: "" }))} className="hover:text-foreground"><X className="h-3 w-3" /></button>
+      {activeFilters.map(([id, v]) => {
+        const col = colById[id];
+        return (
+          <span key={id} className="inline-flex items-center gap-1 rounded-full bg-accent px-2.5 py-1 text-xs font-medium text-accent-foreground">
+            {/* Read back through the column's own grammar: ">5000" on a money column is a chip that says
+                "Amount: > ₹5,000", and an excluded value says so rather than showing a bare "!". */}
+            {col?.header}: {col ? filterChipLabel(col.filter ?? "text", v, fmtNumber(col)) : v}
+            <button onClick={() => setFilters((f) => ({ ...f, [id]: "" }))} className="hover:text-foreground" aria-label={`Clear the ${col?.header ?? id} filter`}><X className="h-3 w-3" /></button>
+          </span>
+        );
+      })}
+      {groupCol && (
+        <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
+          <Layers className="h-3 w-3" /> Grouped by {groupCol.header}
+          <button onClick={() => setGroupBy("")} className="hover:text-foreground" aria-label="Ungroup the table"><X className="h-3 w-3" /></button>
         </span>
-      ))}
+      )}
+      {/* Fold the lot at once. Next to the grouping chip because that is where the reader is told the table
+          is grouped, and the per-group chevrons are too far down to serve a table with twenty folds. */}
+      {groupCol && (groups?.length ?? 0) > 1 && (
+        <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={foldAll}>
+          {allFolded ? <ChevronsUpDown className="h-3 w-3" /> : <ChevronsDownUp className="h-3 w-3" />}
+          {allFolded ? "Expand all" : "Collapse all"}
+        </Button>
+      )}
       {activeFilters.length > 0 && (
         <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setFilters({})}>Clear filters</Button>
       )}
@@ -863,6 +1280,13 @@ export function DataTable<T>({
       sort: sort ? `${sort.id}.${sort.dir}` : undefined,
       filters: nonEmpty(filters),
       hidden: [...hidden],
+      groupBy,
+      // The shape as well as the rows: applying a view should give back the table the way it was saved,
+      // not that layout poured into whatever column order and density the reader happens to be on.
+      order: orderedManaged,
+      widths,
+      pageSize,
+      density,
       // Keep the pin when overwriting a view that was the default.
       ...(views.find((v) => v.name === name)?.isDefault ? { isDefault: true as const } : {}),
       ...(search ? { search: search.value } : {}),
@@ -880,6 +1304,19 @@ export function DataTable<T>({
     setFilters(v ? { ...v.filters } : base.filters);
     // Legacy views saved before column visibility was captured leave the current layout alone.
     setHidden(v ? (v.hidden ? new Set(v.hidden) : hidden) : base.hidden);
+    // Same rule for grouping: a view that predates it says nothing, and silence is not "ungroup".
+    if (v === null) setGroupBy(defaultGroupByRef.current ?? "");
+    else if (typeof v.groupBy === "string") setGroupBy(v.groupBy);
+    // The shape, on the same "silence is not an instruction" rule. "Default" is about which rows and
+    // columns the table shows, so it leaves order, widths, page size and density alone: those are how this
+    // reader likes the table, not part of the narrowing being reset.
+    if (v) {
+      if (v.order) setOrder(v.order);
+      if (v.widths) setWidths(v.widths);
+      if (typeof v.pageSize === "number") setPageSize(v.pageSize);
+      if (v.density) setDensity(v.density);
+    }
+    setCollapsed(new Set());
     // Legacy views saved before the search box was captured carry no `search`, and clearing on their behalf is
     // a claim they never made: applying one - which happens unprompted on mount, for a pinned default - wiped
     // whatever the page had seeded into its own search box. `undefined` means "this view says nothing about
@@ -892,10 +1329,15 @@ export function DataTable<T>({
   // Which view the table is currently showing. The one the user picked wins as long as the live state still
   // matches its snapshot, so it clears itself the moment they tweak a filter away from it - and two views
   // that happen to capture the same state stay distinguishable (matching alone would always name the first).
+  //
+  // Matched on which rows and columns are shown, NOT on the shape a view also carries: dragging a column
+  // wider or switching to compact does not put you on a different view, and making it do so would drop the
+  // view's name off the table for a change that moved no rows.
   const viewMatches = (v: SavedView) =>
     JSON.stringify(nonEmpty(v.filters)) === filtersKey &&
     (v.sort ?? "") === sortKey &&
     (!v.hidden || [...v.hidden].sort().join(",") === hiddenKey) &&
+    (v.groupBy === undefined || v.groupBy === groupBy) &&
     (!search || (v.search ?? "") === search.value);
   const picked = views.find((v) => v.name === pickedView) ?? null;
   const activeView = picked && viewMatches(picked) ? picked : (views.find(viewMatches) ?? null);
@@ -904,6 +1346,7 @@ export function DataTable<T>({
     !sort &&
     filtersKey === JSON.stringify(nonEmpty(baseline().filters)) &&
     hiddenKey === [...baseline().hidden].sort().join(",") &&
+    groupBy === (defaultGroupBy ?? "") &&
     (!search || !search.value);
 
   // Open the table on its pinned default view. Runs once, after prefs land, and yields to a deep link:
@@ -995,7 +1438,7 @@ export function DataTable<T>({
           <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
             {views.length === 0
               ? "Set up filters, a sort or a search, then save them here as a named view."
-              : "A view restores its filters, sort, search and columns. Star one to open the table with it."}
+              : "A view restores its filters, sort, grouping, search and columns. Star one to open the table with it."}
           </p>
           <div className="mt-2 flex items-center gap-1.5 border-t pt-2">
             <Input
@@ -1059,6 +1502,22 @@ export function DataTable<T>({
             })}
           </div>
           <Button variant="ghost" size="sm" className="mt-2 h-7 w-full text-xs" onClick={() => setHidden(new Set())}>Show all</Button>
+          {groupable.length > 0 && (
+            <div className="mt-2 space-y-1 border-t pt-2">
+              <span className="text-xs font-semibold text-muted-foreground">Group by</span>
+              <Select value={groupBy || "__none__"} onValueChange={(v) => setGroupBy(v === "__none__" ? "" : v)}>
+                <SelectTrigger className="h-8" aria-label="Group rows by a column">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">No grouping</SelectItem>
+                  {groupable.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>{c.header}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="mt-2 flex items-center justify-between border-t pt-2">
             <span className="text-xs font-semibold text-muted-foreground">Density</span>
             <div className="inline-flex rounded-md border p-0.5">
@@ -1146,53 +1605,42 @@ export function DataTable<T>({
             </section>
           )}
 
+          {groupable.length > 0 && (
+            <section className="space-y-1.5">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Group</h4>
+              <Select value={groupBy || "__none__"} onValueChange={(v) => setGroupBy(v === "__none__" ? "" : v)}>
+                <SelectTrigger aria-label="Group rows by a column">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">No grouping</SelectItem>
+                  {groupable.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>{c.header}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </section>
+          )}
+
           {filterableCols.length > 0 && (
             <section className="space-y-3">
               <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Filter</h4>
+              {/* The same panels the desktop header popovers use, laid out flat: a phone has no column
+                  headers to hang a popover off, and a filter that reads differently on the two surfaces is
+                  two filters to learn. Folded shut past the first few so the sheet opens on something
+                  scannable rather than on a wall of every column's values. */}
               {filterableCols.map((col) => {
                 const value = filters[col.id] ?? "";
                 return (
-                  <div key={col.id} className="space-y-1.5">
-                    <label className="text-sm font-medium">{col.header}</label>
-                    {col.filter === "select" ? (
-                      // A native-feeling Select rather than the desktop popover's option list: on a phone one
-                      // tap to a bounded, scrollable list beats a nested overlay inside a sheet.
-                      <Select
-                        value={value || "__all__"}
-                        onValueChange={(v) => setFilters((f) => ({ ...f, [col.id]: v === "__all__" ? "" : v }))}
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__all__">All</SelectItem>
-                          {distinctValues(col).map((v) => (
-                            <SelectItem key={v} value={v}>
-                              {v}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    ) : (
-                      <div className="flex items-center gap-1.5">
-                        <Input
-                          value={value}
-                          placeholder={`Any ${col.header.toLowerCase()}`}
-                          onChange={(e) => setFilters((f) => ({ ...f, [col.id]: e.target.value }))}
-                        />
-                        {value && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            aria-label={`Clear ${col.header} filter`}
-                            onClick={() => setFilters((f) => ({ ...f, [col.id]: "" }))}
-                          >
-                            <X className="h-4 w-4" />
-                          </Button>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                  <details key={col.id} open={!!value} className="rounded-lg border px-3 py-2">
+                    <summary className="flex cursor-pointer items-center justify-between gap-2 text-sm font-medium">
+                      <span>{col.header}</span>
+                      <span className="truncate text-xs font-normal text-muted-foreground">
+                        {value ? filterChipLabel(col.filter ?? "text", value, fmtNumber(col)) : "Any"}
+                      </span>
+                    </summary>
+                    <div className="pt-2">{filterPanel(col)}</div>
+                  </details>
                 );
               })}
             </section>
@@ -1293,6 +1741,25 @@ export function DataTable<T>({
     </>
   );
 
+  // --- insights ---------------------------------------------------------------------------------------------
+  // Computed over every LOADED row rather than the filtered set, so a chip's figure holds still once its own
+  // filter is applied - a strip whose numbers all collapsed to "1" the moment you used it would be unreadable
+  // and, worse, would look like the rows had gone.
+  const insightList = insights ? insights(rows) : [];
+  const insightActive =
+    insightList.find((i) => i.filters && Object.entries(i.filters).every(([k, v]) => (filters[k] ?? "") === v))?.id ?? null;
+  const applyInsight = (i: TableInsight, undo: boolean) => {
+    if (i.onClick) {
+      i.onClick();
+      return;
+    }
+    setPage(0);
+    // Applied over the table's OWN defaults, not over whatever is currently filtered: the chip says "these
+    // seven", and landing on the intersection of it with someone's half-finished filter would show fewer.
+    setFilters(undo ? baseline().filters : { ...baseline().filters, ...i.filters });
+    if (i.sort) setSort(undo ? null : parseUrlSort(i.sort));
+  };
+
   return (
     <div className="space-y-3">
       {/* Controls: portaled into a parent bar (tabs/toggles) when a slot is given, else their own row. */}
@@ -1332,16 +1799,18 @@ export function DataTable<T>({
         </div>
       )}
 
+      {insightList.length > 0 && <TableInsights insights={insightList} activeId={insightActive} onApply={applyInsight} />}
+
       {/* Bulk bar: appears with the first selected row.
           Desktop - sticky under the toolbar, so it stays reachable while scrolling a long table.
-          Phone - docked above the bottom nav instead. Selecting rows on a phone means scrolling a card list,
-          and a bar stuck to the TOP of that list is off screen by the third selection; docked at the bottom
-          it stays exactly where the selecting thumb already is. */}
+          Phone - docked at the foot of the viewport instead, clear of the home indicator. Selecting rows on
+          a phone means scrolling a card list, and a bar stuck to the TOP of that list is off screen by the
+          third selection; docked at the bottom it stays exactly where the selecting thumb already is. */}
       {bulkActions && selected.size > 0 && (
         <div
           className={cn(
             "z-20 flex items-center gap-2 rounded-lg border border-primary/30 bg-card px-3 py-2 shadow-pop",
-            "fixed inset-x-3 bottom-[calc(4.25rem+env(safe-area-inset-bottom))] flex-wrap",
+            "fixed inset-x-3 bottom-[calc(1.25rem+env(safe-area-inset-bottom))] flex-wrap",
             "md:sticky md:inset-x-auto md:bottom-auto md:top-2",
           )}
         >
@@ -1392,11 +1861,32 @@ export function DataTable<T>({
                 ))}
               </div>
             )}
-            {paged.flatMap((row) => [
-              renderMobileCard(row, false),
-              // Children are always visible on phone: cards carry no fold chevron.
-              ...(getSubRows?.(row) ?? []).map((k) => renderMobileCard(k, true)),
-            ])}
+            {renderItems.flatMap((item) => {
+              if (item.kind === "group") {
+                return [
+                  <button
+                    key={`g:${item.key}`}
+                    type="button"
+                    onClick={() => toggleGroup(item.key)}
+                    aria-expanded={!item.collapsed}
+                    className="flex w-full items-center gap-1.5 rounded-lg bg-muted/70 px-3 py-2 text-left text-sm font-semibold"
+                  >
+                    <ChevronRight className={cn("h-4 w-4 shrink-0 transition-transform", !item.collapsed && "rotate-90")} />
+                    <span className="truncate">{item.label}</span>
+                    <span className="font-normal text-muted-foreground">{item.rows.length}</span>
+                    <span className="min-w-2 flex-1" />
+                    {sumCols.map((col) => (
+                      <span key={col.id} className="shrink-0 text-xs font-medium tabular-nums">{fmtTotal(col, sumOf(item.rows, col))}</span>
+                    ))}
+                  </button>,
+                ];
+              }
+              return [
+                renderMobileCard(item.row, false),
+                // Children are always visible on phone: cards carry no fold chevron.
+                ...(getSubRows?.(item.row) ?? []).map((k) => renderMobileCard(k, true)),
+              ];
+            })}
           </div>
         )
       ) : (
@@ -1493,32 +1983,13 @@ export function DataTable<T>({
                               <Filter className={cn("h-3.5 w-3.5", filterValue && "fill-primary/20")} />
                             </button>
                           </PopoverTrigger>
-                          <PopoverContent align={col.align === "right" ? "end" : "start"}>
+                          <PopoverContent
+                            align={col.align === "right" ? "end" : "start"}
+                            className={col.filter === "number" || col.filter === "date" ? "w-64" : undefined}
+                          >
                             <div className="space-y-2">
                               <p className="text-xs font-semibold text-muted-foreground">Filter by {col.header}</p>
-                              {col.filter === "select" ? (
-                                <div className="max-h-56 space-y-0.5 overflow-y-auto">
-                                  <FilterOption label="All" active={!filterValue} onClick={() => setFilters((f) => ({ ...f, [col.id]: "" }))} />
-                                  {distinctValues(col).map((v) => (
-                                    <FilterOption key={v} label={v} active={filterValue === v} onClick={() => setFilters((f) => ({ ...f, [col.id]: v }))} />
-                                  ))}
-                                </div>
-                              ) : (
-                                <div className="flex items-center gap-1.5">
-                                  <Input
-                                    autoFocus
-                                    value={filterValue}
-                                    placeholder={`Search ${col.header.toLowerCase()}`}
-                                    onChange={(e) => setFilters((f) => ({ ...f, [col.id]: e.target.value }))}
-                                    className="h-8"
-                                  />
-                                  {filterValue && (
-                                    <Button variant="ghost" size="icon" aria-label={`Clear the ${col.header.toLowerCase()} filter`} className="h-8 w-8 shrink-0" onClick={() => setFilters((f) => ({ ...f, [col.id]: "" }))}>
-                                      <X className="h-4 w-4" />
-                                    </Button>
-                                  )}
-                                </div>
-                              )}
+                              {filterPanel(col)}
                             </div>
                           </PopoverContent>
                         </Popover>
@@ -1547,7 +2018,7 @@ export function DataTable<T>({
                 </TableCell>
               </TableRow>
             ) : (
-              paged.flatMap((row) => {
+              renderItems.flatMap((item) => {
                 const renderRow = (r: T, isChild: boolean) => (
                   <TableRow
                     key={getRowId(r)}
@@ -1566,15 +2037,21 @@ export function DataTable<T>({
                       role: "button",
                       onKeyDown: (e: React.KeyboardEvent<HTMLTableRowElement>) => {
                         if (e.target !== e.currentTarget) return;
+                        // j/k alongside ↑/↓ because the shortcut sheet already promises them for a queue,
+                        // and x to select without reaching for the checkbox - the three keys that make a
+                        // long approval queue workable from the keyboard alone.
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
                           onRowClick(r);
-                        } else if (e.key === "ArrowDown") {
+                        } else if (e.key === "ArrowDown" || e.key === "j") {
                           e.preventDefault();
-                          (e.currentTarget.nextElementSibling as HTMLElement | null)?.focus();
-                        } else if (e.key === "ArrowUp") {
+                          focusSiblingRow(e.currentTarget, 1);
+                        } else if (e.key === "ArrowUp" || e.key === "k") {
                           e.preventDefault();
-                          (e.currentTarget.previousElementSibling as HTMLElement | null)?.focus();
+                          focusSiblingRow(e.currentTarget, -1);
+                        } else if (e.key === "x" && bulkActions) {
+                          e.preventDefault();
+                          toggleOne(getRowId(r));
                         }
                       },
                     })}
@@ -1583,6 +2060,7 @@ export function DataTable<T>({
                       <TableCell
                         key={col.id}
                         style={widthStyle(col.id)}
+                        onContextMenu={col.accessor && col.filter !== "none" ? openCellMenu(col, r) : undefined}
                         className={cn(
                           "truncate",
                           // Right-aligned columns are numeric by convention; tabular-nums keeps digits in
@@ -1599,7 +2077,14 @@ export function DataTable<T>({
                             <Checkbox
                               checked={selected.has(getRowId(r))}
                               onCheckedChange={() => toggleOne(getRowId(r))}
-                              onClick={(e) => e.stopPropagation()}
+                              // Shift-click runs INSTEAD of the toggle: Radix composes our handler ahead of
+                              // its own and skips its own once the event is defaulted-prevented.
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (!e.shiftKey) return;
+                                e.preventDefault();
+                                extendSelection(getRowId(r));
+                              }}
                               aria-label="Select row"
                             />
                           )
@@ -1612,6 +2097,55 @@ export function DataTable<T>({
                     ))}
                   </TableRow>
                 );
+                if (item.kind === "group") {
+                  const groupSelected = bulkActions ? item.rows.every((r) => selected.has(getRowId(r))) : false;
+                  return [
+                    <TableRow key={`g:${item.key}`} className="border-y bg-muted/70 hover:bg-muted/70">
+                      <TableCell colSpan={renderCols.length} className="py-1.5">
+                        <div className="flex items-center gap-2">
+                          {bulkActions && (
+                            <Checkbox
+                              checked={groupSelected}
+                              aria-label={`Select every row in ${item.label}`}
+                              onCheckedChange={() =>
+                                setSelected((prev) => {
+                                  const next = new Set(prev);
+                                  for (const r of item.rows) {
+                                    if (groupSelected) next.delete(getRowId(r));
+                                    else next.add(getRowId(r));
+                                  }
+                                  return next;
+                                })
+                              }
+                            />
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => toggleGroup(item.key)}
+                            aria-expanded={!item.collapsed}
+                            className="inline-flex min-w-0 items-center gap-1.5 text-sm font-semibold hover:text-primary"
+                          >
+                            <ChevronRight className={cn("h-4 w-4 shrink-0 transition-transform", !item.collapsed && "rotate-90")} />
+                            <span className="truncate">{item.label}</span>
+                            <span className="shrink-0 font-normal text-muted-foreground">
+                              {item.rows.length}
+                              {item.continued ? " · continued" : ""}
+                            </span>
+                          </button>
+                          <div className="min-w-4 flex-1" />
+                          {/* A fold's own subtotals, on the fold. Grouping a money table by cost centre and
+                              still having to add the column up by hand would be the whole point missed. */}
+                          {sumCols.map((col) => (
+                            <span key={col.id} className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                              {col.header}: <span className="font-medium text-foreground">{fmtTotal(col, sumOf(item.rows, col))}</span>
+                            </span>
+                          ))}
+                        </div>
+                      </TableCell>
+                    </TableRow>,
+                  ];
+                }
+                const row = item.row;
                 const kids = getSubRows?.(row);
                 const open = kids && kids.length > 0 && expanded.has(getRowId(row));
                 return open ? [renderRow(row, false), ...kids!.map((k) => renderRow(k, true))] : [renderRow(row, false)];
@@ -1647,10 +2181,25 @@ export function DataTable<T>({
         </Table>
       </Card>
       )}
+      {/* The cell menu, anchored at the pointer. One menu for the whole table, positioned rather than one
+          per cell - fifty rows of ten columns is five hundred menus nobody has opened. */}
+      <DropdownMenu open={!!cellMenu} onOpenChange={(o) => !o && setCellMenu(null)}>
+        <DropdownMenuTrigger asChild>
+          {/* Focusable but not tabbable, and NOT aria-hidden: Radix returns focus here when the menu
+              closes, and focusing an aria-hidden element is the one thing that would make this a barrier
+              rather than an invisible anchor. */}
+          <span tabIndex={-1} className="pointer-events-none fixed" style={{ left: cellMenu?.x ?? 0, top: cellMenu?.y ?? 0 }} />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-56">{cellMenuItems()}</DropdownMenuContent>
+      </DropdownMenu>
+
       <div className="flex flex-wrap items-center justify-between gap-3 px-1 text-xs text-muted-foreground">
         <span className="flex items-center gap-2">
           <span>
-            {total === 0 ? "No records" : `Showing ${from}-${to} of ${truncated ? `${total}+` : total}`}
+            {shown.length === 0 ? "No records" : `Showing ${from}-${to} of ${truncated ? `${shown.length}+` : shown.length}`}
+            {/* Folded groups are hidden, not filtered out: the totals and the export still cover them, so
+                the pager has to say they are there rather than letting the count read as a loss of rows. */}
+            {foldedAway > 0 ? ` (+${foldedAway} in folded groups)` : ""}
             {total !== rows.length ? ` (filtered from ${truncated ? `${rows.length}+` : rows.length})` : ""}
             {truncated && !onLoadMore ? " — first page only" : ""}
           </span>
@@ -1709,17 +2258,3 @@ export function DataTable<T>({
   );
 }
 
-function FilterOption({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "block w-full truncate rounded px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent",
-        active && "bg-accent font-medium text-accent-foreground"
-      )}
-    >
-      {label}
-    </button>
-  );
-}

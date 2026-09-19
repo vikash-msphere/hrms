@@ -21,6 +21,9 @@ export const NOTIFICATION_CATEGORIES: { key: string; label: string; defaultPrior
   { key: "overtime", label: "Overtime", defaultPriority: "normal" },
   { key: "remote", label: "Remote work", defaultPriority: "normal" },
   { key: "regularization", label: "Attendance regularization", defaultPriority: "normal" },
+  // Its own category rather than folded into `regularization`: a mark is not a correction, and somebody
+  // muting "attendance regularization" has not asked to stop hearing that a day of their pay was re-valued.
+  { key: "dayMark", label: "Attendance day marks", defaultPriority: "normal" },
   { key: "encashment", label: "Leave encashment", defaultPriority: "normal" },
   { key: "timesheet", label: "Timesheets", defaultPriority: "normal" },
   { key: "kudos", label: "Kudos", defaultPriority: "normal" },

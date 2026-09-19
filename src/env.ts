@@ -138,6 +138,10 @@ export type Variables = {
   user: AppUser;
   deps: import("./deps").Deps;
   scope: import("./domain/access").ListScope; // list scope for the request's collection, decided by the middleware
+  // The matcher context this request was decided in - the caller's employee code plus, when their grant uses
+  // the manager-chain tokens, their reporting line (lib/selfContext.ts). Published so a handler can ask the
+  // engine a further question in the SAME context rather than resolving the chain again.
+  self: import("./domain/permissions").SelfContext;
   // Global search only (`GET /v1/search`): one entry per collection the caller may LIST, holding that
   // collection's list scope. Built by the middleware from the same decide()/scopeFor() it applies to a real
   // list request, so the search service binds scopes to columns and decides nothing. A collection missing

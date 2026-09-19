@@ -4,7 +4,13 @@ import { dateFormat } from "./intl";
 // src/" premise does not hold - lib/leaveForecast.ts, lib/eventRepeat.ts, lib/assetTagsPdf.ts and several pages
 // already do it - and a copy of this particular rule is what let the grid and the payroll build disagree about
 // which days leave excuses.
-import { leaveCover, type LeaveRange } from "../../../src/domain/attendance";
+import { leaveCover, type LeaveRange, type DayCredit } from "../../../src/domain/attendance";
+// Every attendance surface describes the same window of days, so the range type travels with the rule that
+// reads it rather than being restated per page.
+export type { LeaveRange, DayCredit };
+
+/** How a day mark reads on screen. One table, so the badge, the picker and the toast agree. */
+export const CREDIT_LABEL: Record<DayCredit, string> = { full: "Full day", half: "Half day", absent: "Absent" };
 
 // Org work schedule (stored in settings/attendance; HR edits it). Day status (late/early) is derived on the
 // client from sessions + this schedule. Times are wall-clock in `timezone`; punches are real instants.
@@ -205,7 +211,13 @@ export function enumerateDays(fromYmd: string, toYmd: string): string[] {
 // "Half day" or "Late", which is a violation reported for work that earns nothing but goodwill. The minutes
 // still count; the day is simply not owed.
 export type DayStatus = "open" | "present" | "late" | "left_early" | "late_early" | "half_day" | "insufficient" | "on_leave" | "half_day_leave" | "holiday" | "worked_off_day" | "absent";
-export type AttendanceRow = { day: string; summary?: DaySummary; status: DayStatus };
+/**
+ * `status` is what the PUNCHES say the day was; `mark` is what HR decided it COUNTS as, where they have
+ * decided. Both are kept, and the UI shows both, because a marked day is exactly the day somebody will later
+ * ask about - "it says half day, why was I paid for a full one" has no answer if the grid only kept the
+ * winner. What the mark actually changes is loss of pay, which the server settles (domain/attendance.ts).
+ */
+export type AttendanceRow = { day: string; summary?: DaySummary; status: DayStatus; mark?: DayCredit };
 
 // Status of a day that has punches and/or event work credit. `total` is clocked + event-credited minutes;
 // `s` is absent on an event-only day. Minutes decide first (a day too short to count can't be "late"), then
@@ -236,9 +248,10 @@ export function buildAttendanceRows(opts: {
   // `{start, end}` only, call the whole day "On leave", and so show as fully excused a day payroll then docked.
   leaveRanges: LeaveRange[];
   workMinutesByDay?: Map<string, number>; // count_as_work events: minutes credited toward the day's worked total
+  marksByDay?: Map<string, DayCredit>; // HR's decision for a day, carried onto the row beside its derived status
   joinedYmd?: string; // employee start date; days before it aren't their attendance, so they're omitted (no absent)
 }): AttendanceRow[] {
-  const { fromYmd, toYmd, todayYmd, sched, summaries, holidays, leaveRanges, workMinutesByDay = new Map(), joinedYmd } = opts;
+  const { fromYmd, toYmd, todayYmd, sched, summaries, holidays, leaveRanges, workMinutesByDay = new Map(), marksByDay, joinedYmd } = opts;
   const byDay = new Map(summaries.map((s) => [s.day, s]));
   // The SERVER'S rule, imported rather than restated - see the note on `leaveRanges` above and on
   // `leaveCover` in src/domain/attendance.ts. 1 = the whole day is excused, 0.5 = one session is.
@@ -278,6 +291,9 @@ export function buildAttendanceRows(opts: {
     }
     // today / future with no punch yet -> omit
   }
+  // The mark rides along on whichever row the day produced. Applied here rather than inside each branch so
+  // there is one place it can be attached and no branch can forget it.
+  if (marksByDay?.size) for (const r of rows) { const m = marksByDay.get(r.day); if (m) r.mark = m; }
   return rows.sort((a, b) => b.day.localeCompare(a.day));
 }
 
@@ -324,6 +340,100 @@ export const weekStartOf = (ymd: string) => {
   const t = Date.parse(`${ymd}T00:00:00Z`);
   return new Date(t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000).toISOString().slice(0, 10);
 };
+
+// ---- Day labels ----
+// "Thu, Jun 12" for a history row (the range caption above it carries the year). One row per day of the
+// range, so the formatter is shared rather than rebuilt per cell (see lib/intl.ts).
+const DAY_OPTS: Intl.DateTimeFormatOptions = { weekday: "short", month: "short", day: "numeric" };
+export const fmtDay = (ymd: string) => dateFormat(undefined, DAY_OPTS).format(new Date(`${ymd}T00:00:00`));
+// "Thursday, 12 June" for the calendar's selected-day panel, which has room to spell it out.
+export const fmtDayLong = (ymd: string) =>
+  new Date(`${ymd}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+export const monthLabel = (ymd: string) =>
+  new Date(`${ymd}T00:00:00Z`).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+export const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+/** A duration carrying its own sign, for a balance against what was expected ("+3h 10m", "-45m"). */
+export const signedDuration = (min: number) => `${min >= 0 ? "+" : "-"}${fmtDurationShort(Math.abs(min))}`;
+// Wall-clock "HH:MM" (24h) of an instant in the org timezone, for prefilling an `<input type="time">`, which
+// accepts 00-23 and rejects "24:15" - `hour12: false` leaves the cycle to the locale, where h24 spells
+// midnight that way.
+export const fmtHM24 = (iso: string, tz: string) =>
+  dateFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+
+// ---- Window totals ----
+/** Everything a summary strip, an hours chart and a period comparison read off one window of days. */
+export type WindowStats = {
+  worked: number; late: number; absent: number; minutes: number; workingDays: number;
+  avgDay: number; onTimePct: number | null; avgIn: number | null; avgOut: number | null;
+  // The ledger counts COMPLETED days only - today is still being worked, so counting it as a full expected
+  // day would show a deficit all morning.
+  doneMinutes: number; expectedMinutes: number;
+};
+
+export function statsOf(rows: AttendanceRow[], tz: string, fullDayMinutes: number, todayYmd: string): WindowStats {
+  let worked = 0, late = 0, absent = 0, minutes = 0, workingDays = 0, judged = 0, punctual = 0;
+  let arrSum = 0, arrN = 0, depSum = 0, depN = 0, doneMinutes = 0, expectedDays = 0;
+  for (const r of rows) {
+    // A day nobody was rostered on is not a working day, whether it was worked or not: `worked_off_day` joins
+    // holiday and on_leave here. Counted, it added a whole `full_day_minutes` of EXPECTATION for voluntary
+    // work - so coming in on a Saturday moved the "done vs expected" bar backwards - and put that day's
+    // arrival into the punctuality score for a shift window that did not apply to it. The minutes it earned
+    // still count below; the day was simply not owed. (`workingDaysInRange` on the server skips it too.)
+    const counts = r.status !== "holiday" && r.status !== "on_leave" && r.status !== "worked_off_day";
+    if (counts) workingDays++;
+    if (counts && r.day < todayYmd) expectedDays++;
+    const s = r.summary;
+    if (s) {
+      worked++;
+      minutes += s.workedMinutes;
+      if (r.day < todayYmd) doneMinutes += s.workedMinutes;
+      if (s.arrival) { arrSum += localMinutes(s.arrival, tz); arrN++; }
+      if (s.departure) { depSum += localMinutes(s.departure, tz); depN++; }
+      if (counts && !s.open) { judged++; if (!s.late) punctual++; } // a still-open day hasn't earned a verdict yet
+    }
+    if (r.status === "late" || r.status === "late_early") late++;
+    // NOT an `else if`. Before day marks these two were exclusive - a status is one value, and no day is both
+    // "late" and "absent" - so chaining them cost nothing. A mark breaks that: ANY day with punches can be
+    // marked absent, late ones included, and chained the late branch swallowed it and the absence was never
+    // counted. They are independent tallies now, and the fallback below still cannot double-count an unmarked
+    // day (a late day's status is "late", never "absent").
+    // ABSENCE IS THE ONE FIGURE HERE THAT READS AS A CONSEQUENCE rather than an observation - it is the count
+    // somebody expects to see reflected in their pay - so it is the one a day mark overrides. Days worked,
+    // lateness and short/long days stay what the punches say, because a mark does not claim the punches were
+    // wrong; that is a regularization's job.
+    //
+    // `counts` gates it for the same reason `lopDayUnits` skips those days before it reads a mark: a day that
+    // owed nothing settles at nothing whatever the mark says. A holiday or a wholly-excused leave day can
+    // still CARRY a mark (leave is approved after the fact, and the mark stays visible so it can be withdrawn)
+    // and letting it through here would have this strip count an absence the payroll build does not.
+    if (r.mark && counts ? r.mark === "absent" : r.status === "absent") absent++;
+  }
+  return {
+    worked, late, absent, minutes, workingDays,
+    avgDay: worked ? Math.round(minutes / worked) : 0,
+    onTimePct: judged ? Math.round((punctual / judged) * 100) : null,
+    avgIn: arrN ? arrSum / arrN : null,
+    avgOut: depN ? depSum / depN : null,
+    doneMinutes,
+    expectedMinutes: expectedDays * fullDayMinutes,
+  };
+}
+
+/** One week of the history list: its days plus the subtotal shown on the week's header row. */
+export type WeekGroup = { start: string; rows: AttendanceRow[]; minutes: number; days: number };
+
+/** Newest-first day rows, grouped into weeks so a long window has rhythm and each week carries its own total. */
+export function groupWeeks(rows: AttendanceRow[]): WeekGroup[] {
+  const out: WeekGroup[] = [];
+  for (const r of rows) {
+    const start = weekStartOf(r.day);
+    let g = out[out.length - 1];
+    if (!g || g.start !== start) { g = { start, rows: [], minutes: 0, days: 0 }; out.push(g); }
+    g.rows.push(r);
+    if (r.summary) { g.minutes += r.summary.workedMinutes; g.days++; }
+  }
+  return out;
+}
 
 // How a day status looks: its plain-language label, the Badge variant of its pill, the dot colour in the
 // month grid / legend and the cell tint. One table so a colour means the same thing everywhere on the page.

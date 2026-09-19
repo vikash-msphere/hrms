@@ -162,21 +162,21 @@ export default function RemoteWork({ me }: { me: Me }) {
     : null;
 
   const empCol: Column<RemoteWorkRequest> = {
-    id: "employee", header: "Employee", filter: "select", accessor: (r) => empName(r.employee),
+    id: "employee", header: "Employee", filter: "select", groupBy: true, accessor: (r) => empName(r.employee),
     cell: (r) => { const e = emp(r.employee); return <span className="inline-flex items-center gap-2"><PhotoAvatar employeeId={r.employee ? idOf(r.employee) : ""} name={empName(r.employee)} photo={e?.photo} className="h-6 w-6" /> {empName(r.employee)}</span>; },
   };
   const baseCols: Column<RemoteWorkRequest>[] = [
     {
-      id: "dates", header: "Dates", accessor: (r) => r.start_date,
+      id: "dates", header: "Dates", filter: "date", accessor: (r) => r.start_date,
       cell: (r) => {
         const single = r.start_date === r.end_date;
         const note = single ? (r.start_session === 1 && r.end_session === 1 ? " · morning" : r.start_session === 2 && r.end_session === 2 ? " · afternoon" : "") : "";
         return <span className="tabular-nums">{formatDate(r.start_date)}{!single && <> - {formatDate(r.end_date)}</>}{note && <span className="text-muted-foreground">{note}</span>}</span>;
       },
     },
-    { id: "days", header: "Days", align: "right", accessor: (r) => r.days, cell: (r) => <span className="tabular-nums">{r.days}</span> },
-    { id: "location", header: "Location", filter: "select", accessor: (r) => r.location ?? "", cell: (r) => r.location || <span className="text-muted-foreground">-</span> },
-    { id: "state", header: "Status", filter: "select", accessor: (r) => upper(r.state), cell: (r) => <StatusBadge state={r.state} /> },
+    { id: "days", header: "Days", align: "right", filter: "number", aggregate: "sum", accessor: (r) => r.days, cell: (r) => <span className="tabular-nums">{r.days}</span> },
+    { id: "location", header: "Location", filter: "select", groupBy: true, accessor: (r) => r.location ?? "", cell: (r) => r.location || <span className="text-muted-foreground">-</span> },
+    { id: "state", header: "Status", filter: "select", groupBy: true, accessor: (r) => upper(r.state), cell: (r) => <StatusBadge state={r.state} /> },
     { id: "reason", header: "Reason", accessor: (r) => r.reason ?? "", cell: (r) => r.reason || <span className="text-muted-foreground">-</span> },
   ];
   // History only: the approver's note explains WHY a request landed where it did (esp. rejections).

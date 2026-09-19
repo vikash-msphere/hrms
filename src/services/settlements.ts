@@ -15,6 +15,7 @@ import {
 import { encashmentRateConfig } from "./leaveEncashments";
 import { orgToday, dayStartMs } from "./orgDay";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, lopDayUnits, eventCreditByDay, sessionWorkedMinutes } from "../domain/attendance";
+import { marksForPeriod } from "./attendanceDayMarks";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidReimbursements, markReimbursementsSettledStmt, releaseReimbursementsSettledStmt } from "./reimbursements";
 import { unpaidBonuses, markBonusesSettledStmt, releaseBonusesSettledStmt } from "./bonuses";
@@ -215,8 +216,13 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
   });
   for (const [day, m] of credit) workedByDay.set(day, (workedByDay.get(day) ?? 0) + m);
 
+  // HR's day marks over the same window, for the same reason payroll reads them: a marked day is settled on
+  // the mark rather than on the minutes. A leaver's final month is exactly where an agreed short day is most
+  // likely to be sitting, so leaving them out here would have the settlement and the payslip disagree.
+  const marksByDay = (await marksForPeriod(deps, fromMs, toMs)).get(employeeId);
+
   return lopDayUnits({
-    startYmd, endYmd, workDays: att.work_days, holidays, leaveRanges, workedByDay,
+    startYmd, endYmd, workDays: att.work_days, holidays, leaveRanges, workedByDay, marksByDay,
     fullDayMinutes: att.full_day_minutes ?? 480,
     halfDayMinutes: att.half_day_minutes ?? 240,
   });

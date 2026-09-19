@@ -108,10 +108,10 @@ test("the funnel, source table and offer counts reflect what was actually filed,
     // A tile is a door, not just a number: it lands on the page that owns the rows it counted, already
     // focused on the same slice.
     await page.getByRole("button", { name: /Candidates/ }).click();
-    await expect.poll(() => page.url()).toContain("#/candidates");
+    await expect.poll(() => page.url()).toContain("/candidates");
     await gotoRoute(page, "recruiting-analytics", "Recruiting analytics");
     await page.getByRole("button", { name: /Open jobs/ }).click();
-    await expect.poll(() => page.url()).toContain("#/job-requisitions?focus=open");
+    await expect.poll(() => page.url()).toContain("/job-requisitions?focus=open");
   } finally {
     // Children before parents (offer -> applications -> candidates -> requisition): a purge cascade is only
     // declared where the app actually wants one, and nothing says applications/offers are it - an FK still

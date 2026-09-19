@@ -158,6 +158,10 @@ export function Sidebar({
   const approvals = useApprovals();
   const { unreadByPage } = useNotifications();
   const has = (perm: string) => hasCapability(me.capabilities, perm);
+  // The second half of a nav gate, for the entries that are about OTHER PEOPLE: does this caller's grant reach
+  // past their own rows in that collection (users/me `caller_access.read_scopes`)? The capability alone cannot
+  // say - it is scope-stripped - so "Team goals" sat in every employee's sidebar over their own two goals.
+  const reachesOthers = (collection: string) => !!me.scopes.read[collection];
   // Unread notifications owned by a nav item = sum over its page subtree (the item + its tabs). Approvals keeps
   // its own pending count (not notifications). There is no Notifications nav ITEM - the feed is reached from the
   // bell in the top bar, which carries the grand total - so no branch for it here.
@@ -167,7 +171,7 @@ export function Sidebar({
   };
   const groups = NAV.map((g) => ({
     ...g,
-    items: g.items.filter((i) => itemVisible(i, has)),
+    items: g.items.filter((i) => itemVisible(i, has, reachesOthers)),
   })).filter((g) => g.items.length > 0);
 
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed(me.email));
@@ -312,17 +316,17 @@ export function Sidebar({
                         <Tooltip key={item.key}>
                           <TooltipTrigger asChild>
                             <a
-                              href={`#/${item.key}`}
+                              href={`/${item.key}`}
                               onClick={onNavigate}
                               aria-current={active ? "page" : undefined}
                               aria-label={item.label}
                               className={cn(
                                 "relative flex h-10 items-center justify-center rounded-lg transition-colors",
-                                active ? "bg-sidebar-accent text-white shadow-sm" : "text-sidebar-foreground hover:bg-foreground/[0.06] hover:text-foreground",
+                                active ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm" : "text-sidebar-foreground hover:bg-foreground/[0.06] hover:text-foreground",
                               )}
                             >
                               <Icon className="h-[18px] w-[18px] shrink-0" />
-                              {badge > 0 && <span className={cn("absolute right-1.5 top-1.5 h-2 w-2 rounded-full", active ? "bg-white" : "bg-primary")} aria-hidden />}
+                              {badge > 0 && <span className={cn("absolute right-1.5 top-1.5 h-2 w-2 rounded-full", active ? "bg-sidebar-accent-foreground" : "bg-primary")} aria-hidden />}
                             </a>
                           </TooltipTrigger>
                           <TooltipContent side="right">{item.label}{badge > 0 ? ` (${badge > 99 ? "99+" : badge})` : ""}</TooltipContent>
@@ -373,13 +377,13 @@ export function Sidebar({
                         <span className="absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-primary" aria-hidden />
                       )}
                       <a
-                        href={`#/${item.key}`}
+                        href={`/${item.key}`}
                         onClick={onNavigate}
                         aria-current={active ? "page" : undefined}
                         className={cn(
                           "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
                           active
-                            ? "bg-sidebar-accent text-white shadow-sm"
+                            ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
                             : "text-sidebar-foreground hover:bg-foreground/[0.06] hover:text-foreground"
                         )}
                       >
@@ -388,7 +392,8 @@ export function Sidebar({
                         {badge > 0 && (
                           <span className={cn(
                             "ml-auto rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none tabular-nums",
-                            active ? "bg-white text-sidebar-accent" : "bg-primary text-white",
+                            // Inverted against the row it sits on, so it reads as a count either way round.
+                            active ? "bg-sidebar-accent-foreground text-sidebar-accent" : "bg-primary text-primary-foreground",
                           )}>
                             {badge > 99 ? "99+" : badge}
                           </span>

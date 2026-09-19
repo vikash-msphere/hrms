@@ -2,8 +2,9 @@ import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { dropDialogEntry, isSelfPop, pushDialogEntry } from "@/lib/dialogHistory";
-// The keyboard measurement is shared with sheet.tsx and the bottom nav - see hooks/useKeyboardInset.ts for
+// Back closes the topmost overlay, for dialogs and sheets alike - see hooks/useHistoryClose.ts.
+import { HistoryClose } from "@/hooks/useHistoryClose";
+// The keyboard measurement is shared with sheet.tsx and the command palette - see hooks/useKeyboardInset.ts for
 // why a bottom-anchored phone panel cannot trust `bottom: 0`.
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 
@@ -35,55 +36,11 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 // a viewport-relative max height, and vertical scrolling. Callers that own their scrolling (a flex column with
 // an internal scroll area) set any `overflow-*` class and keep it - hence the regex rather than a class merge,
 // which would leave `overflow-hidden overflow-y-auto` fighting in the stylesheet.
-// Back closes the topmost dialog - for every dialog in the app, not only the ones built on WriteDialog.
-//
-// Radix unmounts content when the dialog closes, so "content is mounted" IS "dialog is open": pushing a
-// history entry on mount and consuming it on unmount needs no open prop threaded from the caller. On a back
-// press the entry we pushed is popped, and we close the dialog by dispatching Escape at its own content node
-// rather than by reaching for the caller's setState - which means each dialog closes through the path it
-// already owns, including any unsaved-changes guard hanging off onOpenChange.
-function useHistoryClose(node: HTMLElement | null) {
-  const pushed = React.useRef(false);
-  const popping = React.useRef(false);
-  // Which entry is ours, taken at push time. Radix keeps a closing dialog mounted through its exit animation,
-  // so by cleanup another dialog may already own the top of the stack - see lib/dialogHistory.ts.
-  const token = React.useRef(0);
-  const nodeRef = React.useRef(node);
-  nodeRef.current = node;
-
-  React.useEffect(() => {
-    token.current = pushDialogEntry();
-    pushed.current = true;
-
-    const onPop = () => {
-      if (!pushed.current) return;
-      // A back() the APP asked for - a dialog above this one dropping its entry as it closes - is not the
-      // reader pressing back, and replaying it as Esc closes a dialog nobody asked to close (or, on a guarded
-      // form, re-raises the discard prompt they just dismissed). See lib/dialogHistory.ts#isSelfPop.
-      if (isSelfPop()) return;
-      pushed.current = false;
-      popping.current = true;
-      nodeRef.current?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-      setTimeout(() => { popping.current = false; }, 0);
-    };
-    window.addEventListener("popstate", onPop);
-
-    return () => {
-      window.removeEventListener("popstate", onPop);
-      // Closed from the UI instead: drop our entry, so the next back press goes to the previous page rather
-      // than replaying this dialog. `dropDialogEntry` decides when that is safe - notably NOT when this dialog
-      // closed by opening another one (see lib/dialogHistory.ts).
-      if (pushed.current && !popping.current) dropDialogEntry(token.current);
-      pushed.current = false;
-    };
-  }, []);
-}
-
 // Radix locks the page behind a modal layer by setting `pointer-events: none` on <body>, and lifts it when
 // that layer closes. When a dialog is opened FROM another layer - the common row-menu -> "Edit" path - the
 // menu's lock can outlive the dialog that replaced it, and the page is then dead to the mouse: every click
-// lands on <html> and nothing responds until some later layer happens to close cleanly. So on unmount, once
-// no modal layer is left open, lift the lock. A no-op whenever Radix has already done it.
+// lands on <html> and nothing responds until some later layer happens to close cleanly. So when the dialog
+// closes, once no modal layer is left open, lift the lock. A no-op whenever Radix has already done it.
 function useReleasePointerLock() {
   React.useEffect(
     () => () => {
@@ -94,6 +51,15 @@ function useReleasePointerLock() {
     },
     [],
   );
+}
+
+// Everything that is owed to ONE OPENING of a dialog, mounted inside the content element so that it lives
+// exactly as long as the opening does. `<Dialog open={false}><DialogContent/></Dialog>` mounts the wrapper
+// below the moment its page renders - dialogs a reader has never opened and may never open - so a hook called
+// out there fires on page load for every dialog the page declares. See hooks/useHistoryClose.ts.
+function DialogLifecycle({ node }: { node: HTMLElement | null }) {
+  useReleasePointerLock();
+  return <HistoryClose node={node} />;
 }
 
 const DialogContent = React.forwardRef<
@@ -116,8 +82,6 @@ const DialogContent = React.forwardRef<
 >(({ className, children, onEnterSubmit, onKeyDown, scrollBody, overlayClassName, style, ...props }, ref) => {
   // The content node is needed to aim the synthetic Escape at, and callers may still pass their own ref.
   const [node, setNode] = React.useState<HTMLDivElement | null>(null);
-  useHistoryClose(node);
-  useReleasePointerLock();
   const keyboard = useKeyboardInset();
   const setRefs = React.useCallback(
     (el: HTMLDivElement | null) => {
@@ -171,6 +135,7 @@ const DialogContent = React.forwardRef<
       {...props}
     >
       {children}
+      <DialogLifecycle node={node} />
       <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-60 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring">
         <X className="h-4 w-4" />
         <span className="sr-only">Close</span>

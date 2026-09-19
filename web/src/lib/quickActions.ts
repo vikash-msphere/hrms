@@ -68,18 +68,22 @@ export const QUICK_ACTIONS: QuickAction[] = [
   { id: "new-document", label: "Upload a document", icon: Upload, route: "documents", intent: "new-document", group: "Create", visible: (me) => hasCapability(me.capabilities, "org-documents.write") || hasCapability(me.capabilities, "personal-documents.write") },
   { id: "new-employee", label: "Add an employee", icon: UserRoundPlus, route: "employees", intent: "new-employee", group: "Create", visible: (me) => hasCapability(me.capabilities, "employees.write") },
   { id: "new-table", label: "Build a table", icon: Table2, route: "tables", intent: "new-table", group: "Create", visible: (me) => hasCapability(me.capabilities, "table-views.write") },
-  // Give kudos is surfaced as its own always-visible top-bar button, not inside the "+" menu.
+  // An ordinary "+" menu entry, arranged on /settings/quick-actions. The pre-filled path is the button on a
+  // person's profile, which already knows who is being praised; from the menu it opens with an empty picker.
   { id: "give-kudos", label: "Give kudos", icon: Sparkles, route: "announcements", intent: "give-kudos", group: "Create", visible: (me) => hasCapability(me.capabilities, "announcements.giveKudos") },
 ];
 
-// Standalone actions get their own always-visible top-bar affordance, not a "+" menu item, so the org menu
-// config never governs them - they stay capability-gated only. These ids are excluded from the config editor
-// and every "+" menu resolve path (but still appear in the ⌘K palette).
+// Standalone actions have an affordance of their OWN in the chrome (the Support button, the clock chip) or no
+// menu home at all, so the org menu config never governs them - they stay capability-gated only. These ids are
+// excluded from the config editor and every "+" menu resolve path (but still appear in the ⌘K palette).
+//
+// `give-kudos` is deliberately NOT one of them: it has no button of its own, so it is an ordinary configurable
+// entry that an org arranges - or removes - on /settings/quick-actions like any other.
 export const KUDOS_ACTION_ID = "give-kudos";
 export const TICKET_ACTION_ID = "new-ticket";
 export const REPORT_PROBLEM_ACTION_ID = "report-problem";
 export const CLOCK_ACTION_ID = "clock-toggle";
-export const STANDALONE_ACTION_IDS = new Set([KUDOS_ACTION_ID, TICKET_ACTION_ID, REPORT_PROBLEM_ACTION_ID, CLOCK_ACTION_ID]);
+export const STANDALONE_ACTION_IDS = new Set([TICKET_ACTION_ID, REPORT_PROBLEM_ACTION_ID, CLOCK_ACTION_ID]);
 
 // Actions the org can arrange into menu sections (everything except the standalone top-bar buttons).
 export const CONFIGURABLE_QUICK_ACTIONS = QUICK_ACTIONS.filter((a) => !STANDALONE_ACTION_IDS.has(a.id));
@@ -128,7 +132,8 @@ export function normalizeQuickMenu(raw?: { groups?: QuickMenuGroup[]; order?: st
 }
 
 // Renderable menu sections for a caller: config sections in order, each with the enabled actions that caller can
-// perform, empty sections dropped. Unknown/kudos ids ignored. Pass raw org config; normalization happens here.
+// perform, empty sections dropped. Unknown and standalone ids ignored. Pass raw org config; normalization
+// happens here.
 export function resolveQuickMenu(me: Me, raw?: { groups?: QuickMenuGroup[]; order?: string[] }): { id: string; label: string; actions: QuickAction[] }[] {
   const byId = new Map(QUICK_ACTIONS.map((a) => [a.id, a]));
   return normalizeQuickMenu(raw)

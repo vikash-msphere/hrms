@@ -19,9 +19,10 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  // In-app links arrive as hash routes ("#/approvals"); anchor them to the app origin.
+  // In-app links arrive as app paths ("/approvals"); anchor anything relative to the app root, so it resolves
+  // against the origin rather than against whatever page an already-open window happens to be showing.
   const link = event.notification.data && event.notification.data.link;
-  const url = link && link.startsWith("#") ? `/${link}` : link || "/";
+  const url = link ? (link.startsWith("/") ? link : `/${link.replace(/^#\/?/, "")}`) : "/";
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
       for (const w of wins) {

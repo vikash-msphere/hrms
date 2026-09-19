@@ -122,7 +122,16 @@ export function ruleSentence(r: { collection: string; scope: string; scopeRef?: 
   // and the trail is where somebody checks which. Callers that do not resolve the anchor omit `scopeRef` and
   // get the record wording, which is right for `exact` and no worse than before for the rest.
   const anchored = r.scopeRef?.startsWith("departments/") ? `one department's ${nouns}` : `one ${nouns} record`;
-  const where = r.scope === "self" ? `their own ${nouns}` : r.scope === "dept" ? `their department's ${nouns}` : r.scope === "exact" || r.scope === "subtree" ? anchored : nouns;
+  // The manager chain says WHOSE rows as much as `self` and `dept` do, and without these two a chain rule read
+  // as the bare plural - which is the phrase an ORG-WIDE rule gets. In an audit trail that is the difference
+  // between "read their reports' payslips" and "read payslips", written about the same grant.
+  const where =
+    r.scope === "self" ? `their own ${nouns}`
+    : r.scope === "dept" ? `their department's ${nouns}`
+    : r.scope === "reports" ? `their reports' ${nouns}`
+    : r.scope === "org" ? `their reporting line's ${nouns}`
+    : r.scope === "exact" || r.scope === "subtree" ? anchored
+    : nouns;
   const what = r.verb ? `the "${r.verb}" action on ${where}` : r.scope === "create" ? `creating ${nouns}` : `${r.level ?? "read"} access to ${where}${r.field ? ` (field "${r.field}")` : ""}`;
   return r.effect === "deny" ? `no ${what}` : what;
 }
@@ -222,7 +231,7 @@ async function notifyGranted(deps: Deps, actor: AppUser, row: typeof schema.acce
     type: "access.granted",
     title: "You have new access",
     body: `You now have ${sentence}.${row.expiresAt ? ` It expires on ${new Date(row.expiresAt).toISOString().slice(0, 10)}.` : ""}`,
-    link: `#/${row.namespace}`,
+    link: row.namespace,
     actorId: actor.employeeId,
   });
 }
@@ -235,7 +244,7 @@ async function notifyPending(deps: Deps, actor: AppUser, row: typeof schema.acce
     type: "access.changePending",
     title: "A permission change needs approval",
     body: `${actor.name || actor.email} requested the ${verb} of ${ruleSentence({ collection: row.namespace, scope: row.scopeKind, level: row.level ?? undefined, effect: row.effect })} for ${row.subjectKind === "role" ? `the ${row.subject} role` : "a person"}. Someone else has to approve it.`,
-    link: "#/settings/permissions",
+    link: "settings/permissions",
     actorId: actor.employeeId,
   });
 }
@@ -493,7 +502,7 @@ async function notifyCloned(deps: Deps, actor: AppUser, to: Subject, added: numb
     type: "access.granted",
     title: "You have new access",
     body: `${added} permission${added === 1 ? "" : "s"} held by ${String(fromLabel ?? "another subject")} ${added === 1 ? "was" : "were"} copied to you.`,
-    link: "#/settings/permissions",
+    link: "settings/permissions",
     actorId: actor.employeeId,
   });
 }
@@ -506,7 +515,7 @@ async function notifyCloneQueued(deps: Deps, actor: AppUser, added: number, from
     type: "access.changePending",
     title: "A permission change needs approval",
     body: `${actor.name || actor.email} copied ${added} permission${added === 1 ? "" : "s"} from ${String(fromLabel ?? "another subject")} to ${String(toLabel ?? "another subject")}. Someone else has to approve them.`,
-    link: "#/settings/permissions",
+    link: "settings/permissions",
     actorId: actor.employeeId,
   });
 }
@@ -569,7 +578,7 @@ export async function decideAccessRule(deps: Deps, actor: AppUser, id: string, d
       type: "access.changeDecided",
       title: `Permission change ${applying ? "approved" : "rejected"}`,
       body: `${actor.name || actor.email} ${applying ? "approved" : "rejected"} your requested ${removing ? "removal" : "grant"} of ${sentence}.`,
-      link: "#/settings/permissions",
+      link: "settings/permissions",
       actorId: actor.employeeId,
     }).catch(() => {});
   }
@@ -638,7 +647,7 @@ export async function reviewStandingAccess(deps: Deps): Promise<number> {
     type: "access.review",
     title: "Time to review standing access",
     body: `${standing.length} permanent rule${standing.length === 1 ? "" : "s"} across ${subjects} role${subjects === 1 ? "" : "s"}/people grant write access or a custom method. Confirm each is still needed, and remove the ones that are not.`,
-    link: "#/settings/permissions",
+    link: "settings/permissions",
   });
   await audit(deps, "system", "access-review.due", "access-rules", undefined, { rules: standing.length, subjects, every_days: everyDays });
   return standing.length;

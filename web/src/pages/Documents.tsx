@@ -35,6 +35,7 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { PageSkeleton, TableSkeleton } from "@/components/common/Skeletons";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { type TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { RowActions, type RowAction } from "@/components/common/RowActions";
@@ -448,6 +449,23 @@ export default function Documents({ me }: { me: Me }) {
     }
     return { expired, soon };
   }, [rows, today, soonCutoff]);
+
+  // A document library is not read like a list; it is read for the four things that make one a liability:
+  // what has lapsed, what is about to, what is waiting on a person, and what has no file behind it at all.
+  const documentInsights = (ds: DocumentResource[]): TableInsight[] => {
+    const live = ds.filter((d) => !d.delete_time);
+    const out: TableInsight[] = [];
+    const chip = (id: string, n: number, label: string, tone: TableInsight["tone"], filters: Record<string, string>, hint?: string, sort?: string) => {
+      if (n > 0) out.push({ id, label: `${n} ${label}`, tone, filters, hint, sort });
+    };
+    chip("expired", live.filter((d) => expiryBucket(d) === "Expired").length, "expired", "destructive", { expires: "Expired" }, "Past their expiry date and still on file.", "expiry_date.asc");
+    chip("soon", live.filter((d) => expiryBucket(d) === "Expiring soon").length, "expiring within 30 days", "warning", { expires: "Expiring soon" }, undefined, "expiry_date.asc");
+    chip("unsigned", live.filter((d) => d.requires_signature && !d.signed_time).length, "awaiting a signature", "warning", { compliance: "Awaiting signature" });
+    chip("unacked", live.filter((d) => d.requires_ack && !d.acknowledged).length, "not yet acknowledged", "warning", { compliance: "Action required" });
+    chip("nofile", live.filter((d) => !d.size_bytes).length, "with no file attached", "neutral", { file: "Missing" }, "A record with nothing behind it.");
+    return out;
+  };
+
   const columns: Column<DocumentResource>[] = [
     {
       id: "title",
@@ -468,11 +486,12 @@ export default function Documents({ me }: { me: Me }) {
         );
       },
     },
-    { id: "type", header: "Type", filter: "select", accessor: (d) => humanize(d.document_type), cell: (d) => <Badge variant="secondary">{humanize(d.document_type)}</Badge> },
+    { id: "type", header: "Type", filter: "select", groupBy: true, accessor: (d) => humanize(d.document_type), cell: (d) => <Badge variant="secondary">{humanize(d.document_type)}</Badge> },
     {
       id: "owner",
       header: "Belongs to",
       filter: "select",
+      groupBy: true,
       accessor: (d) => (d.employee ? empName(d.employee) : "Organization"),
       cell: (d) =>
         d.employee ? (
@@ -484,6 +503,7 @@ export default function Documents({ me }: { me: Me }) {
     {
       id: "file",
       header: "File",
+      filter: "select",
       accessor: (d) => (d.size_bytes ? "Uploaded" : "Missing"),
       cell: (d) =>
         d.size_bytes ? (
@@ -495,8 +515,11 @@ export default function Documents({ me }: { me: Me }) {
     {
       id: "expires",
       header: "Expiry",
-      // Filter/group by status (expired / expiring soon / valid); the date is shown in the cell.
+      // Filter/group by status (expired / expiring soon / valid); the date is shown in the cell, and the
+      // hidden "Expiry date" column below is the one to filter by when the question is a calendar window
+      // rather than a bucket ("what runs out before the audit in March").
       filter: "select",
+      groupBy: true,
       accessor: (d) => expiryBucket(d),
       cell: (d) => {
         if (!d.expire_time) return <span className="text-muted-foreground">-</span>;
@@ -511,9 +534,19 @@ export default function Documents({ me }: { me: Me }) {
       },
     },
     {
+      id: "expiry_date",
+      header: "Expiry date",
+      defaultHidden: true,
+      filter: "date",
+      dateHint: "future",
+      accessor: (d) => d.expire_time ?? "",
+      cell: (d) => (d.expire_time ? formatDate(d.expire_time) : <span className="text-muted-foreground">-</span>),
+    },
+    {
       id: "compliance",
       header: "Acknowledgement",
       filter: "select",
+      groupBy: true,
       accessor: (d) =>
         d.requires_ack ? (d.acknowledged ? "Acknowledged" : "Action required")
         : d.requires_signature ? (d.signed_time ? "Signed" : "Awaiting signature")
@@ -536,7 +569,7 @@ export default function Documents({ me }: { me: Me }) {
         ),
     },
     { id: "file_name", header: "File name", defaultHidden: true, accessor: (d) => d.file_name ?? "", cell: (d) => d.file_name || "-" },
-    { id: "content_type", header: "Content type", defaultHidden: true, filter: "select", accessor: (d) => d.content_type ?? "", cell: (d) => d.content_type || "-" },
+    { id: "content_type", header: "Content type", defaultHidden: true, filter: "select", groupBy: true, accessor: (d) => d.content_type ?? "", cell: (d) => d.content_type || "-" },
     stateColumn<DocumentResource>({ publishable: true }),
     ...metaColumns<DocumentResource>(),
     {
@@ -819,6 +852,7 @@ export default function Documents({ me }: { me: Me }) {
         ) : (
           <DataTable
             columns={columns}
+            insights={documentInsights}
             tableId="documents"
             rows={topRows}
             getRowId={(d) => d.path}

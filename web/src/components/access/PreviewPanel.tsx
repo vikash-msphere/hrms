@@ -24,7 +24,7 @@ export type PreviewVerdict = {
   write: boolean;
   admin: boolean;
   verb_allowed?: boolean;
-  why?: "all" | "subtree" | "exact" | "self" | "dept";
+  why?: "all" | "subtree" | "exact" | "self" | "dept" | "reports" | "org"; // the engine's full ScopeKind - chain tiers included
   denied: boolean;
   capabilities?: string[];
 };

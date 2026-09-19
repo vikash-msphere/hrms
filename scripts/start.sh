@@ -9,8 +9,9 @@
 #   scripts/start.sh --bootstrap     # (re)create local D1 from migrations + apply the PRODUCTION bootstrap
 #                                     #   catalog (no demo people); mints the dev login as super_admin so the
 #                                     #   local stack is usable. Pass an email to pick that login.
-#   scripts/start.sh --demo          # --bootstrap, then overlay demo people + a populated kudos board
-#                                     #   (bootstrap/demo.sql). Best way to see the recognition feature.
+#   scripts/start.sh --demo          # --bootstrap, then overlay demo people, a populated kudos board, a
+#                                     #   quarter of goals + team goals, and two work boards with tasks
+#                                     #   (bootstrap/demo.sql). Best way to see the product with data in it.
 #
 # Seeded role logins (email -> role):  super@example.com=super_admin  hr@example.com=hr_admin
 #   mgr@example.com=manager  pay@example.com=payroll_admin  emp@example.com=employee
@@ -35,7 +36,7 @@ for arg in "$@"; do
   case "$arg" in
     --seed) SEED=1 ;;
     --bootstrap) BOOTSTRAP=1 ;;
-    --demo) BOOTSTRAP=1; DEMO=1 ;; # bootstrap, then overlay demo people + kudos
+    --demo) BOOTSTRAP=1; DEMO=1 ;; # bootstrap, then overlay demo people, kudos, goals + boards
     *) EMAIL="$arg" ;;
   esac
 done
@@ -77,7 +78,7 @@ if [ "$BOOTSTRAP" = "1" ]; then
 fi
 
 if [ "$DEMO" = "1" ]; then
-  echo "→ Applying demo overlay (people + a populated kudos board)…"
+  echo "→ Applying demo overlay (people, kudos, goals + team goals, work boards with tasks)…"
   node --import ./scripts/tsResolve.mjs bootstrap/genDemo.ts > bootstrap/demo.sql   # regenerate so it's never stale
   npx wrangler d1 execute hrms --local --file=bootstrap/demo.sql
 fi

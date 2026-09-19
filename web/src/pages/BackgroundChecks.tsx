@@ -4,7 +4,7 @@ import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
-import { formatDate, idOf, personName } from "@/lib/utils";
+import { cn, formatDate, idOf, personName } from "@/lib/utils";
 import { describeError } from "@/lib/formError";
 import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
 import type { BackgroundCheck, Employee, Me } from "@/types";
@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { type TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { ActivitySection } from "@/components/common/ActivitySection";
@@ -220,19 +221,52 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
     catch (e) { toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" }); }
   }
 
+  /** How long a check has been out with the vendor. Zero for anything that has come back or been dropped. */
+  const openDays = (c: BackgroundCheck) =>
+    !c.delete_time && (c.status === "pending" || c.status === "in_progress") && c.initiated_date
+      ? Math.max(0, daysBetweenYmd(c.initiated_date.slice(0, 10), todayStr()))
+      : 0;
+
+  // The only question a screening register is really asked: what is stuck, and with whom.
+  const checkInsights = (cs: BackgroundCheck[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const stuck = cs.filter((c) => openDays(c) > 14);
+    if (stuck.length > 0) {
+      out.push({
+        id: "stuck",
+        label: `${stuck.length} open over two weeks`,
+        tone: "warning",
+        hint: "Sent to the vendor and still not back. Longest first.",
+        filters: { open_days: ">14" },
+        sort: "open_days.desc",
+      });
+    }
+    const failed = cs.filter((c) => !c.delete_time && c.status === "failed");
+    if (failed.length > 0) {
+      out.push({
+        id: "failed",
+        label: `${failed.length} came back adverse`,
+        tone: "destructive",
+        filters: { status: statusLabel("failed") },
+      });
+    }
+    return out;
+  };
+
   const columns: Column<BackgroundCheck>[] = [
     {
-      id: "employee", header: "Employee", filter: "select", accessor: (c) => empName(c.employee),
+      id: "employee", header: "Employee", filter: "select", groupBy: true, accessor: (c) => empName(c.employee),
       cell: (c) => {
         const e = emp(c.employee);
         return <span className="inline-flex items-center gap-2"><PhotoAvatar employeeId={c.employee ? idOf(c.employee) : ""} name={empName(c.employee)} photo={e?.photo} className="h-6 w-6" /> {empName(c.employee)}</span>;
       },
     },
-    { id: "check_type", header: "Check", filter: "select", accessor: (c) => humanize(c.check_type), cell: (c) => <span className="inline-flex items-center gap-1.5"><Badge variant="secondary">{humanize(c.check_type)}</Badge>{c.transition && <span className="text-[10px] uppercase tracking-wide text-muted-foreground" title="From onboarding">onboarding</span>}</span> },
-    { id: "status", header: "Status", filter: "select", accessor: (c) => statusLabel(c.status), cell: (c) => <StatusBadge s={c.status} /> },
-    { id: "vendor", header: "Vendor", accessor: (c) => c.vendor ?? "", cell: (c) => c.vendor || <span className="text-muted-foreground">-</span> },
+    { id: "check_type", header: "Check", filter: "select", groupBy: true, accessor: (c) => humanize(c.check_type), cell: (c) => <span className="inline-flex items-center gap-1.5"><Badge variant="secondary">{humanize(c.check_type)}</Badge>{c.transition && <span className="text-[10px] uppercase tracking-wide text-muted-foreground" title="From onboarding">onboarding</span>}</span> },
+    { id: "status", header: "Status", filter: "select", groupBy: true, accessor: (c) => statusLabel(c.status), cell: (c) => <StatusBadge s={c.status} /> },
+    // Grouping by vendor is how the "who is slow" conversation starts; blank is a check nobody has sent out.
+    { id: "vendor", header: "Vendor", filter: "select", groupBy: true, accessor: (c) => c.vendor ?? "", cell: (c) => c.vendor || <span className="text-muted-foreground">-</span> },
     {
-      id: "initiated", header: "Initiated", accessor: (c) => c.initiated_date ?? "",
+      id: "initiated", header: "Initiated", filter: "date", dateHint: "past", accessor: (c) => c.initiated_date ?? "",
       // For open checks show how long they've been sitting - that's the "chase the vendor" signal.
       cell: (c) => {
         if (!c.initiated_date) return <span className="text-muted-foreground">-</span>;
@@ -249,7 +283,7 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
       },
     },
     {
-      id: "completed", header: "Completed", accessor: (c) => c.completed_date ?? "",
+      id: "completed", header: "Completed", filter: "date", dateHint: "past", accessor: (c) => c.completed_date ?? "",
       // Show the turnaround alongside the date - "how long did this check take" without mental math.
       cell: (c) => {
         if (!c.completed_date) return <span className="text-muted-foreground">-</span>;
@@ -260,6 +294,14 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
       },
     },
     { id: "reference", header: "Reference", defaultHidden: true, accessor: (c) => c.reference_no ?? "", cell: (c) => c.reference_no || "-" },
+    // Days a check has been open, zero once it has landed. The "Initiated" cell already shows this in
+    // passing; as a column of its own it can be sorted, filtered ("open more than 14 days") and is what
+    // makes the chase-the-vendor chip above the table narrow to exactly the rows it counted.
+    {
+      id: "open_days", header: "Days open", align: "right", defaultHidden: true, filter: "number", formatTotal: (n) => `${n} days`,
+      accessor: (c) => openDays(c),
+      cell: (c) => { const d = openDays(c); return d > 0 ? <span className={cn("tabular-nums", d > 14 && "font-medium text-warning")}>{d}</span> : <span className="text-muted-foreground">-</span>; },
+    },
     stateColumn<BackgroundCheck>(),
     ...metaColumns<BackgroundCheck>(),
     {
@@ -302,7 +344,7 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
         {rows.length === 0 ? (
           <EmptyState icon={UserCheck} title="No background checks" description="Record verification checks (identity, address, education, employment, criminal) and track each to a clear or discrepancy outcome." action={addBtn} />
         ) : (
-          <DataTable columns={columns} tableId="background-checks" rows={shown} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : "No checks match"} accessCollection="background-checks" accessTargetOf={(c) => ({ objectPath: c.path, label: `${empName(c.employee)} · ${humanize(c.check_type)}`, can: c.access?.can })} />
+          <DataTable columns={columns} insights={checkInsights} tableId="background-checks" rows={shown} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : "No checks match"} accessCollection="background-checks" accessTargetOf={(c) => ({ objectPath: c.path, label: `${empName(c.employee)} · ${humanize(c.check_type)}`, can: c.access?.can })} />
         )}
       </DataState>
 

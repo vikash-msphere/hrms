@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { weekdayOf, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, localDay, utcDay, type WorkEvent } from "../src/domain/attendance";
+import { weekdayOf, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, localDay, utcDay, creditUnits, type DayCredit, type WorkEvent } from "../src/domain/attendance";
 
 const WORK = [1, 2, 3, 4, 5]; // Mon-Fri
 const FULL = 480; // minutes for a full day
@@ -293,5 +293,85 @@ describe("attendance.eventCreditByDay", () => {
     });
     expect(short.get("2026-06-01")).toBe(180);
     expect(lopDayUnits({ ...lopBase, workedByDay: short })).toBe(1);
+  });
+});
+
+// DAY MARKS: HR's decision about what a day is worth, which REPLACES what the punches say it was worth.
+//
+// This is the half of the feature with money on it. Everything else about a mark - the badge, the audit row,
+// the notification - is reporting; what it actually does is move this number, so each case below is one of
+// the three answers applied to a day whose punches say something else.
+describe("a day mark replaces what the punches say a day is worth", () => {
+  const base = {
+    startYmd: "2026-06-01", endYmd: "2026-06-01", // a Monday
+    workDays: WORK, holidays: new Set<string>(), leaveRanges: [],
+    fullDayMinutes: FULL, halfDayMinutes: HALF,
+  };
+  const marks = (c: DayCredit) => new Map([["2026-06-01", c]]);
+
+  it("scores a credit the same way whichever direction it moves the day", () => {
+    expect(creditUnits("full")).toBe(1);
+    expect(creditUnits("half")).toBe(0.5);
+    expect(creditUnits("absent")).toBe(0);
+  });
+
+  it("pays a short day in full when HR says it counts in full", () => {
+    // Three hours: under the half-day minimum, so the punches alone make it a whole day's absence.
+    const short = new Map([["2026-06-01", 180]]);
+    expect(lopDayUnits({ ...base, workedByDay: short })).toBe(1);
+    expect(lopDayUnits({ ...base, workedByDay: short, marksByDay: marks("full") })).toBe(0);
+    expect(lopDayUnits({ ...base, workedByDay: short, marksByDay: marks("half") })).toBe(0.5);
+  });
+
+  it("docks a fully worked day when HR says the person was absent", () => {
+    // The override has to run BOTH ways or it is a discount button rather than a decision.
+    const worked = new Map([["2026-06-01", 500]]);
+    expect(lopDayUnits({ ...base, workedByDay: worked })).toBe(0);
+    expect(lopDayUnits({ ...base, workedByDay: worked, marksByDay: marks("absent") })).toBe(1);
+  });
+
+  it("marks a day nobody punched at all", () => {
+    // The case a regularization cannot serve without inventing clock times nobody has: the person worked, the
+    // punches were never made, and HR is willing to say so.
+    expect(lopDayUnits({ ...base, workedByDay: new Map(), marksByDay: marks("full") })).toBe(0);
+  });
+
+  it("settles a half-leave day against the half that was still owed, not against a whole one", () => {
+    // Half the day is excused, so only half is owed. A "half" mark discharges exactly that - it does not
+    // leave 0.5 behind (which treating the mark as an absolute absence figure rather than a credit would).
+    const halfLeave = { ...base, leaveRanges: [{ start: "2026-06-01", end: "2026-06-01", startSession: 2 }] };
+    expect(lopDayUnits({ ...halfLeave, workedByDay: new Map(), marksByDay: marks("half") })).toBe(0);
+    expect(lopDayUnits({ ...halfLeave, workedByDay: new Map(), marksByDay: marks("full") })).toBe(0);
+    expect(lopDayUnits({ ...halfLeave, workedByDay: new Map(), marksByDay: marks("absent") })).toBe(0.5);
+  });
+
+  it("never banks a surplus against another day", () => {
+    // A "full" mark on a half-leave day is worth more than that day owed. The excess stays on the day rather
+    // than paying down the absence beside it, which is what `Math.max(0, …)` per day is for.
+    const units = lopDayUnits({
+      ...base,
+      endYmd: "2026-06-02",
+      leaveRanges: [{ start: "2026-06-01", end: "2026-06-01", startSession: 2 }],
+      workedByDay: new Map(),
+      marksByDay: marks("full"),
+    });
+    expect(units).toBe(1); // Mon settled, Tue still a full absence
+  });
+
+  it("is inert on a day nothing was owed on", () => {
+    // A holiday and a non-working day are skipped before the mark is read, so a stray mark on one cannot turn
+    // a day nobody owed into a deduction. The route refuses to create one; this is the backstop under it.
+    expect(lopDayUnits({ ...base, holidays: new Set(["2026-06-01"]), workedByDay: new Map(), marksByDay: marks("absent") })).toBe(0);
+    expect(lopDayUnits({ ...base, startYmd: "2026-06-06", endYmd: "2026-06-06", workedByDay: new Map(), marksByDay: new Map([["2026-06-06", "absent" as DayCredit]]) })).toBe(0); // Saturday
+  });
+
+  it("leaves every unmarked day in the window alone", () => {
+    const units = lopDayUnits({
+      ...base,
+      endYmd: "2026-06-03",
+      workedByDay: new Map([["2026-06-02", 180]]), // Tue short -> 1
+      marksByDay: marks("full"), // Mon only
+    });
+    expect(units).toBe(2); // Mon marked full(0) + Tue short(1) + Wed no punch(1)
   });
 });

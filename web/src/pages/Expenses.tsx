@@ -10,7 +10,7 @@ import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useRoute } from "@/router";
 import { formatDate, formatMoney, idOf, cn } from "@/lib/utils";
-import { orgDayOf, thisMonthStr, todayStr } from "@/lib/orgDay";
+import { addDaysYmd, orgDayOf, thisMonthStr, todayStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { useTabActivity, markTabSeen } from "@/lib/tabActivity";
@@ -26,6 +26,8 @@ import { AccessTab } from "@/components/common/AccessTab";
 import { DataTable, type Column, type BulkAction } from "@/components/common/DataTable";
 import { metaColumns } from "@/components/common/metaColumns";
 import { RowActions, type RowAction } from "@/components/common/RowActions";
+import { type TableInsight } from "@/components/common/TableInsights";
+import { BLANK } from "@/lib/tableFilter";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Chart, ChartCard } from "@/components/common/Chart";
@@ -145,7 +147,7 @@ export default function Expenses({ me }: { me: Me }) {
     : "bank";
 
   // ---- tabs -----------------------------------------------------------------------------------------------
-  // Deep-linkable (`#/expenses/review`), so a queue can be shared or reached from a notification.
+  // Deep-linkable (`/expenses/review`), so a queue can be shared or reached from a notification.
   const route = useRoute();
   const { value: tab, onValueChange: setTab } = useRoutedTabs("expenses", TAB_KEYS, me.employee_id ? "mine" : "all");
   const tabFromUrl = route.page === "expenses" && TAB_KEYS.includes(route.id ?? "");
@@ -381,7 +383,7 @@ export default function Expenses({ me }: { me: Me }) {
   useEffect(() => {
     if (landed.current || state !== "ready") return;
     landed.current = true;
-    if (tabFromUrl) return; // an explicit `#/expenses/<tab>` wins over the landing rule
+    if (tabFromUrl) return; // an explicit `/expenses/<tab>` wins over the landing rule
     if (canApprove && toReviewLocal.length) setTab("review");
     else if (canPay && toPayLocal.length) setTab("pay");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -804,6 +806,9 @@ export default function Expenses({ me }: { me: Me }) {
   };
   const amountColumn: Column<Expense> = {
     id: "amount", header: "Amount", align: "right", mobilePriority: 2, accessor: (r) => r.amount,
+    // Filtered as money: "over ₹5,000", "between 1k and 10k" - and the popover shows the queue's own
+    // spread (lowest, highest, median, total) before anyone types a figure.
+    filter: "number",
     // Totalled under the column (and over any selection) - "how much is in this queue" without a spreadsheet.
     aggregate: "sum", formatTotal: (n) => money(n),
     cell: (r) => (
@@ -814,7 +819,10 @@ export default function Expenses({ me }: { me: Me }) {
     ),
   };
   const invoiceColumn: Column<Expense> = {
-    id: "invoice", header: "Invoice", sortable: false, filter: "none", accessor: (r) => (r.has_invoice ? "yes" : ""),
+    // Filterable on whether the paperwork is there at all: "(Blank)" is every expense with no invoice
+    // attached, which is the list an audit asks for and the one the "over ₹5,000 with no invoice" chip
+    // above the table narrows to.
+    id: "invoice", header: "Invoice", sortable: false, filter: "select", accessor: (r) => (r.has_invoice ? "Attached" : ""),
     cell: (r) => (r.has_invoice
       ? <Button size="icon" variant="ghost" className="h-7 w-7" title="View invoice" aria-label="View invoice" onClick={(e) => { e.stopPropagation(); viewInvoice(r); }}><Eye className="h-3.5 w-3.5" /></Button>
       : <span className="text-muted-foreground" title="No invoice attached">-</span>),
@@ -822,7 +830,8 @@ export default function Expenses({ me }: { me: Me }) {
   // How long this has been waiting on a decision - a queue is worked oldest-first, and a week-old expense that
   // looks identical to a fresh one is how approvals rot.
   const waitingColumn: Column<Expense> = {
-    id: "waiting", header: "Waiting", align: "right", accessor: (r) => waitingDays(r.create_time),
+    id: "waiting", header: "Waiting", align: "right", filter: "number", formatTotal: (n) => `${n} days`,
+    accessor: (r) => waitingDays(r.create_time),
     cell: (r) => {
       const d = waitingDays(r.create_time);
       return <span className={cn("tabular-nums text-xs", d >= 7 ? "font-medium text-destructive" : d >= 3 ? "font-medium text-warning" : "text-muted-foreground")}>{waitingLabel(d)}</span>;
@@ -831,12 +840,14 @@ export default function Expenses({ me }: { me: Me }) {
 
   const baseLedgerColumns: Column<Expense>[] = [
     payeeColumn,
-    { id: "category", header: "Category", filter: "select", mobilePriority: 4, accessor: (r) => catName(r.category) },
-    { id: "gl", header: "GL code", defaultHidden: true, accessor: (r) => catGl(r.category), cell: (r) => catGl(r.category) || <span className="text-muted-foreground">-</span> },
-    { id: "department", header: "Cost centre", filter: "select", accessor: (r) => deptName(r.department), defaultHidden: true },
+    // The three columns a finance table gets sliced by. Grouping by cost centre (with the amount column's
+    // subtotal on every fold) is the month-end question this page could only answer by export until now.
+    { id: "category", header: "Category", filter: "select", groupBy: true, mobilePriority: 4, accessor: (r) => catName(r.category) },
+    { id: "gl", header: "GL code", defaultHidden: true, groupBy: true, accessor: (r) => catGl(r.category), cell: (r) => catGl(r.category) || <span className="text-muted-foreground">-</span> },
+    { id: "department", header: "Cost centre", filter: "select", groupBy: true, accessor: (r) => deptName(r.department), defaultHidden: true },
     amountColumn,
-    { id: "incurred", header: "Incurred", accessor: (r) => r.incurred_on ?? "", cell: (r) => (r.incurred_on ? formatDate(r.incurred_on) : "-") },
-    { id: "state", header: "Status", filter: "select", mobilePriority: 3, accessor: (r) => up(r.state), cell: stateCell },
+    { id: "incurred", header: "Incurred", filter: "date", dateHint: "past", accessor: (r) => r.incurred_on ?? "", cell: (r) => (r.incurred_on ? formatDate(r.incurred_on) : "-") },
+    { id: "state", header: "Status", filter: "select", groupBy: true, mobilePriority: 3, accessor: (r) => up(r.state), cell: stateCell },
     { id: "invoice_number", header: "Invoice no.", defaultHidden: true, accessor: (r) => r.invoice_number ?? "", cell: (r) => r.invoice_number || "-" },
     {
       id: "payment", header: "Payment", defaultHidden: true,
@@ -860,11 +871,12 @@ export default function Expenses({ me }: { me: Me }) {
   // Templates are a schedule, not a ledger line: what matters is what recurs, how often, and when next.
   const recurringColumns: Column<Expense>[] = [
     payeeColumn,
-    { id: "category", header: "Category", filter: "select", mobilePriority: 4, accessor: (r) => catName(r.category) },
-    { id: "amount", header: "Amount", align: "right", mobilePriority: 2, accessor: (r) => r.amount, aggregate: "sum", formatTotal: (n) => money(n), cell: (r) => <span className="tabular-nums">{money(r.amount)}</span> },
-    { id: "rule", header: "Repeats", filter: "select", mobilePriority: 3, accessor: (r) => RULE_LABEL[r.recurrence_rule ?? ""] ?? "-" },
+    { id: "category", header: "Category", filter: "select", groupBy: true, mobilePriority: 4, accessor: (r) => catName(r.category) },
+    { id: "amount", header: "Amount", align: "right", filter: "number", mobilePriority: 2, accessor: (r) => r.amount, aggregate: "sum", formatTotal: (n) => money(n), cell: (r) => <span className="tabular-nums">{money(r.amount)}</span> },
+    { id: "rule", header: "Repeats", filter: "select", groupBy: true, mobilePriority: 3, accessor: (r) => RULE_LABEL[r.recurrence_rule ?? ""] ?? "-" },
     {
-      id: "next", header: "Next occurrence", accessor: (r) => r.next_occurrence_on ?? "",
+      // A schedule is read forwards, so its filter leads with the windows ahead ("next 7 days").
+      id: "next", header: "Next occurrence", filter: "date", dateHint: "future", accessor: (r) => r.next_occurrence_on ?? "",
       cell: (r) => {
         const upcoming = nextOccurrences(r.next_occurrence_on, r.recurrence_rule, 3);
         return r.next_occurrence_on
@@ -876,10 +888,10 @@ export default function Expenses({ me }: { me: Me }) {
           : "-";
       },
     },
-    { id: "last", header: "Last generated", defaultHidden: true, accessor: (r) => r.last_generated_time ?? "", cell: (r) => (r.last_generated_time ? formatDate(r.last_generated_time) : <span className="text-muted-foreground">never</span>) },
-    { id: "department", header: "Cost centre", filter: "select", accessor: (r) => deptName(r.department), defaultHidden: true },
+    { id: "last", header: "Last generated", defaultHidden: true, filter: "date", dateHint: "past", accessor: (r) => r.last_generated_time ?? "", cell: (r) => (r.last_generated_time ? formatDate(r.last_generated_time) : <span className="text-muted-foreground">never</span>) },
+    { id: "department", header: "Cost centre", filter: "select", groupBy: true, accessor: (r) => deptName(r.department), defaultHidden: true },
     {
-      id: "state", header: "Status", filter: "select",
+      id: "state", header: "Status", filter: "select", groupBy: true,
       accessor: (r) => (up(r.state) === "CANCELLED" ? "Stopped" : r.paused ? "Paused" : "Active"),
       cell: (r) => (up(r.state) === "CANCELLED"
         ? <Badge variant="muted">Stopped</Badge>
@@ -891,6 +903,49 @@ export default function Expenses({ me }: { me: Me }) {
     ...metaColumns<Expense>(),
     actionsColumn,
   ];
+
+  // ---- what the queue is trying to tell you -----------------------------------------------------------------
+  // Two things an approver should know before starting to click, neither of which is visible in a list sorted
+  // by date: what has gone stale, and what will be handed back for missing paperwork. Each chip narrows the
+  // table to exactly the rows it counted.
+  const queueInsights = (rs: Expense[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const stale = rs.filter((r) => waitingDays(r.create_time) >= 7);
+    if (stale.length > 0) {
+      out.push({
+        id: "stale",
+        label: `${stale.length} waiting over a week`,
+        tone: "warning",
+        hint: "Oldest first. A queue is worked from the top, and these have been sitting longest.",
+        filters: { waiting: ">=7" },
+        sort: "waiting.desc",
+      });
+    }
+    const noInv = rs.filter((r) => !r.has_invoice);
+    if (noInv.length > 0) {
+      out.push({
+        id: "no-invoice",
+        label: `${noInv.length} with no invoice`,
+        tone: "warning",
+        hint: "Accounts hands these back. Worth chasing the paperwork before approving.",
+        filters: { invoice: BLANK },
+      });
+    }
+    // Filed long after the money was spent. Most expense policies have a window, and a claim from last
+    // quarter arriving now is either a policy exception or a mistake - either way it is not routine.
+    const cutoff = addDaysYmd(todayStr(), -90);
+    const old = rs.filter((r) => r.incurred_on && r.incurred_on < cutoff);
+    if (old.length > 0) {
+      out.push({
+        id: "old-incurred",
+        label: `${old.length} incurred over 90 days ago`,
+        hint: `Incurred before ${formatDate(cutoff)}.`,
+        filters: { incurred: `..${cutoff}` },
+        sort: "incurred.asc",
+      });
+    }
+    return out;
+  };
 
   // ---- bulk operations ------------------------------------------------------------------------------------
   // Finance works a queue in batches. Each action is enabled only when EVERY selected row can make the move,
@@ -978,9 +1033,10 @@ export default function Expenses({ me }: { me: Me }) {
   // ---- table ----------------------------------------------------------------------------------------------
   // Search hits the whole collection, so a searching table shows search rows on every tab (the tab's own
   // filter would hide the very record the search reached past the first page).
-  const renderTable = (data: Expense[], columns: Column<Expense>[], tableId: string, emptyTitle: string, emptyDescription: string, opts?: { bulk?: "review" | "pay" | "all"; more?: { hasMore: boolean; loadMore: () => void }; costCentre?: boolean }) => (
+  const renderTable = (data: Expense[], columns: Column<Expense>[], tableId: string, emptyTitle: string, emptyDescription: string, opts?: { bulk?: "review" | "pay" | "all"; more?: { hasMore: boolean; loadMore: () => void }; costCentre?: boolean; insights?: (rs: Expense[]) => TableInsight[] }) => (
     <DataTable
       columns={columns}
+      insights={opts?.insights}
       tableId={tableId}
       rows={searching ? searchRows : data}
       search={{ value: search, onChange: setSearch, placeholder: "Search all expenses…" }}
@@ -1167,14 +1223,14 @@ export default function Expenses({ me }: { me: Me }) {
               <TabsContent value="review">
                 {toReview.length === 0 && !searching
                   ? <EmptyState icon={ClipboardCheck} title="Nothing to approve" description="Submitted expenses waiting on your decision land here." />
-                  : renderTable(toReview, queueColumns, "expenses-review", "No expenses match", "Adjust the filters to see the queue.", { bulk: "review", more: { hasMore: reviewQ.hasMore, loadMore: reviewQ.loadMore } })}
+                  : renderTable(toReview, queueColumns, "expenses-review", "No expenses match", "Adjust the filters to see the queue.", { bulk: "review", insights: queueInsights, more: { hasMore: reviewQ.hasMore, loadMore: reviewQ.loadMore } })}
               </TabsContent>
             )}
             {showPay && (
               <TabsContent value="pay">
                 {toPay.length === 0 && !searching
                   ? <EmptyState icon={Wallet} title="Nothing awaiting payment" description="Approved vendor expenses appear here until they're marked paid. Employee-fronted ones pay out through payroll." />
-                  : renderTable(toPay, queueColumns, "expenses-pay", "No expenses match", "Adjust the filters to see what's payable.", { bulk: "pay", more: { hasMore: payQ.hasMore, loadMore: payQ.loadMore } })}
+                  : renderTable(toPay, queueColumns, "expenses-pay", "No expenses match", "Adjust the filters to see what's payable.", { bulk: "pay", insights: queueInsights, more: { hasMore: payQ.hasMore, loadMore: payQ.loadMore } })}
               </TabsContent>
             )}
             {me.employee_id && (

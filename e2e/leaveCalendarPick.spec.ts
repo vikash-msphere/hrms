@@ -21,18 +21,46 @@ test("a range picked on the grid fills the dates and prices itself", async ({ as
   const form = page.getByRole("dialog");
   await expect(form.getByRole("heading", { name: "Request leave" })).toBeVisible({ timeout: 30_000 });
 
-  // Two DIFFERENT weekdays a fortnight out, far enough ahead that the grid is drawing an ordinary month rather
-  // than today's part-spent one. `nextWeekday(14)` and `nextWeekday(15)` can be the same Monday (when day 14
-  // is a Saturday), which would make the two presses one press and the cost below a day rather than two.
-  const start = nextWeekday(14);
-  const end = weekdayAfter(start);
-
   // Every day carries its own date, which is what lets this press a particular day rather than "the
   // fourteenth cell". By `data-ymd` and not by name: the NAME is the spoken date ("Monday, 28 September
   // 2026"), formatted for whoever is reading it, so matching on it would be this spec asserting the runner's
   // locale agrees with the browser's. What the day IS does not move.
   const day = (ymd: string) => form.locator(`button[data-ymd="${ymd}"]`);
-  await expect(day(start)).toBeVisible({ timeout: 30_000 });
+  await expect(form.locator("button[data-ymd]").first()).toBeVisible({ timeout: 30_000 });
+
+  // TWO ADJACENT DAYS THE ORG ACTUALLY CHARGES FOR, taken from the grid rather than from the calendar.
+  //
+  // "A weekday" is not the same question: a weekday the org has declared a holiday costs nothing, so a pair
+  // picked by skipping only Saturdays and Sundays prices at one day whenever the second of them lands on one -
+  // which is a real answer from the app and a broken premise in the spec, firing on whichever weeks of the
+  // year the seeded holidays happen to fall in (2 October did it). And the pair has to be adjacent on the
+  // CALENDAR, not merely consecutive among working days: a Friday-Monday pair costs the same two days but the
+  // panel then also says "2 weekend/holiday days in between don't count", so the cost line no longer reads as
+  // that sentence alone.
+  //
+  // `data-day` is the grid's own word for what a day is worth ("work", "half", "weekend", "holiday"), in the
+  // four the leave arithmetic itself uses (domain/leave.ts). Barred days are left out: a policy window cannot
+  // be picked at all.
+  const chargeable = await form
+    .locator('button[data-day="work"]:not([disabled]), button[data-day="half"]:not([disabled])')
+    .evaluateAll((els, from) =>
+      els
+        .map((el) => ({ ymd: el.getAttribute("data-ymd") ?? "", kind: el.getAttribute("data-day") ?? "" }))
+        .filter((d) => d.ymd >= from)
+        .sort((a, b) => a.ymd.localeCompare(b.ymd)),
+      // A fortnight out, so the grid is drawing an ordinary month rather than today's part-spent one.
+      nextWeekday(14),
+    );
+  const nextDay = (ymd: string) => {
+    const at = new Date(`${ymd}T00:00:00Z`);
+    return new Date(at.getTime() + 86_400_000).toISOString().slice(0, 10);
+  };
+  const pair = chargeable.findIndex(
+    (d, i) => d.kind === "work" && chargeable[i + 1]?.kind === "work" && chargeable[i + 1]?.ymd === nextDay(d.ymd),
+  );
+  expect(pair, `the two months on screen offer no two adjacent working days:\n${JSON.stringify(chargeable)}`).toBeGreaterThanOrEqual(0);
+  const start = chargeable[pair]!.ymd;
+  const end = chargeable[pair + 1]!.ymd;
 
   // The first press opens the range, the second closes it. The inputs are the proof it reached the form: they
   // are what the request is actually filed from.
@@ -69,18 +97,6 @@ test("a range picked on the grid fills the dates and prices itself", async ({ as
 });
 
 /** The next Mon-Fri strictly after `day`, as the grid names its cells. */
-function weekdayAfter(day: string): string {
-  const at = new Date(`${day}T00:00:00`);
-  for (let n = 1; n <= 7; n++) {
-    const next = new Date(at.getTime() + n * 86_400_000);
-    if (next.getDay() !== 0 && next.getDay() !== 6) {
-      const pad = (v: number) => String(v).padStart(2, "0");
-      return `${next.getFullYear()}-${pad(next.getMonth() + 1)}-${pad(next.getDate())}`;
-    }
-  }
-  throw new Error("e2e: a week with no weekday in it");
-}
-
 /** Any request this person holds that starts on `day` - there should be none. */
 async function filedOn(page: import("@playwright/test").Page, day: string): Promise<string | undefined> {
   const res = await page.request.get("/v1/leave-requests?page_size=100");

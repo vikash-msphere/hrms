@@ -171,11 +171,12 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
         {lt.display_name}
       </span>
     ) },
-    { id: "accrual", header: "Accrual / year", accessor: (lt) => lt.accrual_days_per_year ?? 0, cell: (lt) => `${lt.accrual_days_per_year ?? 0} days` },
+    { id: "accrual", header: "Accrual / year", filter: "number", formatTotal: (n) => `${n} days`, accessor: (lt) => lt.accrual_days_per_year ?? 0, cell: (lt) => `${lt.accrual_days_per_year ?? 0} days` },
     {
       id: "paid",
       header: "Paid",
       filter: "select",
+      groupBy: true,
       accessor: (lt) => (lt.paid ? "Paid" : "Unpaid"),
       cell: (lt) => <Badge variant={lt.paid ? "success" : "muted"}>{lt.paid ? "Paid" : "Unpaid"}</Badge>,
     },
@@ -435,7 +436,7 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
               </div>
               {/* The other half of the policy is a DIFFERENT settings entry, and this is where you find out you
                   are inheriting something you want changed everywhere rather than just here. */}
-              <a href="#/settings/leave-policy?tab=restrictions" className="text-xs text-muted-foreground underline hover:text-foreground">
+              <a href="/settings/leave-policy?tab=restrictions" className="text-xs text-muted-foreground underline hover:text-foreground">
                 Org baseline →
               </a>
             </div>

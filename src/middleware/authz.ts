@@ -353,6 +353,11 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // their grant uses the manager-chain tokens, so `my-reports` / `my-org` decide with real data and
       // everybody else pays nothing (lib/selfContext.ts).
       const self = await selfContextFor(deps, user);
+      // Published on the context so a handler can put the SAME question to the engine the middleware just
+      // decided with - `domain/access.ts subjectScopes` needs the reporting chain to answer "may I see this
+      // person's goals", and resolving it a second time would be a second read. Read-only to handlers: it
+      // decides nothing on its own, it is the context a decision is made IN.
+      c.set("self", self);
       // Set by whichever lane below decides a CONCRETE request, so the view-as containment check after the
       // try/catch can put the identical question to the real caller's grant. See the check for why it is a
       // closure rather than the resolved request itself (the activity lane asks two questions, not one).
@@ -717,9 +722,11 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // can touch; the runner only binds them. This is what makes a SHARED view safe: the recipient runs it under
     // their own map, so they get the same grid with fewer columns and fewer rows, never the author's.
     if (collection === "table-views") c.set("tableScopes", await scopesForCollections(c.get("deps"), user, TABLE_SOURCE_COLLECTIONS));
-    // The builder's field catalogue names collections rather than rows, so it needs only the boolean half of
-    // that decision - no scope, and no per-object exception read.
-    if (collection === "table-fields") c.set("listableCollections", listableCollectionsFor(user));
+    // The builder's field catalogue is answered from the SAME map as the runner, and for the same reason it
+    // needs more than the boolean half: the base picker must not offer a collection whose breadth can bind to
+    // no row (an own-breadth caller on a table with no owner column, a principal with no employee record), and
+    // the breadth - with the caller's shares - is what says so. One exception read, exactly as `:run` pays.
+    if (collection === "table-fields") c.set("tableScopes", await scopesForCollections(c.get("deps"), user, TABLE_SOURCE_COLLECTIONS));
     // Approvals badge: the same per-queue pattern, decided with the `approve` verb. The prior-employer
     // verification queue has no table, so its own capability (`tax-verifications.read` - the gate its rows
     // endpoint gets) is decided here too and handed over as a boolean.

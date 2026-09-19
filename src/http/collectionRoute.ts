@@ -18,6 +18,7 @@ import type { Deps } from "../deps";
 import { customMethod } from "./customMethod";
 import { lifecycleVerb } from "./lifecycleVerb";
 import { accessHint, withAccess } from "./accessHint";
+import { subjectScopes } from "../domain/access";
 import { LIST_OWNER_COLUMNS, OWNER_COLUMN_COLLECTIONS, pageOwnerCodes } from "../lib/authzResolve";
 import { clampPageSize } from "./pagination";
 import { lastWriteAt, listEtag, etagMatches } from "./listEtag";
@@ -89,6 +90,12 @@ export type CollectionRouteSpec<I, T extends CrudTable = CrudTable> = CrudSpec<I
   softDelete?: false;
   publish?: boolean; // resource supports :publish/:unpublish
   publishTime?: boolean; // also stamp publish_time on publish
+  /**
+   * The item response carries `access.subject`: what the caller may reach ABOUT THE PERSON this row IS, across
+   * every collection (`domain/access.ts subjectScopes`). For `employees` alone - it is the answer a profile's
+   * tabs need, and the only one that correlates with who the subject is rather than reporting a blanket tier.
+   */
+  subjectScopes?: boolean;
   /** Replace individual generic service methods, keeping the rest (a bespoke create, a bespoke get, ...). */
   overrides?: Partial<CrudService<I>>;
   /**
@@ -148,6 +155,11 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
     // the one the middleware already decided with (no second lookup), so the hint cannot disagree with the
     // request that produced it.
     const hint = accessHint(user, collection, row?.code, grant, hintVerbs, c.get("itemOwnerCode"));
+    // `subjectScopes: true` (employees) adds what the caller may reach ABOUT THIS PERSON, across every
+    // collection - the question a profile's tabs ask, which `access.can` (verbs on THIS row) cannot answer.
+    // Computed here because this is where the per-object-merged grant and the request's own matcher context
+    // both are, so a share and a manager-chain grant are both in the answer. Pure and in-memory: no reads.
+    if (spec.subjectScopes && row?.code) hint.subject = subjectScopes(grant, c.get("self"), row.code);
     const res = serialize(decorated ?? row, user, hint.can) as object;
     return c.json(withAccess(res, user, collection, row?.code, grant, hintVerbs, hint));
   };

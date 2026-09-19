@@ -35,6 +35,9 @@ export function stateColumn<T extends StateRow>(opts?: { publishable?: boolean; 
     id: "state",
     header: "State",
     filter: "select",
+    // A handful of repeated values across the whole table: the shape grouping was made for ("show me the
+    // disabled ones together"), and it costs a catalogue page nothing to offer it.
+    groupBy: true,
     ...(opts?.hideDeleted === false ? {} : { hideValueByDefault: "Deleted" }),
     // Values to offer even when nothing loaded carries them - "Deleted" on a page that fetches the trash only
     // once it is picked.

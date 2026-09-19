@@ -113,6 +113,17 @@ export type CrudSpec<I, T extends Table = Table> = {
   afterCreate?: (deps: Deps, actor: AppUser, row: any, input: I) => Promise<void>;
   afterUpdate?: (deps: Deps, actor: AppUser, row: any, before: any, patch: I) => Promise<void>;
   /**
+   * A refusal the PATCH owes, decided from the row it is about. Runs after the row is read and its version
+   * checked, before anything is written - so it throws instead of writing, which is the difference between a
+   * rule and a notification.
+   *
+   * It exists because some refusals cannot be expressed as a grant and are not properties of the input either:
+   * an attendance day mark may not be re-valued by the person whose day it is, whatever rule reaches the row
+   * (services/attendanceDayMarks.ts), exactly as a tax declaration may not be verified by its subject. The
+   * create side has always been able to say this - it holds the input - and the update side had nowhere to.
+   */
+  beforeUpdate?: (deps: Deps, actor: AppUser, row: any, patch: I) => Promise<void>;
+  /**
    * Code allocation, when the resource is not a flat one (owned/dept-scoped tables). Receives the resolved
    * insert values, since an owned code is allocated under the row's owner.
    *
@@ -251,6 +262,9 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
       if (row.deleteTime) throw notFound(spec.notFound);
       assertNotLocked(row);
       if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+      // The row-shaped refusals, before anything is written and after the version is settled - so a rule that
+      // depends on WHO the row is about can say no (see CrudSpec#beforeUpdate).
+      if (spec.beforeUpdate) await spec.beforeUpdate(deps, actor, row, patch);
       const set: Record<string, unknown> = { updatedAt: new Date(), ...(await spec.patch(patch, row, deps, actor)) };
       // COMPARE-AND-SWAP, not read-then-write: the version the ETag was computed from is part of the WHERE, so
       // the DB decides whether this write still applies. Checking `ifMatch` above against the row we just read

@@ -118,9 +118,10 @@ const REPLAY_PRIVACY = {
     // behind it was masked. The fix is the `.sentry-mask` convention on the dialogs that actually show pay,
     // identity, medical or bank data (EmployeeBankDetails, EmployeeCompensation, EmployeeTaxDetails,
     // EmployeeSettlement, EmployeeBonuses, EmployeeIdentityDetails, EmployeePersonalDetails,
-    // EmergencyQuickView, SignDocumentDialog), not a blanket rule on every overlay: masking every dialog on a
-    // sensitive route also took the confirm prompts, the pickers and the report form itself, which is the
-    // over-masking this whole list exists to avoid. test/replayMaskCoverage.test.ts holds them to it.
+    // EmployeeEmergencyDetails, SignDocumentDialog), not a blanket rule on every overlay: masking every
+    // dialog on a sensitive route also took the confirm prompts, the pickers and the report form itself,
+    // which is the over-masking this whole list exists to avoid. test/replayMaskCoverage.test.ts holds them
+    // to it.
     // Fields that are sensitive wherever they appear, matched on what the BROWSER already knows about them
     // rather than on app markup: autocomplete hints and input types are set for the password manager's
     // benefit and are therefore both present and stable.
@@ -168,7 +169,7 @@ const REPLAY_PRIVACY = {
     "h3",
     "h4",
     "th", // column names
-    // In-page navigation: the workspace tab strip is <nav><a href="#/…">Reimbursements</a></nav>, so masking
+    // In-page navigation: the workspace tab strip is <nav><a href="/…">Reimbursements</a></nav>, so masking
     // it hid WHICH SECTION the person was in - the first thing anyone triaging asks. A nav holds labels of
     // places, never values.
     "nav",
@@ -248,10 +249,10 @@ const client = dsn
       // REPLAY_OPTIONS and the installer below.
       integrations: [
         Sentry.browserTracingIntegration({
-          // Both off, and driven by hand below. The app routes on the URL HASH (see router.ts), which the
-          // automatic instrumentation cannot see: every route in the SPA is the same pathname, so every
-          // pageload and navigation would arrive named "/" and the trace view would be one undifferentiated
-          // blob. The manual spans below carry the real route pattern instead.
+          // Both off, and driven by hand below. The app has its own history router (see router.ts), and the
+          // automatic instrumentation would name each transaction after the raw URL: `/employees/emp_01j…`
+          // gives every employee a "route" of their own, so the slowest-page view becomes a list of
+          // individuals rather than of pages. The manual spans below carry the route PATTERN instead.
           instrumentPageLoad: false,
           instrumentNavigation: false,
         }),
@@ -261,9 +262,9 @@ const client = dsn
       beforeSend(event) {
         if (event.message) event.message = scrub(event.message);
         for (const ex of event.exception?.values ?? []) if (ex.value) ex.value = scrub(ex.value);
-        // THE URL, which the SDK attaches by itself. This app routes on the hash, and the hash carries text
-        // the person typed: DataTable serialises its column filters into it (`t.<key>={"f":{…}}`) and the
-        // server-side search box rides `?q=`. Somebody looking up a record by account number therefore put
+        // THE URL, which the SDK attaches by itself. The address carries text the person typed: DataTable
+        // serialises its column filters into the query (`t.<key>={"f":{…}}`) and the server-side search box
+        // rides `?q=`. Somebody looking up a record by account number therefore put
         // that number in the address bar, and from there into every issue raised while it was open.
         if (event.request?.url) event.request.url = scrub(event.request.url);
         if (event.request?.query_string && typeof event.request.query_string === "string") {
@@ -318,11 +319,11 @@ const client = dsn
     })
   : undefined;
 
-// The route PATTERN, not the URL: `#/employees/emp_01j…/documents` is `/employees/:id/documents`. Ids in a
+// The route PATTERN, not the URL: `/employees/emp_01j…/documents` is `/employees/:id/documents`. Ids in a
 // transaction name would give every employee their own "route" and make the slowest-page view useless.
 // Parsed the same way router.ts parses it - page / id / sub, query discarded.
 function routePattern(): string {
-  const path = window.location.hash.replace(/^#\/?/, "").split("?")[0] ?? "";
+  const path = window.location.pathname.replace(/^\/+/, "");
   const [page, id, sub] = path.split("/");
   return `/${page || "dashboard"}${id ? "/:id" : ""}${sub ? `/${sub}` : ""}`;
 }
@@ -417,7 +418,7 @@ if (client) {
   // 3s also put the recorder under that floor for e2e/replayMasking.spec.ts, which flushes at 6s.
   void loadReplay();
 
-  // Source "route" from the start, unlike the reference flow that opens on "url" and upgrades: the hash is
+  // Source "route" from the start, unlike the reference flow that opens on "url" and upgrades: the path is
   // already in the address bar when this module runs, so the pattern is known before the first span exists
   // and there is nothing to wait for.
   Sentry.startBrowserTracingPageLoadSpan(client, {
@@ -426,12 +427,14 @@ if (client) {
   });
 
   // A dedicated listener rather than a hook inside useRoute: useRoute is mounted by several components at
-  // once, so a span started there would be started several times per navigation. `hashchange` fires once.
+  // once, so a span started there would be started several times per navigation. The router announces each
+  // route change exactly once on this event (web/src/router.ts) - named by string rather than imported,
+  // because nothing in this file may pull in an app module ahead of Sentry init.
   let last = routePattern();
-  window.addEventListener("hashchange", () => {
+  window.addEventListener("hrms:route", () => {
     const next = routePattern();
-    // Query-only writes (filters, an opened dialog, `?setting=`) fire hashchange without changing the route.
-    // They are not navigations and must not open a transaction.
+    // Query-only writes (filters, an opened dialog, `?setting=`) announce a route change without changing the
+    // route. They are not navigations and must not open a transaction.
     if (next === last) return;
     last = next;
     Sentry.startBrowserTracingNavigationSpan(client, {
@@ -483,7 +486,7 @@ export function reportProblemToSentry(
       what_happened: detail || "(not described)",
       // Where they were when they hit it. The issue's own `url` is this too, but it is the first thing anyone
       // triaging asks and it belongs next to the description rather than in the request context.
-      page: window.location.hash || "/",
+      page: `${window.location.pathname}${window.location.search}`,
     });
     Sentry.captureMessage(subject);
   });

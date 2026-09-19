@@ -14,11 +14,12 @@ import { dmy, longDate, monthLabelOf } from "@/lib/leaveCalendar";
 import { todayStr, thisYearStr, daysBetweenYmd } from "@/lib/orgDay";
 import { breakAround, bestBridge, breakLabel, isWeekendDay, longBreakCount, type Break, type Bridge } from "@/lib/holidayBreaks";
 import { buildIcs, downloadIcs } from "@/lib/ics";
-import { readHashQuery, writeHashQuery } from "@/lib/urlQuery";
+import { readUrlQuery, writeUrlQuery } from "@/lib/urlQuery";
 import { DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
 import type { LeaveDraft } from "@/lib/leaveDraft";
 import type { Holiday, LeaveBalance, LeaveRequest, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
+import { FilterChip } from "@/components/common/FilterChips";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { DataState } from "@/components/common/DataState";
@@ -108,11 +109,11 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
   // browser's was a second calendar in a file that already carries the note about removing the first: around
   // New Year the page opened on the viewer's year, and the create form's `defaultFrom` seeded it too, so a
   // holiday added on 1 January by someone whose browser still said 31 December was created against last year.
-  const [year, setYear] = useState(readHashQuery("year") ?? thisYearStr());
-  const [view, setView] = useState<View>(isView(readHashQuery("view")) ? (readHashQuery("view") as View) : "calendar");
-  const [query, setQuery] = useState(readHashQuery("q") ?? "");
-  const [kindFilter, setKindFilter] = useState(readHashQuery("kind") ?? "all");
-  const [mineOnly, setMineOnly] = useState(readHashQuery("mine") === "1");
+  const [year, setYear] = useState(readUrlQuery("year") ?? thisYearStr());
+  const [view, setView] = useState<View>(isView(readUrlQuery("view")) ? (readUrlQuery("view") as View) : "calendar");
+  const [query, setQuery] = useState(readUrlQuery("q") ?? "");
+  const [kindFilter, setKindFilter] = useState(readUrlQuery("kind") ?? "all");
+  const [mineOnly, setMineOnly] = useState(readUrlQuery("mine") === "1");
   const [showPast, setShowPast] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
   const [draft, setDraft] = useState<LeaveDraft | null>(null); // a bridge day, handed to the leave form
@@ -132,11 +133,11 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
       .then((s) => { if (s.value) setSchedule({ ...DEFAULT_SCHEDULE, ...s.value }); })
       .catch(() => {});
   }, []);
-  useEffect(() => { writeHashQuery("year", year); }, [year]);
-  useEffect(() => { writeHashQuery("view", view === "calendar" ? null : view); }, [view]);
-  useEffect(() => { writeHashQuery("q", query.trim() || null); }, [query]);
-  useEffect(() => { writeHashQuery("kind", kindFilter === "all" ? null : kindFilter); }, [kindFilter]);
-  useEffect(() => { writeHashQuery("mine", mineOnly ? "1" : null); }, [mineOnly]);
+  useEffect(() => { writeUrlQuery("year", year); }, [year]);
+  useEffect(() => { writeUrlQuery("view", view === "calendar" ? null : view); }, [view]);
+  useEffect(() => { writeUrlQuery("q", query.trim() || null); }, [query]);
+  useEffect(() => { writeUrlQuery("kind", kindFilter === "all" ? null : kindFilter); }, [kindFilter]);
+  useEffect(() => { writeUrlQuery("mine", mineOnly ? "1" : null); }, [mineOnly]);
 
   // Memoized: the fallback is a fresh array literal, and a callback + a memo below key off this.
   const workDays = useMemo(() => (schedule.work_days?.length ? schedule.work_days : [1, 2, 3, 4, 5]), [schedule.work_days]);
@@ -397,6 +398,10 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
     {
       id: "date",
       header: "Date",
+      // A holiday calendar is planned against: "what falls in the next quarter" is the question, and a
+      // month or a range answers it in one click.
+      filter: "date",
+      dateHint: "future",
       accessor: (h) => h.date,
       cell: (h) => `${weekdayShortOf(h.date)}, ${formatDate(h.date)}`,
     },
@@ -404,6 +409,7 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
       id: "kind",
       header: "Type",
       filter: "select",
+      groupBy: true,
       accessor: (h) => (h.kind === "optional" ? "Optional" : "Fixed"),
       cell: (h) => <Badge variant={h.kind === "optional" ? "warning" : "secondary"}>{h.kind === "optional" ? "Optional" : "Fixed"}</Badge>,
     },
@@ -411,6 +417,7 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
       id: "location",
       header: "Applies to",
       filter: "select",
+      groupBy: true,
       accessor: (h) => h.location ?? "Everyone",
       cell: (h) => (h.location ? <span className="flex items-center gap-1"><MapPin className="h-3.5 w-3.5 text-muted-foreground" />{h.location}</span> : <span className="text-muted-foreground">Everyone</span>),
     },
@@ -418,6 +425,7 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
       id: "when",
       header: "When",
       filter: "select",
+      groupBy: true,
       accessor: (h) => (h.date >= today ? "Upcoming" : "Past"),
       cell: (h) => <Badge variant={h.date >= today ? "secondary" : "muted"}>{h.date >= today ? "Upcoming" : "Past"}</Badge>,
     },
@@ -580,19 +588,9 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2" data-print-hide>
         <div className="flex flex-wrap items-center gap-1.5">
           {years.length > 1 && ["", ...years].map((y) => (
-            <button
-              key={y || "all"}
-              type="button"
-              onClick={() => setYear(y)}
-              aria-pressed={activeYear === y}
-              disabled={view === "year" && !y}
-              className={cn(
-                "rounded-full border px-3 py-1 text-xs font-medium transition-colors disabled:opacity-40",
-                activeYear === y ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent",
-              )}
-            >
+            <FilterChip key={y || "all"} active={activeYear === y} disabled={view === "year" && !y} onClick={() => setYear(y)}>
               {y || "All years"}
-            </button>
+            </FilterChip>
           ))}
         </div>
         <div className="flex flex-wrap items-center gap-2">

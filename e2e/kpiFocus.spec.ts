@@ -3,7 +3,7 @@ import { fileLeave, gotoRoute, test, expect } from "./fixtures";
 // A number you can click.
 //
 // Every metric strip in the app is a filter: clicking a tile narrows the list below to exactly the rows that
-// produced the number, clicking it again clears it, and the choice lives in the hash query (`?focus=`) so a
+// produced the number, clicking it again clears it, and the choice lives in the URL query (`?focus=`) so a
 // narrowed page is shareable and closes with the back button (`lib/kpiFocus.ts`).
 //
 // All of that is browser state. The rows are already in the client, no request is made, and nothing about the

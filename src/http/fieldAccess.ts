@@ -5,6 +5,8 @@
 // denied set - access inherits by default. Lives in src/http (not scanned by the single-source gate) and uses
 // the engine exactly like accessHint.ts: the decision is still rendered by decide(), never re-implemented.
 import { decide, type Grant, type SelfContext } from "../domain/permissions";
+import { redactedFieldsOf } from "../domain/manifests";
+import type { AppUser } from "../env";
 import { BANK_FIELDS } from "../services/bankDetails";
 import { PERSONAL_FIELDS } from "../services/personalDetails";
 import { TAX_FIELDS } from "../services/taxDetails";
@@ -98,4 +100,58 @@ export function redactFlat<T extends Record<string, unknown>>(view: T, subresour
   // the view does not carry is a no-op, so naming both is free and cannot leave one behind.
   for (const key of denied) for (const outKey of [key, ...(READ_KEY[subresource]?.[key] ?? [])]) delete out[outKey];
   return out;
+}
+
+/**
+ * Which of `fields` (WIRE column names) this caller may NOT read on a base-record row of `collection`.
+ *
+ * The grid projects raw columns, so it bypassed the one place `policy.redacted_fields` is enforced:
+ * http/accessHint.ts `redactFields`, which every serialized resource passes through. A deny on
+ * `tickets.*.description`, `leave-requests.*.reason`, `candidates.*.email` or `offers.*.base_comp` - the whole
+ * point of that manifest, and what the ACL's field templates author - therefore removed the field from every
+ * list and item response in the app and left it fully readable as a column of a saved grid, on the same rows,
+ * to the same caller. Decided here per ROW, on the row's own code, because that is the key the redaction is
+ * scoped by.
+ *
+ * Same fail-closed rule as `deniedSubresourceKeys` above: a row with no code cannot be decided against.
+ */
+export function deniedRedactedFields(
+  grant: Grant,
+  collection: string,
+  code: string | null | undefined,
+  fields: readonly string[],
+  self: SelfContext,
+): Set<string> {
+  if (!fields.length) return new Set();
+  if (!code) return new Set(fields);
+  const out = new Set<string>();
+  for (const f of fields) {
+    if (!decide(grant, { kind: "standard", resource: `${collection}.${code}.${f}`, level: "read" }, self).allow) out.add(f);
+  }
+  return out;
+}
+
+/**
+ * The same decision as a LOOKUP, for a surface that holds rows of many collections at once and has to ask it
+ * per row: hand it a collection and that row's code, get back the redacted fields this caller may not read
+ * there. Memoized per (collection, code), because a page of hits routinely repeats both.
+ *
+ * Global search is the caller that needed it. Its hits are rows of two dozen collections, and it renders text
+ * COPIED from them into an index - so the gate every serializer applies could not reach it, and a deny on
+ * `leave-requests.*.reason` hid the reason everywhere in the app except the one place it was the title of the
+ * search result.
+ */
+export type RedactionGate = (collection: string, code: string | null | undefined) => readonly string[];
+
+export function redactionGateFor(user: AppUser): RedactionGate {
+  const self = { employeeCode: user.employeeCode };
+  const memo = new Map<string, readonly string[]>();
+  return (collection, code) => {
+    const fields = redactedFieldsOf(user.policy, collection);
+    if (!fields.length) return [];
+    const key = `${collection}|${code ?? ""}`;
+    let denied = memo.get(key);
+    if (denied === undefined) memo.set(key, (denied = [...deniedRedactedFields(user.grant, collection, code, fields, self)]));
+    return denied;
+  };
 }

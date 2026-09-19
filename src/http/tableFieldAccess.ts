@@ -6,7 +6,8 @@
 // see test/singleSource.test.ts). It can only NARROW: the request has already been authorized by the
 // middleware by the time a runner calls any of this.
 import { decide, resolveRequest, type Grant, type SelfContext } from "../domain/permissions";
-import { SCOPE_PROBE_CODE } from "../domain/access";
+import { SCOPE_PROBE_CODE, SCOPE_PROBE_LEAF } from "../domain/access";
+import { redactedFieldsOf } from "../domain/manifests";
 import type { AppUser } from "../env";
 import { deniedFieldKeys } from "./fieldAccess";
 
@@ -71,5 +72,63 @@ export function unmaskGate(user: AppUser): (field: { subresource?: string; field
     if (!field.subresource || !field.fieldKey) return false; // nothing precise to ask about -> the broad answer stands
     const resource = `unmask.${SCOPE_PROBE_CODE}.${field.subresource}.${field.fieldKey}`;
     return decide(user.grant, { kind: "standard", resource, level: "read" }, self).allow;
+  };
+}
+
+/**
+ * The catalogue's own read gate: may this caller read this FIELD on any row of the collection they can reach?
+ *
+ * The builder's promise is that it offers what the caller can have, so the field catalogue already drops every
+ * field of a collection they may not list. Field-level access was the half it did not ask, and there are two
+ * kinds of it: a PII sub-resource (`employees.<code>.identity[.<key>]`, the gate the profile endpoint runs) and
+ * a redacted base field (`policy.redacted_fields`, the gate every serializer runs). Without this, a caller
+ * denied `identity` was offered the whole Identity group and a caller denied `tickets.*.description` was
+ * offered that column, and both found out by adding it and getting a grid of restricted markers back.
+ *
+ * TWO PROBE CODES, OR-ed, because access is per row and a catalogue answers before there are any rows:
+ *   - the scope-probe sentinel, which only an UNSCOPED rule reaches (`domain/access.ts`), and
+ *   - the caller's own code, plus a leaf under it, which is what a `me`-scoped rule reaches.
+ * A field readable under either is offered; one readable under neither cannot be read on ANY row this caller
+ * can reach, so it is not offered. Erring towards offering is deliberate: the runner still decides per row
+ * (`deniedSubresourceKeys`, `deniedRedactedFields`), so a field that slips through is blanked there, while a
+ * field wrongly withheld here is a column the builder would not let them pick at all.
+ */
+export function catalogueFieldGate(user: AppUser, self: SelfContext = { employeeCode: user.employeeCode }): (field: {
+  collection: string;
+  subresource?: string;
+  fieldKey?: string;
+  /** The wire column name, for a plain base field that `policy.redacted_fields` may gate. */
+  wireName?: string;
+}) => boolean {
+  const own = user.employeeCode;
+  // The codes a rule could match for this caller: unscoped (the sentinel), their own record, a row owned by
+  // them (an owned code is `<employeeCode>-<leaf>`), and - because a manager's PII reach is over OTHER people -
+  // one real code from their reporting line, which is the only shape `my-reports` / `my-org` can match. Without
+  // that last pair, a role granted `employees.my-reports.identity.**` and no self grant of its own was offered
+  // no identity column at all, while the run returned it for every report on the page.
+  const chain = [self.reportCodes?.[0], self.orgCodes?.[0]].filter((c): c is string => !!c);
+  const codes = [
+    SCOPE_PROBE_CODE,
+    ...(own ? [own, `${own}-${SCOPE_PROBE_LEAF}`] : []),
+    ...chain.flatMap((c) => [c, `${c}-${SCOPE_PROBE_LEAF}`]),
+  ];
+  const readable = (resource: (code: string) => string) =>
+    codes.some((code) => decide(user.grant, { kind: "standard", resource: resource(code), level: "read" }, self).allow);
+
+  // The sub-resource question is the same one for every field of a source, so it is asked once - a dozen
+  // identity fields re-asking "may I read identity" is the shape of decision that gets re-decided per cell.
+  const subMemo = new Map<string, boolean>();
+  return (field) => {
+    if (field.subresource) {
+      const sub = field.subresource;
+      let ok = subMemo.get(sub);
+      if (ok === undefined) subMemo.set(sub, (ok = readable((code) => `employees.${code}.${sub}`)));
+      if (!ok) return false;
+      return field.fieldKey ? readable((code) => `employees.${code}.${sub}.${field.fieldKey}`) : true;
+    }
+    if (!field.wireName) return true;
+    const redacted = redactedFieldsOf(user.policy, field.collection);
+    if (!redacted.includes(field.wireName)) return true;
+    return readable((code) => `${field.collection}.${code}.${field.wireName}`);
   };
 }
