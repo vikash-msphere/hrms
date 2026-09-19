@@ -106,20 +106,36 @@ In order. Nothing before step 4 has any user-visible effect.
   a fault.
 - Ticket triage needs resolved tickets to learn from. On a fresh database it correctly suggests nothing.
 
-## What is left to build
+## What is left
+
+Everything below this line is outstanding. Everything above it is committed: `656fe79` (search, triage,
+drafting, extraction), `31cb586` (narration, table assist), `04d1257` (feature-flag gating and the fallback
+e2e spec). The working tree is clean and `npm run verify` passes.
 
 Ordered by value against risk.
 
-### 1. A real end-to-end smoke (do this first)
+### 1. A real end-to-end smoke (do this first, and it needs a decision)
 
-Not a feature. Bind the account, create the index, run one draft, one search and one extraction against the
-live model, and look at what comes back. Record the real neuron cost per call. Everything below is worth more
-once this has happened, and any of it may need reworking if the prompts disappoint.
+Not a feature, and the only item here that cannot be done from inside the repository: it creates a Vectorize
+index in the Cloudflare account and deploys. **That is somebody's call to make, not something to run because
+it is next on a list.**
+
+Bind the account, create the index, run one draft, one search and one extraction against the live model, and
+look at what comes back. Record the real neuron cost per call. Everything below is worth more once this has
+happened, and any of it may need reworking if the prompts disappoint.
 
 ### 2. Moderation
 
-`@cf/meta/llama-guard-3-8b` on content that posts publicly. Flag rather than block, which means it needs a
-moderator queue to be worth anything. That queue is the real work; the model call is the small part.
+`@cf/meta/llama-guard-3-8b` is in the model allowlist and nothing calls it. The idea is flag-rather-than-block
+on content that posts publicly: kudos, announcements, the suggestion wall.
+
+**The model call is the small part.** Flagging means nothing without somewhere for flags to go and somebody
+whose job it is to look, so the real work is the moderator queue: who sees it, what they can do from it, what
+happens to a post while it waits, and what happens to the flag when they decide. None of that is designed.
+
+A shortcut exists if it is wanted: `ai_suggestions` already carries a host record, a state and a decision, so
+a flag could be a row in it with `feature: "moderation"` and the queue a filtered read - no new table, no new
+collection. That is a starting point, not a design.
 
 ### 3. E2E coverage of the features themselves
 
@@ -127,16 +143,40 @@ moderator queue to be worth anything. That queue is the real work; the model cal
 keyword index, and no AI affordance renders anywhere. That is the half that matters for a default
 deployment, and it is the half the unit suite structurally cannot reach.
 
+Those three tests assert ABSENCE plus CONTINUITY, and the absence half was checked for vacuity: the gate was
+temporarily removed, the spec was confirmed to fail, and the gate was put back. An absence assertion that has
+never been seen to fail is not evidence of anything.
+
 What is still uncovered is every feature actually doing its job in a browser, which needs a stack with a
 model bound - so it waits on the smoke above. Candidates then: the triage panel, a draft round trip, the
-extraction panel, creating a table from a description. House rules in `docs/04-testing.md`; run only the
-named specs, never the full suite.
+extraction panel, creating a table from a description.
 
-### 4. The narration has no UI yet
+Note that `e2e/ticketTriage.spec.ts` is NOT this. It predates the AI layer and covers the manual assign /
+route / prioritize controls; the AI suggestion panel above them has no browser coverage at all.
 
-`people-analytics:narrate` is built, tested and specified, and nothing calls it. The team report page is
-where it belongs, above the measures table. Small, and worth doing once the real smoke has shown what the
-prose actually reads like - wiring it first would mean designing around output nobody has seen.
+House rules in `docs/04-testing.md`; run only the named specs, never the full suite.
+
+### 4. The narration has no UI
+
+`people-analytics:narrate` is built, tested and specified, and **nothing in the web app calls it**. The only
+references to it outside the server are the settings switch and the feature-flag helper. The team report page
+is where it belongs, above the measures table.
+
+Deferred on purpose rather than forgotten: wiring it before the smoke means designing a panel around prose
+nobody has read. It is small once that is known - the endpoint already returns the findings alongside the
+text, so the panel can show the sentence with the numbers under it and needs no second request.
+
+### 5. Retune the budget from evidence
+
+`BUDGET` in `src/domain/aiPolicy.ts` holds pessimistic guesses, and `ai_usage` exists to replace them. After
+a day of real traffic, read the table and set the ceilings from what calls actually cost. Until then the app
+is deliberately under-spending, which is the safe direction but not the right number.
+
+Two constants worth revisiting at the same time, both currently guesses:
+- `SEMANTIC_WHEN_KEYWORD_UNDER` (8) in `globalSearch.ts` - how thin a keyword result has to be before the
+  semantic half is worth an embed.
+- `MIN_CHANGE_PCT` / `MIN_ABSOLUTE` in `domain/narrate.ts` - how much a measure has to move to be worth a
+  sentence. Too low and the narration talks about noise; too high and it says nothing on a week that mattered.
 
 ### Deliberately not scheduled
 
@@ -151,8 +191,13 @@ prose actually reads like - wiring it first would mean designing around output n
 
 - **The migration is untested against a real D1.** `npm run db:migrate:local` has not been run against these
   tables.
-- **Everything is uncommitted.** The working tree also carries in-flight table-builder work that predates
-  this effort; the AI work should be committed as its own set rather than swept up with it.
+- **Committing needs the sandbox off.** The husky pre-commit runs the whole of `npm run verify`, and the
+  test gate binds a port and writes a wrangler log - both refused inside the agent sandbox, which fails the
+  commit with an `EPERM` that looks like a test failure and is not one.
+- **The `ai` settings blob is broadly readable**, like every other settings key. That is what lets the client
+  decide whether to offer an AI affordance without a second endpoint. It means any signed-in caller can see
+  which AI features the org has enabled and the neuron ceilings, which is configuration rather than data -
+  but it is a deliberate position, not an oversight.
 - **Drafting reads no records, which is a cost as well as a property.** The suggestion-response draft does not
   see the suggestion, so the responder has to put the substance in the instruction. If that proves annoying
   in use, sending the suggestion body is a deliberate decision to take, not a tweak to slip in.
@@ -177,3 +222,13 @@ If a later change has to be judged quickly, these are the ones that matter.
    never worse than it was before the layer existed.
 5. **The trail records a hash, never the input.** Storing prompts would rebuild, inside our own database, the
    retained copy of salary and review text that the gateway suppression exists to prevent.
+6. **An affordance is hidden when its feature is off, not disabled.** Gating lives inside each component
+   (`useAiFeature`), so a page that adds one cannot forget it. This is the rule the layer broke once already:
+   every AI control rendered regardless, and pressing one explained that it did not work.
+
+## If you only do one thing next
+
+Run the smoke. Three phases of features are complete, covered and committed, and **not one of them has ever
+spoken to a real model**. Everything else on the list - the moderator queue, the narration panel, the browser
+coverage, the budget numbers - is better designed after seeing what the models actually return, and some of it
+may not survive the seeing.
