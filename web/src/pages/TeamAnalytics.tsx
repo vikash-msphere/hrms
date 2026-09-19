@@ -27,6 +27,7 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { ExportButton } from "@/components/common/ExportButton";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { PersonAvatar } from "@/components/common/PersonAvatar";
+import { WhatChanged } from "@/components/common/WhatChanged";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -267,6 +268,10 @@ export default function TeamAnalytics({ me }: { me: Me }) {
                 }),
               ]}
             />
+
+            {/* Period-on-period movement, above the table the movements are in. Keyed on the window so a
+                change of dates collapses it rather than leaving a comparison of the old pair on screen. */}
+            <WhatChanged key={`${from}|${to}|${dept}`} from={from} to={to} department={dept || undefined} />
 
             <div className="mb-3 flex flex-wrap gap-1.5">
               {groups.map((g) => (

@@ -54,6 +54,28 @@ test.describe("with no AI configured", () => {
     await expect(page.locator("div.shadow-card").filter({ hasText: title }).first()).toBeVisible({ timeout: 30_000 });
   });
 
+  test("the team report's period comparison shows its figures and credits no model", async ({ as }) => {
+    test.setTimeout(120_000);
+    const page = await as("manager");
+    await gotoRoute(page, "team-analytics", "Team analytics");
+
+    // The one panel in the app that is SUPPOSED to render with no model behind it. `narrateAnalytics` finds
+    // the movements arithmetically and only then asks for prose, so with no binding it still answers - the
+    // same findings, with a deterministic summary the panel does not print. Asserting its absence alongside
+    // the Draft button's would be wrong: what belongs here is that the panel works and says nothing about AI.
+    await page.getByRole("button", { name: "What changed since the previous period" }).click();
+
+    const panel = page.locator("div").filter({ hasText: /^What changed/ }).last();
+    // The compared-with line renders only once the response is in, so it is the "it resolved" signal - and it
+    // resolved through a path that never touched a model.
+    await expect(panel.getByText(/against \d{4}-\d{2}-\d{2} to \d{4}-\d{2}-\d{2}/)).toBeVisible({ timeout: 60_000 });
+    await expect(panel.getByText("Comparing with the previous period...")).toHaveCount(0);
+
+    // No badge, because nothing wrote anything. The badge is the whole of this feature's AI surface, so its
+    // absence is the hide-never-disable check for this panel.
+    await expect(page.getByText("Written by AI from the figures below.")).toHaveCount(0);
+  });
+
   test("the table builder offers no description field, and still creates a table", async ({ as }) => {
     test.setTimeout(180_000);
     const page = await as("super");

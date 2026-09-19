@@ -4,7 +4,7 @@ Companion to `ai-plan.md`, which holds the design and the reasoning behind it. T
 work and the route from here to something running. Read `ai-plan.md` for why the layer is shaped the way it
 is; read this to find out what exists, what is decided, and what is left.
 
-Last verified with `npm run verify`: spectral, eslint, three tsc projects, **3764 tests across 301 files, 0
+Last verified with `npm run verify`: spectral, eslint, three tsc projects, **3801 tests across 303 files, 0
 failures**.
 
 ## The one thing to know first
@@ -143,9 +143,14 @@ collection. That is a starting point, not a design.
 keyword index, and no AI affordance renders anywhere. That is the half that matters for a default
 deployment, and it is the half the unit suite structurally cannot reach.
 
-Those three tests assert ABSENCE plus CONTINUITY, and the absence half was checked for vacuity: the gate was
+Those tests assert ABSENCE plus CONTINUITY, and every absence half was checked for vacuity: the gate was
 temporarily removed, the spec was confirmed to fail, and the gate was put back. An absence assertion that has
 never been seen to fail is not evidence of anything.
+
+The fourth test is the other shape, and the only AI-layer feature that can be covered in a browser today:
+the team report's period comparison is SUPPOSED to render with no model, so it asserts that the panel
+resolves and shows its figures, and that the "written by AI" credit is absent. Its absence half was
+vacuity-checked the same way - forcing the credit to render made it fail on `Expected: 0, Received: 1`.
 
 What is still uncovered is every feature actually doing its job in a browser, which needs a stack with a
 model bound - so it waits on the smoke above. Candidates then: the triage panel, a draft round trip, the
@@ -156,15 +161,22 @@ route / prioritize controls; the AI suggestion panel above them has no browser c
 
 House rules in `docs/04-testing.md`; run only the named specs, never the full suite.
 
-### 4. The narration has no UI
+### 4. The narration UI, built findings-first
 
-`people-analytics:narrate` is built, tested and specified, and **nothing in the web app calls it**. The only
-references to it outside the server are the settings switch and the feature-flag helper. The team report page
-is where it belongs, above the measures table.
+`web/src/components/common/WhatChanged.tsx`, on the team report above the measures table.
 
-Deferred on purpose rather than forgotten: wiring it before the smoke means designing a panel around prose
-nobody has read. It is small once that is known - the endpoint already returns the findings alongside the
-text, so the panel can show the sentence with the numbers under it and needs no second request.
+The concern that held this back was designing a panel around prose nobody has read. It is answered by
+inverting what the panel is about: `narrateAnalytics` returns the FINDINGS alongside the text and falls back
+to a deterministic summary when the feature is off, so the panel is a period-on-period comparison first and
+the written paragraph is added to it. The movements render either way; the paragraph appears only when
+`source` comes back `model`, badged as written by AI. With the feature off there is no AI control on the
+panel to hide, which is the hide-never-disable rule satisfied by there being nothing to disable.
+
+It therefore does not wait on the smoke. What the smoke still decides is whether the paragraph is worth
+keeping, and that is now a judgement about one element of a panel that is useful without it.
+
+Lazy behind an explicit open, because narrating runs the whole report a second time over the preceding
+window. Keyed on the window, so changing the dates collapses it rather than leaving a stale comparison up.
 
 ### 5. Retune the budget from evidence
 
@@ -178,6 +190,31 @@ Two constants worth revisiting at the same time, both currently guesses:
 - `MIN_CHANGE_PCT` / `MIN_ABSOLUTE` in `domain/narrate.ts` - how much a measure has to move to be worth a
   sentence. Too low and the narration talks about noise; too high and it says nothing on a week that mattered.
 
+### 6. Suggestion-box clustering
+
+`ai-plan.md` puts this beside ticket duplicates, and it is the same primitive already shipped: embed the
+suggestion, find its nearest neighbours, group them. No generation. The work is the grouping rule and the UI
+that says "seven people have asked for this", which is what makes the upvote count honest - a suggestion
+split across seven wordings reads as seven weak asks rather than one strong one.
+
+Cheapest unbuilt feature on either document, and the only one here that needs nothing from the smoke beyond
+an index that exists.
+
+### Designed in `ai-plan.md`, not scheduled above
+
+Both are Phase 4 in the plan, neither is built, and neither belongs in the ordered list until something is
+decided about it.
+
+- **Requisition matching** - embed the job description and every application, rank by similarity. The plan
+  frames it as a ranking aid and explicitly not a filter. **That collides with decision 3 above**, which says
+  candidate ranking is not built because it is Annex III high risk under the EU AI Act, and holds the line
+  with a test pinning `CONSENTED_PATHS` to one entry. Advisory ranking is still ranking, so the two cannot
+  both be acted on. Decision 3 is the later position and the one citing law; it stands until somebody rules
+  otherwise, and this line exists so the ruling is made once rather than rediscovered.
+- **Interview note summarisation**, optionally with `@cf/openai/whisper` over an uploaded recording. No
+  conflict with anything, cost is per interview rather than per query, and it is ordinary Phase 3 drafting
+  work pointed at a different record. Worth doing once the smoke has shown what the prompts return.
+
 ### Deliberately not scheduled
 
 - **Candidate ranking**, per decision 3 above. Unblocked whenever somebody decides to take it on.
@@ -189,8 +226,22 @@ Two constants worth revisiting at the same time, both currently guesses:
 
 ## Known gaps and risks
 
-- **The migration is untested against a real D1.** `npm run db:migrate:local` has not been run against these
-  tables.
+- **The migration applies cleanly from scratch, but not yet through wrangler.** The squashed
+  `0000_exotic_photon.sql` was run into an empty SQLite database: 127 tables, 489 indexes and 534 triggers,
+  with `integrity_check` and `foreign_key_check` both clean and `ai_usage`, `ai_cache`, `ai_suggestions` and
+  `search_vectors` all present. D1 is SQLite, so the DDL itself is proven. What is still unexercised is
+  `wrangler d1 migrations apply` against a real D1 and its migration bookkeeping.
+
+  `npm run db:migrate:local` cannot show this on a machine that already has a local database: the squash
+  rule means 0000 is regenerated under a new name each time, so wrangler offers to apply it to a database
+  that already holds the tables and stops on `table access_rules already exists`. Testing the apply path
+  needs a local D1 that has been reset first.
+
+- **Vectorize has no local emulation.** `wrangler` says so on every test run: index bindings do not work in
+  local development, and the suggested `remote: true` means the real index. Nothing local - the test suite,
+  `wrangler dev`, the e2e stack - can exercise semantic search or triage against a real vector store, which
+  is why the fake is the only coverage those two have and why the smoke is the only thing that can change
+  that.
 - **Committing needs the sandbox off.** The husky pre-commit runs the whole of `npm run verify`, and the
   test gate binds a port and writes a wrangler log - both refused inside the agent sandbox, which fails the
   commit with an `EPERM` that looks like a test failure and is not one.
