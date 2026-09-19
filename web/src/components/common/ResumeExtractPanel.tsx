@@ -5,6 +5,7 @@ import { openPdf } from "@/lib/pdfjs";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
+import { useAiFeature } from "@/lib/aiFeatures";
 
 // Read a candidate's CV into the candidate form, one field at a time.
 //
@@ -57,8 +58,11 @@ export function ResumeExtractPanel({ candidateId, candidatePath, can, hasResume,
   const [fields, setFields] = useState<Fields | null>(null);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<Record<string, "accepted" | "dismissed">>({});
+  const enabled = useAiFeature("ats.extraction");
 
-  if (!hasResume) return null;
+  // No resume to read, or the org has not turned this on. Either way there is nothing to offer, and offering
+  // it anyway would put a button on the page whose only outcome is an error.
+  if (!hasResume || !enabled) return null;
 
   async function read() {
     setBusy(true);

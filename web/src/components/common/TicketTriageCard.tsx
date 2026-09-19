@@ -3,6 +3,7 @@ import { Sparkles, Copy, Check, X } from "lucide-react";
 import { invoke } from "@/api";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
+import { useAiFeature } from "@/lib/aiFeatures";
 
 // The triage suggestion on a ticket: which servicing department, category and priority the nearest RESOLVED
 // tickets carry, and which open ones may be the same problem.
@@ -44,6 +45,9 @@ export function TicketTriageCard({ ticketPath, ticketId, can, deptName, onApplyD
   const [asked, setAsked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Gated inside the component, like the Draft button: the host page should not have to know that this is an
+  // AI feature, and a "Suggest triage" button that answers "switched off" is a button that exists to fail.
+  const enabled = useAiFeature("tickets.triage");
 
   async function ask() {
     setBusy(true);
@@ -60,6 +64,8 @@ export function TicketTriageCard({ ticketPath, ticketId, can, deptName, onApplyD
   }
 
   const decide = (accepted: boolean) => invoke(`tickets/${ticketId}`, "decideTriage", undefined, { accepted }).catch(() => { /* measurement only, never the user's problem */ });
+
+  if (!enabled) return null;
 
   if (!asked) {
     return (

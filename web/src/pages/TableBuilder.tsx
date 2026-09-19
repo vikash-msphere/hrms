@@ -10,6 +10,7 @@ import { useMoney } from "@/lib/org";
 import { usePermission } from "@/lib/perm";
 import { useCollection } from "@/hooks/useCollection";
 import { useIntent } from "@/lib/intent";
+import { useAiFeature } from "@/lib/aiFeatures";
 import { useKpiFocus, type FocusSpec } from "@/lib/kpiFocus";
 import { resourceRoute, opensExactRecord } from "@/lib/resourceRoute";
 import { useToast } from "@/components/ui/use-toast";
@@ -229,6 +230,7 @@ function TableList() {
   // Held apart from `form` on purpose: it is not a field of the table, it is an instruction for building one,
   // and it is not sent to the create.
   const [describe, setDescribe] = useState("");
+  const canDescribe = useAiFeature("tables.describe");
   const openCreate = useCallback(() => {
     setForm({ display_name: "", description: "", base: bases[0]?.collection ?? "" });
     setDescribe("");
@@ -484,16 +486,20 @@ function TableList() {
             </SelectContent>
           </Select>
         </Field>
-        {/* Optional. Left blank this is the create it always was, and the table opens empty for the person to
-            pick columns by hand. It comes AFTER the base because the suggestion is made against that base's
-            catalogue, and asking for it first would invite describing a table the base cannot answer. */}
-        <Field label="What should it show? (optional)" hint="Describe it and the columns, filters and sorting are laid out for you. You can change all of it afterwards.">
-          <Input
-            value={describe}
-            placeholder="e.g. open tickets by department, newest first"
-            onChange={(e) => setDescribe(e.target.value)}
-          />
-        </Field>
+        {/* Optional, and only when the org has the feature on - an input that cannot do anything is worse
+            than no input. Left blank this is the create it always was, and the table opens empty for the
+            person to pick columns by hand. It comes AFTER the base because the suggestion is made against
+            that base's catalogue, and asking for it first would invite describing a table the base cannot
+            answer. */}
+        {canDescribe && (
+          <Field label="What should it show? (optional)" hint="Describe it and the columns, filters and sorting are laid out for you. You can change all of it afterwards.">
+            <Input
+              value={describe}
+              placeholder="e.g. open tickets by department, newest first"
+              onChange={(e) => setDescribe(e.target.value)}
+            />
+          </Field>
+        )}
       </WriteDialog>
     </div>
   );

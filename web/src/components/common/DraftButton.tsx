@@ -7,6 +7,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
+import { useAiFeature } from "@/lib/aiFeatures";
 
 // The "Draft" affordance for a long-form field, shared by every page that has one.
 //
@@ -34,6 +35,9 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
   const [open, setOpen] = useState(false);
   const [instruction, setInstruction] = useState("");
   const [busy, setBusy] = useState(false);
+  // Gated HERE rather than at each of the four call sites, so a page that adds a Draft button cannot forget
+  // it and ship a button whose only behaviour is to explain that it does not work.
+  const enabled = useAiFeature("drafting");
 
   const improving = !!(existing && existing.trim());
 
@@ -58,6 +62,8 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
       setBusy(false);
     }
   }
+
+  if (!enabled) return null;
 
   return (
     <>

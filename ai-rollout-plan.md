@@ -121,12 +121,16 @@ once this has happened, and any of it may need reworking if the prompts disappoi
 `@cf/meta/llama-guard-3-8b` on content that posts publicly. Flag rather than block, which means it needs a
 moderator queue to be worth anything. That queue is the real work; the model call is the small part.
 
-### 3. E2E coverage
+### 3. E2E coverage of the features themselves
 
-No browser spec drives any AI feature. The unit suite covers the logic with fakes; nothing exercises the UI
-paths. Candidates: the search box with the flag on and off, the triage panel, a draft round trip, the
-extraction panel, and creating a table from a description. Note the house rules in `docs/04-testing.md` and
-run only the named specs, never the full suite.
+`e2e/aiFallback.spec.ts` covers the OFF state: with no `AI` binding, search still finds records through the
+keyword index, and no AI affordance renders anywhere. That is the half that matters for a default
+deployment, and it is the half the unit suite structurally cannot reach.
+
+What is still uncovered is every feature actually doing its job in a browser, which needs a stack with a
+model bound - so it waits on the smoke above. Candidates then: the triage panel, a draft round trip, the
+extraction panel, creating a table from a description. House rules in `docs/04-testing.md`; run only the
+named specs, never the full suite.
 
 ### 4. The narration has no UI yet
 
