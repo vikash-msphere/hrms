@@ -125,6 +125,8 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "triage", "decideTriage", // read the nearest-neighbour triage suggestion, and record what was done with it (tickets)
   "draft", // collection-level: write a first draft of some text from the caller's own instruction (announcements, job-requisitions, goals, suggestions)
   "extractResume", // read a CV into suggested form fields for the recruiter to accept one by one (candidates)
+  "describe", // collection-level: turn a description of a grid into a spec the builder renders (table-fields)
+  "narrate", // collection-level: write up how the team's measures changed against the previous window (people-analytics)
   "promoteTodo", // turn a checklist item into a card of its own (cards)
   "watch", "unwatch", // follow a card or a goal you do not own (cards, goals)
   "activate", // start a sprint (sprints) - complete reuses the existing verb

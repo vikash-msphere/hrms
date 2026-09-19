@@ -3527,6 +3527,54 @@ components:
         author_email: { type: string, readOnly: true }
         body: { type: string }
         create_time: { type: string, format: date-time, readOnly: true }
+    analytics-narration:
+      type: object
+      description: "A written account of how a team's measures changed, plus the movements it was written from. The findings are returned alongside the text so a reader can check the prose against the numbers without a second request."
+      required: [text, findings, source]
+      properties:
+        text: { type: string, readOnly: true, description: "At most a short paragraph." }
+        source:
+          type: string
+          readOnly: true
+          enum: [model, plain]
+          description: "`plain` means the deterministic summary was used, either because no model was available or because the generated one named a number that was not in the findings."
+        findings:
+          type: array
+          readOnly: true
+          description: "The movements the comparison found, biggest proportional change first. These are the only facts the text is allowed to state."
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              label: { type: string }
+              unit: { type: string }
+              direction: { type: string, description: "Whether higher or lower is the good direction for this measure, or none." }
+              previous: { type: number }
+              current: { type: number }
+              change_pct: { type: number, nullable: true, description: Absent when the previous value was zero. }
+              movement: { type: string, enum: [up, down] }
+        window: { type: object, readOnly: true, properties: { from: { type: string }, to: { type: string } } }
+        compared_to: { type: object, readOnly: true, properties: { from: { type: string }, to: { type: string } } }
+        cached: { type: boolean, readOnly: true }
+    table-suggestion:
+      type: object
+      description: "A suggested grid specification, for the builder to render and the person to edit. Not a saved view and not a resource; saving it is a separate ordinary write."
+      required: [spec, unmatched]
+      properties:
+        spec:
+          type: object
+          readOnly: true
+          description: "The same shape a saved view stores, minus the base. Every field key in it is one the caller may use."
+          properties:
+            columns: { type: array, items: { type: object, properties: { field: { type: string } } } }
+            filters: { type: array, items: { type: object, properties: { field: { type: string }, op: { type: string }, value: { type: string } } } }
+            sort: { type: array, items: { type: object, properties: { field: { type: string }, dir: { type: string } } } }
+        unmatched:
+          type: array
+          readOnly: true
+          description: "Field names the model asked for that the catalogue does not have, so the UI can say what it could not do instead of returning a quietly narrower grid."
+          items: { type: string }
+        cached: { type: boolean, readOnly: true }
     resume-extraction:
       type: object
       description: "Fields read out of a CV, for a recruiter to accept or discard one at a time. Every value is nullable and null means the document did not say - the model is instructed not to guess, because a filled field reads to a recruiter as something the CV stated. Nothing here is an assessment of the candidate."
@@ -5382,6 +5430,51 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/event_log_entry' } } } }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/people-analytics:narrate:
+    post:
+      description: "Custom method narrate: compare this report's TEAM aggregates with the immediately preceding window of equal length, and write up what changed. The detection is arithmetic, not a model - the model is handed the movements that were already found and asked only to write them up, so it cannot announce a change that is not there. A narration containing any number that was not in those movements is discarded in favour of a plain deterministic summary, which `source` reports as `plain`. Nothing per-person is involved: the comparison is over team totals. Gated by the same per-collection list decisions as the GET, so a measure the caller may not list is absent from both runs and cannot be narrated."
+      operationId: ":NarratePeopleAnalytics"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from: { type: string, description: "Start of the window, YYYY-MM-DD inclusive. Defaults to the start of the org's current month." }
+                to: { type: string, description: "End of the window, YYYY-MM-DD inclusive. Defaults to the org's today." }
+                department: { type: string, nullable: true, description: A departments/<id> ref to narrow the report to. }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/analytics-narration' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/table-fields:describe:
+    post:
+      description: "Custom method describe: turn a description of a grid into a specification the builder renders. The base is chosen by the caller, not by the model - they are already in the builder with one selected. The model is given ONLY the catalogue keys this caller may use (the same fields the picker offers them) and answers with those keys; anything it names that the catalogue does not have is reported in `unmatched` rather than dropped in silence. Nothing is saved: the spec comes back for the person to edit and save through the ordinary table-views write, which validates it again."
+      operationId: ":DescribeTableFields"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                base: { type: string, description: The collection one row of the grid is. Must be a base this caller can build on. }
+                question: { type: string, maxLength: 500, description: What the table should show. }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/table-suggestion' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/table-fields:
     get:
       description: >-

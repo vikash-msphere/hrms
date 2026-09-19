@@ -1,6 +1,9 @@
 import { Hono } from "hono";
+import { z } from "zod";
 import type { AppEnv } from "../env";
 import type { ListScope } from "../domain/access";
+import { jsonBody } from "../http/jsonRequest";
+import { suggestTableView, MAX_QUESTION } from "../services/tableAssist";
 import { basesFor, buildCatalogue } from "../services/tableCatalog";
 import { catalogueFieldGate } from "../http/tableFieldAccess";
 import { BASES } from "../domain/tableFields";
@@ -58,3 +61,32 @@ export const tableFields = new Hono<AppEnv>().get("/", async (c) => {
     links: catalogue.links,
   });
 });
+
+// Collection-level custom method `table-fields:describe` - say what the grid should show in words, get a
+// spec back for the builder to render.
+//
+// Mounted on THIS capability rather than on `table-views`, because the thing it needs is the catalogue, and
+// `table-fields.read` is already the gate that decides who may see one. Gating it anywhere else would be a
+// second answer to a question this endpoint has already answered - and the middleware sets `tableScopes` for
+// this collection, so the fields offered to the model are exactly the fields the picker would have offered.
+//
+// Nothing is saved. The spec is returned, the builder renders it, and the person edits and saves it through
+// the ordinary table-views write, which validates the spec again on its own account.
+export const tableDescribe = new Hono<AppEnv>().post("/", async (c) => {
+  const parsed = describeSchema.safeParse(await jsonBody(c));
+  if (!parsed.success) throw invalidArgument("body must be { base, question }");
+  const scopes = c.get("tableScopes") ?? new Map<string, ListScope>();
+  const out = await suggestTableView(
+    c.get("deps"),
+    c.get("user")!,
+    scopes,
+    c.get("self"),
+    parsed.data.base,
+    parsed.data.question,
+  );
+  return c.json({ spec: out.spec, unmatched: out.unmatched, cached: out.cached });
+});
+
+const describeSchema = z
+  .object({ base: z.string().min(1).max(64), question: z.string().min(1).max(MAX_QUESTION) })
+  .strict();

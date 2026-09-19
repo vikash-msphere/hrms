@@ -226,8 +226,12 @@ function TableList() {
   const [form, setForm] = useState({ display_name: "", description: "", base: "" });
   const [bases, setBases] = useState<{ collection: string; label: string }[]>([]);
   const [catalogueDenied, setCatalogueDenied] = useState(false);
+  // Held apart from `form` on purpose: it is not a field of the table, it is an instruction for building one,
+  // and it is not sent to the create.
+  const [describe, setDescribe] = useState("");
   const openCreate = useCallback(() => {
     setForm({ display_name: "", description: "", base: bases[0]?.collection ?? "" });
+    setDescribe("");
     setCreating(true);
   }, [bases]);
   // "Build a table" from ⌘K or the "+" menu lands here and opens the dialog straight away.
@@ -256,13 +260,44 @@ function TableList() {
   // new table would never open.
   const createdId = useRef<string | null>(null);
   async function submit() {
+    // An optional description of what the table should show. When it is given, the columns, filters and sort
+    // are worked out first and the table is created already laid out; when it is not, this is exactly the
+    // create it always was. A failure here must not cost the person their table, so it is caught and the
+    // empty table is created anyway - they can still pick columns by hand, which is the fallback for every
+    // AI feature in this app.
+    type Suggested = { columns: { field: string }[]; filters?: unknown[]; sort?: unknown[] };
+    let suggested: Suggested | null = null;
+    const wanted = describe.trim();
+    if (wanted) {
+      try {
+        const res = await api<{ spec: Suggested; unmatched: string[] }>("/table-fields:describe", {
+          method: "POST",
+          body: JSON.stringify({ base: form.base, question: wanted }),
+        });
+        suggested = res.spec;
+        if (res.unmatched.length) {
+          // Named, not swallowed: a grid quietly narrower than what somebody described reads as the feature
+          // misunderstanding them rather than as a field that does not exist.
+          toast({ title: "Some of that had no matching field", description: res.unmatched.join(", "), variant: "destructive" });
+        }
+      } catch (e) {
+        toast({ title: "Couldn't lay it out", description: `${(e as Error).message} - creating the table empty.`, variant: "destructive" });
+      }
+    }
+
     const created = await create<TableView>("table-views", {
       display_name: form.display_name.trim(),
       description: form.description.trim() || null,
       base: form.base,
-      columns: [],
+      columns: suggested?.columns ?? [],
+      ...(suggested?.filters?.length ? { filters: suggested.filters } : {}),
+      ...(suggested?.sort?.length ? { sort: suggested.sort } : {}),
     });
-    toast({ title: "Table created", description: "Pick its columns to fill it in.", variant: "success" });
+    toast({
+      title: "Table created",
+      description: suggested?.columns.length ? "Check the columns it picked." : "Pick its columns to fill it in.",
+      variant: "success",
+    });
     reload();
     createdId.current = idOf(created.path);
   }
@@ -448,6 +483,16 @@ function TableList() {
               {bases.map((b) => <SelectItem key={b.collection} value={b.collection}>{b.label}</SelectItem>)}
             </SelectContent>
           </Select>
+        </Field>
+        {/* Optional. Left blank this is the create it always was, and the table opens empty for the person to
+            pick columns by hand. It comes AFTER the base because the suggestion is made against that base's
+            catalogue, and asking for it first would invite describing a table the base cannot answer. */}
+        <Field label="What should it show? (optional)" hint="Describe it and the columns, filters and sorting are laid out for you. You can change all of it afterwards.">
+          <Input
+            value={describe}
+            placeholder="e.g. open tickets by department, newest first"
+            onChange={(e) => setDescribe(e.target.value)}
+          />
         </Field>
       </WriteDialog>
     </div>

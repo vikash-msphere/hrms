@@ -18,7 +18,7 @@ import { getSetting, saveSetting } from "@/lib/settingsStore";
 // employee data. Each feature also states what it does WITHOUT AI, because every one of them has a working
 // non-AI path and switching it off is not a loss of function.
 
-type AiFeatureKey = "search.semantic" | "tickets.triage" | "drafting" | "ats.extraction";
+type AiFeatureKey = "search.semantic" | "tickets.triage" | "drafting" | "ats.extraction" | "tables.describe" | "analytics.narrate";
 type AiConfig = { features?: Partial<Record<AiFeatureKey, boolean>>; dailyNeurons?: number; perUserHourlyGenerations?: number; resume_fields?: string[] };
 
 // Which fields a CV may be read into, and which of those are the model doing more than copying. Mirrors
@@ -62,6 +62,18 @@ const FEATURES: { key: AiFeatureKey; title: string; on: string; off: string }[] 
     title: "Read a CV into the candidate form",
     on: "A recruiter can have a candidate's CV read into the form fields, then accept or discard each one. The model transcribes only: it does not score, rank or comment on a candidate's suitability, and it is not asked to. Nothing is saved to the candidate until the recruiter accepts it. This is the one place candidate data is sent to a model, and it happens per candidate on a recruiter's action - never in bulk and never in the background.",
     off: "CVs are read by people. Candidate data is never sent to a model at all.",
+  },
+  {
+    key: "tables.describe",
+    title: "Describe a table in words",
+    on: "In the table builder, someone can say what they want the grid to show and get columns, filters and sorting laid out for them to adjust. The model is shown only the field names that person can already pick from, and can only answer with those - anything it invents is reported back as not found rather than used. No rows are read and nothing is saved.",
+    off: "Grids are built by picking fields from the catalogue, as they are today.",
+  },
+  {
+    key: "analytics.narrate",
+    title: "Write up what changed in team reports",
+    on: "A team report can be summarised against the previous period in a sentence or two. Which measures moved is worked out arithmetically, not by the model, so it cannot report a change that did not happen; and a summary containing any number that was not in those measures is thrown away in favour of a plain one. Team totals only, never individuals.",
+    off: "Reports show their numbers without a written summary, as they do today.",
   },
 ];
 

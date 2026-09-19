@@ -97,7 +97,7 @@ import { search } from "./routes/search";
 import { activityCountsRoute } from "./routes/activityCounts";
 import { changes } from "./routes/changes";
 import { dashboardSummaryRoute } from "./routes/dashboardSummary";
-import { peopleAnalyticsRoute } from "./routes/peopleAnalytics";
+import { peopleAnalyticsRoute, peopleAnalyticsNarrate } from "./routes/peopleAnalytics";
 import { approvalsSummaryRoute } from "./routes/approvalsSummary";
 import { bankFormats } from "./routes/bankFormats";
 import { letterheads } from "./routes/letterheads";
@@ -136,7 +136,7 @@ import { workflowInstances } from "./routes/workflowInstances";
 import { workflowMeta } from "./routes/workflowMeta";
 import { esignProviders } from "./routes/esignProviders";
 import { tableViews } from "./routes/tableViews";
-import { tableFields } from "./routes/tableFields";
+import { tableFields, tableDescribe } from "./routes/tableFields";
 import { authRoutes } from "./routes/authRoutes";
 
 /** Path prefixes the Worker owns outright, where a miss is a real 404 rather than a client-side route.
@@ -261,6 +261,7 @@ app.route("/v1/access-rules", accessRules);
 app.route("/v1/batch:run", batch); // multi-read batch: re-dispatches GET sub-requests through the full chain
 app.route("/v1/search", search); // cross-collection search: per-collection list decision + scope inside the service
 app.route("/v1/dashboard-summary", dashboardSummaryRoute); // aggregated KPI counts: same per-collection gating as search
+app.route("/v1/people-analytics:narrate", peopleAnalyticsNarrate); // narrated period-on-period change, before the collection mount
 app.route("/v1/people-analytics", peopleAnalyticsRoute); // per-person report across the modules: same per-collection gating as search
 app.route("/v1/approvals-summary", approvalsSummaryRoute); // approval queue counts: per-queue `approve` gating, no rows
 app.route("/v1/activity-counts", activityCountsRoute); // "new since I last looked" counts: same gating as search, no rows
@@ -375,6 +376,7 @@ app.route("/v1/automation-runs", automationRuns);
 app.route("/v1/workflow-instances", workflowInstances);
 app.route("/v1/workflow-meta", workflowMeta);
 app.route("/v1/esign-providers", esignProviders); // virtual: non-secret e-sign driver catalog for Settings
+app.route("/v1/table-fields:describe", tableDescribe); // NL -> grid spec, before the table-fields mount
 app.route("/v1/table-fields", tableFields); // virtual: the custom-grid field catalogue (no table, no rows)
 app.route("/v1/table-views", tableViews); // saved custom grids (the definition; `:run` produces the rows)
 
