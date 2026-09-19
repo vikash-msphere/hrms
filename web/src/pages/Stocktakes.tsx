@@ -13,6 +13,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { DataState } from "@/components/common/DataState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { FoldSection } from "@/components/common/FoldSection";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -42,6 +43,9 @@ import { getSetting } from "@/lib/settingsStore";
 // them, never folded into them.
 
 const DEFAULT_STALE_DAYS = 180;
+// How far coverage has to fall between one count and the next before it is worth saying. Small movements are
+// scope and timing; ten points is the register losing track of where things are.
+const COVERAGE_DROP_PCT = 10;
 
 export default function Stocktakes({ me }: { me: Me }) {
   const route = useRoute();
@@ -180,6 +184,43 @@ export default function Stocktakes({ me }: { me: Me }) {
   const lastClosedCount = closed[0];
   const sinceLast = daysSince(lastClosedCount?.closed_time);
 
+  // What a list of finished counts is read for: whether things are still missing, and whether the last count
+  // went worse than the one before it. The second is the finding that makes anybody act, and it is invisible
+  // in a table where each row is read on its own.
+  const countInsights = (cs: Stocktake[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const unresolved = cs.filter((r) => reconcileMissing(r, assets).stillMissing > 0);
+    if (unresolved.length > 0) {
+      out.push({
+        id: "still-missing",
+        label: `${unresolved.length} with kit still unaccounted for`,
+        tone: "destructive",
+        hint: "Nothing has turned up since the count closed.",
+        filters: { still: ">0" },
+        sort: "still.desc",
+      });
+    }
+    // Newest against the one before it, both by close date. A single figure means little; a drop is the
+    // whole signal.
+    const coverage = (r: Stocktake) => { const k = r.result?.counts; return k?.scope_total ? (k.sighted ?? 0) / k.scope_total : null; };
+    const chronological = [...cs].filter((r) => r.closed_time && coverage(r) != null).sort((a, b) => (b.closed_time ?? "").localeCompare(a.closed_time ?? ""));
+    const latest = chronological[0];
+    const previous = chronological[1];
+    if (latest && previous) {
+      const drop = Math.round(((coverage(previous) ?? 0) - (coverage(latest) ?? 0)) * 100);
+      if (drop >= COVERAGE_DROP_PCT) {
+        out.push({
+          id: "coverage-drop",
+          label: `Coverage down ${drop} points on the last count`,
+          tone: "warning",
+          hint: `${latest.label ?? "The newest count"} found a smaller share of its scope than the one before it.`,
+          filters: { closed: (latest.closed_time ?? "").slice(0, 10) },
+        });
+      }
+    }
+    return out;
+  };
+
   const columns: Column<Stocktake>[] = [
     { id: "label", header: "Count", accessor: (r) => r.label ?? "", cell: (r) => (
       <div className="min-w-0">
@@ -193,9 +234,21 @@ export default function Stocktakes({ me }: { me: Me }) {
         <div className="truncate text-xs text-muted-foreground">by {empName(r.closed_by)}</div>
       </div>
     ) },
-    { id: "sighted", header: "Sighted", align: "right", filter: "number", accessor: (r) => r.result?.counts?.sighted ?? 0, cell: (r) => (
-      <span className="tabular-nums">{r.result?.counts?.sighted ?? 0} <span className="text-muted-foreground">/ {r.result?.counts?.scope_total ?? 0}</span></span>
-    ) },
+    { id: "sighted", header: "Sighted", align: "right", filter: "number", accessor: (r) => r.result?.counts?.sighted ?? 0,
+      // The headline of a stocktake is what share of the scope it actually found, and every reader was
+      // doing that division themselves down a column of "83 / 97".
+      bar: (r) => { const k = r.result?.counts; return k?.scope_total ? (k.sighted ?? 0) / k.scope_total : null; },
+      cell: (r) => (
+        <span className="tabular-nums">{r.result?.counts?.sighted ?? 0} <span className="text-muted-foreground">/ {r.result?.counts?.scope_total ?? 0}</span></span>
+      ) },
+    {
+      // Coverage as a figure that can be compared between counts, sorted and averaged. Its own column rather
+      // than a second reading of "Sighted", because "did this count go well" and "how many things did it
+      // find" are different questions and only one of them is comparable across scopes.
+      id: "accuracy", header: "Coverage", align: "right", defaultHidden: true, filter: "number", aggregate: "avg",
+      formatTotal: (n) => `${Math.round(n)}%`,
+      accessor: (r) => { const k = r.result?.counts; return k?.scope_total ? Math.round(((k.sighted ?? 0) / k.scope_total) * 100) : null; },
+    },
     // Proof quality, not just coverage: a count ticked off by hand and one scanned end to end are different
     // evidence, and the difference is worth seeing without opening the count.
     { id: "proof", header: "Scan-proved", align: "right", filter: "number", accessor: (r) => r.result?.counts?.scanned ?? 0, cell: (r) => {
@@ -318,6 +371,7 @@ export default function Stocktakes({ me }: { me: Me }) {
           tableId="stocktakes"
           columns={columns}
           rows={closed}
+          insights={countInsights}
           getRowId={(r) => r.path}
           accessCollection="stocktakes"
           accessTargetOf={(r) => ({ collection: "stocktakes", objectPath: r.path, label: r.label ?? "count", can: r.access?.can })}

@@ -366,3 +366,185 @@ describe("a field the caller may not read is not searchable text either", () => 
     expect(await search(admin, "dhanbad")).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------------------------------------
+// The semantic half.
+//
+// The failure being guarded against is the one that would make this feature a data breach rather than a
+// ranking improvement: the vector index knows nothing about departments, owners or per-object shares, so if a
+// match went to the caller on the index's say-so, semantic search would return rows the same caller's list of
+// that collection refuses. The service is built to make that impossible by construction - ids come back from
+// the index and the ROWS are read under the same `or(...branches)` the FTS query uses - and these tests hold
+// that construction by handing the index ids it should not be trusted with.
+// ---------------------------------------------------------------------------------------------------------
+
+/** A vector index that returns whatever ids the test tells it to, in order. The query vector is ignored: what
+ *  is under test is what the service does with matches, not whether cosine similarity works. */
+function scriptedIndex(ids: () => string[]) {
+  return {
+    async upsert() {},
+    async query() {
+      return ids().map((id, i) => ({ id, score: 1 - i / 100 }));
+    },
+    async fetch() { return new Map<string, number[]>(); },
+    async remove() {},
+  };
+}
+
+const constantModel = {
+  async embed(texts: string[]) { return texts.map(() => [0.1, 0.2, 0.3]); },
+  async generate() { return ""; },
+  async rerank() { return []; },
+};
+
+/** Semantic search defaults to OFF for the org - binding the model is an operator's act, letting it read the
+ *  org's text is a separate decision. These tests are about what happens once that decision is made. */
+const withSemanticOn = async (fn: () => Promise<void>) => {
+  await deps.db.insert(schema.settings).values({ key: "ai", value: JSON.stringify({ features: { "search.semantic": true } }) })
+    .onConflictDoUpdate({ target: schema.settings.key, set: { value: JSON.stringify({ features: { "search.semantic": true } }) } });
+  try {
+    await fn();
+  } finally {
+    await deps.db.delete(schema.settings).where(eq(schema.settings.key, "ai"));
+    deps.ai = undefined;
+    deps.vectors = undefined;
+  }
+};
+
+describe("semantic search obeys the same scope as the keyword half", () => {
+  it("drops a neighbour the caller could not have listed", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const bhavna = await seedPerson("07-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    await leaveFor(alice, "04-a01-l1", "root canal");
+    await leaveFor(bhavna, "07-b01-l1", "dental surgery");
+
+    // Every leave request in the database, handed to the service as if the index had matched them all.
+    const all = await deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.collection, "leave-requests"));
+    expect(all.length).toBe(2); // both are indexed; the question is which one comes back
+
+    await withSemanticOn(async () => {
+      deps.ai = constantModel;
+      deps.vectors = scriptedIndex(() => all.map((d) => `leave-requests:${d.recordId}`));
+      // Alice holds `leave-requests.me.**`: her own row only. Bhavna's is in the index's answer and must not
+      // survive the SQL re-check, however highly the index ranked it.
+      const hits = await search(alice, "tooth");
+      expect(hits.every((h) => h.collection !== "leave-requests" || h.id === all.find((d) => d.code === "04-a01-l1")!.recordId)).toBe(true);
+      expect(hits.some((h) => h.id === all.find((d) => d.code === "07-b01-l1")!.recordId)).toBe(false);
+    });
+  });
+
+  it("stays off until the org turns it on", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    await leaveFor(alice, "04-a01-l1", "root canal");
+    const own = await deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.collection, "leave-requests"));
+
+    // Model and index bound, but no org setting. Binding them is an operator's act; letting a model read the
+    // org's text is a separate decision, and until it is made this behaves as though nothing were bound.
+    deps.ai = constantModel;
+    deps.vectors = scriptedIndex(() => own.map((d) => `leave-requests:${d.recordId}`));
+    try {
+      expect(await search(alice, "dentist")).toEqual([]);
+    } finally {
+      deps.ai = undefined;
+      deps.vectors = undefined;
+    }
+  });
+
+  it("finds a row by meaning that the keyword index cannot match", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    await leaveFor(alice, "04-a01-l1", "root canal");
+    const own = await deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.collection, "leave-requests"));
+
+    // No FTS hit for this query; the row arrives purely through the semantic path.
+    expect(await search(alice, "dentist")).toEqual([]);
+
+    await withSemanticOn(async () => {
+      deps.ai = constantModel;
+      deps.vectors = scriptedIndex(() => own.map((d) => `leave-requests:${d.recordId}`));
+      const hits = await search(alice, "dentist");
+      expect(hits.length).toBe(1);
+      expect(hits[0]!.collection).toBe("leave-requests");
+    });
+  });
+
+  it("ignores an id for a collection the caller is not searching", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    await leaveFor(alice, "04-a01-l1", "root canal");
+    const own = await deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.collection, "leave-requests"));
+
+    await withSemanticOn(async () => {
+      deps.ai = constantModel;
+      // The id names a collection Alice's grant does not cover at all. Nothing should reach a query for it.
+      deps.vectors = scriptedIndex(() => [`compensation:${own[0]!.recordId}`, `not-a-collection:${own[0]!.recordId}`, "malformed"]);
+      expect(await search(alice, "dentist")).toEqual([]);
+    });
+  });
+
+  it("survives the field gate, which asks a different question of it", async () => {
+    // The regression this pins. `narrowRedacted` re-checks an FTS hit by requiring the caller's READABLE
+    // columns to still contain the query tokens - correct for a keyword match, and exactly wrong for a
+    // semantic one, whose whole point is matching text that does not contain the typed words. Run through
+    // that check, every semantic hit was dropped for any caller denied a matchable field, and the default
+    // policy denies `tickets.description` - so it was silently off for most people.
+    const admin = await seedPerson("04-z01", "Root", "Admin", { levels: { "**": "admin" }, allow: ["**"], deny: ["tickets.*.description.**"] } as Grant, "super_admin");
+    await deps.db.insert(schema.tickets).values({
+      uuid: genId(), code: "04-z01-t1", employeeId: admin.employeeId!,
+      subject: "Laptop battery swollen", description: "escalated after the Dhanbad incident",
+    } as never);
+    const docs = await deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.collection, "tickets"));
+    expect(docs.length).toBe(1);
+
+    // "hardware" appears nowhere on the row, so there is no keyword hit to fall back on: anything returned
+    // came through the semantic path.
+    expect(await search(admin, "hardware")).toEqual([]);
+
+    await withSemanticOn(async () => {
+      deps.ai = constantModel;
+      deps.vectors = scriptedIndex(() => docs.map((d) => `tickets:${d.recordId}`));
+      const hits = await search(admin, "hardware");
+      expect(hits.length).toBe(1);
+      // The subject is readable, so it still renders; the denied description was never part of the embedding.
+      expect(hits[0]!.title).toBe("Laptop battery swollen");
+    });
+  });
+
+  it("is dropped when the text it was embedded from is itself denied", async () => {
+    // The other half of the same rule. The embedding is built from the title and subtitle, so if THOSE are
+    // hidden the hit has no visible basis at all and must not be offered - a row whose every shown field is
+    // blank is an existence disclosure, not a search result.
+    const denyReason: Grant = {
+      levels: { "employees.**": "read", "leave-requests": "write", "leave-requests.me.**": "write" },
+      allow: [],
+      deny: ["leave-requests.*.reason.**"],
+    };
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", denyReason);
+    await leaveFor(alice, "04-a01-l1", "Ski trip to Gulmarg");
+    const docs = await deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.collection, "leave-requests"));
+
+    await withSemanticOn(async () => {
+      deps.ai = constantModel;
+      deps.vectors = scriptedIndex(() => docs.map((d) => `leave-requests:${d.recordId}`));
+      // `reason` is what the leave-request title is built from, and it is denied.
+      const hits = await search(alice, "snowboarding");
+      expect(hits.some((h) => h.collection === "leave-requests")).toBe(false);
+    });
+  });
+
+  it("falls back to the keyword result when the index throws", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    await leaveFor(alice, "04-a01-l1", "root canal");
+
+    await withSemanticOn(async () => {
+      deps.ai = constantModel;
+      deps.vectors = {
+        async upsert() {},
+        async query() { throw new Error("index down"); },
+        async fetch() { return new Map<string, number[]>(); },
+        async remove() {},
+      };
+      // An outage in an optional feature must not cost the caller the search they would have had anyway.
+      const hits = await search(alice, "canal");
+      expect(hits.length).toBe(1);
+    });
+  });
+});

@@ -11,6 +11,8 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
+import { countBy } from "@/lib/tableSignals";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -110,6 +112,56 @@ export default function Departments({ embedded, title }: { me?: Me; embedded?: b
     reload();
   }
 
+  // Headcount per department, and the same counted down the tree. Both are over the employees this caller can
+  // see, which is the same set the rest of the page is built from.
+  const directCount = useMemo(
+    () => countBy(employees.filter((e) => !e.delete_time && !e.disabled), (e) => (e.department ? idOf(e.department) : null)),
+    [employees],
+  );
+  const rollupCount = useMemo(() => {
+    const kids = new Map<string, string[]>();
+    for (const d of rows) {
+      const parent = d.parent ? idOf(d.parent) : "";
+      if (!parent) continue;
+      kids.set(parent, [...(kids.get(parent) ?? []), idOf(d.path)]);
+    }
+    const out = new Map<string, number>();
+    // Depth-first with a seen set: a cycle in the tree is a data error, not a reason to hang the page.
+    const count = (id: string, seen: Set<string>): number => {
+      if (seen.has(id)) return 0;
+      seen.add(id);
+      return (directCount.get(id) ?? 0) + (kids.get(id) ?? []).reduce((n, kid) => n + count(kid, seen), 0);
+    };
+    for (const d of rows) out.set(idOf(d.path), count(idOf(d.path), new Set()));
+    return out;
+  }, [rows, directCount]);
+
+  // What a department list is checked for: the gaps that break routing, and the teams that are not teams.
+  const departmentInsights = (ds: Department[]): TableInsight[] => {
+    const live = ds.filter((d) => !d.delete_time && !d.disabled);
+    const out: TableInsight[] = [];
+    const unmanaged = live.filter((d) => (d.managers ?? []).length === 0);
+    if (unmanaged.length > 0) {
+      out.push({
+        id: "no-manager",
+        label: `${unmanaged.length} with nobody running them`,
+        tone: "warning",
+        hint: "Approvals that route to a department manager have nowhere to go.",
+        filters: { managers: "=0" },
+      });
+    }
+    const empty = live.filter((d) => (rollupCount.get(idOf(d.path)) ?? 0) === 0);
+    if (empty.length > 0) {
+      out.push({
+        id: "empty",
+        label: `${empty.length} with nobody in them`,
+        hint: "Nobody sits in these or in anything under them - usually left over from a reorg.",
+        filters: { headcount_rollup: "=0" },
+      });
+    }
+    return out;
+  };
+
   const columns: Column<Department>[] = [
     { id: "name", header: "Name", accessor: (d) => d.display_name, cell: (d) => <span className="font-medium">{d.display_name}</span> },
     // Sorted and filtered on the readable name, not the opaque id it's stored as.
@@ -123,6 +175,23 @@ export default function Departments({ embedded, title }: { me?: Me; embedded?: b
       filter: "number",
       accessor: (d) => (d.managers ?? []).length,
       cell: (d) => ((d.managers ?? []).length ? (d.managers ?? []).map(empName).join(", ") : <span className="text-muted-foreground">-</span>),
+    },
+    // Headcount, direct and including everything underneath. A department list without it is a list of names
+    // where a team of sixty and an empty one look the same, and the rollup is the number every conversation
+    // about structure actually uses.
+    {
+      id: "headcount", header: "People", align: "right", filter: "number", aggregate: "sum",
+      accessor: (d) => directCount.get(idOf(d.path)) ?? 0,
+      cell: (d) => {
+        const n = directCount.get(idOf(d.path)) ?? 0;
+        return n ? <span className="tabular-nums">{n}</span> : <span className="text-muted-foreground">0</span>;
+      },
+    },
+    {
+      // Not summed: the rollups of a parent and its children overlap, so a footer total of them would count
+      // most people several times.
+      id: "headcount_rollup", header: "With sub-teams", align: "right", defaultHidden: true, filter: "number",
+      accessor: (d) => rollupCount.get(idOf(d.path)) ?? 0,
     },
     stateColumn<Department>(),
     ...metaColumns<Department>(),
@@ -162,6 +231,7 @@ export default function Departments({ embedded, title }: { me?: Me; embedded?: b
             columns={columns}
             tableId="departments"
             rows={rows}
+            insights={departmentInsights}
             getRowId={(d) => d.path}
             rowClassName={(d) => (d.delete_time ? "opacity-60" : undefined)}
             emptyTitle="No departments match"

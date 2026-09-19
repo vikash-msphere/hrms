@@ -67,7 +67,9 @@ Wiring is ambient-first so a page opts in once and everything inside lights up:
 2. Shared primitives read that scope and self-sponsor icons: `DataTable` (per-row icon + export action),
    `RowActions` (verb icons on row menus), `Field`/`FieldAccess` (field-level, only for real field targets),
    `PageHeader accessCollection` (whole-collection icon on the title), `AccessTab` (per-tab sub-resource
-   sections on profiles).
+   sections on profiles). A page whose tabs were SCOPES of one collection rather than sub-resources keeps the
+   collection icon on the heading instead - Support is the one that moved, when its four identity tabs became
+   scope chips on a single table (docs/07-table-interactions.md §6).
 3. Anything not built from those uses the explicit primitives:
    - `AccessItem` - any bare card / list item / widget: nests an item-level scope + corner key icon.
    - `AccessAction` - any action element: `create` for "new X" buttons, `verb` for custom-method buttons,
@@ -359,6 +361,10 @@ Every layer that shows or fetches is capability-gated, each at ONE central place
   the effective-access context the cell alone can't show - `+all:<level>` when the `everyone` role already
   grants it, `+N` when narrower (own/department/field/method/object) rules exist - and a key on every cell
   that opens the full ACL modal for that collection.
+- **Users × collections grid**: the same cells for per-user grants. A per-user rule is the exception in this
+  app, so the grid is mostly empty by construction: "Only collections with access" drops every column no
+  visible user has anything on, and says how many it hid. Off by default, like "Only rows with access" on the
+  roles side, because a matrix that hides most of itself on arrival makes a different claim about the data.
 - **Pending changes queue**: everything awaiting four-eyes approval across every collection, with the
   approve/reject buttons (each a grantable verb target of its own) and the switch that turns the
   requirement on.

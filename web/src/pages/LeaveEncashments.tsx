@@ -89,6 +89,12 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
     return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown type" : "-");
   }, [leaveTypes]);
 
+  /** A leave type's yearly accrual, for reading a payout as a share of what the type grants. */
+  const ltAccrual = useMemo(() => {
+    const m = new Map(leaveTypes.map((t) => [idOf(t.path), t.accrual_days_per_year ?? 0]));
+    return (p?: string) => (p ? m.get(idOf(p)) ?? 0 : 0);
+  }, [leaveTypes]);
+
   const encashableTypes = useMemo(() => leaveTypes.filter((t) => t.encashable && !t.delete_time && !t.disabled), [leaveTypes]);
   // `null` means "no balance row for this pair", which is NOT the same as a zero balance: an employee who has
   // never accrued this type has no row, and so does one whose row simply has not loaded yet. Asserting 0 for
@@ -201,6 +207,22 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
     // The payout this queue commits the company to, under the column.
     { id: "amount", header: "Amount", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => money(n), accessor: (r) => r.amount ?? 0, cell: (r) => <span className="tabular-nums">{r.amount != null ? money(r.amount) : "-"}</span> },
     { id: "state", header: "Status", filter: "select", groupBy: true, accessor: (r) => r.state, cell: (r) => <StatusBadge state={r.state} /> },
+    {
+      // Days cashed out against what the type accrues in a year. The point of an encashment policy is that
+      // leave is rest first and money second, and "eleven days" means nothing until you know whether the
+      // type grants twelve or thirty.
+      id: "of_accrual", header: "Of a year", align: "right", defaultHidden: true, filter: "number",
+      formatTotal: (n) => `${Math.round(n)}%`,
+      accessor: (r) => {
+        const accrual = ltAccrual(r.leave_type);
+        return accrual ? Math.round((r.days / accrual) * 100) : null;
+      },
+      bar: (r) => { const accrual = ltAccrual(r.leave_type); return accrual ? r.days / accrual : null; },
+      cell: (r) => {
+        const accrual = ltAccrual(r.leave_type);
+        return accrual ? <span className="tabular-nums">{Math.round((r.days / accrual) * 100)}%</span> : <span className="text-muted-foreground">-</span>;
+      },
+    },
   ];
 
   const decideCol: Column<LeaveEncashment> = {

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Tag, Plus } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -6,11 +6,13 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
 import { idOf } from "@/lib/utils";
-import type { ReimbursementCategory, Me } from "@/types";
+import type { Reimbursement, ReimbursementCategory, Me } from "@/types";
+import { countBy } from "@/lib/tableSignals";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -94,8 +96,32 @@ export default function ReimbursementCategories({ embedded, openId }: { me?: Me;
     }
   }
 
+  // How much each category is actually used. Same reason as the expense catalogue next door: a list with no
+  // volume beside it is a list nobody dares shorten.
+  const canClaims = usePermission("reimbursements.read");
+  const { rows: claims } = useCollection<Reimbursement>("reimbursements", { enabled: canClaims });
+  const catUse = useMemo(
+    () => countBy(claims.filter((r) => !["CANCELLED", "REJECTED"].includes((r.state ?? "").toUpperCase())), (r) => (r.category ? idOf(r.category) : null)),
+    [claims],
+  );
+
+  const categoryInsights = (cs: ReimbursementCategory[]): TableInsight[] => {
+    if (!canClaims) return [];
+    const idle = cs.filter((c) => !c.delete_time && !c.disabled && !catUse.has(idOf(c.path)));
+    return idle.length === 0 ? [] : [{
+      id: "unused",
+      label: `${idle.length} nobody has claimed against`,
+      hint: "Nothing loaded uses these. Disabling one keeps the history and takes it off the claim form.",
+      filters: { claims: "=0" },
+    }];
+  };
+
   const columns: Column<ReimbursementCategory>[] = [
     { id: "name", header: "Name", accessor: (c) => c.display_name, cell: (c) => <span className="font-medium">{c.display_name}</span> },
+    ...(canClaims ? [{
+      id: "claims", header: "Claims", align: "right" as const, filter: "number" as const, aggregate: "sum" as const,
+      accessor: (c: ReimbursementCategory) => catUse.get(idOf(c.path)) ?? 0,
+    }] : []),
     {
       id: "receipt",
       header: "Receipt",
@@ -135,6 +161,7 @@ export default function ReimbursementCategories({ embedded, openId }: { me?: Me;
             columns={columns}
             tableId="reimbursement-categories"
             rows={rows}
+            insights={categoryInsights}
             getRowId={(c) => c.path}
             rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)}
             emptyTitle="No categories match"

@@ -1,4 +1,4 @@
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -15,6 +15,29 @@ import { clearCache } from "../lib/cache";
 import { byIdChunks } from "../lib/dbBatch";
 
 export type UserInput = { role?: string; roles?: string[]; status?: string; employee?: string | null };
+
+/**
+ * Stamp when this account was last seen. Called from the auth middleware on every lane, behind the same
+ * throttle `api_keys.last_used_at` uses (services/apiKeys.ts `shouldTouchLastUsed`).
+ *
+ * Deliberately NOT audited and not version-guarded. It is not something a person did to the record - it is the
+ * record noticing them - so an audit entry per quarter-hour per account would bury the trail it shares.
+ *
+ * `updated_at` IS HELD, by writing it back to itself. The column carries `$onUpdateFn` (db/schema.ts), which
+ * drizzle applies to any update that does not name it - so the obvious one-column write would re-stamp it,
+ * and with it the row's ETag, every fifteen minutes that somebody merely BROWSES. Two things then go wrong at
+ * once: `GET /v1/users` is a conditional, list-ETag'd read (http/listEtag.ts), so every client's cached user
+ * list would be invalidated by activity that changed nothing in it; and a record whose `update_time` moves on
+ * its own reads in the UI - and in `GET /v1/changes` - as a record somebody edited. Self-assignment is the
+ * only way to suppress the hook, since suppressing it needs the column present in the SET and the value it
+ * should keep is the one already in the row.
+ */
+export function touchLastSeen(deps: Deps, userId: string, now: Date) {
+  return deps.db
+    .update(schema.users)
+    .set({ lastSeenAt: now, updatedAt: sql`${schema.users.updatedAt}` })
+    .where(eq(schema.users.uuid, userId));
+}
 
 /**
  * Replace a user's SECONDARY roles (db/schema.ts `user_roles`) with exactly `wanted`.

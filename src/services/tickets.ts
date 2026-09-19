@@ -44,7 +44,7 @@ export type TicketInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const PRIORITIES = new Set(["low", "medium", "high"]);
 
-export async function listTickets(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, assigneeFilter?: string, actor?: AppUser, departmentFilter?: string, q?: string, showDeleted = false, deletedOnly = false) {
+export async function listTickets(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, assigneeFilter?: string, actor?: AppUser, departmentFilter?: string, q?: string, showDeleted = false, deletedOnly = false, employeeFilter?: string) {
   // Visibility decided by the middleware (scopeFor over the grant); here we only bind it to columns. The
   // owner (for "own") is the requester, exactly like leave-requests.
   const conds = [applyScope(scope, schema.tickets.code, schema.tickets.employeeId)];
@@ -60,6 +60,14 @@ export async function listTickets(deps: Deps, scope: ListScope, maxPageSize: num
     // "?assignee=me" or an employees/<id> ref -> the assignee's queue (still bounded by the scope above).
     const assigneeId = assigneeFilter === "me" ? actor?.employeeId : idFromPath(assigneeFilter);
     conds.push(assigneeId ? eq(schema.tickets.assigneeId, assigneeId) : (undefined as never));
+  }
+  if (employeeFilter) {
+    // The other half of the same question: "?employee=me" is what somebody RAISED, where `assignee` is what
+    // they were given. The desk offers both as scopes, and without this one a caller with more than a page of
+    // tickets would be shown their own tickets out of the first hundred rows and told that was all of them.
+    // Same shape as the assignee filter above, and still bounded by the scope.
+    const employeeId = employeeFilter === "me" ? actor?.employeeId : idFromPath(employeeFilter);
+    conds.push(employeeId ? eq(schema.tickets.employeeId, employeeId) : (undefined as never));
   }
   // Tickets ARE soft-deletable, so the factory mounts DELETE and `:restore` for them. This used to drop
   // soft-deleted rows unconditionally, which left a deleted ticket unreachable: no list could surface it, so
@@ -222,7 +230,15 @@ export async function transitionTicket(deps: Deps, actor: AppUser, id: string, v
   if (!t) throw failedPrecondition(`a ${row.state.toLowerCase()} ticket cannot be ${verb}ed`);
   // Guard the flip on the read state so the transition is EXACTLY-ONCE (0 rows = a concurrent call moved it):
   // no double resolve/close/reopen notification to the requester.
-  const [updated] = await deps.db.update(schema.tickets).set({ state: t.to as TicketState, updatedAt: new Date() }).where(and(eq(schema.tickets.uuid, id), eq(schema.tickets.state, row.state))).returning();
+  // `resolvedAt` rides the SAME guarded flip as the state, so the stamp and the state can never disagree: a
+  // losing race writes neither. It follows the state rather than latching - reaching RESOLVED stamps it,
+  // leaving RESOLVED clears it - so a reopened ticket is honestly unresolved again instead of carrying the
+  // date it was wrongly closed, and one resolved twice reports the second date, which is the one that answers
+  // "is this done". CLOSED keeps whatever RESOLVED wrote: closing is filing, not a second resolution - and a
+  // ticket closed straight from the queue (a duplicate, something handled outside the tool) keeps none,
+  // because nothing was resolved and a stamp there would price work that was never done.
+  const resolvedStamp = t.to === "RESOLVED" ? { resolvedAt: new Date() } : t.to === "CLOSED" ? {} : { resolvedAt: null };
+  const [updated] = await deps.db.update(schema.tickets).set({ state: t.to as TicketState, ...resolvedStamp, updatedAt: new Date() }).where(and(eq(schema.tickets.uuid, id), eq(schema.tickets.state, row.state))).returning();
   if (!updated) throw failedPrecondition(`a ${row.state.toLowerCase()} ticket cannot be ${verb}ed`);
   await audit(deps, actor, `ticket.${verb}`, "tickets", id, stateMeta(row.state, t.to, { employee: `employees/${row.employeeId}` }), updated);
   // Tell the requester when their ticket is resolved/closed/reopened.
@@ -296,8 +312,22 @@ export async function commentTicket(deps: Deps, actor: AppUser, id: string, body
   const text = (body ?? "").trim();
   if (!text) throw invalidArgument("a comment body is required");
   await deps.db.insert(schema.ticketComments).values({ ticketId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
-  // Touch the ticket so its update_time reflects the latest activity.
-  await deps.db.update(schema.tickets).set({ updatedAt: new Date() }).where(eq(schema.tickets.uuid, id));
+  // Touch the ticket so its update_time reflects the latest activity - and, when this is the first reply from
+  // anyone but the requester, start the first-response clock in the same write.
+  //
+  // The requester is excluded because somebody chasing their own ticket is not an answer to it, and counting
+  // it would report the queue's response time as near zero on exactly the tickets nobody has looked at. An
+  // admin with no employee record (`actor.employeeId` null) cannot be the requester, so they always count.
+  //
+  // `isNull` in the predicate, not a check on the row read above: two agents replying at the same moment both
+  // saw an empty stamp, and without it the second write would move a first response that had already
+  // happened. A lost race matches no rows and so skips the touch too, which costs nothing - the agent that
+  // won wrote `updated_at` a moment earlier, from the same reply thread.
+  const firstResponse = !t.firstResponseAt && actor.employeeId !== t.employeeId;
+  await deps.db
+    .update(schema.tickets)
+    .set({ ...(firstResponse ? { firstResponseAt: new Date() } : {}), updatedAt: new Date() })
+    .where(firstResponse ? and(eq(schema.tickets.uuid, id), isNull(schema.tickets.firstResponseAt)) : eq(schema.tickets.uuid, id));
   await audit(deps, actor, "ticket.comment", "tickets", id, noteMeta("tickets", text), t);
   // Notify the other party (requester <-> assignee) that there's a new comment on the thread.
   for (const rid of [t.employeeId, t.assigneeId].filter((r): r is string => !!r && r !== actor.employeeId))

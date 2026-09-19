@@ -584,6 +584,31 @@ const likeEscape = (s: string) => s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 /** Operators that ORDER two values rather than compare them as text. */
 const ORDERING_OPS = new Set(["gt", "gte", "lt", "lte"]);
 
+/** Kinds stored as an instant or a flag but RENDERED as text - the pair whose two forms read differently. */
+const RENDERED_KINDS = new Set<ResolvedField["kind"]>(["date", "datetime", "bool"]);
+
+/**
+ * An ordering comparison over TEXT, case-folded, as SQL.
+ *
+ * `gt`/`lt` on a text column went to SQLite as a BINARY comparison, which orders it lexicographically and
+ * answers - while the in-memory half read `Number(cell)`, got `NaN`, and answered false for every row. So a
+ * saved filter like "name is after M" returned the whole page when the column sat on the base table and
+ * nothing when it sat behind a link: the fourth instance of the split `likeEscape`, `lowerEq` and
+ * `equalsValue` each closed for their own operator. Folded case on both sides, matching `lowerEq` next door,
+ * so the two halves order the same strings the same way.
+ */
+const lowerCmp = (col: unknown, op: string, v: string | number | boolean): SQL | undefined => {
+  const rhs = String(v).toLowerCase();
+  const lhs = sql`lower(${col as never})`;
+  switch (op) {
+    case "gt": return sql`${lhs} > ${rhs}`;
+    case "gte": return sql`${lhs} >= ${rhs}`;
+    case "lt": return sql`${lhs} < ${rhs}`;
+    case "lte": return sql`${lhs} <= ${rhs}`;
+    default: return undefined;
+  }
+};
+
 /** The items of an `in` filter's comma-joined value. One place, so the SQL half and the cost estimate below
  *  can never disagree about how many parameters the list is going to spend. */
 const inList = (v: ViewFilter["value"]) => String(v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -639,11 +664,20 @@ function baseFilterSql(table: SQLiteTable & Record<string, any>, field: Resolved
     case "not_empty": return and(isNotNull(col), ne(col, ""));
     case "eq": return v == null ? undefined : textual(field, v) ? lowerEq(col, v) : eq(col, coerce(field, v));
     case "ne": return v == null ? undefined : textual(field, v) ? not(lowerEq(col, v)) : ne(col, coerce(field, v));
-    case "gt": return v == null ? undefined : gt(col, coerce(field, v));
-    case "gte": return v == null ? undefined : gte(col, coerce(field, v));
-    case "lt": return v == null ? undefined : lt(col, coerce(field, v));
-    case "lte": return v == null ? undefined : lte(col, coerce(field, v));
-    case "contains": return typeof v === "string" && v ? sql`${col} like ${`%${likeEscape(v)}%`} escape '\\'` : undefined;
+    // Ordering on a TEXT column is a string comparison on both halves (see `lowerCmp`); on every other kind it
+    // is the typed comparison `coerce` binds.
+    case "gt": return v == null ? undefined : textual(field, v) ? lowerCmp(col, "gt", v) : gt(col, coerce(field, v));
+    case "gte": return v == null ? undefined : textual(field, v) ? lowerCmp(col, "gte", v) : gte(col, coerce(field, v));
+    case "lt": return v == null ? undefined : textual(field, v) ? lowerCmp(col, "lt", v) : lt(col, coerce(field, v));
+    case "lte": return v == null ? undefined : textual(field, v) ? lowerCmp(col, "lte", v) : lte(col, coerce(field, v));
+    // A date, a datetime and a boolean are STORED as an instant or as 0/1 and RENDERED as `ymd()` / ISO / true
+    // (see `cellValue`), so a LIKE over the stored form asks a different question from the one the reader is
+    // looking at: `contains "2026"` matched nothing against `1767225600000` on a base column and matched on
+    // `2026-01-15` behind a link. There is no spelling of this in SQL that is the same question, so it is not
+    // pushed at all - the in-memory half compares the text the grid actually shows, and is the only answer.
+    case "contains":
+      if (RENDERED_KINDS.has(field.kind)) return undefined;
+      return typeof v === "string" && v ? sql`${col} like ${`%${likeEscape(v)}%`} escape '\\'` : undefined;
     case "in": {
       const list = inList(v);
       return list.length ? or(...list.map((x) => (textual(field, x) ? lowerEq(col, x) : eq(col, coerce(field, x))))) : undefined;
@@ -717,6 +751,18 @@ function matches(cell: unknown, f: ViewFilter, kind?: ResolvedField["kind"]): bo
   if (f.op === "not_empty") return !(cell === null || cell === undefined || cell === "");
   if (cell === null || cell === undefined) return false;
   if (ORDERING_OPS.has(f.op)) {
+    // Text orders as text, case-folded, which is what `lowerCmp` binds on the SQL side. Reading it as a number
+    // made every ordering filter on a text column false wherever it was judged here.
+    if (kind !== undefined && TEXT_KINDS.has(kind)) {
+      const l = String(cell).toLowerCase();
+      const r = String(v ?? "").toLowerCase();
+      switch (f.op) {
+        case "gt": return l > r;
+        case "gte": return l >= r;
+        case "lt": return l < r;
+        default: return l <= r; // "lte"
+      }
+    }
     const temporal = kind === "date" || kind === "datetime";
     const l = temporal ? Date.parse(String(cell)) : Number(cell);
     const r = temporal ? Date.parse(String(v ?? "")) : Number(v);

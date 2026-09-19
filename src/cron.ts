@@ -19,6 +19,8 @@ import { awardReferralBonuses } from "./services/referrals";
 import { nudgeMissingScorecards } from "./services/ats";
 import { reconcilePendingEsign } from "./services/esign/callback";
 import { publishDueAnnouncements } from "./services/announcements";
+import { drainSearchEmbeddings } from "./services/searchEmbed";
+import { sweepAiCache } from "./services/ai";
 import { nextOccurrence } from "./services/events";
 import { purgeExpiredAccessRules, reviewStandingAccess } from "./services/accessRules";
 import { purgeIdentityFieldsSlice, IDENTITY_PURGE_JOB, type IdentityPurgeCursor } from "./services/identityDetails";
@@ -139,7 +141,13 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // The drain runs jobs authored by other people's rules, so it gets its own budget too rather than
     // inheriting whatever the announcement publish spent.
     const drained = await run("drainJobs", () => drainJobs(deps, 20));
-    return { summary: { drained, announcementsPublished }, failures };
+    // Reconcile the semantic search index against `search_docs`: embed what changed, drop what no longer has
+    // a row. On the FAST tick rather than the nightly one because a search index a day behind is a search
+    // index people stop trusting - somebody who just filed a ticket expects to find it. Bounded per tick by
+    // the neuron budget, so a first-run backfill spreads over several ticks instead of spending the day at
+    // once, and it no-ops entirely on a deployment with no model or no index bound.
+    const embedded = await run("drainSearchEmbeddings", async () => (await drainSearchEmbeddings(deps)).embedded);
+    return { summary: { drained, announcementsPublished, embedded }, failures };
   }
   if (cron === NIGHTLY_CRON) {
     // Carry-forward runs BEFORE accrual so it caps last year's balance before the new year accrues on top.
@@ -196,13 +204,17 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // Sweep lapsed temporary access rules. They already stopped deciding at their expiry instant (policyLoad
     // filters on it), so this is table hygiene, not the enforcement mechanism.
     const accessRulesExpired = await run("purgeExpiredAccessRules", () => purgeExpiredAccessRules(deps));
+    // Drop expired AI generations. `cacheGet` already ignores an expired row, so this is hygiene rather than
+    // the enforcement - but the table holds generated text about real records, and without this it grows for
+    // the life of the deployment.
+    const aiCacheSwept = await run("sweepAiCache", () => sweepAiCache(deps));
     // Periodic recertification of STANDING privilege (opt-in per org via the `access-review` setting). The
     // expiry sweep above only handles access somebody knew was temporary; this is the rest - the grant made
     // for one project or one person's leave cover that nobody's job it is to remove. No-ops on every tick
     // that is not due, so it costs one settings read a night.
     const accessReviewed = await run("reviewStandingAccess", () => reviewStandingAccess(deps));
     return {
-      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, accessReviewed },
+      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, accessReviewed },
       failures,
     };
   }

@@ -45,6 +45,9 @@ const PAGES: ChartPage[] = [
 const ELSEWHERE: Record<string, string> = {
   "ReviewCycles.tsx": "reviewGoals.spec.ts (the cycle's attainment curve, inside the calibration panel)",
   "EmployeeProfile.tsx": "attendanceViews.spec.ts (the attendance tab's hours chart, on somebody's record)",
+  // The builder's own summary. Unreachable from a route: it needs a SAVED table with a groupable column on
+  // it, and then the Summarise press - so the spec that builds one is the one that judges its chart.
+  "TableBuilder.tsx": "tableBuilder.spec.ts (the Summarise chart, on a table the spec builds)",
 };
 
 /** Does this source draw charts itself? */

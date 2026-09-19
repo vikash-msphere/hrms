@@ -24,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { DraftButton } from "@/components/common/DraftButton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useConfirm } from "@/components/common/confirm";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -559,6 +560,18 @@ function RespondDialog({ suggestion: s, queue, onStep, mergeTargets, onClose, on
             </Select>
           </Field>
           <Field label="Public response" field="response" hint="Shown to everyone who can see the suggestion.">
+            <div className="mb-2 flex justify-end">
+              {/* The suggestion's own text is NOT sent - only what the responder types here. So the
+                  instruction has to carry the substance: "we are doing this from April" rather than
+                  "reply to this". That is the cost of a drafting feature that reads no records. */}
+              <DraftButton
+                collection="suggestions"
+                kind="suggestion-response"
+                existing={form.response}
+                hint={declining ? "e.g. not this year, the budget is committed, revisit in the next planning round" : "e.g. agreed, rolling this out from April, the facilities team will confirm dates"}
+                onDraft={(text) => setForm({ ...form, response: text })}
+              />
+            </div>
             <Textarea rows={3} value={form.response} onChange={(e) => setForm({ ...form, response: e.target.value })} placeholder={declining ? "Why not, in a sentence." : "Optional reply…"} autoFocus />
           </Field>
         </>

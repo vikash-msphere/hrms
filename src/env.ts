@@ -66,6 +66,20 @@ export type AppUser = {
 export type Bindings = {
   DB: D1Database;
   DOCS: R2Bucket;
+  // Workers AI. OPTIONAL: absent = no AI layer, and every feature that would have used one falls back to what
+  // the app did before it (FTS search, a manual pick, no draft button). Which models may be called is an
+  // allowlist in domain/aiPolicy.ts, not a matter of what this binding will accept - it will proxy external
+  // providers, and that is the one thing the AI layer must never do with employee data.
+  AI?: Ai;
+  // Optional AI Gateway id to route inference through, for per-model analytics and a shared cache. Payload
+  // logging is suppressed on every call regardless (lib/ai.ts): the gateway records that a call happened, not
+  // what was in it. Unset = call the binding directly.
+  AI_GATEWAY_ID?: string;
+  // The semantic search index. OPTIONAL and independent of `AI`: with no index bound, global search is the
+  // FTS5 path it has always been. Holds derived personal data (an embedding is partially invertible), so it
+  // is treated as a data store in its own right - what may be put in it is decided by domain/aiPolicy.ts, and
+  // what may be read out of it is re-decided in SQL, never by the index's own metadata.
+  VEC?: VectorizeIndex;
   // The built SPA in web/dist. Bound so the Worker can decide the SPA fallback itself instead of letting the
   // asset layer answer every miss with index.html - see the notFound handler in src/index.ts.
   ASSETS: Fetcher;

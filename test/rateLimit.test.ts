@@ -268,7 +268,11 @@ describe("the limiter in the request chain", () => {
     expect(body.detail).toContain("fan-out");
     // Charged per sub-read, so the budget is gone in about limit/20 envelopes rather than limit of them.
     expect(sent).toBeLessThanOrEqual(fanOut / perEnvelope);
-  });
+    // Spending a fan-out budget means actually issuing the fan-out: about `limit` real searches against D1
+    // before the refusal arrives, which is the one test in this suite that does not fit the 5s default. It
+    // passed alone and failed inside the full run, which is the shape of a timeout that is really a load
+    // measurement - so the budget is stated here rather than left to depend on how busy the machine is.
+  }, 30_000);
 
   // LAST in this file on purpose: it drives the batch budget to its ceiling, and the budgets live for the
   // isolate, so anything after it would start out of allowance.

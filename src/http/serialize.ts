@@ -127,6 +127,10 @@ export function toUserResource(r: any): Wire<"user"> {
     ...(Array.isArray(r.roles) ? { roles: r.roles as string[] } : {}),
     status: r.status,
     employee: ref("employees", r.employeeId),
+    // Omitted rather than sent empty when the account has never been seen: a missing field says "no reading",
+    // which is a different claim from any date this could otherwise invent. Accurate to the throttle window
+    // the stamp is written on (services/apiKeys.ts LAST_USED_THROTTLE_MS), not to the request.
+    last_seen_time: r.lastSeenAt ? iso(r.lastSeenAt) : undefined,
   };
 }
 
@@ -268,6 +272,9 @@ export function toBackgroundCheckResource(r: any): Wire<"background-check"> {
     reference_no: r.referenceNo ?? undefined,
     initiated_date: r.initiatedDate ? iso(r.initiatedDate).slice(0, 10) : undefined,
     completed_date: r.completedDate ? iso(r.completedDate).slice(0, 10) : undefined,
+    // `?? undefined`, not `|| undefined`: a check that genuinely cost nothing is a recorded 0, and dropping it
+    // would report the same thing as an invoice nobody has entered.
+    cost: r.cost ?? undefined,
     notes: r.notes ?? undefined,
     document: ref("personal-documents", r.documentId),
   };
@@ -657,6 +664,8 @@ export function toCardResource(r: any): Wire<"card"> {
     // and this is who to go back to about it. Stamped at create, never editable.
     reporter: ref("employees", r.reporterId),
     column_key: r.columnKey,
+    // When it entered THIS column, so a list can age work-in-progress without the movement log per row.
+    column_since_time: r.columnSince ? iso(r.columnSince) : undefined,
     swimlane_key: r.swimlaneKey ?? undefined,
     rank: r.rank ?? 0,
     title: r.title,
@@ -1204,6 +1213,11 @@ export function toAssetResource(r: any, _user?: AppUser, can?: string[]): Wire<"
     assigned_to: r.assignedTo ? ref("employees", r.assignedTo) : undefined,
     assigned_on: r.assignedOn ? iso(r.assignedOn).slice(0, 10) : undefined,
     purchase_date: r.purchaseDate ? iso(r.purchaseDate).slice(0, 10) : undefined,
+    purchase_cost: r.purchaseCost ?? undefined,
+    // Attached by the service, which is where the category's useful life is in hand (services/assets.ts).
+    // ABSENT rather than 0 when it could not be computed: zero is the right answer for kit that is written
+    // off, and a lie about kit nobody priced - so a sum over this column totals only what is actually known.
+    book_value: r._bookValue ?? undefined,
     tag_printed_time: r.tagPrintedAt ? iso(r.tagPrintedAt) : undefined,
     last_verified_time: r.verifiedAt ? iso(r.verifiedAt) : undefined,
     // Who saw it last, whether a scan proved it, and which count claimed the sighting. Together these let the
@@ -1248,6 +1262,9 @@ export function toAssetCategoryResource(r: any): Wire<"asset-category"> {
     display_name: r.name,
     tag_code: r.tagCode,
     requires_serial: !!r.requiresSerial,
+    // The depreciation life every asset in this category is written down over. Null means the category is not
+    // depreciated at all, which is why this is not defaulted to a number.
+    useful_life_months: r.usefulLifeMonths ?? undefined,
   };
 }
 
@@ -1592,6 +1609,9 @@ export function toExpenseBudgetResource(r: any): Wire<"expense-budget"> {
     // The highest alert threshold the daily cron has already fired for this period, so the page can say the
     // notification went out (and why editing the cap re-arms it) instead of leaving it invisible.
     alert_level: r.alertLevel ?? 0,
+    // `spent` broken out by the months the period covers, in order. Free: computeBudgetSpendMany already
+    // buckets every charge by month to sum them, so this is the shape it was throwing away.
+    spend_history: r.spendHistory ?? [],
   };
 }
 
@@ -1747,6 +1767,10 @@ export function toTicketResource(r: any): Wire<"ticket"> {
     description: r.description ?? undefined,
     priority: r.priority,
     state: r.state,
+    // The two service clocks. Both are stamps, not derivations, so a queue can be aged without reading a
+    // thread per row - see the columns in db/schema.ts for what each one promises.
+    first_response_time: r.firstResponseAt ? iso(r.firstResponseAt) : undefined,
+    resolved_time: r.resolvedAt ? iso(r.resolvedAt) : undefined,
     // Checklist progress on every ticket (list + get): from the loaded items when present (Get), else the
     // counts the list query attached. Lets the table show done/total without loading the full items.
     // Oldest first, the order they were made in. The console link is built client-side from the configured org
@@ -1896,6 +1920,11 @@ export function toPayrollRunResource(r: any): Wire<"payroll-run"> {
     submitted_by_name: r.submittedByName ?? undefined,
     approved_by: ref("users", r.approvedBy),
     approved_by_name: r.approvedByName ?? undefined,
+    // The size of the build, stamped by the build itself. `?? undefined` so a never-built run carries none of
+    // the three rather than claiming it paid nobody nothing - the same distinction `built_time: null` draws.
+    headcount: r.headcount ?? undefined,
+    gross: r.gross ?? undefined,
+    net: r.net ?? undefined,
     // Set = a payout file has been handed to a bank, so the run is no longer deletable (deleteRun would
     // release the one-off payables it already paid). The UI drops the delete action on the strength of this.
     bank_file_time: r.bankFileAt ? new Date(r.bankFileAt).toISOString() : undefined,

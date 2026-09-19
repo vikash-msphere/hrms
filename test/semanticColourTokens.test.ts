@@ -60,7 +60,6 @@ const LEDGER = new Set([
   "pages/BankFormats.tsx",
   "pages/Boards.tsx",
   "pages/CheckIns.tsx",
-  "pages/Delegations.tsx",
   "pages/Documents.tsx",
   "pages/Events.tsx",
   "pages/Holidays.tsx",

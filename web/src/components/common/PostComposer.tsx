@@ -33,6 +33,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Combobox } from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { DraftButton } from "@/components/common/DraftButton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -765,6 +766,20 @@ export function PostComposer({
   const messageField = (
     <Field label={isKudos ? "Message" : isPoll ? "Description (optional)" : "Body"}>
       <div>
+        {/* Drafting is offered for a plain announcement only. A kudos is a personal thing to say about a
+            named colleague and a poll is a question, neither of which is improved by having a model write
+            it - and a machine-written thank-you is worse than a short one. */}
+        {!isKudos && !isPoll && (
+          <div className="mb-2 flex justify-end">
+            <DraftButton
+              collection="announcements"
+              kind="announcement"
+              existing={form.body}
+              hint="e.g. the office moves to the second floor from Monday, entry is by the side door"
+              onDraft={(text) => setForm((f) => ({ ...f, body: text }))}
+            />
+          </div>
+        )}
         <RichTextToolbar
           textareaRef={bodyRef}
           value={form.body}

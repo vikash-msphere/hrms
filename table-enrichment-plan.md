@@ -69,9 +69,16 @@ date but no `days to expiry`. One helper, applied as a `defaultHidden` companion
 page add its own items so a row can jump to the same person's other records ("their leave", "their assets",
 "their tickets"). Turns 38 tables into one connected set rather than 38 lists.
 
-**P7. Scope chips from the caller's identity.** "Mine", "My team", "My department" as a first-class seed of
-the table's own filters, off `access.subject` and the manager chain. Several pages hand-roll a tab bar for
-exactly this (Tickets, Expenses, Leaves), and every other page has no way to ask it.
+**P7. Scope chips from the caller's identity.** "Mine", "Assigned to me", "Nobody's" as named presets over
+the table's own filters, so the identity question is a chip rather than a tab per person - and so a page that
+never had a control for it gains one. BUILT: `scopes` / `defaultScope` on DataTable, built with
+`lib/tableScope.ts`.
+
+Only ONE page turned out to be hand-rolling this. Support had four identity tabs over four tables and is now
+one table with four chips. Expenses' tabs are state queues fetched separately from the server (`?state=`)
+plus a different row type, and the shared Requests/History shell is ownership AND state - neither is an
+identity axis, so both keep their tabs. Assets, Boards and Compliance had no identity control at all and now
+have chips.
 
 **P8. Group header percentage.** A group's subtotal already renders; add its share of the filtered total
 ("Travel  ₹4.2L  31%"). Free once grouping is on, and it is the whole question on Expenses and Payslips.
@@ -474,19 +481,68 @@ Moving all of these is not the proposal. Naming the affordance each one is missi
 
 ---
 
-## 5. Sequencing
+## 5. What is built
 
-1. **P1, P2, P5** - average aggregates, proportion bars, days-since companions. They are small, and roughly
-   half the per-page items above are blocked on one of them.
-2. **The money pages**: Payslips net-change, Expenses duplicates and budget impact, Reimbursements waiting
-   and duplicates. Highest cost of being wrong, and each one catches an error before money moves.
-3. **The queue pages**: Leaves, Overtime, RemoteWork, Tickets - all want the same `waiting` column and the
-   same "pending over 3 days" chip. One pattern, four pages, consistent wording.
-4. **P3 and P4** - signals and period columns, once there are three or more callers for each.
-5. **The catalogues** (leave types, pay components, categories, vendors, templates, roles): all want the same
-   "used by" count and the same "nothing references this" chip. Do them in one pass so the wording matches.
-6. **P6, P7, P10** - cross-page row actions, identity scope chips, and the built-table kind mapping. Each
-   changes how the whole app reads rather than one page.
+Everything above that could be built from data the client already holds is in. The contract each piece keeps
+is written where it lives - `docs/07-table-interactions.md` for the table, and a comment on each column or
+chip for the page-specific judgement.
+
+**Primitives.** `aggregate` takes `sum | avg | min | max | count` (blanks skipped on everything but `sum`);
+`bar` draws a proportion behind a column's cells; group headers carry each fold's share of a summed total;
+`actions` adds page-supplied items to a cell's menu; `lib/tableDerive.ts` holds the day and period helpers;
+`lib/tableSignals.ts` holds duplicates, outliers and cross-collection counts; Table Builder infers a
+`dateHint` for every date field it renders.
+
+**Pages.** Payslips, Expenses (ledger and schedules), Reimbursements, Payroll runs, Pay periods, Expense
+budgets, Vendors, both category catalogues, Leaves (requests and balances), Leave types, Leave encashments,
+Overtime, Remote work, Tickets, Boards, Directory, Departments, Delegations, Notice periods, Documents,
+Background checks, Holidays, Events, Assets, Asset categories, Stocktakes, Compliance (events and rules),
+Pay components, Pay grades, Salary structures, Goal templates, Table Builder's own list, API keys, Users,
+Roles, and the fine-grained access rules.
+
+## 6. What is left, and why
+
+**Built.** Every field this section used to wait on is on the wire, and the client half - the column, the
+chip, the line - is in. What each one reads:
+
+| Field | How it is served |
+|---|---|
+| Payroll runs: `headcount`, `gross`, `net` | Stamped ON the run by the build, in the same atomic write as `built_time`, so a list never reads the items. Absent until built. |
+| Assets: `purchase_cost`, `book_value` | A cost on the asset and a `useful_life_months` on its category; straight-line, floored at zero (`domain/assetValue.ts`). Absent, never 0, when it cannot be computed. |
+| Tickets: `first_response_time`, `resolved_time` | Two stamps. First response is the first comment by anyone but the requester, claimed once. Resolution follows the state: `:resolve` sets it, `:reopen` clears it. |
+| Boards: `column_since_time` | Re-stamped on every column change, so a list can age WIP. Cycle time per card was never blocked - `start_time` and `deliver_time` were already on the card. |
+| Expense budgets: `spend_history` | `spent` broken out by the months the period covers. Free: the attribution already bucketed by month to sum it. |
+| Background checks: `cost` | A column on the row, writable, redacted from the subject like the rest of the money in this app. |
+| Users: `last_seen_time` | Stamped by the auth middleware on every lane, at most once per 15 minutes, off the response path. |
+
+Two of these carry a judgement the client has to respect. `book_value` is ABSENT rather than zero when an
+asset was never priced, because a zero totals identically to kit that is written off - so a column footer over
+it must say how many rows it could not value. `resolved_time` is empty on a ticket closed straight from the
+queue (a duplicate, something handled elsewhere), which is not the same as a ticket resolved instantly.
+
+`purchase_cost` / `book_value` and `cost` are in `policy.redacted_fields`, so both the resource and any custom
+table built over them drop the field for a caller who may not see it. A chip that counts them must count what
+came back, not what it expected. The Assets "no cost against them" chip is therefore absent when NO row came
+back priced - on that caller it would be reporting their own permissions back as a data gap - and both money
+cells say "not priced, or not shown to you" rather than choosing between the two.
+
+Two more judgements the columns had to make. Boards' ageing column moved off `update_time` and onto
+`column_since_time`: a retitle used to reset it, so a card that had sat in review for three weeks read as
+fresh. And a never-used account falls back to its own age for the Users dormant column, because a blank would
+drop exactly the rows the chip counted out of the range the chip filters on.
+
+**Scope chips replaced one tab bar, not three.** `P7` was deferred on the premise that Tickets, Expenses and
+Leaves all hand-rolled a tab bar for identity. Reading them said otherwise: only Support's bar was about
+whose rows these are, and it is now four chips on one table, with `?employee=` added to the tickets list so
+the "My tickets" scope reaches past the first page the way `?assignee=me` already did. Expenses' review and
+pay tabs are server-side state queues and its recurring tab is a different row type; the Requests/History
+shell shared by Leaves, Reimbursements, Overtime and Remote work is ownership and state together. Converting
+either would have flattened two questions into one control.
+
+**The permissions matrix got subtraction, not addition.** Users x sixty-five collections, where a per-user
+grant is the exception and almost everything is granted by role - so the useful change was a way to drop the
+columns nobody has anything on, not another column. It is the twin of "Only rows with access" on the roles
+matrix, applied to columns, off by default, with a count of what it hid beside it.
 
 A per-page item is worth building when somebody can say out loud what they would do about the number. Where
 this plan lists a chip nobody would act on, it is wrong and should be dropped rather than built.

@@ -20,6 +20,7 @@ const GENERIC: Record<string, VerbInfo> = {
   complete: { label: "Complete", description: "Mark it done." },
   reopen: { label: "Reopen", description: "Bring a closed item back to active." },
   restore: { label: "Restore", description: "Un-delete a soft-deleted row." },
+  extractResume: { label: "Read CV into the form", description: "Have a candidate's CV read into the candidate form, then accept or discard each field. Nothing is saved until you accept it, and no judgement about the candidate is produced.", caution: "This is the one action that sends candidate data to a model. It happens per candidate, when somebody asks for it." },
   "*": { label: "All methods", description: "Every custom method of this collection in one rule." },
 };
 

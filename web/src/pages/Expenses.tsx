@@ -28,6 +28,7 @@ import { metaColumns } from "@/components/common/metaColumns";
 import { RowActions, type RowAction } from "@/components/common/RowActions";
 import { type TableInsight } from "@/components/common/TableInsights";
 import { BLANK } from "@/lib/tableFilter";
+import { countBy, duplicateIds } from "@/lib/tableSignals";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Chart, ChartCard } from "@/components/common/Chart";
@@ -70,6 +71,8 @@ const up = (s?: string) => (s ?? "").toUpperCase();
 const sum = (rs: Expense[]) => rs.reduce((n, r) => n + (r.amount || 0), 0);
 const PAY_METHODS = ["bank", "card", "cash", "upi", "cheque"] as const;
 const RULE_LABEL: Record<string, string> = { monthly: "Monthly", quarterly: "Quarterly", yearly: "Yearly" };
+// How many times a rule fires in a year, which is what turns a per-occurrence amount into an annual cost.
+const OCCURRENCES_PER_YEAR: Record<string, number> = { monthly: 12, quarterly: 4, yearly: 1 };
 // The rejections a reviewer actually writes, offered as one tap each. Sentences, not codes: the submitter
 // reads them verbatim in the notification.
 const REJECT_REASONS: { label: string; note: string }[] = [
@@ -838,6 +841,61 @@ export default function Expenses({ me }: { me: Me }) {
     },
   };
 
+  // ---- what the ledger can see about itself ---------------------------------------------------------------
+  // The same two questions the entry form already asks about ONE expense (is this a repeat, and what does it
+  // do to its cap), asked of the whole list. The form catches what somebody is filing now; nothing caught
+  // what was filed last week, which is where a double payment actually comes from.
+  //
+  // Flags rather than chips alone: an insight has to narrow the table to exactly the rows it counted, and no
+  // filter grammar can say "is a duplicate", so each signal is a real column that sorts, exports and can be
+  // turned off like any other.
+  const dupeIds = useMemo(
+    () => duplicateIds(
+      rows.filter((r) => !r.recurring && !["CANCELLED", "REJECTED"].includes(up(r.state))),
+      // The same two identities the entry-time guard uses: an invoice number is definitive on its own, and
+      // without one it takes payee, amount and day together to mean anything.
+      (r) => (r.invoice_number?.trim() ? `inv:${r.invoice_number.trim()}` : `pay:${r.vendor ? idOf(r.vendor) : payeeName(r)}|${r.amount}|${r.incurred_on ?? ""}`),
+      (r) => r.path,
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows],
+  );
+  /** How many times this payee appears in the loaded ledger - one means nobody here has paid them before. */
+  const payeeCounts = useMemo(
+    () => countBy(rows, (r) => (r.vendor ? idOf(r.vendor) : payeeName(r))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows],
+  );
+  /** The cap this expense lands against, and how full it already is. Null where no budget covers it. */
+  const budgetOf = (r: Expense) => impactOf({ amount: String(r.amount), category: r.category, department: r.department, incurred_on: r.incurred_on }, r.amount);
+
+  const signalColumns: Column<Expense>[] = [
+    {
+      id: "dupe", header: "Repeat", defaultHidden: true, filter: "select", sortable: false,
+      accessor: (r) => (dupeIds.has(r.path) ? "Possible duplicate" : ""),
+      cell: (r) => (dupeIds.has(r.path)
+        ? <span className="inline-flex items-center gap-1 text-warning"><TriangleAlert className="h-3.5 w-3.5" /> Repeat</span>
+        : <span className="text-muted-foreground">-</span>),
+    },
+    {
+      id: "payee_history", header: "Payee", defaultHidden: true, filter: "select", groupBy: true,
+      accessor: (r) => ((payeeCounts.get(r.vendor ? idOf(r.vendor) : payeeName(r)) ?? 0) <= 1 ? "First claim" : "Seen before"),
+    },
+    {
+      // Not this expense's own share of the cap - the cap's state. "Filed against a budget that is already
+      // over" is the sentence finance says at month end, and it was only answerable one budget card at a time.
+      id: "budget_used", header: "Budget used", align: "right", defaultHidden: true, filter: "number",
+      formatTotal: (n) => `${Math.round(n)}%`,
+      accessor: (r) => budgetOf(r)?.pct ?? null,
+      bar: (r) => { const pct = budgetOf(r)?.pct; return pct == null ? null : pct / 100; },
+      cell: (r) => {
+        const impact = budgetOf(r);
+        if (!impact) return <span className="text-muted-foreground">-</span>;
+        return <span className={cn("tabular-nums", impact.pct >= 100 ? "font-medium text-destructive" : impact.pct >= 80 ? "text-warning" : undefined)}>{impact.pct}%</span>;
+      },
+    },
+  ];
+
   const baseLedgerColumns: Column<Expense>[] = [
     payeeColumn,
     // The three columns a finance table gets sliced by. Grouping by cost centre (with the amount column's
@@ -857,6 +915,7 @@ export default function Expenses({ me }: { me: Me }) {
         : <span className="text-muted-foreground">-</span>),
     },
     invoiceColumn,
+    ...signalColumns,
     { id: "description", header: "Description", defaultHidden: true, accessor: (r) => r.description ?? "", cell: (r) => r.description || "-" },
   ];
   const ledgerColumns: Column<Expense>[] = [...baseLedgerColumns, ...metaColumns<Expense>(), actionsColumn];
@@ -874,6 +933,18 @@ export default function Expenses({ me }: { me: Me }) {
     { id: "category", header: "Category", filter: "select", groupBy: true, mobilePriority: 4, accessor: (r) => catName(r.category) },
     { id: "amount", header: "Amount", align: "right", filter: "number", mobilePriority: 2, accessor: (r) => r.amount, aggregate: "sum", formatTotal: (n) => money(n), cell: (r) => <span className="tabular-nums">{money(r.amount)}</span> },
     { id: "rule", header: "Repeats", filter: "select", groupBy: true, mobilePriority: 3, accessor: (r) => RULE_LABEL[r.recurrence_rule ?? ""] ?? "-" },
+    {
+      // What this schedule costs over a year, which is the only question anybody asks of a list of
+      // subscriptions and retainers - and the one the per-occurrence amount cannot answer, because a monthly
+      // ₹5,000 and an annual ₹50,000 sort next to each other and mean the opposite.
+      id: "annual", header: "Per year", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => money(n),
+      accessor: (r) => (up(r.state) === "CANCELLED" || r.paused ? null : r.amount * (OCCURRENCES_PER_YEAR[r.recurrence_rule ?? ""] ?? 0)),
+      cell: (r) => {
+        const per = OCCURRENCES_PER_YEAR[r.recurrence_rule ?? ""] ?? 0;
+        if (!per || up(r.state) === "CANCELLED" || r.paused) return <span className="text-muted-foreground">-</span>;
+        return <span className="tabular-nums">{money(r.amount * per)}</span>;
+      },
+    },
     {
       // A schedule is read forwards, so its filter leads with the windows ahead ("next 7 days").
       id: "next", header: "Next occurrence", filter: "date", dateHint: "future", accessor: (r) => r.next_occurrence_on ?? "",
@@ -942,6 +1013,66 @@ export default function Expenses({ me }: { me: Me }) {
         hint: `Incurred before ${formatDate(cutoff)}.`,
         filters: { incurred: `..${cutoff}` },
         sort: "incurred.asc",
+      });
+    }
+    // The same repeat the entry form warns about, asked of what is already filed. An approver cannot see it
+    // from a row: the twin is somewhere else in the list, or on a page they are not looking at.
+    const dupes = rs.filter((r) => dupeIds.has(r.path));
+    if (dupes.length > 0) {
+      out.push({
+        id: "dupes",
+        label: `${dupes.length} look like repeats`,
+        tone: "destructive",
+        hint: "Same invoice number, or same payee, amount and day, as another filed expense. Check before paying either.",
+        filters: { dupe: "Possible duplicate" },
+        sort: "amount.desc",
+      });
+    }
+    // Against a cap that is already full. Approving is still allowed - a budget is a plan, not a lock - but
+    // it should be a decision somebody makes rather than one that happens.
+    const overCap = rs.filter((r) => (budgetOf(r)?.pct ?? 0) > 100);
+    if (overCap.length > 0) {
+      out.push({
+        id: "over-budget",
+        label: `${overCap.length} against a budget already over`,
+        tone: "warning",
+        hint: "The cost centre and period this lands on has spent past its cap.",
+        filters: { budget_used: ">100" },
+        sort: "budget_used.desc",
+      });
+    }
+    return out;
+  };
+
+  // The ledger is not a queue: nothing there is waiting on this reader, so the "waiting over a week" chip has
+  // no meaning. What it is read for is the state of the book, so it keeps the two signals about the book.
+  const ledgerInsights = (rs: Expense[]): TableInsight[] =>
+    queueInsights(rs).filter((i) => i.id === "dupes" || i.id === "over-budget");
+
+  // A schedule that has stopped firing looks exactly like one that is working: the row is still active, the
+  // amount is still right, and the only thing that moved is a date nobody reads. The vendor finds out first.
+  const recurringInsights = (rs: Expense[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const today = todayStr();
+    const late = rs.filter((r) => !r.paused && up(r.state) !== "CANCELLED" && r.next_occurrence_on && r.next_occurrence_on < today);
+    if (late.length > 0) {
+      out.push({
+        id: "not-generated",
+        label: `${late.length} overdue to generate`,
+        tone: "destructive",
+        hint: "The next occurrence is in the past and no expense came out of it.",
+        filters: { next: "past", state: "Active" },
+        sort: "next.asc",
+      });
+    }
+    const never = rs.filter((r) => !r.paused && up(r.state) !== "CANCELLED" && !r.last_generated_time);
+    if (never.length > 0) {
+      out.push({
+        id: "never-generated",
+        label: `${never.length} have never generated`,
+        tone: "warning",
+        hint: "Active schedules with nothing behind them - usually a rule set up and never started.",
+        filters: { last: BLANK, state: "Active" },
       });
     }
     return out;
@@ -1263,6 +1394,7 @@ export default function Expenses({ me }: { me: Me }) {
               {renderTable(cf.apply(kf.apply(ledger)), ledgerColumns, "expenses", cf.activeLabel ? `Nothing in ${cf.activeLabel}` : kf.activeLabel ? `No ${kf.activeLabel}` : "No expenses match", "Adjust the filters to see the ledger.", {
                 bulk: "all",
                 costCentre: true,
+                insights: ledgerInsights,
                 ...(deptFilter ? { more: { hasMore: deptQ.hasMore, loadMore: deptQ.loadMore } } : {}),
               })}
             </TabsContent>
@@ -1275,7 +1407,7 @@ export default function Expenses({ me }: { me: Me }) {
                       description="A schedule generates a fresh expense every month, quarter or year - rent, subscriptions, retainers - so nobody has to remember to file it."
                       action={<AccessAction collection="expenses" create label="New recurring expense"><Button onClick={() => openCreate(true)}><Plus className="h-4 w-4" /> New schedule</Button></AccessAction>}
                     />
-                  : renderTable(templates, recurringColumns, "expenses-recurring", "No schedules match", "Adjust the filters to see the schedules.")}
+                  : renderTable(templates, recurringColumns, "expenses-recurring", "No schedules match", "Adjust the filters to see the schedules.", { insights: recurringInsights })}
               </TabsContent>
             )}
           </Tabs>

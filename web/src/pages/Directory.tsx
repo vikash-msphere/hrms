@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Users, Plus, Mail, UserPlus, Clock, LayoutGrid, List, Network, Layers, Search } from "lucide-react";
+import { Users, Plus, Mail, UserPlus, Clock, LayoutGrid, List, Network, Layers, Search, UserRound, CalendarDays, Laptop } from "lucide-react";
 import { create, patch, get } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useClock } from "@/lib/clock";
@@ -9,6 +9,8 @@ import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf, reportsUnder } from "@/lib/utils";
 import { addDaysYmd, daysBetweenYmd, todayStr, thisMonthStr } from "@/lib/orgDay";
+import { daysSince } from "@/lib/tableDerive";
+import { countBy } from "@/lib/tableSignals";
 import { BLANK } from "@/lib/tableFilter";
 import { navigate } from "@/router";
 import type { Department, Employee, Me } from "@/types";
@@ -51,6 +53,8 @@ type ViewMode = "table" | "grid";
 type Focus = null | "clockedIn" | "joined" | "joining" | "probation" | "noManager";
 // A probation review is due when the end date is inside this window (or already past it).
 const PROBATION_SOON_DAYS = 30;
+// Spelled out for the "Joined in" column, which is about the month of the year rather than a date.
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
 // "New"/"Joining" freshness from start_date alone: joined within the last 30 days, or a future
 // start already on the books. Deleted rows never badge.
@@ -478,6 +482,16 @@ export default function Directory({ me }: { me: Me }) {
     reload();
   }
 
+  // How many people each person manages, counted from the directory rows themselves. It is a count over what
+  // is LOADED, which on a truncated directory is a floor rather than a total - the same caveat the page's own
+  // headcount tile already carries.
+  const reportCounts = useMemo(
+    () => countBy(rows.filter((e) => !e.delete_time), (e) => (e.manager ? idOf(e.manager) : null)),
+    [rows],
+  );
+  /** "09" as "September", for the anniversary column and the chip that filters it. */
+  const monthName = (mm: string) => MONTH_NAMES[Number(mm) - 1] ?? "";
+
   // The two dates HR is chased about, and the gap that makes an org chart wrong. Each chip turns on the
   // column it is about, because all three live in the column picker rather than on screen by default.
   const directoryInsights = (es: Employee[]): TableInsight[] => {
@@ -516,6 +530,51 @@ export default function Directory({ me }: { me: Me }) {
         filters: { manager: BLANK },
       });
     }
+    // Missing an employee ID. It is what letters, payroll files and statutory reports quote, and the gap is
+    // invisible until one of those has to be produced for that person.
+    const noNumber = live.filter((e) => !e.employee_number?.trim());
+    if (noNumber.length > 0) {
+      out.push({
+        id: "no-employee-number",
+        label: `${noNumber.length} with no employee ID`,
+        tone: "warning",
+        hint: "Letters, payroll files and statutory reports all quote it.",
+        filters: { employee_number: BLANK },
+      });
+    }
+    // Missing a department. It breaks the org chart's rollups and every department-scoped access rule, so
+    // the person quietly falls outside their own team's view.
+    const noDept = live.filter((e) => !e.department);
+    if (noDept.length > 0) {
+      out.push({
+        id: "no-department",
+        label: `${noDept.length} in no department`,
+        tone: "warning",
+        hint: "They fall outside department rollups and any access rule scoped to a team.",
+        filters: { department: BLANK },
+      });
+    }
+    // Work anniversaries this month, which is the one date on this page that produces a nice thing to do
+    // rather than a gap to fix. Counted on completed years only, so somebody's first month is not an
+    // anniversary.
+    const month = todayStr().slice(5, 7);
+    const anniversaries = live.filter((e) => {
+      if (!e.start_date || e.start_date.slice(5, 7) !== month) return false;
+      const days = daysSince(e.start_date);
+      return days != null && days >= 365;
+    });
+    if (anniversaries.length > 0) {
+      out.push({
+        id: "anniversaries",
+        label: `${anniversaries.length} work anniversaries this month`,
+        tone: "success",
+        hint: "A year or more of service, with the anniversary falling this month.",
+        // On the derived month column, not on `start_date`: a date filter of "2026-09" means September of
+        // THAT year, and an anniversary is September of any year.
+        filters: { anniversary: monthName(month), tenure: ">=1" },
+        sort: "tenure.desc",
+      });
+    }
     return out;
   };
 
@@ -524,6 +583,18 @@ export default function Directory({ me }: { me: Me }) {
       id: "name",
       header: "Name",
       accessor: (e) => `${e.first_name} ${e.last_name}`,
+      // A person's name is a way out of this table, not just a value in it. Right-clicking it offers their
+      // own pages, which is the difference between a directory and twenty separate lists somebody has to
+      // retype a name into.
+      actions: (e) => [
+        { label: "Open profile", icon: <UserRound className="h-4 w-4" />, onSelect: () => navigate(`employees/${idOf(e.path)}`) },
+        { label: "Show in org chart", icon: <Network className="h-4 w-4" />, onSelect: () => navigate(`org-chart/${idOf(e.path)}`) },
+        // The profile's tabs are the URL's third segment (see EmployeeProfile), so these are addresses
+        // rather than a query the page would have to interpret.
+        { label: "Their leave", icon: <CalendarDays className="h-4 w-4" />, onSelect: () => navigate(`employees/${idOf(e.path)}/leave`) },
+        // Assets live on the Employment tab rather than one of their own, so that is where this lands.
+        { label: "Their kit and employment", icon: <Laptop className="h-4 w-4" />, onSelect: () => navigate(`employees/${idOf(e.path)}/employment`) },
+      ],
       cell: (e) => {
         const badge = joinBadge(e);
         return (
@@ -570,6 +641,42 @@ export default function Directory({ me }: { me: Me }) {
     // Both are calendar questions, and both were unaskable: "who joined this quarter" and "whose probation
     // ends before the end of the month" are the two dates HR is chased for.
     { id: "start_date", header: "Start date", defaultHidden: true, filter: "date", dateHint: "past", accessor: (e) => e.start_date ?? "", cell: (e) => (e.start_date ? formatDate(e.start_date) : "-") },
+    {
+      // Service, in years, from the start date. A date column can only be asked calendar questions, so
+      // "everyone past five years" - the service-award list, and the first thing asked of a directory in a
+      // review cycle - could not be asked at all. Averaged in the footer, where it reads per department or
+      // per manager once the table is grouped.
+      id: "tenure", header: "Tenure", align: "right", defaultHidden: true, filter: "number", aggregate: "avg",
+      formatTotal: (n) => `${Math.round(n * 10) / 10} yrs`,
+      accessor: (e) => {
+        const days = daysSince(e.start_date);
+        return days == null || days < 0 ? null : Math.round((days / 365.25) * 10) / 10;
+      },
+      cell: (e) => {
+        const days = daysSince(e.start_date);
+        if (days == null || days < 0) return <span className="text-muted-foreground">-</span>;
+        const years = days / 365.25;
+        return <span className="tabular-nums">{years < 1 ? `${Math.max(1, Math.round(days / 30))}m` : `${Math.round(years * 10) / 10}y`}</span>;
+      },
+    },
+    {
+      // How many people report to this person, counted from the directory itself. It is the question behind
+      // both "who is carrying too many" and "who is a manager on paper only", and neither was answerable
+      // from a column that only named somebody's own manager.
+      // The month somebody's start date falls in, whatever the year. A date column cannot answer "who has an
+      // anniversary in September" - "2026-09" is one September - so the recurring half of a start date needs
+      // a column of its own. Groupable, which turns the directory into a service-award calendar.
+      id: "anniversary", header: "Joined in", filter: "select", groupBy: true, defaultHidden: true,
+      accessor: (e) => (e.start_date ? monthName(e.start_date.slice(5, 7)) : ""),
+    },
+    {
+      id: "reports", header: "Reports", align: "right", defaultHidden: true, filter: "number",
+      accessor: (e) => reportCounts.get(idOf(e.path)) ?? 0,
+      cell: (e) => {
+        const n = reportCounts.get(idOf(e.path)) ?? 0;
+        return n ? <span className="tabular-nums">{n}</span> : <span className="text-muted-foreground">-</span>;
+      },
+    },
     { id: "probation_end_date", header: "Probation ends", defaultHidden: true, filter: "date", dateHint: "future", accessor: (e) => e.probation_end_date ?? "", cell: (e) => (e.probation_end_date ? formatDate(e.probation_end_date) : "-") },
     // Fetched on demand: the column offers "Deleted" with none loaded, and must not hide the value it just
     // went and got.

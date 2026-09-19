@@ -7,6 +7,7 @@ import { usePermission } from "@/lib/perm";
 import type { User } from "@/types";
 import { Card, CardContent } from "@/components/ui/card";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -81,6 +82,18 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   const duplicateName = !editing && !!form.name.trim() && roles.some((r) => r.name === form.name.trim());
   const duplicateLabel = !!form.label.trim() && roles.some((r) => r.path !== editing?.path && (r.label ?? "").trim().toLowerCase() === form.label.trim().toLowerCase());
 
+  // A role nobody holds still appears in every picker and every rule editor, and is the one somebody
+  // eventually grants by accident. Core roles are exempt: they exist whether or not anyone is on them.
+  const roleInsights = (rs: Role[]): TableInsight[] => {
+    const empty = rs.filter((r) => !r.protected && (userCount.get(r.name) ?? 0) === 0);
+    return empty.length === 0 ? [] : [{
+      id: "no-users",
+      label: `${empty.length} nobody holds`,
+      hint: "Offered in every picker and every access rule, with nobody on them.",
+      filters: { users: "=0" },
+    }];
+  };
+
   const columns: Column<Role>[] = [
     {
       id: "role", header: "Role", filter: "text", accessor: (r) => r.label,
@@ -88,7 +101,7 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     },
     { id: "name", header: "Identifier", filter: "text", accessor: (r) => r.name, cell: (r) => <span className="font-mono text-xs text-muted-foreground">{r.name}</span> },
     // "=0" here is every role nobody holds, which is the list to prune.
-    { id: "users", header: "Users", filter: "number", align: "right", accessor: (r) => userCount.get(r.name) ?? 0 },
+    { id: "users", header: "Users", filter: "number", align: "right", aggregate: "sum", accessor: (r) => userCount.get(r.name) ?? 0 },
     {
       id: "actions", header: "", sortable: false, filter: "none", align: "right",
       cell: (r) =>
@@ -163,6 +176,7 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
           columns={columns}
           tableId="roles"
           rows={roles}
+          insights={roleInsights}
           getRowId={(r) => r.path}
           rowClassName={() => "group"}
           emptyTitle="No roles"

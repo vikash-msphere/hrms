@@ -5,6 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { idOf, formatMoney, formatDate, round2, cn } from "@/lib/utils";
+import { fmtDaysCount } from "@/lib/tableDerive";
 import { thisYearStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { navigate } from "@/router";
@@ -18,6 +19,7 @@ import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { TableSkeleton } from "@/components/common/Skeletons";
 import { DataTable, type Column, type BulkAction } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
 import { Field, FieldRow } from "@/components/common/Field";
@@ -214,6 +216,57 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
     const projected = paceOf(b, now)?.projected;
     if (ph === "current" && projected != null && projected >= 1) return "Trending over";
     return "On track";
+  };
+
+  /**
+   * Days of spending left at the rate this period has run at so far, or null where there is nothing to
+   * project from (a period not currently running, or one too young for the divisor to mean anything - the
+   * same floor `paceOf` uses).
+   */
+  const runwayDays = (b: ExpenseBudget): number | null => {
+    if (phaseOf(b, now) !== "current") return null;
+    const pace = paceOf(b, now);
+    if (!pace || pace.day < 1) return null;
+    const spent = b.spent ?? 0;
+    const perDay = spent / pace.day;
+    if (perDay <= 0) return null;
+    const left = (b.remaining ?? b.amount - spent);
+    return left <= 0 ? 0 : Math.floor(left / perDay);
+  };
+
+  // Two questions a budget table is opened with, and neither is answered by any single row: which caps are
+  // heading for an overrun, and which were set and then never used - one is a conversation this week, the
+  // other is money that could be somewhere else.
+  const budgetInsights = (bs: ExpenseBudget[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const trending = bs.filter((b) => healthOf(b) === "Trending over");
+    if (trending.length > 0) {
+      out.push({
+        id: "trending-over",
+        label: `${trending.length} heading for an overrun`,
+        tone: "warning",
+        hint: "At the pace so far, these pass their cap before the period ends.",
+        filters: { status: "Trending over" },
+        sort: "runway.asc",
+      });
+    }
+    // Past halfway with nothing spent. Usually a cap pointing at the wrong category or cost centre, which
+    // means the spend it was meant to govern is landing somewhere with no cap at all.
+    const idle = bs.filter((b) => {
+      if (b.delete_time || phaseOf(b, now) !== "current") return false;
+      const pace = paceOf(b, now);
+      return !!pace && pace.elapsed >= 0.5 && (b.spent ?? 0) === 0;
+    });
+    if (idle.length > 0) {
+      out.push({
+        id: "idle",
+        label: `${idle.length} unused past halfway`,
+        hint: "Over half the period gone with nothing against them. Often a cap scoped to the wrong category.",
+        filters: { spent: "=0", days_left: "0.." },
+        sort: "amount.desc",
+      });
+    }
+    return out;
   };
 
   const live = useMemo(() => rows.filter((b) => !b.delete_time), [rows]);
@@ -542,6 +595,35 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
         </span>
       );
     } },
+    // How long the period has left, and how long the money has left. The page could already say a cap was
+    // trending over; it could not say whether that meant next week or next quarter, which is the difference
+    // between a note to the cost centre and a conversation today.
+    { id: "days_left", header: "Days left", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount, accessor: (b) => {
+      const pace = paceOf(b, now);
+      return pace && phaseOf(b, now) === "current" ? Math.max(0, pace.days - pace.day) : null;
+    } },
+    { id: "runway", header: "Runway", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount, accessor: (b) => runwayDays(b), cell: (b) => {
+      const days = runwayDays(b);
+      if (days == null) return <span className="text-muted-foreground">-</span>;
+      const pace = paceOf(b, now);
+      const left = pace ? Math.max(0, pace.days - pace.day) : null;
+      // Toned against the period, not against a fixed number of days: a fortnight of runway is comfortable in
+      // a month that ends next week and a problem in one with three weeks to go.
+      return <span className={cn("tabular-nums", left != null && days < left && "font-medium text-destructive")}>{fmtDaysCount(days)}</span>;
+    } },
+    {
+      // The shape of the spend, month by month, beside the figure. A single "spent" number cannot tell a cap
+      // consumed steadily from one consumed in a single week, and those are different conversations with the
+      // cost centre. One point per month the period covers, oldest first, straight from the server.
+      //
+      // Hand-drawn SVG rather than the shared Chart: that lazy-loads a charting library per instance, and a
+      // page of budgets would mount fifty. The numbers stay reachable - the accessor is the latest month's
+      // spend, so the column sorts and filters, and the title reads the series out.
+      id: "trend", header: "By month", filter: "number", defaultHidden: true, sortable: true,
+      formatTotal: money,
+      accessor: (b) => { const h = b.spend_history ?? []; return h.length > 1 ? h[h.length - 1]!.spent : null; },
+      cell: (b) => <SpendSparkline history={b.spend_history ?? []} money={money} />,
+    },
     { id: "repeats", header: "Repeats", filter: "select", groupBy: true, defaultHidden: true, accessor: (b) => (b.recurring ? "Yes" : "No") },
     // No `hideValueByDefault`: the fetch decides whether deleted caps are present. "Deleted" is offered as a
     // filter value regardless, because its rows arrive only once it is picked.
@@ -767,6 +849,7 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
                 columns={columns}
                 tableId="expense-budgets"
                 rows={shown}
+                insights={budgetInsights}
                 getRowId={(b) => b.path}
                 onRowClick={(b) => setDetail(b.path)}
                 rowClassName={(b) => (b.delete_time ? "opacity-60" : undefined)}
@@ -1010,6 +1093,41 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
 }
 
 // ---- the bar --------------------------------------------------------------------------------------------
+/**
+ * A month-by-month spend line, the width of a table cell.
+ *
+ * Drawn by hand: the shared `Chart` lazy-loads a charting library per instance, which is right for one chart
+ * on a page and wrong for one per row. This is a polyline over a fixed viewBox, scaled to the series' own
+ * peak, with the last point marked because "where is it now" is what the column is read for.
+ *
+ * `aria-hidden` on the picture with the numbers in the title, the same contract every other chart in the app
+ * keeps: the figure is decoration, and the reading has to survive without it.
+ */
+function SpendSparkline({ history, money }: { history: { period: string; spent: number }[]; money: (n: number) => string }) {
+  // One point is not a trend - a monthly cap has exactly one - so it reads as the figure it already is.
+  if (history.length < 2) return <span className="text-muted-foreground">-</span>;
+  const peak = Math.max(...history.map((h) => h.spent));
+  const W = 64;
+  const H = 18;
+  const step = W / (history.length - 1);
+  // A flat series (all zero, or all equal) sits on the baseline rather than dividing by a zero range.
+  const y = (v: number) => (peak > 0 ? H - 1 - (v / peak) * (H - 2) : H - 1);
+  const points = history.map((h, i) => `${(i * step).toFixed(1)},${y(h.spent).toFixed(1)}`).join(" ");
+  const last = history[history.length - 1]!;
+  return (
+    <span
+      className="inline-flex items-center gap-1.5"
+      title={history.map((h) => `${h.period}: ${money(h.spent)}`).join("\n")}
+    >
+      <svg aria-hidden viewBox={`0 0 ${W} ${H}`} width={W} height={H} className="shrink-0 overflow-visible">
+        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" className="text-primary" vectorEffect="non-scaling-stroke" />
+        <circle cx={W} cy={y(last.spent)} r="2" className="fill-primary" />
+      </svg>
+      <span className="tabular-nums text-xs text-muted-foreground">{money(last.spent)}</span>
+    </span>
+  );
+}
+
 // Three facts in one 8px strip: spend (solid), the queue behind it (striped - submitted, not yet approved, so
 // not counted in utilization but already committed in practice), and where today sits in the period (tick).
 // A bar without the tick can only be read after the fact; with it, "60% at the third of the month" is obvious.

@@ -159,3 +159,55 @@ describe("owner-on-create gate, when the owner ref rides in the query string", (
     expect(res.status).toBe(200);
   });
 });
+
+describe("a body reference to another object is gated by READ on that object", () => {
+  // `policy.references` is the gate for a body field that POINTS AT another record, and a goal's alignment was
+  // not declared in it: services/goals.ts checked that the parent exists and that the chain does not loop -
+  // integrity, not access - so a caller could hang their own goal under a goal they cannot read. No disclosure
+  // (the serializer emits a bare `goals/<id>` ref), but the row then sits in somebody else's alignment tree and
+  // counts toward that subtree's rollups.
+  const createGoal = (body: Record<string, unknown>) =>
+    app.request(
+      "/v1/goals",
+      { method: "POST", headers: { "X-Requested-By": "hrms-spa", "Content-Type": "application/json" }, body: JSON.stringify(body) },
+      b as unknown as Record<string, unknown>,
+    );
+
+  beforeEach(async () => {
+    await deps.db.insert(schema.roles).values([{ name: "goal_owner", label: "Goals" }]).onConflictDoNothing();
+    // Their own goals, and nobody else's - the ordinary employee grant.
+    await deps.db.insert(schema.accessRules).values([
+      { subject: "goal_owner", subjectKind: "role", namespace: "goals", pattern: "goals", scopeKind: "all", scopeCode: "", matchCode: null, level: "write", effect: "allow" },
+      { subject: "goal_owner", subjectKind: "role", namespace: "goals", pattern: "goals.me.**", scopeKind: "self", scopeCode: "", matchCode: null, level: "write", effect: "allow" },
+      { subject: "goal_owner", subjectKind: "role", namespace: "employees", pattern: "employees.me.**", scopeKind: "self", scopeCode: "", matchCode: null, level: "read", effect: "allow" },
+    ]);
+    clearCache();
+  });
+
+  async function goalFor(code: string, employeeId: string, title: string) {
+    const uuid = genId();
+    await deps.db.insert(schema.goals).values({ uuid, code, employeeId, title } as never);
+    return uuid;
+  }
+
+  it("refuses aligning to a goal the caller may not read", async () => {
+    const mine = await seedPerson("04-001", "Mine", "goal_owner");
+    const other = await seedPerson("07-001", "Other", "goal_owner");
+    const theirs = await goalFor("07-001-1", other.employeeId, "Their private objective");
+    (b as Record<string, unknown>).DEV_FAKE_EMAIL = mine.email;
+
+    const res = await createGoal({ title: "Mine", parent: `goals/${theirs}` });
+    expect(res.status).toBe(403);
+    expect(await deps.db.select().from(schema.goals).then((r) => r.length)).toBe(1); // only theirs
+  });
+
+  it("still allows aligning to one of the caller's own", async () => {
+    const mine = await seedPerson("04-001", "Mine", "goal_owner");
+    const ours = await goalFor("04-001-1", mine.employeeId, "My objective");
+    (b as Record<string, unknown>).DEV_FAKE_EMAIL = mine.email;
+
+    const res = await createGoal({ title: "Key result", parent: `goals/${ours}` });
+    expect(res.status).toBe(200);
+  });
+});
+

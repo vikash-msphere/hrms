@@ -1,5 +1,5 @@
 import { allocFlatCode } from "../services/codeAlloc";
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { eq, sql, and, asc, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
@@ -20,6 +20,7 @@ import type { SQL } from "drizzle-orm";
 import { hasApiKeyBearer, parseToken } from "../lib/apiKeyToken";
 import { findLiveKeyByPrefix, shouldTouchLastUsed, touchLastUsed } from "../services/apiKeys";
 import { narrowGrant, parseScope } from "../domain/keyScope";
+import { touchLastSeen } from "../services/users";
 
 let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 
@@ -35,7 +36,52 @@ type UserRow = {
   /** The linked employee's soft-delete stamp, when they have one. See `assertLive`. */
   employeeDeleteTime: Date | number | null;
   sessionsValidFrom: Date | number | null;
+  lastSeenAt: Date | number | null;
 };
+
+/**
+ * Run a write off the response path.
+ *
+ * `c.executionCtx` THROWS when the context has none (the test runner, and any in-process dispatch) rather than
+ * returning undefined, so this cannot be an optional-chain. Without an execution context there is nothing to
+ * hand the promise to, so the write settles inline - it is one small statement, and dropping it unawaited
+ * would surface as an unhandled rejection. Never fatal either way: these are convenience columns, and failing
+ * a request because a bookkeeping stamp did not land would be the wrong trade.
+ */
+async function detach(c: Context<AppEnv>, write: Promise<unknown>): Promise<void> {
+  const settled = write.then(() => undefined, () => undefined);
+  try {
+    c.executionCtx.waitUntil(settled);
+    return;
+  } catch {
+    /* no execution context */
+  }
+  await settled;
+}
+
+/**
+ * Stamp when this account was last seen, at most once per throttle window.
+ *
+ * Every lane ends here, which is the point: "last seen" has to mean the last request of any kind, and a stamp
+ * written by only the browser lanes would report an account that lives on an API key as dormant. The READ is
+ * free - `loadUserRow` already fetches this row on every request to check `status` - so the only cost is the
+ * write, and `shouldTouchLastUsed` keeps that to once every 15 minutes per account rather than once per
+ * request. That throttle is also the field's accuracy: it answers "today / last week / never", which is the
+ * resolution the question is actually asked at, and not "at 09:41:03".
+ *
+ * Skipped under `__sharedCtx` - an internal dispatch (an automation's apiCall re-entering the app) is the
+ * system acting, not the person, and stamping there would keep a departed employee's account looking active
+ * for as long as a rule they once wrote keeps firing.
+ *
+ * Takes the AUTHENTICATED row, and is called before `resolveViewAs` swaps the principal - so an admin
+ * simulating somebody stamps themselves, never the subject. The same rule the audit trail keeps: a
+ * simulation is the admin looking, and it must not make a dormant account read as active.
+ */
+async function touchSeen(c: Context<AppEnv>, deps: Deps, user: UserRow, now: Date): Promise<void> {
+  if (c.env.__sharedCtx) return;
+  if (!shouldTouchLastUsed(user.lastSeenAt, +now)) return;
+  await detach(c, touchLastSeen(deps, user.uuid, now));
+}
 
 // The one caller read, shared by every lane: user + their employee `code` (the dept-scope key) in a single
 // left join. The browser lanes look the caller up by email; the API-key lane already holds the owner's uuid.
@@ -60,6 +106,7 @@ async function loadUserRow(deps: Deps, where: SQL | undefined, stable = false): 
       lastName: schema.employees.lastName,
       employeeDeleteTime: schema.employees.deleteTime,
       sessionsValidFrom: schema.users.sessionsValidFrom,
+      lastSeenAt: schema.users.lastSeenAt,
     })
     .from(schema.users)
     .leftJoin(schema.employees, eq(schema.users.employeeId, schema.employees.uuid))
@@ -168,21 +215,10 @@ async function authenticateApiKey(c: Parameters<MiddlewareHandler<AppEnv>>[0], d
 
   // Convenience column, not an audit record: written at most once per throttle window so a busy integration
   // does not add a D1 write to every call. Off the response path, and never fatal.
-  if (shouldTouchLastUsed(key.lastUsedAt, +now) && !c.env.__sharedCtx) {
-    const write = touchLastUsed(deps, key.uuid, now).catch(() => {});
-    // `c.executionCtx` THROWS when the context has none (the test runner, and any in-process dispatch)
-    // rather than returning undefined, so this cannot be an optional-chain. Without an execution context
-    // there is nothing to hand the promise to, so settle it inline - it is one small write, and dropping it
-    // unawaited would surface as an unhandled rejection.
-    let scheduled = false;
-    try {
-      c.executionCtx.waitUntil(write);
-      scheduled = true;
-    } catch {
-      /* no execution context */
-    }
-    if (!scheduled) await write;
-  }
+  if (shouldTouchLastUsed(key.lastUsedAt, +now) && !c.env.__sharedCtx) await detach(c, touchLastUsed(deps, key.uuid, now));
+  // The same for the OWNER of the key: an integration running is that account being used, and the dormant-
+  // account review would otherwise read a service owner as never seen while their key calls all day.
+  await touchSeen(c, deps, user, now);
 
   return {
     uuid: user.uuid,
@@ -350,6 +386,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
         firstName: null,
         lastName: null,
         sessionsValidFrom: inserted.sessionsValidFrom,
+        lastSeenAt: inserted.lastSeenAt,
       };
     } catch (e) {
       // THE OTHER UNIQUE INDEX ON THIS INSERT, and it is not a race.
@@ -397,6 +434,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   // The role grant already includes the `everyone` pseudo-role (unioned inside loadRoleGrant in the SAME query,
   // super-exempt), so the broad authority is just role + the caller's own user rules - no extra `everyone` read.
   const { grant, policy, roles, guards } = await loadAuthority(deps, user);
+  await touchSeen(c, deps, user, deps.clock.now());
 
   const caller: AppUser = {
     uuid: user.uuid,

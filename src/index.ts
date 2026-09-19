@@ -75,6 +75,7 @@ import { form16Generate } from "./routes/form16Generate";
 import { form16Upload } from "./routes/form16Upload";
 import { letterPreview } from "./routes/letterPreview";
 import { payslipTemplatePreview } from "./routes/payslipTemplatePreview";
+import { draftRoutes } from "./routes/aiDraft";
 import { payslips } from "./routes/payslips";
 import { reimbursements } from "./routes/reimbursements";
 import { reimbursementCategories } from "./routes/reimbursementCategories";
@@ -304,6 +305,12 @@ app.route("/v1/background-checks", backgroundChecks);
 app.route("/v1/announcements:post", announcementPost); // collection custom method, before the announcements mount
 app.route("/v1/announcements:giveKudos", announcementGiveKudos); // open recognition wall (kind="kudos")
 app.route("/v1/announcements:markAllRead", announcementMarkAllRead); // clear the board's unread state in one call
+// `<collection>:draft` for every collection that has a draft kind. Mounted from the registry rather than
+// listed here, so adding a kind in domain/aiDraft.ts cannot leave its route unmounted. Each must come BEFORE
+// its collection's own mount, for the same reason `payslips:previewTemplate` does: the collection route would
+// otherwise match the path first and read `:draft` as an item id.
+for (const { path, app: draftApp } of draftRoutes) app.route(path, draftApp);
+
 app.route("/v1/announcements", announcements);
 app.route("/v1/letter-templates", letterTemplates);
 app.route("/v1/leave-types", leaveTypes);

@@ -9,7 +9,7 @@ import { alreadyExists, invalidArgument } from "../lib/errors";
 import type { Deps } from "../deps";
 import { has, type CrudSpec, type SetOf } from "./crud";
 
-export type AssetCategoryInput = { display_name?: string; tag_code?: string | null; requires_serial?: boolean };
+export type AssetCategoryInput = { display_name?: string; tag_code?: string | null; requires_serial?: boolean; useful_life_months?: number | null };
 
 /** The codes in use right now, live rows only; `exceptId` skips the row being updated. */
 async function codesInUse(deps: Deps, exceptId?: string): Promise<string[]> {
@@ -49,7 +49,9 @@ export const assetCategorySpec: CrudSpec<AssetCategoryInput, typeof schema.asset
     if (!input.display_name?.trim()) throw invalidArgument("display_name is required");
     const name = input.display_name.trim();
     const tagCode = await resolveTagCode(deps, input.tag_code, name);
-    return { name, tagCode, requiresSerial: input.requires_serial ?? false };
+    // Null rather than a default life: a category nobody has given one to is not depreciated, and inventing a
+    // number here would put a made-up book value on every asset filed under it.
+    return { name, tagCode, requiresSerial: input.requires_serial ?? false, usefulLifeMonths: input.useful_life_months ?? null };
   },
   patch: async (patch, row, deps) => {
     const set: SetOf<typeof schema.assetCategories> = {};
@@ -63,6 +65,9 @@ export const assetCategorySpec: CrudSpec<AssetCategoryInput, typeof schema.asset
       set.tagCode = await resolveTagCode(deps, patch.tag_code, set.name ?? row.name, row.uuid);
     }
     if (has(patch, "requires_serial")) set.requiresSerial = patch.requires_serial;
+    // Changing the life re-values every asset in the category on the next read - which is the point: book
+    // value is derived, never stored, so there is nothing to re-stamp and no history to rewrite.
+    if (has(patch, "useful_life_months")) set.usefulLifeMonths = patch.useful_life_months ?? null;
     return set;
   },
   sort: (a, b) => String(a.name).localeCompare(String(b.name)),

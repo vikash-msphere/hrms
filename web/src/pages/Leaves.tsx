@@ -9,6 +9,7 @@ import { leaveBalanceOf, leaveDecisionContext, leaveOverlapCount, leaveSummary }
 import { useIntent } from "@/lib/intent";
 import { formatDate, idOf, cn, personIndex, personName, round2 } from "@/lib/utils";
 import { todayStr, daysBetweenYmd } from "@/lib/orgDay";
+import { daysSince, fmtDaysCount, monthKey, monthLabel, ymd } from "@/lib/tableDerive";
 import { leaveColor } from "@/lib/leaveColors";
 import { readUrlQuery, writeUrlQuery } from "@/lib/urlQuery";
 import { useRoutedTab } from "@/lib/routedTabs";
@@ -49,6 +50,12 @@ import { getSetting } from "@/lib/settingsStore";
 
 const upper = (s?: string) => (s ?? "").toUpperCase();
 const sumDays = (rs: LeaveRequest[]) => rs.reduce((n, r) => n + (r.days || 0), 0);
+// When a pending request stops being fresh. Leave is planned around, so three days of silence is already
+// somebody unable to book a flight.
+const PENDING_STALE_DAYS = 3;
+// Under this much warning, leave is worth looking at rather than waving through: cover has to be arranged
+// and the team usually finds out from the calendar.
+const SHORT_NOTICE_DAYS = 2;
 // The summary metric currently selected (`?metric=`), i.e. the one lit segment of the strip. Deep-linkable, so
 // a shared link opens on the same narrowed view; anything else in the param is ignored.
 type StripFocus = "available" | "history" | "inflight" | null;
@@ -548,6 +555,35 @@ export default function Leaves({ me }: { me: Me }) {
     // whose free text is routinely a diagnosis, a bereavement or a family emergency, and it is not worth
     // masking a whole page of business data to protect one column, nor worth recording it to keep the column.
     { id: "reason", header: "Reason", defaultHidden: true, accessor: (lr) => lr.reason ?? "", cell: (lr) => <span data-sentry-mask>{lr.reason || "-"}</span> },
+    {
+      // Which month the leave falls in, as a groupable value. The date columns deliberately cannot group (a
+      // day folds the table into one-row heaps), so "how many days went in March" had no answer here at all.
+      // Keyed YYYY-MM rather than "Mar 2026" so the folds run in calendar order.
+      id: "month", header: "Month", filter: "select", groupBy: true, defaultHidden: true,
+      accessor: (lr) => monthKey(lr.start_date),
+      cell: (lr) => monthLabel(monthKey(lr.start_date)),
+    },
+    {
+      // How long this has sat waiting on a decision. Empty once it is decided, which also makes the chip
+      // above narrow to exactly the rows it counted.
+      id: "waiting", header: "Waiting", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      accessor: (lr) => (isPending(lr) ? daysSince(lr.create_time) : null),
+      cell: (lr) => {
+        const d = isPending(lr) ? daysSince(lr.create_time) : null;
+        if (d == null) return <span className="text-muted-foreground">-</span>;
+        return <span className={cn("tabular-nums text-xs", d >= 3 ? "font-medium text-warning" : "text-muted-foreground")}>{fmtDaysCount(d)}</span>;
+      },
+    },
+    {
+      // How much warning the team got: days between filing and the first day off. Negative means it was filed
+      // after the leave had already started, which is what a backdated sick day looks like and is worth being
+      // able to find.
+      id: "notice", header: "Notice", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      accessor: (lr) => {
+        const filed = ymd(lr.create_time);
+        return filed && lr.start_date ? daysBetweenYmd(filed, lr.start_date) : null;
+      },
+    },
   ];
 
   // Cancellable: a pending request, or an approved leave that hasn't started yet (server restores the balance).
@@ -677,7 +713,17 @@ export default function Leaves({ me }: { me: Me }) {
       ),
     },
     { id: "left", header: "Days left", align: "right", filter: "number", formatTotal: (n) => fmtDays(n), accessor: (b) => b.balance_days, cell: (b) => <span className="font-medium tabular-nums">{fmtDays(b.balance_days)}</span> },
-    { id: "used", header: "Used this year", align: "right", filter: "number", formatTotal: (n) => fmtDays(n), accessor: (b) => usageOf(b).used, cell: (b) => <span className="tabular-nums">{fmtDays(usageOf(b).used)}</span> },
+    // Used against entitled, drawn as well as printed. A balance sheet is read for who is nowhere near
+    // taking their leave and who is nearly out of it, and both are proportions the reader was doing in their
+    // head from two other columns.
+    {
+      id: "used", header: "Used this year", align: "right", filter: "number", formatTotal: (n) => fmtDays(n), accessor: (b) => usageOf(b).used,
+      bar: (b) => {
+        const entitled = typeOf(b.leave_type)?.accrual_days_per_year ?? 0;
+        return entitled > 0 ? usageOf(b).used / entitled : null;
+      },
+      cell: (b) => <span className="tabular-nums">{fmtDays(usageOf(b).used)}</span>,
+    },
     {
       id: "pending", header: "Pending", align: "right", filter: "number", formatTotal: (n) => fmtDays(n), accessor: (b) => usageOf(b).pending,
       cell: (b) => { const p = usageOf(b).pending; return <span className={cn("tabular-nums", !p && "text-muted-foreground")}>{fmtDays(p)}</span>; },
@@ -741,12 +787,46 @@ export default function Leaves({ me }: { me: Me }) {
     </div>
   );
 
+  // What a leave list is worth saying out loud. Both are about the SET: one pending request looks exactly
+  // like another until you know which has been sitting a week, and a clash is only visible next to the other
+  // person's dates - which is the thing an approver otherwise opens the calendar for, every time.
+  const requestInsights = (rs: LeaveRequest[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const stale = rs.filter((lr) => isPending(lr) && (daysSince(lr.create_time) ?? 0) >= PENDING_STALE_DAYS);
+    if (stale.length > 0) {
+      out.push({
+        id: "stale",
+        label: `${stale.length} waiting over ${PENDING_STALE_DAYS} days`,
+        tone: "warning",
+        hint: "Nobody has decided these, and the leave itself may be getting close.",
+        filters: { waiting: `>=${PENDING_STALE_DAYS}` },
+        sort: "waiting.desc",
+      });
+    }
+    const shortNotice = rs.filter((lr) => {
+      if (!isPending(lr)) return false;
+      const filed = ymd(lr.create_time);
+      return !!filed && !!lr.start_date && daysBetweenYmd(filed, lr.start_date) < SHORT_NOTICE_DAYS;
+    });
+    if (shortNotice.length > 0) {
+      out.push({
+        id: "short-notice",
+        label: `${shortNotice.length} filed at short notice`,
+        hint: `Under ${SHORT_NOTICE_DAYS} days between filing and the first day off, and still undecided.`,
+        filters: { notice: `<${SHORT_NOTICE_DAYS}`, waiting: "0.." },
+        sort: "start.asc",
+      });
+    }
+    return out;
+  };
+
   const renderTable = (search: RequestsHistorySearch, data: LeaveRequest[], columns: Column<LeaveRequest>[], tableId: string, emptyTitle: string, emptyDescription?: string) => (
     <DataTable
       tableId={tableId}
       columns={columns}
       rows={data}
       search={search}
+      insights={requestInsights}
       onRowClick={(lr) => setDetailPath(lr.path)}
       getRowId={(lr) => lr.path}
       emptyTitle={emptyTitle}

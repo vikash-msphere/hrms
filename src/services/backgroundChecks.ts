@@ -34,6 +34,8 @@ export type BackgroundCheckInput = {
   reference_no?: string | null;
   initiated_date?: string | null;
   completed_date?: string | null;
+  /** What the vendor charged. Null clears it; 0 is a real recorded figure and is kept. */
+  cost?: number | null;
   notes?: string | null;
   /** `personal-documents/<id>`: the vendor's report, filed as the employee's own document. */
   document?: string | null;
@@ -86,6 +88,9 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.b
       referenceNo: input.reference_no?.trim() || null,
       initiatedDate: input.initiated_date ? parseDate(input.initiated_date, "initiated_date") : today,
       completedDate: input.completed_date ? parseDate(input.completed_date, "completed_date") : isFinal(status) ? today : null,
+      // `?? null`, not `|| null`: a check that cost nothing is a recorded 0, which is a different fact from an
+      // invoice nobody has entered yet.
+      cost: input.cost ?? null,
       notes: input.notes?.trim() || null,
       documentId: idFromPath(input.document) ?? null,
     };
@@ -105,6 +110,7 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.b
     if (has(patch, "reference_no")) set.referenceNo = patch.reference_no?.trim() || null;
     if (has(patch, "initiated_date")) set.initiatedDate = patch.initiated_date ? parseDate(patch.initiated_date, "initiated_date") : null;
     if (has(patch, "completed_date")) set.completedDate = patch.completed_date ? parseDate(patch.completed_date, "completed_date") : null;
+    if (has(patch, "cost")) set.cost = patch.cost ?? null;
     if (has(patch, "notes")) set.notes = patch.notes?.trim() || null;
     if (has(patch, "document")) set.documentId = idFromPath(patch.document) ?? null;
     if (has(patch, "status")) {

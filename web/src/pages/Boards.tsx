@@ -16,6 +16,9 @@ import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuIte
 import { idOf, cn, initials } from "@/lib/utils";
 import { useRowKeys } from "@/lib/rowKeys";
 import { todayStr, addDaysYmd, weekdayOf, daysBetweenYmd } from "@/lib/orgDay";
+import { daysSince, fmtDaysCount } from "@/lib/tableDerive";
+import { BLANK } from "@/lib/tableFilter";
+import { allScope, mineColumn, mineScope, scopesOf, valueScope } from "@/lib/tableScope";
 import { useCanSeeActivity } from "@/lib/perm";
 import type { Me, Board, BoardMode, Card as CardT, CardComment, CardTodo, TicketChecklist, BoardColumn, WipScope, SwimlaneMode, Employee, Goal, Department, BoardMetrics, Sprint } from "@/types";
 import type { Wire } from "@/wire";
@@ -2166,6 +2169,19 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
   }, [employees]);
   const colLabel = useMemo(() => new Map(board.columns.map((c) => [c.key, c.label])), [board.columns]);
 
+  // WHOSE WORK. The board grid has a filter for this; the list did not, so "what am I on" meant typing your
+  // own name into a column filter. "Nobody" matches the column's own word for an empty assignee rather than a
+  // blank, because that is what the accessor puts in the cell and what the filter therefore compares.
+  const cardScopes = scopesOf(
+    mineScope("mine", "Assigned to me", "assigned_to_me", !!me.employee_id, {
+      count: cards.filter((c) => c.assignee && idOf(c.assignee) === me.employee_id).length,
+    }),
+    valueScope("unassigned", "Nobody on them", "assignee", "Unassigned", {
+      count: cards.filter((c) => !c.assignee).length,
+    }),
+    allScope("Everything", cards.length),
+  );
+
   const columns: Column<CardT>[] = useMemo(() => [
     { id: "key", header: "Key", accessor: (c) => taskKey(c), cell: (c) => <span className="font-mono text-xs text-muted-foreground">{taskKey(c)}</span>, mobilePriority: 2 },
     { id: "title", header: "Title", accessor: (c) => c.title, mobilePriority: 1 },
@@ -2184,7 +2200,43 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
     { id: "labels", header: "Labels", accessor: (c) => (c.labels ?? []).map((k) => board.labels.find((l) => l.key === k)?.label ?? k).join(", "), cell: (c) => <span className="flex flex-wrap gap-1"><LabelChips keys={c.labels} catalog={board.labels} max={3} /></span>, defaultHidden: board.labels.length === 0 },
     { id: "blocked", header: "Blocked", accessor: (c) => (c.blocked ? "Blocked" : ""), filter: "select", cell: (c) => (c.blocked ? <span className="inline-flex items-center gap-1 text-destructive"><Ban className="h-3.5 w-3.5" /> Blocked</span> : null), defaultHidden: true },
     { id: "updated", header: "Updated", accessor: (c) => c.update_time ?? "", filter: "date", dateHint: "past", cell: (c) => (c.update_time ? new Date(c.update_time).toLocaleDateString() : ""), defaultHidden: true },
-  ], [colLabel, empName, board.labels]);
+    // What the "Assigned to me" chip filters on, answered from the assignee's id: the names in the column
+    // beside it arrive with the directory, and a scope that waited for them would read as off until it did.
+    mineColumn<CardT>("assigned_to_me", "Assigned to me", (c) => !!c.assignee && !!me.employee_id && idOf(c.assignee) === me.employee_id),
+    {
+      // How long since anything happened to this card. A board hides this completely: a card that moved
+      // yesterday and one that has sat in the same column for three weeks look identical, and ageing work in
+      // progress is the thing a board exists to expose.
+      // How long the card has sat in THE COLUMN IT IS IN, from the stamp the move itself writes
+      // (`column_since_time`), not from the last edit. The difference is the whole point: retitling a card
+      // that has been in review for three weeks does not make it fresh, and `update_time` said it did.
+      //
+      // The same threshold as the board's own ageing dot (STALE_AFTER_DAYS), so the list and the board cannot
+      // disagree about which cards have gone quiet. `max` in the footer: the worst one is what a stand-up
+      // asks about, and a total of everybody's waiting days means nothing.
+      id: "idle", header: "In column", align: "right", filter: "number", aggregate: "max", formatTotal: fmtDaysCount, defaultHidden: true,
+      accessor: (c) => daysSince(c.column_since_time ?? c.create_time),
+      cell: (c) => {
+        const d = daysSince(c.column_since_time ?? c.create_time);
+        if (d == null) return <span className="text-muted-foreground">-</span>;
+        return <span className={cn("tabular-nums text-xs", d >= STALE_AFTER_DAYS ? "font-medium text-warning" : "text-muted-foreground")}>{d}d</span>;
+      },
+    },
+    {
+      // Start to delivery, in days, on the cards that finished. The board can draw a cumulative flow but
+      // cannot answer "how long does one of these take" per assignee or per label - which is the question
+      // asked before every commitment. Averaged, and only over delivered work, so it is about things that
+      // finished rather than about the backlog dragging the figure.
+      id: "cycle", header: "Cycle", align: "right", filter: "number", aggregate: "avg", formatTotal: fmtDaysCount, defaultHidden: true,
+      accessor: (c) => {
+        if (!c.deliver_time) return null;
+        const from = c.start_time ?? c.create_time;
+        if (!from) return null;
+        const days = Math.round(((Date.parse(c.deliver_time) - Date.parse(from)) / 86_400_000) * 10) / 10;
+        return Number.isFinite(days) && days >= 0 ? days : null;
+      },
+    },
+  ], [colLabel, empName, board.labels, me.employee_id]);
 
   // What a backlog is asked about when it stops being a wall of cards: what has gone past its date, what
   // nobody owns, and what is stuck behind something else.
@@ -2202,6 +2254,32 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
     const blocked = cs.filter((c) => c.blocked);
     if (blocked.length > 0) {
       out.push({ id: "blocked", label: `${blocked.length} blocked`, tone: "destructive", hint: "Waiting on something else before they can move.", filters: { blocked: "Blocked" } });
+    }
+    // Nothing has happened to these in weeks. Not blocked, not overdue, just quietly not moving - which is
+    // what most of a stalled board actually consists of.
+    const idle = cs.filter((c) => (daysSince(c.column_since_time ?? c.create_time) ?? 0) >= STALE_AFTER_DAYS);
+    if (idle.length > 0) {
+      out.push({
+        id: "idle",
+        label: `${idle.length} stuck for ${STALE_AFTER_DAYS} days`,
+        tone: "warning",
+        hint: "In the same column that long. Close them, move them, or say what they are waiting for.",
+        filters: { idle: `>=${STALE_AFTER_DAYS}` },
+        sort: "idle.desc",
+      });
+    }
+    // Unestimated cards drop out of every forecast this board draws, silently, so a sprint that looks half
+    // sized is often fully sized with half of it uncounted.
+    if (cs.some((c) => c.size != null)) {
+      const unsized = cs.filter((c) => c.size == null);
+      if (unsized.length > 0) {
+        out.push({
+          id: "unsized",
+          label: `${unsized.length} with no points`,
+          hint: "This board estimates, and these are left out of every total and chart it draws.",
+          filters: { points: BLANK },
+        });
+      }
     }
     return out;
   };
@@ -2297,6 +2375,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
       <DataTable
         columns={columns}
         insights={cardInsights}
+        scopes={cardScopes}
         rows={cards}
         getRowId={(c) => c.path}
         onRowClick={openCard}

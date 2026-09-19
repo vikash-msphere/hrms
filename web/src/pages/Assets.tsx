@@ -5,7 +5,16 @@ import { navigate, setQueryParam, useRoute } from "@/router";
 import { useCollection } from "@/hooks/useCollection";
 import { formatDate, idOf } from "@/lib/utils";
 import { cn } from "@/lib/utils";
-import type { Asset, AssetCategory, Employee, Me, Stocktake as StocktakeRecord } from "@/types";
+import type { Asset, AssetCategory, Employee, Me, NoticePeriod, Stocktake as StocktakeRecord } from "@/types";
+import { usePermission } from "@/lib/perm";
+import { useOrg, currencyDecimals } from "@/lib/org";
+import { formatMoney } from "@/lib/utils";
+// `daysSince` here is the stocktake one imported below, which measures from a stored instant - the same
+// figure the custody panel and the stale-sighting logic already use, so the register cannot disagree with
+// itself about how old a sighting is.
+import { fmtDaysCount } from "@/lib/tableDerive";
+import { duplicateIds } from "@/lib/tableSignals";
+import { allScope, mineColumn, mineScope, scopesOf, unassignedScope } from "@/lib/tableScope";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Chart, ChartCard } from "@/components/common/Chart";
@@ -56,6 +65,9 @@ const STATUSES: { value: Asset["status"]; label: string }[] = [
 type AssetBand = "pending" | "assigned" | "in_stock" | "repair" | "untagged" | "unseen";
 // Kit nobody has laid eyes on for this long is what a stocktake exists to find.
 const UNSEEN_DAYS = 90;
+// When kit stops being current and starts being a replacement to plan for. Four years is the ordinary
+// refresh cycle for laptops and phones; it is a planning signal, not a rule about anything.
+const REFRESH_YEARS = 4;
 const BANDS: { id: AssetBand; label: string; hint: string; match: (a: Asset) => boolean }[] = [
   // The to-do list rather than a fact: both pending states are somebody owing a scan.
   { id: "pending", label: "Awaiting scan", hint: "somebody owes a scan", match: (a) => a.status === "pending_verification" || a.status === "pending_ack" },
@@ -99,6 +111,25 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
   useDeepOpen(route.query.s ? undefined : openId, rows, openEdit);
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: categories } = useCollection<AssetCategory>("asset-categories", { all: true });
+  // Who is on their way out, so the register can say which kit is about to walk. Read only where the caller
+  // can see notice periods - it is somebody's exit, not an asset attribute, and a caller without that grant
+  // gets the page without the column rather than a column that always says "Here".
+  // The org's own money formatter, the way every other money surface in the app renders - the register now
+  // carries figures (cost, written-down value) and a bare number in the wrong unit is worse than none.
+  const { org } = useOrg();
+  const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
+  const canNotice = usePermission("notice-periods.read");
+  const { rows: notices } = useCollection<NoticePeriod>("notice-periods", { enabled: canNotice });
+  const leaving = useMemo(
+    () => new Set(notices.filter((n) => !n.delete_time && n.status === "serving" && n.employee).map((n) => idOf(n.employee!))),
+    [notices],
+  );
+  // Two records carrying one serial number. Blank serials are not duplicates of each other, which the shared
+  // helper already handles by skipping empty keys.
+  const dupeSerials = useMemo(
+    () => duplicateIds(rows, (r) => r.serial_number ?? null, (r) => r.path),
+    [rows],
+  );
   const { toast } = useToast();
   const confirm = useConfirm();
 
@@ -151,6 +182,20 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
     // the directory is the ordinary case (lib/utils.ts `personName`).
     return (p?: string | null) => (p ? m.get(idOf(p)) ?? "Someone" : "-");
   }, [employees]);
+
+  // WHOSE KIT. A register is read from two directions - "what am I holding" by everybody, "what is out with
+  // nobody" by whoever runs it - and neither had a control: both meant typing a name into a column filter, or
+  // knowing that blank means unassigned.
+  const assetScopes = scopesOf(
+    mineScope("mine", "Held by me", "held_by_me", !!myId, {
+      count: rows.filter((r) => r.assigned_to && idOf(r.assigned_to) === myId).length,
+    }),
+    unassignedScope("unassigned", "Held by nobody", "assigned_to", {
+      count: rows.filter((r) => !r.assigned_to).length,
+      title: "In stock, in repair, or simply not handed to anybody",
+    }),
+    allScope("Everything", rows.length),
+  );
 
   // The category the form currently names, for the serial-number hint (the server enforces it either way).
   const selectedCategory = useMemo(() => categories.find((c) => c.path === form.category), [categories, form.category]);
@@ -357,6 +402,57 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
   // person to scan it. Both are custody questions, and neither is visible in a list sorted by name.
   const assetInsights = (rs: Asset[]): TableInsight[] => {
     const out: TableInsight[] = [];
+    // Kit assigned to somebody who is working out their notice. The exit list says who is leaving, the
+    // register says what they are holding, and nobody was joining the two before the last working day.
+    if (canNotice) {
+      const withLeavers = rs.filter((r) => r.assigned_to && leaving.has(idOf(r.assigned_to)));
+      if (withLeavers.length > 0) {
+        out.push({
+          id: "with-leavers",
+          label: `${withLeavers.length} out with people on notice`,
+          tone: "destructive",
+          hint: "Assigned to somebody serving their notice period. Collect before their last working day.",
+          filters: { holder_leaving: "On notice" },
+          sort: "assigned_to.asc",
+        });
+      }
+    }
+    const dupes = rs.filter((r) => dupeSerials.has(r.path));
+    if (dupes.length > 0) {
+      out.push({
+        id: "dupe-serials",
+        label: `${dupes.length} share a serial number`,
+        tone: "warning",
+        hint: "Two records for one machine. Every count on this page is over by the difference.",
+        filters: { serial_dupe: "Duplicate serial" },
+        sort: "serial.asc",
+      });
+    }
+    // Kit nobody can put a figure on. Every total over the value column is short by these, and the fix is one
+    // number per row that finance usually has on an invoice somewhere.
+    //
+    // Only when SOME rows came back priced. `purchase_cost` is a redacted field (http/accessHint.ts drops it
+    // per row for a caller who may not read it), so on a caller who sees none of them an "unpriced" chip
+    // would be reporting their own permissions back to them as a data gap.
+    const unpriced = rs.filter((r) => !r.purchase_cost);
+    if (unpriced.length > 0 && unpriced.length < rs.length) {
+      out.push({
+        id: "unpriced",
+        label: `${unpriced.length} with no cost against them`,
+        hint: "No cost came back for these, so any total over the register is short by whatever they are worth.",
+        filters: { purchase_cost: BLANK },
+      });
+    }
+    const old = rs.filter((r) => { const d = daysSince(r.purchase_date); return d != null && d / 365.25 >= REFRESH_YEARS; });
+    if (old.length > 0) {
+      out.push({
+        id: "past-refresh",
+        label: `${old.length} past ${REFRESH_YEARS} years old`,
+        hint: "Bought long enough ago to be worth planning a replacement for.",
+        filters: { age: `>=${REFRESH_YEARS}` },
+        sort: "age.desc",
+      });
+    }
     const stalest = addDaysYmd(todayStr(), -180);
     const unseen = rs.filter((r) => !r.last_verified_time);
     const stale = rs.filter((r) => r.last_verified_time && r.last_verified_time.slice(0, 10) < stalest);
@@ -428,6 +524,79 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
       ) : "-"
     ) },
     { id: "last_verified_by", header: "Sighted by", defaultHidden: true, filter: "select", groupBy: true, accessor: (r) => (r.last_verified_by ? empName(r.last_verified_by) : ""), cell: (r) => (r.last_verified_by ? empName(r.last_verified_by) : "-") },
+    // What the "Held by me" chip filters on. Answered from the holder's id rather than their rendered name,
+    // which arrives with the directory a moment after the table does.
+    mineColumn<Asset>("held_by_me", "Held by me", (r) => !!r.assigned_to && !!myId && idOf(r.assigned_to) === myId),
+    ...(canNotice ? [{
+      // Whether the person holding this is on their way out. It is the register's own copy of a fact that
+      // lives on another page entirely, and the reason kit goes missing at exits.
+      id: "holder_leaving", header: "Holder", defaultHidden: true, filter: "select" as const, groupBy: true,
+      accessor: (r: Asset) => (r.assigned_to && leaving.has(idOf(r.assigned_to)) ? "On notice" : r.assigned_to ? "Here" : ""),
+      cell: (r: Asset) => (r.assigned_to && leaving.has(idOf(r.assigned_to))
+        ? <span className="font-medium text-destructive">On notice</span>
+        : <span className="text-muted-foreground">-</span>),
+    }] : []),
+    {
+      // Age in years, from the purchase date. The date column can only be asked calendar questions, so "every
+      // laptop past four years" - the refresh list, and the only way a hardware budget gets planned instead
+      // of guessed - could not be asked at all.
+      id: "age", header: "Age", align: "right", defaultHidden: true, filter: "number", aggregate: "avg",
+      formatTotal: (n) => `${Math.round(n * 10) / 10} yrs`,
+      accessor: (r) => {
+        const days = daysSince(r.purchase_date);
+        return days == null || days < 0 ? null : Math.round((days / 365.25) * 10) / 10;
+      },
+      cell: (r) => {
+        const days = daysSince(r.purchase_date);
+        if (days == null || days < 0) return <span className="text-muted-foreground">-</span>;
+        const years = days / 365.25;
+        return <span className={cn("tabular-nums", years >= REFRESH_YEARS && "text-warning")}>{years < 1 ? `${Math.max(1, Math.round(days / 30))}m` : `${Math.round(years * 10) / 10}y`}</span>;
+      },
+    },
+    {
+      // What the company is holding, written down straight-line by the server (domain/assetValue.ts) from the
+      // asset's cost and its category's useful life. Summed, because "what are we holding" is the question a
+      // register is asked at year end and the one it could never answer.
+      //
+      // Blank where it cannot be known - no cost, no purchase date, or a category with no life - and
+      // deliberately not zero: a zero would report written-off kit and un-priced kit identically, and the
+      // footer total would then understate what the company owns. The chip below counts the unpriced rows so
+      // the total can be read for what it is.
+      //
+      // A blank can also mean the caller may not read the figure: both money fields here are redacted per row
+      // for a caller without the field-level grant, and a dropped field arrives as "absent", exactly like an
+      // asset nobody ever priced. The cell says "not priced or not shown" rather than choosing between them.
+      id: "book_value", header: "Value", align: "right", defaultHidden: true, filter: "number", aggregate: "sum",
+      formatTotal: (n) => money(n),
+      accessor: (r) => r.book_value ?? null,
+      cell: (r) => (r.book_value == null
+        ? <span className="text-muted-foreground" title="Not priced, or not shown to you: no cost, no purchase date, a category that is not depreciated, or a field you may not read">-</span>
+        // Masked in session replay (`data-sentry-mask`, see web/src/instrument.ts): both figures are in
+        // REDACTED_FIELDS, which states the judgement - "your laptop cost 1.8 lakh" is a different
+        // sensitivity from "you have a laptop", on a row the holder's own `me` rule can reach. The blank
+        // carries no figure, so only the priced branch needs it.
+        : <span className="tabular-nums" data-sentry-mask>{money(r.book_value)}</span>),
+    },
+    {
+      id: "purchase_cost", header: "Cost", align: "right", defaultHidden: true, filter: "number", aggregate: "sum",
+      formatTotal: (n) => money(n),
+      accessor: (r) => r.purchase_cost ?? null,
+      cell: (r) => (r.purchase_cost == null ? <span className="text-muted-foreground">-</span> : <span className="tabular-nums" data-sentry-mask>{money(r.purchase_cost)}</span>),
+    },
+    {
+      // The sighting date as a NUMBER, so "unseen for more than 90 days" is one filter rather than a date
+      // window somebody has to work out. Blank where nothing has ever been sighted, which the "never
+      // verified" chip already covers on its own terms.
+      id: "unseen_days", header: "Unseen", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      accessor: (r) => daysSince(r.last_verified_time),
+    },
+    {
+      // Two rows carrying the same serial are one machine counted twice: every total on this page, and every
+      // stocktake run against it, is wrong by one until somebody notices.
+      id: "serial_dupe", header: "Serial", defaultHidden: true, filter: "select", sortable: false,
+      accessor: (r) => (dupeSerials.has(r.path) ? "Duplicate serial" : ""),
+      cell: (r) => (dupeSerials.has(r.path) ? <span className="text-warning">Duplicate</span> : <span className="text-muted-foreground">-</span>),
+    },
     ...metaColumns<Asset>(),
     {
       id: "actions", header: "", sortable: false, filter: "none", align: "right",
@@ -584,6 +753,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
           }
           columns={columns}
           insights={assetInsights}
+          scopes={assetScopes}
           rows={shown}
           getRowId={(r) => r.path}
           accessCollection="assets"

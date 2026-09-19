@@ -31,7 +31,13 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 type BudgetRow = typeof schema.expenseBudgets.$inferSelect;
 
 export type BudgetScope = Pick<BudgetRow, "departmentId" | "categoryId" | "periodType" | "periodKey">;
-export type BudgetSpend = { spent: number; pending: number };
+/**
+ * `months` is `spent` broken out by the calendar months the period covers, oldest first - the shape this
+ * module was already computing and discarding. The attribution below buckets every charge by month in order to
+ * sum it, so a sparkline costs nothing extra; a month with no charges is emitted as 0 so the series is evenly
+ * spaced and a reader can see the gap. `pending` is deliberately NOT broken out: it is a queue, not history.
+ */
+export type BudgetSpend = { spent: number; pending: number; months: { period: string; spent: number }[] };
 
 // A spend-charging expense, reduced to the fields attribution needs.
 type ChargeRow = { amount: number | null; state: string | null; incurredOn: Date | null; createdAt: Date | null; departmentId: string | null; categoryId: string | null };
@@ -64,7 +70,7 @@ export async function computeBudgetSpendMany(deps: Deps, budgets: (BudgetScope &
   const spans = bounds.filter((r): r is { start: number; end: number } => !!r);
   const key = (b: BudgetScope & { uuid?: string }) => b.uuid ?? scopeKeyOf(b);
   if (!spans.length) {
-    for (const b of budgets) out.set(key(b), { spent: 0, pending: 0 });
+    for (const b of budgets) out.set(key(b), { spent: 0, pending: 0, months: [] });
     return out;
   }
 
@@ -103,20 +109,27 @@ export async function computeBudgetSpendMany(deps: Deps, budgets: (BudgetScope &
 
   budgets.forEach((b, i) => {
     const range = bounds[i];
-    if (!range) { out.set(key(b), { spent: 0, pending: 0 }); return; }
+    if (!range) { out.set(key(b), { spent: 0, pending: 0, months: [] }); return; }
     let spent = 0;
     let pending = 0;
+    const months: { period: string; spent: number }[] = [];
     for (const m of monthsBetween(range.start, range.end)) {
+      // The month's own spend, kept as well as added to the running total. `monthsBetween` already walks the
+      // period in order and emits every month in it, so the series comes out oldest-first and evenly spaced -
+      // a month nothing was charged to is a real 0, not a missing point.
+      let inMonth = 0;
       for (const r of byMonth.get(m) ?? []) {
         if (b.departmentId && r.departmentId !== b.departmentId) continue;
         if (b.categoryId && r.categoryId !== b.categoryId) continue;
         const at = chargedOn(r)!.getTime();
         if (at < range.start || at >= range.end) continue; // a month bucket can straddle the period edge
         if (r.state === "SUBMITTED") pending += r.amount ?? 0;
-        else spent += r.amount ?? 0;
+        else inMonth += r.amount ?? 0;
       }
+      spent += inMonth;
+      months.push({ period: m, spent: round2(inMonth) });
     }
-    out.set(key(b), { spent: round2(spent), pending: round2(pending) });
+    out.set(key(b), { spent: round2(spent), pending: round2(pending), months });
   });
   return out;
 }
@@ -140,21 +153,21 @@ export const scopeKeyOf = (b: BudgetScope) => `${b.departmentId ?? "-"}|${b.cate
 // list of one, so there is exactly one derivation of "what counts as charged to a cap".
 export async function computeBudgetSpend(deps: Deps, budget: BudgetScope): Promise<BudgetSpend> {
   const many = await computeBudgetSpendMany(deps, [budget]);
-  return many.get(scopeKeyOf(budget)) ?? many.values().next().value ?? { spent: 0, pending: 0 };
+  return many.get(scopeKeyOf(budget)) ?? many.values().next().value ?? { spent: 0, pending: 0, months: [] };
 }
 
 // A budget row plus its derived spend/pending/remaining/utilization, ready for the serializer.
 export async function budgetWithSpend(deps: Deps, budget: BudgetRow) {
-  const { spent, pending } = await computeBudgetSpend(deps, budget);
-  return { ...budget, ...budgetUtilization(budget.amount, spent, pending) };
+  const { spent, pending, months } = await computeBudgetSpend(deps, budget);
+  return { ...budget, ...budgetUtilization(budget.amount, spent, pending), spendHistory: months };
 }
 
 // The same, for a whole page of budgets: one expenses read for all of them.
 export async function budgetsWithSpend(deps: Deps, budgets: BudgetRow[]) {
   const spends = await computeBudgetSpendMany(deps, budgets);
   return budgets.map((b) => {
-    const { spent, pending } = spends.get(b.uuid) ?? { spent: 0, pending: 0 };
-    return { ...b, ...budgetUtilization(b.amount, spent, pending) };
+    const { spent, pending, months } = spends.get(b.uuid) ?? { spent: 0, pending: 0, months: [] };
+    return { ...b, ...budgetUtilization(b.amount, spent, pending), spendHistory: months };
   });
 }
 

@@ -5,11 +5,14 @@ import { useCollection } from "@/hooks/useCollection";
 import { roleLabel, type Role } from "@/lib/roles";
 import { CopyEmail } from "@/components/common/CopyEmail";
 import { usePermission } from "@/lib/perm";
-import { idOf } from "@/lib/utils";
+import { cn, formatDate, idOf } from "@/lib/utils";
+import { daysSince, fmtDaysCount } from "@/lib/tableDerive";
 import type { Employee, Me, User } from "@/types";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type BulkAction, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
+import { BLANK } from "@/lib/tableFilter";
 import { metaColumns } from "@/components/common/metaColumns";
 import { Field } from "@/components/common/Field";
 import { Button } from "@/components/ui/button";
@@ -20,6 +23,10 @@ import { Combobox } from "@/components/ui/combobox";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { SubjectPermissionsDialog } from "@/components/access/SubjectPermissionsDialog";
 import { useToast } from "@/components/ui/use-toast";
+
+// When an account stops looking idle and starts looking abandoned. A quarter of silence on a privileged
+// login is the question an access review exists to ask.
+const DORMANT_DAYS = 90;
 
 const ROLE_OPTIONS: Role[] = ["employee", "manager", "hr_admin", "payroll_admin", "super_admin"];
 const NONE = "__none__";
@@ -97,6 +104,46 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
     reload();
   }
 
+  // Two gaps a login list is audited for, both of which look like ordinary rows: an account with nobody
+  // behind it survives every leaver process, and a disabled account holding a privileged role is one
+  // re-enable away from being live again.
+  const userInsights = (us: User[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const unlinked = us.filter((u) => u.status === "active" && !u.employee);
+    if (unlinked.length > 0) {
+      out.push({
+        id: "no-employee",
+        label: `${unlinked.length} not linked to an employee`,
+        tone: "warning",
+        hint: "Nothing ties these logins to a person, so an exit never touches them and no self-scoped rule applies.",
+        filters: { employee: BLANK, status: "Active" },
+      });
+    }
+    // Active, privileged, and nobody has signed in for a quarter. The account most worth asking about in a
+    // review: it still opens every door it ever did, and nothing is using it.
+    const dormant = us.filter((u) => u.status === "active" && u.role && u.role !== "employee" && (daysSince(u.last_seen_time ?? u.create_time) ?? 0) >= DORMANT_DAYS);
+    if (dormant.length > 0) {
+      out.push({
+        id: "dormant",
+        label: `${dormant.length} privileged and dormant`,
+        tone: "warning",
+        hint: `Above employee, still enabled, and unused for ${DORMANT_DAYS} days or never signed in.`,
+        filters: { dormant_days: `>=${DORMANT_DAYS}`, status: "Active" },
+        sort: "dormant_days.desc",
+      });
+    }
+    const disabledPrivileged = us.filter((u) => u.status !== "active" && u.role && u.role !== "employee");
+    if (disabledPrivileged.length > 0) {
+      out.push({
+        id: "disabled-privileged",
+        label: `${disabledPrivileged.length} disabled but still privileged`,
+        hint: "Disabled accounts that keep a role above employee. Re-enabling one hands the access straight back.",
+        filters: { status: "Disabled" },
+      });
+    }
+    return out;
+  };
+
   const columns: Column<User>[] = [
     { id: "email", header: "Email", accessor: (u) => u.email, cell: (u) => <CopyEmail email={u.email} className="font-medium" /> },
     { id: "role", header: "Role", filter: "select", groupBy: true, accessor: (u) => roleLabel(u.role), cell: (u) => <Badge variant={roleVariant(u.role)}>{roleLabel(u.role)}</Badge> },
@@ -110,6 +157,31 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
     },
     // Blank is a login with no employee behind it - the account that gets missed when somebody leaves.
     { id: "employee", header: "Linked employee", filter: "select", accessor: (u) => empName(u.employee) },
+    {
+      // When the account was last used. An access review is a list of accounts and a question - "does this
+      // person still need this?" - and the only evidence on the page was who they are.
+      id: "last_seen", header: "Last seen", filter: "date", dateHint: "past", defaultHidden: true,
+      accessor: (u) => u.last_seen_time ?? "",
+      cell: (u) => (u.last_seen_time ? formatDate(u.last_seen_time) : <span className="text-muted-foreground">never</span>),
+    },
+    {
+      // The same reading as a number, because a review asks it as a threshold: "anything not used this
+      // quarter". An account that has NEVER been seen falls back to its own age, which is the honest figure -
+      // a login created two hundred days ago and never used has been dormant for two hundred days - and it
+      // keeps the chip's filter exact, since a blank would drop those rows out of a range it counted them in.
+      id: "dormant_days", header: "Dormant", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      accessor: (u) => daysSince(u.last_seen_time ?? u.create_time),
+      cell: (u) => {
+        const d = daysSince(u.last_seen_time ?? u.create_time);
+        if (d == null) return <span className="text-muted-foreground">-</span>;
+        const never = !u.last_seen_time;
+        return (
+          <span className={cn("tabular-nums text-xs", d >= DORMANT_DAYS ? "font-medium text-warning" : "text-muted-foreground")}>
+            {never ? `never · ${fmtDaysCount(d)} old` : fmtDaysCount(d)}
+          </span>
+        );
+      },
+    },
     ...metaColumns<User>(),
     {
       id: "actions",
@@ -177,7 +249,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
         {rows.length === 0 ? (
           <EmptyState icon={ShieldAlert} title="No users yet" description="Users appear here after their first sign-in." />
         ) : (
-          <DataTable tableId="users" columns={columns} rows={rows} getRowId={(u) => u.path} accessCollection="users" emptyTitle="No users match" rowClassName={() => "group"} controlsSlot={controlsSlot} bulkActions={bulkActions} />
+          <DataTable tableId="users" columns={columns} rows={rows} insights={userInsights} getRowId={(u) => u.path} accessCollection="users" emptyTitle="No users match" rowClassName={() => "group"} controlsSlot={controlsSlot} bulkActions={bulkActions} />
         )}
       </DataState>
 

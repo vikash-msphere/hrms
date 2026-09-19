@@ -92,7 +92,7 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   suggestions: ["update", "delete", "respond", "upvote", "downvote", "merge"],
   referrals: ["update", "delete", "upload", "download", "award"],
   "job-requisitions": ["update", "delete"],
-  candidates: ["update", "delete", "upload", "download"],
+  candidates: ["update", "delete", "upload", "download", "extractResume"],
   applications: ["update", "delete", "advance", "hire", "reject"],
   interviews: ["update", "delete", "complete", "cancel", "invite"],
   "interview-feedback": ["update", "delete"],
@@ -122,6 +122,9 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "configure", "metrics", // kanban board config (columns/WIP/policies/lanes) + flow analytics (boards)
   "move", "block", "unblock", "assign", "prioritize", "comment", // kanban card actions (cards)
   "addTodos", "toggleTodo", "removeTodo", // card checklist (cards; tickets use the same verbs)
+  "triage", "decideTriage", // read the nearest-neighbour triage suggestion, and record what was done with it (tickets)
+  "draft", // collection-level: write a first draft of some text from the caller's own instruction (announcements, job-requisitions, goals, suggestions)
+  "extractResume", // read a CV into suggested form fields for the recruiter to accept one by one (candidates)
   "promoteTodo", // turn a checklist item into a card of its own (cards)
   "watch", "unwatch", // follow a card or a goal you do not own (cards, goals)
   "activate", // start a sprint (sprints) - complete reuses the existing verb

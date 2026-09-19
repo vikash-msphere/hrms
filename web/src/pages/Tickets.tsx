@@ -24,6 +24,7 @@ import { DataState } from "@/components/common/DataState";
 import { DataTable, type BulkAction, type Column } from "@/components/common/DataTable";
 import { type TableInsight } from "@/components/common/TableInsights";
 import { BLANK } from "@/lib/tableFilter";
+import { allScope, mineColumn, mineScope, scopesOf } from "@/lib/tableScope";
 import { daysBetweenYmd, orgDayOf, todayStr } from "@/lib/orgDay";
 import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { ActivitySection } from "@/components/common/ActivitySection";
@@ -38,6 +39,7 @@ import { useChartFocus } from "@/lib/chartFocus";
 import { ChartFilterNote } from "@/components/common/ChartFilterNote";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field, FieldRow } from "@/components/common/Field";
+import { TicketTriageCard } from "@/components/common/TicketTriageCard";
 import { useConfirm } from "@/components/common/confirm";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -46,8 +48,6 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Combobox } from "@/components/ui/combobox";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AccessTab } from "@/components/common/AccessTab";
 import { ActivityBadge } from "@/components/common/ActivityBadge";
 import { useTabActivity, markTabSeen } from "@/lib/tabActivity";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -61,6 +61,29 @@ import { useTicketWorkflow, ticketStatusMeta, ticketMove, ticketMovesFrom, ticke
 import { getSetting } from "@/lib/settingsStore";
 
 const upper = (s?: string) => (s ?? "").toUpperCase();
+// What each priority promises, in days, measured from when the ticket was raised. Not configurable yet, and
+// deliberately conservative: these are the numbers a service desk would recognise as "late", not a contract.
+const SLA_DAYS: Record<string, number> = { HIGH: 2, MEDIUM: 5, LOW: 10, DEFAULT: 5 };
+// What the Queue column says about a ticket in one of the reader's own categories. A value rather than a
+// boolean because it is a filter value first: the "My team" chip narrows to exactly this string.
+const MY_QUEUE = "Mine to handle";
+// A first reply inside a working day is what makes a queue feel staffed. Past this it is worth seeing, and
+// it is the threshold the "nobody has replied" chip counts against.
+const FIRST_REPLY_TARGET_HOURS = 8;
+
+/** Hours between two stamps, or null when either is missing. Kept in hours because a first reply measured in
+ *  whole days cannot tell ten minutes from ten hours. */
+function hoursBetween(from?: string, to?: string): number | null {
+  if (!from || !to) return null;
+  const ms = Date.parse(to) - Date.parse(from);
+  return Number.isFinite(ms) && ms >= 0 ? Math.round((ms / 3_600_000) * 10) / 10 : null;
+}
+
+/** "40m" / "6.5h" / "3d" - a duration a reader takes in at a glance, at the scale it happens to be. */
+function fmtHours(h: number): string {
+  if (h < 1) return `${Math.max(1, Math.round(h * 60))}m`;
+  return h < 48 ? `${Math.round(h * 10) / 10}h` : `${Math.round(h / 24)}d`;
+}
 const TERMINAL = new Set(["CLOSED", "CANCELLED"]);
 // "Updated since you last opened it" is tracked client-side; the map and its pruning rule live in
 // lib/ticketsSeen.ts, which the boot-time sweep also reaches.
@@ -280,7 +303,9 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
   const assignedOpen = useMemo(() => assigned.filter(isActive), [assigned]);
   const mineOpen = useMemo(() => mine.filter(isActive), [mine]);
   const teamOpen = useMemo(() => team.filter(isActive), [team]);
-  const [ticketTab, setTicketTab] = useState(assignedOpen.length ? "assigned" : "mine");
+  // What the table is drawing, for the detail drawer's next/previous. Held here rather than derived, because
+  // the narrowing that produced it (scope chips, column filters, a metric) lives inside the table now.
+  const [visibleRows, setVisibleRows] = useState<Ticket[]>([]);
   // An open ticket in your categories with nobody on it, and an urgent one still unresolved, are the two states
   // a queue owner needs to see without reading every row.
   const unassignedTeam = useMemo(() => teamOpen.filter((t) => !t.assignee), [teamOpen]);
@@ -317,27 +342,22 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
       match: (t, k) => catName(t.category) === k,
     },
   });
-  // A metric narrows whichever tab it lands on, so the number and the list below it always agree.
-  const kf = useKpiFocus<Ticket, "needsAction" | "open" | "unassigned" | "urgent">({
+  // A metric narrows the desk to exactly the rows it counted.
+  //
+  // Each one carries its own WHOSE as well as its what: "My open tickets" is open AND raised by me, in one
+  // predicate. They used to be a metric plus a tab to switch to, which meant the tile could only mean what it
+  // said if something else moved first - and with the tabs gone there is nothing to move. A predicate that
+  // says the whole thing is what the drill-through was always promising.
+  const kf = useKpiFocus<Ticket, "needsAction" | "mineOpen" | "teamOpen" | "teamUnassigned" | "urgent">({
     needsAction: { label: "tickets waiting on you", match: (t) => { const s = upper(t.state); return (isAssignee(t) && (s === "OPEN" || s === "IN_PROGRESS")) || (isRequester(t) && s === "RESOLVED"); } },
-    open: { label: "open tickets", match: isActive },
-    unassigned: { label: "unassigned open tickets", match: (t) => isActive(t) && !t.assignee },
+    mineOpen: { label: "open tickets you raised", match: (t) => isActive(t) && isRequester(t) },
+    teamOpen: { label: "open tickets in your categories", match: (t) => isActive(t) && !!t.category && myCategoryKeys.has(t.category) },
+    teamUnassigned: { label: "unassigned open tickets in your categories", match: (t) => isActive(t) && !t.assignee && !!t.category && myCategoryKeys.has(t.category) },
     urgent: { label: "high-priority open tickets", match: (t) => isActive(t) && t.priority === "high" },
   });
-  // Clicking a metric picks the tab that owns those rows, then narrows it.
-  const tabKpi = (key: "needsAction" | "open" | "unassigned" | "urgent", tab: string) => {
-    const base = kf.kpi(key);
-    return { ...base, onClick: () => { setTicketTab(tab); base.onClick(); } };
-  };
-  // Each tab counts THROUGH the active metric, so the number on a tab is what clicking it would show rather
-  // than a total the narrowed list below contradicts. A narrowed tab keeps its zero: an absent count would
-  // read as "nothing here at all" when the metric is what emptied it.
-  const tabCount = (list: Ticket[]) => {
-    const n = kf.count(cf.apply(list));
-    return n || kf.focus || cf.picked ? ` (${n})` : "";
-  };
-  // Viewing a tab clears its "new" badge and advances the reference the next visit measures from.
-  useEffect(() => { markTabSeen(`tickets:${ticketTab}`); }, [ticketTab]);
+  // Arriving on the page counts as having looked at the desk: the badges that used to clear a tab at a time
+  // now clear together, because there is one list and it is all on screen.
+  useEffect(() => { for (const k of ["assigned", "team", "all"]) markTabSeen(`tickets:${k}`); }, []);
 
   // Throws to fail: WriteDialog owns the busy state, pins the reason inside the form and keeps what was typed.
   async function submit() {
@@ -416,17 +436,40 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
     const until = settled ? orgDayOf(t.update_time ?? t.create_time ?? "") : todayStr();
     return t.create_time ? Math.max(0, daysBetweenYmd(orgDayOf(t.create_time), until)) : 0;
   };
+  /**
+   * Where an OPEN ticket stands against what its priority promises: "Breached" past the target, "At risk"
+   * on the last fifth of it, "On time" otherwise. Empty on a settled ticket, which owes nothing and would
+   * otherwise fill the column with history.
+   */
+  const slaStateOf = (t: Ticket): "" | "On time" | "At risk" | "Breached" => {
+    if (["RESOLVED", "CLOSED", "CANCELLED"].includes(upper(t.state))) return "";
+    const target = SLA_DAYS[upper(t.priority ?? "")] ?? SLA_DAYS.DEFAULT!;
+    const age = ticketAge(t);
+    if (age > target) return "Breached";
+    return age >= target * 0.8 ? "At risk" : "On time";
+  };
+
   const cols: Column<Ticket>[] = [
     subjectCol,
     { id: "category", header: "Category", filter: "select", groupBy: true, accessor: (t) => catName(t.category) },
     { id: "department", header: "Department", filter: "select", groupBy: true, accessor: (t) => deptName(t.department) },
     { id: "requester", header: "Requester", filter: "select", groupBy: true, accessor: (t) => empName(t.employee) },
+    // The three "is this mine?" columns the scope chips filter on. Each answers from ids the page already
+    // holds, so a scope is right on the first paint and stays right when two people share a name - which a
+    // filter on the rendered name would not be, since the directory those names come from lands a moment
+    // after the table does.
+    mineColumn<Ticket>("raised_by_me", "Raised by me", isRequester),
+    mineColumn<Ticket>("assigned_to_me", "Assigned to me", isAssignee),
+    mineColumn<Ticket>("my_queue", "My categories", (t) => !!t.category && myCategoryKeys.has(t.category)),
     // Blank in this column is the unassigned queue - the first thing a service desk sorts out each morning.
     { id: "assignee", header: "Assignee", filter: "select", groupBy: true, accessor: (t) => empName(t.assignee) },
     { id: "priority", header: "Priority", filter: "select", groupBy: true, accessor: (t) => t.priority, cell: (t) => <PriorityBadge value={t.priority} /> },
     { id: "state", header: "Status", filter: "select", groupBy: true, accessor: (t) => ticketStatusLabel(t.state), cell: (t) => <TicketStatusMenu ticket={t} busy={moving === t.path} onPick={(to) => moveStatus(t, to)} /> },
     {
-      id: "age", header: "Age", align: "right", filter: "number", formatTotal: (n) => `${n} days`, accessor: ticketAge,
+      // Averaged in the footer, not summed: the total age of a queue is a number with no meaning, and "how
+      // long does a ticket take here" is the one figure a service desk is asked for. It answers over whatever
+      // the table is currently narrowed to, so it reads per category, per assignee or per month.
+      id: "age", header: "Age", align: "right", filter: "number", aggregate: "avg", formatTotal: (n) => `${n} days`, accessor: ticketAge,
       cell: (t) => {
         const d = ticketAge(t);
         const open = !["RESOLVED", "CLOSED", "CANCELLED"].includes(upper(t.state));
@@ -439,13 +482,81 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
     },
     {
       id: "checklist", header: "Checklist", filter: "number", accessor: (t) => t.todo_total ?? 0,
+      // The proportion done, drawn behind the count, so a column of checklists says which tickets are nearly
+      // there without reading twenty "3/7"s.
+      bar: (t) => (t.todo_total ? (t.todo_done ?? 0) / t.todo_total : null),
       cell: (t) => t.todo_total
         ? <span className={cn("inline-flex items-center gap-1 text-xs", t.todo_done === t.todo_total ? "text-success" : "text-muted-foreground")}><ListChecks className="h-3.5 w-3.5" /> {t.todo_done}/{t.todo_total}</span>
         : <span className="text-muted-foreground">-</span>,
     },
+    {
+      // How long the requester waited to hear anything. It is the number a service desk is actually judged
+      // on - a ticket answered in an hour and fixed in a week feels better than the reverse - and it was
+      // unanswerable until the server started stamping it.
+      //
+      // In hours, because a first response measured in days is already a failure and "0 days" would hide
+      // every difference between ten minutes and ten hours. Averaged, over whatever the table is narrowed
+      // to, so it reads per category or per assignee the moment the table is grouped.
+      id: "first_response", header: "First reply", align: "right", defaultHidden: true, filter: "number", aggregate: "avg",
+      formatTotal: (n) => `${Math.round(n * 10) / 10} h`,
+      accessor: (t) => hoursBetween(t.create_time, t.first_response_time),
+      cell: (t) => {
+        const h = hoursBetween(t.create_time, t.first_response_time);
+        if (h == null) {
+          // Still open with nobody having replied is a different state from a closed ticket nobody logged a
+          // reply on, and only the first is somebody's job right now.
+          return isActive(t)
+            ? <span className="text-warning">waiting</span>
+            : <span className="text-muted-foreground">-</span>;
+        }
+        return <span className={cn("tabular-nums text-xs", h >= FIRST_REPLY_TARGET_HOURS && "text-warning")}>{fmtHours(h)}</span>;
+      },
+    },
+    {
+      // End to end, in days: raised to resolved. Only on tickets that actually resolved, so the average is
+      // about work that finished rather than about the backlog.
+      id: "resolution", header: "Resolved in", align: "right", defaultHidden: true, filter: "number", aggregate: "avg",
+      formatTotal: (n) => `${Math.round(n * 10) / 10} days`,
+      accessor: (t) => {
+        const h = hoursBetween(t.create_time, t.resolved_time);
+        return h == null ? null : Math.round((h / 24) * 10) / 10;
+      },
+    },
+    {
+      // What the queue owes this ticket, from its priority and its age together. Neither column says it on
+      // its own: a two-day-old urgent ticket is late and a two-week-old low one is not, and a service desk
+      // works the breaches first rather than the oldest.
+      id: "sla", header: "Service", filter: "select", groupBy: true, defaultHidden: true,
+      accessor: (t) => slaStateOf(t),
+      cell: (t) => {
+        const s = slaStateOf(t);
+        if (!s) return <span className="text-muted-foreground">-</span>;
+        return <span className={cn("text-xs", s === "Breached" ? "font-medium text-destructive" : s === "At risk" ? "text-warning" : "text-muted-foreground")}>{s}</span>;
+      },
+    },
   ];
-  const mineCols = [...cols.filter((c) => c.id !== "requester"), ...metaColumns<Ticket>()];
+  // ONE column set, because there is now one table. The per-tab sets existed because "My tickets" was its own
+  // table and every row on it said the reader's own name; as a scope of the whole desk the requester column
+  // still means something the moment the scope comes off, so it stays and the reader can hide it like any
+  // other.
   const allCols = [...cols, ...metaColumns<Ticket>()];
+
+  // WHOSE TICKETS. Four narrowings of one desk, where there used to be four tables: the reader's own, the
+  // ones routed to them, their categories' queue, and everything they can see. Each is a preset over the
+  // columns above, so it deep-links, saves into a view and narrows to exactly what its chip counted.
+  const ticketScopes = scopesOf(
+    mineScope("mine", "My tickets", "raised_by_me", !!me.employee_id, { count: kf.count(cf.apply(mine)) }),
+    mineScope("assigned", "Assigned to me", "assigned_to_me", !!me.employee_id, {
+      count: kf.count(cf.apply(assigned)),
+      badge: <ActivityBadge count={activity["tickets:assigned"] ?? 0} />,
+    }),
+    mineScope("team", "My team", "my_queue", hasTeam, {
+      count: kf.count(cf.apply(team)),
+      title: "Every ticket in the categories you handle",
+      badge: <ActivityBadge count={activity["tickets:team"] ?? 0} />,
+    }),
+    { ...allScope("All", kf.count(cf.apply(all))), badge: <ActivityBadge count={activity["tickets:all"] ?? 0} /> },
+  );
 
   const newBtn = (
     <AccessAction collection="tickets" create label="New ticket">
@@ -535,6 +646,32 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
         sort: "age.desc",
       });
     }
+    // Open, and nobody has said anything yet. Distinct from "unassigned" - a ticket can have an owner and
+    // still be silent - and it is the one thing a requester notices before any fix.
+    const silent = ts.filter((t) => isActive(t) && !t.first_response_time);
+    if (silent.length > 0) {
+      out.push({
+        id: "no-reply",
+        label: `${silent.length} with no reply yet`,
+        tone: "warning",
+        hint: "Open tickets nobody has answered. The wait the requester actually feels.",
+        filters: { first_response: BLANK, state: openLabel },
+        sort: "age.desc",
+      });
+    }
+    // Past what the priority promised. Distinct from "open over a week": a two-day-old high-priority ticket
+    // is late and a ten-day-old low one is not, and it is the breaches a desk works first.
+    const breached = ts.filter((t) => slaStateOf(t) === "Breached");
+    if (breached.length > 0) {
+      out.push({
+        id: "sla",
+        label: `${breached.length} past their service target`,
+        tone: "destructive",
+        hint: "Older than the target for their own priority.",
+        filters: { sla: "Breached" },
+        sort: "age.desc",
+      });
+    }
     return out;
   };
 
@@ -543,12 +680,17 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
       tableId={tableId}
       columns={columns}
       insights={ticketInsights}
-      // A clicked metric or chart slice narrows whichever tab is showing to the rows it counted.
+      scopes={ticketScopes}
+      // Land an assignee on their own queue when something is open there, and everybody else on the tickets
+      // they raised - the same opening the four tabs chose, now said as a scope so a deep link can override it.
+      defaultScope={assignedOpen.length ? "assigned" : "mine"}
+      // A clicked metric or chart slice narrows the desk to the rows it counted.
       rows={cf.apply(kf.apply(data))}
       search={{ value: search, onChange: setSearch, placeholder: "Search all tickets…" }}
       hasMore={searching ? searchHasMore : undefined}
       onLoadMore={searching ? loadMoreSearch : loadMore}
       getRowId={(t) => t.path}
+      onVisibleRows={setVisibleRows}
       onRowClick={(t) => openTicket(t)}
       emptyTitle={cf.activeLabel ? `No ${cf.activeLabel} tickets here` : kf.activeLabel ? `No ${kf.activeLabel}` : emptyTitle}
       emptyDescription={cf.activeLabel ? "Press the same slice again, or Show all." : kf.activeLabel ? "Click the metric again to show everything." : emptyDescription}
@@ -560,7 +702,11 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
 
   return (
     <div>
+      {/* The collection-level access key used to ride the "All" tab, because that tab WAS the whole
+          collection. With one table and a scope chip in its place there is no tab to carry it, so it sits
+          where every untabbed collection page keeps it - on the heading. Per-row keys are unchanged. */}
       <PageHeader
+        accessCollection="tickets"
         title="Support"
         description="Raise a support ticket and follow it through to resolution."
         actions={<>{newBtn}<PageSettings me={me} host="tickets" /></>}
@@ -604,50 +750,33 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
                 label: "Waiting on me", value: needsAction.length, icon: AlertCircle,
                 tone: needsAction.length ? "warning" : "success",
                 hint: needsAction.length ? "next step is yours" : "nothing needs you",
-                ...tabKpi("needsAction", "all"),
+                ...kf.kpi("needsAction"),
               },
-              { label: "My open tickets", value: mineOpen.length, icon: LifeBuoy, hint: "raised by you", ...tabKpi("open", "mine") },
-              ...(hasTeam ? [{ label: "Team queue", value: teamOpen.length, icon: Users, hint: "your categories", ...tabKpi("open", "team") }] : []),
+              { label: "My open tickets", value: mineOpen.length, icon: LifeBuoy, hint: "raised by you", ...kf.kpi("mineOpen") },
+              ...(hasTeam ? [{ label: "Team queue", value: teamOpen.length, icon: Users, hint: "your categories", ...kf.kpi("teamOpen") }] : []),
               ...(hasTeam && unassignedTeam.length
-                ? [{ label: "Unassigned", value: unassignedTeam.length, icon: Users, tone: "warning" as const, hint: "nobody is on these", ...tabKpi("unassigned", "team") }]
+                ? [{ label: "Unassigned", value: unassignedTeam.length, icon: Users, tone: "warning" as const, hint: "nobody is on these", ...kf.kpi("teamUnassigned") }]
                 : []),
               ...(urgentOpen.length
-                ? [{ label: "High priority", value: urgentOpen.length, icon: AlertCircle, tone: "destructive" as const, hint: "urgent, still open", ...tabKpi("urgent", "all") }]
+                ? [{ label: "High priority", value: urgentOpen.length, icon: AlertCircle, tone: "destructive" as const, hint: "urgent, still open", ...kf.kpi("urgent") }]
                 : []),
-              { label: "Total visible", value: rows.length, tone: "muted" as const, hint: "open and closed", onClick: () => { kf.setFocus(null); setTicketTab("all"); }, active: kf.focus === null && ticketTab === "all" },
+              // The way back to the whole desk: clears the metric, and the scope chips beside the table clear
+              // the "whose" half. Active only when nothing is narrowing it.
+              { label: "Total visible", value: rows.length, tone: "muted" as const, hint: "open and closed", onClick: () => kf.setFocus(null), active: kf.focus === null },
             ]}
           />
         )}
 
         <ChartFilterNote label={cf.activeLabel} shown={cf.count(rows)} total={rows.length} onClear={cf.clear} />
 
-        {/* Land assignees on their queue when something is open there; everyone else starts on their own tickets. */}
-        <Tabs value={ticketTab} onValueChange={setTicketTab}>
-          <TabsList>
-            <TabsTrigger value="mine">My tickets{tabCount(mine)}</TabsTrigger>
-            <TabsTrigger value="assigned">Assigned to me{tabCount(assigned)}<ActivityBadge count={ticketTab === "assigned" ? 0 : activity["tickets:assigned"] ?? 0} /></TabsTrigger>
-            {hasTeam && <TabsTrigger value="team">My team{tabCount(team)}<ActivityBadge count={ticketTab === "team" ? 0 : activity["tickets:team"] ?? 0} /></TabsTrigger>}
-            {/* mine/assigned/team are scope filters of the same collection; the collection-level access key
-                rides on "All" (the whole collection), with per-row keys inside each table. */}
-            <AccessTab value="all" target={{ collection: "tickets", label: "Support tickets" }}>All<ActivityBadge count={ticketTab === "all" ? 0 : activity["tickets:all"] ?? 0} /></AccessTab>
-          </TabsList>
-          <TabsContent value="mine">
-            {mine.length === 0 && !kf.focus
-              ? <EmptyState icon={LifeBuoy} title="No tickets yet" description="Stuck on IT, payroll, facilities or anything else? Raise a ticket and track it here through to resolution." action={newBtn} />
-              : renderTable(mine, mineCols, "tickets-mine", "No tickets match", "Adjust the filters to see your tickets.")}
-          </TabsContent>
-          <TabsContent value="assigned">
-            {renderTable(assigned, allCols, "tickets-assigned", "Nothing assigned to you", "Tickets routed to you appear here.", true)}
-          </TabsContent>
-          {hasTeam && (
-            <TabsContent value="team">
-              {renderTable(team, allCols, "tickets-team", "No tickets in your categories", "Tickets in the categories you handle appear here.", true)}
-            </TabsContent>
-          )}
-          <TabsContent value="all">
-            {renderTable(all, allCols, "tickets-all", "No tickets", "Tickets you can see appear here.", true)}
-          </TabsContent>
-        </Tabs>
+        {/* ONE desk, narrowed by who you are. This was four tabs over four tables - four saved layouts, four
+            column pickers, four sets of filters - for what is one list asked "whose?". As scopes the answer
+            travels in the URL, saves into a view, and shows up in the same chip row as every other narrowing
+            on the page. Assignees land on their own queue when something is open there; everybody else lands
+            on the tickets they raised. */}
+        {rows.length === 0 && !kf.focus && !cf.picked
+          ? <EmptyState icon={LifeBuoy} title="No tickets yet" description="Stuck on IT, payroll, facilities or anything else? Raise a ticket and track it here through to resolution." action={newBtn} />
+          : renderTable(all, allCols, "tickets", "No tickets match", "Adjust the scope or the filters to see tickets.", true)}
       </DataState>
 
       <NewTicketDialog open={open} onOpenChange={setOpen} form={form} setForm={setForm} files={files} setFiles={setFiles} categories={categories} departments={departments} checklists={checklists} myOpen={mineOpen} empName={empName} onSubmit={submit} />
@@ -663,9 +792,10 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
         deptName={deptName}
         canModify={(t) => !TERMINAL.has(upper(t.state))}
         onChanged={(t) => { setActive(t); reload(); }}
-        /* The queue behind the drawer: the tab that is actually on screen, in the order it is drawn, so
-           "next" means the next row the reader can see rather than the next row in some other list. */
-        siblings={ticketTab === "mine" ? mine : ticketTab === "assigned" ? assigned : ticketTab === "team" ? team : all}
+        /* The queue behind the drawer: the rows the table is actually showing, in the order it drew them, so
+           "next" means the next row the reader can see. The table reports them through `onVisibleRows` rather
+           than the page guessing from a scope it no longer owns. */
+        siblings={visibleRows}
         onOpen={openTicket}
         toast={toast}
       />
@@ -1247,6 +1377,26 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
               </AccessAction>
             </Field>
           </FieldRow>
+        )}
+
+        {/* The triage suggestion, fetched only when asked for. Applying one calls the same `:route` /
+            `:prioritize` the pickers above use, so an accepted suggestion is an ordinary edit with an
+            ordinary audit row - there is no second write path. */}
+        {modifiable && (
+          <TicketTriageCard
+            ticketPath={t.path}
+            ticketId={idOf(t.path)}
+            can={can}
+            deptName={deptName}
+            onApplyDepartment={(ref) => act("route", { department: ref })}
+            onApplyPriority={(p) => act("prioritize", { priority: p })}
+            onOpenTicket={(id) => {
+              // Only the tickets this page has loaded can be opened in place. A neighbour outside the current
+              // filter or page renders as text rather than as a link that would do nothing.
+              const found = siblings.find((s) => idOf(s.path) === id);
+              return found ? () => onOpen(found) : null;
+            }}
+          />
         )}
 
         {/* Checklist / todo list. Items can be added one-off or copied in from a predefined checklist (the

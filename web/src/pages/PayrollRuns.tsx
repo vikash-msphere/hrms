@@ -4,8 +4,9 @@ import { api, get, create, invoke, download, remove, ApiError } from "@/api";
 import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreviewDialog";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
-import { idOf, formatDate, formatMoney, round2 } from "@/lib/utils";
+import { cn, idOf, formatDate, formatMoney, round2 } from "@/lib/utils";
 import { todayStr } from "@/lib/orgDay";
+import { daysUntil, fmtDaysCount } from "@/lib/tableDerive";
 import { navigate } from "@/router";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { BankFormat, Me, Operation, PayPeriod, PayrollRun, PayrollRunItem } from "@/types";
@@ -20,6 +21,7 @@ import { ActivitySection } from "@/components/common/ActivitySection";
 import { EmptyState } from "@/components/common/EmptyState";
 import { TableSkeleton } from "@/components/common/Skeletons";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { metaColumns } from "@/components/common/metaColumns";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Field, FieldRow } from "@/components/common/Field";
@@ -39,6 +41,13 @@ import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { useConfirm } from "@/components/common/confirm";
 import PayPeriods from "@/pages/PayPeriods";
 import { PayrollBonuses } from "@/components/common/PayrollBonuses";
+
+// A run's state as the page compares it. The API's casing is not guaranteed, which is why every comparison
+// in this file upper-cases first.
+const up = (s?: string) => (s ?? "").toUpperCase();
+// How close a pay date has to be before an unfinished run is worth chasing. A week: long enough to build,
+// review and approve without a rush, short enough that the chip means something when it appears.
+const PAY_DATE_SOON_DAYS = 7;
 
 type Verb = "build" | "submit" | "approve" | "publish";
 const NEXT: Record<string, { verb: Verb; label: string; icon: typeof Hammer; variant?: "success" }[]> = {
@@ -350,6 +359,12 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     const m = new Map(periods.map((p) => [idOf(p.path), p.display_name]));
     return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown period" : "-");
   }, [periods]);
+  // The pay date a run is working towards. It belongs to the PERIOD, which is why nothing on the runs list
+  // could say how long there is left.
+  const payDateOf = useMemo(() => {
+    const m = new Map(periods.map((p) => [idOf(p.path), p.pay_date]));
+    return (p?: string) => (p ? m.get(idOf(p)) : undefined);
+  }, [periods]);
 
   // Periods that already carry a run, so the picker can say so instead of letting the create collide. A second
   // run on one period is a genuine mistake (two payments for the same days), not a workflow.
@@ -472,11 +487,91 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     }
   }
 
+  // What payroll needs to know before anything else: which runs are about to miss their own pay date. A
+  // published run is done whatever its date says, so only the unfinished ones count.
+  const runInsights = (rs: PayrollRun[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const due = rs.filter((r) => {
+      if (up(r.state) === "PUBLISHED") return false;
+      const d = daysUntil(payDateOf(r.pay_period));
+      return d != null && d >= 0 && d <= PAY_DATE_SOON_DAYS;
+    });
+    if (due.length > 0) {
+      out.push({
+        id: "pay-soon",
+        label: `${due.length} to finish within ${PAY_DATE_SOON_DAYS} days`,
+        tone: "warning",
+        hint: "Unpublished runs whose pay date is nearly here.",
+        filters: { pay_in: `0..${PAY_DATE_SOON_DAYS}` },
+        sort: "pay_in.asc",
+      });
+    }
+    const late = rs.filter((r) => {
+      if (up(r.state) === "PUBLISHED") return false;
+      const d = daysUntil(payDateOf(r.pay_period));
+      return d != null && d < 0;
+    });
+    if (late.length > 0) {
+      out.push({
+        id: "pay-past",
+        label: `${late.length} past their pay date`,
+        tone: "destructive",
+        hint: "The date the money was meant to move has gone and the run is not published.",
+        filters: { pay_in: "<0" },
+        sort: "pay_in.asc",
+      });
+    }
+    return out;
+  };
+
   const columns: Column<PayrollRun>[] = [
     { id: "period", header: "Pay period", filter: "select", groupBy: true, accessor: (r) => periodName(r.pay_period), cell: (r) => <span className="font-medium">{periodName(r.pay_period)}</span> },
     { id: "state", header: "State", filter: "select", groupBy: true, accessor: (r) => r.state, cell: (r) => <StatusBadge state={r.state} /> },
     { id: "submitted_by", header: "Submitted by", defaultHidden: true, filter: "select", groupBy: true, accessor: (r) => r.submitted_by_name ?? (r.submitted_by ? idOf(r.submitted_by) : ""), cell: (r) => r.submitted_by_name ?? (r.submitted_by ? idOf(r.submitted_by) : "-") },
     { id: "approved_by", header: "Approved by", defaultHidden: true, filter: "select", groupBy: true, accessor: (r) => r.approved_by_name ?? (r.approved_by ? idOf(r.approved_by) : ""), cell: (r) => r.approved_by_name ?? (r.approved_by ? idOf(r.approved_by) : "-") },
+    // The size of each run, stamped by its own build. A run list that showed only a state made you open every
+    // one to find out whether it paid four people or four hundred - and the three figures are the first thing
+    // anybody checks against last month before approving.
+    //
+    // Blank, not zero, until the run is built: `undefined` from the API says "never priced", which is a
+    // different claim from a run that priced nobody, and it keeps an unbuilt run out of the averages.
+    {
+      id: "headcount", header: "People", align: "right", filter: "number", aggregate: "avg",
+      accessor: (r) => r.headcount ?? null,
+      cell: (r) => (r.headcount == null ? <span className="text-muted-foreground">not built</span> : <span className="tabular-nums">{r.headcount}</span>),
+    },
+    {
+      // Summed across whatever the table is narrowed to, which is how "what did we pay out this year" gets
+      // answered - and per pay period the moment it is grouped.
+      id: "gross", header: "Gross", align: "right", defaultHidden: true, filter: "number", aggregate: "sum", formatTotal: (n) => money(n),
+      accessor: (r) => r.gross ?? null,
+      cell: (r) => (r.gross == null ? <span className="text-muted-foreground">-</span> : <span className="tabular-nums">{money(r.gross)}</span>),
+    },
+    {
+      id: "net", header: "Net", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => money(n),
+      accessor: (r) => r.net ?? null,
+      cell: (r) => (r.net == null ? <span className="text-muted-foreground">-</span> : <span className="font-medium tabular-nums">{money(r.net)}</span>),
+    },
+    {
+      // How long until the money is supposed to move. A run list ordered by creation says nothing about
+      // urgency: the run that has to be approved TODAY looks exactly like the one for next quarter, and the
+      // pay date it is measured against lives on the period, one page across.
+      // Empty once the run is published, and deliberately so: a published run has paid, so "three days left"
+      // is not a thing anybody needs to act on. It also makes the countdown the exact set the chips above
+      // count, since a range filter leaves the blanks out.
+      id: "pay_in", header: "Pay date in", align: "right", filter: "number", formatTotal: fmtDaysCount,
+      accessor: (r) => (up(r.state) === "PUBLISHED" ? null : daysUntil(payDateOf(r.pay_period))),
+      cell: (r) => {
+        if (up(r.state) === "PUBLISHED") return <span className="text-muted-foreground">paid</span>;
+        const d = daysUntil(payDateOf(r.pay_period));
+        if (d == null) return <span className="text-muted-foreground">-</span>;
+        return (
+          <span className={cn("tabular-nums text-xs", d <= 3 && "font-medium text-destructive", d > 3 && d <= PAY_DATE_SOON_DAYS && "text-warning")}>
+            {d < 0 ? `${fmtDaysCount(-d)} ago` : fmtDaysCount(d)}
+          </span>
+        );
+      },
+    },
     ...metaColumns<PayrollRun>(),
     {
       id: "actions",
@@ -588,6 +683,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
                 tableId="payroll-runs"
                 columns={columns}
                 rows={rows}
+                insights={runInsights}
                 getRowId={(r) => r.path}
                 emptyTitle="No runs match"
                 rowClassName={() => "group"}

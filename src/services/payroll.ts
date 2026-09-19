@@ -87,6 +87,17 @@ export async function withStaleness<T extends { uuid: string; state: string; pay
   return { ...run, _staleness: await runStaleness(deps, run) };
 }
 
+/**
+ * Everything that describes ONE build, wiped together.
+ *
+ * Both reset paths (the rebuild's opening reset, and the rollback when payables drift under a build) put the
+ * run back in the clean "never built" state, and every field here has to go with the items or it starts
+ * describing a build whose rows are gone: a stale `itemsBuiltAt` reads as "built and up to date" for an EMPTY
+ * run, a surviving `unpricedJson` names people against a run that priced nobody, and surviving size figures
+ * report last build's money as this run's. One constant so the next field cannot be added to one path only.
+ */
+const RUN_UNBUILT = { itemsBuiltAt: null, unpricedJson: null, headcount: null, gross: null, net: null } as const;
+
 export async function getRun(deps: Deps, id: string) {
   const r = (await deps.db.select().from(schema.payrollRuns).where(eq(schema.payrollRuns.uuid, id)).limit(1))[0];
   if (!r) throw notFound("payroll run not found");
@@ -352,8 +363,9 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // pointing at the previous build would read as "built and up to date" for an EMPTY run (runStaleness
     // compares inputs against it) - which an approver could then approve and publish, paying nobody.
     // The unpriced list is cleared with it: it describes ONE build, and a list outliving the items it was
-    // written beside would name people against a run that has not priced anybody.
-    deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: null, unpricedJson: null }).where(eq(schema.payrollRuns.uuid, runId)),
+    // written beside would name people against a run that has not priced anybody. So are the size figures,
+    // for exactly the same reason - a run with no items reporting last build's gross is the same lie.
+    deps.db.update(schema.payrollRuns).set(RUN_UNBUILT).where(eq(schema.payrollRuns.uuid, runId)),
   ]);
   const periodEndMs = period ? +new Date(period.periodEnd) : undefined;
   const now = new Date();
@@ -859,6 +871,11 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // building, and rebuilding produced the same warning again: a permanent false alarm on the one banner that
   // exists to be believed.
   const builtAt = new Date();
+  // What the build PRODUCED, not just how many people it touched. A rebuild is the commonest payroll action
+  // and the question asked of its trail is always the same - "did the numbers move, and by how much" - which
+  // a headcount cannot answer and a diff against the previous build's totals can. Rounded like every other
+  // money figure in this file (see the monetary invariant in db/schema.ts).
+  const built = { gross: round2(itemRows.reduce((s, r) => s + r.gross, 0)), net: round2(itemRows.reduce((s, r) => s + r.net, 0)), tax: round2(itemRows.reduce((s, r) => s + (r.tax ?? 0), 0)) };
   const stmts: (BatchStmt | CheckedStmt)[] = [
     ...marks,
     ...loanWrites.stmts,
@@ -866,9 +883,22 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // Stamp the build time: any income-affecting input touched after this makes the run stale (see runStaleness).
     // The unpriced list rides the SAME statement, so who the run could not price is written by the same atomic
     // batch as what it did price - the two can never describe different builds.
+    //
+    // The run's SIZE rides it too, for the same reason and one more. These three figures are what a list of
+    // runs shows, and they live on the items - so serving them by summing would read the whole org's items for
+    // every run on the page. Here they cost nothing: `itemRows` is already in hand and this update was already
+    // happening. `headcount` is what the run PAYS (`itemRows.length`), not everyone it walked - the people it
+    // could not price are named separately in `unpricedJson` and are absent from the money above.
     deps.db
       .update(schema.payrollRuns)
-      .set({ itemsBuiltAt: builtAt, unpricedJson: unpriced.length ? JSON.stringify(unpriced) : null, updatedAt: builtAt })
+      .set({
+        itemsBuiltAt: builtAt,
+        unpricedJson: unpriced.length ? JSON.stringify(unpriced) : null,
+        headcount: itemRows.length,
+        gross: built.gross,
+        net: built.net,
+        updatedAt: builtAt,
+      })
       .where(eq(schema.payrollRuns.uuid, runId)),
   ];
   const drifted = await runBatchChecked(deps.db, stmts);
@@ -879,7 +909,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     await runBatch(deps.db, [
       deps.db.delete(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId)),
       ...(await releasePaidByRun(deps, runId)),
-      deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: null, unpricedJson: null }).where(eq(schema.payrollRuns.uuid, runId)),
+      deps.db.update(schema.payrollRuns).set(RUN_UNBUILT).where(eq(schema.payrollRuns.uuid, runId)),
     ]);
     throw failedPrecondition(`payables changed while the run was building (${[...new Set(drifted)].join(", ")}) - nothing was paid; build the run again`);
   }
@@ -893,11 +923,6 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       console.error(`[payroll] ${ev.type} emit failed (non-fatal)`, err);
     }
   }
-  // What the build PRODUCED, not just how many people it touched. A rebuild is the commonest payroll action
-  // and the question asked of its trail is always the same - "did the numbers move, and by how much" - which
-  // a headcount cannot answer and a diff against the previous build's totals can. Rounded like every other
-  // money figure in this file (see the monetary invariant in db/schema.ts).
-  const built = { gross: round2(itemRows.reduce((s, r) => s + r.gross, 0)), net: round2(itemRows.reduce((s, r) => s + r.net, 0)), tax: round2(itemRows.reduce((s, r) => s + (r.tax ?? 0), 0)) };
   // COUNTED AS PRICED, not as considered. `employees.length` is everyone the build walked, which includes the
   // people it could not price - so a run that silently dropped someone recorded the headcount it meant to pay
   // rather than the one it did, and the diff against the previous build showed no movement on the very number

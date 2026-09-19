@@ -6,13 +6,14 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
 import { usePermission } from "@/lib/perm";
-import { idOf, round2 } from "@/lib/utils";
+import { cn, idOf, round2 } from "@/lib/utils";
 import { useMoney } from "@/lib/org";
 import { navigate } from "@/router";
 import type { Me, SalaryStructure, SalaryStructureLine, PayComponent } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
 import { Field } from "@/components/common/Field";
@@ -139,6 +140,46 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
     }
   }
 
+  /**
+   * What a SAVED structure claims of basic pay - the same sum the dialog computes while one is being typed,
+   * read off the stored lines. A line with no rate of its own inherits the component's default, which is how
+   * the form treats it too.
+   */
+  const percentOfStructure = (s: SalaryStructure) =>
+    (s.lines ?? []).reduce((sum, l) => {
+      const c = byPath.get(l.component);
+      if (c?.method !== "percent_base") return sum;
+      const rate = l.rate == null ? c.rate ?? 0 : Number(l.rate);
+      return sum + (Number.isFinite(rate) ? rate : 0);
+    }, 0);
+
+  // A structure that cannot price anybody, and one that prices nobody. The first is a failure waiting for
+  // the next compensation revision to find it; the second is catalogue clutter.
+  const structureInsights = (ss: SalaryStructure[]): TableInsight[] => {
+    const live = ss.filter((s) => !s.delete_time);
+    const out: TableInsight[] = [];
+    const over = live.filter((s) => percentOfStructure(s) >= 100);
+    if (over.length > 0) {
+      out.push({
+        id: "over-100",
+        label: `${over.length} claiming all of basic`,
+        tone: "destructive",
+        hint: "At or over 100% of basic, so there is nothing left for the balancing line and the CTC split cannot solve.",
+        filters: { of_basic: ">=100" },
+        sort: "of_basic.desc",
+      });
+    }
+    const empty = live.filter((s) => (s.lines ?? []).length === 0);
+    if (empty.length > 0) {
+      out.push({
+        id: "no-lines",
+        label: `${empty.length} with no components`,
+        hint: "Nothing to build a package out of - usually a structure started and never finished.",
+      });
+    }
+    return out;
+  };
+
   const columns: Column<SalaryStructure>[] = [
     { id: "name", header: "Structure", accessor: (s) => s.display_name, cell: (s) => <span className="font-medium">{s.display_name}</span> },
     {
@@ -158,6 +199,20 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
             ))}
           </span>
         ),
+    },
+    {
+      // What the structure already claims of basic, as a percentage. The dialog checks this while somebody
+      // is typing (`percentOfBasic`); nothing said it about the structures already saved, and one at or over
+      // 100% leaves nothing for the plug line - every CTC split under it fails, one compensation revision at
+      // a time.
+      id: "of_basic", header: "% of basic", align: "right", filter: "number",
+      formatTotal: (n) => `${Math.round(n)}%`,
+      accessor: (s) => percentOfStructure(s),
+      cell: (s) => {
+        const pct = percentOfStructure(s);
+        if (pct === 0) return <span className="text-muted-foreground">-</span>;
+        return <span className={cn("tabular-nums", pct >= 100 ? "font-medium text-destructive" : pct >= 90 ? "text-warning" : undefined)}>{Math.round(pct)}%</span>;
+      },
     },
     { id: "description", header: "Description", defaultHidden: true, accessor: (s) => s.description ?? "" },
     ...metaColumns<SalaryStructure>(),
@@ -188,6 +243,7 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
           columns={columns}
           tableId="salary-structures"
           rows={rows}
+          insights={structureInsights}
           getRowId={(s) => s.path}
           rowClassName={(s) => (s.delete_time ? "opacity-60" : undefined)}
           emptyTitle="No salary structures"

@@ -5,7 +5,10 @@ import { create, get, invoke, upload, download } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
-import { formatDate, formatMoney, idOf } from "@/lib/utils";
+import { cn, formatDate, formatMoney, idOf } from "@/lib/utils";
+import { daysSince, fmtDaysCount } from "@/lib/tableDerive";
+import { duplicateIds } from "@/lib/tableSignals";
+import { BLANK } from "@/lib/tableFilter";
 import { todayStr } from "@/lib/orgDay";
 import { thisYearStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
@@ -16,6 +19,7 @@ import { RequestsHistoryTabs, type RequestsHistorySearch } from "@/components/co
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { withNewBadge } from "@/components/common/NewBadge";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { metaColumns } from "@/components/common/metaColumns";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
@@ -40,6 +44,8 @@ import { getSetting } from "@/lib/settingsStore";
 
 const upper = (s?: string) => (s ?? "").toUpperCase();
 const sum = (rs: Reimbursement[]) => rs.reduce((n, r) => n + (r.amount || 0), 0);
+// When a pending claim stops being "recent" and starts being a person waiting for their own money back.
+const STALE_CLAIM_DAYS = 7;
 // Local-time today, for prefilling "Date incurred" (toISOString would shift across midnight in non-UTC zones).
 // `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
 // local parts, which is a different day for part of every day and a different day again from the one the
@@ -203,8 +209,46 @@ export default function Reimbursements({ me }: { me: Me }) {
   }
   const getReceipt = (r: Reimbursement) => download("reimbursements/" + idOf(r.path), `receipt-${idOf(r.path)}`);
 
+  // ---- what the queue can see about itself ---------------------------------
+  // The same claim filed twice is the commonest honest mistake on this page: a phone submission that looked
+  // like it failed, then a second one from the desk. Same person, same amount, same day, and neither of them
+  // cancelled - the pair the entry form on Expenses already warns about, applied here to what is filed.
+  const dupeIds = useMemo(
+    () => duplicateIds(
+      rows.filter((r) => !["CANCELLED", "REJECTED"].includes(upper(r.state))),
+      (r) => `${r.employee ? idOf(r.employee) : ""}|${r.amount}|${r.incurred_on ?? ""}`,
+      (r) => r.path,
+    ),
+    [rows],
+  );
+
   // ---- columns -------------------------------------------------------------
   const empCol: Column<Reimbursement> = { id: "employee", header: "Employee", filter: "select", groupBy: true, accessor: (r) => empName(r.employee), cell: (r) => <span className="font-medium">{empName(r.employee)}</span> };
+  // How long a claim has been waiting on somebody, and how long it took once it was paid. The first is the
+  // queue's own backlog; the second is the number an employee actually feels, and neither was on the page.
+  const waitingCol: Column<Reimbursement> = {
+    id: "waiting", header: "Waiting", align: "right", filter: "number", formatTotal: fmtDaysCount,
+    accessor: (r) => (isPending(r) ? daysSince(r.create_time) : null),
+    cell: (r) => {
+      const d = isPending(r) ? daysSince(r.create_time) : null;
+      if (d == null) return <span className="text-muted-foreground">-</span>;
+      return <span className={cn("tabular-nums text-xs", d >= 7 ? "font-medium text-destructive" : d >= 3 ? "font-medium text-warning" : "text-muted-foreground")}>{fmtDaysCount(d)}</span>;
+    },
+  };
+  const turnaroundCol: Column<Reimbursement> = {
+    id: "turnaround", header: "Paid in", align: "right", defaultHidden: true, filter: "number", aggregate: "avg", formatTotal: fmtDaysCount,
+    accessor: (r) => {
+      if (upper(r.state) !== "PAID" || !r.paid_time || !r.create_time) return null;
+      const filed = daysSince(r.create_time);
+      const paid = daysSince(r.paid_time);
+      return filed == null || paid == null ? null : Math.max(0, filed - paid);
+    },
+  };
+  const dupeCol: Column<Reimbursement> = {
+    id: "dupe", header: "Repeat", defaultHidden: true, filter: "select", sortable: false,
+    accessor: (r) => (dupeIds.has(r.path) ? "Possible duplicate" : ""),
+    cell: (r) => (dupeIds.has(r.path) ? <span className="text-warning">Repeat</span> : <span className="text-muted-foreground">-</span>),
+  };
   const baseCols: Column<Reimbursement>[] = [
     { id: "category", header: "Category", filter: "select", groupBy: true, accessor: (r) => catName(r.category) },
     // Totalled under the column and over any selection: "how much is this queue worth" is the question the
@@ -254,9 +298,51 @@ export default function Reimbursements({ me }: { me: Me }) {
   };
 
   const activityCol: Column<Reimbursement> = { id: "activity", header: "", sortable: false, filter: "none", align: "right", cell: (r) => <RowActivityButton resource={r.path} /> };
-  const mineCols = [...baseCols, ...metaColumns<Reimbursement>(), ownActions];
+  const mineCols = [...baseCols, waitingCol, turnaroundCol, ...metaColumns<Reimbursement>(), ownActions];
   // Approvers see everyone's decided claims in History (with the employee), plus a Mark-paid action in separate mode.
-  const historyCols = withNewBadge(canDecide ? [empCol, ...baseCols, ...metaColumns<Reimbursement>(), payCol, activityCol] : [...baseCols, ...metaColumns<Reimbursement>(), activityCol]);
+  const historyCols = withNewBadge(canDecide
+    ? [empCol, ...baseCols, waitingCol, turnaroundCol, dupeCol, ...metaColumns<Reimbursement>(), payCol, activityCol]
+    : [...baseCols, waitingCol, turnaroundCol, ...metaColumns<Reimbursement>(), activityCol]);
+
+  // What an approver should know before starting to click. Both are about the SET, not about any row: one
+  // claim that has waited nine days looks exactly like one filed this morning, and a repeat is only visible
+  // next to its twin.
+  const claimInsights = (rs: Reimbursement[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const stale = rs.filter((r) => isPending(r) && (daysSince(r.create_time) ?? 0) >= STALE_CLAIM_DAYS);
+    if (stale.length > 0) {
+      out.push({
+        id: "stale",
+        label: `${stale.length} waiting over a week`,
+        tone: "warning",
+        hint: "People are out of pocket while these sit. Oldest first.",
+        filters: { waiting: `>=${STALE_CLAIM_DAYS}` },
+        sort: "waiting.desc",
+      });
+    }
+    const dupes = rs.filter((r) => dupeIds.has(r.path));
+    if (dupes.length > 0) {
+      out.push({
+        id: "dupes",
+        label: `${dupes.length} look like repeats`,
+        tone: "destructive",
+        hint: "Same person, amount and day as another live claim. Usually one submission that looked like it failed.",
+        filters: { dupe: "Possible duplicate" },
+        sort: "amount.desc",
+      });
+    }
+    const noReceipt = rs.filter((r) => isPending(r) && !r.has_receipt);
+    if (noReceipt.length > 0) {
+      out.push({
+        id: "no-receipt",
+        label: `${noReceipt.length} with no receipt`,
+        tone: "warning",
+        hint: "Nothing to file against the claim. Worth asking before deciding.",
+        filters: { receipt: BLANK, state: "PENDING" },
+      });
+    }
+    return out;
+  };
 
   const requestBtn = (
     <AccessAction collection="reimbursements" create label="New claim">
@@ -270,6 +356,7 @@ export default function Reimbursements({ me }: { me: Me }) {
       columns={columns}
       rows={data}
       search={search}
+      insights={claimInsights}
       getRowId={(r) => r.path}
       emptyTitle={emptyTitle}
       emptyDescription={emptyDescription}

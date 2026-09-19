@@ -176,6 +176,9 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // 65 rows where most say "none" for every role buries the dozen that carry the org's access model. This
   // keeps the rows some role (or `everyone`) actually holds something on.
   const [onlySet, setOnlySet] = React.useState(false);
+  // The same idea on the users matrix, where it applies to COLUMNS rather than rows. Off by default, like its
+  // twin: a matrix that quietly hid most of itself on arrival would be a different claim about the data.
+  const [onlyUserSet, setOnlyUserSet] = React.useState(false);
   // A subject with a global ("*"/"**") allow rule (super_admin) is admin everywhere - shown read-only.
   const isGlobal = (kind: Kind, subject: string) =>
     rules.some((r) => r.subject_kind === kind && r.subject === subject && (r.collection === "*" || r.collection === "**") && !r.field && !r.verb && r.effect === "allow");
@@ -300,9 +303,22 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // Users matrix: one row per user, one column per collection. The rows come from a cursor walk (`listAll`
   // in reload) rather than a page, because DataTable paginates the rows it is HANDED - it cannot page a
   // collection that was never fetched, and a person with no row here has no editable per-user access at all.
+  // Which collections this matrix is worth being wide for. A per-user grant is the EXCEPTION in this app -
+  // almost everything is granted by role - so the honest default is sixty-five columns of "none" with two
+  // that say something, and finding those two means scrolling sideways past the rest.
+  //
+  // The columns are dropped, not greyed: a column where nobody has anything carries no information at all,
+  // and the count beside the toggle says how many were left out so the view is never silently partial. This
+  // is the users-side twin of "Only rows with access" on the roles matrix, which solves the same problem the
+  // other way up.
+  const userColumns = React.useMemo(
+    () => (onlyUserSet ? collections.filter((c) => users.some((u) => valueOf("user", u.path, c) !== "none")) : collections),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [collections, users, rules, onlyUserSet],
+  );
   const userMatrixCols: Column<{ path: string; email: string }>[] = [
     { id: "user", header: "User", filter: "text", accessor: (u) => u.email, cell: (u) => <CopyEmail email={u.email} className="font-medium" /> },
-    ...collections.map((c) => ({ id: c, header: labelOf(c), sortable: false, filter: "none", accessor: (u: { path: string; email: string }) => valueOf("user", u.path, c), cell: (u: { path: string; email: string }) => levelCell("user", u.path, c, u.email) } as Column<{ path: string; email: string }>)),
+    ...userColumns.map((c) => ({ id: c, header: labelOf(c), sortable: false, filter: "none", accessor: (u: { path: string; email: string }) => valueOf("user", u.path, c), cell: (u: { path: string; email: string }) => levelCell("user", u.path, c, u.email) } as Column<{ path: string; email: string }>)),
   ];
 
   // Rules as JSON: the reviewable, diffable, restorable form of the whole access configuration. Export is a
@@ -684,6 +700,15 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
           // rather than presenting whatever it holds as every login account.
           <div className="space-y-3">
             {matrixNote}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant={onlyUserSet ? "default" : "outline"} className="h-8" aria-pressed={onlyUserSet} onClick={() => setOnlyUserSet((s) => !s)}>
+                Only collections with access
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                {userColumns.length} of {collections.length} collections
+                {onlyUserSet && userColumns.length < collections.length ? ` · ${collections.length - userColumns.length} hidden, nobody has them` : ""}
+              </span>
+            </div>
             <DataTable columns={userMatrixCols} rows={users} getRowId={(u) => u.path} tableId="user-perms-matrix" accessCollection="users" emptyTitle="No users" controlsSlot={controlsSlot} />
           </div>
         ) : (

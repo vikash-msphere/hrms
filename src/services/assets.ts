@@ -27,6 +27,8 @@ import {
   type CustodyPolicy,
 } from "../domain/assetCustody";
 import { allocTagRun, FALLBACK_TAG_CODE, formatAssetTag, nextSeq, normalizeTagConfig, type AssetTagConfig } from "../domain/assetTag";
+import { bookValue } from "../domain/assetValue";
+import { refAssetCategories } from "../lib/refData";
 import { requireOpenStocktake } from "./stocktakes";
 import { orgToday, dayStartMs } from "./orgDay";
 import { atVersion, checkEtag, updateAtVersion, versionConflict } from "./versionGuard";
@@ -40,6 +42,7 @@ export type AssetInput = {
   assigned_to?: string | null; // employees/<id> or null (the inbound edge already decoded the ref)
   assigned_on?: string | null; // YYYY-MM-DD
   purchase_date?: string | null;
+  purchase_cost?: number | null;
   notes?: string | null;
 };
 
@@ -102,6 +105,39 @@ async function categoriesOf(deps: Deps, ids: (string | null)[]): Promise<Map<str
   if (found.size !== wanted.length) throw invalidArgument("asset category not found");
   return found;
 }
+
+type AssetRow = typeof schema.assets.$inferSelect;
+
+/**
+ * Attach `_bookValue` to asset rows on their way out, so every asset answer values itself the same way.
+ *
+ * The valuation itself is pure (domain/assetValue.ts); all this adds is the one thing the row is missing - its
+ * category's `useful_life_months`. That comes from the per-request memo (lib/refData.ts refAssetCategories)
+ * rather than a lookup per row, because this runs over a whole page: without it a hundred-asset inventory view
+ * would resolve the same handful of categories a hundred times, which is the shape `categoriesOf` above exists
+ * to avoid on the write path.
+ *
+ * Applied at EVERY exit that hands a row to a caller, not only the list and the get. A patched or freshly
+ * scanned asset goes straight back into the table the caller is looking at, and a row that arrived valued and
+ * came back blank would read as "this asset lost its value", which is a worse answer than never showing one.
+ *
+ * Deliberately not gated here: `book_value` is declared in REDACTED_FIELDS (domain/manifests.ts), so a caller
+ * who may not see an asset's money has it removed by the same mechanism that removes `purchase_cost`. Deciding
+ * it twice, in two places, is how the two answers come apart.
+ */
+async function valued<T extends AssetRow>(deps: Deps, rows: T[]): Promise<(T & { _bookValue?: number })[]> {
+  // Nothing to value and nothing to read: an empty page must not pay for the catalogue.
+  if (!rows.some((r) => r.purchaseCost != null && r.purchaseDate != null)) return rows;
+  const lives = new Map((await refAssetCategories(deps)).map((c) => [c.uuid, c.usefulLifeMonths]));
+  const nowMs = +deps.clock.now();
+  return rows.map((r) => ({
+    ...r,
+    _bookValue: bookValue(r.purchaseCost, r.purchaseDate ? +new Date(r.purchaseDate) : null, r.categoryId ? lives.get(r.categoryId) : null, nowMs),
+  }));
+}
+
+/** `valued` for the single-row exits, which are most of them. */
+const valuedOne = async <T extends AssetRow>(deps: Deps, row: T) => (await valued(deps, [row]))[0]!;
 
 /**
  * Every asset tag is stored UPPER CASE, generated or typed.
@@ -222,16 +258,22 @@ export async function listAssets(deps: Deps, scope: ListScope, opts: { employeeI
     { max: opts.maxPageSize, pageToken: opts.pageToken },
   );
   return {
-    items: items.sort((a, b) => (a.assetTag ?? a.name).localeCompare(b.assetTag ?? b.name) || a.uuid.localeCompare(b.uuid)),
+    items: await valued(deps, items.sort((a, b) => (a.assetTag ?? a.name).localeCompare(b.assetTag ?? b.name) || a.uuid.localeCompare(b.uuid))),
     nextPageToken,
   };
 }
 
+// Reads one row raw - it is the pre-write read for half the verbs in this file as well as the API's own Get,
+// and a valuation on the way IN would be thrown away by every one of those. The Get lane values it (see the
+// `get` override in routes/assets.ts); the verbs value what they return.
 export async function getAsset(deps: Deps, id: string) {
   const row = (await deps.db.select().from(schema.assets).where(eq(schema.assets.uuid, id)).limit(1))[0];
   if (!row) throw notFound("asset not found");
   return row;
 }
+
+/** The API's Get: the same row, valued. */
+export const readAsset = async (deps: Deps, id: string) => valuedOne(deps, await getAsset(deps, id));
 
 // A new asset is a claim, not a fact: unless the org has turned custody enforcement off it lands in
 // `pending_verification` (someone must scan it into stock) or, when it is created already assigned, in
@@ -282,6 +324,7 @@ export async function createAsset(deps: Deps, actor: AppUser, input: AssetInput)
       // and stays one.
       assignedOn: assignedTo ? (dayMs(input.assigned_on) ?? new Date(dayStartMs(await orgToday(deps)))) : null,
       purchaseDate: dayMs(input.purchase_date),
+      purchaseCost: input.purchase_cost ?? null,
       tagSecret: mintTagSecret(),
       custodySince: isPending(status) ? now : null,
       notes: input.notes?.trim() || null,
@@ -292,7 +335,7 @@ export async function createAsset(deps: Deps, actor: AppUser, input: AssetInput)
   await audit(deps, actor, "asset.create", "assets", row.uuid, createdMeta(row, "assets"), row);
   await emitEvent(deps, actor, "asset.created", { subject: `assets/${row.uuid}`, employeeId: assignedTo, payload: { categoryId: row.categoryId, assetTag: row.assetTag } });
   if (assignedTo && assignedTo !== actor.employeeId) await notifyAssignee(deps, actor, row);
-  return row;
+  return valuedOne(deps, row);
 }
 
 /** One line of a batch create: an asset, or - with `quantity` - a run of identical ones. */
@@ -430,7 +473,7 @@ export async function createAssetsBatch(deps: Deps, actor: AppUser, items: Asset
   // Each asset keeps its own creation entry (its activity feed is per record), stamped with the run it came in.
   await auditMany(deps, actor, ordered.map((row) => ({ action: "asset.create", entity: "assets", entityId: row.uuid, meta: { batch: ordered.length, ...createdMeta(row, "assets") }, snapshot: row })));
   await emitEvents(deps, actor, "asset.created", ordered.map((row) => ({ subject: `assets/${row.uuid}`, payload: { categoryId: row.categoryId, assetTag: row.assetTag, batch: ordered.length } })));
-  return ordered;
+  return valued(deps, ordered);
 }
 
 // One notification for "this is yours now", whose wording depends on whether the holder still owes a scan.
@@ -471,6 +514,9 @@ export async function updateAsset(deps: Deps, actor: AppUser, id: string, patch:
   const category = await categoryOf(deps, (has("category") ? (set.categoryId ?? null) : row.categoryId) as string | null);
   assertSerial(category, (has("serial_number") ? (set.serialNumber ?? null) : row.serialNumber) as string | null);
   if (has("purchase_date")) set.purchaseDate = dayMs(patch.purchase_date);
+  // `?? null` clears, like every other nullable field here - and unlike a falsy test, which would silently
+  // refuse to record kit that genuinely cost nothing (a donation, a transfer in at no charge).
+  if (has("purchase_cost")) set.purchaseCost = patch.purchase_cost ?? null;
   // `last_verified_time` is deliberately NOT writable here: a sighting is something someone did in a room,
   // recorded by :verify. A PATCHable timestamp would be a second way to claim custody, without the scan.
   if (has("notes")) set.notes = patch.notes?.trim() || null;
@@ -507,7 +553,7 @@ export async function updateAsset(deps: Deps, actor: AppUser, id: string, patch:
   // Newly assigned to someone (a reassignment) notifies the new owner - with the "scan it" ask when the
   // org requires acknowledgement.
   if (derivedAssigned && derivedAssigned !== row.assignedTo && derivedAssigned !== actor.employeeId) await notifyAssignee(deps, actor, updated!);
-  return updated!;
+  return valuedOne(deps, updated!);
 }
 
 /**
@@ -551,7 +597,7 @@ export async function verifyAsset(deps: Deps, actor: AppUser, id: string, input:
     employeeId: updated!.assignedTo,
     payload: { categoryId: updated!.categoryId, assetTag: updated!.assetTag, scanned, checkedIn, condition: input.condition ?? "good" },
   });
-  return updated!;
+  return valuedOne(deps, updated!);
 }
 
 /**
@@ -583,7 +629,7 @@ export async function acknowledgeAsset(deps: Deps, actor: AppUser, id: string, i
     employeeId: actor.employeeId,
     payload: { categoryId: updated!.categoryId, assetTag: updated!.assetTag, condition: input.condition ?? "good", scanned, waitedDays },
   });
-  return updated!;
+  return valuedOne(deps, updated!);
 }
 
 /**
@@ -601,7 +647,7 @@ export async function markTagPrinted(deps: Deps, actor: AppUser, id: string) {
     .where(eq(schema.assets.uuid, id))
     .returning();
   await audit(deps, actor, "asset.printTag", "assets", id, { diff: { tagPrintedAt: { from: row.tagPrintedAt, to: updated!.tagPrintedAt } } }, updated);
-  return updated!;
+  return valuedOne(deps, updated!);
 }
 
 /**
@@ -621,7 +667,7 @@ export async function reissueTag(deps: Deps, actor: AppUser, id: string) {
   // The old sticker stops working here, so the trail records the invalidation - never the secret itself,
   // which lib/audit strips from any meta regardless.
   await audit(deps, actor, "asset.reissueTag", "assets", id, { note: "the printed tag was invalidated and the asset returned to the print queue" }, updated);
-  return updated!;
+  return valuedOne(deps, updated!);
 }
 
 export async function deleteAsset(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {

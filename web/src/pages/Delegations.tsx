@@ -3,11 +3,14 @@ import { Plus, Trash2, ArrowRight } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
-import { formatDate, idOf, personIndex, personName } from "@/lib/utils";
-import { todayStr } from "@/lib/orgDay";
+import { cn, formatDate, idOf, personIndex, personName } from "@/lib/utils";
+import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
+import { daysUntil, fmtDaysCount } from "@/lib/tableDerive";
+import { duplicateIds } from "@/lib/tableSignals";
 import type { ApprovalDelegation, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { DataState } from "@/components/common/DataState";
 import { metaColumns } from "@/components/common/metaColumns";
 import { Field, FieldRow } from "@/components/common/Field";
@@ -22,6 +25,9 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 
 const COL = "approval-delegations";
+// How much warning is useful before cover lapses. A working week: long enough to extend it or hand over,
+// short enough that the chip is not permanently on screen.
+const ENDING_SOON_DAYS = 7;
 // `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
 // local parts, which is a different day for part of every day and a different day again from the one the
 // server validates against.
@@ -89,6 +95,43 @@ export default function Delegations({ me }: { me: Me }) {
   }
 
   const isActive = (r: ApprovalDelegation) => r.from_date <= today && r.to_date >= today;
+  const statusOf = (r: ApprovalDelegation): "Upcoming" | "Active now" | "Expired" =>
+    r.from_date > today ? "Upcoming" : r.to_date < today ? "Expired" : "Active now";
+
+  // Delegation fails quietly in both directions: one that has lapsed sends approvals back to somebody who is
+  // still away, and two live ones for the same approver make it ambiguous who is answering.
+  const delegationInsights = (rs: ApprovalDelegation[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const ending = rs.filter((r) => isActive(r) && (daysUntil(r.to_date) ?? 99) <= ENDING_SOON_DAYS);
+    if (ending.length > 0) {
+      out.push({
+        id: "ending",
+        label: `${ending.length} ending within ${ENDING_SOON_DAYS} days`,
+        tone: "warning",
+        hint: "Cover stops on that date and approvals go back to the person who was away.",
+        filters: { ends_in: `0..${ENDING_SOON_DAYS}` },
+        sort: "ends_in.asc",
+      });
+    }
+    // Two live delegations naming the same delegate is usually a duplicate rather than a decision, and the
+    // rows are rarely next to each other.
+    const doubled = duplicateIds(
+      rs.filter(isActive),
+      (r) => (r.delegate ? idOf(r.delegate) : null),
+      (r) => r.path,
+    );
+    if (doubled.size > 1) {
+      out.push({
+        id: "overlapping",
+        label: `${doubled.size} overlapping right now`,
+        tone: "warning",
+        hint: "The same person is named on more than one delegation that is live today.",
+        filters: { status: "Active now" },
+        sort: "delegate.asc",
+      });
+    }
+    return out;
+  };
 
   const columns: Column<ApprovalDelegation>[] = [
     {
@@ -106,11 +149,35 @@ export default function Delegations({ me }: { me: Me }) {
       cell: (r) => (
         <span className="inline-flex items-center gap-1.5 text-sm">
           {formatDate(r.from_date)} <ArrowRight className="h-3 w-3 text-muted-foreground" /> {formatDate(r.to_date)}
-          {isActive(r) && <span className="ml-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">Active now</span>}
+          {/* The shared success token, not a hand-rolled emerald light/dark pair - the palette owns what
+              "good" looks like in both themes (docs/06-responsive-ui.md, semantic colours). */}
+          {isActive(r) && <span className="ml-1 rounded-full bg-success/15 px-2 py-0.5 text-xs font-medium text-success">Active now</span>}
         </span>
       ),
     },
     { id: "reason", header: "Reason", accessor: (r) => r.reason ?? "", cell: (r) => <span className="text-sm text-muted-foreground">{r.reason || "—"}</span> },
+    {
+      // Where each delegation stands today. The dates say it, but only one row at a time: a list of six is
+      // read as six subtractions, and the question is always "who is covering right now".
+      id: "status", header: "Status", filter: "select", groupBy: true,
+      accessor: (r) => statusOf(r),
+      cell: (r) => {
+        const s = statusOf(r);
+        return <span className={cn("text-xs", s === "Active now" ? "font-medium text-success" : s === "Upcoming" ? "text-foreground" : "text-muted-foreground")}>{s}</span>;
+      },
+    },
+    {
+      // How long the cover runs for. A fortnight of holiday cover and a six-month standing arrangement are
+      // different things, and only one of them should still be there next quarter.
+      id: "length", header: "Days", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      accessor: (r) => (r.from_date && r.to_date ? daysBetweenYmd(r.from_date, r.to_date) + 1 : null),
+    },
+    {
+      id: "ends_in", header: "Ends in", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      // Only while it is running: a finished delegation's "ends in" is history, and leaving it blank is what
+      // lets the chip below narrow to exactly the rows it counted.
+      accessor: (r) => (isActive(r) ? daysUntil(r.to_date) : null),
+    },
     ...metaColumns<ApprovalDelegation>(),
     {
       id: "actions", header: "", sortable: false, filter: "none", align: "right",
@@ -147,6 +214,7 @@ export default function Delegations({ me }: { me: Me }) {
         <DataTable
           rows={rows}
           columns={columns}
+          insights={delegationInsights}
           tableId="delegations"
           getRowId={(r) => r.path}
           emptyTitle="No delegations yet"

@@ -569,6 +569,9 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
       // reporter anybody can put somebody else's name on.
       reporterId: actor.employeeId ?? null,
       columnKey,
+      // Filing a card IS its first placement, so the column clock starts here rather than on the first move -
+      // otherwise a card that never moves reads as having no age at all, which is the opposite of the truth.
+      columnSince: new Date(),
       departmentId,
       swimlaneKey: idFromPath(input.swimlane_key) ?? (input.swimlane_key?.trim() || null),
       rank,
@@ -727,6 +730,11 @@ export async function moveCard(deps: Deps, actor: AppUser, id: string, to: MoveC
     set.deliveredAt = now;
     justDelivered = true;
   }
+  // Unlike the three above, this one is RE-stamped on every column change: it ages the column the card is in
+  // now, not the card. Rides the same guarded update, so it can only move when the move itself lands - a
+  // losing race leaves the clock where it was, beside the column the card is really in. Reordering within a
+  // column is not a move and deliberately does not reset it; a card does not get younger for being dragged.
+  if (changingColumn) set.columnSince = now;
 
   // GUARDED ON THE COLUMN THAT WAS READ. The WIP check above counts a column and then writes without claiming
   // anything, so two people dragging into a column sitting one below its limit both counted `limit - 1`, both

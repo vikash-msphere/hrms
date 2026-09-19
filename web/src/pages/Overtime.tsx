@@ -8,7 +8,9 @@ import { orgDayOf, orgTimezone, thisMonthStr, todayStr } from "@/lib/orgDay";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useDiscardGuard } from "@/hooks/useDiscardGuard";
-import { formatDate, idOf, personIndex, personName } from "@/lib/utils";
+import { cn, formatDate, idOf, personIndex, personName } from "@/lib/utils";
+// `monthLabel` is aliased: this page already has a local of that name for the month picker's own caption.
+import { daysSince, fmtDaysCount, isWeekend, monthKey, monthLabel as monthName, weekdayName, weekendLabel } from "@/lib/tableDerive";
 import { navigate, navigateTab } from "@/router";
 import type { OvertimeRequest, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -19,6 +21,7 @@ import { RequestsHistoryTabs, type RequestsHistorySearch } from "@/components/co
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { withNewBadge } from "@/components/common/NewBadge";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { metaColumns } from "@/components/common/metaColumns";
 import { Field } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -37,6 +40,9 @@ import { confirmDecision } from "@/lib/confirmDecision";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const upper = (s?: string) => (s ?? "").toUpperCase();
+// A month's overtime past which somebody should be asked about, rather than approved. Twenty hours: half a
+// normal working week on top of a normal working month.
+const HEAVY_MONTH_MINUTES = 20 * 60;
 
 // EVERY DATE ON THIS PAGE IS THE ORG'S, not the viewer's.
 //
@@ -221,6 +227,29 @@ export default function Overtime({ me }: { me: Me }) {
     { id: "duration", header: "Duration", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => fmtDuration(n), accessor: (r) => r.minutes, cell: (r) => <span className="font-medium tabular-nums">{fmtDuration(r.minutes)}</span> },
     { id: "state", header: "Status", filter: "select", groupBy: true, accessor: (r) => upper(r.state), cell: (r) => <span className="inline-flex items-center gap-1.5"><StatusBadge state={r.state} />{r.paid && <Badge variant="success">Paid</Badge>}</span> },
     { id: "reason", header: "Reason", accessor: (r) => r.reason ?? "", cell: (r) => r.reason || <span className="text-muted-foreground">-</span> },
+    {
+      // Overtime is signed off, budgeted and worried about per MONTH, and a date column cannot group. Folding
+      // by month with the duration subtotal on each fold is the sign-off this page could not do.
+      id: "month", header: "Month", filter: "select", groupBy: true, defaultHidden: true,
+      accessor: (r) => monthKey(orgYmd(r.start_time)),
+      cell: (r) => monthName(monthKey(orgYmd(r.start_time))),
+    },
+    {
+      // Worked on a Saturday or Sunday. One weekend is a deadline; every weekend is a rota problem, and the
+      // only way to see the difference was to read the dates one at a time.
+      id: "day_kind", header: "Day", filter: "select", groupBy: true, defaultHidden: true,
+      accessor: (r) => weekendLabel(orgYmd(r.start_time)),
+      cell: (r) => <span className={cn(isWeekend(orgYmd(r.start_time)) && "text-warning")}>{weekdayName(orgYmd(r.start_time))}</span>,
+    },
+    {
+      id: "waiting", header: "Waiting", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      accessor: (r) => (upper(r.state) === "PENDING" ? daysSince(r.create_time) : null),
+      cell: (r) => {
+        const d = upper(r.state) === "PENDING" ? daysSince(r.create_time) : null;
+        if (d == null) return <span className="text-muted-foreground">-</span>;
+        return <span className={cn("tabular-nums text-xs", d >= 3 ? "font-medium text-warning" : "text-muted-foreground")}>{fmtDaysCount(d)}</span>;
+      },
+    },
   ];
   // History only: the approver's note explains WHY a request landed where it did (esp. rejections).
   const noteCol: Column<OvertimeRequest> = {
@@ -249,8 +278,47 @@ export default function Overtime({ me }: { me: Me }) {
 
   const addBtn = canCreate && <AccessAction collection="overtime-requests" create><Button onClick={() => openCreate()}><Plus className="h-4 w-4" /> Log overtime</Button></AccessAction>;
 
+  // Three things about the set that no single row can say: what has been sitting undecided, who is doing
+  // this every weekend, and who is past what a month should hold.
+  const overtimeInsights = (rs: OvertimeRequest[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const stale = rs.filter((r) => upper(r.state) === "PENDING" && (daysSince(r.create_time) ?? 0) >= 3);
+    if (stale.length > 0) {
+      out.push({
+        id: "stale",
+        label: `${stale.length} waiting over 3 days`,
+        tone: "warning",
+        hint: "Undecided overtime holds up the month it belongs to.",
+        filters: { waiting: ">=3" },
+        sort: "waiting.desc",
+      });
+    }
+    // Per person, this month, against what the org considers a lot. Counted on APPROVED and PENDING minutes
+    // together, because the hours were worked either way.
+    const month = thisMonthStr();
+    const perPerson = new Map<string, number>();
+    for (const r of rs) {
+      if (upper(r.state) === "REJECTED" || upper(r.state) === "CANCELLED") continue;
+      if (monthKey(orgYmd(r.start_time)) !== month) continue;
+      const key = r.employee ? idOf(r.employee) : "";
+      perPerson.set(key, (perPerson.get(key) ?? 0) + (r.minutes || 0));
+    }
+    const heavy = [...perPerson.entries()].filter(([, mins]) => mins >= HEAVY_MONTH_MINUTES);
+    if (heavy.length > 0) {
+      out.push({
+        id: "heavy",
+        label: `${heavy.length} over ${HEAVY_MONTH_MINUTES / 60} hours this month`,
+        tone: "warning",
+        hint: "Counted per person across this month's logged overtime. Group by employee to see whose.",
+        filters: { month },
+        sort: "duration.desc",
+      });
+    }
+    return out;
+  };
+
   const renderTable = (search: RequestsHistorySearch, data: OvertimeRequest[], columns: Column<OvertimeRequest>[], tableId: string, emptyTitle: string) => (
-    <DataTable columns={columns} tableId={tableId} rows={data} search={search} getRowId={(r) => r.path} emptyTitle={emptyTitle} emptyAction={addBtn} accessCollection="overtime-requests" accessTargetOf={(r) => ({ objectPath: r.path, label: `${empName(r.employee)} · ${orgYmd(r.start_time)}`, can: r.access?.can })} />
+    <DataTable columns={columns} tableId={tableId} rows={data} search={search} insights={overtimeInsights} getRowId={(r) => r.path} emptyTitle={emptyTitle} emptyAction={addBtn} accessCollection="overtime-requests" accessTargetOf={(r) => ({ objectPath: r.path, label: `${empName(r.employee)} · ${orgYmd(r.start_time)}`, can: r.access?.can })} />
   );
 
   return (

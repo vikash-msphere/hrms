@@ -67,6 +67,15 @@ export const users = sqliteTable("users", {
   // request to check `status` and resolve the role - the comparison rides a read that was happening anyway.
   // NULL means "nothing revoked", the state every user starts in.
   sessionsValidFrom: integer("sessions_valid_from", { mode: "timestamp_ms" }),
+  // When this account was last seen making a request. A convenience column, not an audit record: the audit log
+  // records WRITES, so an account that only ever reads - which is exactly the dormant privileged account worth
+  // finding - leaves no trace there at all.
+  //
+  // Written at most once every `LAST_USED_THROTTLE_MS` per account (services/apiKeys.ts owns the predicate),
+  // the same treatment `api_keys.last_used_at` gets and for the same reason: a write per request would put a
+  // D1 write on every call in the app for a field nobody reads at that resolution. The READ is free - auth
+  // already loads this row on every request to check `status`.
+  lastSeenAt: integer("last_seen_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ pageIdx: index("users_page_idx").on(t.createdAt, t.uuid),
@@ -595,6 +604,10 @@ export const backgroundChecks = sqliteTable("background_checks", {
   referenceNo: text("reference_no"), // the vendor's case reference
   initiatedDate: integer("initiated_date", { mode: "timestamp_ms" }),
   completedDate: integer("completed_date", { mode: "timestamp_ms" }),
+  // What the vendor charged for this check. Choosing a verification agency is the decision this collection
+  // informs, and turnaround alone only answers half of it. Nullable: a check run in-house, or one whose
+  // invoice has not landed, costs nothing recorded rather than zero.
+  cost: real("cost"),
   notes: text("notes"),
   // The vendor's report, filed as the employee's own document and linked here. Notes summarise a finding; the
   // report is what a dispute is settled against. Personal, not org: it is about one person.
@@ -1199,6 +1212,11 @@ export const cards = sqliteTable("cards", {
   // tied to a department, so this is the card's own attribute, used for filtering/reporting.
   departmentId: text("department_id").references(() => departments.uuid),
   columnKey: text("column_key").notNull(),
+  // When the card entered the column it is in now, stamped by the same write that moves it. Ageing WIP - a
+  // card sat in review for a fortnight - is the whole point of a board, and the list view could not see it:
+  // `cardMovements` holds the answer but is read only by the board roll-up, so a table would need the movement
+  // log per row to age one column. Reset on every move, so it is "since this column", not "since it was filed".
+  columnSince: integer("column_since", { mode: "timestamp_ms" }),
   swimlaneKey: text("swimlane_key"),
   rank: real("rank").notNull().default(0),
   title: text("title").notNull(),
@@ -1691,6 +1709,144 @@ export const cronRuns = sqliteTable("cron_runs", {
   updatedAt: updated(),
 }, (t) => ({ pageIdx: index("cron_runs_page_idx").on(t.createdAt, t.uuid), cronIdx: index("cron_runs_cron_idx").on(t.cron), startedIdx: index("cron_runs_started_idx").on(t.startedAt) }));
 
+// ---- AI layer ----
+// One row per inference, written whether the call succeeded or not. Two jobs, and the second is the reason
+// the first is not enough on its own:
+//
+//   MEASUREMENT. Cloudflare's free allocation is 10,000 Neurons/day for the whole account, and the per-model
+//   neuron cost of a real workload is not something a pricing table answers - it depends on our prompts and
+//   our text lengths. `estimatedNeurons` starts as the pessimistic guess in domain/aiPolicy.ts and this table
+//   is what replaces it with a measurement, so the budget ceilings can be retuned from evidence.
+//
+//   ACCOUNTABILITY. An AI layer over HR data has to be able to answer "what was sent to a model, by whom,
+//   about what" a year later. So the row records the FEATURE, the caller, and the subject it concerned - and
+//   `inputHash` rather than the input. Storing the prompt would recreate, inside our own database, exactly
+//   the retained copy of salary and review text that lib/ai.ts suppresses at the gateway.
+export const aiUsage = sqliteTable("ai_usage", {
+  uuid: pk(),
+  feature: text("feature").notNull(), // "search.embed", "tickets.triage", "announcements.draft", ...
+  model: text("model").notNull(), // the @cf/... id actually called
+  role: text("role", { enum: ["embed", "rerank", "generate", "moderate"] }).notNull(),
+  userId: text("user_id").references((): AnySQLiteColumn => users.uuid), // null = a cron/system call
+  subject: text("subject"), // "<collection>/<uuid>" the call concerned, for the accountability question
+  inputHash: text("input_hash").notNull(), // sha256 of the prompt. NEVER the prompt itself.
+  inputChars: integer("input_chars").notNull().default(0),
+  outputChars: integer("output_chars").notNull().default(0),
+  estimatedNeurons: integer("estimated_neurons").notNull().default(0),
+  cacheHit: integer("cache_hit", { mode: "boolean" }).notNull().default(false),
+  durationMs: integer("duration_ms"),
+  outcome: text("outcome", { enum: ["ok", "error", "refused", "budget"] }).notNull().default("ok"),
+  error: text("error"),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  pageIdx: index("ai_usage_page_idx").on(t.createdAt, t.uuid),
+  // The budget check is "neurons spent since midnight UTC", so it reads by time. Without this index that
+  // check would scan the table, and it runs before every single inference.
+  spendIdx: index("ai_usage_spend_idx").on(t.createdAt),
+  userIdx: index("ai_usage_user_idx").on(t.userId, t.createdAt),
+  featureIdx: index("ai_usage_feature_idx").on(t.feature),
+}));
+
+// Generation results, keyed by (feature, prompt version, hash of the inputs). A review-cycle summary nobody
+// edited costs one inference forever, which on a 10,000-neuron day is the difference between a feature being
+// affordable and not.
+//
+// The output IS stored here, unlike in `ai_usage`, and that is a deliberate distinction rather than an
+// inconsistency: the output is already being shown in the app and is about to be written to a record, so it
+// lives in the same database under the same access control as the record it describes. The INPUT still is not
+// stored - a hash is enough to match a cache entry, and storing the prompt would mean keeping a second copy
+// of source text that already exists in its own table.
+export const aiCache = sqliteTable("ai_cache", {
+  uuid: pk(),
+  cacheKey: text("cache_key").notNull(), // sha256(feature | promptVersion | inputs)
+  feature: text("feature").notNull(),
+  output: text("output").notNull(),
+  hits: integer("hits").notNull().default(0),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  keyIdx: uniqueIndex("ai_cache_key_idx").on(t.cacheKey),
+  // The nightly sweep deletes by expiry; without this it would scan.
+  expiryIdx: index("ai_cache_expiry_idx").on(t.expiresAt),
+}));
+
+// A machine's suggestion about one record, and what a human did with it.
+//
+// Generic in its key (`hostCollection` + `hostRecordId`) but NOT a wire collection: it is served as a
+// sub-resource of whatever it is about, gated by read on that record, so there is no separate question of who
+// may see a suggestion about somebody else's ticket. Promoting it to a collection later, when a second host
+// exists, is a route change rather than a migration - which is why the columns are host-agnostic now.
+//
+// It exists for two reasons, and neither is "so the app can act on it":
+//   PROVENANCE. An AI layer over HR data has to be able to say which suggestions were made, by which model,
+//   from what evidence, and whether a person took them. `basis` records the evidence count - "4 of the 7
+//   nearest resolved tickets" - so a suggestion can be re-explained after the fact.
+//   MEASUREMENT. The accept rate is the only honest signal of whether a feature is worth its neurons. A
+//   suggestion nobody takes is a feature to remove, and without this table that is unanswerable.
+//
+// Accepting does NOT write through this table. The UI calls the record's own verb (`tickets:route`,
+// `tickets:prioritize`), so the change goes through the normal service with the normal validation and audit
+// trail, and `state` here is only the record of what was decided.
+export const aiSuggestions = sqliteTable("ai_suggestions", {
+  uuid: pk(),
+  hostCollection: text("host_collection").notNull(), // "tickets"
+  hostRecordId: text("host_record_id").notNull(),
+  feature: text("feature").notNull(), // "tickets.triage"
+  payloadJson: text("payload_json").notNull(), // the suggested values + the neighbours that produced them
+  model: text("model").notNull(),
+  basis: integer("basis").notNull().default(0), // how many neighbours the vote was taken over
+  state: text("state", { enum: ["pending", "accepted", "rejected", "superseded"] }).notNull().default("pending"),
+  decidedBy: text("decided_by").references((): AnySQLiteColumn => users.uuid),
+  decidedAt: integer("decided_at", { mode: "timestamp_ms" }),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  // One live suggestion per record per feature: a recomputation REPLACES the previous one rather than
+  // stacking, so the panel never has to choose between two answers and the accept rate counts records, not
+  // page opens.
+  hostIdx: uniqueIndex("ai_suggestions_host_idx").on(t.hostCollection, t.hostRecordId, t.feature),
+  stateIdx: index("ai_suggestions_state_idx").on(t.feature, t.state),
+}));
+
+// What the semantic index currently holds, and for which version of the text. The VECTORS are in Vectorize
+// (see lib/vector.ts for why they are not here); this is the bookkeeping that makes the index reconcilable.
+//
+// Without it there is no way to answer either of the two questions the embed drain has to ask every tick:
+// which `search_docs` rows have changed since they were embedded (compare `textHash`), and which entries in
+// the index no longer have a row behind them at all. The second matters because `search_docs` is maintained
+// by SQL triggers - a delete happens inside the database, where nothing can call Vectorize - so orphans are
+// found by outer-joining this table against `search_docs` rather than by noticing the delete as it happens.
+//
+// `model` is recorded because vectors from two models are not comparable. Changing the embedding model means
+// every row needs re-embedding, and this column is what makes that a query rather than a guess.
+export const searchVectors = sqliteTable("search_vectors", {
+  uuid: pk(),
+  collection: text("collection").notNull(),
+  recordId: text("record_id").notNull(),
+  textHash: text("text_hash").notNull(), // sha256 of the title + subtitle that was embedded
+  model: text("model").notNull(),
+  embeddedAt: integer("embedded_at", { mode: "timestamp_ms" }).notNull(),
+  // When the drain last COMPARED this row's text against its hash, which is not the same as when it last
+  // embedded it: a row that has not changed is checked and left alone.
+  //
+  // It exists to make the sweep a rotation. `search_docs` is trigger-maintained and carries no updated_at, so
+  // "has this row's text changed" can only be answered by hashing it, which means reading rows that are
+  // probably fine. Ordering the sweep by this column oldest-first means every row comes up for inspection in
+  // turn; without it the drain would re-examine whatever the database handed back first and could leave the
+  // rest of the table permanently unvisited.
+  checkedAt: integer("checked_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  // Mirrors the key `search_docs` is unique on, which is also the Vectorize id (lib/vector.ts vectorIdOf).
+  recordIdx: uniqueIndex("search_vectors_record_idx").on(t.collection, t.recordId),
+  modelIdx: index("search_vectors_model_idx").on(t.model),
+  // The sweep's order. Without this the rotation below would sort the whole table every five minutes.
+  checkedIdx: index("search_vectors_checked_idx").on(t.checkedAt),
+}));
+
 // ---- Workflow & automation engine ----
 // Append-only record of every emitted domain event (see services/eventBus.ts). The spine that makes the
 // system coherent: services announce "X happened" here, and the automation engine reacts. Flat, admin-only
@@ -2095,6 +2251,11 @@ export const assetCategories = sqliteTable("asset_categories", {
   name: text("name").notNull(), // e.g. "Laptop"
   tagCode: text("tag_code").notNull(), // short code printed in the tag, e.g. "LAP"
   requiresSerial: integer("requires_serial", { mode: "boolean" }).notNull().default(false), // serial number mandatory for this kind
+  // How long this kind of kit is written down over, in months - the depreciation life a laptop or a monitor
+  // has as a CLASS, which is why it sits here and not on each asset. Feeds `bookValue` (domain/assetValue.ts)
+  // together with the asset's own purchase cost and date. NULL = this category is not depreciated, and an
+  // asset in it has no book value rather than a book value equal to its cost.
+  usefulLifeMonths: integer("useful_life_months"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
   locked: integer("locked", { mode: "boolean" }).notNull().default(false),
@@ -2117,6 +2278,10 @@ export const assets = sqliteTable("assets", {
   assignedTo: text("assigned_to").references(() => employees.uuid),
   assignedOn: integer("assigned_on", { mode: "timestamp_ms" }),
   purchaseDate: integer("purchase_date", { mode: "timestamp_ms" }),
+  // What it cost. Half of the book value the inventory is asked for ("what are we holding"); the other half is
+  // the category's useful life. Kept nullable because most of what an inventory inherits has no invoice behind
+  // it any more, and guessing a cost would be worse than declining to value the row.
+  purchaseCost: real("purchase_cost"),
   tagPrintedAt: integer("tag_printed_at", { mode: "timestamp_ms" }), // last time a physical sticker tag was printed for this asset
   verifiedAt: integer("verified_at", { mode: "timestamp_ms" }), // last time the physical asset was sighted (stocktake scan)
   // Who sighted it, and whether that sighting was PROVEN by a scan or ticked off by hand (a destroyed sticker
@@ -2322,6 +2487,17 @@ export const payrollRuns = sqliteTable("payroll_runs", {
   // overtime, loans, tax verifications, settings, new joiners, holidays, and - with LOP on - approved leave
   // and attendance punches) touched after this timestamp = rebuild needed.
   itemsBuiltAt: integer("items_built_at", { mode: "timestamp_ms" }),
+  // The size of the last build: how many people it priced, and what it priced them at. Written by the SAME
+  // atomic batch as `itemsBuiltAt` and the items themselves, and cleared with them on every reset - so the
+  // three can never describe different builds, and NULL means "never built" exactly as a null build stamp does.
+  //
+  // Stored rather than summed on read. The figures live on `payroll_run_items`, one row per employee per run,
+  // so a run list that wanted them would read the whole org's items for every run on the page to render twelve
+  // lines. The build already holds those rows in memory when it commits, so this costs one wider update on a
+  // path that was already writing, and nothing at all on the read.
+  headcount: integer("headcount"),
+  gross: real("gross"),
+  net: real("net"),
   // When a bank payout file was first generated for this run. Downloading it is the point where the money
   // leaves the company, and deleting a run RELEASES every payable it paid back into the queue - so once this
   // is stamped the run can no longer be deleted, otherwise the next run would pay the same one-offs again.
@@ -2881,6 +3057,17 @@ export const tickets = sqliteTable("tickets", {
   description: text("description"),
   priority: text("priority", { enum: ["low", "medium", "high"] }).notNull().default("medium"),
   state: text("state", { enum: ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED", "CANCELLED"] }).notNull().default("OPEN"),
+  // The two service timestamps a queue is judged on. Stamped rather than derived: first response would
+  // otherwise mean reading a ticket's whole comment thread for every row of a list, which is the cost the
+  // checklist counts were denormalized to avoid.
+  //
+  // `firstResponseAt` is the first comment by somebody OTHER than the requester. It is claimed once and never
+  // moves - a later reply is not a first response, and the requester chasing their own ticket is not an answer.
+  // `resolvedAt` is when the ticket reached its CURRENT resolution: `:resolve` stamps it and `:reopen` clears
+  // it, so a reopened ticket is honestly unresolved again rather than carrying the date it was wrongly closed.
+  // A ticket resolved twice reports the second date, which is the one a reader asking "is this done" wants.
+  firstResponseAt: integer("first_response_at", { mode: "timestamp_ms" }),
+  resolvedAt: integer("resolved_at", { mode: "timestamp_ms" }),
   // Files attached to the ticket: a JSON array of {key,name,content_type,size_bytes,created_at,by} where `key`
   // is the R2 object holding the bytes. A JSON column rather than a child collection because an attachment has
   // no life of its own - it is readable exactly when its ticket is, dies with it, and is never listed, shared

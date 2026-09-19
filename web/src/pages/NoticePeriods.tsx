@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { LogOut, Plus, Check, Pencil, Trash2, RotateCcw, ShieldX, Undo2, UserMinus } from "lucide-react";
+import { LogOut, Plus, Check, Pencil, Trash2, RotateCcw, ShieldX, Undo2, UserMinus, Laptop } from "lucide-react";
 import { create, patch, get } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { DEFAULT_TRANSITION_TEMPLATES, type TransitionTemplate } from "@/lib/transitions";
@@ -8,7 +8,8 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf, humanize, personIndex, personName } from "@/lib/utils";
 import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
-import type { NoticePeriod, Employee, Me } from "@/types";
+import type { Asset, Department, NoticePeriod, Employee, Me } from "@/types";
+import { countBy } from "@/lib/tableSignals";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -94,7 +95,24 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
   const offboardingTemplates = templates.filter((t) => t.kind === "offboarding");
   const chosenTemplate = offboardingTemplates.find((t) => t.id === form.template);
 
+  // Kit still out with the people on this page. Read only where the caller can see assets at all - the
+  // column is about company property, not about the leaver, so somebody without that grant gets the page
+  // without it rather than a column of zeroes that would read as "nothing to collect".
+  const canAssets = usePermission("assets.read");
+  const { rows: assets } = useCollection<Asset>("assets", { enabled: canAssets });
+  const assetsOut = useMemo(
+    () => countBy(assets.filter((a) => a.assigned_to), (a) => idOf(a.assigned_to!)),
+    [assets],
+  );
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
+  const deptName = useMemo(() => {
+    const m = new Map(departments.map((d) => [idOf(d.path), d.display_name]));
+    return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "" : "");
+  }, [departments]);
+
   const emp = (p?: string) => (p ? employees.find((e) => idOf(e.path) === idOf(p)) : undefined);
+  /** The employee row behind a notice period, for the columns that read their department. */
+  const empOf = (p?: string) => emp(p);
   // Built ONCE per directory read, not once per call - this is a DataTable column accessor (see `personName`).
   const empIdx = useMemo(() => personIndex(employees), [employees]);
   const empName = (p?: string, unknown?: string) => personName(empIdx, p, unknown);
@@ -203,6 +221,21 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
         sort: "lwd.asc",
       });
     }
+    // Leaving with company kit still assigned to them. The assets page knows, the exit list knows, and
+    // until now neither said it to the person doing the offboarding.
+    if (canAssets) {
+      const withKit = live.filter((n) => isServing(n) && (assetsOut.get(idOf(n.employee ?? "")) ?? 0) > 0);
+      if (withKit.length > 0) {
+        out.push({
+          id: "kit-out",
+          label: `${withKit.length} leaving with kit still out`,
+          tone: "warning",
+          hint: "Laptops, phones and anything else still assigned to them. Collect before the last working day.",
+          filters: { assets_out: ">0" },
+          sort: "lwd.asc",
+        });
+      }
+    }
     return out;
   };
 
@@ -219,6 +252,25 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
     { id: "status", header: "Status", filter: "select", groupBy: true, accessor: (n) => n.status, cell: (n) => <StatusBadge n={n} /> },
     { id: "total", header: "Notice (days)", defaultHidden: true, align: "right", filter: "number", formatTotal: (d) => `${d} days`, accessor: (n) => n.total_days, cell: (n) => <span className="tabular-nums">{n.total_days}</span> },
     { id: "reason", header: "Reason", defaultHidden: true, accessor: (n) => n.reason ?? "", cell: (n) => n.reason || "-" },
+    {
+      // Which team is losing somebody. An exit list reads as a list of individuals until it is folded by
+      // department, at which point "three of the four leavers are in one team" is a single glance.
+      id: "department", header: "Department", filter: "select", groupBy: true, defaultHidden: true,
+      accessor: (n) => deptName(empOf(n.employee)?.department),
+    },
+    ...(canAssets ? [{
+      // Company kit still assigned to somebody who is working out their notice. It is the single most
+      // expensive thing to discover after a last working day, and neither page could see the other.
+      id: "assets_out", header: "Kit out", align: "right" as const, filter: "number" as const, aggregate: "sum" as const,
+      accessor: (n: NoticePeriod) => (isServing(n) ? assetsOut.get(idOf(n.employee ?? "")) ?? 0 : null),
+      cell: (n: NoticePeriod) => {
+        if (!isServing(n)) return <span className="text-muted-foreground">-</span>;
+        const count = assetsOut.get(idOf(n.employee ?? "")) ?? 0;
+        return count
+          ? <span className="inline-flex items-center gap-1 font-medium text-warning"><Laptop className="h-3.5 w-3.5" />{count}</span>
+          : <span className="text-muted-foreground">0</span>;
+      },
+    }] : []),
     stateColumn<NoticePeriod>(),
     ...metaColumns<NoticePeriod>(),
     {

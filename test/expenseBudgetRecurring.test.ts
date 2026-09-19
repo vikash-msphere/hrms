@@ -53,6 +53,13 @@ async function seedCategory(name = "Rent"): Promise<string> {
   await deps.db.insert(schema.expenseCategories).values({ uuid, code: short("c"), name });
   return uuid;
 }
+/** One expense charged to a cap: filed, submitted and (by default) approved, which is what `spent` counts. */
+async function charged(actor: AppUser, cat: string, on: string, amount: number, approve = true) {
+  const e = await createExpense(deps, actor, { category: `expense-categories/${cat}`, incurred_on: on, amount });
+  await submitExpense(deps, actor, e.uuid);
+  if (approve) await approveExpense(deps, actor, e.uuid);
+  return e;
+}
 
 describe("recurring expense generation", () => {
   it("clones a due template once, advances nextOccurrenceOn, and is idempotent", async () => {
@@ -155,7 +162,10 @@ describe("expense budgets", () => {
     expect(budget.pending).toBe(12000);
 
     const raw = (await deps.db.select().from(schema.expenseBudgets).where(eq(schema.expenseBudgets.uuid, budget.uuid)))[0]!;
-    expect(await computeBudgetSpend(deps, raw)).toEqual({ spent: 30000, pending: 12000 });
+    // `months` is the same spend broken out per calendar month the period covers (it becomes `spendHistory`
+    // on the wire). A monthly budget covers exactly one, so it restates the total - which is the case worth
+    // pinning, because a breakdown that disagreed with its own total would be worse than no breakdown.
+    expect(await computeBudgetSpend(deps, raw)).toEqual({ spent: 30000, pending: 12000, months: [{ period: "2026-06", spent: 30000 }] });
   });
 
   it("fires a budget-threshold alert once when spend crosses a level", async () => {
@@ -222,17 +232,76 @@ describe("budget spend attribution", () => {
     expect(queries).toBe(1);
 
     const key = (s: (typeof scopes)[number]) => `${s.departmentId ?? "-"}|${s.categoryId ?? "-"}|${s.periodType}|${s.periodKey}`;
+    // `toMatchObject`, because the answer also carries the per-month breakdown `spend_history` is built from -
+    // which has its own tests below. The totals are what this one is about.
     // Org-wide Travel, July: both July travel charges (the dept one included - an org-wide cap has no filter).
-    expect(many.get(key(scopes[0]))).toEqual({ spent: 15000, pending: 0 });
+    expect(many.get(key(scopes[0]))).toMatchObject({ spent: 15000, pending: 0 });
     // Sales Travel, July: only the charge carrying that cost centre.
-    expect(many.get(key(scopes[1]))).toEqual({ spent: 5000, pending: 0 });
+    expect(many.get(key(scopes[1]))).toMatchObject({ spent: 5000, pending: 0 });
     // Cloud, Q3: July approved + September submitted, split by commitment.
-    expect(many.get(key(scopes[2]))).toEqual({ spent: 3000, pending: 1000 });
+    expect(many.get(key(scopes[2]))).toMatchObject({ spent: 3000, pending: 1000 });
     // All categories, 2026: every charge in the year.
-    expect(many.get(key(scopes[3]))).toEqual({ spent: 27000, pending: 1000 });
+    expect(many.get(key(scopes[3]))).toMatchObject({ spent: 27000, pending: 1000 });
 
     // Same answers as the single-budget path.
     for (const s of scopes) expect(await computeBudgetSpend(deps, s as any)).toEqual(many.get(key(s)));
+  });
+
+  // `spend_history` on the wire is this breakdown. It is free - the attribution above already buckets every
+  // charge by month in order to sum it - so what has to hold is that the series is COMPLETE (a month with no
+  // charges is a real 0, not a missing point), IN ORDER, and reconciles: the points sum to `spent`. A
+  // sparkline drawn from a series that silently drops its empty months draws a different shape.
+  describe("per-month breakdown", () => {
+    it("emits one point per month of the period, oldest first, summing to spent", async () => {
+      const emp = await seedEmployee();
+      const actor = await seedActor(emp);
+      const cloud = await seedCategory("Cloud");
+      await charged(actor, cloud, "2026-07-10", 3000);
+      await charged(actor, cloud, "2026-09-10", 1500);
+
+      const q3 = { departmentId: null, categoryId: cloud, periodType: "quarterly", periodKey: "2026-Q3" } as const;
+      const { spent, months } = await computeBudgetSpend(deps, q3 as any);
+      expect(months.map((m) => m.period)).toEqual(["2026-07", "2026-08", "2026-09"]);
+      // August is a real zero: nothing was charged, and saying so is the point.
+      expect(months.map((m) => m.spent)).toEqual([3000, 0, 1500]);
+      expect(months.reduce((s, m) => s + m.spent, 0)).toBe(spent);
+    });
+
+    it("gives a monthly cap exactly one point, and a yearly cap twelve", async () => {
+      const emp = await seedEmployee();
+      const actor = await seedActor(emp);
+      const cat = await seedCategory("Rent");
+      await charged(actor, cat, "2026-03-01", 8000);
+
+      const monthly = await computeBudgetSpend(deps, { departmentId: null, categoryId: cat, periodType: "monthly", periodKey: "2026-03" } as any);
+      expect(monthly.months).toEqual([{ period: "2026-03", spent: 8000 }]);
+
+      const yearly = await computeBudgetSpend(deps, { departmentId: null, categoryId: cat, periodType: "yearly", periodKey: "2026" } as any);
+      expect(yearly.months).toHaveLength(12);
+      expect(yearly.months[0]!.period).toBe("2026-01");
+      expect(yearly.months[11]!.period).toBe("2026-12");
+      expect(yearly.months.reduce((s, m) => s + m.spent, 0)).toBe(yearly.spent);
+    });
+
+    it("leaves submitted claims out of the series, as it leaves them out of spent", async () => {
+      const emp = await seedEmployee();
+      const actor = await seedActor(emp);
+      const cat = await seedCategory("Events");
+      await charged(actor, cat, "2026-04-05", 2000); // approved
+      await charged(actor, cat, "2026-04-20", 7000, false); // submitted, still in the queue
+
+      const { spent, pending, months } = await computeBudgetSpend(deps, { departmentId: null, categoryId: cat, periodType: "monthly", periodKey: "2026-04" } as any);
+      expect(spent).toBe(2000);
+      expect(pending).toBe(7000);
+      // A queue is not history, so the sparkline never plots it.
+      expect(months).toEqual([{ period: "2026-04", spent: 2000 }]);
+    });
+
+    it("is empty for a malformed period key rather than guessing a span", async () => {
+      const cat = await seedCategory("Nonsense");
+      const bad = await computeBudgetSpend(deps, { departmentId: null, categoryId: cat, periodType: "monthly", periodKey: "not-a-month" } as any);
+      expect(bad).toEqual({ spent: 0, pending: 0, months: [] });
+    });
   });
 
   it("charges an expense with no incurred date by its created date", async () => {
@@ -245,10 +314,10 @@ describe("budget spend attribution", () => {
     const created = (await deps.db.select().from(schema.expenses).where(eq(schema.expenses.uuid, e.uuid)))[0]!.createdAt!;
 
     const thisMonth = periodKeyFor("monthly", created);
-    expect(await computeBudgetSpend(deps, { departmentId: null, categoryId: cat, periodType: "monthly", periodKey: thisMonth })).toEqual({ spent: 4000, pending: 0 });
+    expect(await computeBudgetSpend(deps, { departmentId: null, categoryId: cat, periodType: "monthly", periodKey: thisMonth })).toEqual({ spent: 4000, pending: 0, months: [{ period: thisMonth, spent: 4000 }] });
     // ...and not against a month it was neither incurred nor created in.
     const other = periodKeyFor("monthly", new Date(Date.UTC(created.getUTCFullYear() - 1, 0, 15)));
-    expect(await computeBudgetSpend(deps, { departmentId: null, categoryId: cat, periodType: "monthly", periodKey: other })).toEqual({ spent: 0, pending: 0 });
+    expect(await computeBudgetSpend(deps, { departmentId: null, categoryId: cat, periodType: "monthly", periodKey: other })).toEqual({ spent: 0, pending: 0, months: [{ period: other, spent: 0 }] });
   });
 });
 

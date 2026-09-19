@@ -7,11 +7,13 @@ import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
 import { cn, idOf } from "@/lib/utils";
 import { LEAVE_COLORS, leaveColor } from "@/lib/leaveColors";
-import type { LeaveType, Me } from "@/types";
+import type { LeaveRequest, LeaveType, Me } from "@/types";
+import { countBy } from "@/lib/tableSignals";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -164,6 +166,26 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
     return parts.join(" · ");
   })();
 
+  // Requests filed against each type, from what this caller can see. Read only where they can see leave at
+  // all: for anybody else the column would be a row of zeroes claiming nobody uses any of these.
+  const canRequests = usePermission("leave-requests.read");
+  const { rows: leaveRequests } = useCollection<LeaveRequest>("leave-requests", { enabled: canRequests });
+  const typeUse = useMemo(
+    () => countBy(leaveRequests.filter((lr) => !["CANCELLED", "REJECTED"].includes((lr.state ?? "").toUpperCase())), (lr) => (lr.leave_type ? idOf(lr.leave_type) : null)),
+    [leaveRequests],
+  );
+
+  const typeInsights = (lts: LeaveType[]): TableInsight[] => {
+    if (!canRequests) return [];
+    const idle = lts.filter((lt) => !lt.delete_time && !lt.disabled && !typeUse.has(idOf(lt.path)));
+    return idle.length === 0 ? [] : [{
+      id: "unused",
+      label: `${idle.length} nobody has booked`,
+      hint: "No requests loaded against these. Disabling one keeps its history and takes it off the request form.",
+      filters: { requests: "=0" },
+    }];
+  };
+
   const columns: Column<LeaveType>[] = [
     { id: "name", header: "Name", accessor: (lt) => lt.display_name, cell: (lt) => (
       <span className="flex items-center gap-2 font-medium">
@@ -172,6 +194,16 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
       </span>
     ) },
     { id: "accrual", header: "Accrual / year", filter: "number", formatTotal: (n) => `${n} days`, accessor: (lt) => lt.accrual_days_per_year ?? 0, cell: (lt) => `${lt.accrual_days_per_year ?? 0} days` },
+    ...(canRequests ? [{
+      // How much each type is actually used. A leave catalogue only ever grows, and the type nobody has
+      // booked in a year is indistinguishable from the one half the company lives on until somebody counts.
+      id: "requests", header: "Requests", align: "right" as const, filter: "number" as const, aggregate: "sum" as const,
+      accessor: (lt: LeaveType) => typeUse.get(idOf(lt.path)) ?? 0,
+      cell: (lt: LeaveType) => {
+        const n = typeUse.get(idOf(lt.path)) ?? 0;
+        return n ? <span className="tabular-nums">{n}</span> : <span className="text-muted-foreground">none</span>;
+      },
+    }] : []),
     {
       id: "paid",
       header: "Paid",
@@ -267,6 +299,7 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
             columns={columns}
             tableId="leave-types"
             rows={rows}
+            insights={typeInsights}
             getRowId={(lt) => lt.path}
             rowClassName={(lt) => (lt.delete_time ? "opacity-60" : undefined)}
             emptyTitle="No leave types match"

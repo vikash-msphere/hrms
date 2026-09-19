@@ -13,6 +13,7 @@ import type { Employee, Department, Event, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -283,6 +284,41 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
     reload();
   }
 
+  // What an organiser needs before the week starts, which a list ordered by date does not say: which events
+  // nobody has answered, and which are nearly here with half the room undecided.
+  const eventInsights = (es: Event[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    // "Next 7 days" is both the window counted and the filter applied, so the two cannot drift: the chip's
+    // own narrowing is `when: "next7"` on the date column, which is the same set.
+    const soon = Date.now() + 7 * 86400000;
+    const upcoming = es.filter((e) => !e.delete_time && endMs(e) >= Date.now() && endMs(e) <= soon && (e.attendees ?? []).length > 0);
+    const silent = upcoming.filter((e) => (e.going_count ?? 0) === 0);
+    if (silent.length > 0) {
+      out.push({
+        id: "no-rsvp",
+        label: `${silent.length} with nobody confirmed`,
+        tone: "warning",
+        hint: "Happening in the next 7 days with no yes from anybody invited.",
+        filters: { turnout: "=0", when: "next7" },
+        sort: "when.asc",
+      });
+    }
+    const thin = upcoming.filter((e) => {
+      const invited = (e.attendees ?? []).length;
+      return invited > 0 && (e.going_count ?? 0) / invited < 0.5 && (e.going_count ?? 0) > 0;
+    });
+    if (thin.length > 0) {
+      out.push({
+        id: "thin-turnout",
+        label: `${thin.length} under half confirmed`,
+        hint: "In the next 7 days, with fewer than half the invitations answered yes. Numbers for catering and rooms.",
+        filters: { turnout: "1..49", when: "next7" },
+        sort: "turnout.asc",
+      });
+    }
+    return out;
+  };
+
   const cols: Column<Event>[] = [
     { id: "title", header: "Event", accessor: (e) => e.title, cell: (e) => (
       <span className="flex items-center gap-2 font-medium">
@@ -347,6 +383,19 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
         </div>
       );
     } },
+    {
+      // Confirmed heads as a share of the people invited, drawn as well as printed. Catering, rooms and
+      // travel all hang off it, and "12 going" means nothing until you know whether 14 or 140 were asked.
+      id: "turnout", header: "Turnout", align: "right", defaultHidden: true, filter: "number",
+      formatTotal: (n) => `${Math.round(n)}%`,
+      accessor: (e) => { const invited = (e.attendees ?? []).length; return invited ? Math.round(((e.going_count ?? 0) / invited) * 100) : null; },
+      bar: (e) => { const invited = (e.attendees ?? []).length; return invited ? (e.going_count ?? 0) / invited : null; },
+      cell: (e) => {
+        const invited = (e.attendees ?? []).length;
+        if (!invited) return <span className="text-muted-foreground">-</span>;
+        return <span className="tabular-nums">{Math.round(((e.going_count ?? 0) / invited) * 100)}%</span>;
+      },
+    },
     { id: "description", header: "Description", defaultHidden: true, accessor: (e) => e.description ?? "", cell: (e) => e.description || "-" },
     stateColumn<Event>(),
     ...metaColumns<Event>(),
@@ -423,6 +472,7 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
             tableId="events"
             columns={cols}
             rows={kf.apply(sorted)}
+            insights={eventInsights}
             getRowId={(e) => e.path}
             rowClassName={(e) => (e.delete_time || endMs(e) < Date.now() ? "opacity-60" : undefined)}
             emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : "No events"}

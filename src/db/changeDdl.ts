@@ -144,6 +144,10 @@ export const UNSTAMPED_TABLES: Record<string, string> = {
   // The FTS index. Written by the search triggers whenever a stamped row is written, so it is stamped already -
   // one hop back - and `/v1/search` is a live query that caches nothing.
   search_docs: "derived from stamped tables; search results are never stored",
+  // The semantic index's bookkeeping: which `search_docs` row was embedded, for which text and which model.
+  // One hop further back than the FTS index and the same argument - a row here moves only when the row it
+  // describes has already been written and stamped, and nothing over the wire carries its values.
+  search_vectors: "index bookkeeping for stamped rows; search results are never stored",
   // Per-VIEWER UI state (theme, tab badges), fetched by its own key-addressed route and never listed. The
   // browser that wrote it is the only one that reads it back.
   preferences: "per-viewer UI state, key-addressed, never listed",
@@ -152,6 +156,20 @@ export const UNSTAMPED_TABLES: Record<string, string> = {
   // access-rules collection changed on every audited request in the app - the opposite of what a change stamp
   // is for, and it would invalidate every client's rule cache continuously.
   rule_usage: "internal counter; the review that reads it is a live report, never cached as a collection",
+  // The inference trail. Written on every model call, and no wire resource carries a row's own values: what a
+  // reader sees is a spend report built live from it. Stamping it would mark a collection changed on every
+  // inference the app performs, including the ones made for that reader's own request.
+  ai_usage: "internal inference trail; the spend report that reads it is live, never cached as a collection",
+  // Generation cache, keyed by a hash of the inputs. A hit changes nothing anybody reads: the output it holds
+  // is what the same call would have produced, and the resource it lands on is stamped when it is written.
+  ai_cache: "internal result cache; the record the output is written to is stamped on its own",
+  // A machine's suggestion about a record, plus what a human did with it. Deliberately NOT a stamp on the
+  // collection it concerns: a suggestion is not a change to the ticket, and treating it as one would tell
+  // every client the ticket had been edited each time somebody opened the triage panel. It is read live
+  // through `tickets:triage`, computed per call, and never held client-side as a collection. When a
+  // suggestion IS accepted, the write that follows goes through `tickets:route` / `:prioritize`, and those
+  // stamp `tickets` themselves - which is the change a reader actually cares about.
+  ai_suggestions: "advisory record read live through its host's verb; accepting one writes through the host, which is stamped",
 };
 
 // `attachments` is a side table too, but a POLYMORPHIC one: every row names its own parent collection, so

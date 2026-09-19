@@ -18,6 +18,7 @@ import { usePermission, useCapabilities, canSeeActivity, useCanSeeActivity } fro
 import { cn, formatBytes, formatDate, humanize, idOf } from "@/lib/utils";
 import { isExternalUrl, openExternal } from "@/lib/openExternal";
 import { todayStr, addDaysYmd } from "@/lib/orgDay";
+import { daysUntil, fmtDaysCount } from "@/lib/tableDerive";
 import { Checkbox } from "@/components/ui/checkbox";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { RupeeCircle } from "@/components/icons/RupeeCircle";
@@ -567,6 +568,28 @@ export default function Documents({ me }: { me: Me }) {
         ) : (
           <span className="text-muted-foreground">-</span>
         ),
+    },
+    {
+      // The expiry as a NUMBER of days. The bucket column answers "expired / soon / valid" and the date
+      // column answers a calendar window; neither answers "everything that runs out inside 90 days", which
+      // is how a document library is actually reviewed. Negative once it has already gone.
+      id: "expires_in", header: "Expires in", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      accessor: (d) => daysUntil(d.expire_time),
+      cell: (d) => {
+        const days = daysUntil(d.expire_time);
+        if (days == null) return <span className="text-muted-foreground">-</span>;
+        return <span className={cn("tabular-nums text-xs", days < 0 ? "font-medium text-destructive" : days <= 30 ? "text-warning" : "text-muted-foreground")}>
+          {days < 0 ? `${fmtDaysCount(-days)} ago` : fmtDaysCount(days)}
+        </span>;
+      },
+    },
+    {
+      // What the library costs to hold, and which single record is a forty-megabyte scan. Summed, because
+      // "how much is in here" is the question a storage bill asks.
+      id: "size", header: "Size", align: "right", defaultHidden: true, filter: "number", aggregate: "sum",
+      formatTotal: (n) => formatBytes(n),
+      accessor: (d) => d.size_bytes ?? null,
+      cell: (d) => (d.size_bytes ? <span className="tabular-nums text-muted-foreground">{formatBytes(d.size_bytes)}</span> : <span className="text-muted-foreground">-</span>),
     },
     { id: "file_name", header: "File name", defaultHidden: true, accessor: (d) => d.file_name ?? "", cell: (d) => d.file_name || "-" },
     { id: "content_type", header: "Content type", defaultHidden: true, filter: "select", groupBy: true, accessor: (d) => d.content_type ?? "", cell: (d) => d.content_type || "-" },

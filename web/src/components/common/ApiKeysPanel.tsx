@@ -8,6 +8,10 @@ import { useDebounced } from "@/hooks/useDebounced";
 import { useCanSeeActivity, usePermission } from "@/lib/perm";
 import { Card, CardContent } from "@/components/ui/card";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
+import { cn } from "@/lib/utils";
+import { daysSince, daysUntil, fmtDaysCount } from "@/lib/tableDerive";
+import { BLANK } from "@/lib/tableFilter";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -40,6 +44,12 @@ import type { ApiKey } from "@/types";
 // `custom` takes any future date, because the server always did and a key's real life is usually somebody
 // else's date - an audit window, a contract end, a migration cutover. With only fixed spans on offer, all of
 // those became "Never".
+// When a credential stops being dormant and starts being loose. A quarter of silence means whatever used it
+// has moved on, been rewritten, or never existed.
+const IDLE_KEY_DAYS = 90;
+// How much warning is useful before a key lapses and takes an integration with it.
+const KEY_EXPIRY_SOON_DAYS = 30;
+
 const CUSTOM_EXPIRY = "custom";
 const EXPIRY_OPTIONS = [
   { value: "1", label: "1 month" },
@@ -170,6 +180,46 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
   const [minted, setMinted] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // What a credential list is audited for. Each one is a key somebody should decide about: the unused ones
+  // are free to revoke, the ones with no expiry never will be unless a person does it, and the ones about to
+  // lapse take an integration down when they do.
+  const keyInsights = (ks: ApiKey[]): TableInsight[] => {
+    const live = ks.filter((k) => !k.delete_time);
+    const out: TableInsight[] = [];
+    const idle = live.filter((k) => (daysSince(k.last_used_time) ?? Infinity) >= IDLE_KEY_DAYS);
+    if (idle.length > 0) {
+      out.push({
+        id: "idle",
+        label: `${idle.length} unused for ${IDLE_KEY_DAYS} days`,
+        tone: "warning",
+        hint: "Nothing has called with these. A key nobody uses is one nobody misses when it is revoked.",
+        filters: { idle_days: `>=${IDLE_KEY_DAYS}` },
+        sort: "idle_days.desc",
+      });
+    }
+    const soon = live.filter((k) => { const d = daysUntil(k.expire_time); return d != null && d >= 0 && d <= KEY_EXPIRY_SOON_DAYS; });
+    if (soon.length > 0) {
+      out.push({
+        id: "expiring",
+        label: `${soon.length} expiring within ${KEY_EXPIRY_SOON_DAYS} days`,
+        tone: "warning",
+        hint: "Whatever calls with these stops working on that date.",
+        filters: { expires_in: `0..${KEY_EXPIRY_SOON_DAYS}` },
+        sort: "expires_in.asc",
+      });
+    }
+    const forever = live.filter((k) => !k.expire_time);
+    if (forever.length > 0) {
+      out.push({
+        id: "no-expiry",
+        label: `${forever.length} that never expire`,
+        hint: "These stay valid until somebody revokes them by hand.",
+        filters: { expires: BLANK },
+      });
+    }
+    return out;
+  };
+
   const columns: Column<ApiKey>[] = useMemo(
     () => [
       {
@@ -209,6 +259,21 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
       // months (a key nobody uses is a key nobody misses when it is revoked). Blank in either is "never".
       { id: "expires", header: "Expires", filter: "date", dateHint: "future", accessor: (k) => k.expire_time ?? "", cell: (k) => <span className="text-muted-foreground">{k.expire_time ? fmtDate(k.expire_time) : "Never"}</span> },
       { id: "last_used", header: "Last used", filter: "date", dateHint: "past", accessor: (k) => k.last_used_time ?? "", cell: (k) => <span className="text-muted-foreground">{fmtDate(k.last_used_time)}</span> },
+      {
+        // The same two dates as numbers, because an audit asks them as thresholds ("anything idle past 90
+        // days", "anything lapsing inside a month") and a calendar window cannot be sorted by how bad it is.
+        id: "idle_days", header: "Idle", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+        accessor: (k) => (k.delete_time ? null : daysSince(k.last_used_time)),
+        cell: (k) => {
+          const d = k.delete_time ? null : daysSince(k.last_used_time);
+          if (d == null) return <span className="text-muted-foreground">never used</span>;
+          return <span className={cn("tabular-nums text-xs", d >= IDLE_KEY_DAYS ? "font-medium text-warning" : "text-muted-foreground")}>{fmtDaysCount(d)}</span>;
+        },
+      },
+      {
+        id: "expires_in", header: "Expires in", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+        accessor: (k) => (k.delete_time ? null : daysUntil(k.expire_time)),
+      },
       {
         id: "actions", header: "", sortable: false, filter: "none", align: "right",
         cell: (k) =>
@@ -442,6 +507,7 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
           columns={columns}
           tableId="api-keys"
           rows={searching ? searchRows : keys}
+          insights={keyInsights}
           getRowId={(k) => k.path}
           rowClassName={() => "group"}
           emptyTitle="No API keys"

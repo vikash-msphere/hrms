@@ -842,3 +842,40 @@ describe("the column picker offers only fields the caller can read", () => {
     expect(await keysFor(employee)).toContain("@identity.pan");
   });
 });
+
+describe("a filter means the same thing wherever it is judged", () => {
+  // The runner evaluates a filter in SQL when it sits on a base column and in memory when it sits behind a
+  // link or a source. Every operator therefore has two implementations, and the file's history is a list of
+  // the ones that had drifted apart (`likeEscape`, `lowerEq`, `equalsValue`). These are the last two.
+  const year = String(new Date().getFullYear());
+  const run = (filters: ViewFilter[], columns: { field: string }[]) =>
+    runTableView(deps, SUPER(), allScopes(), { base: "employees", columns, filters }, { maxPageSize: 50 });
+
+  it("orders TEXT as text on both halves", async () => {
+    await seed();
+    // SQL compared a text column lexicographically while the in-memory half read `Number(cell)` and got NaN,
+    // so "name is after G" answered the whole page on a base column and nothing behind a link.
+    const base = await run([{ field: "first_name", op: "gt", value: "b" }], [{ field: "first_name" }]);
+    expect(base.rows.map((r) => r.cells.first_name)).toEqual(["Grace"]);
+    // Case is folded, matching `lowerEq` next door: "Grace" > "b" needs the two sides in one case to be true.
+    const folded = await run([{ field: "first_name", op: "gte", value: "ADA" }], [{ field: "first_name" }]);
+    expect(folded.rows.map((r) => r.cells.first_name).sort()).toEqual(["Ada", "Grace"]);
+    // The same operator on a LINKED text column, judged in memory, answers rather than excluding everything.
+    const linked = [{ field: "first_name" }, { field: "department_id.name" }];
+    expect((await run([{ field: "department_id.name", op: "gt", value: "A" }], linked)).rows).toHaveLength(2);
+    expect((await run([{ field: "department_id.name", op: "lt", value: "A" }], linked)).rows).toEqual([]);
+  });
+
+  it("matches `contains` on a date against the text the grid shows, not the stored instant", async () => {
+    await seed();
+    // A date column is stored as an instant and rendered as `ymd()`. LIKE over the stored form asked a
+    // different question from the one the reader is looking at, so this matched nothing on a base column and
+    // matched behind a link.
+    const base = await run([{ field: "created_at", op: "contains", value: year }], [{ field: "first_name" }]);
+    expect(base.rows).toHaveLength(2);
+    expect((await run([{ field: "created_at", op: "contains", value: "1999" }], [{ field: "first_name" }])).rows).toEqual([]);
+    const linked = [{ field: "first_name" }, { field: "department_id.name" }];
+    expect((await run([{ field: "department_id.created_at", op: "contains", value: year }], linked)).rows).toHaveLength(2);
+  });
+});
+

@@ -58,7 +58,7 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   suggestions: ["respond", "upvote", "downvote", "merge"],
   referrals: ["upload", "download", "award"],
   "job-requisitions": [],
-  candidates: ["upload", "download"],
+  candidates: ["upload", "download", "extractResume"],
   applications: ["advance", "hire", "reject"],
   interviews: ["complete", "cancel", "invite"],
   "interview-feedback": [],

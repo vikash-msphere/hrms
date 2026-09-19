@@ -5,12 +5,13 @@ import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
-import { idOf } from "@/lib/utils";
+import { cn, idOf } from "@/lib/utils";
 import type { Department, Employee, GoalTemplate, Me, ReviewCycle } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -164,6 +165,36 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
     }
   }
 
+  // A set whose weights do not total 100 scores wrong for everybody it is applied to, and the footer already
+  // shows the sum - but only once somebody thinks to group by set and read each fold. This says it without
+  // being asked, and names the sets.
+  /** Total weight of the set a template belongs to, or null for one that is not in a set. */
+  const setWeight = (t: GoalTemplate) => (t.group_name ? setTotals.get(t.group_name) ?? 0 : null);
+  const setTotals = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of rows) {
+      if (t.delete_time || t.disabled || !t.group_name) continue;
+      m.set(t.group_name, (m.get(t.group_name) ?? 0) + (t.weight ?? 0));
+    }
+    return m;
+  }, [rows]);
+
+  const templateInsights = (ts: GoalTemplate[]): TableInsight[] => {
+    // Counted in TEMPLATES rather than sets, so the chip's own filter leaves exactly what it counted - and
+    // the rows it leaves are the ones somebody has to re-weight anyway.
+    const off = ts.filter((t) => !t.delete_time && !t.disabled && t.group_name && (setWeight(t) ?? 0) > 0 && setWeight(t) !== 100);
+    if (off.length === 0) return [];
+    const sets = [...new Set(off.map((t) => t.group_name!))];
+    return [{
+      id: "weights",
+      label: `${off.length} in sets not totalling 100`,
+      tone: "warning",
+      hint: `Weights add up across a set: ${sets.slice(0, 3).map((name) => `${name} is ${setTotals.get(name)}`).join(", ")}${sets.length > 3 ? "…" : ""}.`,
+      filters: { set_total: "Off" },
+      sort: "group.asc",
+    }];
+  };
+
   const columns: Column<GoalTemplate>[] = [
     { id: "title", header: "Goal", accessor: (t) => t.title ?? "", cell: (t) => (
       <div className="min-w-0">
@@ -181,6 +212,18 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
         : <span className="text-muted-foreground">-</span>
     ) },
     { id: "department", header: "Suggested for", filter: "select", groupBy: true, accessor: (t) => deptName(t.department) ?? "Everyone", cell: (t) => <span className="text-muted-foreground">{deptName(t.department) ?? "Everyone"}</span> },
+    {
+      // Whether this template's SET adds up. The weight column totals in the footer, and the fold subtotal
+      // says it per set once grouped - but neither can be filtered on, and re-weighting is done a template
+      // at a time.
+      id: "set_total", header: "Set weight", filter: "select", groupBy: true, defaultHidden: true,
+      accessor: (t) => { const total = setWeight(t); return total == null || total === 0 ? "" : total === 100 ? "Adds up" : "Off"; },
+      cell: (t) => {
+        const total = setWeight(t);
+        if (total == null || total === 0) return <span className="text-muted-foreground">-</span>;
+        return <span className={cn("tabular-nums", total !== 100 && "font-medium text-warning")}>{total}</span>;
+      },
+    },
     stateColumn<GoalTemplate>(),
     ...metaColumns<GoalTemplate>(),
     {
@@ -242,6 +285,7 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
               columns={columns}
               tableId="goal-templates"
               rows={rows}
+              insights={templateInsights}
               getRowId={(t) => t.path}
               rowClassName={(t) => (t.delete_time || t.disabled ? "opacity-60" : undefined)}
               emptyTitle="No templates match"

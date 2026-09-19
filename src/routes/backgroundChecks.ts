@@ -2,6 +2,7 @@ import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
 import { backgroundCheckSpec, listBackgroundChecks } from "../services/backgroundChecks";
 import { toBackgroundCheckResource } from "../http/serialize";
+import { nonNegativeMoney } from "../http/moneyField";
 
 // Background-verification tracking. NO access checks - the middleware gates the path by grants (private by
 // default; sensitive). Standard CRUD + soft-delete/restore, with a scope-filtered list.
@@ -14,6 +15,7 @@ const writeSchema = z
     reference_no: z.string().nullable().optional(),
     initiated_date: z.string().nullable().optional(),
     completed_date: z.string().nullable().optional(),
+    cost: nonNegativeMoney().nullable().optional(), // what the vendor charged; 0 is legal, negative is not
     notes: z.string().nullable().optional(),
     document: z.string().nullable().optional(), // personal-documents/<id>: the vendor's report
   })

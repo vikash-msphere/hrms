@@ -425,6 +425,15 @@ components:
           items: { type: string }
         status: { type: string, description: Account status value active/disabled. }
         employee: { type: string, description: "Resource path: employees/{employee_id}" }
+        last_seen_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: >-
+            When this account last made a request. A convenience stamp, not an audit record: it is written at
+            most once every 15 minutes per account, so it is accurate to the quarter-hour and no finer. ABSENT
+            when the account has not been seen since the field existed - which is not the same claim as a date,
+            and is why it is omitted rather than sent empty.
         holiday_feed_token: { type: string, readOnly: true, description: "On users/me only: the caller's unguessable token for the public holiday calendar feed at /calendar/holidays/{token}. Present only when the org enabled the feed and the caller has an employee record (never for a simulated principal)." }
         session_id: { type: string, readOnly: true, description: "On users/me only: an opaque identifier for the caller's current sitting, stable for the life of their session and different after a new sign-in. The SPA namespaces its on-disk caches to it so cached records can never outlive the session that fetched them. Absent on lanes that carry no session (an API key, the Cloudflare Access JWT, the dev bypass), where the client keeps no disk cache keyed to one." }
         caller_access:
@@ -1042,6 +1051,7 @@ components:
         reference_no: { type: string, description: "The vendor's case reference." }
         initiated_date: { type: string, format: date }
         completed_date: { type: string, format: date }
+        cost: { type: number, description: "What the vendor charged for this check, in the org's currency. Absent when nothing was recorded - a check run in-house, or an invoice that has not landed - which is not the same as zero." }
         notes: { type: string }
         document: { type: string, description: "Resource path: personal-documents/{id} - the vendor's report, filed as the employee's own document." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
@@ -1486,6 +1496,15 @@ components:
         assigned_to: { type: string, nullable: true, description: "Resource path: employees/{employee_id}. Null (or omitted) when in stock - how a PATCH returns an asset to the company." }
         assigned_on: { type: string, format: date, nullable: true, description: "Date the asset was assigned." }
         purchase_date: { type: string, format: date, nullable: true }
+        purchase_cost: { type: number, nullable: true, description: "What the asset cost, in the org's currency. Half of what `book_value` needs; the other half is the category's useful_life_months." }
+        book_value:
+          type: number
+          readOnly: true
+          description: >-
+            What the asset is worth today: its purchase cost written down straight-line over its category's
+            `useful_life_months`, floored at zero once fully depreciated. ABSENT - never zero - when it cannot
+            be computed (no purchase cost, no purchase date, or a category with no useful life), because zero
+            is the honest answer for kit that is written off and a wrong one for kit nobody priced.
         tag_printed_time: { type: string, format: date-time, readOnly: true, description: "Last time a physical sticker tag was printed for this asset (set by :printTag)." }
         last_verified_time: { type: string, format: date-time, readOnly: true, description: "Last time the physical asset was sighted. Owned by :verify - not writable, so a sighting cannot be claimed without a scan." }
         last_verified_by: { type: string, readOnly: true, description: "Resource path of the employee who recorded the last sighting (employees/{employee_id})." }
@@ -2177,6 +2196,15 @@ components:
         employee: { type: string, description: "Resource path: employees/{employee_id}. Owner; defaults to the caller." }
         department: { type: string, description: "Resource path: departments/{department_id}. The card's department; omit to default to the org default department, null to clear." }
         column_key: { type: string, description: "The card's current column (= state). Defaults to the first column." }
+        column_since_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: >-
+            When the card entered the column it is in NOW - reset on every move, so it ages the current column
+            rather than the card. This is what makes stalled work-in-progress visible in a list ("sat in review
+            for nine days") without reading the board's movement log per row. Absent on a card that has not
+            moved since the field existed.
         swimlane_key: { type: string }
         rank: { type: number, description: "Fractional order within the column/swimlane." }
         title: { type: string }
@@ -3018,6 +3046,16 @@ components:
         display_name: { type: string, description: "e.g. Laptop." }
         tag_code: { type: string, nullable: true, description: "Short code printed inside the tag, e.g. LAP. Unique; a code you send that is already in use is refused. Null asks for the default, which is the first three letters of the name, numbered when another category already answers to it (LAP, then LAP2)." }
         requires_serial: { type: boolean, description: "When true an asset in this category must have its serial number recorded." }
+        useful_life_months:
+          type: integer
+          nullable: true
+          minimum: 1
+          maximum: 600
+          description: >-
+            How long kit of this kind is written down over, in months (36 for a laptop, say). Sits on the
+            category because a depreciation life is a fact about a CLASS of equipment. Together with an asset's
+            own purchase_cost and purchase_date it is what produces `asset.book_value`; null means this
+            category is not depreciated, and its assets carry no book value at all.
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
         locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
@@ -3238,6 +3276,21 @@ components:
         remaining: { type: number, readOnly: true }
         utilization: { type: number, readOnly: true, description: "spent / amount (0..>1)." }
         alert_level: { type: integer, readOnly: true, description: "Highest budget-alert threshold already fired for this period (0 = none)." }
+        spend_history:
+          type: array
+          readOnly: true
+          description: >-
+            `spent` broken down by calendar month, oldest first, covering exactly the months this budget's
+            period spans - one point for a monthly cap, three for a quarterly, twelve for a yearly. That is the
+            finest resolution the underlying attribution has, so a sparkline drawn from it is honest about what
+            it knows. The entries always sum to `spent`; a month with no charges is present with 0, so the
+            series is evenly spaced.
+          items:
+            type: object
+            required: [period, spent]
+            properties:
+              period: { type: string, description: "The calendar month, YYYY-MM." }
+              spent: { type: number, description: "Approved + paid expenses charged to this budget in that month." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -3474,6 +3527,47 @@ components:
         author_email: { type: string, readOnly: true }
         body: { type: string }
         create_time: { type: string, format: date-time, readOnly: true }
+    resume-extraction:
+      type: object
+      description: "Fields read out of a CV, for a recruiter to accept or discard one at a time. Every value is nullable and null means the document did not say - the model is instructed not to guess, because a filled field reads to a recruiter as something the CV stated. Nothing here is an assessment of the candidate."
+      required: [fields]
+      properties:
+        fields:
+          type: object
+          readOnly: true
+          properties:
+            name: { type: string, nullable: true }
+            email: { type: string, nullable: true }
+            phone: { type: string, nullable: true }
+            skills: { type: array, nullable: true, items: { type: string } }
+            current_employer: { type: string, nullable: true }
+            current_title: { type: string, nullable: true }
+            years_experience: { type: number, nullable: true }
+            summary: { type: string, nullable: true, description: "At most three sentences, in the document's own terms." }
+        cached: { type: boolean, readOnly: true, description: "True when this exact text had already been read and the stored result was served." }
+    ai-draft-request:
+      type: object
+      description: "An instruction for the drafting model, plus optionally the text being improved. Both come from the caller's own keyboard; nothing from a record is added server-side. `kind` and `instruction` are both mandatory - enforced by the route's own schema, which answers 400 - but they are deliberately not listed in `required` here: this document's `required` lists may name only readOnly properties (see test/requiredReadOnlyDrift.test.ts)."
+      properties:
+        kind: { type: string, description: "Which drafting prompt to use. Must be one of the kinds belonging to the collection in the path, or the request is a 400: a grant on one collection cannot reach another's prompt." }
+        instruction: { type: string, maxLength: 4000, description: What the caller wants written. }
+        existing: { type: string, maxLength: 4000, nullable: true, description: "The current draft, to improve rather than replace. Omit when starting from nothing." }
+    ai-draft:
+      type: object
+      description: Drafted text, for the caller to read, edit and save. Not a resource, and not persisted anywhere - if the caller does nothing with it, nothing happened.
+      required: [text, kind]
+      properties:
+        text: { type: string, readOnly: true, description: The drafted text. }
+        kind: { type: string, readOnly: true }
+        cached: { type: boolean, readOnly: true, description: "True when an identical request had already been drafted and the stored result was served, costing no inference." }
+    triage-vote:
+      type: object
+      nullable: true
+      description: One field of a triage suggestion - the value the resolved neighbours agreed on, and the evidence for it. Null when too few neighbours agreed, or when the leading candidates tied; a tie is refused rather than broken, because there is no honest tiebreak to present to a person with the same confidence as a real answer.
+      properties:
+        value: { type: string, description: "The suggested value: a department id, a category key, or a priority." }
+        votes: { type: integer, description: How many neighbours carried this value. }
+        of: { type: integer, description: How many neighbours had any value for this field at all. }
     ticket-todo:
       type: object
       description: A checklist item on a ticket (emitted inline on the ticket Get; not addressable on its own). Toggle/remove it via :toggleTodo / :removeTodo using its id.
@@ -3502,6 +3596,25 @@ components:
         description: { type: string }
         priority: { type: string, enum: [low, medium, high], description: Priority low/medium/high. Defaults to medium; change via :prioritize. }
         state: { type: string, readOnly: true, description: State value OPEN/IN_PROGRESS/RESOLVED/CLOSED/CANCELLED. }
+        first_response_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: >-
+            When somebody OTHER than the requester first commented. Claimed once and never moved: a later reply
+            is not a first response, and the requester chasing their own ticket is not an answer. Measure
+            response latency against `create_time`. Absent while nobody has replied - which is the queue worth
+            looking at.
+        resolved_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: >-
+            When the ticket reached its CURRENT resolution. `:resolve` stamps it and `:reopen` clears it, so a
+            reopened ticket is honestly unresolved again rather than carrying the date it was wrongly closed,
+            and one resolved twice reports the second date. `:close` keeps it but never sets it - a ticket
+            closed straight from the queue (a duplicate, something handled elsewhere) has none, because
+            nothing was resolved. Measure time-to-resolve against `create_time`.
         todo_done: { type: integer, readOnly: true, description: "Completed checklist items. Present on list and get." }
         todo_total: { type: integer, readOnly: true, description: "Total checklist items. Present on list and get." }
         initial_todos: { type: array, maxItems: 100, items: { type: string, maxLength: 500 }, writeOnly: true, description: "Create-only: checklist item texts to seed on the new ticket (custom items and/or a copied checklist)." }
@@ -3826,6 +3939,15 @@ components:
         submitted_by_name: { type: string, readOnly: true, description: Display name of the submitter. }
         approved_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who approved the run." }
         approved_by_name: { type: string, readOnly: true, description: Display name of the approver. }
+        headcount:
+          type: integer
+          readOnly: true
+          description: >-
+            How many people the last build priced. Stamped by the build itself, in the same atomic write as
+            built_time, so the three size figures and the staleness warning always describe the same build.
+            ABSENT on a run that has never been built - the state `built_time: null` also reports.
+        gross: { type: number, readOnly: true, description: "Total gross pay across everyone the last build priced. Stamped by the build; absent until the run is built. See `headcount`." }
+        net: { type: number, readOnly: true, description: "Total net pay across everyone the last build priced - what the bank file will move. Stamped by the build; absent until the run is built. See `headcount`." }
         bank_file_time: { type: string, format: date-time, readOnly: true, description: "When a bank payout file was first generated for this run; null if never. Once set the run can no longer be deleted, since deleting releases the one-off payables it paid and the money may already have left." }
         built_time: { type: string, format: date-time, readOnly: true, description: "When the run's line items were last (re)built from live inputs; null if never built. Detail GET only." }
         stale: { type: boolean, readOnly: true, description: "True when an income-affecting input (compensation, pay components, bonuses, leave encashments, reimbursements, overtime, loans, tax verifications, settings, joiners) changed after built_time, so the built numbers are out of date and the run should be rebuilt. Only ever true while editable (DRAFT/REVIEW). Detail GET only." }
@@ -12745,6 +12867,28 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/candidate' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/candidates/{candidate_id}:extractResume:
+    post:
+      description: "Custom method extractResume: read a candidate's CV into suggested form fields for the recruiter to accept one by one. The TEXT is sent by the client, which already runs a PDF reader for the document viewer - the Worker has no PDF text extractor, and keeping a PDF parser out of it is also the safer and cheaper arrangement. The model transcribes and makes NO assessment: there is no score, no ranking and no judgement of suitability, and the response shape has nowhere to put one. Nothing is written to the candidate - accepting a field is an ordinary PATCH. `candidates` is otherwise barred from reaching a model; this is a single named exception with its lawful basis recorded in src/domain/aiPolicy.ts."
+      operationId: ":ExtractResumeCandidate"
+      parameters: [ { in: path, name: candidate_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text: { type: string, maxLength: 20000, description: "The CV text, extracted client-side. Mandatory; the route answers 400 without it." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/resume-extraction' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/candidates/{candidate_id}:download:
     post:
       description: "Custom method download: returns the candidate's resume file bytes."
@@ -13343,6 +13487,7 @@ paths:
           description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters."
         - { in: query, name: state, schema: { type: string } }
         - { in: query, name: assignee, schema: { type: string }, description: "Filter to a single assignee's queue: 'me' or employees/{employee_id}." }
+        - { in: query, name: employee, schema: { type: string }, description: "Filter to the tickets somebody RAISED: 'me' or employees/{employee_id}. The other half of `assignee` - on a ticket routed to a service desk the two are different people - and what the support page's own scope narrows by, so a requester with more than a page of tickets sees all of them rather than their own out of the first hundred." }
         - { in: query, name: department, schema: { type: string }, description: "Filter to one servicing department: departments/{department_id}." }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
@@ -13516,6 +13661,75 @@ paths:
               required: [priority]
               properties:
                 priority: { type: string, description: low/medium/high. }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ticket' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/tickets/{ticket_id}:triage:
+    post:
+      description: "Custom method triage: the nearest-neighbour suggestion for this ticket's servicing department, category and priority, taken from the RESOLVED tickets closest to it, plus open tickets that may be duplicates. A read, and a POST only because that is how this API spells a custom method. Every neighbour is re-checked against the caller's own ticket list scope, so it cites nothing the caller could not have listed. Returns { triage: null } when the ticket is not indexed yet, when no neighbour is visible, or when no field reaches the evidence floor."
+      operationId: ":TriageTicket"
+      parameters: [ { in: path, name: ticket_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  triage:
+                    nullable: true
+                    type: object
+                    properties:
+                      department: { $ref: '#/components/schemas/triage-vote' }
+                      category: { $ref: '#/components/schemas/triage-vote' }
+                      priority: { $ref: '#/components/schemas/triage-vote' }
+                      basis:
+                        type: array
+                        description: The resolved neighbours the vote was taken over, best first.
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            subject: { type: string }
+                            score: { type: number }
+                      duplicates:
+                        type: array
+                        description: Open neighbours close enough to be the same problem.
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            subject: { type: string }
+                            score: { type: number }
+                            state: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/tickets/{ticket_id}:decideTriage:
+    post:
+      description: "Custom method decideTriage: record whether the triage suggestion was accepted or rejected, for measuring whether the feature earns its cost. This does NOT change the ticket - an accepted suggestion is applied by calling :route and :prioritize, so the change goes through the normal validation and audit trail."
+      operationId: ":DecideTriageTicket"
+      parameters: [ { in: path, name: ticket_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accepted]
+              properties:
+                accepted: { type: boolean }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -14995,6 +15209,72 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  # `<collection>:draft` - the AI drafting lane. Collection-level, because drafting happens before the record
+  # exists. Gated by the host collection's own grant, so drafting is never a second access decision.
+  /v1/announcements:draft:
+    post:
+      description: "Custom method draft: write a first draft of announcement text from an instruction the caller types, and return it for them to edit. Nothing is written - the draft is text in a response, and becomes a record only if the caller then creates or updates one through the ordinary path. The prompt is built from the caller's own instruction and nothing else: no record is read and no employee data is interpolated."
+      operationId: ":DraftAnnouncement"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ai-draft-request' } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ai-draft' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/job-requisitions:draft:
+    post:
+      description: "Custom method draft: write a first draft of a job description from an instruction the caller types, and return it for them to edit. Nothing is written. The prompt is built from the caller's own instruction and nothing else, and the instruction given to the model forbids requirements that are not about doing the job."
+      operationId: ":DraftJobRequisition"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ai-draft-request' } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ai-draft' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goals:draft:
+    post:
+      description: "Custom method draft: write a first draft of a work goal from an instruction the caller types, and return it for them to edit. Nothing is written, and the model is instructed not to assess anybody's performance."
+      operationId: ":DraftGoal"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ai-draft-request' } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ai-draft' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/suggestions:draft:
+    post:
+      description: "Custom method draft: write a first draft of an HR response to an employee suggestion, and return it for them to edit. Nothing is written and no suggestion is read - the caller supplies the substance in the instruction."
+      operationId: ":DraftSuggestion"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ai-draft-request' } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ai-draft' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/payslips:previewTemplate:
     post:
       description: "Custom method previewTemplate: render a payslip DESIGN (the block template from the payslip setting, or an unsaved draft passed in the body) against representative sample figures and return the PDF without persisting anything. Powers the live preview in the payslip-design editor."

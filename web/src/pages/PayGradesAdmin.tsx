@@ -10,6 +10,7 @@ import type { Me, PayGrade } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
 import { Field } from "@/components/common/Field";
@@ -126,6 +127,44 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
     }
   }
 
+  // The two things a grade ladder is reviewed for, neither of which any single row shows: bands that were
+  // never finished, and bands that overlap the grade above so far that the two are not really distinct.
+  const gradeInsights = (gs: PayGrade[]): TableInsight[] => {
+    const live = gs.filter((g) => !g.delete_time);
+    const out: TableInsight[] = [];
+    const incomplete = live.filter((g) => g.band_min == null || g.band_mid == null || g.band_max == null);
+    if (incomplete.length > 0) {
+      out.push({
+        id: "no-band",
+        label: `${incomplete.length} with an unfinished band`,
+        tone: "warning",
+        hint: "Nothing to anchor a compa-ratio or price an offer against.",
+        filters: { band_set: "Incomplete" },
+      });
+    }
+    // Ordered by level, then each band compared with the next one up: an overlap of more than half the lower
+    // band's width means the two grades pay much the same money.
+    const ladder = live
+      .filter((g) => g.band_min != null && g.band_max != null)
+      .sort((a, b) => (a.level ?? 0) - (b.level ?? 0));
+    let overlaps = 0;
+    for (let i = 0; i < ladder.length - 1; i++) {
+      const lower = ladder[i]!;
+      const upper = ladder[i + 1]!;
+      const width = (lower.band_max ?? 0) - (lower.band_min ?? 0);
+      if (width > 0 && (lower.band_max ?? 0) - (upper.band_min ?? 0) > width / 2) overlaps++;
+    }
+    if (overlaps > 0) {
+      out.push({
+        id: "overlap",
+        label: `${overlaps} band${overlaps === 1 ? "" : "s"} overlap the next grade`,
+        hint: "More than half of the lower band sits inside the one above it, so a promotion between them is worth little.",
+        sort: "level.asc",
+      });
+    }
+    return out;
+  };
+
   const columns: Column<PayGrade>[] = [
     { id: "level", header: "Level", align: "right", filter: "number", accessor: (g) => g.level ?? 0 },
     { id: "name", header: "Grade", accessor: (g) => g.display_name, cell: (g) => <span className="font-medium">{g.display_name}</span> },
@@ -147,6 +186,24 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
             {g.band_max != null ? money(g.band_max, g.currency_code) : "-"}
           </span>
         ),
+    },
+    {
+      // The width of the band as a share of its own midpoint. A grade ladder is judged on whether the bands
+      // are consistent, and comparing three money figures per row by eye is how an inconsistent one survives
+      // for years. Blank where the band is not fully set, which is what the chip below counts separately.
+      id: "spread", header: "Band width", align: "right", defaultHidden: true, filter: "number",
+      formatTotal: (n) => `${Math.round(n)}%`,
+      accessor: (g) => (g.band_min != null && g.band_max != null && g.band_mid ? Math.round(((g.band_max - g.band_min) / g.band_mid) * 100) : null),
+      cell: (g) => {
+        const pct = g.band_min != null && g.band_max != null && g.band_mid ? Math.round(((g.band_max - g.band_min) / g.band_mid) * 100) : null;
+        return pct == null ? <span className="text-muted-foreground">-</span> : <span className="tabular-nums">{pct}%</span>;
+      },
+    },
+    {
+      // Whether the band is usable at all. A grade with no numbers on it cannot anchor a compa-ratio, price
+      // an offer or answer a pay review, and it looks exactly like a finished one in a list of names.
+      id: "band_set", header: "Band", filter: "select", groupBy: true, defaultHidden: true,
+      accessor: (g) => (g.band_min != null && g.band_mid != null && g.band_max != null ? "Complete" : "Incomplete"),
     },
     { id: "description", header: "Description", defaultHidden: true, accessor: (g) => g.description ?? "" },
     ...metaColumns<PayGrade>(),
@@ -175,6 +232,7 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
           columns={columns}
           tableId="pay-grades"
           rows={rows}
+          insights={gradeInsights}
           getRowId={(g) => g.path}
           rowClassName={(g) => (g.delete_time ? "opacity-60" : undefined)}
           emptyTitle="No pay grades"

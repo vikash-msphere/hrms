@@ -6,6 +6,9 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf } from "@/lib/utils";
 import { daysBetweenYmd, thisMonthStr, todayStr } from "@/lib/orgDay";
+import { daysSince, fmtDaysCount } from "@/lib/tableDerive";
+import { countBy } from "@/lib/tableSignals";
+import { allScope, mineColumn, mineScope, scopesOf, unassignedScope } from "@/lib/tableScope";
 import { BLANK } from "@/lib/tableFilter";
 import type { ComplianceEvent, ComplianceRule, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -116,6 +119,20 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
   // "Mine" and "due this week" are the two questions a filer actually opens this page with, so they are
   // metrics rather than something to reconstruct out of the due-date column.
   const isMine = (c: ComplianceEvent) => !!me.employee_id && !!c.assignee && idOf(c.assignee) === me.employee_id;
+
+  // The same "whose" on the table itself, where the metric tile only narrows what is already listed. Owner is
+  // the field a compliance calendar is worked from: the filer wants their own obligations, and whoever runs
+  // the calendar wants the ones nobody has taken.
+  const eventScopes = scopesOf(
+    mineScope("mine", "Owned by me", "owned_by_me", !!me.employee_id, {
+      count: rows.filter(isMine).length,
+    }),
+    unassignedScope("unowned", "Owned by nobody", "assignee", {
+      count: rows.filter((c) => !c.delete_time && !c.assignee).length,
+      title: "Nothing routes these to anyone, so nobody is reminded about them",
+    }),
+    allScope("Everything", rows.length),
+  );
   const isDueSoon = (c: ComplianceEvent) => {
     if (c.status !== "pending" || c.overdue) return false;
     // The ORG's day, like `advance()` below and like the server, which computes `c.overdue` on it. A
@@ -325,6 +342,24 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
     // Blank here is an obligation nobody owns, which is the one that gets missed.
     { id: "assignee", header: "Owner", defaultHidden: true, filter: "select", groupBy: true, accessor: (c) => empName(c.assignee), cell: (c) => empName(c.assignee) || <span className="text-muted-foreground">-</span> },
     { id: "reference", header: "Reference", defaultHidden: true, accessor: (c) => c.reference ?? "", cell: (c) => c.reference || "-" },
+    // What the "Owned by me" chip filters on - the owner's id, not the name the column beside it renders,
+    // which is only right once the directory has loaded.
+    mineColumn<ComplianceEvent>("owned_by_me", "Owned by me", isMine),
+    {
+      // How late, in days, on anything still unfiled. "Overdue" is a state; a penalty is a function of how
+      // long, and the worst-first order this gives is how a compliance backlog is actually worked.
+      id: "days_late", header: "Days late", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      accessor: (c) => {
+        if (c.status !== "pending" || !c.overdue) return null;
+        const late = daysSince(c.due_date);
+        return late != null && late > 0 ? late : null;
+      },
+      cell: (c) => {
+        if (c.status !== "pending" || !c.overdue) return <span className="text-muted-foreground">-</span>;
+        const late = daysSince(c.due_date) ?? 0;
+        return <span className="font-medium tabular-nums text-destructive">{fmtDaysCount(late)}</span>;
+      },
+    },
     stateColumn<ComplianceEvent>(),
     ...metaColumns<ComplianceEvent>(),
     {
@@ -385,12 +420,40 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
     return out;
   };
 
+  // How many events each rule has produced, from the obligations already on this page. The two tabs are the
+  // same data seen from either end, and until now neither referred to the other.
+  const ruleUse = useMemo(() => countBy(rows, (c) => (c.rule ? idOf(c.rule) : null)), [rows]);
+
+  // A recurrence that has never fired is the quietest failure this page has: everything about the row looks
+  // right, and the obligation simply never appears on anybody's calendar.
+  const ruleInsights = (rs: ComplianceRule[]): TableInsight[] => {
+    const silent = rs.filter((r) => !r.delete_time && r.active && (ruleUse.get(idOf(r.path)) ?? 0) === 0);
+    return silent.length === 0 ? [] : [{
+      id: "never-generated",
+      label: `${silent.length} active with no events`,
+      tone: "warning",
+      hint: "Marked active but nothing has been generated from them. Usually a schedule that was never valid.",
+      filters: { generated: "=0", active: "Active" },
+    }];
+  };
+
   const ruleColumns: Column<ComplianceRule>[] = [
     { id: "title", header: "Obligation", accessor: (r) => r.title, cell: (r) => <span className="font-medium">{r.title}</span> },
     { id: "category", header: "Authority", filter: "select", groupBy: true, accessor: (r) => r.category ?? "", cell: (r) => r.category || <span className="text-muted-foreground">-</span> },
     { id: "schedule", header: "Schedule", filter: "select", groupBy: true, accessor: (r) => scheduleLabel(r), cell: (r) => <span className="inline-flex items-center gap-1.5"><Repeat className="h-3.5 w-3.5 text-muted-foreground" /> {scheduleLabel(r)}</span> },
     { id: "owner", header: "Owner", filter: "select", groupBy: true, accessor: (r) => empName(r.assignee), cell: (r) => empName(r.assignee) || <span className="text-muted-foreground">-</span> },
     { id: "active", header: "State", filter: "select", groupBy: true, accessor: (r) => (r.delete_time ? "Deleted" : r.active ? "Active" : "Paused"), cell: (r) => r.delete_time ? <Badge variant="muted">Deleted</Badge> : r.active ? <Badge variant="secondary">Active</Badge> : <Badge variant="warning">Paused</Badge> },
+    {
+      // How many obligations this rule has actually produced. A recurrence that has generated nothing looks
+      // exactly like a healthy one - same title, same schedule, marked active - and the first anyone hears
+      // of it is a filing that never happened.
+      id: "generated", header: "Events", align: "right", filter: "number",
+      accessor: (r) => ruleUse.get(idOf(r.path)) ?? 0,
+      cell: (r) => {
+        const n = ruleUse.get(idOf(r.path)) ?? 0;
+        return n ? <span className="tabular-nums">{n}</span> : <span className="text-muted-foreground">none</span>;
+      },
+    },
     ...metaColumns<ComplianceRule>(),
     {
       id: "actions", header: "", sortable: false, filter: "none", align: "right",
@@ -483,7 +546,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
             ) : (
               <>
                 <ChartFilterNote label={cf.activeLabel} shown={shownEvents.length} total={rows.length} onClear={cf.clear} />
-                <DataTable columns={eventColumns} insights={eventInsights} tableId="compliance-events" rows={shownEvents} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle={cf.activeLabel ? `Nothing in ${cf.activeLabel}` : kf.activeLabel ? `No ${kf.activeLabel}` : "No items match"} accessCollection="compliance-events" accessTargetOf={(c) => ({ objectPath: c.path, label: c.title, can: c.access?.can })} />
+                <DataTable columns={eventColumns} insights={eventInsights} scopes={eventScopes} tableId="compliance-events" rows={shownEvents} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle={cf.activeLabel ? `Nothing in ${cf.activeLabel}` : kf.activeLabel ? `No ${kf.activeLabel}` : "No items match"} accessCollection="compliance-events" accessTargetOf={(c) => ({ objectPath: c.path, label: c.title, can: c.access?.can })} />
               </>
             )}
           </DataState>
@@ -502,7 +565,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
           {rules.length === 0 ? (
             <EmptyState icon={Repeat} title="No recurring rules" description="Define a recurring obligation (e.g. PF, monthly, due 15th) and occurrences are generated automatically for the next 12 months and rolled forward over time." action={addBtn} />
           ) : (
-            <DataTable columns={ruleColumns} tableId="compliance-rules" rows={rules} getRowId={(r) => r.path} rowClassName={(r) => (r.delete_time ? "opacity-60" : undefined)} emptyTitle="No rules match" accessCollection="compliance-rules" accessTargetOf={(r) => ({ objectPath: r.path, label: r.title, can: r.access?.can })} />
+            <DataTable columns={ruleColumns} insights={ruleInsights} tableId="compliance-rules" rows={rules} getRowId={(r) => r.path} rowClassName={(r) => (r.delete_time ? "opacity-60" : undefined)} emptyTitle="No rules match" accessCollection="compliance-rules" accessTargetOf={(r) => ({ objectPath: r.path, label: r.title, can: r.access?.can })} />
           )}
         </DataState>
       )}

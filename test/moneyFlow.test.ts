@@ -1004,6 +1004,75 @@ describe("payroll run staleness (inputs changed after the build)", () => {
   });
 });
 
+// `payroll_runs.headcount/gross/net` are the size of the last build, stamped BY the build in the same atomic
+// write as `items_built_at`. They exist so a list of runs can show what each one comes to without reading the
+// whole org's items per row - which means the invariant that matters is not "the numbers are right" (they are
+// the items' own totals) but that they can never describe a DIFFERENT build from the one the run is in: never
+// built means none of them, and a reset must take them with it.
+describe("payroll run size (headcount / gross / net)", () => {
+  it("is absent before the build and matches the items after it", async () => {
+    const a = await seedEmployee();
+    const bEmp = await seedEmployee();
+    const actor = await seedActor(a);
+    await reviseCompensation(deps, actor, { employee: `employees/${a}`, annual_ctc: 1_200_000, effective_from: "2025-07-01" });
+    await reviseCompensation(deps, actor, { employee: `employees/${bEmp}`, annual_ctc: 600_000, effective_from: "2025-07-01" });
+    const period = await seedPeriodRange("Jul 2025", "2025-07-01", "2025-07-31");
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+
+    // A run that has never been built carries no size at all - the same state `items_built_at: null` reports.
+    // Null rather than 0, because "this run pays nobody" and "this run has not been built" are different facts.
+    const fresh = await getRun(deps, run.uuid);
+    expect(fresh.headcount).toBeNull();
+    expect(fresh.gross).toBeNull();
+    expect(fresh.net).toBeNull();
+
+    await buildRunItems(deps, actor, run.uuid);
+    const stamped = await getRun(deps, run.uuid);
+    const items = await listRunItems(deps, run.uuid);
+    expect(stamped.headcount).toBe(items.length);
+    expect(stamped.gross).toBeCloseTo(items.reduce((s, i) => s + i.gross, 0), 2);
+    expect(stamped.net).toBeCloseTo(items.reduce((s, i) => s + i.net, 0), 2);
+    // Stamped by the same write as the build time, so the two can never disagree about which build they mean.
+    expect(stamped.itemsBuiltAt).toBeTruthy();
+  });
+
+  it("is re-stamped by a rebuild rather than accumulated", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 1_200_000, effective_from: "2025-07-01" });
+    const period = await seedPeriodRange("Jul 2025", "2025-07-01", "2025-07-31");
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    const first = await getRun(deps, run.uuid);
+
+    // A rebuild drops the old items and writes new ones. The size has to follow the items it describes, not
+    // add to the previous build's - the failure a stored total invites and the reset half of this exists for.
+    await buildRunItems(deps, actor, run.uuid);
+    const second = await getRun(deps, run.uuid);
+    expect(second.headcount).toBe(first.headcount);
+    expect(second.gross).toBeCloseTo(first.gross!, 2);
+    expect(second.net).toBeCloseTo(first.net!, 2);
+  });
+
+  it("counts only the people it PRICED, so gross and headcount describe the same set", async () => {
+    const paid = await seedEmployee();
+    const unpriced = await seedEmployee(); // no compensation row: the build walks them and cannot price them
+    const actor = await seedActor(paid);
+    await reviseCompensation(deps, actor, { employee: `employees/${paid}`, annual_ctc: 1_200_000, effective_from: "2025-07-01" });
+    const period = await seedPeriodRange("Jul 2025", "2025-07-01", "2025-07-31");
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+
+    const stamped = await getRun(deps, run.uuid);
+    const items = await listRunItems(deps, run.uuid);
+    // The headcount the run MEANT to pay is a different number from the one it did, and the money is over the
+    // second - so a headcount that counted the skipped person would not divide into its own gross.
+    expect(stamped.headcount).toBe(items.length);
+    expect(items.some((i) => i.employee === `employees/${unpriced}`)).toBe(false);
+    expect(stamped.unpricedJson).toContain(unpriced);
+  });
+});
+
 describe("payslip preview (pre-publish, nothing persisted)", () => {
   it("renders a PDF for one built run item and writes no payslip row or file", async () => {
     const emp = await seedEmployee({ firstName: "Priya", lastName: "Sharma", jobTitle: "Engineer" });

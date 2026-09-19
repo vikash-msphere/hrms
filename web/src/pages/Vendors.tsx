@@ -12,6 +12,8 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
+import { BLANK } from "@/lib/tableFilter";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -42,6 +44,10 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
   const lc = useLifecycle("vendors", "vendor", reload);
   const writable = usePermission("vendors.write");
   const canPurge = usePermission("vendors.admin");
+  // The spend columns exist only for a caller who can read expenses at all; for anybody else they would be a
+  // column of zeroes that says "this vendor has never been paid", which is a different and wrong claim.
+  const canExpenses = usePermission("expenses.read");
+  const { org } = useOrg();
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Vendor | null>(null);
@@ -64,6 +70,64 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
     const m = new Map(categories.map((c) => [idOf(c.path), c.display_name]));
     return (p?: string) => (p ? m.get(idOf(p)) ?? "Unknown category" : "-");
   }, [categories]);
+
+  // What each vendor has cost and when they were last used, from the expenses this caller can see. A page of
+  // expenses is a window, so the figures are what is loaded rather than the whole ledger - which is why the
+  // chips below talk about the vendors themselves ("no tax ID", "never used") and not about amounts.
+  const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
+  const { rows: expenses } = useCollection<Expense>("expenses", { enabled: canExpenses });
+  const vendorSpend = useMemo(() => {
+    const m = new Map<string, { total: number; last: string; count: number }>();
+    for (const e of expenses) {
+      if (!e.vendor || ["CANCELLED", "REJECTED"].includes((e.state ?? "").toUpperCase())) continue;
+      const key = idOf(e.vendor);
+      const at = m.get(key) ?? { total: 0, last: "", count: 0 };
+      at.total += e.amount || 0;
+      at.count += 1;
+      const day = (e.incurred_on ?? "").slice(0, 10);
+      if (day > at.last) at.last = day;
+      m.set(key, at);
+    }
+    return m;
+  }, [expenses]);
+
+  // A vendor list is checked for the things that stop a payment going out, not for anything about the
+  // vendors themselves - so these are the two gaps that block one, plus the list worth archiving.
+  const vendorInsights = (vs: Vendor[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const live = vs.filter((v) => !v.delete_time && !v.disabled);
+    const noTax = live.filter((v) => !v.tax_id?.trim());
+    if (noTax.length > 0) {
+      out.push({
+        id: "no-tax-id",
+        label: `${noTax.length} with no tax ID`,
+        tone: "warning",
+        hint: "Needed on the invoice and on the payment file.",
+        filters: { tax: BLANK },
+      });
+    }
+    const noTerms = live.filter((v) => !v.payment_terms?.trim());
+    if (noTerms.length > 0) {
+      out.push({
+        id: "no-terms",
+        label: `${noTerms.length} with no payment terms`,
+        hint: "Nothing says when they are due, so every invoice from them is decided by hand.",
+        filters: { terms: BLANK },
+      });
+    }
+    if (canExpenses) {
+      const unused = live.filter((v) => !vendorSpend.has(idOf(v.path)));
+      if (unused.length > 0) {
+        out.push({
+          id: "unused",
+          label: `${unused.length} with no expenses`,
+          hint: "Nothing loaded has been filed against them. Usually a supplier that has been replaced.",
+          filters: { last_paid: BLANK },
+        });
+      }
+    }
+    return out;
+  };
 
   function openCreate() { setEditing(null); setForm(EMPTY); setErr(null); setOpen(true); }
   function openEdit(v: Vendor) {
@@ -116,6 +180,21 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
   const columns: Column<Vendor>[] = [
     { id: "name", header: "Vendor", accessor: (v) => v.display_name, cell: (v) => <span className="font-medium">{v.display_name}</span> },
     { id: "category", header: "Default category", filter: "select", groupBy: true, accessor: (v) => catName(v.default_category) },
+    // What each vendor has actually cost and when they were last used. A supplier list with no volume beside
+    // it cannot be pruned, renegotiated or checked: every row looks equally important, and the one nobody has
+    // paid in two years looks exactly like the one taking a third of the spend.
+    { id: "spend", header: "Spend", align: "right", filter: "number", aggregate: "sum", formatTotal: money,
+      accessor: (v) => vendorSpend.get(idOf(v.path))?.total ?? 0,
+      cell: (v) => {
+        const total = vendorSpend.get(idOf(v.path))?.total ?? 0;
+        return total ? <span className="tabular-nums">{money(total)}</span> : <span className="text-muted-foreground">-</span>;
+      } },
+    { id: "last_paid", header: "Last expense", filter: "date", dateHint: "past", defaultHidden: true,
+      accessor: (v) => vendorSpend.get(idOf(v.path))?.last ?? "",
+      cell: (v) => {
+        const last = vendorSpend.get(idOf(v.path))?.last;
+        return last ? formatDate(last) : <span className="text-muted-foreground">never</span>;
+      } },
     { id: "tax", header: "Tax ID", accessor: (v) => v.tax_id ?? "", cell: (v) => v.tax_id || <span className="text-muted-foreground">-</span>, defaultHidden: true },
     { id: "terms", header: "Terms", filter: "select", groupBy: true, accessor: (v) => v.payment_terms ?? "", cell: (v) => v.payment_terms || <span className="text-muted-foreground">-</span> },
     { id: "email", header: "Contact", accessor: (v) => v.contact_email ?? "", cell: (v) => v.contact_email || <span className="text-muted-foreground">-</span> },
@@ -139,6 +218,7 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
             columns={columns}
             tableId="vendors"
             rows={rows}
+            insights={vendorInsights}
             getRowId={(v) => v.path}
             rowClassName={(v) => (v.delete_time ? "opacity-60" : undefined)}
             emptyTitle="No vendors match"

@@ -11,6 +11,8 @@ import { parsePayslipTemplate } from "../domain/payslipTemplate";
 import { DOCUMENT_KINDS } from "../services/letterheads";
 import { validateStateMachine, type StateMachine } from "../domain/stateMachines";
 import { validateRestrictions } from "../domain/leaveRestrictions";
+import { AI_FEATURES } from "../domain/aiPolicy";
+import { EXTRACTABLE_FIELDS } from "../domain/resumeFields";
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
 import { validateAtsConfig, orphanedStages, type AtsStage } from "../domain/ats";
 import { stagesInUse } from "../services/ats";
@@ -549,7 +551,45 @@ function validatePerformance(value: unknown) {
 // with far less at stake were. `upsertSetting` writes any JSON to any key, and `getSettingValue` merges it
 // over the default shallowly - so the only place a partial statutory blob can be caught is here, before it is
 // stored.
+/**
+ * The AI switches. Validated rather than exempted because each leaf decides something consequential: whether a
+ * model may read a category of the org's text at all, and how much of a shared daily allowance it may spend.
+ *
+ * The feature map is checked against the declared feature list, so a typo is refused instead of stored. That
+ * matters more here than in most blobs: an unknown key reads as `undefined`, which is falsy, so a misspelled
+ * feature name would silently leave the feature OFF on a screen that said it had been turned on - and the
+ * admin would conclude the feature is broken rather than that the setting never applied.
+ */
+function validateAi(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("ai must be an object");
+  numericLeaves("ai", value, [
+    { name: "dailyNeurons", min: 0 },
+    { name: "perUserHourlyGenerations", min: 0 },
+  ]);
+  if (value.features !== undefined) {
+    if (!isObj(value.features)) throw invalidArgument("ai.features must be an object");
+    for (const [k, v] of Object.entries(value.features)) {
+      if (!(AI_FEATURES as readonly string[]).includes(k)) {
+        throw invalidArgument(`ai.features.${k} is not a known AI feature (${AI_FEATURES.join(", ")})`);
+      }
+      if (typeof v !== "boolean") throw invalidArgument(`ai.features.${k} must be true or false`);
+    }
+  }
+  // WHICH CV fields a model may propose. Validated by name for the same reason the feature map is: an unknown
+  // field would be dropped silently at read time, so the screen would show it saved and the extraction would
+  // never ask for it.
+  if (value.resume_fields !== undefined) {
+    if (!Array.isArray(value.resume_fields)) throw invalidArgument("ai.resume_fields must be an array");
+    for (const f of value.resume_fields) {
+      if (typeof f !== "string" || !(EXTRACTABLE_FIELDS as readonly string[]).includes(f)) {
+        throw invalidArgument(`ai.resume_fields contains "${String(f)}", which is not an extractable field (${EXTRACTABLE_FIELDS.join(", ")})`);
+      }
+    }
+  }
+}
+
 const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
+  ["ai", validateAi],
   ["ctc", validateCtc],
   ["esign", validateEsign],
   ["payslip", validatePayslip],

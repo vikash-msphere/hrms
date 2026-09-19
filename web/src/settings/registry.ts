@@ -5,7 +5,7 @@ import {
   Coins, Layers, ListOrdered, Percent, Receipt, Wallet, FileSpreadsheet, FolderKanban,
   UserSearch, UserPlus, Target, ClipboardList, HeartPulse,
   FileText, PenLine, FileSignature, Bell, BellRing, LifeBuoy, ListTodo,
-  Users, Shield, KeyRound, Wrench, Plus, KanbanSquare, Tag,
+  Users, Shield, KeyRound, Wrench, Plus, KanbanSquare, Tag, Sparkles,
 } from "lucide-react";
 
 // One flat registry of every settings panel. This is the single source of truth for the Settings hub grid,
@@ -101,6 +101,9 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   { key: "permissions", title: "Permissions", desc: "What each role can see and do, per collection.", group: "Access & security", icon: KeyRound, perm: "users.write", keywords: ["grants", "access rules", "capabilities"], target: { collection: "access-rules", label: "Roles & permissions" } },
   { key: "api-keys", title: "API keys", desc: "Machine credentials for scripts and integrations, scoped below your own access.", group: "Access & security", icon: KeyRound, perm: "api-keys.read", keywords: ["token", "bearer", "integration", "machine", "service account"], target: { collection: "api-keys", label: "API keys" } },
   { key: "operations", title: "System operations", desc: "Cron runs, background jobs and system health.", group: "Access & security", icon: Wrench, perm: "cron-runs.read", keywords: ["cron", "jobs", "maintenance"], target: { collection: "operations", label: "Operations" } },
+  // Under Access & security rather than Company, because what this panel decides is which of the org's text a
+  // model may read - a data-handling decision, not a preference.
+  { key: "ai", title: "AI features", desc: "Which AI-assisted features are switched on, and the daily budget they share. Every feature is off until turned on here, and each one works without AI when it is off.", group: "Access & security", icon: Sparkles, keywords: ["semantic search", "triage", "suggestions", "workers ai", "machine learning", "neurons", "budget", "model"], target: { collection: "settings", objectPath: "settings/ai", label: "AI features" } },
 ];
 
 // Old routes (parent tabs + renamed children) → today's panel keys, so bookmarks and in-app links keep landing.

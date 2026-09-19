@@ -240,6 +240,23 @@ test("a table renames a column, summarises its rows, saves a filter, and opens t
     await page.getByRole("button", { name: "Summarise" }).click();
     await expect(page.getByText("Rows by Given name")).toBeVisible({ timeout: 30_000 });
 
+    // And it is a REAL chart, judged the way everyChart.spec.ts judges every other one: a picture with a box,
+    // and the same numbers in a table under it for a reader who cannot see the picture. This is the chart that
+    // spec's page walk cannot reach - it only exists on a saved table, after a press - so `ELSEWHERE` there
+    // names this spec, and these three assertions are what that name promises.
+    const figure = page.locator("figure").filter({ has: page.locator("figcaption") }).first();
+    const svg = figure.locator("svg").first();
+    await expect(svg).toBeAttached({ timeout: 30_000 });
+    // Polled rather than measured once: `Chart` is lazy and the library sizes its SVG a frame or more after
+    // the element lands, so a single read is a race on a loaded machine.
+    await expect
+      .poll(async () => { const b = await svg.boundingBox(); return (b?.width ?? 0) > 0 && (b?.height ?? 0) > 0; }, { timeout: 15_000 })
+      .toBe(true);
+    const caption = ((await figure.locator("figcaption").first().textContent()) ?? "").trim();
+    const numbers = figure.locator("table");
+    await expect(numbers.locator("caption")).toHaveText(caption);
+    await expect(numbers.locator("tbody tr").first()).toBeAttached({ timeout: 30_000 });
+
     // The table's OWN filter - saved on the view, applied by the server to every page. "is not empty" needs no
     // typed value, so what this proves is the round trip rather than one particular comparison.
     await page.getByRole("button", { name: /^Filter & sort/ }).click();

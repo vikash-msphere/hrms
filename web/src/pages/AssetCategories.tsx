@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Tag, Plus } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -6,11 +6,13 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
 import { idOf } from "@/lib/utils";
-import type { AssetCategory, Me } from "@/types";
+import type { Asset, AssetCategory, Me } from "@/types";
+import { countBy } from "@/lib/tableSignals";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -97,9 +99,34 @@ export default function AssetCategories({ embedded, openId }: { me?: Me; embedde
     }
   }
 
+  // How much kit sits under each category, and how old it is. A category catalogue is otherwise a list of
+  // names where the one holding sixty laptops and the one holding nothing read the same.
+  const canAssets = usePermission("assets.read");
+  const { rows: assets } = useCollection<Asset>("assets", { all: true, enabled: canAssets });
+  const catUse = useMemo(() => countBy(assets, (a) => (a.category ? idOf(a.category) : null)), [assets]);
+
+  const categoryInsights = (cs: AssetCategory[]): TableInsight[] => {
+    if (!canAssets) return [];
+    const idle = cs.filter((c) => !c.delete_time && !c.disabled && !catUse.has(idOf(c.path)));
+    return idle.length === 0 ? [] : [{
+      id: "unused",
+      label: `${idle.length} with nothing in them`,
+      hint: "No assets are registered under these. Each one is still offered every time somebody adds kit.",
+      filters: { assets: "=0" },
+    }];
+  };
+
   const columns: Column<AssetCategory>[] = [
     { id: "name", header: "Name", accessor: (c) => c.display_name, cell: (c) => <span className="font-medium">{c.display_name}</span> },
     { id: "tag_code", header: "Tag code", accessor: (c) => c.tag_code ?? "", cell: (c) => <span className="font-mono text-xs">{c.tag_code || "-"}</span> },
+    ...(canAssets ? [{
+      id: "assets", header: "Assets", align: "right" as const, filter: "number" as const, aggregate: "sum" as const,
+      accessor: (c: AssetCategory) => catUse.get(idOf(c.path)) ?? 0,
+      cell: (c: AssetCategory) => {
+        const n = catUse.get(idOf(c.path)) ?? 0;
+        return n ? <span className="tabular-nums">{n}</span> : <span className="text-muted-foreground">none</span>;
+      },
+    }] : []),
     {
       id: "serial",
       header: "Serial number",
@@ -139,6 +166,7 @@ export default function AssetCategories({ embedded, openId }: { me?: Me; embedde
             columns={columns}
             tableId="asset-categories"
             rows={rows}
+            insights={categoryInsights}
             getRowId={(c) => c.path}
             rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)}
             emptyTitle="No categories match"

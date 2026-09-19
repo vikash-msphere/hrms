@@ -8,6 +8,7 @@ import { useMoney } from "@/lib/org";
 import { navigate } from "@/router";
 import type { Application, Candidate, Employee, Interview, JobRequisition, Me, Offer, Referral } from "@/types";
 import { useAtsConfig, sourceLabel } from "./Candidates";
+import { ResumeExtractPanel } from "@/components/common/ResumeExtractPanel";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -155,6 +156,16 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
 
             {/* Free-text notes about a person outside the org - the third field resourceStore.ts names. */}
             {candidate.notes && <p className="whitespace-pre-wrap text-sm text-foreground/80" data-sentry-mask>{candidate.notes}</p>}
+
+            {/* Read the CV into the form. Renders nothing without a resume, and the button is gated on the
+                verb, so a recruiter who may not run it never sees it offered. */}
+            <ResumeExtractPanel
+              candidateId={id}
+              candidatePath={`candidates/${id}`}
+              can={candidate.access?.can}
+              hasResume={!!candidate.has_resume}
+              onSaved={reload}
+            />
 
             {/* Applications - the spine of the hiring story. */}
             <section>

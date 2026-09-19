@@ -4,7 +4,9 @@ import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
-import { cn, formatDate, idOf, personName } from "@/lib/utils";
+import { cn, formatDate, formatMoney, idOf, personName } from "@/lib/utils";
+import { useOrg, currencyDecimals } from "@/lib/org";
+import { outlierIds } from "@/lib/tableSignals";
 import { describeError } from "@/lib/formError";
 import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
 import type { BackgroundCheck, Employee, Me } from "@/types";
@@ -83,6 +85,9 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
   const sd = useSoftDelete("background-checks", "background check", reload);
   const writable = usePermission("background-checks.write");
   const canPurge = usePermission("background-checks.admin");
+  // The org's own money formatter, so vendor invoices read in the same unit as every other money surface.
+  const { org } = useOrg();
+  const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<BackgroundCheck | null>(null);
@@ -227,6 +232,17 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
       ? Math.max(0, daysBetweenYmd(c.initiated_date.slice(0, 10), todayStr()))
       : 0;
 
+  // Checks that are dragging by their OWN vendor's standards. Measured against that vendor's median rather
+  // than a flat number of days, because turnaround varies by an order of magnitude between vendors, and
+  // against the median rather than the mean, because the slow check is exactly what would drag a mean.
+  const slowForVendor = useMemo(
+    () => outlierIds(
+      rows.filter((c) => !c.delete_time && openDays(c) > 0),
+      { valueOf: (c) => openDays(c), idOf: (c) => c.path, groupOf: (c) => c.vendor ?? "", factor: 3 },
+    ),
+    [rows],
+  );
+
   // The only question a screening register is really asked: what is stuck, and with whom.
   const checkInsights = (cs: BackgroundCheck[]): TableInsight[] => {
     const out: TableInsight[] = [];
@@ -248,6 +264,21 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
         label: `${failed.length} came back adverse`,
         tone: "destructive",
         filters: { status: statusLabel("failed") },
+      });
+    }
+    // Open far longer than that VENDOR's own usual. Distinct from the two-week chip: a vendor who normally
+    // turns checks round in three days has a problem at nine, and one who takes three weeks does not. The
+    // comparison is per vendor and against the median, so one very slow check cannot move the bar it is
+    // being measured against.
+    const slow = cs.filter((c) => slowForVendor.has(c.path));
+    if (slow.length > 0) {
+      out.push({
+        id: "slow-for-vendor",
+        label: `${slow.length} slow for their vendor`,
+        tone: "warning",
+        hint: "Open several times longer than that vendor's own typical turnaround.",
+        filters: { pace: "Slow for this vendor" },
+        sort: "open_days.desc",
       });
     }
     return out;
@@ -298,9 +329,33 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
     // passing; as a column of its own it can be sorted, filtered ("open more than 14 days") and is what
     // makes the chase-the-vendor chip above the table narrow to exactly the rows it counted.
     {
-      id: "open_days", header: "Days open", align: "right", defaultHidden: true, filter: "number", formatTotal: (n) => `${n} days`,
+      // Averaged in the footer rather than summed: "our checks take nine days" is the figure that decides
+      // whether a vendor is kept, and it reads per vendor the moment the table is grouped by one. A total of
+      // everybody's waiting days is a number nobody has a use for.
+      id: "open_days", header: "Days open", align: "right", defaultHidden: true, filter: "number", aggregate: "avg", formatTotal: (n) => `${n} days`,
       accessor: (c) => openDays(c),
       cell: (c) => { const d = openDays(c); return d > 0 ? <span className={cn("tabular-nums", d > 14 && "font-medium text-warning")}>{d}</span> : <span className="text-muted-foreground">-</span>; },
+    },
+    {
+      // What screening costs. Summed under the column and per fold, so grouping by vendor answers the two
+      // questions this page exists to inform - who is quick, and who is cheap - side by side.
+      //
+      // Blank rather than zero when nothing was recorded: a check run in-house genuinely cost nothing and is
+      // stored as 0, while an invoice that has not landed is absent, and averaging those together would be
+      // wrong in the direction that flatters the slowest vendor. A blank is also what a caller who may not
+      // read the figure sees - the field is redacted per row - so the column never claims a check was free.
+      id: "cost", header: "Cost", align: "right", defaultHidden: true, filter: "number", aggregate: "sum",
+      formatTotal: (n) => money(n),
+      accessor: (c) => c.cost ?? null,
+      cell: (c) => (c.cost == null ? <span className="text-muted-foreground">-</span> : <span className="tabular-nums">{money(c.cost)}</span>),
+    },
+    {
+      // The flag behind the "slow for their vendor" chip. A real column so it sorts, exports and can be
+      // turned off, and so the chip can narrow to exactly the rows it counted - no filter grammar can say
+      // "unusual for its own group".
+      id: "pace", header: "Pace", defaultHidden: true, filter: "select", sortable: false,
+      accessor: (c) => (slowForVendor.has(c.path) ? "Slow for this vendor" : ""),
+      cell: (c) => (slowForVendor.has(c.path) ? <span className="text-warning">Slow</span> : <span className="text-muted-foreground">-</span>),
     },
     stateColumn<BackgroundCheck>(),
     ...metaColumns<BackgroundCheck>(),

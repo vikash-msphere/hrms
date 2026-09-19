@@ -29,7 +29,8 @@ export type RefTable =
   | "departments"
   | "pay_periods"
   | "pay_grades"
-  | "salary_structures";
+  | "salary_structures"
+  | "asset_categories";
 
 /** Create the per-request memo. Called by the request middleware; absent everywhere else. */
 export const makeRefCache = (): Map<string, Promise<unknown>> => new Map();
@@ -61,6 +62,12 @@ export const refPayPeriods = (deps: Deps) => once(deps, "pay_periods", () => dep
 // the grade that revision was priced at.
 export const refPayGrades = (deps: Deps) => once(deps, "pay_grades", () => deps.db.select().from(schema.payGrades));
 export const refSalaryStructures = (deps: Deps) => once(deps, "salary_structures", () => deps.db.select().from(schema.salaryStructures));
+// The asset catalogue, read for its `useful_life_months` when an asset answer is valued (services/assets.ts).
+// Here for the reason the ladder catalogs are: the valuation runs over every row of an asset page, so without
+// the memo a page of 100 assets would resolve the same handful of categories 100 times. Deleted categories are
+// INCLUDED, again for the same reason - an asset still pointing at a retired category is still depreciated on
+// the life that category was given.
+export const refAssetCategories = (deps: Deps) => once(deps, "asset_categories", () => deps.db.select().from(schema.assetCategories));
 
 /**
  * Drop this request's snapshot of a table, so a later read in the SAME request sees a write it just made.

@@ -6,7 +6,7 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import {
   listAssets,
-  getAsset,
+  readAsset,
   createAsset,
   createAssetsBatch,
   updateAsset,
@@ -20,6 +20,7 @@ import {
   type CustodyScanInput,
 } from "../services/assets";
 import { ASSET_CONDITIONS, ASSET_STATUSES, type AssetStatus } from "../domain/assetCustody";
+import { nonNegativeMoney } from "../http/moneyField";
 import { toAssetResource } from "../http/serialize";
 import { accessHint, withAccess } from "../http/accessHint";
 import { LIST_OWNER_COLUMNS, pageOwnerCodes } from "../lib/authzResolve";
@@ -34,6 +35,7 @@ const writeSchema = z
     assigned_to: z.string().nullable().optional(),
     assigned_on: z.string().nullable().optional(),
     purchase_date: z.string().nullable().optional(),
+    purchase_cost: nonNegativeMoney().nullable().optional(),
     notes: z.string().nullable().optional(),
   })
   .strict();
@@ -112,7 +114,7 @@ export const assets = collectionRoutes<AssetInput, typeof schema.assets>({
   serialize: toAssetResource,
   softDelete: false,
   overrides: {
-    get: (deps, _actor, id) => getAsset(deps, id),
+    get: (deps, _actor, id) => readAsset(deps, id),
     create: (deps, actor, input) => createAsset(deps, actor, input),
     update: (deps, actor, id, patch, ifMatch) => updateAsset(deps, actor, id, patch, ifMatch),
     remove: deleteAsset,

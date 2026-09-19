@@ -42,6 +42,8 @@ function realColumns(src: string): { table: string; prop: string }[] {
 
 // Currency amounts. A write to one of these must be round2/sum2-pinned.
 const MONEY = new Set([
+  "assets.purchaseCost", // what the asset cost to buy; half of the book value the inventory reports
+  "backgroundChecks.cost", // what the verification vendor charged for this check
   "benefitPlans.employeeCost", "benefitPlans.employerCost",
   "bonuses.amount",
   "compensation.arrearsAmount", "compensation.arrearsBaseAmount", "compensation.basePay",
@@ -54,6 +56,7 @@ const MONEY = new Set([
   "payGrades.bandMax", "payGrades.bandMid", "payGrades.bandMin",
   "payrollRunItems.gross", "payrollRunItems.net", "payrollRunItems.tax",
   "payrollRunItems.taxableGross", "payrollRunItems.totalDeductions",
+  "payrollRuns.gross", "payrollRuns.net", // the run's own totals, stored by the build rather than summed on read
   "payslips.gross", "payslips.net", "payslips.tax", "payslips.taxableGross", "payslips.totalDeductions",
   "referrals.bonusAmount", "reimbursements.amount",
   "settlements.net", "settlements.taxableEarnings", "settlements.tds",

@@ -9,6 +9,9 @@ import { ruleSentence, ruleFlags } from "./ruleLogic";
 // picker built from anything else would offer rules the validator refuses (which is exactly what happened).
 import { COLLECTION_FIELD_CAPABILITIES } from "../../../../src/domain/manifests";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
+import { daysUntil, fmtDaysCount } from "@/lib/tableDerive";
+import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,6 +22,9 @@ import { useConfirm } from "@/components/common/confirm";
 // A Select item can never carry an empty value (Radix reserves "" for "cleared"), so the "any collection"
 // choice in activity's target picker travels under a sentinel and maps back to "" on the rule.
 const ANY_COLLECTION = "__any__";
+// How much notice is useful before temporary access lapses. A week: long enough to extend it deliberately,
+// short enough that the chip means something when it shows up.
+const RULE_LAPSE_SOON_DAYS = 7;
 
 type RoleOption = { name: string; label: string };
 type UserOption = { path: string; email: string };
@@ -118,6 +124,33 @@ export function FineRulesEditor({
     }
   }
 
+  // Two things about a rule set that no row shows: what is about to lapse, and what is sitting unapproved.
+  // Both are access that is not what anybody thinks it is.
+  const ruleInsights = (rs: AccessRule[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const lapsing = rs.filter((r) => { const d = daysUntil(r.expire_time); return d != null && d >= 0 && d <= RULE_LAPSE_SOON_DAYS; });
+    if (lapsing.length > 0) {
+      out.push({
+        id: "lapsing",
+        label: `${lapsing.length} expiring within ${RULE_LAPSE_SOON_DAYS} days`,
+        tone: "warning",
+        hint: "Temporary access that stops on that date, mid-task, with nothing said.",
+        filters: { expires_in: `0..${RULE_LAPSE_SOON_DAYS}` },
+        sort: "expires_in.asc",
+      });
+    }
+    const pending = rs.filter((r) => r.status && r.status !== "active");
+    if (pending.length > 0) {
+      out.push({
+        id: "awaiting",
+        label: `${pending.length} awaiting approval`,
+        hint: "Written but not in force. Whoever asked for them is still without the access.",
+        filters: { state: "awaiting approval" },
+      });
+    }
+    return out;
+  };
+
   const columns: Column<AccessRule>[] = [
     ...(multi ? [{ id: "subject", header: "Subject", filter: "select", accessor: (r: AccessRule) => subjLabel(r) } as Column<AccessRule>] : []),
     // The rule AS A SENTENCE, first and widest: five coded columns (collection/scope/field/permission/effect)
@@ -167,6 +200,17 @@ export function FineRulesEditor({
     { id: "field", header: "Field", filter: "select", accessor: (r) => r.field ?? "-" },
     { id: "perm", header: "Permission", filter: "select", groupBy: true, accessor: (r) => permText(r), cell: (r) => <Badge variant={r.effect === "deny" ? "destructive" : r.verb ? "default" : "secondary"}>{permText(r)}</Badge> },
     { id: "state", header: "State", filter: "select", groupBy: true, accessor: (r) => (r.status && r.status !== "active" ? "awaiting approval" : r.expire_time ? "temporary" : "live") },
+    {
+      // How long a temporary rule has left. A rule that lapses takes somebody's access with it mid-task, and
+      // the state column can only say "temporary" - not whether that means tomorrow or next year.
+      id: "expires_in", header: "Expires in", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      accessor: (r) => daysUntil(r.expire_time),
+      cell: (r) => {
+        const d = daysUntil(r.expire_time);
+        if (d == null) return <span className="text-muted-foreground">-</span>;
+        return <span className={cn("tabular-nums text-xs", d <= 7 ? "font-medium text-warning" : "text-muted-foreground")}>{d < 0 ? "lapsed" : fmtDaysCount(d)}</span>;
+      },
+    },
     ...(canWrite
       ? [{ id: "actions", header: "", sortable: false, filter: "none", align: "right", cell: (r: AccessRule) => <Button variant="ghost" size="icon" aria-label="Delete this rule" className="h-8 w-8" disabled={busy} onClick={() => del(r)}><Trash2 className="h-4 w-4" /></Button> } as Column<AccessRule>]
       : []),
@@ -177,6 +221,7 @@ export function FineRulesEditor({
       <DataTable
         columns={columns}
         rows={rules}
+        insights={ruleInsights}
         getRowId={(r) => r.path}
         tableId={`fine-rules-${fixedSubject ? fixedSubject.kind : "all"}`}
         emptyTitle="No rules"

@@ -115,6 +115,7 @@ beforeAll(async () => {
   await put("pay-grades", schema.payGrades, { name: "L3" });
   await put("boards", schema.boards, { name: "Delivery" });
   await put("goals", schema.goals, { employeeId: otherEmployeeId, title: "Ship it" });
+  await put("review-cycles", schema.reviewCycles, { name: "H1 2026" });
   await put("sprints", schema.sprints, { boardId: fixture.boards!, name: "Sprint 1" });
   await put("referrals", schema.referrals, { referrerId: otherEmployeeId, candidateName: "Ada" });
   await put("candidates", schema.candidates, { name: "Ada Lovelace" });

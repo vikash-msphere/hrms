@@ -5,7 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { cn, formatDate, idOf, personIndex, personName } from "@/lib/utils";
-import { addDaysYmd, orgDayFromToday, todayStr, weekStartYmd } from "@/lib/orgDay";
+import { addDaysYmd, orgDayFromToday, thisMonthStr, todayStr, weekStartYmd } from "@/lib/orgDay";
 import { navigate, navigateTab } from "@/router";
 import { Card } from "@/components/ui/card";
 import type { ApprovalDelegation, RemoteWorkRequest, Employee, Me } from "@/types";
@@ -17,6 +17,8 @@ import { RequestsHistoryTabs, type RequestsHistorySearch } from "@/components/co
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { withNewBadge } from "@/components/common/NewBadge";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
+import { daysSince, fmtDaysCount, monthKey, monthLabel } from "@/lib/tableDerive";
 import { metaColumns } from "@/components/common/metaColumns";
 import { Field, FieldRow } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -45,6 +47,9 @@ const endOfWeek = () => {
   return friday < today ? today : friday;
 };
 const upper = (s?: string) => (s ?? "").toUpperCase();
+// Half a working month away from the office: the point at which "working remotely" is worth a conversation
+// about arrangements rather than another approval.
+const HEAVY_MONTH_DAYS = 10;
 
 export default function RemoteWork({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<RemoteWorkRequest>("remote-work-requests");
@@ -178,6 +183,22 @@ export default function RemoteWork({ me }: { me: Me }) {
     { id: "location", header: "Location", filter: "select", groupBy: true, accessor: (r) => r.location ?? "", cell: (r) => r.location || <span className="text-muted-foreground">-</span> },
     { id: "state", header: "Status", filter: "select", groupBy: true, accessor: (r) => upper(r.state), cell: (r) => <StatusBadge state={r.state} /> },
     { id: "reason", header: "Reason", accessor: (r) => r.reason ?? "", cell: (r) => r.reason || <span className="text-muted-foreground">-</span> },
+    {
+      // Remote work is allowed and counted by the month, and a date column cannot group. Folded by month
+      // with the days subtotal on each fold, this answers "how much of March was anybody in".
+      id: "month", header: "Month", filter: "select", groupBy: true, defaultHidden: true,
+      accessor: (r) => monthKey(r.start_date),
+      cell: (r) => monthLabel(monthKey(r.start_date)),
+    },
+    {
+      id: "waiting", header: "Waiting", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      accessor: (r) => (upper(r.state) === "PENDING" ? daysSince(r.create_time) : null),
+      cell: (r) => {
+        const d = upper(r.state) === "PENDING" ? daysSince(r.create_time) : null;
+        if (d == null) return <span className="text-muted-foreground">-</span>;
+        return <span className={cn("tabular-nums text-xs", d >= 3 ? "font-medium text-warning" : "text-muted-foreground")}>{fmtDaysCount(d)}</span>;
+      },
+    },
   ];
   // History only: the approver's note explains WHY a request landed where it did (esp. rejections).
   const noteCol: Column<RemoteWorkRequest> = {
@@ -206,8 +227,44 @@ export default function RemoteWork({ me }: { me: Me }) {
 
   const addBtn = canCreate && <AccessAction collection="remote-work-requests" create><Button onClick={openCreate}><Plus className="h-4 w-4" /> Request remote</Button></AccessAction>;
 
+  // Undecided requests, and the days a team has already committed to being away. The second is the one a
+  // manager is actually deciding against, and it was only visible by reading every row.
+  const remoteInsights = (rs: RemoteWorkRequest[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const stale = rs.filter((r) => upper(r.state) === "PENDING" && (daysSince(r.create_time) ?? 0) >= 3);
+    if (stale.length > 0) {
+      out.push({
+        id: "stale",
+        label: `${stale.length} waiting over 3 days`,
+        tone: "warning",
+        hint: "People plan travel around these.",
+        filters: { waiting: ">=3" },
+        sort: "waiting.desc",
+      });
+    }
+    const month = thisMonthStr();
+    const heavy = new Map<string, number>();
+    for (const r of rs) {
+      if (["REJECTED", "CANCELLED"].includes(upper(r.state))) continue;
+      if (monthKey(r.start_date) !== month) continue;
+      const key = r.employee ? idOf(r.employee) : "";
+      heavy.set(key, (heavy.get(key) ?? 0) + (r.days || 0));
+    }
+    const over = [...heavy.values()].filter((d) => d >= HEAVY_MONTH_DAYS).length;
+    if (over > 0) {
+      out.push({
+        id: "heavy",
+        label: `${over} remote ${HEAVY_MONTH_DAYS} days or more this month`,
+        hint: "Counted per person across this month. Group by employee to see whose.",
+        filters: { month },
+        sort: "days.desc",
+      });
+    }
+    return out;
+  };
+
   const renderTable = (search: RequestsHistorySearch, data: RemoteWorkRequest[], columns: Column<RemoteWorkRequest>[], tableId: string, emptyTitle: string) => (
-    <DataTable columns={columns} tableId={tableId} rows={data} search={search} getRowId={(r) => r.path} emptyTitle={emptyTitle} emptyAction={addBtn} accessCollection="remote-work-requests" accessTargetOf={(r) => ({ objectPath: r.path, label: `${empName(r.employee)} · ${r.start_date}`, can: r.access?.can })} />
+    <DataTable columns={columns} tableId={tableId} rows={data} search={search} insights={remoteInsights} getRowId={(r) => r.path} emptyTitle={emptyTitle} emptyAction={addBtn} accessCollection="remote-work-requests" accessTargetOf={(r) => ({ objectPath: r.path, label: `${empName(r.employee)} · ${r.start_date}`, can: r.access?.can })} />
   );
 
   return (

@@ -189,6 +189,14 @@ export function shouldTouchLastUsed(lastUsedAt: Date | number | null, nowMs: num
   return lastUsedAt === null || nowMs - +new Date(lastUsedAt) > LAST_USED_THROTTLE_MS;
 }
 
+// `updated_at` is held by writing it back to itself, for the reason services/users.ts#touchLastSeen sets out
+// at length: the column carries `$onUpdateFn`, which drizzle applies to any update that does not name it, so
+// the plain one-column write moved this key's ETag every fifteen minutes that the integration ran. An admin
+// with the API keys panel open then got a 409 on their next edit - a conflict with nobody, raised by the key
+// being USED - and the panel's conditional read refetched on every poll.
 export function touchLastUsed(deps: Deps, id: string, now: Date) {
-  return deps.db.update(schema.apiKeys).set({ lastUsedAt: now }).where(eq(schema.apiKeys.uuid, id));
+  return deps.db
+    .update(schema.apiKeys)
+    .set({ lastUsedAt: now, updatedAt: sql`${schema.apiKeys.updatedAt}` })
+    .where(eq(schema.apiKeys.uuid, id));
 }

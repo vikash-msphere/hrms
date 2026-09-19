@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { CalendarRange, Plus } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -6,11 +6,15 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf } from "@/lib/utils";
-import type { Me, PayPeriod } from "@/types";
+import { todayStr } from "@/lib/orgDay";
+import { isWeekend, weekdayName, weekendLabel } from "@/lib/tableDerive";
+import { countBy } from "@/lib/tableSignals";
+import type { Me, PayPeriod, PayrollRun } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -100,12 +104,74 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
     }
   }
 
+  // How many payroll runs each period carries. Read only where the caller can see runs at all - an employee
+  // with no payroll grant gets the same period list without a column that would always read zero.
+  const canRuns = usePermission("payroll-runs.read");
+  const { rows: runs } = useCollection<PayrollRun>("payroll-runs", { enabled: canRuns });
+  const runCounts = useMemo(() => countBy(runs, (r) => (r.pay_period ? idOf(r.pay_period) : null)), [runs]);
+
+  // The two things a payroll calendar is checked for, neither of which a list of dates can show.
+  const periodInsights = (pps: PayPeriod[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const today = todayStr();
+    // Only periods that have already ENDED: a period still running has nothing to pay yet, and counting it
+    // would make the chip permanent furniture.
+    const unrun = canRuns
+      ? pps.filter((pp) => !pp.delete_time && pp.period_end && pp.period_end < today && (runCounts.get(idOf(pp.path)) ?? 0) === 0)
+      : [];
+    if (unrun.length > 0) {
+      out.push({
+        id: "no-run",
+        label: `${unrun.length} ended with no payroll run`,
+        tone: "destructive",
+        hint: "The period is over and nothing has been run against it.",
+        filters: { runs: "=0", end: `..${today}` },
+        sort: "end.asc",
+      });
+    }
+    const weekend = pps.filter((pp) => !pp.delete_time && pp.pay_date && pp.pay_date >= today && isWeekend(pp.pay_date));
+    if (weekend.length > 0) {
+      out.push({
+        id: "weekend-pay",
+        label: `${weekend.length} pay on a weekend`,
+        tone: "warning",
+        hint: "Banks do not settle then, so the money lands the next working day. Move the date or expect the delay.",
+        filters: { pay_day: "Weekend", pay: `${today}..` },
+        sort: "pay.asc",
+      });
+    }
+    return out;
+  };
+
   const columns: Column<PayPeriod>[] = [
     { id: "label", header: "Label", accessor: (pp) => pp.display_name, cell: (pp) => <span className="font-medium">{pp.display_name}</span> },
     { id: "start", header: "Period start", filter: "date", accessor: (pp) => pp.period_start, cell: (pp) => formatDate(pp.period_start) },
     { id: "end", header: "Period end", filter: "date", accessor: (pp) => pp.period_end, cell: (pp) => formatDate(pp.period_end) },
     // The calendar this page exists for: "which run pays out this month" is one click on the date filter.
     { id: "pay", header: "Pay date", filter: "date", dateHint: "future", accessor: (pp) => pp.pay_date, cell: (pp) => formatDate(pp.pay_date) },
+    {
+      // Banks do not settle on a Saturday, so a pay date that lands on one pays late whatever the run says.
+      // It is fixable weeks ahead and invisible until somebody is not paid, which is exactly the kind of
+      // thing a column should say out loud.
+      id: "pay_day", header: "Pay day", filter: "select", groupBy: true, defaultHidden: true,
+      accessor: (pp) => weekendLabel(pp.pay_date),
+      cell: (pp) => (isWeekend(pp.pay_date)
+        ? <span className="text-warning">{weekdayName(pp.pay_date)}</span>
+        : <span className="text-muted-foreground">{weekdayName(pp.pay_date) || "-"}</span>),
+    },
+    {
+      // Whether payroll has actually been run for this period. The list of periods and the list of runs were
+      // two tabs that never referred to each other, and a period nobody ran is the quietest way to miss a
+      // payroll: nothing on this page was wrong, there was simply nothing there.
+      id: "runs", header: "Runs", align: "right", filter: "number",
+      accessor: (pp) => runCounts.get(idOf(pp.path)) ?? 0,
+      cell: (pp) => {
+        const n = runCounts.get(idOf(pp.path)) ?? 0;
+        return n === 0
+          ? <span className="text-muted-foreground">none</span>
+          : <span className="tabular-nums">{n}</span>;
+      },
+    },
     stateColumn<PayPeriod>(),
     ...metaColumns<PayPeriod>(),
     {
@@ -142,6 +208,7 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
             columns={columns}
             tableId="pay-periods"
             rows={rows}
+            insights={periodInsights}
             getRowId={(pp) => pp.path}
             rowClassName={(pp) => (pp.delete_time ? "opacity-60" : undefined)}
             emptyTitle="No pay periods match"

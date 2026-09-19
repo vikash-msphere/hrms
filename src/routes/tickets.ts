@@ -9,6 +9,7 @@ import {
   attachToTicket, detachFromTicket, readTicketAttachment, attachRecordingToTicket,
   type TicketInput,
 } from "../services/tickets";
+import { suggestTriage, decideTriage } from "../services/ticketTriage";
 import { requireCappedBody } from "../services/documentsCommon";
 import { MAX_RICH_COMMENT } from "../domain/richText";
 import { toTicketResource } from "../http/serialize";
@@ -37,6 +38,7 @@ const toggleTodoSchema = z.object({ todo: z.string(), done: z.boolean() }).stric
 const removeTodoSchema = z.object({ todo: z.string() }).strict();
 const detachSchema = z.object({ key: z.string() }).strict();
 const attachRecordingSchema = z.object({ session_replay_id: z.string() }).strict();
+const decideTriageSchema = z.object({ accepted: z.boolean() }).strict();
 
 // Helpdesk tickets. A ticket is never edited or deleted through the API - it moves through its state machine
 // and accumulates comments - so there is no PATCH and, despite the table's delete_time (which exists for the
@@ -55,7 +57,7 @@ export const tickets = collectionRoutes<TicketInput, typeof schema.tickets>({
     get: (deps, actor, id) => getTicketWithComments(deps, actor, id),
     create: (deps, actor, input) => createTicket(deps, actor, input),
   },
-  list: (c, page) => listTickets(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("assignee"), c.get("user"), c.req.query("department"), c.req.query("q"), page.showDeleted, page.deletedOnly),
+  list: (c, page) => listTickets(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("assignee"), c.get("user"), c.req.query("department"), c.req.query("q"), page.showDeleted, page.deletedOnly, c.req.query("employee")),
   verbs: {
     // The five bodyless moves through the state machine; the service validates which are legal from where.
     start: { run: (deps, user, id) => transitionTicket(deps, user, id, "start") },
@@ -77,6 +79,31 @@ export const tickets = collectionRoutes<TicketInput, typeof schema.tickets>({
         attachToTicket(deps, user, id, await requireCappedBody(c.req.raw), { fileName: c.req.query("file_name"), contentType: c.req.query("content_type") }),
     },
     detach: { schema: detachSchema, run: (deps, user, id, body) => detachFromTicket(deps, user, id, body.key) },
+    // The triage suggestion: which department/category/priority the nearest RESOLVED tickets carry, and which
+    // open ones look like the same problem. A read, mounted as a custom method because it answers with an
+    // analysis rather than a resource - the same shape as `boards:metrics` and `access-rules:scopeCounts`.
+    //
+    // `raw`, so it owns its response: there is no ticket row to serialize here, and passing the analysis
+    // through the resource serializer would mean inventing a resource that does not exist.
+    //
+    // The caller's own list scope goes in, and the service re-decides every neighbour against it. A ticket the
+    // caller could not list contributes nothing - not a link, not a number in the vote.
+    triage: {
+      raw: async (c, id) => {
+        const triage = await suggestTriage(c.get("deps"), c.get("scope"), id);
+        return c.json({ triage });
+      },
+    },
+    // What the human did with it, for measuring whether the feature earns its keep. It does NOT change the
+    // ticket: an accepted suggestion is applied by the UI calling `:route` / `:prioritize`, so the write goes
+    // through the normal service with its normal validation and audit row.
+    decideTriage: {
+      schema: decideTriageSchema,
+      run: async (deps, user, id, body) => {
+        await decideTriage(deps, user, id, body.accepted);
+        return getTicketWithComments(deps, user, id);
+      },
+    },
     // Add a session recording after the fact. The create body still takes the first one; this is how the
     // second and third get there, which is what "can you show me that again?" needs.
     attachRecording: { schema: attachRecordingSchema, run: (deps, user, id, body) => attachRecordingToTicket(deps, user, id, body.session_replay_id) },

@@ -4,10 +4,16 @@ import { collectionRoutes } from "../http/collectionRoute";
 import { listCandidates, getCandidate, createCandidate, updateCandidate, type CandidateInput } from "../services/ats";
 import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
+import { extractResume, MAX_RESUME_CHARS } from "../services/resumeExtract";
+import { jsonBody } from "../http/jsonRequest";
+import { invalidArgument } from "../lib/errors";
 import { toCandidateResource } from "../http/serialize";
 
 const COL = "candidates";
 const RESUME = "resume"; // the attachment slot for a candidate's resume
+
+// The resume TEXT, extracted client-side. See the verb below for why it arrives this way.
+const extractSchema = z.object({ text: z.string().min(1).max(MAX_RESUME_CHARS) }).strict();
 
 const writeSchema = z
   .object({
@@ -57,6 +63,22 @@ export const candidates = collectionRoutes<CandidateInput, typeof schema.candida
       raw: async (c, id) => {
         const { bytes, row: att } = await downloadAttachment(c.get("deps"), COL, id, RESUME);
         return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": attachmentDisposition(att, "resume") });
+      },
+    },
+    // Read the CV into form fields the recruiter then accepts one by one. Off unless the org has enabled it,
+    // and then only for the fields the org chose (domain/resumeFields.ts).
+    //
+    // The TEXT is posted by the client because the Worker cannot read a PDF (the SPA already runs pdfjs for
+    // the viewer), which also keeps a PDF parser out of the Worker and a big parse off its CPU budget.
+    //
+    // `raw`, because the answer is a set of suggested field values, not a candidate resource. Nothing is
+    // written to the candidate here: accepting a field is the ordinary PATCH, with its ordinary audit row.
+    extractResume: {
+      raw: async (c, id) => {
+        const parsed = extractSchema.safeParse(await jsonBody(c));
+        if (!parsed.success) throw invalidArgument("body must be { text }");
+        const out = await extractResume(c.get("deps"), c.get("user"), id, parsed.data.text);
+        return c.json({ fields: out.fields, cached: out.cached });
       },
     },
   },

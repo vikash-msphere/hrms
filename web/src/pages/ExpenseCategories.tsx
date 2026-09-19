@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -39,6 +40,7 @@ export default function ExpenseCategories({ embedded, openId }: { me?: Me; embed
   const lc = useLifecycle("expense-categories", "category", reload);
   const writable = usePermission("expense-categories.write");
   const canPurge = usePermission("expense-categories.admin");
+  const { org: listOrg } = useOrg();
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<ExpenseCategory | null>(null);
@@ -101,9 +103,66 @@ export default function ExpenseCategories({ embedded, openId }: { me?: Me; embed
     }
   }
 
+  // What each category has actually carried. A catalogue with no volume beside it cannot be pruned or
+  // re-mapped: every row looks equally alive, and the category nobody has filed against in a year is
+  // indistinguishable from the one taking half the ledger.
+  const canExpenses = usePermission("expenses.read");
+  const { rows: allExpenses } = useCollection<Expense>("expenses", { enabled: canExpenses });
+  const catUse = useMemo(() => {
+    const m = new Map<string, { count: number; total: number }>();
+    for (const e of allExpenses) {
+      if (!e.category || ["CANCELLED", "REJECTED"].includes((e.state ?? "").toUpperCase())) continue;
+      const key = idOf(e.category);
+      const at = m.get(key) ?? { count: 0, total: 0 };
+      at.count += 1;
+      at.total += e.amount || 0;
+      m.set(key, at);
+    }
+    return m;
+  }, [allExpenses]);
+  const listMoney = (n: number) => formatMoney(n, listOrg.default_currency, currencyDecimals(undefined, listOrg));
+
+  const categoryInsights = (cs: ExpenseCategory[]): TableInsight[] => {
+    if (!canExpenses) return [];
+    const out: TableInsight[] = [];
+    const idle = cs.filter((c) => !c.delete_time && !c.disabled && !catUse.has(idOf(c.path)));
+    if (idle.length > 0) {
+      out.push({
+        id: "unused",
+        label: `${idle.length} with nothing filed against them`,
+        hint: "Nothing loaded uses these. A shorter list is a better-coded one.",
+        filters: { claims: "=0" },
+      });
+    }
+    // A category that takes no receipt and carries large claims is a control gap: the money leaves with
+    // nothing behind it, and nobody finds out until an audit asks.
+    const loose = cs.filter((c) => !c.delete_time && !c.requires_receipt && (catUse.get(idOf(c.path))?.total ?? 0) > 0);
+    if (loose.length > 0) {
+      out.push({
+        id: "no-receipt-policy",
+        label: `${loose.length} in use with receipts optional`,
+        tone: "warning",
+        hint: "Spend is going through these with nothing required behind it.",
+        filters: { receipt: "Optional", claims: ">0" },
+        sort: "spend.desc",
+      });
+    }
+    return out;
+  };
+
   const columns: Column<ExpenseCategory>[] = [
     { id: "name", header: "Name", accessor: (c) => c.display_name, cell: (c) => <span className="font-medium">{c.display_name}</span> },
     { id: "gl", header: "GL code", accessor: (c) => c.gl_code ?? "", cell: (c) => c.gl_code || <span className="text-muted-foreground">-</span> },
+    ...(canExpenses ? [
+      { id: "claims", header: "Expenses", align: "right" as const, filter: "number" as const, aggregate: "sum" as const,
+        accessor: (c: ExpenseCategory) => catUse.get(idOf(c.path))?.count ?? 0 },
+      { id: "spend", header: "Spend", align: "right" as const, filter: "number" as const, aggregate: "sum" as const, formatTotal: listMoney,
+        accessor: (c: ExpenseCategory) => catUse.get(idOf(c.path))?.total ?? 0,
+        cell: (c: ExpenseCategory) => {
+          const total = catUse.get(idOf(c.path))?.total ?? 0;
+          return total ? <span className="tabular-nums">{listMoney(total)}</span> : <span className="text-muted-foreground">-</span>;
+        } },
+    ] : []),
     {
       id: "receipt",
       header: "Receipt",
@@ -143,6 +202,7 @@ export default function ExpenseCategories({ embedded, openId }: { me?: Me; embed
             columns={columns}
             tableId="expense-categories"
             rows={rows}
+            insights={categoryInsights}
             getRowId={(c) => c.path}
             rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)}
             emptyTitle="No categories match"

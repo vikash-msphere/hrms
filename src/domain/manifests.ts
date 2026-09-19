@@ -26,6 +26,22 @@ export const REFERENCES: Record<string, Record<string, RefField>> = {
   applications: { candidate: { collection: "candidates", level: "read" }, requisition: { collection: "job-requisitions", level: "read" }, referral: { collection: "referrals", level: "read" } },
   interviews: { application: { collection: "applications", level: "read" } },
   "interview-feedback": { interview: { collection: "interviews", level: "read" } },
+  // A goal's ALIGNMENT and its BLOCKER name other goals, and nothing gated them: `resolveParentId` /
+  // `resolveBlockedBy` (services/goals.ts) check that the target exists and that the chain does not loop, which
+  // is integrity rather than access. So a caller could align their own goal under a goal they cannot read -
+  // no disclosure (the serializer emits a bare `goals/<id>` ref, and opening it still 403s), but their row then
+  // hangs in somebody else's alignment tree and counts toward that subtree's rollups. Declared here rather than
+  // fixed in the service, because this is the one place a body reference is gated and the engine already does
+  // it: `read` on the target, exactly as `cards.goal` below has always required.
+  //
+  // Costs no reachable flow: every parent the UI can offer comes from the goals list it already loaded, which
+  // is scope-bound, and "none" is sent as "" (skipped here).
+  goals: {
+    parent: { collection: "goals", level: "read" },
+    blocked_by: { collection: "goals", level: "read" },
+    cycle: { collection: "review-cycles", level: "read" },
+    department: { collection: "departments", level: "read" },
+  },
   // A card lives on a board (need read on it) and may link to a goal (need read on it). `assignee` is a
   // principal ref (like manager), enforced structurally, so it is deliberately not gated here.
   cards: { board: { collection: "boards", level: "read" }, goal: { collection: "goals", level: "read" }, sprint: { collection: "sprints", level: "read" } },
@@ -81,6 +97,15 @@ export const REDACTED_FIELDS: Record<string, string[]> = {
   "leave-requests": ["reason"],
   // A ticket raised about a person can carry anything; a queue only needs its subject and state.
   tickets: ["description"],
+  // What the company paid for a thing, and what it is worth now. An asset row is readable by the person
+  // HOLDING it (assets.me), and "your laptop cost 1.8 lakh" is a different sensitivity from "you have a
+  // laptop" - the same split `offers.base_comp` draws between running a process and seeing its number.
+  // `book_value` is listed beside its input because hiding only the cost would leave the figure it is
+  // computed from on the wire, which is not a redaction.
+  assets: ["purchase_cost", "book_value"],
+  // Vendor pricing on a check about one person, on a row that person's own `me` rule can reach. Choosing an
+  // agency is an HR decision; the subject of the check has no part in it and no business seeing the invoice.
+  "background-checks": ["cost"],
   // NOT `reviews`: its manager comments and ratings are already withheld by the review's own state machine
   // (`_managerVisible`, http/serialize.ts), and a second mechanism over the same field would be two places
   // deciding one question.

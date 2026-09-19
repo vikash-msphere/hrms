@@ -45,6 +45,7 @@ import { useConfirm } from "@/components/common/confirm";
 import { FilterChip } from "@/components/common/FilterChips";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { DraftButton } from "@/components/common/DraftButton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -1510,7 +1511,18 @@ export default function Goals({ me, openId, scope: forcedScope }: {
             </Field>
           )}
           <Field label="Title" field="title"><Input value={form.title} placeholder="e.g. Ship the billing revamp" onChange={(e) => setForm({ ...form, title: e.target.value })} autoFocus /></Field>
-          <Field label="Description (optional)" field="description"><Textarea rows={3} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What does success look like?" /></Field>
+          <Field label="Description (optional)" field="description">
+            <div className="mb-2 flex justify-end">
+              <DraftButton
+                collection="goals"
+                kind="goal"
+                existing={form.description}
+                hint="e.g. cut checkout errors, measured by the weekly error rate, by the end of Q2"
+                onDraft={(text) => setForm({ ...form, description: text })}
+              />
+            </div>
+            <Textarea rows={3} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What does success look like?" />
+          </Field>
           {!editing && (
             <Field label="For" hint="Who this goal belongs to.">
               <Combobox

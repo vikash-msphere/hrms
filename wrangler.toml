@@ -106,6 +106,32 @@ SENTRY_DSN = "https://b0783df050ada7c6adc0a89aaa15b4f4@o4511976927461376.ingest.
 # `npm run preflight` warns when it is unset or when the SPA has no VITE_APP_VERSION to pair with it.
 SENTRY_ENVIRONMENT = "production"
 
+# Workers AI. The free allocation is 10,000 Neurons/day for the whole ACCOUNT, which staging shares - see the
+# budget ceilings in src/domain/aiPolicy.ts, which are set below it deliberately.
+#
+# Binding it does not decide anything about what may be called: the binding will proxy EXTERNAL providers
+# given a provider-prefixed model id, and sending employee data to one is the single thing this layer must
+# never do. The allowlist in domain/aiPolicy.ts is what prevents it, and lib/ai.ts is the only file that calls
+# `AI.run`. Unbind this and every AI feature falls back to the non-AI path it was built with.
+[ai]
+binding = "AI"
+
+# The semantic search index. Create it once with the dimensions and metric the embedding model in
+# domain/aiPolicy.ts produces - changing either later means rebuilding the index, because vectors from two
+# models are not comparable:
+#
+#   wrangler vectorize create hrms-search --dimensions=384 --metric=cosine
+#   wrangler vectorize create-metadata-index hrms-search --property-name=collection --type=string
+#
+# The metadata index is required for the `$in` collection pre-filter in lib/vector.ts. It is the ONLY metadata
+# stored: no name, no code, no owner id, so the index cannot be read as a staff directory. Row-level access is
+# re-decided in SQL after the query, never by this filter.
+#
+# Unbind this and global search is the FTS5 path it has always been.
+[[vectorize]]
+binding = "VEC"
+index_name = "hrms-search"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "hrms"
@@ -171,6 +197,19 @@ SENTRY_DSN = "https://b0783df050ada7c6adc0a89aaa15b4f4@o4511976927461376.ingest.
 # What separates staging's issues from production's in the tracker - both report into the same project.
 SENTRY_ENVIRONMENT = "staging"
 # SENTRY_RELEASE = "abc1234"
+
+# Staging shares production's 10,000 Neuron/day account allocation, so a rehearsal can starve the live app.
+# Either leave this bound and give staging a small slice of the budget in settings, or unbind it and let
+# staging exercise the non-AI fallback paths, which is the more useful rehearsal of the two.
+[env.staging.ai]
+binding = "AI"
+
+# Its OWN index, never production's. Staging runs against a copy of the database with different record ids,
+# so sharing one index would mean staging's upserts overwriting production's entries and its searches
+# returning rows that do not exist there.
+[[env.staging.vectorize]]
+binding = "VEC"
+index_name = "hrms-search-staging"
 
 [[env.staging.d1_databases]]
 binding = "DB"

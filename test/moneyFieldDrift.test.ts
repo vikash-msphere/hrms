@@ -25,6 +25,9 @@ const routes = import.meta.glob("../src/routes/**/*.ts", { query: "?raw", import
 const MONEY_FIELDS = [
   "amount", "tax_amount", "principal", "annual_ctc", "variable_pay_target", "base_comp",
   "band_min", "band_mid", "band_max", "employee_cost", "employer_cost", "days",
+  // What a thing cost: an asset's purchase price, a background check's vendor invoice. Both are summed
+  // (inventory book value, spend per vendor), which is the property that makes an unbounded one dangerous.
+  "purchase_cost", "cost",
 ];
 
 /**

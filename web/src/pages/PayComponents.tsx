@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -8,10 +8,11 @@ import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
 import { usePermission } from "@/lib/perm";
 import { idOf } from "@/lib/utils";
-import type { Me, PayComponent } from "@/types";
+import type { Me, PayComponent, SalaryStructure } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -172,6 +173,34 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
     }
   }
 
+  // Which components the org's salary structures actually build on. A pay catalogue is the one nobody dares
+  // prune, because deleting a component that turns out to be in use rewrites somebody's pay - so the count
+  // is the whole point, and the wording stays honest about what it covers.
+  const canStructures = usePermission("salary-structures.read");
+  const { rows: structures } = useCollection<SalaryStructure>("salary-structures", { all: true, enabled: canStructures });
+  const structureUse = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const s of structures) {
+      for (const line of s.lines ?? []) {
+        if (!line.component) continue;
+        const key = idOf(line.component);
+        m.set(key, (m.get(key) ?? 0) + 1);
+      }
+    }
+    return m;
+  }, [structures]);
+
+  const componentInsights = (pcs: PayComponent[]): TableInsight[] => {
+    if (!canStructures) return [];
+    const idle = pcs.filter((pc) => !pc.delete_time && !pc.disabled && !structureUse.has(idOf(pc.path)));
+    return idle.length === 0 ? [] : [{
+      id: "unused",
+      label: `${idle.length} in no salary structure`,
+      hint: "No structure builds on these. They may still sit on an individual package, so check before removing one.",
+      filters: { structures: "=0" },
+    }];
+  };
+
   const columns: Column<PayComponent>[] = [
     { id: "name", header: "Name", accessor: (pc) => pc.display_name, cell: (pc) => <span className="font-medium">{pc.display_name}</span> },
     {
@@ -206,6 +235,17 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
       },
     },
     { id: "recurring", header: "Recurring", defaultHidden: true, filter: "select", groupBy: true, accessor: (pc) => (pc.recurring ? "Yes" : "No"), cell: (pc) => <Badge variant={pc.recurring ? "secondary" : "muted"}>{pc.recurring ? "Yes" : "No"}</Badge> },
+    ...(canStructures ? [{
+      // How many salary structures build on this component. Deliberately NOT a claim about every use - a
+      // component can also be attached to one person's own package, which this page cannot see - so the
+      // header says structures and the chip below says the same.
+      id: "structures", header: "In structures", align: "right" as const, filter: "number" as const,
+      accessor: (pc: PayComponent) => structureUse.get(idOf(pc.path)) ?? 0,
+      cell: (pc: PayComponent) => {
+        const n = structureUse.get(idOf(pc.path)) ?? 0;
+        return n ? <span className="tabular-nums">{n}</span> : <span className="text-muted-foreground">none</span>;
+      },
+    }] : []),
     stateColumn<PayComponent>(),
     ...metaColumns<PayComponent>(),
     {
@@ -235,6 +275,7 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
           columns={columns}
           tableId="pay-components"
           rows={rows}
+          insights={componentInsights}
           getRowId={(pc) => pc.path}
           rowClassName={(pc) => (pc.delete_time ? "opacity-60" : undefined)}
           emptyTitle="No pay components"

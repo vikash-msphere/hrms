@@ -19,6 +19,8 @@ import type {
   TableRunResult, TableRunRow, TableView,
 } from "@/types";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
+import { daysSince, fmtDaysCount } from "@/lib/tableDerive";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -48,6 +50,9 @@ import { Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTit
 // How many rows one table will follow the cursor for. A report is read to the end - a salary sheet is
 // useless as a 100-row window - but a grid is still a screen, not a bulk extract: past this the answer is a
 // filter, or a narrower base, not another page.
+// When a saved table stops being in use and starts being clutter. A quarter: long enough that a table built
+// for one quarterly review is not called stale the week after it was used.
+const STALE_VIEW_DAYS = 90;
 const ROW_CEILING = 5000;
 
 // ONE PAGE IS NOT ONE SCREENFUL OF ROWS, and reading it as though it were is what made a working filter look
@@ -314,6 +319,20 @@ function TableList() {
     }
   }
 
+  // What a builder's own list is worth saying: which of these are experiments nobody came back to. A shared
+  // library fills up with them, and every one is offered to everybody who opens this page.
+  const viewInsights = (vs: TableView[]): TableInsight[] => {
+    const stale = vs.filter((v) => (daysSince(v.update_time) ?? 0) >= STALE_VIEW_DAYS);
+    if (stale.length === 0) return [];
+    return [{
+      id: "stale",
+      label: `${stale.length} untouched for ${STALE_VIEW_DAYS} days`,
+      hint: "Nobody has changed these in months. Usually a question somebody answered once.",
+      filters: { idle: `>=${STALE_VIEW_DAYS}` },
+      sort: "idle.desc",
+    }];
+  };
+
   const columns: Column<TableView>[] = [
     {
       id: "name",
@@ -330,6 +349,13 @@ function TableList() {
     { id: "base", header: "Rows are", accessor: (r) => baseLabel.get(r.base) ?? r.base, filter: "select", groupBy: true, mobilePriority: 2 },
     { id: "columns", header: "Columns", accessor: (r) => (r.columns ?? []).length, align: "right", filter: "number" },
     { id: "updated", header: "Updated", accessor: (r) => r.update_time, filter: "date", dateHint: "past", cell: (r) => formatDate(r.update_time), mobilePriority: 3 },
+    {
+      // How long since anybody touched this table. A builder collects abandoned experiments faster than
+      // anything else in the app, and "Updated" as a date cannot be asked "show me everything nobody has
+      // opened since spring".
+      id: "idle", header: "Untouched", align: "right", defaultHidden: true, filter: "number", formatTotal: fmtDaysCount,
+      accessor: (r) => daysSince(r.update_time),
+    },
     {
       id: "actions",
       header: "",
@@ -387,6 +413,7 @@ function TableList() {
           <DataTable
             columns={columns}
             rows={rows}
+            insights={viewInsights}
             getRowId={(r) => r.path}
             tableId="table-views"
             accessCollection="table-views"
@@ -552,7 +579,13 @@ function OneTable({ id }: { id: string }) {
 
   async function dropFilter(index: number) {
     if (!view) return;
-    await saveFilterSort((view.filters ?? []).filter((_, i) => i !== index), view.sort ?? []);
+    try {
+      await saveFilterSort((view.filters ?? []).filter((_, i) => i !== index), view.sort ?? []);
+    } catch (e) {
+      // The chip is a one-click write with nowhere to report from, so it reports here rather than vanishing
+      // from the toolbar while the filter is still on the saved table.
+      toast({ title: "Couldn't remove the filter", description: (e as Error).message, variant: "destructive" });
+    }
   }
 
   async function duplicate() {
@@ -638,6 +671,11 @@ function OneTable({ id }: { id: string }) {
         : col.kind === "enum" || col.kind === "bool" || col.kind === "ref" ? ("select" as const)
         : ("text" as const),
       ...(col.kind === "enum" || col.kind === "bool" || col.kind === "ref" ? { groupBy: true } : {}),
+      // Which half of the calendar a date field lives in, read off its name. A grid of joining dates is asked
+      // about the past and one of due dates about what is coming, and a reader who has to scroll past "next
+      // 30 days" to reach "last 30 days" every time is being made to pay for something the field name already
+      // said. Ordering only, so a wrong guess costs a scroll and never hides a window.
+      ...(col.kind === "date" || col.kind === "datetime" ? { dateHint: dateHintOf(col.key, col.label) } : {}),
     }));
   }, [result, money]);
 
@@ -1103,6 +1141,13 @@ function OneTable({ id }: { id: string }) {
 // org's currency is, at Intl's default of two decimals. Table Builder is the one surface that puts money from
 // several collections side by side, which makes a wrong unit both hardest to notice and most likely to be
 // exported - and even in INR the bare call reads ₹1,800.00 where the Payroll page reads ₹1,800.
+/** Past or future, from the field's own name. Anything that has not clearly happened yet is asked about the
+ *  past, because most stored dates are records of something that did. */
+function dateHintOf(key: string, label: string): "past" | "future" {
+  const s = `${key} ${label}`.toLowerCase();
+  return /due|expir|next|end|deadline|renew|valid|target|scheduled|upcoming|last_working/.test(s) ? "future" : "past";
+}
+
 function renderCell(
   col: TableRunResult["columns"][number],
   row: TableRunResult["rows"][number],
@@ -1212,6 +1257,7 @@ function FilterSortSheet({ open, onClose, columns, filters, sort, onSave }: {
   const [draft, setDraft] = useState<ViewFilter[]>(filters);
   const [order, setOrder] = useState<ViewSort[]>(sort);
   const [saving, setSaving] = useState(false);
+  const { toast } = useToast();
 
   // Re-seed on OPEN only. Keyed on the props instead, a save (which replaces them) would reset the sheet
   // under the author while they were still in it.
@@ -1233,9 +1279,12 @@ function FilterSortSheet({ open, onClose, columns, filters, sort, onSave }: {
   function setFilter(i: number, next: Partial<ViewFilter>) {
     setDraft((d) => d.map((f, n) => (n === i ? { ...f, ...next } : f)));
   }
-  // Changing the column can leave an operator the new kind does not offer (a date has no "contains"), and the
-  // server would refuse the whole save for it. The operator falls back to that kind's first, and the value
-  // goes with it - a date typed against a text column is not a date.
+  // Changing the column can leave an operator the new kind does not offer (a date has no "contains"). The
+  // server TAKES it - its filter schema is the operator vocabulary, not a per-kind one, because the kind is
+  // the catalogue's answer at run time - and the runner now gives every such pair one meaning on both halves
+  // of the split. So this is about the filter still SAYING something, not about being refused: the operator
+  // falls back to that kind's first, and the value goes with it, since a date typed against a text column is
+  // not a date.
   function setFilterField(i: number, field: string) {
     const kind = kindOf(field);
     setDraft((d) => d.map((f, n) => {
@@ -1249,11 +1298,14 @@ function FilterSortSheet({ open, onClose, columns, filters, sort, onSave }: {
   // said on the button rather than dropped silently on the way out.
   const incomplete = draft.some((f) => !VALUELESS.includes(f.op) && (f.value === "" || f.value === null || f.value === undefined));
 
+  // Same contract as the column sheet: this owns the write, so it owns saying when the write did not happen.
   async function save() {
     setSaving(true);
     try {
       await onSave(draft.map((f) => (VALUELESS.includes(f.op) ? { field: f.field, op: f.op } : f)), order);
       onClose();
+    } catch (e) {
+      toast({ title: "Couldn't save the filters", description: (e as Error).message, variant: "destructive" });
     } finally {
       setSaving(false);
     }
@@ -1403,6 +1455,7 @@ function ColumnPicker({ open, onClose, base, catalogue, selected, onSave, canExp
   const [picked, setPicked] = useState<ChosenColumn[]>(selected);
   const [query, setQuery] = useState("");
   const [saving, setSaving] = useState(false);
+  const { toast } = useToast();
   // Where in the join the picker is standing. `[]` is the base; each entry is one link, in the order they
   // were followed, so the trail doubles as the breadcrumb and as the `?path=` the server is asked for.
   const [trail, setTrail] = useState<TableLink[]>([]);
@@ -1524,11 +1577,17 @@ function ColumnPicker({ open, onClose, base, catalogue, selected, onSave, canExp
   const rename = (i: number, label: string) =>
     setPicked((p) => p.map((c, n) => (n === i ? (label.trim() ? { field: c.field, label: label.trim() } : { field: c.field }) : c)));
 
+  // The save OWNS its failure, the way WriteDialog does for the dialogs next door: a rejected PATCH used to
+  // unwind out of here as an unhandled rejection, so a conflict (the table edited in another tab, or by whoever
+  // it is shared with) stopped the spinner, closed nothing, said nothing, and left the reader looking at a
+  // column list that had not been saved. The sheet stays OPEN on a failure so the picking is not lost.
   async function save() {
     setSaving(true);
     try {
       await onSave(picked);
       onClose();
+    } catch (e) {
+      toast({ title: "Couldn't save the columns", description: (e as Error).message, variant: "destructive" });
     } finally {
       setSaving(false);
     }

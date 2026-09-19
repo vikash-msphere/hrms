@@ -7,7 +7,9 @@ import { codecFor, type IdCodec } from "./lib/idCodec";
 import { makeApiKeySigner, type ApiKeySigner } from "./lib/apiKeyToken";
 import { makeEmailSender, EMAIL_PROVIDERS, type EmailProvider } from "./lib/email";
 import { makeDocumentStore } from "./lib/docstore";
-import type { Clock, Encryptor, EmailSender, DocumentStore, WebhookSender, PushSender } from "./ports";
+import { makeTextModel } from "./lib/ai";
+import { makeVectorIndex } from "./lib/vector";
+import type { Clock, Encryptor, EmailSender, DocumentStore, WebhookSender, PushSender, TextModel, VectorIndex } from "./ports";
 import { makePushSender } from "./lib/webPush";
 import type { EsignSecrets } from "./domain/esign";
 import { makeDispatch, type Dispatch } from "./services/internalDispatch";
@@ -26,7 +28,7 @@ export type DB = ReturnType<typeof drizzle<typeof schema>>;
 // `trace` is the correlation id of the workflow execution currently running on this Deps. emitEvent mints it at
 // the ROOT emission and every event/run/instance in the synchronous fan-out (incl. apiCall re-dispatch, which
 // reuses this Deps) records it - so the UI can group one workflow's events/runs/waits together and show cause.
-export type Deps = { db: DB; refCache?: Map<string, Promise<unknown>>; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; apiKeySigner: ApiKeySigner; email: EmailSender; docs: DocumentStore; webhook?: WebhookSender; push?: PushSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number; dropped: number }; trace?: string; actingAs?: ActingAs };
+export type Deps = { db: DB; refCache?: Map<string, Promise<unknown>>; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; apiKeySigner: ApiKeySigner; email: EmailSender; docs: DocumentStore; ai?: TextModel; vectors?: VectorIndex; webhook?: WebhookSender; push?: PushSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number; dropped: number }; trace?: string; actingAs?: ActingAs };
 
 /**
  * WHAT is acting, when the actor is not a person at the keyboard.
@@ -114,6 +116,12 @@ export function makeDeps(env: Bindings): Deps {
     esignSecrets: {
       cashfree: { apiKey: env.ESIGN_CASHFREE_CLIENT_ID, apiSecret: env.ESIGN_CASHFREE_CLIENT_SECRET, publicKey: env.ESIGN_CASHFREE_PUBLIC_KEY },
     },
+    // Inference is opt-in per deployment: no `AI` binding = no model = every AI feature falls back to the
+    // path the app had before it. Nothing about the app's behaviour is REQUIRED to go through a model.
+    ...(env.AI ? { ai: makeTextModel(env.AI, env.AI_GATEWAY_ID) } : {}),
+    // The semantic index is bound independently of the model: an index with no model cannot be refreshed but
+    // can still be queried, and a model with no index is every AI feature except semantic search.
+    ...(env.VEC ? { vectors: makeVectorIndex(env.VEC) } : {}),
     // Browser push is opt-in per deployment: absent VAPID keys = no sender = notify() skips push entirely.
     ...(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
       ? { push: makePushSender(env.VAPID_PUBLIC_KEY, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT || `mailto:${env.EMAIL_FROM}`) }

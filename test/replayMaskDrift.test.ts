@@ -62,6 +62,10 @@ const EXEMPT: Record<string, string> = {
     "bank FORMAT templates (which column holds what in a bank's bulk-payment file) - org config, not anyone's account number",
   "web/src/components/common/GenerateLetterDialog.tsx":
     "reads `personal-documents` only to spot a duplicate letter, and renders the document's NAME; the letter itself renders in an <iframe>, which instrument.ts blocks outright",
+  "web/src/pages/PayComponents.tsx":
+    "reads `salary-structures` for one number per component - how many structures build on it - and renders that count in the 'In structures' column; no structure, and no figure from one, is rendered",
+  "web/src/pages/PayPeriods.tsx":
+    "reads `payroll-runs` for one number per period - how many runs it carries - and renders that count in the 'Runs' column; no run, and none of its money, is rendered",
 };
 
 // KNOWN BLIND SPOT, stated rather than papered over: this scans pages and components, so a collection fetched

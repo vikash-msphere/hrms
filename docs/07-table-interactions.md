@@ -138,7 +138,10 @@ The contract, from `web/src/components/common/TableInsights.tsx`:
 - **Its `filters` leave exactly the rows it counted.** A chip whose filter disagrees with its own number
   teaches people to distrust both. In practice this is the constraint that shapes them: a select filter
   cannot say "either of these two states", so two states means two chips - or a derived column that can say
-  it in one (see `open_days` on Background checks, `surplus` on leave balances).
+  it in one (see `open_days` on Background checks, `surplus` on leave balances). The same rule is what turns
+  a signal into a column: "is a duplicate", "is slow for its own vendor", "is in a set that does not total
+  100" are not filter values, so the page computes the flag, exposes it as a select column, and the chip
+  filters on that.
 - **It is absent at zero.** "0 overdue" is a good state and needs no chip; the empty strip is the good news.
 - It is called with every LOADED row, not the filtered set, so the figure holds still once its own filter is
   applied.
@@ -162,7 +165,36 @@ say. Two surfaces counting the same thing is one too many.
 
 ---
 
-## 6. Selection and keyboard
+## 6. Scopes: whose rows
+
+```ts
+scopes={[{ id, label, filters, count?, badge? }]}   defaultScope="assigned"
+```
+
+The identity question - my tickets, assigned to me, my team's, everybody's - as chips above the table. A
+scope is **nothing but a named preset of column filters**, which is what makes it worth having: it deep-links
+in `t.<key>`, saves into a view, shows up in the same "these filters are on" row as any other narrowing, and
+shows exactly the rows its chip counted. `defaultScope` is where a reader lands, and it yields to a deep link
+the way the pinned default view does.
+
+Build them with `web/src/lib/tableScope.ts` (`mineScope`, `unassignedScope`, `valueScope`, `allScope`,
+`scopesOf`), which takes the name the page already has on screen - nothing here works out who anybody is.
+
+Two rules:
+
+- **Only the identity axis.** A tab bar whose tabs are STATES (a review queue, a payment queue) or different
+  row types is not this. Expenses keeps its tabs for exactly that reason, and so does the shared
+  Requests/History shell, which is ownership AND state.
+- **A scope filters on what the column HOLDS.** A person column whose accessor renders "Unassigned" wants
+  `valueScope(..., "Unassigned")`, not a blank filter; one that renders an empty string wants
+  `unassignedScope`. The filter runs over the accessor, not over the record.
+
+Where the server can narrow the same way, pass it too (`?assignee=me`, `?employee=me` on tickets) through
+`onFilterChange`, so a scope reaches past the loaded page instead of narrowing a window.
+
+---
+
+## 7. Selection and keyboard
 
 - **Shift-click** a row checkbox to select the range from the last one clicked, in the order the table is
   showing. The range spans pages, like the header's select-all.
@@ -172,16 +204,42 @@ say. Two surfaces counting the same thing is one too many.
 
 ---
 
-## 7. Adding a table
+## 8. Adding a table
 
 Beyond the usual (`columns`, `rows`, `getRowId`, `accessCollection`):
 
 1. Give every money, count and duration column `filter: "number"`, and `formatTotal` if it carries a unit.
-   Add `aggregate: "sum"` when a total of the column is a question anyone asks.
-2. Give every date column `filter: "date"` and a `dateHint`.
-3. Mark the repeated-value columns `groupBy: true`.
-4. Write `insights` only if there is something a person who knows the domain would say out loud on opening
-   the page. Most catalogue tables have nothing, and that is the right answer for them.
+   Add an `aggregate` when a figure over the whole set is a question anyone asks: `sum` for anything that
+   adds up, `avg` for a rate or a duration whose total means nothing ("how long does a ticket take"),
+   `min`/`max` for the extreme that decides something, `count` for how many rows carry a value at all. A sum
+   treats a blank as zero; every other kind skips blanks.
+2. Give every date column `filter: "date"` and a `dateHint`. Where the question is asked as a threshold
+   rather than a calendar window ("unseen for more than 90 days", "expiring inside a quarter"), add a
+   `defaultHidden` companion column of days from `lib/tableDerive.ts` (`daysSince` / `daysUntil`).
+3. Mark the repeated-value columns `groupBy: true`. A date cannot be grouped, so where "per month" is a real
+   question, add a `monthKey` column beside it (same file) - it is keyed `YYYY-MM` so the folds run in
+   calendar order.
+4. Add `bar` to a column that carries a proportion (budget used, checklist done, coverage, leave taken). It
+   draws behind the cell, so the ratio reads down the column instead of one row at a time.
+5. Write `insights` only if there is something a person who knows the domain would say out loud on opening
+   the page. Most catalogue tables have nothing, and that is the right answer for them. Where the chip is
+   about a property no filter can express - a duplicate, an outlier, a cross-collection count - compute it
+   with `lib/tableSignals.ts`, put the answer in a real column, and let the chip filter on that column.
+6. `actions` on a column adds items to that value's cell menu: use it for where the value LEADS (a person's
+   own pages), not for row actions, which belong in an actions column where they can be seen.
+7. Add `scopes` where the page would otherwise grow a tab per person ("mine", "assigned to me", "nobody's").
+   One table with chips, not four tables - see §6 for the two rules that keeps honest.
 
 `test/tableFilter.test.ts` pins the filter grammar. `metaColumns()` and `stateColumn()` already carry their
 own typing, so Created/Updated and State are done for you on every table in the app.
+
+### Two shared files worth knowing before writing a column
+
+- **`web/src/lib/tableDerive.ts`** - `daysSince` / `daysUntil` (with `fmtDaysCount` for their `formatTotal`),
+  `monthKey` / `monthLabel`, `weekdayName`, `isWeekend` / `weekendLabel`. Everything reads the org's today.
+- **`web/src/lib/tableSignals.ts`** - `duplicateIds` (rows that repeat another on a key you choose),
+  `outlierIds` (rows far above the middle of their own group, measured against the median so one extreme
+  row cannot move the bar it is judged by), `countBy` (rows of another collection per key), `median`.
+
+A count that comes from another collection is a count over what is LOADED. Say so in the chip's wording
+where it matters, the way the pager and the export already do.

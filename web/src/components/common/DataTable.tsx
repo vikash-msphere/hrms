@@ -1,6 +1,6 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ArrowUp, Ban, Bookmark, Check, ChevronsDownUp, ChevronsUpDown, Copy, EyeOff, Filter, Layers, X, SlidersHorizontal, GripVertical, ChevronLeft, ChevronRight, Download, FileSpreadsheet, FileText, Inbox, Search, Star } from "lucide-react";
+import { ArrowDown, ArrowUp, Ban, Bookmark, Check, ChevronsDownUp, ChevronsUpDown, Copy, ExternalLink, EyeOff, Filter, Layers, X, SlidersHorizontal, GripVertical, ChevronLeft, ChevronRight, Download, FileSpreadsheet, FileText, Inbox, Search, Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,6 +26,8 @@ import { useToast } from "@/components/ui/use-toast";
 import { BLANK, filterChipLabel, matchesFilter, numberStats, type FilterKind } from "@/lib/tableFilter";
 import { DateFilterPanel, NumberFilterPanel, SelectFilterPanel, type SelectOption } from "@/components/common/tableFilterPanels";
 import { TableInsights, type TableInsight } from "@/components/common/TableInsights";
+// The app's one pill filter, so a scope chip cannot drift into a fifth appearance of the same control.
+import { FilterChip } from "@/components/common/FilterChips";
 import { todayStr } from "@/lib/orgDay";
 
 const PAGE_SIZES = [10, 25, 50, 100, 0]; // 0 = All
@@ -86,16 +88,54 @@ export type Column<T> = {
   // title, the next three its metadata lines). Unranked columns keep their visible order after ranked ones,
   // except a Status column, which is pulled up to sit directly under the title (see `mobileLayout`).
   mobilePriority?: number;
-  // Numeric column that carries a total: the table sums the accessor over every FILTERED row (all pages, not
-  // just the one on screen) into a footer strip, and the bulk bar totals the selection. Money columns pass
-  // `formatTotal` so the total reads in the same units as the cells - "what am I looking at, in total" is the
-  // question a finance table gets asked most, and reaching for a spreadsheet to answer it is a page failing.
-  aggregate?: "sum";
+  // Numeric column that carries a figure: the table aggregates the accessor over every FILTERED row (all
+  // pages, not just the one on screen) into a footer strip, per group, and over the selection in the bulk
+  // bar. Money columns pass `formatTotal` so the figure reads in the same units as the cells - "what am I
+  // looking at, in total" is the question a finance table gets asked most, and reaching for a spreadsheet to
+  // answer it is a page failing.
+  //
+  // Which kind to pick: `sum` for anything that adds up (money, days, points), `avg` for a rate or a
+  // duration where the total is meaningless ("average days open"), `min`/`max` for the extreme that decides
+  // something ("the oldest thing in this queue"), `count` for how many rows carry a value at all.
+  //
+  // Blanks: `sum` treats a missing value as zero, because a row with no amount contributes no amount. Every
+  // other kind SKIPS blanks - an average that counted the rows with nothing recorded is not the average
+  // anybody meant, and it moves whenever somebody adds an empty row.
+  aggregate?: "sum" | "avg" | "min" | "max" | "count";
   // How a figure from this column reads. Used for the footer/selection total, and for every other figure the
   // table prints from it: the min/median/max in a number filter's panel, and the filter chip ("Amount: >
   // ₹5,000" rather than "Amount: >5000"). Worth setting on any numeric column that carries a unit, not only
   // on the ones that are summed.
   formatTotal?: (n: number) => React.ReactNode;
+  // A proportion (0..1) drawn behind this column's cells, so a ratio reads DOWN the column instead of one row
+  // at a time: which budgets are nearly spent, which counts came out short, who has used most of their leave.
+  // Return null where the row has no proportion to draw (no denominator, not applicable) and the cell renders
+  // plain. Values above 1 are drawn full and toned as an overrun, because "over" is the state worth seeing.
+  //
+  // It is decoration over the cell's own content, never a replacement for it: the number still has to be
+  // readable, and the bar is what makes the column scannable.
+  bar?: (row: T) => number | null;
+  // Extra items on this column's cell menu, built from the row. Meant for the jump a value implies - an
+  // employee cell leading to that person's own pages - not for row actions, which belong in an actions column
+  // where they can be seen without a right-click.
+  actions?: (row: T) => CellMenuAction[];
+};
+
+/** One page-supplied item on a cell's right-click menu. */
+export type CellMenuAction = { label: string; icon?: React.ReactNode; onSelect: () => void };
+
+/** One "whose rows" preset. See the `scopes` prop for what belongs here and what does not. */
+export type TableScope = {
+  /** Stable across renders; also what a deep link and `defaultScope` name. */
+  id: string;
+  label: React.ReactNode;
+  /** The narrowing this scope IS, over the table's own columns. Empty = the unnarrowed table ("All"). */
+  filters: Record<string, string>;
+  /** How many rows it would show. Left out where counting it would cost a read the page has not done. */
+  count?: number;
+  /** Anything that rides the chip - a "new since you looked" badge, most often. */
+  badge?: React.ReactNode;
+  title?: string;
 };
 
 type SortState = { id: string; dir: "asc" | "desc" } | null;
@@ -166,6 +206,21 @@ function computeHidden<T>(savedHidden: string[] | undefined, savedOrder: string[
   return hidden;
 }
 
+/** The proportion behind a `bar` column's cell. Drawn under the content, never over it, and toned by how far
+ *  along it is: the reader is looking for the ones running out, so "nearly there" and "over" have to differ
+ *  from "plenty left" without reading the number. */
+function CellBar({ value }: { value: number | null }) {
+  if (value == null || !Number.isFinite(value) || value <= 0) return null;
+  const pct = Math.min(1, value) * 100;
+  // No z-index: an absolutely positioned element paints after the cell's own inline text, so the bar is
+  // deliberately kept faint enough to read straight through. Sending it behind instead (`-z-10`) would put
+  // it behind the ROW's background, which is opaque, and it would never be seen at all.
+  const tone = value > 1 ? "bg-destructive/20" : value >= 0.9 ? "bg-warning/20" : "bg-primary/10";
+  return (
+    <span aria-hidden className={cn("pointer-events-none absolute inset-y-0 left-0 rounded-sm", tone)} style={{ width: `${pct}%` }} />
+  );
+}
+
 function compare(a: unknown, b: unknown): number {
   if (a == null && b == null) return 0;
   if (a == null) return -1;
@@ -198,6 +253,8 @@ export function DataTable<T>({
   bulkActions,
   onLoadMore,
   insights,
+  scopes,
+  defaultScope,
   defaultGroupBy,
 }: {
   columns: Column<T>[];
@@ -264,6 +321,20 @@ export function DataTable<T>({
    * puts the table back. See components/common/TableInsights.tsx for what makes a chip worth having.
    */
   insights?: (rows: T[]) => TableInsight[];
+  /**
+   * WHOSE ROWS - the identity question, as named presets over this table's own column filters.
+   *
+   * A page used to answer this with a tab bar: four tabs, four tables, four saved layouts, for what is one
+   * table narrowed four ways. A scope is the same narrowing said as a chip, and because it is nothing but a
+   * preset of `filters` it inherits everything the table already does with them - the deep link, the saved
+   * view, the "these filters are on" row, and the rule that what a chip shows is exactly what it counted.
+   *
+   * Only for the identity axis. A tab bar whose tabs are STATES (a review queue, a payment queue) or
+   * different row types is not this, and flattening one into chips would conflate two questions.
+   */
+  scopes?: TableScope[];
+  /** The scope a reader lands on. Yields to a deep link, like every other opening state on the table. */
+  defaultScope?: string;
   // Group the table by this column on first open (the reader can regroup or ungroup, and their choice is
   // saved with the rest of the table's prefs). The column must carry `groupBy`.
   defaultGroupBy?: string;
@@ -821,12 +892,51 @@ export function DataTable<T>({
   // so the figure is marked with the same `+` and the same word ("loaded") the pager, the export button and
   // the empty state already use. A partial sum printed as "Total", exact row count beside it, is the number
   // that gets read out in a meeting while the pager two lines below says the set is bigger than that.
-  const sumCols = React.useMemo(() => columns.filter((c) => c.aggregate === "sum"), [columns]);
-  const sumOf = React.useCallback(
-    (rs: T[], col: Column<T>) => rs.reduce((n, r) => n + (Number(col.accessor?.(r)) || 0), 0),
-    [],
-  );
-  const fmtTotal = (col: Column<T>, n: number) => (col.formatTotal ? col.formatTotal(n) : String(n));
+  const sumCols = React.useMemo(() => columns.filter((c) => c.aggregate), [columns]);
+  // `null` when the kind has nothing to report: no rows, or none of them carrying a value. The callers then
+  // print nothing rather than a "0" that reads as a measured zero.
+  const sumOf = React.useCallback((rs: T[], col: Column<T>): number | null => {
+    if (col.aggregate === "sum") return rs.reduce((n, r) => n + (Number(col.accessor?.(r)) || 0), 0);
+    const nums: number[] = [];
+    for (const r of rs) {
+      const v = col.accessor?.(r);
+      if (v == null || v === "") continue;
+      const n = Number(v);
+      if (Number.isFinite(n)) nums.push(n);
+    }
+    if (col.aggregate === "count") return nums.length;
+    if (nums.length === 0) return null;
+    if (col.aggregate === "avg") return nums.reduce((a, b) => a + b, 0) / nums.length;
+    if (col.aggregate === "min") return Math.min(...nums);
+    if (col.aggregate === "max") return Math.max(...nums);
+    return null;
+  }, []);
+  // A bare number is only unambiguous for a sum, which is what every table did before the other kinds
+  // existed. The rest say which question they answer, in one word, or the footer is a row of numbers whose
+  // meaning depends on remembering the column's declaration.
+  const AGG_PREFIX: Record<NonNullable<Column<T>["aggregate"]>, string> = { sum: "", avg: "avg ", min: "min ", max: "max ", count: "" };
+  const fmtTotal = (col: Column<T>, n: number | null): React.ReactNode => {
+    if (n === null) return null;
+    // A count is a number of ROWS, so the column's own formatter (money, days) would mislabel it.
+    if (col.aggregate === "count") return `${n} set`;
+    const rounded = col.aggregate === "avg" ? Math.round(n * 10) / 10 : n;
+    return `${AGG_PREFIX[col.aggregate ?? "sum"]}${col.formatTotal ? String(col.formatTotal(rounded)) : String(rounded)}`;
+  };
+  // Only a sum keeps growing as more pages load, so only a sum is marked "+" when the set is truncated. An
+  // average or a max over a window is not a partial figure, it is a figure about the window.
+  const aggGrows = (col: Column<T>) => col.aggregate === "sum" || col.aggregate === "count";
+  // A fold's share of the whole, printed beside its subtotal. Only for a SUM, where the parts add up to the
+  // total and the share is therefore a fact rather than an arithmetic accident, and only once there is more
+  // than one fold, because "100%" beside the only group is noise. "Which cost centre is this going on" is
+  // the question grouping a money table is asked, and it is a proportion, not an amount.
+  const groupShare = (rowsInGroup: T[], col: Column<T>): string | null => {
+    if (col.aggregate !== "sum" || (groups?.length ?? 0) < 2) return null;
+    const whole = sumOf(filtered, col) ?? 0;
+    const part = sumOf(rowsInGroup, col) ?? 0;
+    if (whole === 0 || part === 0) return null;
+    const pct = (part / whole) * 100;
+    return `${pct < 1 ? "<1" : Math.round(pct)}%`;
+  };
   const showTotals = sumCols.length > 0 && filtered.length > 0;
 
   function toggleSort(col: Column<T>) {
@@ -993,7 +1103,7 @@ export function DataTable<T>({
   // itself and its opposite. The alternative is the route everyone takes today - open the column's filter
   // popover, retype a value that is already on screen, hope it matches - and the retyping is where it goes
   // wrong on exactly the columns (a name with an initial, a code, an amount) where it matters.
-  const [cellMenu, setCellMenu] = React.useState<{ x: number; y: number; colId: string; raw: string } | null>(null);
+  const [cellMenu, setCellMenu] = React.useState<{ x: number; y: number; colId: string; raw: string; row: T } | null>(null);
   const openCellMenu = (col: Column<T>, row: T) => (e: React.MouseEvent) => {
     if (!col.accessor || col.filter === "none") return;
     // A right-click inside a field is the browser's, not ours: cut/paste/spellcheck on an input in a cell
@@ -1001,7 +1111,7 @@ export function DataTable<T>({
     const t = e.target as HTMLElement | null;
     if (t?.closest("input, textarea, [contenteditable='true']")) return;
     e.preventDefault();
-    setCellMenu({ x: e.clientX, y: e.clientY, colId: col.id, raw: String(col.accessor(row) ?? "") });
+    setCellMenu({ x: e.clientX, y: e.clientY, colId: col.id, raw: String(col.accessor(row) ?? ""), row });
   };
   const menuCol = cellMenu ? colById[cellMenu.colId] : undefined;
   const applyFilter = (id: string, v: string) => {
@@ -1061,6 +1171,16 @@ export function DataTable<T>({
             <Layers /> {groupBy === colId ? "Ungroup" : `Group by ${menuCol.header.toLowerCase()}`}
           </DropdownMenuItem>
         )}
+        {/* Where the column says so, the value is also a way OUT of this table: a person's name leads to their
+            leave, their assets, their tickets. Without this the reader copies the name, opens the other page
+            and types it into a search box - and the twenty tables in this app stay twenty separate lists. */}
+        {(menuCol.actions?.(cellMenu.row) ?? []).length > 0 && <DropdownMenuSeparator />}
+        {(menuCol.actions?.(cellMenu.row) ?? []).map((a) => (
+          <DropdownMenuItem key={a.label} onSelect={() => { setCellMenu(null); a.onSelect(); }}>
+            {a.icon ?? <ExternalLink />} {a.label}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
         <DropdownMenuItem
           onSelect={() => {
             setCellMenu(null);
@@ -1748,17 +1868,47 @@ export function DataTable<T>({
   const insightList = insights ? insights(rows) : [];
   const insightActive =
     insightList.find((i) => i.filters && Object.entries(i.filters).every(([k, v]) => (filters[k] ?? "") === v))?.id ?? null;
+  /**
+   * Put the table on a named narrowing - an insight chip, a scope chip.
+   *
+   * Applied over the table's OWN defaults, not over whatever is currently filtered: a chip says "these
+   * seven", and landing on the intersection of it with somebody's half-finished filter would show fewer than
+   * it promised. `undo` is the press that takes it off again, which lands back on those same defaults.
+   */
+  const applyPreset = (preset: { filters?: Record<string, string>; sort?: string }, undo: boolean) => {
+    setPage(0);
+    setFilters(undo ? baseline().filters : { ...baseline().filters, ...preset.filters });
+    if (preset.sort) setSort(undo ? null : parseUrlSort(preset.sort));
+  };
   const applyInsight = (i: TableInsight, undo: boolean) => {
     if (i.onClick) {
       i.onClick();
       return;
     }
-    setPage(0);
-    // Applied over the table's OWN defaults, not over whatever is currently filtered: the chip says "these
-    // seven", and landing on the intersection of it with someone's half-finished filter would show fewer.
-    setFilters(undo ? baseline().filters : { ...baseline().filters, ...i.filters });
-    if (i.sort) setSort(undo ? null : parseUrlSort(i.sort));
+    applyPreset(i, undo);
   };
+
+  // --- scopes -----------------------------------------------------------------------------------------------
+  // Which scope the table is showing: the one whose filters the live state matches. Read rather than stored,
+  // exactly like the active insight, so a scope survives a reload, travels in a deep link and clears itself
+  // the moment somebody edits a filter away from it - none of which a remembered "current tab" could do.
+  const scopeList = scopes ?? [];
+  const scopeActive = scopeList.find((s) => Object.entries(s.filters).every(([k, v]) => (filters[k] ?? "") === v))?.id ?? null;
+  // The opening scope, applied once and only where the reader asked for nothing more specific: a deep link
+  // carries its own filters and is the more specific request, the same rule the pinned default view follows.
+  // Applied once, and not before the rows are in. A page works its opening scope out FROM its rows ("land an
+  // assignee on their queue when something is open there"), so deciding it on the empty first render would
+  // land everybody on the fallback and then leave them there - the answer arrives a moment later and the
+  // reader has already been put somewhere.
+  const scopeApplied = React.useRef(false);
+  React.useEffect(() => {
+    if (scopeApplied.current || !defaultScope || scopeList.length === 0 || rows.length === 0) return;
+    scopeApplied.current = true;
+    if (urlInitial.current?.f) return;
+    const opening = scopeList.find((s) => s.id === defaultScope);
+    if (opening && Object.keys(opening.filters).length > 0) applyPreset(opening, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultScope, scopeList.length, rows.length]);
 
   return (
     <div className="space-y-3">
@@ -1796,6 +1946,25 @@ export function DataTable<T>({
             {viewsControl}
             {!isPhone && columnsControl}
           </div>
+        </div>
+      )}
+
+      {/* Whose rows, then what is worth noticing about them - in that order, because the scope decides which
+          rows the insights below are even about. */}
+      {scopeList.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {scopeList.map((s) => (
+            <FilterChip
+              key={s.id}
+              active={scopeActive === s.id}
+              count={s.count}
+              title={s.title}
+              onClick={() => applyPreset(s, scopeActive === s.id && Object.keys(s.filters).length > 0)}
+            >
+              {s.label}
+              {s.badge}
+            </FilterChip>
+          ))}
         </div>
       )}
 
@@ -1857,7 +2026,7 @@ export function DataTable<T>({
                   Total · {total}{truncated ? "+" : ""} row{total === 1 ? "" : "s"}{truncated ? " loaded" : ""}
                 </span>
                 {sumCols.map((col) => (
-                  <span key={col.id} className="font-medium tabular-nums">{col.header}: {fmtTotal(col, sumOf(filtered, col))}{truncated ? "+" : ""}</span>
+                  <span key={col.id} className="font-medium tabular-nums">{col.header}: {fmtTotal(col, sumOf(filtered, col))}{truncated && aggGrows(col) ? "+" : ""}</span>
                 ))}
               </div>
             )}
@@ -1876,7 +2045,10 @@ export function DataTable<T>({
                     <span className="font-normal text-muted-foreground">{item.rows.length}</span>
                     <span className="min-w-2 flex-1" />
                     {sumCols.map((col) => (
-                      <span key={col.id} className="shrink-0 text-xs font-medium tabular-nums">{fmtTotal(col, sumOf(item.rows, col))}</span>
+                      <span key={col.id} className="shrink-0 text-xs font-medium tabular-nums">
+                        {fmtTotal(col, sumOf(item.rows, col))}
+                        {groupShare(item.rows, col) && <span className="ml-1 font-normal text-muted-foreground">{groupShare(item.rows, col)}</span>}
+                      </span>
                     ))}
                   </button>,
                 ];
@@ -2069,9 +2241,11 @@ export function DataTable<T>({
                           col.align === "center" && "text-center",
                           // Indent a child's first data column so it reads as nested under its parent.
                           isChild && col.id === firstDataColId && "pl-8",
+                          col.bar && "relative", // the proportion is drawn against the cell box
                           col.className
                         )}
                       >
+                        {col.bar && <CellBar value={col.bar(r)} />}
                         {col.id === "__select__" ? (
                           !isChild && (
                             <Checkbox
@@ -2138,6 +2312,7 @@ export function DataTable<T>({
                           {sumCols.map((col) => (
                             <span key={col.id} className="shrink-0 text-xs tabular-nums text-muted-foreground">
                               {col.header}: <span className="font-medium text-foreground">{fmtTotal(col, sumOf(item.rows, col))}</span>
+                              {groupShare(item.rows, col) && <span className="ml-1">{groupShare(item.rows, col)}</span>}
                             </span>
                           ))}
                         </div>
@@ -2166,8 +2341,8 @@ export function DataTable<T>({
                     style={widthStyle(col.id)}
                     className={cn("truncate text-xs", col.className, col.align === "right" && "text-right tabular-nums", col.align === "center" && "text-center")}
                   >
-                    {col.aggregate === "sum" ? (
-                      <>{fmtTotal(col, sumOf(filtered, col))}{truncated ? "+" : ""}</>
+                    {col.aggregate ? (
+                      <>{fmtTotal(col, sumOf(filtered, col))}{truncated && aggGrows(col) ? "+" : ""}</>
                     ) : col.id === totalLabelColId ? (
                       <span className="uppercase tracking-wide text-muted-foreground">
                         Total · {total}{truncated ? "+" : ""} row{total === 1 ? "" : "s"}{truncated ? " loaded" : ""}

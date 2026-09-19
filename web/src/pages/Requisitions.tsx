@@ -22,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Combobox } from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { DraftButton } from "@/components/common/DraftButton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { WriteDialog } from "@/components/common/WriteDialog";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -499,6 +500,15 @@ function RequisitionDialog({ req, cloneOf, reqs, hiredCount, employees, departme
         <p className="-mt-1 text-xs text-muted-foreground">Every opening has a hire - Filled is probably the status you want.</p>
       )}
       <Field label="Description (optional)" field="description">
+        <div className="mb-2 flex justify-end">
+          <DraftButton
+            collection="job-requisitions"
+            kind="job-description"
+            existing={form.description}
+            hint="e.g. senior backend engineer for the payments team, needs Go and Postgres, some on-call"
+            onDraft={(text) => setForm({ ...form, description: text })}
+          />
+        </div>
         <Textarea rows={4} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Role summary, responsibilities, requirements…" />
       </Field>
       {req && <ActivitySection resource={req.path} className="border-t pt-3" />}

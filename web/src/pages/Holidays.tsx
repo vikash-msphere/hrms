@@ -12,6 +12,7 @@ import { navigate } from "@/router";
 import { formatDate, idOf, cn } from "@/lib/utils";
 import { dmy, longDate, monthLabelOf } from "@/lib/leaveCalendar";
 import { todayStr, thisYearStr, daysBetweenYmd } from "@/lib/orgDay";
+import { countBy } from "@/lib/tableSignals";
 import { breakAround, bestBridge, breakLabel, isWeekendDay, longBreakCount, type Break, type Bridge } from "@/lib/holidayBreaks";
 import { buildIcs, downloadIcs } from "@/lib/ics";
 import { readUrlQuery, writeUrlQuery } from "@/lib/urlQuery";
@@ -25,6 +26,7 @@ import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import type { TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
@@ -383,6 +385,37 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
     );
   }
 
+  // Two things a published calendar gets checked for, both of which are still fixable while the year is
+  // ahead and neither of which a list of dates shows.
+  const holidayInsights = (hs: Holiday[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const upcomingWeekend = hs.filter((h) => !h.delete_time && h.date >= today && isWeekendDay(h.date, workDays));
+    if (upcomingWeekend.length > 0) {
+      out.push({
+        id: "weekend",
+        label: `${upcomingWeekend.length} land on a non-working day`,
+        tone: "warning",
+        hint: "Days off that nobody actually gets, on this org's own working week. Some orgs move these.",
+        filters: { falls_on: "Non-working day", when: "Upcoming" },
+        sort: "date.asc",
+      });
+    }
+    // Regions with noticeably fewer holidays than the best-covered one. A regional calendar is built a
+    // location at a time and it is the one nobody finished that people find out about in December.
+    const byLocation = countBy(hs.filter((h) => !h.delete_time && h.date >= today), (h) => h.location || "Everyone");
+    const best = Math.max(0, ...byLocation.values());
+    const thin = [...byLocation.entries()].filter(([loc, n]) => loc !== "Everyone" && n < best / 2);
+    if (best > 0 && thin.length > 0) {
+      out.push({
+        id: "thin-coverage",
+        label: `${thin.length} region${thin.length === 1 ? "" : "s"} with fewer holidays`,
+        hint: `Under half of the ${best} the best-covered list carries. Group by "Applies to" to see which.`,
+        filters: { when: "Upcoming" },
+      });
+    }
+    return out;
+  };
+
   const columns: Column<Holiday>[] = [
     {
       id: "name",
@@ -428,6 +461,17 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
       groupBy: true,
       accessor: (h) => (h.date >= today ? "Upcoming" : "Past"),
       cell: (h) => <Badge variant={h.date >= today ? "secondary" : "muted"}>{h.date >= today ? "Upcoming" : "Past"}</Badge>,
+    },
+    {
+      // Whether the holiday lands on a day people were working anyway. One that falls on a Saturday is a day
+      // off nobody gets, and it is a decision somebody can still make - the calendar is usually published
+      // months ahead. The date cell already names the weekday; this is the version that can be grouped and
+      // counted, which is what turns it from trivia into a list.
+      // `isWeekendDay` with the org's own working days, not a generic Saturday/Sunday test: an org that
+      // works Sunday to Thursday has a different set of wasted holidays, and the page already knows which.
+      id: "falls_on", header: "Falls on", filter: "select", groupBy: true, defaultHidden: true,
+      accessor: (h) => (isWeekendDay(h.date, workDays) ? "Non-working day" : "Working day"),
+      cell: (h) => <span className={cn(isWeekendDay(h.date, workDays) && "text-warning")}>{weekdayShortOf(h.date)}</span>,
     },
     stateColumn<Holiday>(),
     ...metaColumns<Holiday>(),
@@ -687,6 +731,7 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
             columns={columns}
             tableId="holidays"
             rows={shownRows}
+            insights={holidayInsights}
             getRowId={(h) => h.path}
             rowClassName={(h) => (h.delete_time || h.date < today ? "opacity-60" : undefined)}
             emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : activeYear ? `No holidays in ${activeYear}` : "No holidays match"}

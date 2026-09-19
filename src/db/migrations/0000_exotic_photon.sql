@@ -21,6 +21,61 @@ CREATE TABLE `access_rules` (
 );
 --> statement-breakpoint
 CREATE INDEX `ar_subject_ns_match_idx` ON `access_rules` (`subject`,`namespace`,`match_code`);--> statement-breakpoint
+CREATE TABLE `ai_cache` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`cache_key` text NOT NULL,
+	`feature` text NOT NULL,
+	`output` text NOT NULL,
+	`hits` integer DEFAULT 0 NOT NULL,
+	`expires_at` integer NOT NULL,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `ai_cache_key_idx` ON `ai_cache` (`cache_key`);--> statement-breakpoint
+CREATE INDEX `ai_cache_expiry_idx` ON `ai_cache` (`expires_at`);--> statement-breakpoint
+CREATE TABLE `ai_suggestions` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`host_collection` text NOT NULL,
+	`host_record_id` text NOT NULL,
+	`feature` text NOT NULL,
+	`payload_json` text NOT NULL,
+	`model` text NOT NULL,
+	`basis` integer DEFAULT 0 NOT NULL,
+	`state` text DEFAULT 'pending' NOT NULL,
+	`decided_by` text,
+	`decided_at` integer,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`decided_by`) REFERENCES `users`(`uuid`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `ai_suggestions_host_idx` ON `ai_suggestions` (`host_collection`,`host_record_id`,`feature`);--> statement-breakpoint
+CREATE INDEX `ai_suggestions_state_idx` ON `ai_suggestions` (`feature`,`state`);--> statement-breakpoint
+CREATE TABLE `ai_usage` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`feature` text NOT NULL,
+	`model` text NOT NULL,
+	`role` text NOT NULL,
+	`user_id` text,
+	`subject` text,
+	`input_hash` text NOT NULL,
+	`input_chars` integer DEFAULT 0 NOT NULL,
+	`output_chars` integer DEFAULT 0 NOT NULL,
+	`estimated_neurons` integer DEFAULT 0 NOT NULL,
+	`cache_hit` integer DEFAULT false NOT NULL,
+	`duration_ms` integer,
+	`outcome` text DEFAULT 'ok' NOT NULL,
+	`error` text,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`uuid`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX `ai_usage_page_idx` ON `ai_usage` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `ai_usage_spend_idx` ON `ai_usage` (`created_at`);--> statement-breakpoint
+CREATE INDEX `ai_usage_user_idx` ON `ai_usage` (`user_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `ai_usage_feature_idx` ON `ai_usage` (`feature`);--> statement-breakpoint
 CREATE TABLE `announcement_poll_options` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`announcement_id` text NOT NULL,
@@ -200,6 +255,7 @@ CREATE TABLE `asset_categories` (
 	`name` text NOT NULL,
 	`tag_code` text NOT NULL,
 	`requires_serial` integer DEFAULT false NOT NULL,
+	`useful_life_months` integer,
 	`delete_time` integer,
 	`disabled` integer DEFAULT false NOT NULL,
 	`locked` integer DEFAULT false NOT NULL,
@@ -245,6 +301,7 @@ CREATE TABLE `assets` (
 	`assigned_to` text,
 	`assigned_on` integer,
 	`purchase_date` integer,
+	`purchase_cost` real,
 	`tag_printed_at` integer,
 	`verified_at` integer,
 	`verified_by` text,
@@ -429,6 +486,7 @@ CREATE TABLE `background_checks` (
 	`reference_no` text,
 	`initiated_date` integer,
 	`completed_date` integer,
+	`cost` real,
 	`notes` text,
 	`document_id` text,
 	`delete_time` integer,
@@ -608,6 +666,7 @@ CREATE TABLE `cards` (
 	`employee_id` text NOT NULL,
 	`department_id` text,
 	`column_key` text NOT NULL,
+	`column_since` integer,
 	`swimlane_key` text,
 	`rank` real DEFAULT 0 NOT NULL,
 	`title` text NOT NULL,
@@ -1635,6 +1694,9 @@ CREATE TABLE `payroll_runs` (
 	`approved_by` text,
 	`lock_time` integer,
 	`items_built_at` integer,
+	`headcount` integer,
+	`gross` real,
+	`net` real,
 	`bank_file_at` integer,
 	`unpriced_json` text,
 	`created_at` integer NOT NULL,
@@ -1974,6 +2036,21 @@ CREATE TABLE `search_docs` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `search_docs_record_idx` ON `search_docs` (`collection`,`record_id`);--> statement-breakpoint
 CREATE INDEX `search_docs_created_idx` ON `search_docs` (`created_at`);--> statement-breakpoint
+CREATE TABLE `search_vectors` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`collection` text NOT NULL,
+	`record_id` text NOT NULL,
+	`text_hash` text NOT NULL,
+	`model` text NOT NULL,
+	`embedded_at` integer NOT NULL,
+	`checked_at` integer NOT NULL,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `search_vectors_record_idx` ON `search_vectors` (`collection`,`record_id`);--> statement-breakpoint
+CREATE INDEX `search_vectors_model_idx` ON `search_vectors` (`model`);--> statement-breakpoint
+CREATE INDEX `search_vectors_checked_idx` ON `search_vectors` (`checked_at`);--> statement-breakpoint
 CREATE TABLE `settings` (
 	`key` text PRIMARY KEY NOT NULL,
 	`value` text NOT NULL,
@@ -2204,6 +2281,8 @@ CREATE TABLE `tickets` (
 	`description` text,
 	`priority` text DEFAULT 'medium' NOT NULL,
 	`state` text DEFAULT 'OPEN' NOT NULL,
+	`first_response_at` integer,
+	`resolved_at` integer,
 	`attachments_json` text DEFAULT '[]' NOT NULL,
 	`session_replays_json` text DEFAULT '[]' NOT NULL,
 	`delete_time` integer,
@@ -2310,6 +2389,7 @@ CREATE TABLE `users` (
 	`status` text DEFAULT 'active' NOT NULL,
 	`employee_id` text,
 	`sessions_valid_from` integer,
+	`last_seen_at` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`role`) REFERENCES `roles`(`name`) ON UPDATE no action ON DELETE restrict,
