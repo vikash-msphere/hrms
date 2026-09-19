@@ -48,7 +48,9 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.aiSuggestions, schema.moderationScans, schema.aiUsage, schema.aiCache, schema.announcements, schema.suggestions, schema.notifications, schema.users, schema.employees, schema.roles, schema.settings];
+// `auditLog` is cleared with the rest: a decision writes a row against the post, and an assertion about that
+// row is only meaningful if the previous test's rows are not still sitting there.
+const TABLES = [schema.aiSuggestions, schema.moderationScans, schema.aiUsage, schema.aiCache, schema.announcements, schema.suggestions, schema.notifications, schema.auditLog, schema.users, schema.employees, schema.roles, schema.settings];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
   // Every test below is about what happens AFTER an org decided its wall may be read by a model. The "off"
@@ -335,6 +337,48 @@ describe("deciding", () => {
     expect((await flagFor("announcements", id))?.state).toBe("rejected");
     // Nobody is told their post was fine: the post never moved, so there is nothing to tell them about.
     expect(await deps.db.select().from(schema.notifications)).toHaveLength(0);
+  });
+
+  it("records the decision AGAINST THE POST, so the record's own trail explains why it went", async () => {
+    // The regression this pins. The route is `POST /v1/moderation:decide` with the record in the BODY, and
+    // the authz write-backstop derives its entity from the PATH - so before this was audited inline, the
+    // trail held a row with no entity id: somebody used the moderation queue, and no answer to which post
+    // they hid. The post's own activity said nothing about the one event in its life worth explaining.
+    const author = await seedPerson("Ana");
+    const mod = await seedPerson("Mo");
+    const id = await seedAnnouncement(author);
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    await drainModeration(deps);
+
+    await decideModeration(deps, mod, `announcements/${id}`, "hide");
+
+    const rows = await deps.db.select().from(schema.auditLog);
+    const entry = rows.find((r) => r.entity === "announcements" && r.entityId === id);
+    expect(entry, "the decision must be anchored on the post").toBeTruthy();
+    expect(entry!.action).toBe("announcement.moderate.hide");
+    // `audit_log.actor_id` is the EMPLOYEE uuid, not the user uuid - the trail names the person, and a
+    // principal with no employee record leaves it null.
+    expect(entry!.actorId).toBe(mod.employeeId);
+
+    // The hazard the model named is on the row; the post's TEXT is not. The excerpt the moderator judged is
+    // already on the flag, and copying content into the audit trail makes the trail a second store of it.
+    const meta = JSON.parse(entry!.meta ?? "{}") as { hazards?: string[] };
+    expect(meta.hazards).toEqual(["S10"]);
+    expect(JSON.stringify(entry)).not.toContain("Great quarter everyone.");
+  });
+
+  it("records a dismissal too, because deciding to leave a post up is also a decision", async () => {
+    const author = await seedPerson("Ana");
+    const mod = await seedPerson("Mo");
+    const id = await seedAnnouncement(author);
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    await drainModeration(deps);
+
+    await decideModeration(deps, mod, `announcements/${id}`, "dismiss");
+
+    const rows = await deps.db.select().from(schema.auditLog);
+    const entry = rows.find((r) => r.entity === "announcements" && r.entityId === id);
+    expect(entry?.action).toBe("announcement.moderate.dismiss");
   });
 
   it("refuses a second decision on the same flag", async () => {

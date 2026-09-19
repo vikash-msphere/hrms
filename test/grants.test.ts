@@ -272,6 +272,11 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
     // full pay breakdown before the run is published.
     "payroll-runs:approve", "payroll-runs:bankFile", "payroll-runs:previewPayslip",
     "payroll-runs:statutoryReport",
+    // The flagged-post queue, which nothing seeds for any role. Acting on a flag means taking somebody else's
+    // post off a public wall, so who may do it is a decision each org makes in the ACL rather than one this
+    // app makes for them - the same posture as `tax-verifications` and the access system itself. It is
+    // OFFERED in ACCESS_VERBS precisely so it can be granted by name there.
+    "moderation:decide",
   ];
   const NON_SUPER = ["employee", "manager", "hr_admin", "payroll_admin"] as const;
   // Three object codes: own, a dept member's, and a flat-coded row - so a `me` / `my-dept` / `*` rule all get

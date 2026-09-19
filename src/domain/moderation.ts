@@ -2,9 +2,15 @@
 //
 // THE MODEL FLAGS; IT NEVER HIDES. Llama Guard returns a verdict on text, and that verdict becomes a row in
 // `ai_suggestions` with `feature: "moderation"` - the same advisory record triage and extraction use, with
-// the same one-live-suggestion-per-record index. Hiding a post is a separate act, performed by a person, and
-// it goes through the host collection's own write. There is no path from a model's output to content
-// disappearing, which is the property that makes it safe to run this unattended on a five-minute tick.
+// the same one-live-suggestion-per-record index. Hiding a post is a separate act, performed by a person.
+// There is no path from a model's output to content disappearing, which is the property that makes it safe to
+// run this unattended on a five-minute tick.
+//
+// That separate act writes the host row DIRECTLY (`services/moderation.ts` hideHost) rather than through a
+// service of its own, because neither collection has one to route through: `announcements.disabled` is read
+// only by the visibility filter and a suggestion is hidden by its ordinary soft delete. What it does not skip
+// is the trail - the decision is audited against the POST, not against the moderation queue, so the record's
+// own activity says why it went. See the note over `decideModeration`.
 //
 // FLAG RATHER THAN BLOCK, and the reason is asymmetric cost. A false positive that silently eats somebody's
 // kudos post is a worse failure than a true positive that sits in a queue for ten minutes: the first breaks
@@ -20,9 +26,12 @@
  * review to a manager - and a moderation queue over private correspondence is a different product with a
  * different consent story.
  */
-export const MODERATABLE: Record<string, { title: string; body: string }> = {
-  announcements: { title: "title", body: "body" },
-  suggestions: { title: "title", body: "body" },
+export const MODERATABLE: Record<string, { title: string; body: string; singular: string }> = {
+  // `singular` is what the audit action is named with (`announcement.moderate.hide`), matching the
+  // `auditName` each collection's own route already uses - so a moderation entry reads like every other entry
+  // about that record rather than like a different system's.
+  announcements: { title: "title", body: "body", singular: "announcement" },
+  suggestions: { title: "title", body: "body", singular: "suggestion" },
 };
 
 export const isModeratable = (collection: string): boolean =>

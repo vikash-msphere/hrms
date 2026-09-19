@@ -29,6 +29,7 @@ import {
   type ModerationAction,
   type ModerationPayload,
 } from "../domain/moderation";
+import { audit } from "../lib/audit";
 import { aiFeatureOn, aiGenerate } from "./ai";
 import { notify } from "./notifications";
 
@@ -385,7 +386,7 @@ export async function decideModeration(
 ): Promise<{ host: string; action: ModerationAction }> {
   const [collection, recordId] = splitHost(host);
   const flag = await deps.db
-    .select({ uuid: schema.aiSuggestions.uuid, state: schema.aiSuggestions.state })
+    .select({ uuid: schema.aiSuggestions.uuid, state: schema.aiSuggestions.state, payloadJson: schema.aiSuggestions.payloadJson })
     .from(schema.aiSuggestions)
     .where(and(
       eq(schema.aiSuggestions.hostCollection, collection),
@@ -405,6 +406,26 @@ export async function decideModeration(
     // with the model. Read against the other features' rows, both say the same thing: whether a human agreed.
     .set({ state: action === "hide" ? "accepted" : "rejected", decidedBy: user.uuid, decidedAt: now, updatedAt: now })
     .where(eq(schema.aiSuggestions.uuid, flag.uuid));
+
+  // ANCHORED ON THE POST, not on the queue, and that is the whole point of auditing here rather than leaving
+  // it to the write-backstop in middleware/authz.ts.
+  //
+  // The backstop derives its entity from the PATH (domain/auditAccess.ts mutationAudit), and this route is
+  // `POST /v1/moderation:decide` with the record in the BODY - so it wrote a row with no entity id at all.
+  // The trail could say somebody used the moderation queue at 14:32 and not which post they hid, and the
+  // post's own activity (`GET /v1/activity?resource=announcements/<id>`) said nothing about the one event in
+  // its life a reader would most want explained.
+  //
+  // `audit()` sets `user.audited`, so the backstop skips its generic row: this REPLACES a vague entry with a
+  // precise one rather than adding a second.
+  //
+  // The meta carries the hazard codes and nothing of the post. The excerpt the moderator judged is already on
+  // the flag row; copying it here would make the audit trail a second store of the content it is about.
+  const payload = readPayload(flag.payloadJson);
+  await audit(deps, user, `${MODERATABLE[collection]!.singular}.moderate.${action}`, collection, recordId, {
+    hazards: payload?.hazards ?? [],
+    flagged_by: MODELS.moderate,
+  });
 
   return { host, action };
 }

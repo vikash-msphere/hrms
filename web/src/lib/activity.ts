@@ -48,6 +48,11 @@ const VERB: Record<string, string> = {
   removalRequest: "requested removal of",
   expire: "lapsed",
   clone: "copied permissions onto",
+  // Moderation decisions on a public post (`announcement.moderate.hide`, `suggestion.moderate.dismiss`).
+  // `actionLabel` reads the LAST dotted segment, so these two are the verbs that reach the feed - without
+  // them a decision to take somebody's post down reads as the bare token "hide".
+  hide: "took down",
+  dismiss: "cleared the flag on",
 };
 
 export function actionLabel(action: string): string {
@@ -68,6 +73,10 @@ const TONE: Record<string, ActionTone> = {
   sensitive: "read", denied: "denied", // access-audit rows: sensitive read / blocked attempt
   // A pending request is not yet a change (update); a removal request and an expiry both TAKE access away.
   request: "update", removalRequest: "remove", expire: "remove", clone: "create",
+  // Taking a post down is a removal; clearing its flag changes nothing about the post, so it is neither a
+  // removal nor a positive act - the moderator agreed with the author, and the feed should not colour that
+  // as though something happened to the content.
+  hide: "remove", dismiss: "other",
 };
 export function actionTone(action: string): ActionTone {
   const verb = action.includes(".") ? action.slice(action.lastIndexOf(".") + 1) : action;

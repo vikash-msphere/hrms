@@ -100,6 +100,11 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   expenses: ["update", "delete", "submit", "approve", "reject", "cancel", "pay", "upload", "download"],
   automations: ["update", "delete", "enable", "disable", "test"],
   "access-rules": ["update", "delete", "preview", "requestAccess", "approve", "reject", "clone", "review", "scopeCounts"],
+  // The flagged-post queue. Listed so `decide` is offerable BY NAME in the ACL modal: the capability is
+  // private by default and granted deliberately, so the one action on it should be grantable just as
+  // deliberately rather than only through a wildcard. `moderation` has no table, so there is no per-row hint
+  // to compute - this is here for the authoring UI.
+  moderation: ["decide"],
 };
 const DEFAULT_VERBS = ["update", "delete"];
 
@@ -127,6 +132,7 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "extractResume", // read a CV into suggested form fields for the recruiter to accept one by one (candidates)
   "describe", // collection-level: turn a description of a grid into a spec the builder renders (table-fields)
   "narrate", // collection-level: write up how the team's measures changed against the previous window (people-analytics)
+  "decide", // uphold or clear a moderation flag on a public post (moderation)
   "promoteTodo", // turn a checklist item into a card of its own (cards)
   "watch", "unwatch", // follow a card or a goal you do not own (cards, goals)
   "activate", // start a sprint (sprints) - complete reuses the existing verb
