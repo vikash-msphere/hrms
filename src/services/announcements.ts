@@ -614,7 +614,10 @@ export async function repliesFor(deps: Deps, announcementIds: string[], viewerEm
       deps.db
         .select()
         .from(schema.announcementReplies)
-        .where(inArray(schema.announcementReplies.announcementId, group))
+        // A hidden reply is off the wall for everyone, including the person who wrote it. This is the only
+        // read of replies, so it is the only place the moderation stamp has to be honoured - miss it and a
+        // moderator's decision changes nothing a reader sees.
+        .where(and(inArray(schema.announcementReplies.announcementId, group), isNull(schema.announcementReplies.deleteTime)))
         .orderBy(schema.announcementReplies.createdAt),
     )
   ).sort((a, b) => +a.createdAt - +b.createdAt);

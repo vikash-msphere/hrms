@@ -40,6 +40,7 @@ type QueueItem = {
 
 const WALL_LABEL: Record<string, string> = {
   announcements: "Noticeboard",
+  "announcement-replies": "Reply",
   suggestions: "Suggestion box",
 };
 
@@ -47,6 +48,7 @@ export default function Moderation() {
   const { toast } = useToast();
   const confirm = useConfirm();
   const [rows, setRows] = useState<QueueItem[]>([]);
+  const [hasMore, setHasMore] = useState(false);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
   const [wall, setWall] = useState<string>("");
@@ -54,8 +56,8 @@ export default function Moderation() {
 
   const load = useCallback(() => {
     setState("loading");
-    get<{ results: QueueItem[] }>("moderation")
-      .then((r) => { setRows(r.results); setState("ready"); setError(null); })
+    get<{ results: QueueItem[]; has_more?: boolean }>("moderation")
+      .then((r) => { setRows(r.results); setHasMore(r.has_more === true); setState("ready"); setError(null); })
       .catch((e: unknown) => { setState("error"); setError(e instanceof Error ? e.message : String(e)); });
   }, []);
 
@@ -159,6 +161,14 @@ export default function Moderation() {
 
             {shown.length === 0 && (
               <p className="mt-4 text-sm text-muted-foreground">Nothing flagged on that wall.</p>
+            )}
+
+            {/* Said out loud, because a page that quietly stops at 100 is one somebody clears and believes
+                they have finished. Deciding a few makes room for the rest on the next read. */}
+            {hasMore && (
+              <p className="mt-4 text-sm text-muted-foreground">
+                Showing the {rows.length} most recent. More are waiting - decide some of these and reload.
+              </p>
             )}
           </>
         )}

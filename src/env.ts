@@ -42,9 +42,11 @@ export type AppUser = {
   // Present ONLY on a "view as" simulation (lib/viewAs.ts): this whole AppUser is the SIMULATED subject, and
   // this field carries the real access admin driving it. Audit rows are written against the real human (with
   // the simulated email as `viewing_as` meta), so the trail never credits a read to the person being watched.
-  // `grant` + `employeeCode` are the REAL caller's own authority, carried so the authz middleware can ask them
-  // the same question it just answered for the subject: a simulation may never read what the admin driving it
-  // could not have read as themselves (lib/viewAs.ts, rail 2).
+  // `grant` + `guards` + `employeeCode` are the REAL caller's own authority, carried so the authz middleware can
+  // ask them the same question it just answered for the subject: a simulation may never read what the admin
+  // driving it could not have read as themselves (lib/viewAs.ts, rail 2). The guards travel with the grant
+  // because a rule's limits are part of what it grants - a fenced rule answers differently off the network, and
+  // the containment check has to ask the limited question, not the bare one.
   simulatedBy?: {
     uuid: string;
     email: string;
@@ -53,6 +55,7 @@ export type AppUser = {
     name: string | null;
     sessionId?: string;
     grant: import("./domain/permissions").Grant;
+    guards?: import("./domain/ruleCondition").GuardIndex;
   };
   // Present ONLY when the caller authenticated with an API key (middleware/auth.ts). The principal is still
   // the key's OWNER - `grant` above has already been narrowed by the key's scope - so nothing downstream has

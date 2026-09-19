@@ -138,6 +138,42 @@ function detectSideEffects(): Map<string, string[]> {
       if (writes.size) found.set(`${collection}:${verb}`, [...writes].sort());
     }
   }
+
+  // THE COLLECTION-LEVEL METHODS THAT ARE THEIR OWN MOUNT, which the scan above cannot reach.
+  //
+  // A verb usually lives in its collection's `verbs:` block, and that block is what the loop reads. A handful
+  // do not: a method addressed at the collection rather than at a record is mounted separately in src/index.ts
+  // (`app.route("/v1/moderation:decide", ...)`) because `resolveRequest` would otherwise read the verb as an
+  // item id. Those files carry no `verbs:` block at all, so the loop skipped them entirely and the SPA's map
+  // could say nothing about them while nobody noticed - `moderation:decide` hides an announcement or a
+  // suggestion, in a different collection from the one in its path, and rode the unmapped-verb default for its
+  // whole life. That is precisely the case this test was written to catch, arriving through the one door it was
+  // not watching.
+  //
+  // The handler is the WHOLE route file here rather than one property of an object literal: these mounts are a
+  // few lines long and exist to call one service function, so the file is the body.
+  for (const [, collection, verb, ident] of indexTs.matchAll(/app\.route\("\/v1\/([a-z0-9-]+):([A-Za-z0-9_]+)",\s*([A-Za-z0-9_]+)\)/g)) {
+    const entry = Object.entries(routes).find(([, s]) => new RegExp(`^export const ${ident}\\b`, "m").test(s));
+    if (!entry) continue;
+    const src = entry[1];
+    const moduleOf = new Map<string, string>();
+    for (const im of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"\.\.\/services\/([A-Za-z0-9_]+)"/g)) {
+      for (const raw of im[1]!.split(",")) {
+        const name = raw.trim().replace(/^type\s+/, "").split(/\s+as\s+/).pop()?.trim();
+        if (name) moduleOf.set(name, im[2]!);
+      }
+    }
+    const writes = new Set<string>();
+    for (const call of src.matchAll(/\b([A-Za-z0-9_]+)\(/g)) {
+      const name = call[1]!;
+      if (INFRASTRUCTURE.has(name)) continue;
+      const mod = FUNCTIONS.get(moduleOf.get(name) ?? "");
+      const fn = mod?.get(name);
+      if (!mod || !fn) continue;
+      for (const c of writesOf(mod, fn, 1, new Set([name]))) if (c !== collection) writes.add(c);
+    }
+    if (writes.size) found.set(`${collection}:${verb}`, [...writes].sort());
+  }
   return found;
 }
 

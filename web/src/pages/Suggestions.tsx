@@ -30,6 +30,7 @@ import { useConfirm } from "@/components/common/confirm";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
 import { WriteDialog } from "@/components/common/WriteDialog";
+import { SimilarAsks } from "@/components/common/SimilarAsks";
 import { useToast } from "@/components/ui/use-toast";
 
 // How many suggestions the box reads at a time. The list grows by another page each time the reader reaches its
@@ -530,6 +531,16 @@ function RespondDialog({ suggestion: s, queue, onStep, mergeTargets, onClose, on
       </div>
       {/* The same idea asked twice reads as two unpopular ideas. Folding one into the other moves its votes, so
           the fifteen people who wanted it show up as fifteen on one row. */}
+      {/* The ones a machine thinks are the same ask, above the picker rather than instead of it: the whole
+          list is still there, and this only saves reading it. Renders nothing when the feature is off, when
+          nothing is close enough, or when this suggestion has not been indexed yet. */}
+      {!s.merged_into && (
+        <SimilarAsks
+          suggestionPath={s.path}
+          chosen={form.merge}
+          onPick={(path) => setForm({ ...form, merge: path === form.merge ? "" : path })}
+        />
+      )}
       {mergeTargets.length > 0 && !s.merged_into && (
         <Field label="Duplicate of" hint={merging ? undefined : "Leave empty unless this is the same idea as another one."}>
           <Combobox

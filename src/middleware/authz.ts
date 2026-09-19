@@ -29,7 +29,7 @@ import { audit } from "../lib/audit";
 import { isJsonBody } from "../http/jsonRequest";
 import { queryParam } from "../http/query";
 import { selfContextFor } from "../lib/selfContext";
-import { guardAllows, conditionFieldsOf, windowFieldsOf } from "../domain/ruleCondition";
+import { guardAllows, conditionFieldsOf, windowFieldsOf, type GuardContext } from "../domain/ruleCondition";
 
 // Field-level + reference access control on write bodies (docs/archive/plan.txt 11C). For a POST/PATCH whose
 // resource-level write already passed, each PROTECTED field present in the body needs write on
@@ -322,7 +322,14 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
   // only by the view-as containment check below; stays null on the lanes that decide nothing concrete.
   // A holder rather than a bare `let`, because every assignment happens inside a nested closure and narrowing
   // would otherwise settle it at `null` for the reader below.
-  const contain: { reDecide: ((grant: Grant, employeeCode: string | null) => Decision) | null } = { reDecide: null };
+  //
+  // `guardCtx` is what the THRESHOLD axis was measured against on this request (the row's guarded columns, the
+  // caller's address, the clock), kept so the containment check can put the real caller's guards to the very
+  // same facts rather than re-reading the row.
+  const contain: {
+    reDecide: ((grant: Grant, employeeCode: string | null) => Decision) | null;
+    guardCtx: GuardContext | null;
+  } = { reDecide: null, guardCtx: null };
   let pathname = "";
   try {
     const user = c.get("user");
@@ -460,7 +467,13 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // The columns a per-rule THRESHOLD could be evaluated against (domain/ruleCondition.ts). Selected only
       // when this caller actually holds a conditioned rule, and read on the SAME statement as the code - so a
       // threshold costs no read, and a caller without one changes nothing about the query.
-      const condFields = user.guards?.size ? { ...conditionFieldsOf(collection), ...windowFieldsOf(collection) } : {};
+      //
+      // "This caller" is BOTH principals under a simulation: the subject's guards decide the request, and the
+      // real admin's decide the containment check below. A simulation of an unguarded subject by a guarded
+      // admin would otherwise select no columns, and the containment check would have nothing to measure the
+      // admin's own cap against.
+      const guarded = !!user.guards?.size || !!user.simulatedBy?.guards?.size;
+      const condFields = guarded ? { ...conditionFieldsOf(collection), ...windowFieldsOf(collection) } : {};
       const condCols = Object.values(condFields);
       const resolveId = stateRule || ownerProp || condCols.length
         ? async (col: string, id: string) => {
@@ -544,12 +557,14 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // to approve the large ones. Making it a list predicate would silently hide rows they are meant to review.
       // `satisfies` fails closed on an absent row, which is exactly that - a capped rule cannot authorize a
       // collection-level request, because there is nothing to check the cap against.
-      if (decision.allow && user.guards?.size) {
+      if (decision.allow && guarded) {
         // The condition names the WIRE field an admin authored; the row bag is keyed by drizzle column. One
         // translation here rather than a second spelling of the map in the evaluator.
         const byWire: Record<string, unknown> = {};
         for (const [wire, col] of Object.entries(condFields)) byWire[wire] = itemRow?.[col];
-        if (!guardAllows(user.guards, decision.via, { row: itemCode ? byWire : null, ip: user.reqMeta?.ip, now: +deps.clock.now() })) {
+        // Parked for the containment check, which measures the REAL caller's guards against the same facts.
+        contain.guardCtx = { row: itemCode ? byWire : null, ip: user.reqMeta?.ip, now: +deps.clock.now() };
+        if (!guardAllows(user.guards, decision.via, contain.guardCtx)) {
           decision = { allow: false, reason: `outside the limits on "${decision.via}"` };
         }
       }
@@ -616,6 +631,18 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       const real = contain.reDecide?.(simulated.grant, simulated.employeeCode) ?? { allow: true };
       if (!real.allow) {
         decision = { allow: false, reason: `view as: you may not read through a simulation what you cannot read as yourself (${real.reason})` };
+      } else if (contain.reDecide && simulated.guards?.size) {
+        // THE REAL CALLER'S OWN LIMITS, asked of the pattern that would have authorized them. Answering the
+        // grant alone is only half of "could they have read this as themselves": a rule capped at an amount,
+        // held open only in a window, or fenced to the office range grants nothing outside those bounds, so a
+        // simulation that consulted the pattern and not its guards was a way to read past a fence by opening
+        // one. The facts are the ones the subject's own gate measured (`contain.guardCtx`); a request that
+        // resolved no item carries a null row, which is what `satisfies` fails closed on - the same answer a
+        // capped rule gets on a collection path when the admin asks it directly.
+        const ctx = contain.guardCtx ?? { row: null, ip: c.get("user")?.reqMeta?.ip, now: Date.now() };
+        if (!guardAllows(simulated.guards, real.via, ctx)) {
+          decision = { allow: false, reason: `view as: outside the limits on your own "${real.via}"` };
+        }
       }
     }
   }

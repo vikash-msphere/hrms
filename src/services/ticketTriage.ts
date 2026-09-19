@@ -46,9 +46,18 @@ export type TicketTriage = {
   category: TriageVote<string> | null;
   priority: TriageVote<string> | null;
   /** The resolved neighbours the vote was taken over, best first - what the panel cites. */
-  basis: { id: string; subject: string; score: number }[];
+  /**
+   * The resolved neighbours the vote was taken over, best first - what the panel cites.
+   *
+   * `path` is a REF (`tickets/<id>`), not a bare id. The outbound wire edge only tokenizes strings shaped
+   * `<collection>/<id>` (middleware/encodeWireIds.ts), so a bare `id` here went over the wire as an INTERNAL
+   * id and then matched nothing on the client, whose every ticket path is tokenized - the panel compared the
+   * two and silently rendered every neighbour as plain text instead of a link. Returning the ref fixes both
+   * halves at once.
+   */
+  basis: { path: string; subject: string; score: number }[];
   /** Open neighbours close enough to be the same problem. */
-  duplicates: { id: string; subject: string; score: number; state: string }[];
+  duplicates: { path: string; subject: string; score: number; state: string }[];
 };
 
 /**
@@ -121,13 +130,13 @@ export async function suggestTriage(deps: Deps, scope: ListScope, ticketId: stri
   const resolved = visible.filter((r) => RESOLVED_STATES.has(r.state));
   const duplicates = visible
     .filter((r) => OPEN_STATES.has(r.state) && r.score >= DUPLICATE_SCORE)
-    .map((r) => ({ id: r.uuid, subject: r.subject, score: r.score, state: r.state }));
+    .map((r) => ({ path: `tickets/${r.uuid}`, subject: r.subject, score: r.score, state: r.state }));
 
   const triage: TicketTriage = {
     department: vote(resolved.map((r) => r.departmentId)),
     category: vote(resolved.map((r) => r.category)),
     priority: vote(resolved.map((r) => r.priority)),
-    basis: resolved.map((r) => ({ id: r.uuid, subject: r.subject, score: r.score })),
+    basis: resolved.map((r) => ({ path: `tickets/${r.uuid}`, subject: r.subject, score: r.score })),
     duplicates,
   };
   // Nothing to say: no field cleared the floor and nothing looks duplicated.

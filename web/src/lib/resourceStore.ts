@@ -804,7 +804,9 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   "assets:verify": [],
   // A delivery adds rows nobody has yet, so the inventory has to be refetched (the response carries them, but
   // every list showing assets - the page, the profile card, the printer's picker - reads them from the store).
-  "assets:batchCreate": ["assets"],
+  // `notifications` because a batch that assigns kit tells the people it was assigned to. Another entry the
+  // drift check was blind to while it read only `verbs:` blocks.
+  "assets:batchCreate": ["assets", "notifications"],
   // Closing a count writes its snapshot and raises the "we couldn't find your kit" notices; nothing on the
   // asset rows changes (not finding something proves nothing about the thing).
   "stocktakes:close": ["stocktakes", "notifications"],
@@ -884,7 +886,10 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   "announcements:unpin": [],
   // Mark-all-read stamps receipts on many posts at once and hands back only a count, so the board has to
   // refetch to pick up the new read state.
-  "announcements:markAllRead": ["announcements"],
+  // `notifications` because stamping the receipts also clears the board notices they belong to. It is a
+  // collection-level mount (src/index.ts), which the drift check could not see until it learned to read those -
+  // so this entry sat one collection short with nothing able to say so.
+  "announcements:markAllRead": ["announcements", "notifications"],
   "announcements:publish": ["announcements", "notifications"],
   "notifications:markAllRead": ["notifications"],
   // The three collection-level methods that FILE a document: a generated letter, a generated Form 16, and the
@@ -892,9 +897,25 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   // the profile's Documents card, the Documents page - so the collection has to be refetched. They used to go
   // out through the raw `api()` helper, which invalidates nothing, and the row they created appeared only
   // after a reload.
-  "personal-documents:generateLetter": ["personal-documents"],
-  "personal-documents:generateForm16": ["personal-documents"],
-  "personal-documents:uploadForm16": ["personal-documents"],
+  // All three FILE a document, and filing one that has to be signed opens its acknowledgement row with it
+  // (services/documentAck.ts). The Documents page shows both, so refreshing only the document left the
+  // "awaiting signature" state a reload behind. Three more entries the drift check could not reach.
+  "personal-documents:generateLetter": ["personal-documents", "document-acknowledgements"],
+  "personal-documents:generateForm16": ["personal-documents", "document-acknowledgements"],
+  "personal-documents:uploadForm16": ["personal-documents", "document-acknowledgements"],
+  // Upholding a moderation flag HIDES THE POST, and the post lives in another collection: an announcement is
+  // disabled and a suggestion is soft-deleted (services/moderation.ts hideHost). Both walls are therefore
+  // showing a post that is no longer public until their own freshness window lapses, which is exactly what
+  // this map is for. It needs an entry rather than riding the unmapped-verb default because that default
+  // refreshes only the verb's own collection plus the bell, and `moderation` is a virtual capability with no
+  // rows of its own. test/verbInvalidationDrift.test.ts cannot see this one: it scans the `verbs:` blocks of
+  // collection-factory routes, and the moderation queue is a hand-rolled mount (src/routes/moderation.ts).
+  "moderation:decide": ["announcements", "suggestions", "notifications"],
+  // A narration READS. It runs the team report twice and writes nothing, so it is a POST for transport reasons
+  // only - the same shape `batch:run` has. Left unmapped it took the default and spent two list reads (its own
+  // collection and the bell) on every press of "What changed", on a page that had just paid for the report.
+  // `[]` is the decision recorded, as it is for the board verbs above.
+  "people-analytics:narrate": [],
 };
 
 // Collections a mutation on `path` (custom `verb` optional) should invalidate.

@@ -2,7 +2,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers" />
 import { env } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
 import * as schema from "../src/db/schema";
@@ -180,6 +180,75 @@ describe("view as - the simulation is enforced server-side", () => {
     await deps.db.insert(schema.accessRules).values({ subject: "hr_admin", subjectKind: "role", namespace: "employees", pattern: "employees.**", scopeKind: "all", scopeCode: "", matchCode: null, level: "read", effect: "allow" });
     clearCache();
     expect((await req(`/v1/employees/${diya.employeeId}`, asDiya)).status).toBe(200);
+  });
+
+  it("keeps the REAL caller's own network fence on, through the simulation", async () => {
+    // A guard is the second half of what a rule grants: "employees, but only from the office range" grants
+    // nothing from a cafe. The containment check asked the real caller's GRANT and not the guards on it, and
+    // `guardAllows` returns true for a caller with no guard index at all - which is exactly what a simulated
+    // principal was, because lib/viewAs.ts never loaded any. So opening a simulation switched the fence off
+    // for both people at once, and reading through one was a way past a limit the admin holds themselves.
+    const hr = await seedPerson("04-004", "Hr", "hr_admin");
+    const diya = await seedPerson("04-002", "Diya", "employee");
+    await deps.db.insert(schema.accessRules).values([
+      { subject: "hr_admin", subjectKind: "role", namespace: "access-rules", pattern: "access-rules.preview", scopeKind: "all", scopeCode: "", matchCode: null, level: null, effect: "allow" },
+      // Their read of the directory, fenced to one address.
+      { subject: "hr_admin", subjectKind: "role", namespace: "employees", pattern: "employees.**", scopeKind: "all", scopeCode: "", matchCode: null, level: "read", effect: "allow", fromIp: "203.0.113.7" },
+    ]);
+    clearCache();
+    (b as Record<string, unknown>).DEV_FAKE_EMAIL = hr.email;
+
+    const asDiya = { "X-View-As": await viewAs("users", diya.userId) };
+    const onNet = { "cf-connecting-ip": "203.0.113.7" };
+    const offNet = { "cf-connecting-ip": "198.51.100.9" };
+
+    // The control: the fence works when they act as themselves.
+    expect((await req(`/v1/employees/${diya.employeeId}`, onNet)).status).toBe(200);
+    expect((await req(`/v1/employees/${diya.employeeId}`, offNet)).status).toBe(403);
+
+    // ...and it still works when they are watching as somebody whose own grant covers the row.
+    const res = await req(`/v1/employees/${diya.employeeId}`, { ...asDiya, ...offNet });
+    expect(res.status).toBe(403);
+    expect((await req(`/v1/employees/${diya.employeeId}`, { ...asDiya, ...onNet })).status).toBe(200);
+  });
+
+  it("applies the SUBJECT's own limits, so the simulation does not show more than they have", async () => {
+    // The other direction of the same missing index. A subject whose access is fenced sees nothing off the
+    // network; a simulation of them that carried no guards showed the admin rows the person themselves would
+    // have been refused, which is the one thing this surface promises not to do.
+    const admin = await seedPerson("04-001", "Admin", "super_admin");
+    const diya = await seedPerson("04-002", "Diya", "employee");
+    await deps.db.insert(schema.accessRules).values({
+      subject: "employee", subjectKind: "role", namespace: "employees", pattern: "employees.me.**",
+      scopeKind: "self", scopeCode: "", matchCode: null, level: "read", effect: "allow", fromIp: "203.0.113.7",
+    });
+    // The unfenced `employees.me.**` rule the fixture seeds for every employee would otherwise satisfy the
+    // pattern on its own (an unguarded rule on the same pattern wins, by design), so this test is about the
+    // guarded rule only once that one is gone.
+    await deps.db
+      .delete(schema.accessRules)
+      .where(and(eq(schema.accessRules.subject, "employee"), eq(schema.accessRules.pattern, "employees.me.**"), isNull(schema.accessRules.fromIp)));
+    clearCache();
+    (b as Record<string, unknown>).DEV_FAKE_EMAIL = admin.email;
+
+    const asDiya = { "X-View-As": await viewAs("users", diya.userId) };
+    expect((await req(`/v1/employees/${diya.employeeId}`, { ...asDiya, "cf-connecting-ip": "203.0.113.7" })).status).toBe(200);
+    expect((await req(`/v1/employees/${diya.employeeId}`, { ...asDiya, "cf-connecting-ip": "198.51.100.9" })).status).toBe(403);
+  });
+
+  it("refuses a subject whose employee record has been removed", async () => {
+    // A user whose employee row is soft-deleted is refused at the door for a real sign-in
+    // (middleware/auth.ts assertLive), so simulating one showed an app that person cannot reach at all.
+    const admin = await seedPerson("04-001", "Admin", "super_admin");
+    const diya = await seedPerson("04-002", "Diya", "employee");
+    await deps.db.update(schema.employees).set({ deleteTime: new Date() }).where(eq(schema.employees.uuid, diya.employeeId));
+    (b as Record<string, unknown>).DEV_FAKE_EMAIL = admin.email;
+
+    const byUser = await req("/v1/users/me", { "X-View-As": await viewAs("users", diya.userId) });
+    expect(byUser.status).toBe(403);
+    expect(((await byUser.json()) as { detail?: string }).detail).toMatch(/^view as: that person has been removed/);
+    // The same by the other spelling of the subject, which resolves off the employee row itself.
+    expect((await req("/v1/users/me", { "X-View-As": await viewAs("employees", diya.employeeId) })).status).toBe(404);
   });
 
   it("records a sensitive read made through a simulation - it is not a self-read", async () => {

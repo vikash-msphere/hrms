@@ -17,8 +17,7 @@ import { decideModeration, listModerationQueue } from "../services/moderation";
 // each moderator could already see would make coverage depend on an unrelated grant. `moderation.read` is
 // therefore the whole of the decision, which is exactly why it grants nothing by default.
 export const moderationRoute = new Hono<AppEnv>().get("/", async (c) => {
-  const results = await listModerationQueue(c.get("deps"));
-  return c.json({ results });
+  return c.json(await listModerationQueue(c.get("deps")));
 });
 
 // POST /v1/moderation:decide - uphold a flag (hide the post) or dismiss it (leave it alone).

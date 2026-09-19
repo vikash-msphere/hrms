@@ -234,9 +234,9 @@ describe("access: a neighbour the caller cannot list contributes nothing", () =>
     // there is no suggestion at all - and crucially no "2 of 3" citing tickets she cannot see.
     const asAlice = await suggestTriage(deps, own(alice), subject);
     expect(asAlice?.department ?? null).toBeNull();
-    const basisIds = (asAlice?.basis ?? []).map((n) => n.id);
-    expect(basisIds).not.toContain(hidden1);
-    expect(basisIds).not.toContain(hidden2);
+    const basisIds = (asAlice?.basis ?? []).map((n) => n.path);
+    expect(basisIds).not.toContain(`tickets/${hidden1}`);
+    expect(basisIds).not.toContain(`tickets/${hidden2}`);
   });
 
   it("does not offer a duplicate the caller cannot read", async () => {
@@ -247,7 +247,7 @@ describe("access: a neighbour the caller cannot list contributes nothing", () =>
 
     deps.vectors = scriptedIndex(subject, () => [{ id: vectorIdOf("tickets", bobsOpen), score: 0.99 }]);
     const out = await suggestTriage(deps, own(alice), subject);
-    expect((out?.duplicates ?? []).map((d) => d.id)).not.toContain(bobsOpen);
+    expect((out?.duplicates ?? []).map((d) => d.path)).not.toContain(`tickets/${bobsOpen}`);
   });
 
   it("ignores an id that is not a ticket id at all", async () => {
@@ -273,7 +273,7 @@ describe("duplicates", () => {
       { id: vectorIdOf("tickets", far), score: 0.40 },
     ]);
     const out = (await suggestTriage(deps, ALL, subject))!;
-    expect(out.duplicates.map((d) => d.id)).toEqual([near]);
+    expect(out.duplicates.map((d) => d.path)).toEqual([`tickets/${near}`]);
   });
 });
 

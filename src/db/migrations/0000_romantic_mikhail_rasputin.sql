@@ -133,6 +133,7 @@ CREATE TABLE `announcement_replies` (
 	`author_id` text,
 	`author_email` text,
 	`body` text NOT NULL,
+	`delete_time` integer,
 	`created_at` integer NOT NULL,
 	FOREIGN KEY (`announcement_id`) REFERENCES `announcements`(`uuid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`author_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action

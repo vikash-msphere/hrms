@@ -20,6 +20,7 @@ const GENERIC: Record<string, VerbInfo> = {
   complete: { label: "Complete", description: "Mark it done." },
   reopen: { label: "Reopen", description: "Bring a closed item back to active." },
   restore: { label: "Restore", description: "Un-delete a soft-deleted row." },
+  similar: { label: "See suggestions asking the same thing", description: "Show other suggestions that look like the same ask, so they can be merged instead of splitting the votes between them. Carries no submitter, signed or anonymous." },
   decide: { label: "Act on a flagged post", description: "Take a flagged post off the wall, or clear the flag and leave it up. Reading the queue is a separate permission: somebody can review what was flagged without being able to remove anything.", caution: "This removes other people's posts from a public wall. The decision is recorded against the post." },
   extractResume: { label: "Read CV into the form", description: "Have a candidate's CV read into the candidate form, then accept or discard each field. Nothing is saved until you accept it, and no judgement about the candidate is produced.", caution: "This is the one action that sends candidate data to a model. It happens per candidate, when somebody asks for it." },
   "*": { label: "All methods", description: "Every custom method of this collection in one rule." },

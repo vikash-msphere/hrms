@@ -18,20 +18,35 @@
 // post stays exactly as visible as it was, and the only thing that changes is that it appears on a queue.
 
 /**
- * The collections whose rows post publicly, and which columns carry the text a reader sees.
+ * The collections whose rows post publicly.
  *
  * DEFAULT DENY, like `INDEXABLE`. A collection absent here is never scanned, whatever its content. The two
  * that are here are the two public walls: `announcements` (which is also where kudos live, as `kind="kudos"`)
  * and `suggestions`. Everything else in the app is addressed to somebody - a ticket to a servicing desk, a
  * review to a manager - and a moderation queue over private correspondence is a different product with a
  * different consent story.
+ *
+ * WHICH COLUMNS CARRY THE TEXT IS NOT HERE. `services/moderation.ts` dueForScan binds `title` and `body` on
+ * each table as typed drizzle columns, because the two walls are two tables and a name in this map could not
+ * be handed to either query without giving up that typing. This map decides WHETHER a collection is scanned;
+ * the query decides what it reads. An earlier version carried the column names here as well and nothing ever
+ * read them, which made this look like the source of truth for something it did not control.
  */
-export const MODERATABLE: Record<string, { title: string; body: string; singular: string }> = {
+export const MODERATABLE: Record<string, { singular: string }> = {
   // `singular` is what the audit action is named with (`announcement.moderate.hide`), matching the
   // `auditName` each collection's own route already uses - so a moderation entry reads like every other entry
   // about that record rather than like a different system's.
-  announcements: { title: "title", body: "body", singular: "announcement" },
-  suggestions: { title: "title", body: "body", singular: "suggestion" },
+  announcements: { singular: "announcement" },
+  suggestions: { singular: "suggestion" },
+  // A REPLY IS FLAGGED ON ITS OWN, not as part of the post it sits under, and that is the whole reason it is
+  // a host rather than more text folded into the announcement's scan. It is the one public surface written
+  // by somebody other than the post's author: hiding the thread because a commenter was abusive would take
+  // the author's post down for what somebody else wrote. The unique index is per (host, record, feature), so
+  // giving replies their own host is also what lets two bad replies under one post both be flagged.
+  //
+  // Not a wire collection - replies are reached through the announcement's routes - but the queue addresses
+  // one directly, so it is registered in `ENCODABLE` to keep its id off the wire in the clear.
+  "announcement-replies": { singular: "reply" },
 };
 
 export const isModeratable = (collection: string): boolean =>
@@ -99,12 +114,30 @@ export function parseVerdict(raw: string): Verdict | null {
   return { safe: false, hazards: [...new Set(hazards)].sort() };
 }
 
-/** What the model is shown, and what the queue quotes back. Title and body, trimmed, capped: Llama Guard
- *  judges the opening of a post as well as it judges all of it, and an unbounded body is an unbounded prompt. */
+/**
+ * What the model is shown: the post's text, trimmed and capped. An unbounded body is an unbounded prompt,
+ * and a generation call runs unattended on a five-minute tick.
+ *
+ * KNOWN AND ACCEPTED: THIS IS A CEILING ON WHAT IS READ, NOT A SUMMARY OF IT. Anything past this point is
+ * never seen, so a long post can carry abuse below the cut and pass clean. The cap is a cost decision and
+ * it buys a real hole in a safety feature, which is worth saying plainly rather than leaving for somebody
+ * to discover from a queue that stayed empty.
+ *
+ * It is tolerable today because the two walls are short-form by construction - a noticeboard post, a
+ * suggestion, a reply - so a body long enough to exploit it is already unusual enough to notice. If that
+ * stops being true, the fix is to scan the tail as a second call rather than to raise this: doubling the
+ * cap doubles the cost of every ordinary post to catch the one that is padded.
+ */
 export const MAX_SCAN_CHARS = 2_000;
 
-export function scanText(title: string | null, body: string | null): string {
-  return [title, body].map((s) => (s ?? "").trim()).filter(Boolean).join("\n\n").slice(0, MAX_SCAN_CHARS);
+/**
+ * Variadic because a post is not always two fields. A poll carries its choices in
+ * `announcement_poll_options.label`, written by the same author at the same moment as the body, and those
+ * labels were invisible to the scan while this took exactly a title and a body - so a poll whose question
+ * was innocuous and whose options were not passed clean.
+ */
+export function scanText(...parts: (string | null | undefined)[]): string {
+  return parts.map((s) => (s ?? "").trim()).filter(Boolean).join("\n\n").slice(0, MAX_SCAN_CHARS);
 }
 
 /** The excerpt stored on the flag: what the model actually read, so a moderator is judging the same text and

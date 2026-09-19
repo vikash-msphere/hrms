@@ -47,9 +47,22 @@ export interface PushSender {
 //
 // `embed` takes an array because the embedding model does: one subrequest for a batch of rows is the
 // difference between indexing a collection inside the free allocation and not.
+/** The generative models a caller may ask for by name: free-form generation, or the safety classifier. */
+export type GenerativeRole = "generate" | "moderate";
+
 export interface TextModel {
   embed(texts: string[]): Promise<number[][]>;
-  generate(req: { system: string; user: string; maxTokens?: number }): Promise<string>;
+  /**
+   * `role` names WHICH generative model answers, defaulting to the general instruct one.
+   *
+   * It exists because the safety classifier is reached through this same method and is a different model
+   * with a different answer format. Without it a caller could pick a model in every other respect - the
+   * prompt, the parser, the recorded cost - and still be answered by the wrong one, which is precisely what
+   * happened: moderation asked Llama Guard for a two-line verdict and `@cf/meta/llama-3.1-8b-instruct-fast`
+   * replied in prose, so the strict parser rejected every answer and the feature flagged nothing at all.
+   * A fake injected at this port cannot catch that, because the model choice is what the port hides.
+   */
+  generate(req: { system: string; user: string; maxTokens?: number; role?: GenerativeRole }): Promise<string>;
   /** Score `candidates` against `query`, best first. Returns the input indices, not the strings. */
   rerank(query: string, candidates: string[]): Promise<{ index: number; score: number }[]>;
 }

@@ -125,9 +125,14 @@ In order. Nothing before step 4 has any user-visible effect.
 
 ## What is left
 
-Everything below this line is outstanding. Everything above it is committed: `656fe79` (search, triage,
-drafting, extraction), `31cb586` (narration, table assist), `04d1257` (feature-flag gating and the fallback
-e2e spec). The working tree is clean and `npm run verify` passes.
+Everything below this line is outstanding. Everything above it is built: search, triage, drafting,
+extraction, narration, the table assist, moderation and suggestion clustering, across `656fe79`, `31cb586`,
+`04d1257`, `2a8669b`, `9d750cb`, `6624a82` and the working tree. `npm run verify` passes: 3851 tests across
+306 files, and both AI e2e specs are green.
+
+**Every feature in the plan is now built, covered and reachable from the UI.** Sections 3 and 5 below are
+kept for their reasoning, marked DONE. What actually remains is one thing that cannot be done from inside the
+repository, and two that cannot be done until it has been.
 
 Ordered by value against risk.
 
@@ -156,16 +161,27 @@ the team report's period comparison is SUPPOSED to render with no model, so it a
 resolves and shows its figures, and that the "written by AI" credit is absent. Its absence half was
 vacuity-checked the same way - forcing the credit to render made it fail on `Expected: 0, Received: 1`.
 
+`e2e/moderationQueue.spec.ts` covers the other thing a browser can reach without a model: that the queue is
+PRIVATE BY DEFAULT in a running app. A super is offered it and can open it; an employee holds neither
+`moderation.read` nor `moderation.decide`, is not shown the nav item, and is refused 403 by the endpoint
+directly - the nav being a courtesy and the middleware being the control. A super naming a post that was
+never flagged gets 404, so the capability is to act on the queue rather than to take down any post by name.
+
+That spec states its own limit in its header: a flag is written by the drain, the drain needs a guard model,
+and this stack has none - so the queue is empty in every run and rendering a flag cannot be covered here. It
+carries a positive control (the super DOES see the nav item) so the employee's absence assertion is a
+contrast rather than a test that would pass if the nav item existed for nobody.
+
 What is still uncovered is every feature actually doing its job in a browser, which needs a stack with a
 model bound - so it waits on the smoke above. Candidates then: the triage panel, a draft round trip, the
-extraction panel, creating a table from a description.
+extraction panel, creating a table from a description, and a flag rendering on the moderation queue.
 
 Note that `e2e/ticketTriage.spec.ts` is NOT this. It predates the AI layer and covers the manual assign /
 route / prioritize controls; the AI suggestion panel above them has no browser coverage at all.
 
 House rules in `docs/04-testing.md`; run only the named specs, never the full suite.
 
-### 3. The narration UI, built findings-first
+### 3. The narration UI, built findings-first (DONE, `2a8669b` - kept here for the reasoning)
 
 `web/src/components/common/WhatChanged.tsx`, on the team report above the measures table.
 
@@ -194,15 +210,18 @@ Two constants worth revisiting at the same time, both currently guesses:
 - `MIN_CHANGE_PCT` / `MIN_ABSOLUTE` in `domain/narrate.ts` - how much a measure has to move to be worth a
   sentence. Too low and the narration talks about noise; too high and it says nothing on a week that mattered.
 
-### 5. Suggestion-box clustering
+### 5. Suggestion-box clustering (DONE - kept here for the reasoning)
 
-`ai-plan.md` puts this beside ticket duplicates, and it is the same primitive already shipped: embed the
-suggestion, find its nearest neighbours, group them. No generation. The work is the grouping rule and the UI
-that says "seven people have asked for this", which is what makes the upvote count honest - a suggestion
-split across seven wordings reads as seven weak asks rather than one strong one.
+`suggestions:similar` plus `SimilarAsks` on the respond dialog, above the existing merge picker rather than
+instead of it. The same primitive as ticket duplicates: neighbours of an embedding the search drain already
+made, no generation. It answers the thing that made the upvote count dishonest - one idea in seven wordings
+reads as seven weak asks.
 
-Cheapest unbuilt feature on either document, and the only one here that needs nothing from the smoke beyond
-an index that exists.
+Two thresholds differ from the ticket version deliberately. It only offers neighbours a good deal closer,
+because this feeds a MERGE that rewrites somebody's suggestion and moves their votes, so a false neighbour
+costs more than a wrong duplicate hint on a ticket. And it carries NO submitter for any neighbour, signed or
+anonymous: a "who else asked for this" feature is a different feature, and on a box that offers anonymity it
+would break a promise for the rows that used it.
 
 ### Designed in `ai-plan.md`, not scheduled above
 

@@ -56,7 +56,7 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   "org-documents": ["download", "acknowledge", "remindAck"],
   "personal-documents": ["download", "sign", "refreshEsign", "print"],
   "document-acknowledgements": [],
-  suggestions: ["respond", "upvote", "downvote", "merge"],
+  suggestions: ["respond", "upvote", "downvote", "merge", "similar"],
   referrals: ["upload", "download", "award"],
   "job-requisitions": [],
   candidates: ["upload", "download", "extractResume"],

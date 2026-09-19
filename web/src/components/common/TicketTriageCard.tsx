@@ -22,8 +22,11 @@ export type Triage = {
   department: TriageVote;
   category: TriageVote;
   priority: TriageVote;
-  basis: { id: string; subject: string; score: number }[];
-  duplicates: { id: string; subject: string; score: number; state: string }[];
+  // Refs (`tickets/<token>`), not bare ids: only `<collection>/<id>` strings are tokenized by the outbound
+  // wire edge, so a bare id arrived as an INTERNAL id and matched none of the tokenized paths this page
+  // holds - every neighbour silently rendered as text instead of a link.
+  basis: { path: string; subject: string; score: number }[];
+  duplicates: { path: string; subject: string; score: number; state: string }[];
 };
 
 export function TicketTriageCard({ ticketPath, ticketId, can, deptName, onApplyDepartment, onApplyPriority, onOpenTicket }: {
@@ -39,7 +42,7 @@ export function TicketTriageCard({ ticketPath, ticketId, can, deptName, onApplyD
    * filter or page. Returning null for those lets the row render as text instead of as a button that does
    * nothing, which is the failure people report as "the link is broken".
    */
-  onOpenTicket: (id: string) => (() => void) | null;
+  onOpenTicket: (path: string) => (() => void) | null;
 }) {
   const [triage, setTriage] = useState<Triage | null>(null);
   const [asked, setAsked] = useState(false);
@@ -105,8 +108,8 @@ export function TicketTriageCard({ ticketPath, ticketId, can, deptName, onApplyD
           <p className="text-sm font-medium text-warning">Possibly already reported</p>
           <ul className="mt-1 space-y-1">
             {duplicates.map((d) => (
-              <li key={d.id}>
-                <NeighbourLink id={d.id} subject={d.subject} onOpenTicket={onOpenTicket} />
+              <li key={d.path}>
+                <NeighbourLink path={d.path} subject={d.subject} onOpenTicket={onOpenTicket} />
                 <span className="ml-1.5 text-xs text-muted-foreground">({d.state.toLowerCase().replace("_", " ")})</span>
               </li>
             ))}
@@ -145,7 +148,7 @@ export function TicketTriageCard({ ticketPath, ticketId, can, deptName, onApplyD
           <summary className="cursor-pointer text-muted-foreground">Based on {basis.length} resolved {basis.length === 1 ? "ticket" : "tickets"}</summary>
           <ul className="mt-1 space-y-1 pl-4">
             {basis.map((n) => (
-              <li key={n.id}><NeighbourLink id={n.id} subject={n.subject} onOpenTicket={onOpenTicket} /></li>
+              <li key={n.path}><NeighbourLink path={n.path} subject={n.subject} onOpenTicket={onOpenTicket} /></li>
             ))}
           </ul>
         </details>
@@ -155,8 +158,8 @@ export function TicketTriageCard({ ticketPath, ticketId, can, deptName, onApplyD
 }
 
 /** A neighbour's subject: a button when this page can open it, plain text when it cannot. */
-function NeighbourLink({ id, subject, onOpenTicket }: { id: string; subject: string; onOpenTicket: (id: string) => (() => void) | null }) {
-  const open = onOpenTicket(id);
+function NeighbourLink({ path, subject, onOpenTicket }: { path: string; subject: string; onOpenTicket: (path: string) => (() => void) | null }) {
+  const open = onOpenTicket(path);
   if (!open) return <span className="text-sm">{subject}</span>;
   return <button type="button" className="text-left text-sm underline underline-offset-2" onClick={open}>{subject}</button>;
 }

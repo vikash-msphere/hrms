@@ -111,6 +111,20 @@ describe("the grounding guard", () => {
   it("rejects a plausible-looking year or total", () => {
     expect(groundedIn("Late days are the highest since 2024.", findings)).toBe(false);
   });
+
+  it("accepts a real figure written with thousands separators", () => {
+    // A bare `\d+` scan read "12,400" as TWO numbers - "12" and "400" - neither of which is a finding, so a
+    // narration quoting a computed figure the way people write it was thrown away and the reader got the plain
+    // summary. Every measure that counts anything in an organisation of any size crosses a thousand, so this
+    // fired on exactly the numbers most worth writing up.
+    const big: Finding[] = [
+      { key: "hours", label: "Hours logged", unit: "hours", direction: "higher", previous: 9800, current: 12400, changePct: 26.5, movement: "up" },
+    ];
+    expect(groundedIn("Hours logged rose from 9,800 to 12,400.", big)).toBe(true);
+    expect(groundedIn("Hours logged rose from 9800 to 12400.", big)).toBe(true);
+    // The separators do not widen anything: a figure nobody computed is still refused in either spelling.
+    expect(groundedIn("Hours logged rose to 13,500.", big)).toBe(false);
+  });
 });
 
 describe("the plain fallback", () => {

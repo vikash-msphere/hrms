@@ -23,7 +23,11 @@ import { MAX_FINDINGS, findMovements, groundedIn, plainSummary, type Finding } f
 import { peopleAnalytics, type AnalyticsQuery } from "./peopleAnalytics";
 import { aiFeatureOn, aiGenerate } from "./ai";
 
-const PROMPT_VERSION = "v1";
+// v2: the system prompt forbids restating the dates and the user prompt labels them as context. Bumped with
+// that edit, because `aiGenerate` caches on (feature, promptVersion, inputs) - left at v1 every window that had
+// already been narrated would keep serving the paragraph the OLD prompt produced, which is the one the
+// grounding check throws away.
+const PROMPT_VERSION = "v2";
 
 export type Narration = {
   text: string;
@@ -106,6 +110,14 @@ const SYSTEM = [
   "You write one short paragraph about how a team's measures changed between two periods.",
   "You are given the changes that were already found. Write about those and nothing else.",
   "Do NOT introduce any number that is not in the list. Do not total them, average them or work anything out.",
+  // THE DATES ARE CONTEXT, NOT MATERIAL, and saying so is what keeps the grounding check from rejecting almost
+  // every generation. `groundedIn` (domain/narrate.ts) allows only the figures in the findings, deliberately -
+  // a year or a period length beside a real dashboard is a claim nobody computed. The prompt below states the
+  // window so the model knows what it is describing, and a model left to its own devices will then open with
+  // "Between 1 and 7 March...", whose digits are not findings: the paragraph is discarded, the reader gets the
+  // plain summary, and the neurons and the caller's hourly allowance are spent for nothing. So the one thing
+  // it must not do with the dates is repeat them.
+  "Do not mention any date, month, year, or how long the period is. Refer to them as this period and the previous one.",
   "Do not speculate about causes. Do not recommend anything. Do not praise or criticise anyone.",
   "Write in plain British English, at most four sentences, no bullet points, no heading, no em dashes.",
   "Where a measure has a good direction, you may say whether the movement was in it. Where it has none, describe the change without judging it.",
@@ -122,7 +134,9 @@ export function promptFor(findings: readonly Finding[], window: { from: string; 
     return `- ${f.label} (${f.unit}, ${good}): was ${f.previous}, now ${f.current}, ${pct}`;
   });
   return [
-    `Period: ${window.from} to ${window.to}. Compared with: ${prior.from} to ${prior.to}.`,
+    // Labelled as context so the instruction above ("do not mention any date") has something to attach to, and
+    // so a reader of a logged prompt can see the window a narration was about without the model repeating it.
+    `Context, not to be restated. This period: ${window.from} to ${window.to}. The previous period of equal length: ${prior.from} to ${prior.to}.`,
     "Changes found:",
     ...lines,
   ].join("\n");

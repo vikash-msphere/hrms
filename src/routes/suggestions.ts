@@ -3,6 +3,7 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { jsonBody } from "../http/jsonRequest";
 import { listSuggestions, createSuggestion, updateSuggestion, respondSuggestion, voteSuggestion, mergeSuggestion, purgeSuggestion, decorate, type SuggestionInput } from "../services/suggestions";
+import { similarSuggestions } from "../services/suggestionSimilar";
 import { toSuggestionResource } from "../http/serialize";
 import { invalidArgument } from "../lib/errors";
 import { MAX_RICH_BODY } from "../domain/richText";
@@ -59,5 +60,14 @@ export const suggestions = collectionRoutes<SuggestionInput, typeof schema.sugge
     upvote: { run: (deps, user, id) => voteSuggestion(deps, user, id, 1) },
     downvote: { run: (deps, user, id) => voteSuggestion(deps, user, id, -1) },
     merge: { schema: mergeSchema, run: (deps, user, id, body) => mergeSuggestion(deps, user, id, body.into) },
+    // Other suggestions asking for the same thing - what `:merge` needs somebody to know before they can use
+    // it. A read, so `raw`: the answer is a shortlist of neighbours, not a suggestion resource, and pushing
+    // it through the serializer would mean inventing one.
+    //
+    // The caller's own list scope goes in and every neighbour is re-decided against it, so this can never
+    // surface a suggestion their own list would not have returned. No submitter is carried, signed or not.
+    similar: {
+      raw: async (c, id) => c.json({ results: await similarSuggestions(c.get("deps"), c.get("scope"), id) }),
+    },
   },
 });

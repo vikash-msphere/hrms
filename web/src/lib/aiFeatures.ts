@@ -22,7 +22,8 @@ export type AiFeatureKey =
   | "ats.extraction"
   | "tables.describe"
   | "analytics.narrate"
-  | "moderation";
+  | "moderation"
+  | "suggestions.similar";
 
 type AiSetting = { features?: Partial<Record<AiFeatureKey, boolean>> };
 

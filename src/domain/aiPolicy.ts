@@ -369,7 +369,7 @@ export type AiConfig = {
 };
 
 /** The switchable features. A new one is added here, which is also what puts it in the settings panel. */
-export const AI_FEATURES = ["search.semantic", "tickets.triage", "drafting", "ats.extraction", "tables.describe", "analytics.narrate", "moderation"] as const;
+export const AI_FEATURES = ["search.semantic", "tickets.triage", "drafting", "ats.extraction", "tables.describe", "analytics.narrate", "moderation", "suggestions.similar"] as const;
 export type AiFeature = (typeof AI_FEATURES)[number];
 
 export const AI_CONFIG_DEFAULT: AiConfig = {
@@ -380,6 +380,7 @@ export const AI_CONFIG_DEFAULT: AiConfig = {
     "ats.extraction": false,
     "tables.describe": false,
     "analytics.narrate": false,
+    "suggestions.similar": false,
     moderation: false,
   },
   dailyNeurons: 7000,

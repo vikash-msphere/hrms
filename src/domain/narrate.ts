@@ -127,14 +127,24 @@ export function allowedNumbers(findings: readonly Finding[]): Set<string> {
  * assumed - and a fabricated figure sitting beside a real dashboard is worse than no sentence at all. When
  * this fails the caller falls back to the deterministic summary, which is plain but true.
  *
- * Years and small ordinals are allowed through: "the last 30 days" and "three measures" are prose, not
- * claims about the data.
+ * ONLY small counting words are allowed through - "three measures moved" is prose about the narration itself,
+ * not a claim about the data. A YEAR IS NOT ALLOWED, and neither is a period length: "the highest since 2024"
+ * and "over the last 30 days" are both claims this app never made, and a reader has no way to tell one of them
+ * from a figure that was computed. The prompt is written so the model has no reason to state either
+ * (services/analyticsNarrate.ts SYSTEM), which is what makes the strict rule cheap rather than a trap.
  */
 export function groundedIn(text: string, findings: readonly Finding[]): boolean {
   const allowed = allowedNumbers(findings);
-  const numbers = text.match(/\d+(?:\.\d+)?/g) ?? [];
+  // Thousands separators are folded away before the comparison. `12,400` is ONE number to a reader and was two
+  // to a bare `\d+` scan - "12" and "400" - so a narration that spelled a real, computed figure the way people
+  // write it failed the check and the reader got the plain summary instead. Every measure that counts anything
+  // in an organisation of any size crosses a thousand, so this was not an edge case; it fired on exactly the
+  // numbers a reader most wants written up. Matching the separated form and stripping the commas asks about the
+  // number on the page, which is what the check is for. It does not widen anything: the value still has to be
+  // one of the findings.
+  const numbers = text.match(/\d+(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g) ?? [];
   for (const raw of numbers) {
-    const n = Number(raw);
+    const n = Number(raw.replace(/,/g, ""));
     if (!Number.isFinite(n)) return false;
     // Counting words a narration legitimately uses about itself rather than about the data.
     if (Number.isInteger(n) && n <= MAX_FINDINGS) continue;

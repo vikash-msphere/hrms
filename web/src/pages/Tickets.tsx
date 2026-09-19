@@ -1390,10 +1390,14 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
             deptName={deptName}
             onApplyDepartment={(ref) => act("route", { department: ref })}
             onApplyPriority={(p) => act("prioritize", { priority: p })}
-            onOpenTicket={(id) => {
+            onOpenTicket={(path) => {
               // Only the tickets this page has loaded can be opened in place. A neighbour outside the current
               // filter or page renders as text rather than as a link that would do nothing.
-              const found = siblings.find((s) => idOf(s.path) === id);
+              //
+              // Matched on the PATH, which is what the server now sends. It previously sent a bare id, which
+              // the wire edge leaves untokenized - so this compared an internal id against a tokenized path
+              // and never matched, and every neighbour rendered as text whether or not the page had it.
+              const found = siblings.find((s) => s.path === path);
               return found ? () => onOpen(found) : null;
             }}
           />

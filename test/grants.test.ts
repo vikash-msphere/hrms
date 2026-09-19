@@ -262,6 +262,11 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
     "letterheads:deleteImage", "letterheads:duplicate", "letterheads:image", "letterheads:preview",
     "letterheads:uploadImage",
     "referrals:award", "suggestions:downvote", "suggestions:merge", "suggestions:upvote",
+    // `similar` exists to serve `merge` - it shows which suggestions are the same ask so they can be folded
+    // together. Merging is already ACL-only (right above), so the thing that tells somebody what to merge is
+    // withheld on exactly the same terms: granting one without the other would be offering an answer nobody
+    // can act on.
+    "suggestions:similar",
     // Company/department-wide group award (one bonus row per in-scope employee). HR's `bonuses.**` LEVEL
     // covers recording a single award; this collection-level verb is left to the ACL for now, deliberately,
     // because it writes money for a whole population at once.

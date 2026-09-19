@@ -5814,7 +5814,7 @@ paths:
                     items:
                       type: object
                       properties:
-                        id: { type: string }
+                        path: { type: string, description: "A `suggestions/<id>` ref, tokenized by the wire edge - compare it to a suggestion path, never to a bare id." }
                         label: { type: string }
                         requiresAadhaar: { type: boolean }
                         supportsWebhook: { type: boolean }
@@ -7462,7 +7462,7 @@ paths:
                   next_page_token: { type: string, description: "Absent - the queue is returned in full." }
   /v1/moderation:
     get:
-      description: "Public posts a guard model objected to and which nobody has decided on yet. Gated by the `moderation` capability (super-only by default; widen through the ACL). The queue quotes posts in full and is not narrowed to what the holder could otherwise read - moderating is an org-wide job - so the capability is the whole of the access decision. An anonymous suggestion arrives with no author: the wall's promise is to the reader as well as the submitter."
+      description: "Public posts a guard model objected to and which nobody has decided on yet, newest first, capped at 100 with `has_more` when there are others. Gated by the `moderation` capability (super-only by default; widen through the ACL). The queue quotes posts in full and is not narrowed to what the holder could otherwise read - moderating is an org-wide job - so the capability is the whole of the access decision. An anonymous suggestion arrives with no author: the wall's promise is to the reader as well as the submitter. A flag whose post has since gone is closed as superseded rather than listed."
       operationId: ListModerationQueue
       parameters:
         - { in: query, name: max_page_size, schema: { type: integer } }
@@ -7485,8 +7485,8 @@ paths:
                     items:
                       type: object
                       properties:
-                        host: { type: string, description: "Resource path of the flagged post: announcements/{id} or suggestions/{id}" }
-                        collection: { type: string, enum: [announcements, suggestions] }
+                        host: { type: string, description: "Resource path of the flagged item: announcements/{id} - announcement-replies/{id} - or suggestions/{id}" }
+                        collection: { type: string, enum: [announcements, announcement-replies, suggestions] }
                         hazards: { type: array, items: { type: string }, description: "Llama Guard hazard codes such as S5 or S10" }
                         hazard_labels: { type: array, items: { type: string }, description: "The same codes in words - 'Defamation' rather than S5" }
                         excerpt: { type: string, description: "The text as the model read it" }
@@ -7494,10 +7494,11 @@ paths:
                         edited_since_flag: { type: boolean, description: "The post changed after it was flagged, so the excerpt is no longer what is on the wall" }
                         author: { type: string, nullable: true, description: "Resource path employees/{id}, or null when the post is anonymous" }
                         flagged_time: { type: string, format: date-time }
-                  next_page_token: { type: string, description: "Absent - the queue is capped at 100 and returned in full." }
+                  has_more: { type: boolean, description: "More flags are pending than this response carries. Decide some and read again." }
+                  next_page_token: { type: string, description: "Absent - the queue is not paged. It returns the newest 100 and sets `has_more` when there are others." }
   /v1/moderation:decide:
     post:
-      description: "Uphold a moderation flag or dismiss it. `hide` withdraws the post through its own collection's write (an announcement is disabled; a suggestion is soft-deleted) and notifies its author; `dismiss` closes the flag and leaves the post exactly where it is. Neither is a hard delete and both are recorded against the deciding user. Gated by the `moderation` capability."
+      description: "Uphold a moderation flag or dismiss it. `hide` withdraws the item through its own table's write (an announcement is disabled; a suggestion and a reply are soft-deleted) and notifies whoever wrote it; `dismiss` closes the flag and leaves the item exactly where it is. A reply is hidden on its own, never by taking down the post it sits under - the author did not write it. Neither action is a hard delete and both are recorded against the deciding user. Gated by the `moderation` capability."
       operationId: ":Decide"
       requestBody:
         required: true
@@ -7507,7 +7508,7 @@ paths:
               type: object
               required: [host, action]
               properties:
-                host: { type: string, description: "Resource path of the flagged post: announcements/{id} or suggestions/{id}" }
+                host: { type: string, description: "Resource path of the flagged item: announcements/{id} - announcement-replies/{id} - or suggestions/{id}" }
                 action: { type: string, enum: [hide, dismiss] }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
@@ -11352,6 +11353,37 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/suggestion' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/suggestions/{suggestion_id}:similar:
+    post:
+      description: "Custom method similar: other suggestions that look like the same ask, so they can be merged with :merge rather than splitting the votes between them. Nothing is generated - this reads the neighbours of the suggestion's existing search embedding. Every neighbour is re-decided against the caller's own suggestions list scope, so it can never surface one their list would not have returned, and NO submitter is carried for any of them, signed or anonymous. Returns an empty list when the feature is off, when no index is bound, or when this suggestion has not been embedded yet."
+      operationId: ":SimilarSuggestion"
+      parameters: [ { in: path, name: suggestion_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    readOnly: true
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        title: { type: string, nullable: true }
+                        status: { type: string }
+                        score: { type: number, description: How close the two asks are. }
+                        votes: { type: integer, description: "Net votes, so a moderator can see which way round to merge." }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/suggestions/{suggestion_id}:merge:
     post:
       description: >-
@@ -13858,7 +13890,7 @@ paths:
                         items:
                           type: object
                           properties:
-                            id: { type: string }
+                            path: { type: string, description: "A `tickets/<id>` ref, tokenized by the wire edge - compare it to a ticket path, never to a bare id." }
                             subject: { type: string }
                             score: { type: number }
                       duplicates:
@@ -13867,7 +13899,7 @@ paths:
                         items:
                           type: object
                           properties:
-                            id: { type: string }
+                            path: { type: string, description: "A `tickets/<id>` ref, tokenized by the wire edge." }
                             subject: { type: string }
                             score: { type: number }
                             state: { type: string }

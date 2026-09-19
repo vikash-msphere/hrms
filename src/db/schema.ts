@@ -851,6 +851,11 @@ export const announcementReplies = sqliteTable("announcement_replies", {
   authorId: text("author_id").references(() => employees.uuid),
   authorEmail: text("author_email"),
   body: text("body").notNull(),
+  // Soft-delete, and the only way a reply comes off the wall. It exists for moderation: a reply is the one
+  // public surface written by somebody other than the post's author, so hiding the parent to deal with an
+  // abusive comment would take down the author's post for what a commenter wrote. Append-only was right
+  // while nothing could withdraw one; it stopped being right the moment a moderator could.
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }),
   createdAt: created(),
 }, (t) => ({ annIdx: index("arp_ann_idx").on(t.announcementId) }));
 

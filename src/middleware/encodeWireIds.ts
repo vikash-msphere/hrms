@@ -34,6 +34,11 @@ export const ENCODABLE = new Set<string>([
   // edge (middleware/decodeWireIds) decodes it back, so `DELETE /v1/access-rules/<token>` resolves and the
   // `{ rule: "access-rules/<token>" }` body the four-eyes verbs take is decoded like any other ref.
   "access-rules", "activity",
+  // Board replies, for the same reason and found the same way. A reply is not a wire collection - it is
+  // reached only through its announcement's routes - but the moderation queue addresses one directly
+  // (`host: "announcement-replies/<id>"`, decided by `POST /v1/moderation:decide`), so its id crosses the
+  // wire in both directions and would otherwise cross it raw.
+  "announcement-replies",
 ]);
 
 // `<collection>/<13-char base32 id>` with an optional tail: a `:verb` (photo/download style) or one more

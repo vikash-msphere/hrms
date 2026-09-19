@@ -64,12 +64,19 @@ run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "
 # whole-collection prefetch plus one atomic db.batch write group (src/lib/dbBatch.ts), which is what keeps a
 # payroll build to a couple of dozen queries at any headcount.
 #
-# The NIGHTLY TICK is not, and this comment used to claim it was. `dispatchCron` (src/cron.ts) runs 22
-# subtasks in ONE invocation - accrual, carry-forward, reminders, digests, five kinds of recurrence roll -
-# each doing several reads of its own, so the night comfortably exceeds 50 and fits inside 1000. It is
-# best-effort per subtask and records what failed on the `cron_runs` row, so overrunning would go red rather
-# than silent, but the honest statement is: THE NIGHTLY CRON NEEDS THE PAID BUDGET. Running this app on the
-# free plan means splitting that tick across several scheduled triggers first.
+# NEITHER CRON TICK IS, and this comment used to name only the nightly one. `dispatchCron` (src/cron.ts) runs 22
+# subtasks in ONE invocation on the nightly schedule - accrual, carry-forward, reminders, digests, five kinds of
+# recurrence roll - each doing several reads of its own, so the night comfortably exceeds 50 and fits inside 1000.
+#
+# The FIVE-MINUTE tick is now in the same position, which it was not when this said "the nightly tick". It runs
+# four subtasks, and the moderation scan alone spends about six statements per post it looks at (the budget
+# read, the cache lookup, the inference, the usage row, the scan stamp, the flag) against a ceiling of
+# `BUDGET.moderationsPerDrain` posts - so a busy wall puts that one subtask near 50 before the job drain, the
+# announcement publish and the embedding reconcile have run at all.
+#
+# Both are best-effort per subtask and record what failed on the `cron_runs` row, so overrunning goes red rather
+# than silent. The honest statement is: BOTH CRON TICKS NEED THE PAID BUDGET. Running this app on the free plan
+# means splitting them across several scheduled triggers first, and lowering `moderationsPerDrain`.
 [limits]
 cpu_ms = 60000
 

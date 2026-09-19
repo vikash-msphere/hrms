@@ -45,8 +45,11 @@ export function makeTextModel(binding: Ai, gatewayId?: string): TextModel {
       return out.data;
     },
 
-    async generate({ system, user, maxTokens }) {
-      const out = await run<{ response?: string }>(MODELS.generate, {
+    async generate({ system, user, maxTokens, role }) {
+      // `MODELS[role]`, not `MODELS.generate`: the safety classifier is a different model reached through the
+      // same method, and hardcoding one here silently answered every moderation prompt with the instruct
+      // model. `assertModelAllowed` inside `run` still refuses anything off the allowlist.
+      const out = await run<{ response?: string }>(MODELS[role ?? "generate"], {
         messages: [
           { role: "system", content: system },
           { role: "user", content: user },

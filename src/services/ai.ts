@@ -16,6 +16,7 @@
 import { and, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
+import type { GenerativeRole } from "../ports";
 import {
   AI_CONFIG_DEFAULT,
   BUDGET,
@@ -114,27 +115,33 @@ export async function aiEmbed(deps: Deps, ctx: AiCallContext, texts: string[]): 
 export async function aiGenerate(
   deps: Deps,
   ctx: AiCallContext,
-  req: { system: string; user: string; promptVersion: string; maxTokens?: number; cacheTtlMs?: number },
+  req: { system: string; user: string; promptVersion: string; maxTokens?: number; cacheTtlMs?: number; role?: GenerativeRole },
 ): Promise<AiResult<string>> {
   if (ctx.collection) assertMayReachModel(ctx.collection, ctx.subresource);
   if (!deps.ai) return refuse("unavailable", "no AI binding on this deployment");
 
-  const key = await sha256Hex(`${ctx.feature}|${req.promptVersion}|${req.system}|${req.user}`);
+  // Which model answers, and therefore what it costs and what the ledger says it was. Defaulting here rather
+  // than at each call site keeps the three in step: a caller that names a role cannot end up charged for one
+  // model and answered by another.
+  const role = req.role ?? "generate";
+  // The role is IN THE CACHE KEY. Two models asked the same question give different answers, and without it
+  // a moderation verdict and a draft built from identical text would share one cached reply.
+  const key = await sha256Hex(`${ctx.feature}|${role}|${req.promptVersion}|${req.system}|${req.user}`);
   const hit = await cacheGet(deps, key);
   if (hit !== null) {
     // Recorded, with `cacheHit` set: a cache hit is still a use of the feature, and leaving it out of the
     // trail would make the usage picture flatter than reality and the accountability answer incomplete.
-    await recordUsage(deps, ctx, "generate", { inputHash: key, inputChars: req.user.length, outputChars: hit.length, neurons: 0, cacheHit: true, outcome: "ok", durationMs: 0 });
+    await recordUsage(deps, ctx, role, { inputHash: key, inputChars: req.user.length, outputChars: hit.length, neurons: 0, cacheHit: true, outcome: "ok", durationMs: 0 });
     return { ok: true, value: hit, cached: true };
   }
 
   const rate = await withinUserRate(deps, ctx);
   if (!rate.ok) return rate;
-  const budget = await withinDailyBudget(deps, ESTIMATED_NEURONS.generate, ctx.limits);
+  const budget = await withinDailyBudget(deps, ESTIMATED_NEURONS[role], ctx.limits);
   if (!budget.ok) return budget;
 
-  const out = await runRecorded(deps, ctx, "generate", `${req.system}\n${req.user}`, ESTIMATED_NEURONS.generate, async () => {
-    const text = await deps.ai!.generate({ system: req.system, user: req.user, maxTokens: req.maxTokens });
+  const out = await runRecorded(deps, ctx, role, `${req.system}\n${req.user}`, ESTIMATED_NEURONS[role], async () => {
+    const text = await deps.ai!.generate({ system: req.system, user: req.user, maxTokens: req.maxTokens, role });
     return { value: text, outputChars: text.length };
   });
   if (out.ok && out.value) await cachePut(deps, key, ctx.feature, out.value, req.cacheTtlMs ?? DEFAULT_CACHE_MS);

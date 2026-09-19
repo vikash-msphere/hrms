@@ -89,7 +89,7 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   "org-documents": ["update", "delete", "download", "acknowledge", "remindAck"],
   "personal-documents": ["update", "delete", "download", "sign", "refreshEsign", "print"],
   "document-acknowledgements": ["delete"],
-  suggestions: ["update", "delete", "respond", "upvote", "downvote", "merge"],
+  suggestions: ["update", "delete", "respond", "upvote", "downvote", "merge", "similar"],
   referrals: ["update", "delete", "upload", "download", "award"],
   "job-requisitions": ["update", "delete"],
   candidates: ["update", "delete", "upload", "download", "extractResume"],
@@ -133,6 +133,7 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "describe", // collection-level: turn a description of a grid into a spec the builder renders (table-fields)
   "narrate", // collection-level: write up how the team's measures changed against the previous window (people-analytics)
   "decide", // uphold or clear a moderation flag on a public post (moderation)
+  "similar", // other suggestions asking for the same thing, for somebody deciding what to merge (suggestions)
   "promoteTodo", // turn a checklist item into a card of its own (cards)
   "watch", "unwatch", // follow a card or a goal you do not own (cards, goals)
   "activate", // start a sprint (sprints) - complete reuses the existing verb

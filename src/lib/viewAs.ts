@@ -14,16 +14,17 @@
 //      is never allowed - the admin stops the simulation and acts as themselves.
 // The audit trail keeps naming the real human (lib/audit.ts stamps `viewing_as` on the row), so a simulated
 // read is attributable to the admin who ran it, never to the person they were watching the app as.
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { Context } from "hono";
 import * as schema from "../db/schema";
 import type { AppEnv, AppUser } from "../env";
 import type { Deps } from "../deps";
 import { forbidden, invalidArgument, notFound } from "./errors";
 import { decide, type Grant } from "../domain/permissions";
-import { mergeGrants } from "../domain/compileGrants";
+import { mergeGrants, mergeGuards } from "../domain/compileGrants";
 import { EMPTY_GRANT, isSuperGrant } from "../domain/grants";
-import { loadRoleGrant, loadUserGrant, loadUserRoles } from "./policyLoad";
+import type { GuardIndex } from "../domain/ruleCondition";
+import { loadRoleGrant, loadRoleGuards, loadUserGrant, loadUserGuards, loadUserRoles } from "./policyLoad";
 
 export const VIEW_AS_HEADER = "X-View-As";
 const TOKEN_RE = /^[0-9a-hj-km-np-tv-z]{26}$/; // a wire-id token (the SPA speaks tokens, tests speak internal ids)
@@ -73,6 +74,12 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
   // A subject is a sign-in account OR a person. A person with an account is graded as that account; one who has
   // never signed in is graded as the account they WOULD get on first login (default `employee` role, their own
   // employee code, no user rules) - the same rule services/accessPreview.ts uses, so the two agree.
+  //
+  // THE EMPLOYEE'S SOFT-DELETE STAMP RIDES ALONG, and is refused below. A user whose employee row is deleted is
+  // refused at the door for a real sign-in (middleware/auth.ts assertLive), so simulating one shows an app that
+  // person cannot reach at all - the opposite of what this surface is for. The `employees` lane filters it in
+  // SQL (there is no account to grade without the person); the `users` lane reads the column, because a user
+  // row outlives the employee it points at and the join must still resolve to say so.
   const row =
     kind === "users"
       ? (
@@ -86,6 +93,7 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
               employeeCode: schema.employees.code,
               firstName: schema.employees.firstName,
               lastName: schema.employees.lastName,
+              employeeDeleteTime: schema.employees.deleteTime,
             })
             .from(schema.users)
             .leftJoin(schema.employees, eq(schema.users.employeeId, schema.employees.uuid))
@@ -104,13 +112,15 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
               firstName: schema.employees.firstName,
               lastName: schema.employees.lastName,
               workEmail: schema.employees.workEmail,
+              employeeDeleteTime: schema.employees.deleteTime,
             })
             .from(schema.employees)
             .leftJoin(schema.users, eq(schema.users.employeeId, schema.employees.uuid))
-            .where(eq(schema.employees.uuid, id))
+            .where(and(eq(schema.employees.uuid, id), isNull(schema.employees.deleteTime)))
             .limit(1)
         )[0];
   if (!row) throw notFound("view as: subject not found");
+  if (row.employeeDeleteTime) throw reject("that person has been removed from the directory");
 
   const userUuid = row.userUuid ?? null;
   const email = row.email ?? (row as { workEmail?: string }).workEmail ?? "";
@@ -130,6 +140,18 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
     userUuid ? loadUserGrant(deps, userUuid) : Promise.resolve(EMPTY_GRANT),
   ]);
   const grant: Grant = mergeGrants(roleGrants.reduce(mergeGrants), userGrant);
+  // THE SUBJECT'S GUARDS, assembled off the same cached rows as their grant and exactly as middleware/auth.ts
+  // does for a real sign-in. They were missing entirely, and a missing guard index is not a neutral default:
+  // `guardAllows` returns true for one (domain/ruleCondition.ts), so every threshold, time window and network
+  // fence on the subject's rules stopped being evaluated the moment a simulation was open. The surface exists
+  // to show what this person sees; a rule that refuses them an expense over fifty thousand, or refuses them
+  // anything from outside the office range, is part of that answer, and leaving it out showed the admin MORE
+  // than the subject has - which is the one direction this file is written to make impossible.
+  const [roleGuards, userGuards] = await Promise.all([
+    Promise.all(roles.map((r) => loadRoleGuards(deps, r))),
+    userUuid ? loadUserGuards(deps, userUuid) : Promise.resolve(new Map() as GuardIndex),
+  ]);
+  const guards: GuardIndex = roleGuards.reduce(mergeGuards, userGuards);
   // Rail 2, first half: a non-super caller may not step into a super subject - borrowing the break-glass
   // identity outright.
   //
@@ -157,12 +179,17 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
     employeeCode: row.employeeCode ?? null,
     name: `${row.firstName ?? ""} ${row.lastName ?? ""}`.trim() || null,
     grant,
+    guards,
     policy: real.policy, // the body-AC manifest is global - reuse the one auth already loaded
     // The real admin's SITTING travels with them: a simulation is still something that human did while signed
     // in, and it is the sitting an incident review most wants grouped.
     // The real admin's SITTING travels with them, and so does their own AUTHORITY: rail 2's second half is
     // decided per request in middleware/authz.ts, which needs the real caller's grant and employee code to
     // re-ask the question the subject's grant just answered.
+    // ...and their GUARDS with it, for the same reason the grant travels: the containment check re-asks this
+    // request of the real caller, and a caller's authority is their grant AS LIMITED BY the guards on the rules
+    // that carry it. Without them a fenced or capped rule answered through a simulation as though it were
+    // neither, which is a way for an admin to read past their own limits rather than the subject's.
     simulatedBy: {
       uuid: real.uuid,
       email: real.email,
@@ -171,6 +198,7 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
       name: real.name,
       sessionId: real.sessionId,
       grant: real.grant,
+      guards: real.guards,
     },
   };
 }
