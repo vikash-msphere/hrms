@@ -7460,6 +7460,70 @@ paths:
                         prior_employer_income: { type: number }
                         prior_employer_tds: { type: number }
                   next_page_token: { type: string, description: "Absent - the queue is returned in full." }
+  /v1/moderation:
+    get:
+      description: "Public posts a guard model objected to and which nobody has decided on yet. Gated by the `moderation` capability (super-only by default; widen through the ACL). The queue quotes posts in full and is not narrowed to what the holder could otherwise read - moderating is an org-wide job - so the capability is the whole of the access decision. An anonymous suggestion arrives with no author: the wall's promise is to the reader as well as the submitter."
+      operationId: ListModerationQueue
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        host: { type: string, description: "Resource path of the flagged post: announcements/{id} or suggestions/{id}" }
+                        collection: { type: string, enum: [announcements, suggestions] }
+                        hazards: { type: array, items: { type: string }, description: "Llama Guard hazard codes such as S5 or S10" }
+                        hazard_labels: { type: array, items: { type: string }, description: "The same codes in words - 'Defamation' rather than S5" }
+                        excerpt: { type: string, description: "The text as the model read it" }
+                        title: { type: string, description: "The post's title as it reads now" }
+                        edited_since_flag: { type: boolean, description: "The post changed after it was flagged, so the excerpt is no longer what is on the wall" }
+                        author: { type: string, nullable: true, description: "Resource path employees/{id}, or null when the post is anonymous" }
+                        flagged_time: { type: string, format: date-time }
+                  next_page_token: { type: string, description: "Absent - the queue is capped at 100 and returned in full." }
+  /v1/moderation:decide:
+    post:
+      description: "Uphold a moderation flag or dismiss it. `hide` withdraws the post through its own collection's write (an announcement is disabled; a suggestion is soft-deleted) and notifies its author; `dismiss` closes the flag and leaves the post exactly where it is. Neither is a hard delete and both are recorded against the deciding user. Gated by the `moderation` capability."
+      operationId: ":Decide"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, action]
+              properties:
+                host: { type: string, description: "Resource path of the flagged post: announcements/{id} or suggestions/{id}" }
+                action: { type: string, enum: [hide, dismiss] }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  host: { type: string }
+                  action: { type: string, enum: [hide, dismiss] }
   /v1/activity:
     get:
       description: "The audit trail, newest-first. With ?resource=<collection>/<id>: one entity's activity, gated by read on that target (rows only for an entity the caller can already read). Without ?resource: the org-wide feed across every collection (writes, sensitive-data reads, and denials), gated by the `audit` capability (super-only by default)."

@@ -166,6 +166,7 @@ const PayrollRuns = lazy(() => import("./pages/PayrollRuns"));
 const Settings = lazy(() => import("./pages/Settings"));
 const Workflows = lazy(() => import("./pages/Workflows"));
 const Activity = lazy(() => import("./pages/Activity"));
+const Moderation = lazy(() => import("./pages/Moderation"));
 
 // Route-key -> the page's code-chunk loader. React.lazy only starts a chunk download when the page first
 // RENDERS - which is AFTER `me` resolves and the shell has mounted, so the page's data reads land in a later
@@ -197,6 +198,7 @@ const PAGE_CHUNK: Record<string, () => Promise<unknown>> = {
   interviews: () => import("./pages/Interviews"), offers: () => import("./pages/Offers"),
   "recruiting-analytics": () => import("./pages/RecruitingAnalytics"), tickets: () => import("./pages/Tickets"),
   "team-analytics": () => import("./pages/TeamAnalytics"),
+  moderation: () => import("./pages/Moderation"),
   // Both goal routes are one page now, so the prefetch for either warms the same chunk.
   "team-goals": () => import("./pages/Goals"),
   tables: () => import("./pages/TableBuilder"),
@@ -665,6 +667,8 @@ export default function App() {
         return <Workflows me={gme} openId={route.id ?? undefined} />;
       case "activity":
         return <Activity me={gme} />;
+      case "moderation":
+        return <Moderation />;
       case "users": // legacy deep link -> Settings Access → Roles & permissions
         return <Settings me={gme} tab="users" />;
       case "operations": // moved into Settings; deep-link straight to its tab

@@ -47,6 +47,7 @@ const WITHHELD_COLLECTIONS: Record<string, string> = {
   referrals: "private + ACL by design (see the referrals module notes) - the whole collection is per-object",
   "payroll-debit-accounts": "the employer's own bank account, which the bank file is drawn on: super-only, grantable through the ACL",
   "tax-verifications": "the prior-employer verification queue rides the `tax` capability, decided per employee sub-resource",
+  moderation: "the flagged-post queue quotes public posts in full and is deliberately NOT narrowed per holder (moderating is an org-wide job), so the capability is the whole access decision - granted to a named moderator through the ACL, never seeded to a role",
   users: "the login directory (role and status per account). Changing who can sign in and as what is super's act; delegated through the ACL, never seeded",
 };
 

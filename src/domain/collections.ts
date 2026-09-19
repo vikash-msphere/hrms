@@ -107,6 +107,16 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   // encrypted per-employee tax blob). Sensitive (exposes declared prior salary), so private-by-default: super
   // via `**`, widened to hr/payroll via the ACL. The verify/reject action rides the existing employees.tax write.
   "tax-verifications",
+  // Virtual capability (no table of its own): `moderation.read` gates GET /v1/moderation, the queue of public
+  // posts a guard model objected to, and `moderation.decide` gates acting on one. Assembled from the
+  // `ai_suggestions` advisory rows joined to the two public walls (announcements, suggestions).
+  //
+  // PRIVATE-BY-DEFAULT, and more deliberately than most. The queue quotes posts in full and is NOT narrowed to
+  // what each holder could otherwise read - moderating is an org-wide job, so narrowing it would make coverage
+  // depend on unrelated grants. That makes the capability itself the whole of the access decision, which is
+  // exactly why nobody but super holds it until an org grants it through the ACL. Hiding a post is reversible
+  // and notifies its author; nothing here can delete anything.
+  "moderation",
   // Custom cross-collection grids: the saved DEFINITION of one (base + columns + filters), owner-coded and
   // shared through the ordinary object ACL. Running one reads every source under the runner's own scopes, so a
   // shared view never carries the author's access with it.

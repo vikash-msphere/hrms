@@ -340,6 +340,16 @@ export const BUDGET = {
   perUserHourlyGenerations: 20,
   /** Embed calls per cron drain, so a bulk re-index cannot consume the day in one tick. */
   embedsPerDrain: 200,
+  /**
+   * Posts scanned for moderation per cron drain.
+   *
+   * Two orders of magnitude below the embed ceiling, and the gap is the point: moderation is a GENERATION
+   * call, worth roughly a thousand embeds each, and it runs unattended rather than because somebody pressed
+   * something. Eight per five-minute tick is about two thousand posts a day, far more than any real wall
+   * produces, while a runaway - a bulk import of every historic announcement - costs a bounded slice of the
+   * allocation per tick instead of the whole day before anyone notices.
+   */
+  moderationsPerDrain: 8,
 } as const;
 
 /**
@@ -359,7 +369,7 @@ export type AiConfig = {
 };
 
 /** The switchable features. A new one is added here, which is also what puts it in the settings panel. */
-export const AI_FEATURES = ["search.semantic", "tickets.triage", "drafting", "ats.extraction", "tables.describe", "analytics.narrate"] as const;
+export const AI_FEATURES = ["search.semantic", "tickets.triage", "drafting", "ats.extraction", "tables.describe", "analytics.narrate", "moderation"] as const;
 export type AiFeature = (typeof AI_FEATURES)[number];
 
 export const AI_CONFIG_DEFAULT: AiConfig = {
@@ -370,6 +380,7 @@ export const AI_CONFIG_DEFAULT: AiConfig = {
     "ats.extraction": false,
     "tables.describe": false,
     "analytics.narrate": false,
+    moderation: false,
   },
   dailyNeurons: 7000,
   perUserHourlyGenerations: 20,

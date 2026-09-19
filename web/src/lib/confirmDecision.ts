@@ -11,7 +11,7 @@ import type { ConfirmFn } from "@/components/common/confirm";
 // reversible view state (pin, hide, mark read), and reads (preview, download, export). Friction on those is
 // noise, and noise is what teaches people to click through the dialogs that matter.
 
-export type Decision = "approve" | "reject" | "cancel" | "pay" | "disburse" | "submit" | "award" | "revoke" | "publish" | "unpublish" | "disable" | "route" | "advance" | "decline" | "rescind" | "complete" | "reopen";
+export type Decision = "approve" | "reject" | "cancel" | "pay" | "disburse" | "submit" | "award" | "revoke" | "publish" | "unpublish" | "disable" | "hide" | "route" | "advance" | "decline" | "rescind" | "complete" | "reopen";
 
 type Copy = { title: string; description: string; confirmLabel: string; destructive?: boolean };
 
@@ -29,6 +29,10 @@ const COPY: Record<Decision, (subject: string) => Copy> = {
   publish: (s) => ({ title: "Publish this?", description: `${s} becomes visible to its whole audience, and notifications go out.`, confirmLabel: "Publish" }),
   unpublish: (s) => ({ title: "Unpublish this?", description: `${s} disappears for everyone who could see it. Notifications already sent stay sent.`, confirmLabel: "Unpublish", destructive: true }),
   disable: (s) => ({ title: "Disable this?", description: `${s} stops running until somebody turns it back on.`, confirmLabel: "Disable", destructive: true }),
+  // Distinct from `unpublish`, which is the author taking their own post down. This is somebody else taking
+  // it down for them, so the copy has to say that the author is told - deciding to hide a colleague's post
+  // without their knowing is a different act from the one the person clicking thinks they are performing.
+  hide: (s) => ({ title: "Hide this post?", description: `${s} stops being visible on the wall and its author is told it was hidden. It is not deleted - it can be put back.`, confirmLabel: "Hide post", destructive: true }),
   route: (s) => ({ title: "Re-route this ticket?", description: `${s} moves to another team's queue and leaves yours.`, confirmLabel: "Re-route" }),
   advance: (s) => ({ title: "Move to the next stage?", description: `${s} advances in the pipeline, and the people on that stage are notified.`, confirmLabel: "Advance" }),
   decline: (s) => ({ title: "Decline this?", description: `${s} is declined and whoever asked is notified.`, confirmLabel: "Decline", destructive: true }),

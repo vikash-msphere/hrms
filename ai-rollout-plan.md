@@ -4,7 +4,7 @@ Companion to `ai-plan.md`, which holds the design and the reasoning behind it. T
 work and the route from here to something running. Read `ai-plan.md` for why the layer is shaped the way it
 is; read this to find out what exists, what is decided, and what is left.
 
-Last verified with `npm run verify`: spectral, eslint, three tsc projects, **3801 tests across 303 files, 0
+Last verified with `npm run verify`: spectral, eslint, three tsc projects, **3822 tests across 304 files, 0
 failures**.
 
 ## The one thing to know first
@@ -34,6 +34,7 @@ works", and it is the cheapest way to learn whether the prompts and the estimate
 | 4a | Resume extraction, with a per-field org setting | One named exception to the `candidates` denylist. The model transcribes; it does not judge |
 | 5 | Natural language to a grid spec | The catalogue is a closed set, so an invented field key matches nothing and is reported rather than rendered |
 | 6 | Narrated team analytics | Detection is arithmetic. The model is handed movements already found, and a sentence containing a number that was not in them is discarded |
+| 3 | Moderation queue for the public walls | The model can only add a queue item. Hiding a post is a separate act by a person, through a capability nobody holds by default, and it is reversible |
 
 ### Where things live
 
@@ -46,6 +47,10 @@ works", and it is the cheapest way to learn whether the prompts and the estimate
 - `src/services/searchEmbed.ts` - the reconciling drain.
 - `src/services/globalSearch.ts` - hybrid retrieval and RRF fusion.
 - `src/services/ticketTriage.ts`, `src/services/aiDraft.ts`, `src/services/resumeExtract.ts` - the features.
+- `src/domain/moderation.ts` - what may be scanned, the hazard taxonomy, and the strict verdict parse.
+- `src/services/moderation.ts` - the scan drain, the queue, and the only code that hides anything.
+- `web/src/pages/Moderation.tsx` - the moderator's queue.
+- `web/src/components/common/WhatChanged.tsx` - the period-on-period panel on the team report.
 - `web/src/components/common/AiSettingsTab.tsx` - the org's controls.
 
 ## Decisions already taken
@@ -71,6 +76,17 @@ Recorded so they are not re-litigated by accident, and so the ones that can chan
    write path anywhere in the layer.
 6. **AI Gateway payload logging is suppressed on every call**, whether or not a gateway is configured, so
    turning one on later cannot quietly start retaining prompts.
+7. **A moderator may hide or dismiss, and nothing else.** Hiding uses the column the host collection already
+   uses to withdraw a post - `disabled` for an announcement, the soft-delete stamp for a suggestion - so it is
+   reversible, and the author is notified. There is deliberately no delete: an unrecoverable removal is a
+   different authority from moderation, and nobody should acquire it by being handed a queue.
+8. **The moderation queue is not narrowed per holder.** It quotes flagged posts in full to anyone with the
+   capability, because moderating is an org-wide job and a queue scoped to each moderator's other grants would
+   make coverage depend on something unrelated. That makes the capability the whole of the access decision,
+   which is why nothing seeds it - only super holds it until an org names a moderator through the ACL.
+9. **An anonymous suggestion stays anonymous on the queue.** The wall's promise is to the reader as much as to
+   the submitter, and a moderation surface that resolved the name would make it "anonymous unless somebody
+   complains about you". The author is still notified when their post comes down.
 
 ## Turning it on
 
@@ -92,7 +108,8 @@ In order. Nothing before step 4 has any user-visible effect.
    let staging exercise the non-AI fallback paths, which is the more useful rehearsal of the two.
 
 3. **Apply the migration and deploy.** The single squashed migration adds `ai_usage`, `ai_cache`,
-   `ai_suggestions` and `search_vectors`. It has never been applied to a real D1, local or remote.
+   `ai_suggestions`, `search_vectors` and `moderation_scans`. It has never been applied to a real D1, local
+   or remote.
 
 4. **Turn features on** in Settings, Access and security, AI features. Start with one.
 
@@ -124,20 +141,7 @@ Bind the account, create the index, run one draft, one search and one extraction
 look at what comes back. Record the real neuron cost per call. Everything below is worth more once this has
 happened, and any of it may need reworking if the prompts disappoint.
 
-### 2. Moderation
-
-`@cf/meta/llama-guard-3-8b` is in the model allowlist and nothing calls it. The idea is flag-rather-than-block
-on content that posts publicly: kudos, announcements, the suggestion wall.
-
-**The model call is the small part.** Flagging means nothing without somewhere for flags to go and somebody
-whose job it is to look, so the real work is the moderator queue: who sees it, what they can do from it, what
-happens to a post while it waits, and what happens to the flag when they decide. None of that is designed.
-
-A shortcut exists if it is wanted: `ai_suggestions` already carries a host record, a state and a decision, so
-a flag could be a row in it with `feature: "moderation"` and the queue a filtered read - no new table, no new
-collection. That is a starting point, not a design.
-
-### 3. E2E coverage of the features themselves
+### 2. E2E coverage of the features themselves
 
 `e2e/aiFallback.spec.ts` covers the OFF state: with no `AI` binding, search still finds records through the
 keyword index, and no AI affordance renders anywhere. That is the half that matters for a default
@@ -161,7 +165,7 @@ route / prioritize controls; the AI suggestion panel above them has no browser c
 
 House rules in `docs/04-testing.md`; run only the named specs, never the full suite.
 
-### 4. The narration UI, built findings-first
+### 3. The narration UI, built findings-first
 
 `web/src/components/common/WhatChanged.tsx`, on the team report above the measures table.
 
@@ -178,7 +182,7 @@ keeping, and that is now a judgement about one element of a panel that is useful
 Lazy behind an explicit open, because narrating runs the whole report a second time over the preceding
 window. Keyed on the window, so changing the dates collapses it rather than leaving a stale comparison up.
 
-### 5. Retune the budget from evidence
+### 4. Retune the budget from evidence
 
 `BUDGET` in `src/domain/aiPolicy.ts` holds pessimistic guesses, and `ai_usage` exists to replace them. After
 a day of real traffic, read the table and set the ceilings from what calls actually cost. Until then the app
@@ -190,7 +194,7 @@ Two constants worth revisiting at the same time, both currently guesses:
 - `MIN_CHANGE_PCT` / `MIN_ABSOLUTE` in `domain/narrate.ts` - how much a measure has to move to be worth a
   sentence. Too low and the narration talks about noise; too high and it says nothing on a week that mattered.
 
-### 6. Suggestion-box clustering
+### 5. Suggestion-box clustering
 
 `ai-plan.md` puts this beside ticket duplicates, and it is the same primitive already shipped: embed the
 suggestion, find its nearest neighbours, group them. No generation. The work is the grouping rule and the UI
@@ -227,10 +231,10 @@ decided about it.
 ## Known gaps and risks
 
 - **The migration applies cleanly from scratch, but not yet through wrangler.** The squashed
-  `0000_exotic_photon.sql` was run into an empty SQLite database: 127 tables, 489 indexes and 534 triggers,
-  with `integrity_check` and `foreign_key_check` both clean and `ai_usage`, `ai_cache`, `ai_suggestions` and
-  `search_vectors` all present. D1 is SQLite, so the DDL itself is proven. What is still unexercised is
-  `wrangler d1 migrations apply` against a real D1 and its migration bookkeeping.
+  `0000_clammy_doorman.sql` was run into an empty SQLite database: 128 tables, 492 indexes and 534 triggers,
+  with `integrity_check` and `foreign_key_check` both clean and `ai_usage`, `ai_cache`, `ai_suggestions`,
+  `search_vectors` and `moderation_scans` all present. D1 is SQLite, so the DDL itself is proven. What is
+  still unexercised is `wrangler d1 migrations apply` against a real D1 and its migration bookkeeping.
 
   `npm run db:migrate:local` cannot show this on a machine that already has a local database: the squash
   rule means 0000 is regenerated under a new name each time, so wrangler offers to apply it to a database
@@ -245,6 +249,11 @@ decided about it.
 - **Committing needs the sandbox off.** The husky pre-commit runs the whole of `npm run verify`, and the
   test gate binds a port and writes a wrangler log - both refused inside the agent sandbox, which fails the
   commit with an `EPERM` that looks like a test failure and is not one.
+- **Moderation has never seen a real guard model.** `parseVerdict` is strict, so a model that answers in prose
+  is discarded rather than flagging on a sentence nobody parsed - but whether Llama Guard's workplace
+  false-positive rate makes the queue useful or unusable is exactly the sort of thing only the smoke answers.
+  If it objects to half the kudos wall, the feature is a nuisance rather than a safeguard, and the thing to
+  tune is which hazard codes are worth queueing rather than the prompt.
 - **The `ai` settings blob is broadly readable**, like every other settings key. That is what lets the client
   decide whether to offer an AI affordance without a second endpoint. It means any signed-in caller can see
   which AI features the org has enabled and the neuron ceilings, which is configuration rather than data -
@@ -279,7 +288,11 @@ If a later change has to be judged quickly, these are the ones that matter.
 
 ## If you only do one thing next
 
-Run the smoke. Three phases of features are complete, covered and committed, and **not one of them has ever
-spoken to a real model**. Everything else on the list - the moderator queue, the narration panel, the browser
-coverage, the budget numbers - is better designed after seeing what the models actually return, and some of it
-may not survive the seeing.
+Run the smoke. Every phase in the table above is complete, covered and committed, and **not one of them has
+ever spoken to a real model**. What is left on the list - the browser coverage, the budget numbers, the
+clustering - is better designed after seeing what the models actually return, and some of what is already
+built may not survive the seeing.
+
+Moderation is the sharpest case and worth naming: its machinery is proven against a fake, but a guard model's
+false-positive rate on workplace kudos is not a thing anybody can reason their way to. One afternoon of real
+verdicts decides whether it ships enabled, ships with a narrower set of hazard codes, or does not ship.

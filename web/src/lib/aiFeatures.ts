@@ -21,7 +21,8 @@ export type AiFeatureKey =
   | "drafting"
   | "ats.extraction"
   | "tables.describe"
-  | "analytics.narrate";
+  | "analytics.narrate"
+  | "moderation";
 
 type AiSetting = { features?: Partial<Record<AiFeatureKey, boolean>> };
 

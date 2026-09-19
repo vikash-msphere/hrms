@@ -35,6 +35,7 @@ import { cards } from "./routes/cards";
 import { sprints } from "./routes/sprints";
 import { activity } from "./routes/activity";
 import { taxVerifications } from "./routes/taxVerifications";
+import { moderationRoute, moderationDecide } from "./routes/moderation";
 import { reviewCycles } from "./routes/reviewCycles";
 import { reviews } from "./routes/reviews";
 import { reviewFeedback } from "./routes/reviewFeedback";
@@ -278,6 +279,8 @@ app.route("/v1/cards", cards);
 app.route("/v1/sprints", sprints);
 app.route("/v1/activity", activity);
 app.route("/v1/tax-verifications", taxVerifications);
+app.route("/v1/moderation:decide", moderationDecide); // uphold or dismiss a flag, before the collection mount
+app.route("/v1/moderation", moderationRoute); // public posts a guard model objected to
 app.route("/v1/review-cycles", reviewCycles);
 app.route("/v1/reviews", reviews);
 app.route("/v1/review-feedback", reviewFeedback);

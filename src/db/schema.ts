@@ -1847,6 +1847,36 @@ export const searchVectors = sqliteTable("search_vectors", {
   checkedIdx: index("search_vectors_checked_idx").on(t.checkedAt),
 }));
 
+// Which public posts have been through the moderation model, and on what text.
+//
+// WHY A TABLE AND NOT A LOOK AT `ai_suggestions`. The flag row only exists when the model OBJECTED, so a post
+// that was scanned and found unremarkable is indistinguishable from one that has never been scanned - and the
+// unremarkable case is nearly all of them. Without this the drain would re-scan the whole wall every five
+// minutes, which for a generation-class model is the most expensive possible way to learn nothing.
+//
+// `textHash` is what makes it reconciling rather than a one-shot stamp, exactly as it is for `search_vectors`:
+// an edited post hashes differently and comes back round for a re-scan, so somebody cannot post something
+// innocuous and edit it afterwards. `model` is recorded for the same reason it is there - a different guard
+// model is a different opinion, and changing it should re-scan rather than trust the old verdict.
+export const moderationScans = sqliteTable("moderation_scans", {
+  uuid: pk(),
+  collection: text("collection").notNull(),
+  recordId: text("record_id").notNull(),
+  textHash: text("text_hash").notNull(), // sha256 of the title + body that was scanned
+  model: text("model").notNull(),
+  /** What the scan concluded, kept so the queue can report coverage ("scanned, nothing found") rather than
+   *  only ever showing the objections. */
+  flagged: integer("flagged", { mode: "boolean" }).notNull().default(false),
+  scannedAt: integer("scanned_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  recordIdx: uniqueIndex("moderation_scans_record_idx").on(t.collection, t.recordId),
+  // The sweep's order: oldest scan first, so a backlog drains in age order rather than whatever the database
+  // hands back, and no post can sit unvisited forever behind a busier one.
+  scannedIdx: index("moderation_scans_scanned_idx").on(t.scannedAt),
+}));
+
 // ---- Workflow & automation engine ----
 // Append-only record of every emitted domain event (see services/eventBus.ts). The spine that makes the
 // system coherent: services announce "X happened" here, and the automation engine reacts. Flat, admin-only

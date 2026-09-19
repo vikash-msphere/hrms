@@ -20,6 +20,7 @@ import { nudgeMissingScorecards } from "./services/ats";
 import { reconcilePendingEsign } from "./services/esign/callback";
 import { publishDueAnnouncements } from "./services/announcements";
 import { drainSearchEmbeddings } from "./services/searchEmbed";
+import { drainModeration } from "./services/moderation";
 import { sweepAiCache } from "./services/ai";
 import { nextOccurrence } from "./services/events";
 import { purgeExpiredAccessRules, reviewStandingAccess } from "./services/accessRules";
@@ -147,7 +148,13 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // the neuron budget, so a first-run backfill spreads over several ticks instead of spending the day at
     // once, and it no-ops entirely on a deployment with no model or no index bound.
     const embedded = await run("drainSearchEmbeddings", async () => (await drainSearchEmbeddings(deps)).embedded);
-    return { summary: { drained, announcementsPublished, embedded }, failures };
+    // Scan the public walls for content a guard model objects to. On the FAST tick rather than the nightly
+    // one because the queue is only useful while the post is still the thing people are reading; a flag that
+    // arrives the next morning is a flag about a conversation that already happened. Bounded hard by
+    // `BUDGET.moderationsPerDrain` - it is a generation call, unlike the embed drain above - and it no-ops
+    // entirely with no model bound or the feature switched off.
+    const moderated = await run("drainModeration", async () => (await drainModeration(deps)).flagged);
+    return { summary: { drained, announcementsPublished, embedded, moderated }, failures };
   }
   if (cron === NIGHTLY_CRON) {
     // Carry-forward runs BEFORE accrual so it caps last year's balance before the new year accrues on top.

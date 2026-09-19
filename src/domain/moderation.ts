@@ -1,0 +1,124 @@
+// What may be moderated, what a model is allowed to say about it, and how to read the answer.
+//
+// THE MODEL FLAGS; IT NEVER HIDES. Llama Guard returns a verdict on text, and that verdict becomes a row in
+// `ai_suggestions` with `feature: "moderation"` - the same advisory record triage and extraction use, with
+// the same one-live-suggestion-per-record index. Hiding a post is a separate act, performed by a person, and
+// it goes through the host collection's own write. There is no path from a model's output to content
+// disappearing, which is the property that makes it safe to run this unattended on a five-minute tick.
+//
+// FLAG RATHER THAN BLOCK, and the reason is asymmetric cost. A false positive that silently eats somebody's
+// kudos post is a worse failure than a true positive that sits in a queue for ten minutes: the first breaks
+// trust in the product and is invisible to the person it happened to, the second is a delay. So a flagged
+// post stays exactly as visible as it was, and the only thing that changes is that it appears on a queue.
+
+/**
+ * The collections whose rows post publicly, and which columns carry the text a reader sees.
+ *
+ * DEFAULT DENY, like `INDEXABLE`. A collection absent here is never scanned, whatever its content. The two
+ * that are here are the two public walls: `announcements` (which is also where kudos live, as `kind="kudos"`)
+ * and `suggestions`. Everything else in the app is addressed to somebody - a ticket to a servicing desk, a
+ * review to a manager - and a moderation queue over private correspondence is a different product with a
+ * different consent story.
+ */
+export const MODERATABLE: Record<string, { title: string; body: string }> = {
+  announcements: { title: "title", body: "body" },
+  suggestions: { title: "title", body: "body" },
+};
+
+export const isModeratable = (collection: string): boolean =>
+  Object.prototype.hasOwnProperty.call(MODERATABLE, collection);
+
+/**
+ * Llama Guard's hazard taxonomy, and what each one is called on screen.
+ *
+ * The model answers with these codes and nothing else, which is what makes the parse below strict rather
+ * than hopeful. The labels are ours: "S10" tells a moderator nothing, and a queue whose reason column reads
+ * as an error code is a queue people learn to clear without reading.
+ */
+export const HAZARDS: Record<string, string> = {
+  S1: "Violent crime",
+  S2: "Non-violent crime",
+  S3: "Sex-related crime",
+  S4: "Child sexual exploitation",
+  S5: "Defamation",
+  S6: "Specialised advice",
+  S7: "Privacy",
+  S8: "Intellectual property",
+  S9: "Indiscriminate weapons",
+  S10: "Hate",
+  S11: "Suicide and self-harm",
+  S12: "Sexual content",
+  S13: "Elections",
+};
+
+/** A hazard code's label, or the bare code when the model names one outside the taxonomy it was given. An
+ *  unknown code is still shown rather than dropped: it is evidence about the model, and hiding it would make
+ *  a misbehaving model look like a quiet one. */
+export const hazardLabel = (code: string): string => HAZARDS[code] ?? code;
+
+export type Verdict =
+  /** The model read it and had nothing to say. No row is written. */
+  | { safe: true }
+  /** The model objected, under these hazard codes. At least one, or it would not be unsafe. */
+  | { safe: false; hazards: string[] };
+
+/**
+ * Read Llama Guard's answer.
+ *
+ * The documented shape is the word `safe`, or the word `unsafe` on its own line followed by a line of
+ * comma-separated hazard codes. This accepts that and nothing adjacent to it: a model that starts explaining
+ * itself, apologising, or answering the post instead of judging it produces `null`, and the caller records
+ * nothing rather than flagging on a sentence it did not understand.
+ *
+ * `unsafe` with no parseable code is also `null`, deliberately. A flag whose reason column is empty is a
+ * queue item a moderator cannot act on, and "the model said so" is not a reason a person can weigh.
+ */
+export function parseVerdict(raw: string): Verdict | null {
+  const lines = raw.trim().toLowerCase().split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return null;
+  const [head, ...rest] = lines;
+  if (head === "safe") return { safe: true };
+  if (head !== "unsafe") return null;
+
+  const hazards = (rest[0] ?? "")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter((s) => /^S\d{1,2}$/.test(s));
+  if (hazards.length === 0) return null;
+  // De-duplicated and ordered, so two scans of the same text produce the same row and the unique index does
+  // not churn on ordering alone.
+  return { safe: false, hazards: [...new Set(hazards)].sort() };
+}
+
+/** What the model is shown, and what the queue quotes back. Title and body, trimmed, capped: Llama Guard
+ *  judges the opening of a post as well as it judges all of it, and an unbounded body is an unbounded prompt. */
+export const MAX_SCAN_CHARS = 2_000;
+
+export function scanText(title: string | null, body: string | null): string {
+  return [title, body].map((s) => (s ?? "").trim()).filter(Boolean).join("\n\n").slice(0, MAX_SCAN_CHARS);
+}
+
+/** The excerpt stored on the flag: what the model actually read, so a moderator is judging the same text and
+ *  an edit after the fact is visible as a difference rather than silently replacing the evidence. */
+export const MAX_EXCERPT_CHARS = 400;
+export const excerptOf = (text: string): string =>
+  text.length <= MAX_EXCERPT_CHARS ? text : `${text.slice(0, MAX_EXCERPT_CHARS).trimEnd()}...`;
+
+/** What a moderator decided. `hide` withdraws the post through its own collection's write; `dismiss` leaves
+ *  it exactly where it is and closes the flag. There is no third option, and in particular no "delete": a
+ *  hidden post is recoverable by the same people who hid it, and an unrecoverable one is a different
+ *  authority than moderation. */
+export type ModerationAction = "hide" | "dismiss";
+export const MODERATION_ACTIONS: readonly ModerationAction[] = ["hide", "dismiss"];
+export const isModerationAction = (v: unknown): v is ModerationAction =>
+  typeof v === "string" && (MODERATION_ACTIONS as readonly string[]).includes(v);
+
+/** The payload stored on the flag row. Small and self-describing, because it is read back by a queue that
+ *  must not have to re-run the scan to render a row. */
+export type ModerationPayload = {
+  hazards: string[];
+  excerpt: string;
+  /** Whether the host row hides its author from readers, carried onto the flag so the queue cannot leak an
+   *  identity the wall itself withholds. See `services/moderation.ts` for why this is decided at scan time. */
+  anonymous: boolean;
+};

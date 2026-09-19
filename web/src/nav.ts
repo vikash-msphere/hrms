@@ -15,6 +15,7 @@ import {
   CheckCheck,
   UserPlus,
   ScrollText,
+  ShieldAlert,
   ReceiptText,
   Table2,
   type LucideIcon,
@@ -250,6 +251,10 @@ export const NAV: NavGroup[] = [
       { key: "tables", label: "Tables", icon: Table2, perm: "table-views.read" },
       { key: "workflows", label: "Workflows", icon: Workflow, perm: "automations.read" },
       { key: "activity", label: "Activity", icon: ScrollText, perm: "audit.read" },
+      // Flagged posts awaiting a decision. Private by default (nothing seeds `moderation`), so this appears
+      // only for somebody an admin has deliberately made a moderator - which is the whole access decision,
+      // because the queue quotes posts in full and is not narrowed per holder.
+      { key: "moderation", label: "Flagged posts", icon: ShieldAlert, perm: "moderation.read" },
       { key: "settings", label: "Settings", icon: Settings, perm: "settings.write" },
     ],
   },

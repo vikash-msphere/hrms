@@ -170,6 +170,13 @@ export const UNSTAMPED_TABLES: Record<string, string> = {
   // suggestion IS accepted, the write that follows goes through `tickets:route` / `:prioritize`, and those
   // stamp `tickets` themselves - which is the change a reader actually cares about.
   ai_suggestions: "advisory record read live through its host's verb; accepting one writes through the host, which is stamped",
+  // Bookkeeping for the moderation sweep: which post was scanned, from what text, by which model. Nobody
+  // reads it - it exists so the drain can tell an unscanned post from one already found unremarkable. A scan
+  // changes no collection, and stamping one would mark the noticeboard edited every five minutes for work
+  // that produced nothing. When a scan DOES produce something it writes an `ai_suggestions` row, which is
+  // unstamped for its own reasons above; and when a person acts on that, the write lands on `announcements`
+  // or `suggestions` and stamps those.
+  moderation_scans: "sweep bookkeeping for stamped rows; a scan changes nothing a reader sees",
 };
 
 // `attachments` is a side table too, but a POLYMORPHIC one: every row names its own parent collection, so

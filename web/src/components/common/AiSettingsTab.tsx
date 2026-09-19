@@ -18,7 +18,7 @@ import { getSetting, saveSetting } from "@/lib/settingsStore";
 // employee data. Each feature also states what it does WITHOUT AI, because every one of them has a working
 // non-AI path and switching it off is not a loss of function.
 
-type AiFeatureKey = "search.semantic" | "tickets.triage" | "drafting" | "ats.extraction" | "tables.describe" | "analytics.narrate";
+type AiFeatureKey = "search.semantic" | "tickets.triage" | "drafting" | "ats.extraction" | "tables.describe" | "analytics.narrate" | "moderation";
 type AiConfig = { features?: Partial<Record<AiFeatureKey, boolean>>; dailyNeurons?: number; perUserHourlyGenerations?: number; resume_fields?: string[] };
 
 // Which fields a CV may be read into, and which of those are the model doing more than copying. Mirrors
@@ -74,6 +74,12 @@ const FEATURES: { key: AiFeatureKey; title: string; on: string; off: string }[] 
     title: "Write up what changed in team reports",
     on: "A team report can be summarised against the previous period in a sentence or two. Which measures moved is worked out arithmetically, not by the model, so it cannot report a change that did not happen; and a summary containing any number that was not in those measures is thrown away in favour of a plain one. Team totals only, never individuals.",
     off: "Reports show their numbers without a written summary, as they do today.",
+  },
+  {
+    key: "moderation",
+    title: "Check public posts for harmful content",
+    on: "Announcements, kudos and suggestions are read by a safety model shortly after they are posted, and anything it objects to goes to a queue for a person to look at. Nothing is hidden automatically: a flagged post stays exactly as visible as it was until somebody decides. Whoever holds the moderation permission can then hide it - which is reversible, and tells the author - or dismiss the flag. Anonymous suggestions stay anonymous on the queue.",
+    off: "Nothing posted is read by a model, and there is no queue. Posts are moderated by people noticing them, as they are today.",
   },
 ];
 

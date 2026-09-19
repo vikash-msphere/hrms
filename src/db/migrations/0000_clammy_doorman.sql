@@ -1472,6 +1472,20 @@ CREATE TABLE `loans` (
 CREATE UNIQUE INDEX `loans_code_unique` ON `loans` (`code`);--> statement-breakpoint
 CREATE INDEX `loans_page_idx` ON `loans` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `loan_emp_idx` ON `loans` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
+CREATE TABLE `moderation_scans` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`collection` text NOT NULL,
+	`record_id` text NOT NULL,
+	`text_hash` text NOT NULL,
+	`model` text NOT NULL,
+	`flagged` integer DEFAULT false NOT NULL,
+	`scanned_at` integer NOT NULL,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `moderation_scans_record_idx` ON `moderation_scans` (`collection`,`record_id`);--> statement-breakpoint
+CREATE INDEX `moderation_scans_scanned_idx` ON `moderation_scans` (`scanned_at`);--> statement-breakpoint
 CREATE TABLE `notice_periods` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
