@@ -228,12 +228,15 @@ export const CONSENTED_PATHS: Readonly<Record<string, { collection: string; basi
   "reviews.draft": {
     collection: "reviews",
     basis:
-      "The person writing the review types the instruction themselves and presses a button to get prose back; " +
-      "no review row, rating, goal or anybody else's words are read, and the only text sent is what they " +
-      "typed plus whatever is already in the field they are writing in. The result lands in that field for " +
-      "them to edit, and nothing is saved until they save it. This is a writing tool for an author, not an " +
-      "assessment of a person: the model is told in the prompt that it must not judge, score or recommend a " +
-      "rating, and no path exists by which it could - `draftText` reads no record to judge FROM.",
+      "The author of a review presses a button and gets prose back to edit. The only text sent is the " +
+      "instruction in the box plus whatever is already in the field they are writing in; the result lands in " +
+      "that field, and nothing is saved until they save it. This is a writing tool for an author, not an " +
+      "assessment of a person: the prompt forbids judging, scoring or recommending a rating. " +
+      "THE BOX MAY BE SEEDED with the cycle's own goals - title and progress, the same snapshot already " +
+      "rendered on the page they are looking at - because the manual work here is hunting for what you did, " +
+      "not writing it. It is seeded as EDITABLE TEXT the author reads, cuts and adds to before sending, not " +
+      "collected behind them; the server still receives only an instruction. Ratings, manager comments and " +
+      "peer feedback are never seeded: those are other people's words, and this is somebody writing their own.",
   },
   "ats.resumeExtraction": {
     collection: "candidates",

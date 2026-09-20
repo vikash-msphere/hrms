@@ -29,7 +29,7 @@ import { useAiFeature } from "@/lib/aiFeatures";
 // ERRORS ARE SHOWN, not swallowed. Unlike the invisible AI features, somebody pressed a button and is waiting
 // for text, so "the organisation's budget for today is spent" has to reach them - otherwise they press it
 // again, and again.
-export function DraftButton({ collection, kind, existing, onDraft, label = "Draft", hint, existingIsContext = false }: {
+export function DraftButton({ collection, kind, existing, onDraft, label = "Draft", hint, existingIsContext = false, seedInstruction }: {
   collection: string;
   kind: string;
   existing?: string | null;
@@ -49,6 +49,19 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
    * not writing to.
    */
   existingIsContext?: boolean;
+  /**
+   * What to put in the instruction box when the dialog opens.
+   *
+   * THIS IS THE POINT OF THE FEATURE, not a convenience. The manual work in writing a self-assessment is not
+   * the sentences, it is going and finding what you did: scrolling your goals, reading off the progress, and
+   * typing it back in. The page already has that list on screen, so it can hand it over and leave the person
+   * editing a starting point instead of assembling one.
+   *
+   * SEEDED, NOT SENT. It lands in the box as ordinary editable text, so the person reads it, cuts what is
+   * wrong and adds what the record does not know, before anything goes anywhere. A version that skipped the
+   * box and sent it would be a different feature with a different basis.
+   */
+  seedInstruction?: string;
 }) {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
@@ -95,7 +108,9 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
 
   return (
     <>
-      <Button type="button" size="sm" variant="outline" onClick={() => setOpen(true)}>
+      {/* Seeded on OPEN rather than held in state, so a box that was emptied on a previous try comes back
+          filled and the person is never left staring at the blank they were meant to be spared. */}
+      <Button type="button" size="sm" variant="outline" onClick={() => { setInstruction(seedInstruction ?? ""); setOpen(true); }}>
         <Sparkles className="h-4 w-4" /> {improving ? "Improve" : label}
       </Button>
       <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : close())}>

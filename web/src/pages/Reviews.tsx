@@ -683,6 +683,27 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
   // the exported PDF can never disagree about which goals this cycle covered.
   const cycleGoals = review.goals ?? [];
 
+  /**
+   * The cycle's goals as a line each, to seed a draft with.
+   *
+   * THE MANUAL WORK THIS REMOVES is the hunting, not the writing: today you scroll this same list, read off
+   * each title and percentage, and type them back into the box below. The page already has them, so it hands
+   * them over and you edit a starting point instead of assembling one.
+   *
+   * Straight off `review.goals`, the same snapshot the panel and the attainment score render from, so the
+   * seed can never describe a different set of goals than the one on screen. Nothing else is included - no
+   * rating, no manager comment, no peer feedback - because those are other people's words and this is the
+   * author writing their own.
+   */
+  const goalSeed = (lead: string): string | undefined => {
+    if (cycleGoals.length === 0) return undefined;
+    const lines = cycleGoals.map((g) => {
+      const pct = typeof g.progress === "number" ? `${Math.round(g.progress)}%` : "no progress recorded";
+      return `- ${g.title} - ${pct}${g.status ? ` (${g.status.replace(/_/g, " ")})` : ""}`;
+    });
+    return `${lead}\n${lines.join("\n")}\n`;
+  };
+
   // Move one goal's progress from inside the review (self stage). Status follows the number the same way the
   // Goals page moves it, so truing a goal up here doesn't leave it "not started" at 40%.
   const { toast } = useToast();
@@ -941,6 +962,9 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                 collection="reviews"
                 kind="review-self"
                 existing={selfText}
+                // Pre-filled with your own goals and where they got to. Editable in the box: add what the
+                // record does not know, cut what did not matter, then draft.
+                seedInstruction={goalSeed("What I worked on this cycle:")}
                 hint="e.g. led the payments migration, mentored two juniors, want to move into design work"
                 onDraft={(text) => { setSelfText(text); saveDraft("self", text); }}
               />
@@ -1060,6 +1084,10 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                 collection="reviews"
                 kind="review-summary"
                 existing={mgrComment}
+                // The same list, so a manager writing about the year is not re-reading it off the panel
+                // above. Their own observations still have to be typed in: the goals say what was worked on,
+                // not what the manager makes of it, and the prompt will not fill that in for them.
+                seedInstruction={goalSeed("Goals this cycle, for reference:")}
                 hint="e.g. shipped the migration on time, needs to delegate more, ready for a bigger scope next year"
                 onDraft={(text) => { setMgrComment(text); saveDraft("manager", text); }}
               />
