@@ -147,6 +147,24 @@ describe("field ranking", () => {
     expect(ranked.map((f) => f.key)).toEqual(OFFERED.map((f) => f.key));
   });
 
+  it("does not let a stopword score against a word that merely CONTAINS it", () => {
+    // The two failures this had together, and they only bite once the catalogue is bigger than the cap -
+    // which is exactly what walking the link tree produced. "the" was a search term (over two letters), and
+    // matching was `includes`, so it scored against "Other" and "Further". Hundreds of fields each gained a
+    // spurious point and the one the person actually named was pushed out of the offered set, which the
+    // model then reported as a field that does not exist.
+    const noise = [field("other_ref", "Other reference"), field("further_notes", "Further notes"), field("name", "Name")];
+    expect(rankFields(noise, "the further other").map((f) => f.key)).toEqual(noise.map((f) => f.key));
+  });
+
+  it("matches a word to its plural without a stemmer, but not to a longer word sharing a stem", () => {
+    const fields = [field("a.b", "Departments: Name"), field("dependant_id", "Dependant"), field("z", "Zulu")];
+    // "department" reaches "Departments"...
+    expect(rankFields(fields, "department").map((f) => f.key)[0]).toBe("a.b");
+    // ...and "dep" reaches neither, because a three-letter prefix is a syllable rather than a stem.
+    expect(rankFields(fields, "dep").map((f) => f.key)).toEqual(fields.map((f) => f.key));
+  });
+
   it("ignores short words that would match everything", () => {
     // "the" and "for" are in half the labels in any catalogue; letting them score would make the ranking noise.
     const ranked = rankFields(OFFERED, "the for and");
