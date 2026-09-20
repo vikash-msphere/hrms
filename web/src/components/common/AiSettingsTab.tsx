@@ -18,7 +18,7 @@ import { getSetting, saveSetting } from "@/lib/settingsStore";
 // employee data. Each feature also states what it does WITHOUT AI, because every one of them has a working
 // non-AI path and switching it off is not a loss of function.
 
-type AiFeatureKey = "search.semantic" | "tickets.triage" | "drafting" | "ats.extraction" | "tables.describe" | "analytics.narrate" | "moderation" | "suggestions.similar";
+type AiFeatureKey = "search.semantic" | "tickets.triage" | "drafting" | "ats.extraction" | "tables.describe" | "analytics.narrate" | "moderation" | "suggestions.similar" | "attention.summary";
 type AiConfig = { features?: Partial<Record<AiFeatureKey, boolean>>; dailyNeurons?: number; perUserHourlyGenerations?: number; resume_fields?: string[] };
 
 // Which fields a CV may be read into, and which of those are the model doing more than copying. Mirrors
@@ -86,6 +86,12 @@ const FEATURES: { key: AiFeatureKey; title: string; on: string; off: string }[] 
     title: "Group suggestions asking the same thing",
     on: "On a suggestion, show the others that look like the same ask, so they can be merged rather than splitting the votes between them. This reuses the search index and generates nothing. No submitter is shown, signed or anonymous, and only suggestions the reader could already see are listed.",
     off: "Suggestions stand on their own. The same idea submitted in five wordings reads as five separate asks, as it does today.",
+  },
+  {
+    key: "attention.summary",
+    title: "Say what to look at first on \"Needs you\"",
+    on: "When the dashboard's \"Needs you\" list has more than one thing on it, add a sentence naming the one to start with. The list itself is worked out from dates and progress and does not use a model, so this adds a line and changes nothing else. Goal and task titles are sent; reviews are sent only as a count, never by name.",
+    off: "The list appears as it does today, ranked worst first, with no sentence over it.",
   },
 ];
 

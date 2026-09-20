@@ -16278,6 +16278,9 @@ paths:
                         days:
                           type: integer
                       required: [kind, path, title, detail]
+                  summary:
+                    type: string
+                    description: "One sentence saying what to look at first. Present only when the `attention.summary` feature is on, a model answered, and there is more than one item; the list is arithmetic and never depends on it. Reviews reach the model as a count only - `reviews` is on the denylist - while goal and card titles, which are not, are named."
                 required: [items]
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }

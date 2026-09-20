@@ -93,7 +93,7 @@ Nothing is switched on yet. At this point every AI feature still behaves as thou
 
 **Settings → Access & security → AI features.**
 
-Eight switches, all off, each with a line saying what it does when on and what happens when off. Turn on one
+Nine switches, all off, each with a line saying what it does when on and what happens when off. Turn on one
 at a time - the ledger in step 6 is much easier to read that way.
 
 | Setting key | What turns on | Needs the index |
@@ -101,6 +101,7 @@ at a time - the ledger in step 6 is much easier to read that way.
 | `search.semantic` | ⌘K also matches by meaning | yes |
 | `tickets.triage` | Suggested department/category/priority, duplicate hints | yes |
 | `suggestions.similar` | "Others asked for this" on a suggestion | yes |
+| `attention.summary` | A line over the dashboard's "Needs you" list saying what to look at first | no |
 | `drafting` | Draft buttons on announcements, JDs, goals, suggestion replies | no |
 | `ats.extraction` | Read a CV into the candidate form | no |
 | `tables.describe` | Describe a grid in words in the table builder | no |
@@ -182,7 +183,11 @@ falls back to its non-AI behaviour until midnight UTC - nothing breaks, things j
 **One feature:** switch it off in Settings. Takes effect immediately; the affordance disappears rather than
 being disabled.
 
-**Everything, without deploying:** switch all eight off. The drains no-op, no affordance renders.
+**Everything, without deploying:** switch all nine off. The drains no-op, no affordance renders.
+
+**Note that "Needs you" is not one of them.** The dashboard list is worked out from dates and progress, uses
+no model, and stays exactly as it is with every switch off; `attention.summary` only adds the sentence over
+it. That is the intended shape - the surface people come to rely on does not have an optional dependency.
 
 **Everything, permanently:** remove the `[ai]` and `[[vectorize]]` blocks from `wrangler.toml` and deploy.
 Every feature falls back to the path it had before the layer existed - FTS search, manual routing, typed

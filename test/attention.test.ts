@@ -35,9 +35,13 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.cards, schema.boards, schema.reviews, schema.reviewCycles, schema.goals, schema.employees];
+// `settings` and `aiUsage` are cleared with the rest: the summary reads the org's AI switch and records what
+// it spends, and a test that asserts "asked nothing" is only meaningful against a clean slate.
+const TABLES = [schema.cards, schema.boards, schema.reviews, schema.reviewCycles, schema.goals, schema.employees, schema.settings, schema.aiUsage, schema.aiCache];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
+  // Absent unless a test wires one. The list must stand up with no model at all, which is most of these.
+  deps.ai = undefined;
 });
 
 const ME = { uuid: genId(), code: "04-001-001" };
@@ -58,7 +62,7 @@ async function people() {
 async function goal(over: Partial<typeof schema.goals.$inferInsert> & { title: string }) {
   const uuid = genId();
   await deps.db.insert(schema.goals).values({
-    uuid, code: `g-${uuid.slice(0, 6)}`, title: over.title, employeeId: ME.uuid,
+    uuid, code: `g-${uuid.slice(0, 6)}`, employeeId: ME.uuid,
     status: "in_progress", progress: 0, ...over,
   });
   return uuid;
@@ -155,6 +159,90 @@ describe("reviews waiting on this person", () => {
     await cycleAndReview("SELF", OTHER.uuid, null);
     const { items } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
     expect(items).toEqual([]);
+  });
+});
+
+describe("the one-line summary", () => {
+  /** A model that records what it was asked, so the test can assert on the PROMPT rather than the answer. */
+  function spy(answer = "Automate the payroll regression pack is furthest behind.") {
+    const seen: string[] = [];
+    return {
+      seen,
+      model: {
+        async embed(t: string[]) { return t.map(() => [0.1]); },
+        async generate(req: { user: string }) { seen.push(req.user); return answer; },
+        async rerank() { return []; },
+      },
+    };
+  }
+
+  async function enable() {
+    await deps.db.delete(schema.settings);
+    await deps.db.insert(schema.settings).values({ key: "ai", value: JSON.stringify({ features: { "attention.summary": true } }) });
+  }
+
+  it("never sends a review to the model, only how many there are", async () => {
+    // `reviews` is on NEVER_TO_MODEL. A cycle name is not an assessment, but the honest way to keep it that
+    // way is to not send review rows at all - so they arrive as a count. This is the assertion that stops a
+    // later edit "improving" the summary by naming them.
+    await people();
+    await enable();
+    const cycle = genId();
+    await deps.db.insert(schema.reviewCycles).values({ uuid: cycle, code: `c-${cycle.slice(0, 6)}`, name: "H1 Performance Review", state: "ACTIVE" });
+    const rid = genId();
+    await deps.db.insert(schema.reviews).values({ uuid: rid, code: `r-${rid.slice(0, 6)}`, cycleId: cycle, employeeId: ME.uuid, reviewerId: null, state: "SELF" });
+    await goal({ title: "Platform rewrite", createdAt: new Date(Date.now() - 90 * DAY), dueDate: new Date(Date.now() + 10 * DAY), progress: 10 });
+
+    const s = spy();
+    deps.ai = s.model as unknown as Deps["ai"];
+    const { items, summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+
+    expect(items).toHaveLength(2);
+    expect(summary).toBeTruthy();
+    expect(s.seen).toHaveLength(1);
+    expect(s.seen[0]).not.toContain("H1 Performance Review");
+    expect(s.seen[0]).toContain("1 review waiting on you");
+    // And the goal, which is not denylisted, is named - or the summary could not say anything useful.
+    expect(s.seen[0]).toContain("Platform rewrite");
+  });
+
+  it("says nothing, and asks nothing, when the feature is off", async () => {
+    await people();
+    await deps.db.delete(schema.settings);
+    await goal({ title: "A", createdAt: new Date(Date.now() - 90 * DAY), dueDate: new Date(Date.now() + 10 * DAY), progress: 5 });
+    await goal({ title: "B", createdAt: new Date(Date.now() - 90 * DAY), dueDate: new Date(Date.now() + 10 * DAY), progress: 6 });
+    const s = spy();
+    deps.ai = s.model as unknown as Deps["ai"];
+    const { items, summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    // Off must cost NOTHING, not merely produce nothing: the switch is checked before the model is asked.
+    expect(items).toHaveLength(2);
+    expect(summary).toBeUndefined();
+    expect(s.seen).toEqual([]);
+  });
+
+  it("keeps the list when the model refuses", async () => {
+    await people();
+    await enable();
+    await goal({ title: "A", createdAt: new Date(Date.now() - 90 * DAY), dueDate: new Date(Date.now() + 10 * DAY), progress: 5 });
+    await goal({ title: "B", createdAt: new Date(Date.now() - 90 * DAY), dueDate: new Date(Date.now() + 10 * DAY), progress: 6 });
+    // The whole ordering argument: the list is arithmetic and the sentence is an addition, so a model that
+    // throws costs a sentence and nothing else.
+    deps.ai = { async embed() { return []; }, async generate() { throw new Error("model down"); }, async rerank() { return []; } } as unknown as Deps["ai"];
+    const { items, summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    expect(items).toHaveLength(2);
+    expect(summary).toBeUndefined();
+  });
+
+  it("does not bother summarising a single item", async () => {
+    await people();
+    await enable();
+    await goal({ title: "Only one", createdAt: new Date(Date.now() - 90 * DAY), dueDate: new Date(Date.now() + 10 * DAY), progress: 5 });
+    const s = spy();
+    deps.ai = s.model as unknown as Deps["ai"];
+    const { summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    // The row already says it, in more detail than a sentence would, and a neuron spent here buys nothing.
+    expect(summary).toBeUndefined();
+    expect(s.seen).toEqual([]);
   });
 });
 

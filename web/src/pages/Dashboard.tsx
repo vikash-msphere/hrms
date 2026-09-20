@@ -318,12 +318,13 @@ export default function Dashboard({ me }: { me: Me }) {
   // Shaped here rather than imported from the server's domain: the browser gets this as JSON over the wire,
   // and the contract it depends on is openapi.yaml's `/v1/attention`, not a TypeScript type in src/.
   const [attention, setAttention] = useState<{ kind: string; path: string; title: string; detail: string }[]>([]);
+  const [attentionSummary, setAttentionSummary] = useState<string | null>(null);
   useEffect(() => {
     if (!showSection("needsyou")) return;
     let live = true;
-    get<{ items?: { kind: string; path: string; title: string; detail: string }[] }>("attention")
-      .then((r) => { if (live) setAttention(r.items ?? []); })
-      .catch(() => { if (live) setAttention([]); });
+    get<{ items?: { kind: string; path: string; title: string; detail: string }[]; summary?: string }>("attention")
+      .then((r) => { if (live) { setAttention(r.items ?? []); setAttentionSummary(r.summary ?? null); } })
+      .catch(() => { if (live) { setAttention([]); setAttentionSummary(null); } });
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfgReady, dashCfg, me.employee_id]);
@@ -1101,6 +1102,15 @@ export default function Dashboard({ me }: { me: Me }) {
             <AlertTriangle className="h-4 w-4 text-warning" /> Needs you
             <span className="text-xs font-normal text-muted-foreground">{attention.length}</span>
           </h2>
+          {/* Absent unless a model answered, which is most deployments: the section is the list, and the
+              sentence is an addition to it. Credited, like every other written line in this app, so nobody
+              mistakes it for something the app worked out. */}
+          {attentionSummary && (
+            <p className="mb-2 text-sm text-muted-foreground">
+              {attentionSummary}
+              <span className="ml-1.5 text-xs">Written by AI from the list below.</span>
+            </p>
+          )}
           <div className="divide-y rounded-lg border">
             {attention.map((a) => (
               <button

@@ -22,6 +22,8 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import { applyScope } from "./listScope";
 import { goalPace, staleDays, STALE_AFTER_DAYS } from "../domain/goals";
+import { fence } from "../domain/aiPolicy";
+import { aiFeatureOn, aiGenerate } from "./ai";
 import { ATTENTION_LIMIT, rankAttention, type AttentionItem } from "../domain/attention";
 
 /** Rows read per source before filtering. See the header. */
@@ -34,7 +36,7 @@ const CARD_AGED_DAYS = 21;
 
 const DAY = 86_400_000;
 
-export type Attention = { items: AttentionItem[] };
+export type Attention = { items: AttentionItem[]; summary?: string };
 
 export async function attentionFor(
   deps: Deps,
@@ -42,12 +44,63 @@ export async function attentionFor(
   scopes: ReadonlyMap<string, ListScope>,
 ): Promise<Attention> {
   const now = deps.clock.now().getTime();
-  const items: AttentionItem[] = [
+  const found: AttentionItem[] = [
     ...await goalItems(deps, scopes.get("goals"), now),
     ...await cardItems(deps, scopes.get("cards"), now),
     ...await reviewItems(deps, user, scopes.get("reviews")),
   ];
-  return { items: rankAttention(items).slice(0, ATTENTION_LIMIT) };
+  const items = rankAttention(found).slice(0, ATTENTION_LIMIT);
+  const summary = await summarise(deps, user, items);
+  return { items, ...(summary ? { summary } : {}) };
+}
+
+/**
+ * One line saying what to look at first. Absent unless a model answers.
+ *
+ * THE LIST IS THE FEATURE; THIS IS AN ADDITION TO IT. Everything above is arithmetic and always runs, so a
+ * refusal here - switched off, no binding, out of budget, a model error - costs a sentence and nothing else.
+ * That ordering is deliberate: the moment the list itself depended on a model, a feature people rely on
+ * daily would inherit an optional dependency's failure modes.
+ *
+ * WHAT THE MODEL IS SHOWN, and this is the careful part. Goal and card titles go in: neither collection is on
+ * the denylist, and the titles are the caller's own work, already on their screen. REVIEWS DO NOT. `reviews`
+ * is denylisted, and while a cycle name ("H1") is not an assessment, the honest way to keep it that way is to
+ * not send review rows at all - so reviews reach the prompt as a COUNT and nothing else. A summary that said
+ * "two reviews are waiting" is worth exactly as much as one naming them, and costs nothing to defend.
+ *
+ * No `collection` is declared on the call for the same reason it is omitted in `draftText`: `ctx.collection`
+ * means "content from this collection is in the prompt", and `assertMayReachModel` answers it absolutely. The
+ * two collections whose content IS here are both permitted; declaring one of the three would be picking a
+ * favourite, and declaring `reviews` would be declaring something untrue.
+ */
+async function summarise(deps: Deps, user: AppUser, items: AttentionItem[]): Promise<string | undefined> {
+  // Nothing to say about one thing: the row already says it, in more detail than a sentence would.
+  if (items.length < 2) return undefined;
+  if (!(await aiFeatureOn(deps, "attention.summary"))) return undefined;
+
+  const reviews = items.filter((i) => i.kind === "review_waiting").length;
+  const lines = items
+    .filter((i) => i.kind !== "review_waiting")
+    .map((i) => `- ${i.title}: ${i.detail}`);
+  if (reviews > 0) lines.push(`- ${reviews} review${reviews === 1 ? "" : "s"} waiting on you`);
+
+  const out = await aiGenerate(
+    deps,
+    { feature: "attention.summary", userId: user.uuid },
+    {
+      system:
+        "You are given a list of things that are off track or waiting for one person at work. " +
+        "Reply with ONE sentence, under 30 words, saying what they should look at first and why. " +
+        "Name at most one item. Use only what the list says: invent no cause, no deadline and no blame, " +
+        "and do not suggest what to do about it. No greeting, no preamble, no markdown.",
+      user: fence("what is off track", lines.join("\n")),
+      promptVersion: "v1",
+      maxTokens: 80,
+    },
+  );
+  if (!out.ok) return undefined;
+  const text = out.value.trim().split("\n")[0]?.trim();
+  return text && text.length > 0 ? text.slice(0, 300) : undefined;
 }
 
 /**
