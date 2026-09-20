@@ -154,6 +154,27 @@ export const DRAFT_KINDS: DraftKind[] = [
       "less rather than filling it in.",
   },
   {
+    // Turn a task into the steps it takes. The one kind whose answer is not prose: the caller splits it into
+    // checklist items, so the shape of the output is part of the contract and the prompt has to be strict
+    // about it - a numbered list or a preamble would arrive as checklist items reading "1." and "Sure!".
+    //
+    // `existing` here is the task's DESCRIPTION, sent as context rather than as text to rewrite
+    // (DraftButton `existingIsContext`), because the steps are a different field and the description must
+    // come back untouched.
+    id: "task-checklist",
+    collection: "cards",
+    label: "Suggest steps",
+    promptVersion: "v1",
+    maxTokens: 300,
+    system:
+      `You break a task down into the steps needed to finish it. ${HOUSE_STYLE} ` +
+      "Answer with between three and seven steps, ONE PER LINE, in the order they would be done. " +
+      "No numbering, no bullet characters, no heading, no blank lines and no closing sentence: every line " +
+      "you write becomes a checklist item exactly as it is. " +
+      "Keep each step short enough to read at a glance, and make it an action somebody could tick off. " +
+      "Use only what the task says - invent no owners, dates, tools or acceptance criteria.",
+  },
+  {
     id: "job-description",
     collection: "job-requisitions",
     label: "Job description",

@@ -104,6 +104,25 @@ const PRIORITY_LANES = [ // fixed swimlanes for swimlane_mode = "priority", seve
   { key: "urgent", label: "Urgent" }, { key: "high", label: "High" }, { key: "medium", label: "Medium" }, { key: "low", label: "Low" },
 ];
 const NO_DEPT = "__nodept"; // CardDialog: explicit "no department" (distinct from "" = use the org default)
+
+/**
+ * A suggested checklist, as lines, into staged items.
+ *
+ * The prompt asks for one bare step per line and the parser does not believe it. A model told not to number
+ * a list numbers it anyway often enough to matter, and here the cost lands in the data: every line becomes a
+ * checklist item verbatim, so one stray "1." or "- " is an item somebody has to edit by hand on a card they
+ * have not created yet. Stripping the ornament is cheaper than trusting the instruction.
+ *
+ * Capped, and blank lines dropped: a model that ignores "three to seven" should not be able to stage forty
+ * items into a dialog that renders them all.
+ */
+function toChecklistItems(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.replace(/^\s*(?:[-*•‣]|\d+[.)])\s*/, "").trim())
+    .filter(Boolean)
+    .slice(0, 12);
+}
 // Repeating work. A Select cannot carry "" as a value, so the one-off case gets a sentinel like the above.
 const NO_CADENCE = "__once";
 const CADENCES: { value: string; label: string }[] = [
@@ -1843,12 +1862,27 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                 <ListChecks className="h-4 w-4" /> Checklist
                 {initialTodos.length > 0 && <span className="text-xs font-normal text-muted-foreground">{initialTodos.length} item{initialTodos.length === 1 ? "" : "s"}</span>}
               </p>
-              {checklists.length > 0 && (
-                <Select value="" onValueChange={(v) => { const cl = checklists.find((c) => c.path === v); if (cl?.items?.length) setInitialTodos((s) => [...s, ...cl.items]); }}>
-                  <SelectTrigger className="h-8 w-44 text-xs"><SelectValue placeholder="Apply template…" /></SelectTrigger>
-                  <SelectContent>{checklists.map((c) => <SelectItem key={c.path} value={c.path}>{c.display_name}</SelectItem>)}</SelectContent>
-                </Select>
-              )}
+              <div className="flex items-center gap-2">
+                {/* Beside the template picker, because it answers the same question - "what are the steps?" -
+                    from the task itself rather than from a catalogue. APPENDS rather than replaces, so a
+                    template already applied survives, and every suggested line is removable like any other
+                    item: the model stages the list, the person keeps or drops each one. */}
+                <DraftButton
+                  collection="cards"
+                  kind="task-checklist"
+                  label="Suggest steps"
+                  existing={description}
+                  existingIsContext
+                  hint="e.g. what finishing this task involves"
+                  onDraft={(text) => setInitialTodos((s) => [...s, ...toChecklistItems(text)])}
+                />
+                {checklists.length > 0 && (
+                  <Select value="" onValueChange={(v) => { const cl = checklists.find((c) => c.path === v); if (cl?.items?.length) setInitialTodos((s) => [...s, ...cl.items]); }}>
+                    <SelectTrigger className="h-8 w-44 text-xs"><SelectValue placeholder="Apply template…" /></SelectTrigger>
+                    <SelectContent>{checklists.map((c) => <SelectItem key={c.path} value={c.path}>{c.display_name}</SelectItem>)}</SelectContent>
+                  </Select>
+                )}
+              </div>
             </div>
             {initialTodos.length > 0 && (
               <div className="space-y-1.5">

@@ -29,7 +29,7 @@ import { useAiFeature } from "@/lib/aiFeatures";
 // ERRORS ARE SHOWN, not swallowed. Unlike the invisible AI features, somebody pressed a button and is waiting
 // for text, so "the organisation's budget for today is spent" has to reach them - otherwise they press it
 // again, and again.
-export function DraftButton({ collection, kind, existing, onDraft, label = "Draft", hint }: {
+export function DraftButton({ collection, kind, existing, onDraft, label = "Draft", hint, existingIsContext = false }: {
   collection: string;
   kind: string;
   existing?: string | null;
@@ -39,6 +39,16 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
    *  placeholder when writing from scratch; improving gets its own, because "say what to change" and "say
    *  what to write" are different questions and one example cannot answer both. */
   hint?: string;
+  /**
+   * Send `existing` as CONTEXT rather than as the thing being rewritten.
+   *
+   * The default reading of `existing` is "this is the text you are improving", which drives the whole
+   * Draft/Improve split. Some callers want the opposite: suggesting a checklist FROM a task's description is
+   * a first draft of a different field, and the description is background the model should read but never
+   * rewrite. Without this the button would read "Improve" and the dialog would offer to change a field it is
+   * not writing to.
+   */
+  existingIsContext?: boolean;
 }) {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
@@ -50,7 +60,8 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
   // it and ship a button whose only behaviour is to explain that it does not work.
   const enabled = useAiFeature("drafting");
 
-  const improving = !!(existing && existing.trim());
+  // Context is not a draft in progress, so it never turns this into an "Improve".
+  const improving = !existingIsContext && !!(existing && existing.trim());
 
   function close() {
     setOpen(false);
@@ -90,14 +101,19 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
       <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : close())}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{improving ? "Improve this text" : "Draft this text"}</DialogTitle>
+            <DialogTitle>{improving ? "Improve this text" : existingIsContext ? label : "Draft this text"}</DialogTitle>
             <DialogDescription>
               {/* Two separate sentences about what leaves the browser, because the old single line said both
                   "the current text is sent" and "only what you type here is sent" in the same breath, which
                   cannot both be true and left the more alarming reading as the plausible one. */}
               {improving
                 ? "Say what to change. Your instruction and the text currently in the field are sent."
-                : "Say what you want written. Only your instruction is sent."}
+                : existingIsContext
+                  // The third case, and it needs saying: context IS sent. Letting it fall through to "only
+                  // your instruction is sent" would be the same false reassurance this copy was rewritten to
+                  // remove, just in a new place.
+                  ? "Say what you want. Your instruction is sent, along with what you have already written on this item as background."
+                  : "Say what you want written. Only your instruction is sent."}
               {" "}No records are read, and nothing is changed until you choose to use the result.
             </DialogDescription>
           </DialogHeader>
@@ -134,7 +150,7 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
             <Button variant="ghost" onClick={close} disabled={busy}>Cancel</Button>
             {result === null ? (
               <Button onClick={run} disabled={busy || !instruction.trim()}>
-                {busy ? "Writing…" : improving ? "Improve" : "Draft"}
+                {busy ? "Writing…" : improving ? "Improve" : existingIsContext ? label : "Draft"}
               </Button>
             ) : (
               <>
