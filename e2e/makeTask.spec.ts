@@ -34,8 +34,11 @@ test("a ticket's checklist item is promoted to a board task, and stays on the ti
   const ticket = (await made.json()) as { path: string };
 
   await gotoRoute(page, "tickets", "Support");
-  // By prefix: the tab carries a "new since you last looked" badge, which is part of its accessible name.
-  await page.getByRole("tab", { name: /^All/ }).click();
+  // A BUTTON, not a tab. The scope switcher on this page renders its choices as buttons (Tickets.tsx
+  // `allScope`), so `getByRole("tab")` matched nothing and this waited out its timeout - a spec that had gone
+  // stale against the page rather than a page that had broken.
+  // Matched by prefix because the control carries a "new since you last looked" count in its accessible name.
+  await page.getByRole("button", { name: /^All/ }).click();
   await page.locator("tbody tr").filter({ hasText: subject }).first().click();
   const detail = page.getByRole("dialog");
   const add = detail.getByPlaceholder("Add a checklist item…");

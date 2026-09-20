@@ -89,6 +89,24 @@ export const DRAFT_KINDS: DraftKind[] = [
       "written those, and this text sits underneath them.",
   },
   {
+    // A board card's description. `cards` is indexable and not on the denylist: a card says what work is to
+    // be done, which is the company's own business rather than anybody's record.
+    //
+    // The TITLE is left alone on purpose - it is the card's human key on the wall and in every list, and it
+    // is one line somebody has already written by the time they want the description filled in.
+    id: "task",
+    collection: "cards",
+    label: "Task",
+    promptVersion: "v1",
+    maxTokens: 400,
+    system:
+      `You help somebody write the description of a task on a team's board. ${HOUSE_STYLE} ` +
+      "Say what needs doing and how somebody would know it is done. Keep it to a short paragraph, or a few " +
+      "bullet lines if the request lists steps. " +
+      "Do not invent acceptance criteria, dates, owners or ticket references that were not given, and do not " +
+      "assess anybody's work or performance.",
+  },
+  {
     id: "job-description",
     collection: "job-requisitions",
     label: "Job description",

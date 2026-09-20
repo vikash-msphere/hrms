@@ -49,6 +49,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import type { Label as BoardLabel } from "@/types";
 import { RichTextToolbar } from "@/components/common/RichTextToolbar";
+import { DraftButton } from "@/components/common/DraftButton";
 import { RichText } from "@/lib/richText";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessTarget } from "@/components/access/AccessTarget";
@@ -1560,6 +1561,19 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
           {canEdit ? (
             descEdit ? (
               <div>
+                {/* Above the toolbar, not inside it: the toolbar edits the SOURCE in place (bold, strike)
+                    while this replaces the whole field, and they should not read as the same kind of act.
+                    Only while editing - the rendered view is for reading, and a card with a description
+                    already written offers "Improve" here rather than a second way to overwrite it. */}
+                <div className="mb-2 flex justify-end">
+                  <DraftButton
+                    collection="cards"
+                    kind="task"
+                    existing={description}
+                    hint="e.g. the export button times out on big date ranges, needs to stream instead"
+                    onDraft={setDescription}
+                  />
+                </div>
                 <RichTextToolbar textareaRef={descRef} value={description} onChange={setDescription} />
                 <Textarea ref={descRef} value={description} onChange={(e) => setDescription(e.target.value)} rows={4} className="rounded-t-none" />
               </div>
