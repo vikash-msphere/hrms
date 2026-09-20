@@ -91,7 +91,14 @@ trap cleanup INT TERM EXIT
 
 : > "$WORKER_LOG"; : > "$PRISM_LOG"; : > "$WEB_LOG"
 
-npx wrangler dev --persist-to "$STATE" --port "$WORKER_PORT" --ip 127.0.0.1 "${VARS[@]}" \
+# `--test-scheduled` serves the cron handler at `/__scheduled?cron=<expr>`, which is the only way a browser
+# spec can drive the five-minute tick. Four AI features are fed by it and by nothing else - the embed drain
+# that semantic search, ticket triage and suggestion clustering all read from, and the moderation scan - so
+# without this they could not be covered at all, and waiting five real minutes per assertion is not a test.
+#
+# It adds one route to a stack that is already local-and-CI-only. Nothing else about the Worker changes, and
+# `wrangler deploy` has no such flag to forget.
+npx wrangler dev --persist-to "$STATE" --port "$WORKER_PORT" --ip 127.0.0.1 --test-scheduled "${VARS[@]}" \
   > "$WORKER_LOG" 2>&1 & PIDS+=($!)
 
 # Wait for the Worker before starting Prism: Prism reads nothing from upstream at boot, but a proxy pointed at

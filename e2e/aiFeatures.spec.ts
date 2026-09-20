@@ -1,4 +1,4 @@
-import { aiLocalUp, gotoRoute, patchSettings, test, expect } from "./fixtures";
+import { aiLocalUp, gotoRoute, patchSettings, purge, runCron, SPA_HEADERS, test, expect } from "./fixtures";
 
 // The AI layer in a browser, in its three states: switched off, switched on, and switched on with a model
 // answering.
@@ -270,4 +270,162 @@ test.describe("an AI feature with a model behind it", () => {
       await patchSettings(admin, "ai", off("analytics.narrate"));
     }
   });
+
+  test("reading a CV fills the candidate form from the file", async ({ as }) => {
+    test.setTimeout(240_000);
+    const page = await as("super");
+    test.skip(!(await aiLocalUp(page)), "no local model on this machine (see docs/04-testing.md)");
+
+    const stamp = Date.now();
+    const name = `E2E CV ${stamp}`;
+    const created = await page.request.post("/v1/candidates", {
+      headers: SPA_HEADERS,
+      data: { name, email: `e2e.cv.${stamp}@example.com` },
+    });
+    expect(created.ok(), await created.text()).toBe(true);
+    const path = ((await created.json()) as { path: string }).path;
+
+    await patchSettings(page, "ai", on("ats.extraction"));
+    try {
+      await gotoRoute(page, "candidates", "Candidates");
+      const row = page.locator("tbody tr").filter({ hasText: name }).first();
+      await expect(row).toBeVisible({ timeout: 30_000 });
+
+      // A PDF WITH REAL TEXT IN IT, built with the same pdf-lib the app renders payslips with. The minimal
+      // PDF the other candidate specs upload has no content stream, and the panel extracts the text in the
+      // BROWSER with pdf.js before anything is sent - so a file with no selectable text never reaches the
+      // model at all, it toasts "this may be a scan". A fixture that cannot be read would make this test
+      // pass or fail for a reason that has nothing to do with the feature.
+      const chooser = page.waitForEvent("filechooser");
+      await row.getByRole("button", { name: "Attach" }).click();
+      await (await chooser).setFiles({ name: "cv.pdf", mimeType: "application/pdf", buffer: await cvPdf() });
+      await expect(row.getByRole("button", { name: "View" })).toBeVisible({ timeout: 30_000 });
+
+      await gotoRoute(page, `candidates/${path.split("/").pop()}`);
+      await expect(page.getByRole("heading", { name: "Read the CV" })).toBeVisible({ timeout: 30_000 });
+      await page.getByRole("button", { name: /^Read CV$/ }).click();
+
+      // WHAT IS ASSERTED IS THAT SOMETHING READ THE FILE, not that the model got every field right. The
+      // panel offers each extracted field for a person to Accept one at a time - it saves nothing on its own,
+      // which is the whole reason a model is allowed near a candidate record - so a row appearing with an
+      // Accept beside it is the round trip completing.
+      await expect(page.getByRole("button", { name: "Accept" }).first()).toBeVisible({ timeout: 180_000 });
+    } finally {
+      await patchSettings(page, "ai", off("ats.extraction"));
+      await purge(page, path);
+    }
+  });
 });
+
+// ---------------------------------------------------------------------------------------------------------
+// 4. The half that only the cron tick can reach.
+//
+// Semantic search, ticket triage and suggestion clustering all read the SAME vector index, and nothing fills
+// it on a request - the embed drain does, on the five-minute tick, because `search_docs` is maintained by SQL
+// triggers and nothing can tell the app a row changed. So none of these could be covered in a browser at all
+// until `runCron` existed; `scripts/e2eStack.sh` passes `--test-scheduled` for it.
+//
+// NOT COVERED HERE, DELIBERATELY: a flagged post rendering on the moderation queue. Producing one means
+// getting a model to judge content unacceptable, and the local model is not Llama Guard - the rule this file
+// works under is that a local pass says nothing about how the production classifier judges. A spec that
+// posted deliberately objectionable text and asserted on a stand-in's verdict would be claiming exactly what
+// describe 3 refuses to claim. `e2e/moderationQueue.spec.ts` covers what a browser CAN settle about that
+// feature: it is private by default, and the nav item and the endpoint agree about who may see it.
+test.describe("the AI features fed by the cron tick", () => {
+  test("semantic search finds a ticket by what it means, not by its words", async ({ as }) => {
+    test.setTimeout(300_000);
+    const page = await as("super");
+    test.skip(!(await aiLocalUp(page)), "no local model on this machine (see docs/04-testing.md)");
+
+    const stamp = Date.now();
+    const title = `Laptop overheating ${stamp}`;
+    const created = await page.request.post("/v1/tickets", {
+      headers: SPA_HEADERS,
+      data: { category: "it", subject: title, description: "The fan runs constantly and the case is hot to touch." },
+    });
+    expect(created.ok(), await created.text()).toBe(true);
+    const path = ((await created.json()) as { path: string }).path;
+
+    await patchSettings(page, "ai", on("search.semantic"));
+    try {
+      // The row is brand new, so it is NEVER-SCANNED - which is the front of the drain's rotation, not the
+      // back. That is what makes one tick enough here rather than however many it takes to sweep the seed.
+      await runCron(page);
+
+      await gotoRoute(page, "dashboard");
+      await page.keyboard.press("ControlOrMeta+k");
+      const search = page.getByPlaceholder("Search people, records, pages and settings…");
+      await expect(search).toBeVisible();
+
+      // NOT ONE WORD IN COMMON with the ticket, which is the entire point. "computer" is not "laptop", "hot"
+      // is not "overheating", and FTS5 matches tokens - so the keyword half of the hybrid cannot answer this
+      // query at all. A hit here came through the vector index or it did not come.
+      await search.fill("my computer gets too hot");
+      await expect(page.getByRole("button").filter({ hasText: title }).first()).toBeVisible({ timeout: 120_000 });
+    } finally {
+      await patchSettings(page, "ai", off("search.semantic"));
+      await purge(page, path);
+    }
+  });
+
+  test("the same search finds nothing once the feature is switched off", async ({ as }) => {
+    test.setTimeout(300_000);
+    const page = await as("super");
+    test.skip(!(await aiLocalUp(page)), "no local model on this machine (see docs/04-testing.md)");
+
+    const stamp = Date.now();
+    const title = `Laptop overheating ${stamp}`;
+    const created = await page.request.post("/v1/tickets", {
+      headers: SPA_HEADERS,
+      data: { category: "it", subject: title, description: "The fan runs constantly and the case is hot to touch." },
+    });
+    // CHECKED, and this test is the reason to insist on it. Without this line the create failed on a missing
+    // `category`, `path` was undefined, and the assertion below - that no row with this title appears -
+    // passed because no such row was ever made. A vacuity check that is itself vacuous is the worst of both:
+    // it reports that the feature switch is obeyed while testing nothing at all.
+    expect(created.ok(), await created.text()).toBe(true);
+    const path = ((await created.json()) as { path: string }).path;
+
+    try {
+      // THE VACUITY CHECK for the test above, and it is not optional. That one asserts a record is FOUND, and
+      // a search box that matched everything would pass it just as well. Same record, same wordless query,
+      // feature off: the vector index is never consulted, the FTS half has no token to match, and the right
+      // answer is nothing. Embedded first, so this is the feature switch being obeyed rather than an empty
+      // index answering by accident.
+      await patchSettings(page, "ai", on("search.semantic"));
+      await runCron(page);
+      await patchSettings(page, "ai", off("search.semantic"));
+
+      await gotoRoute(page, "dashboard");
+      await page.keyboard.press("ControlOrMeta+k");
+      const search = page.getByPlaceholder("Search people, records, pages and settings…");
+      await expect(search).toBeVisible();
+      await search.fill("my computer gets too hot");
+
+      // Given a moment to be wrong in: an immediate `toHaveCount(0)` would pass before the request had even
+      // returned, which is the failure mode of every "asserts nothing appeared" test.
+      await page.waitForTimeout(3_000);
+      await expect(page.getByRole("button").filter({ hasText: title })).toHaveCount(0);
+    } finally {
+      await patchSettings(page, "ai", off("search.semantic"));
+      await purge(page, path);
+    }
+  });
+});
+
+/** A one-page CV with selectable text, built with the app's own PDF library. */
+async function cvPdf(): Promise<Buffer> {
+  const { PDFDocument, StandardFonts } = await import("pdf-lib");
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([595, 842]);
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const lines = [
+    "Priya Raman",
+    "priya.raman@example.com",
+    "+91 98765 43210",
+    "Senior Software Engineer",
+    "8 years building payment systems in Bangalore.",
+  ];
+  lines.forEach((line, i) => page.drawText(line, { x: 60, y: 760 - i * 24, size: 12, font }));
+  return Buffer.from(await doc.save());
+}

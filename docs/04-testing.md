@@ -520,6 +520,10 @@ exposes the trigger over HTTP (the flag is required; without it the path 404s):
 curl "http://127.0.0.1:8787/__scheduled?cron=*/5+*+*+*+*"
 ```
 
+`scripts/e2eStack.sh` passes that flag, and `runCron(page)` in `e2e/fixtures.ts` is the browser lane's way in.
+It returns only once the handler has run, so it is a synchronisation point rather than a nudge - which is what
+lets a spec create a record, embed it, and search for it in one test.
+
 `cron_runs.summary_json` records `embedded` and `moderated` per tick, so the effect is readable rather than
 guessed at. The other four are request-time and just need the feature switched on in
 **Settings → Access & security → AI features** (`docs/deploy-ai.md` has the table).
@@ -534,10 +538,22 @@ they ran, and the skip count is the thing to read:
   and, failing that, picks from Ollama's own inventory and **prints which two it used** - because a wrong
   name here does not fail, it skips forever, and a test that quietly never runs is worse than one that
   chooses.
-- `e2e/aiFeatures.spec.ts`, last describe - the affordances pressed in a browser. The other two describes in
-  that file assert the controls are absent when off and present when on, and must keep passing with nothing
-  local running. All three are one file on purpose: the switches are one org-wide settings row, and
-  Playwright runs different files in parallel, so split across files they raced and the retries hid it.
+- `e2e/aiFeatures.spec.ts`, last two describes - the affordances pressed in a browser: a draft written into
+  the composer, the narration badge, a CV read into the candidate form, and a ticket found by semantic search
+  through a query sharing **no word** with it. The first two describes assert the controls are absent when
+  off and present when on, and must keep passing with nothing local running. All four are one file on
+  purpose: the switches are one org-wide settings row, and Playwright runs different files in parallel, so
+  split across files they raced and the retries hid it.
+
+  The semantic-search test carries its own control - the same record and the same wordless query with the
+  feature off, which must find nothing. That pairing is the only thing that distinguishes "the vector index
+  answered" from "the search box matches everything".
+
+  **A flagged post rendering on the moderation queue is deliberately not covered.** Producing one means
+  getting a model to judge content unacceptable, and a local model is not Llama Guard - asserting on a
+  stand-in's verdict would claim exactly what the table below refuses to claim.
+  `e2e/moderationQueue.spec.ts` covers what a browser can settle there: the queue is private by default, and
+  the nav item and the endpoint agree about who may see it.
 
 ### What a local pass proves, and what it does not
 

@@ -185,8 +185,15 @@ the buttons, and `test/aiLocalIntegration.test.ts` drives the drains and the par
 both skipping when Ollama is down, so a green run does not mean they ran. Setup and the full account of what
 a local pass proves are in `docs/04-testing.md`.
 
-Still uncovered in a browser: the triage panel, the extraction panel, and a flag rendering on the moderation
-queue.
+The extraction panel and semantic search are now covered in a browser too, the latter with its own vacuity
+control (same record, same wordless query, feature off, nothing found). `runCron` drives the five-minute tick
+so a spec can create a record, embed it and search for it in one test.
+
+Still uncovered in a browser, both for stated reasons rather than oversight: **the triage panel**, which
+needs a corpus of resolved tickets in one department to vote from before it suggests anything, so a spec
+would be building the fixture it tests; and **a flag rendering on the moderation queue**, which needs a model
+to judge content unacceptable - and a local model is not Llama Guard, so asserting on its verdict would claim
+precisely what the local lane refuses to claim.
 
 Note that `e2e/ticketTriage.spec.ts` is NOT this. It predates the AI layer and covers the manual assign /
 route / prioritize controls; the AI suggestion panel above them has no browser coverage at all.

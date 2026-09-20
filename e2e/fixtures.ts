@@ -3,6 +3,7 @@ import { test as base, expect, type APIResponse, type Browser, type BrowserConte
 import { sealSession } from "../src/lib/session";
 import { HOLIDAYS } from "../bootstrap/collections/holidays";
 import { HOLIDAY_YEAR } from "../bootstrap/lib";
+import { lane } from "./lane";
 
 // Signing in, in a browser test.
 //
@@ -431,6 +432,26 @@ export async function patchSettings(page: Page, key: string, mutate: (value: Rec
 
 export const patchOrgSettings = (page: Page, mutate: (value: Record<string, unknown>) => Record<string, unknown>): Promise<void> =>
   patchSettings(page, "organization", mutate);
+
+/**
+ * Fire the five-minute cron tick and wait for it to finish.
+ *
+ * Four AI features are fed by the tick and by nothing else - the embed drain that semantic search, ticket
+ * triage and suggestion clustering all read from, and the moderation scan. Waiting five real minutes per
+ * assertion is not a test, so `scripts/e2eStack.sh` passes `--test-scheduled`, which serves the cron handler
+ * at this path. It answers only once the handler has RUN, which is what makes this a synchronisation point
+ * rather than a nudge.
+ *
+ * Straight at the Worker, not through Vite or Prism: `/__scheduled` is wrangler's own route, in neither the
+ * SPA's proxy table nor openapi.yaml, so it exists at exactly one origin.
+ */
+export async function runCron(page: Page, cron = "*/5 * * * *"): Promise<void> {
+  const res = await page.request.get(
+    `http://127.0.0.1:${lane.workerPort}/__scheduled?cron=${encodeURIComponent(cron)}`,
+    { timeout: 120_000 },
+  );
+  if (!res.ok()) throw new Error(`e2e: the cron tick answered ${res.status()} - is the stack running with --test-scheduled?`);
+}
 
 /**
  * Is there a model answering on this machine?
