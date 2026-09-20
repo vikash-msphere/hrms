@@ -238,7 +238,9 @@ test.describe("an AI feature switched on", () => {
 // `@cf/meta/llama-3.1-8b-instruct-fast`, and how well either writes is not a thing a browser test can assert.
 test.describe("an AI feature with a model behind it", () => {
   test("Draft writes text into the announcement composer", async ({ as }) => {
-    test.setTimeout(240_000); // a cold local model is slow in a way the hosted one is not
+    // 360s because this is usually the FIRST model call of the run, so it pays to load the weights - tens of
+    // gigabytes - before it generates a word. The others below inherit a warm model and need far less.
+    test.setTimeout(360_000);
     const page = await as("hr");
     test.skip(!(await aiLocalUp(page)), "no local model on this machine (see docs/04-testing.md)");
 
@@ -267,7 +269,11 @@ test.describe("an AI feature with a model behind it", () => {
       // used to overwrite the field the moment the model replied, so improving destroyed what you had written
       // and the textarea's own undo could not bring it back. Asserting the field is STILL EMPTY here is what
       // stops that returning: a regression would fill it before anybody chose.
-      await expect(ask.getByText("Suggested text")).toBeVisible({ timeout: 180_000 });
+      // THE FIRST MODEL CALL OF A RUN PAYS FOR LOADING THE MODEL, and the chat models people have installed
+      // are tens of gigabytes: this waited 180s, timed out, and passed on the retry once the weights were
+      // resident. That is a cold start being measured as if it were the feature. The budget is for the load,
+      // not the generation - once warm this test finishes in about three seconds.
+      await expect(ask.getByText("Suggested text")).toBeVisible({ timeout: 300_000 });
       await expect(body).toHaveValue("");
 
       // And it arrives only on the explicit act. What the model wrote is not a property this suite can hold;

@@ -85,10 +85,33 @@ export async function suggestTableView(
   if (!deps.ai) throw failedPrecondition("AI table suggestions are not available on this deployment");
   if (!(await aiFeatureOn(deps, "tables.describe"))) throw failedPrecondition("AI table suggestions are switched off for this organisation");
 
-  // The ROOT node's fields only. Links are walked lazily in the builder and a deep join is a deliberate act;
-  // flattening the tree here would multiply the prompt by the number of reachable collections.
-  const catalogue = await buildCatalogue(deps, base, new Set(scopes.keys()), [], catalogueFieldGate(user, self));
-  const offered = rankFields(catalogue.fields, q).slice(0, MAX_OFFERED);
+  // The root node's fields AND one hop through each of its links.
+  //
+  // Root-only was the original choice and it was wrong in a way that showed up as the feature being stupid:
+  // people describe a grid in terms of the things a row is ATTACHED to - "tickets with the requester's
+  // department", "candidates with the job they applied for" - and every one of those words named a field the
+  // model had never been shown. It could only answer with a key it had been given, so the whole clause was
+  // silently dropped into `unmatched` and the grid came back narrower than the sentence asked for.
+  //
+  // ONE HOP, NOT THE WHOLE TREE. Depth is what makes this expensive: `MAX_LINK_DEPTH` is 4, and each node
+  // carries its own links, so flattening the tree would multiply the prompt by the reachable collections and
+  // spend the day's allowance on field lists. One hop covers what people actually say out loud, and anything
+  // deeper stays a deliberate act in the builder, which is where the link picker lives.
+  //
+  // Nothing downstream needed changing: a child node already names its fields by the dotted wire path
+  // (`employee_id.first_name`), which is exactly what a column spec stores and what `coerceSpec` checks
+  // against. And each hop is built with the SAME field gate as the root, so a link into a collection the
+  // caller cannot list resolves to nothing and its fields are never offered.
+  const listable = new Set(scopes.keys());
+  const gate = catalogueFieldGate(user, self);
+  const root = await buildCatalogue(deps, base, listable, [], gate);
+  const linked = await Promise.all(
+    root.links.map((l) => buildCatalogue(deps, base, listable, l.path.split("."), gate)),
+  );
+  // Root fields first, so that when the cap bites they win the ties: `rankFields` is a stable sort on the
+  // original order, and a grid's own columns matter more than a neighbour's.
+  const all = [...root.fields, ...linked.flatMap((n) => n.fields)];
+  const offered = rankFields(all, q).slice(0, MAX_OFFERED);
   if (offered.length === 0) throw failedPrecondition("this base has no fields you can use");
 
   const out = await aiGenerate(
