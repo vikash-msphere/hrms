@@ -136,8 +136,11 @@ export function makeLocalTextModel(baseUrl: string, models: LocalModels): TextMo
           { role: "user", content: user },
         ],
         stream: false,
-        // The same temperature lib/ai.ts sends, so a draft reads about as machine-like here as it will there.
-        options: { temperature: 0.3, num_predict: maxTokens ?? 512 },
+        // The same temperature lib/ai.ts sends, PER ROLE, so a draft reads about as machine-like here as it
+        // will there and a verdict is as repeatable. Zero for the classifier is not a local nicety: the two
+        // transports implement one port, and a constant that is true of one of them is the shape of drift this
+        // file is most likely to grow - it already overrides the system prompt for that same role below.
+        options: { temperature: role === "moderate" ? 0 : 0.3, num_predict: maxTokens ?? 512 },
       });
       return out?.message?.content ?? "";
     },

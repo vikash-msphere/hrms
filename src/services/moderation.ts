@@ -660,12 +660,52 @@ export async function decideModeration(
   // The meta carries the hazard codes and nothing of the post. The excerpt the moderator judged is already on
   // the flag row; copying it here would make the audit trail a second store of the content it is about.
   const payload = readPayload(flag.payloadJson);
-  await audit(deps, user, `${MODERATABLE[collection]!.singular}.moderate.${action}`, collection, recordId, {
+  const anchor = await auditAnchor(deps, collection, recordId);
+  await audit(deps, user, `${MODERATABLE[collection]!.singular}.moderate.${action}`, anchor.entity, anchor.entityId, {
     hazards: payload?.hazards ?? [],
     flagged_by: MODELS.moderate,
+    ...anchor.meta,
   });
 
   return { host, action };
+}
+
+/**
+ * The record this decision is written against, which for a reply is NOT the reply.
+ *
+ * The activity lane resolves `?resource=<collection>/<id>` through `uuidToCode` (lib/authzResolve.ts), and that
+ * answers null for any collection absent from `TABLES`. Replies are not in it - they are not a wire collection,
+ * they are reached through their announcement - so a row anchored on `announcement-replies/<id>` was one no
+ * reader could ever fetch back: `GET /v1/activity?resource=announcement-replies/<id>` is refused for everybody,
+ * super included, with "activity: unresolved target resource". The anchoring exists precisely so a record's own
+ * trail explains the one event in its life a reader most wants explained, and for the single host type written
+ * by somebody other than the post's author it explained it nowhere.
+ *
+ * So a reply is anchored on its THREAD, which is both resolvable and where a person looks: the announcement's
+ * activity now reads "a reply was hidden", and `reply` in the meta names which one. The ref is a
+ * `<collection>/<id>` string, so the outbound edge tokenizes it like any other (`announcement-replies` is in
+ * ENCODABLE) rather than publishing the raw id.
+ *
+ * Falls back to the reply's own id if the parent cannot be read, which cannot normally happen - the flag exists
+ * because the drain saw the reply joined to a live announcement - and is better than losing the entry.
+ */
+async function auditAnchor(
+  deps: Deps,
+  collection: string,
+  recordId: string,
+): Promise<{ entity: string; entityId: string; meta: Record<string, unknown> }> {
+  if (collection !== "announcement-replies") return { entity: collection, entityId: recordId, meta: {} };
+  const parent = await deps.db
+    .select({ announcementId: schema.announcementReplies.announcementId })
+    .from(schema.announcementReplies)
+    .where(eq(schema.announcementReplies.uuid, recordId))
+    .get();
+  if (!parent) return { entity: collection, entityId: recordId, meta: {} };
+  return {
+    entity: "announcements",
+    entityId: parent.announcementId,
+    meta: { reply: `announcement-replies/${recordId}` },
+  };
 }
 
 async function hideHost(deps: Deps, collection: string, recordId: string, user: AppUser): Promise<void> {

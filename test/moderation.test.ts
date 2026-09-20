@@ -336,6 +336,16 @@ describe("replies and poll options", () => {
     expect(notes).toHaveLength(1);
     expect(notes[0]?.recipientId).toBe(commenter.employeeId);
     expect(notes[0]?.title).toBe("A reply of yours was hidden");
+
+    // ANCHORED ON THE THREAD, because a reply is not a collection anything can fetch back. The activity lane
+    // resolves `?resource=<collection>/<id>` through `uuidToCode`, which answers null for a collection absent
+    // from TABLES - so a row written against `announcement-replies/<id>` was refused to every reader, super
+    // included. Anchored here, the announcement's own activity says a reply was hidden, and the meta names it.
+    const trail = await deps.db.select().from(schema.auditLog);
+    const entry = trail.find((r) => r.action === "reply.moderate.hide");
+    expect(entry?.entity).toBe("announcements");
+    expect(entry?.entityId).toBe(post);
+    expect(JSON.parse(entry?.meta ?? "{}")).toMatchObject({ reply: `announcement-replies/${reply}` });
   });
 
   it("does not scan a reply whose post is not on the wall", async () => {
