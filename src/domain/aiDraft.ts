@@ -53,6 +53,24 @@ export const DRAFT_KINDS: DraftKind[] = [
       "Do not add a subject line unless the request asks for one.",
   },
   {
+    // A POST IS NOT AN ANNOUNCEMENT, and it had been sharing that kind's prompt. The board carries four
+    // things (web/src/components/common/PostComposer.tsx): an announcement, a post, a poll and a kudos. The
+    // first two both offered drafting and both sent `announcement`, so somebody writing a personal note to
+    // their colleagues got "You help an HR team write an internal announcement for staff. Say what is
+    // happening, when, and what the reader needs to do" - which is why a drafted post read like a circular.
+    // Same collection, so the same write grant and the same denylist check still gate it.
+    id: "post",
+    collection: "announcements",
+    label: "Post",
+    promptVersion: "v1",
+    maxTokens: 400,
+    system:
+      `You help somebody write a short post for their company's internal board. ${HOUSE_STYLE} ` +
+      "Write as the person themselves, in the first person, to colleagues rather than to staff. " +
+      "Keep it to a paragraph or two. This is not an official announcement: do not write it as policy, do " +
+      "not add a subject line, and do not tell people what they are required to do.",
+  },
+  {
     id: "job-description",
     collection: "job-requisitions",
     label: "Job description",

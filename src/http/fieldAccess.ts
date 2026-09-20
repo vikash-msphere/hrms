@@ -7,6 +7,7 @@
 import { decide, type Grant, type SelfContext } from "../domain/permissions";
 import { redactedFieldsOf } from "../domain/manifests";
 import type { AppUser } from "../env";
+import { selfContextOf } from "../lib/selfContext";
 import { BANK_FIELDS } from "../services/bankDetails";
 import { PERSONAL_FIELDS } from "../services/personalDetails";
 import { TAX_FIELDS } from "../services/taxDetails";
@@ -144,7 +145,9 @@ export function deniedRedactedFields(
 export type RedactionGate = (collection: string, code: string | null | undefined) => readonly string[];
 
 export function redactionGateFor(user: AppUser): RedactionGate {
-  const self = { employeeCode: user.employeeCode };
+  // The request's own matcher context, not a rebuilt one - see lib/selfContext.ts#selfContextOf for what the
+  // rebuilt version silently could not match.
+  const self = selfContextOf(user);
   const memo = new Map<string, readonly string[]>();
   return (collection, code) => {
     const fields = redactedFieldsOf(user.policy, collection);

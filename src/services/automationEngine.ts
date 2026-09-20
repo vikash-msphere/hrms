@@ -18,7 +18,7 @@ import { systemActor } from "../lib/systemActor";
 import type { AppUser } from "../env";
 import type { DomainEvent } from "../domain/events";
 import { allocFlatCode } from "./codeAlloc";
-import { notify, notifyManager, notifyAudience, audienceEmployeeIds } from "./notifications";
+import { notify, notifyManager, notifyAudience, audienceEmployeeIds, managerIdOf } from "./notifications";
 import type { Action, Automation, EvalContext, RecipientSpec, WaitArm, Schedule, EmailAttachmentSpec } from "../domain/automations";
 import type { EmailAttachment } from "../ports";
 import { evalCondition, hasPrivilegedAction, privilegedActionKinds, resolveField, scheduleDueOn, SCHEDULE_TRIGGER } from "../domain/automations";
@@ -239,8 +239,21 @@ async function resolveRecipient(deps: Deps, ctx: EvalContext, spec: RecipientSpe
   }
   if (spec.of === "managerOf") {
     if (!ctx.employeeId) return null;
-    const e = (await deps.db.select({ managerId: schema.employees.managerId }).from(schema.employees).where(eq(schema.employees.uuid, ctx.employeeId)).limit(1))[0];
-    return e?.managerId ?? null;
+    // `managerIdOf`, not a bare read of the pointer, and the difference is whether the rule fires at all.
+    //
+    // `employees.manager_id` OUTLIVES THE PERSON: neither exit reparents anybody, so it routinely names
+    // somebody who left. The helper walks up to the first manager who can actually be told something
+    // (services/notifications.ts firstLiveManagerId) - which is what the `notifyManager` ACTION in this same
+    // file has always done, three cases down. Read straight off the row, this arm handed `notify` a dead
+    // recipient, and `notify` binds the liveness rule structurally and returns in SILENCE: nothing was sent,
+    // nothing was logged, and the run row recorded the action as done.
+    //
+    // The population it failed on is the one the rules are for. A manager leaving is exactly when the
+    // offboarding and approval-chase rules run, and it is the moment their reports' requests most need to
+    // reach somebody. Escalated, the skip-level manager is told; with nobody live above them at all the
+    // resolve returns null and `runAction` records a `skipped` outcome that names it, instead of a `done`
+    // that did nothing.
+    return managerIdOf(deps, ctx.employeeId);
   }
   if (spec.of === "ref" && spec.field) {
     const raw = resolveField(ctx, spec.field);

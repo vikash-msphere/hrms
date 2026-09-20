@@ -10,6 +10,7 @@ import { deriveNarrowing, type ScopeKind } from "../domain/compileGrants";
 import { redactedFieldsOf } from "../domain/manifests";
 import type { SubjectScopes } from "../domain/access";
 import type { AppUser } from "../env";
+import { selfContextOf } from "../lib/selfContext";
 
 type Self = { employeeCode: string | null };
 
@@ -248,7 +249,8 @@ export function accessHint(
   ownerCode?: string | null,
 ): AccessHint {
   // A row with no code can't be decided against -> fail safe (hint nothing; the server still enforces).
-  const self = { employeeCode: user.employeeCode };
+  // The request's own matcher context, so a hint answers the question the GATE answered - see selfContextOf.
+  const self = selfContextOf(user);
   const can = code ? computeCan(grant, self, collection, code, candidates, ownerCode) : [];
   const why = code ? computeWhy(grant, self, collection, code, ownerCode) : null;
   return why ? { can, why } : { can };
@@ -275,7 +277,7 @@ function redactFields<T extends object>(res: T, user: AppUser, collection: strin
   if (!code) return res;
   const fields = redactedFieldsOf(user.policy, collection);
   if (!fields.length) return res;
-  const self = { employeeCode: user.employeeCode };
+  const self = selfContextOf(user);
   let out: Record<string, unknown> | null = null;
   for (const f of fields) {
     if (!(f in res)) continue; // already absent (undefined on the wire) - nothing to decide

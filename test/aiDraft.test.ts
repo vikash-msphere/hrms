@@ -202,11 +202,22 @@ describe("a grant on one collection cannot reach another's prompt", () => {
     // what the authz middleware gated. This test documents the seam so the check is not deleted as redundant:
     // without it, a caller with announcements access could POST /v1/announcements:draft with the
     // job-description kind and use a grant they hold to reach a prompt gated behind one they do not.
+    // Listed rather than counted, so ADDING a kind to this collection is a deliberate edit here and not a
+    // silent widening. Two is correct: an announcement and a post are both written on the board and both
+    // gated by the same write grant. `post` exists because they were sharing one prompt, and a personal note
+    // to colleagues was being written as an HR circular to staff.
     const announcementKinds = DRAFT_KINDS.filter((k) => k.collection === "announcements").map((k) => k.id);
-    expect(announcementKinds).toEqual(["announcement"]);
+    expect(announcementKinds).toEqual(["announcement", "post"]);
+
+    // The property that actually matters: a kind belonging to another collection is not reachable from this
+    // one. Sharing a collection is sharing a grant; crossing collections would be using a grant you hold to
+    // reach a prompt behind one you do not.
     const jd = DRAFT_KINDS.find((k) => k.id === "job-description")!;
     expect(jd.collection).toBe("job-requisitions");
     expect(announcementKinds).not.toContain(jd.id);
+    for (const k of DRAFT_KINDS) {
+      if (k.collection !== "announcements") expect(announcementKinds).not.toContain(k.id);
+    }
   });
 });
 

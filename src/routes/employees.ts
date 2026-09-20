@@ -171,7 +171,10 @@ async function identityDoc(c: Context<AppEnv>, id: string, action: "upload" | "d
   // every employee holds `employees.me.identity.**: write` so read and write coincide on their own record;
   // reachable the moment an admin writes a read-only per-field rule, which the ACL offers.
   const level = action === "download" ? "read" : "write";
-  if (deniedFieldKeys(c.get("objectGrant"), "employees", code, "identity", [field], { employeeCode: user.employeeCode }, level).has(field)) {
+  // `c.get("self")` - the context the gate itself decided with. Rebuilt from the employee code it cannot match
+  // `my-reports` / `my-org`, so a caller reaching this record through the reporting line was refused the
+  // document behind a field they may read (lib/selfContext.ts#selfContextOf).
+  if (deniedFieldKeys(c.get("objectGrant"), "employees", code, "identity", [field], c.get("self"), level).has(field)) {
     throw forbidden("you do not have permission to perform this action");
   }
   const slot = identityDocSlot(field);

@@ -216,7 +216,10 @@ test.describe("an AI feature with a model behind it", () => {
       await page.getByRole("menuitem", { name: "Announcement" }).click();
       const composer = page.getByRole("dialog");
 
-      const body = composer.getByPlaceholder("What's on your mind?");
+      // Off the PAGE, not off `composer`. The draft dialog opens on top, so `getByRole("dialog")` matches two
+      // things from that moment and anything scoped through it resolves to nothing. This placeholder belongs
+      // to the composer's body field alone.
+      const body = page.getByPlaceholder("What's on your mind?");
       await expect(body).toHaveValue("");
 
       await composer.getByRole("button", { name: /^Draft$/ }).click();
@@ -227,10 +230,17 @@ test.describe("an AI feature with a model behind it", () => {
       await ask.getByRole("textbox").fill("the office moves to the second floor from Monday, entry is by the side door");
       await ask.getByRole("button", { name: "Draft", exact: true }).click();
 
-      // THE ASSERTION IS THAT TEXT ARRIVED WHERE THE AUTHOR IS TYPING, not what the text says. A model's
-      // wording is not a property this suite can hold, but "the button returns a draft into the field, and
-      // the author can still edit it" is exactly the contract DraftButton describes - it saves nothing.
-      await expect(ask).toHaveCount(0, { timeout: 180_000 });
+      // THE ANSWER IS SHOWN BEFORE IT IS APPLIED, which is the property this flow exists to have. The button
+      // used to overwrite the field the moment the model replied, so improving destroyed what you had written
+      // and the textarea's own undo could not bring it back. Asserting the field is STILL EMPTY here is what
+      // stops that returning: a regression would fill it before anybody chose.
+      await expect(ask.getByText("Suggested text")).toBeVisible({ timeout: 180_000 });
+      await expect(body).toHaveValue("");
+
+      // And it arrives only on the explicit act. What the model wrote is not a property this suite can hold;
+      // that the author decides when it lands is.
+      await ask.getByRole("button", { name: "Use this" }).click();
+      await expect(ask).toHaveCount(0, { timeout: 30_000 });
       await expect(body).not.toHaveValue("", { timeout: 5_000 });
 
       // And nothing was posted. The whole design of the drafting feature is that a model writes into a form

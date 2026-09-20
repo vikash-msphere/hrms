@@ -9,6 +9,7 @@ import { decide, resolveRequest, type Grant, type SelfContext } from "../domain/
 import { SCOPE_PROBE_CODE, SCOPE_PROBE_LEAF } from "../domain/access";
 import { redactedFieldsOf } from "../domain/manifests";
 import type { AppUser } from "../env";
+import { selfContextOf } from "../lib/selfContext";
 import { deniedFieldKeys } from "./fieldAccess";
 
 /**
@@ -93,7 +94,7 @@ export function unmaskGate(user: AppUser): (field: { subresource?: string; field
  * (`deniedSubresourceKeys`, `deniedRedactedFields`), so a field that slips through is blanked there, while a
  * field wrongly withheld here is a column the builder would not let them pick at all.
  */
-export function catalogueFieldGate(user: AppUser, self: SelfContext = { employeeCode: user.employeeCode }): (field: {
+export function catalogueFieldGate(user: AppUser, self: SelfContext = selfContextOf(user)): (field: {
   collection: string;
   subresource?: string;
   fieldKey?: string;

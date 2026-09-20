@@ -9,6 +9,7 @@ import { isSuperGrant, EVERYONE_ROLE, roleSubjectsOf } from "../domain/grants";
 import { ancestorsOf } from "../domain/codes";
 import { loadObjectRulesForRequest } from "./policyLoad";
 import { uuidToCode } from "./authzResolve";
+import { selfContextOf } from "./selfContext";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 
@@ -20,7 +21,10 @@ export async function canReadObjectCode(deps: Deps, user: AppUser, collection: s
   let grant: Grant = user.grant;
   const objRules = await loadObjectRulesForRequest(deps, user.uuid, roleSubjects, collection, ancestorsOf(code));
   if (objRules.length) grant = mergeGrants(user.grant, rulesToGrant(objRules));
-  return decide(grant, { kind: "standard", resource: `${collection}.${code}`, level: "read" }, { employeeCode: user.employeeCode }).allow;
+  // The request's own matcher context, for the reason lib/selfContext.ts#selfContextOf gives: this decides a
+  // ROW, so a context rebuilt from the employee code cannot match a grant that reaches it through the
+  // reporting line and the cross-collection reference is refused to somebody a real request would allow.
+  return decide(grant, { kind: "standard", resource: `${collection}.${code}`, level: "read" }, selfContextOf(user)).allow;
 }
 
 // Convenience: resolve a uuid -> code then read-check.

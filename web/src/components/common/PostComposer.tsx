@@ -773,9 +773,14 @@ export function PostComposer({
           <div className="mb-2 flex justify-end">
             <DraftButton
               collection="announcements"
-              kind="announcement"
+              // THE KIND FOLLOWS THE POST, which it did not before. Both of these render this button and both
+              // sent `announcement`, so a personal post was written by the prompt for an HR circular to
+              // staff. Same collection either way, so the grant and the denylist check are unchanged.
+              kind={form.kind === "announcement" ? "announcement" : "post"}
               existing={form.body}
-              hint="e.g. the office moves to the second floor from Monday, entry is by the side door"
+              hint={form.kind === "announcement"
+                ? "e.g. the office moves to the second floor from Monday, entry is by the side door"
+                : "e.g. thanks to everyone who helped at the open day on Saturday"}
               onDraft={(text) => setForm((f) => ({ ...f, body: text }))}
             />
           </div>

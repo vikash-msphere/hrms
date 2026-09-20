@@ -26,3 +26,21 @@ export async function selfContextFor(deps: Deps, user: Pick<AppUser, "grant" | "
   ]);
   return { ...base, reportCodes, orgCodes };
 }
+
+/**
+ * The matcher context to DECIDE with, for a surface that holds an `AppUser` and not the request.
+ *
+ * The middleware resolves the real one per request and parks it on the caller (`user.self`, set in
+ * middleware/authz.ts next to `c.set("self", …)`). Everything that decides something about a row and takes
+ * only an `AppUser` used to rebuild it here as `{ employeeCode }` instead - which is not the same context, and
+ * the difference is silent: `decide()` given no reporting line cannot match `my-reports` or `my-org`, so it
+ * REFUSES. A manager whose grant reaches their team through the chain was therefore served the row (the
+ * middleware decided that with the full context) with its redacted fields blanked and its `access.can` empty,
+ * and nothing anywhere said why. `my-dept` hid the problem, because that one derives from the employee code.
+ *
+ * The fallback is what the four call sites already did, so a caller built outside a request - the cron tick,
+ * an internal dispatch, a test - is unchanged: no reporting line, and the chain tokens match nothing, which is
+ * the same fail-closed answer `selfContextFor` gives a principal with no employee record.
+ */
+export const selfContextOf = (user: Pick<AppUser, "self" | "employeeCode">): SelfContext =>
+  user.self ?? { employeeCode: user.employeeCode ?? null };

@@ -20,6 +20,7 @@ import { getTableColumns } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
+import { selfContextOf } from "../lib/selfContext";
 import type { ListScope } from "../domain/access";
 import { deniedSubresourceKeys } from "../http/tableFieldAccess";
 import { deniedRedactedFields } from "../http/fieldAccess";
@@ -321,7 +322,10 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
   const usedSources = new Set<string>();
   for (const field of gated) if (field.source) usedSources.add(`${field.path.join(".")}|${field.source}`);
 
-  const self = { employeeCode: user.employeeCode };
+  // The request's own matcher context (lib/selfContext.ts#selfContextOf), so a cell is judged by the same
+  // question the gate asked: rebuilt from the employee code alone it cannot match `my-reports` / `my-org`, and
+  // a manager's grid over their own team came back with its redacted columns blank.
+  const self = selfContextOf(user);
   for (const used of usedSources) {
     const [pathKey, source] = used.split("|") as [string, string];
     const path = pathKey ? pathKey.split(".") : [];

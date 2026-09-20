@@ -24,6 +24,13 @@ export type AppUser = {
   grant: import("./domain/permissions").Grant; // the caller's role grant, loaded on the auth read - the decision reads this, never the DB
   policy: import("./domain/manifests").Policy; // global body-AC manifest (protected fields + refs), carried on the auth read
   reqMeta?: { ip?: string; ua?: string }; // per-request client metadata, set in middleware, recorded by audit()
+  // The matcher context this request's decisions are made IN, resolved once by the authz middleware and parked
+  // here the way `reqMeta` is. It carries the caller's reporting line when their grant uses the manager-chain
+  // tokens (lib/selfContext.ts), which `employeeCode` alone cannot express - and every surface that decides
+  // about a row while holding only an AppUser (the access hint, field redaction, the grid's per-cell gate) has
+  // to ask the SAME question the gate asked, or it answers a narrower one and hides what the caller may see.
+  // Read through `selfContextOf`, never rebuilt from `employeeCode`. Absent outside a request (cron, dispatch).
+  self?: import("./domain/permissions").SelfContext;
   // Identifies the SITTING this request belongs to, for grouping a whole login in the audit trail. Set only on
   // the session-cookie lane; an API key and an Access assertion carry no session to group by.
   sessionId?: string;

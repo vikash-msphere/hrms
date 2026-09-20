@@ -28,7 +28,7 @@ import { DEFAULT_POLICY, subresourceBodyKey } from "../domain/manifests";
 import { audit } from "../lib/audit";
 import { isJsonBody } from "../http/jsonRequest";
 import { queryParam } from "../http/query";
-import { selfContextFor } from "../lib/selfContext";
+import { selfContextFor, selfContextOf } from "../lib/selfContext";
 import { guardAllows, conditionFieldsOf, windowFieldsOf, type GuardContext } from "../domain/ruleCondition";
 
 // Field-level + reference access control on write bodies (docs/archive/plan.txt 11C). For a POST/PATCH whose
@@ -140,7 +140,11 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
     if (typeof v === "string" && v.length > 0) fromQuery[key] = v;
   }
 
-  const self = { employeeCode: user.employeeCode };
+  // The request's own matcher context. This gate decides `<collection>.<code>.<field>` and the owner key -
+  // both per ROW - so rebuilt from the employee code alone it refused a caller whose write grant reaches the
+  // row through `my-reports` / `my-org`, while the resource-level decision a few lines down allowed it. Same
+  // seam as the read side (lib/selfContext.ts#selfContextOf); the caller was stamped with it above.
+  const self = selfContextOf(user);
   // JSON-FAMILY, not just `application/json`: an Update arrives as `application/merge-patch+json`, so a
   // substring test for `application/json` skipped this entire gate on every PATCH in the app (see
   // http/jsonRequest.ts). Every lane that decides whether a body exists asks the same predicate.
@@ -397,6 +401,13 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // person's goals", and resolving it a second time would be a second read. Read-only to handlers: it
       // decides nothing on its own, it is the context a decision is made IN.
       c.set("self", self);
+      // ...and on the CALLER too, for the surfaces that decide about a row while holding only an AppUser: the
+      // access hint, the field redaction every serialized resource passes through, and the grid's per-cell
+      // gate. Each of those rebuilt the context as `{ employeeCode }`, which cannot match `my-reports` or
+      // `my-org` - so a manager reaching their team through the chain got the row and neither its redacted
+      // fields nor its verbs. Same trick, and for the same reason, as `reqMeta` above: the alternative is
+      // threading the context through every serializer signature in the app.
+      user.self = self;
       // Set by whichever lane below decides a CONCRETE request, so the view-as containment check after the
       // try/catch can put the identical question to the real caller's grant. See the check for why it is a
       // closure rather than the resolved request itself (the activity lane asks two questions, not one).
