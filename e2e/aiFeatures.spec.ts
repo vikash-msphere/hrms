@@ -166,6 +166,39 @@ test.describe("an AI feature switched on", () => {
     }
   });
 
+  test("offers it on a poll's description but never on a kudos", async ({ as }) => {
+    test.setTimeout(180_000);
+    const page = await as("hr");
+
+    await patchSettings(page, "ai", on("drafting"));
+    try {
+      await gotoRoute(page, "announcements", "Feed");
+
+      // A POLL GETS IT. The button sits on the body field, which for a poll is "Description (optional)" -
+      // the context under the question. The question itself is the title input above and is deliberately
+      // left alone, which is why this asserts on the composer rather than on the page.
+      await page.getByRole("button", { name: "Choose what to post" }).click();
+      await page.getByRole("menuitem", { name: "Poll" }).click();
+      const poll = page.getByRole("dialog");
+      await expect(poll.getByRole("button", { name: /^Draft$/ })).toBeVisible({ timeout: 30_000 });
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+
+      // A KUDOS DOES NOT, and this is the positive control's other half: without it, the assertion above
+      // would pass just as well if the gate had been removed altogether rather than narrowed. The body of a
+      // kudos IS the thank-you to a named colleague, which is the one thing here a model should not write.
+      await page.getByRole("button", { name: "Choose what to post" }).click();
+      await page.getByRole("menuitem", { name: "Kudos" }).click();
+      const kudos = page.getByRole("dialog");
+      // The dialog is confirmed OPEN before its Draft button is declared absent, or "absent" would also be
+      // the answer for a dialog that never rendered.
+      await expect(kudos.getByRole("button", { name: "Send kudos" })).toBeVisible({ timeout: 30_000 });
+      await expect(kudos.getByRole("button", { name: /Draft|Improve/ })).toHaveCount(0);
+    } finally {
+      await patchSettings(page, "ai", off("drafting"));
+    }
+  });
+
   test("puts the description field on the table builder, and leaving it blank still creates the table", async ({ as }) => {
     test.setTimeout(180_000);
     const page = await as("super");

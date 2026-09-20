@@ -207,7 +207,7 @@ describe("a grant on one collection cannot reach another's prompt", () => {
     // gated by the same write grant. `post` exists because they were sharing one prompt, and a personal note
     // to colleagues was being written as an HR circular to staff.
     const announcementKinds = DRAFT_KINDS.filter((k) => k.collection === "announcements").map((k) => k.id);
-    expect(announcementKinds).toEqual(["announcement", "post"]);
+    expect(announcementKinds).toEqual(["announcement", "post", "poll"]);
 
     // The property that actually matters: a kind belonging to another collection is not reachable from this
     // one. Sharing a collection is sharing a grant; crossing collections would be using a grant you hold to

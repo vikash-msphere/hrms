@@ -71,6 +71,24 @@ export const DRAFT_KINDS: DraftKind[] = [
       "not add a subject line, and do not tell people what they are required to do.",
   },
   {
+    // The CONTEXT under a poll, never the question itself. The question is the `title` field, one line, and
+    // asking a model to invent what you want to ask people is the version of this that should not exist. The
+    // body is "Description (optional)" - the paragraph explaining why the poll is being run and what the
+    // options mean - and that is ordinary prose. The two were refused together because the gate sat on the
+    // body while the reasoning was about the title.
+    id: "poll",
+    collection: "announcements",
+    label: "Poll description",
+    promptVersion: "v1",
+    maxTokens: 300,
+    system:
+      `You help somebody write the short description under a poll on a company's internal board. ${HOUSE_STYLE} ` +
+      "A sentence or two of context: why the question is being asked, what the options mean, and by when " +
+      "people should vote if the request says. " +
+      "Do NOT write the poll question itself and do NOT invent or list the answer options: the person has " +
+      "written those, and this text sits underneath them.",
+  },
+  {
     id: "job-description",
     collection: "job-requisitions",
     label: "Job description",

@@ -766,21 +766,29 @@ export function PostComposer({
   const messageField = (
     <Field label={isKudos ? "Message" : isPoll ? "Description (optional)" : "Body"}>
       <div>
-        {/* Drafting is offered for a plain announcement only. A kudos is a personal thing to say about a
-            named colleague and a poll is a question, neither of which is improved by having a model write
-            it - and a machine-written thank-you is worse than a short one. */}
-        {!isKudos && !isPoll && (
+        {/* Offered on everything except a kudos.
+            KUDOS IS THE ONE REFUSAL, and it is about this exact field: the body IS the thank-you, addressed
+            to a named colleague, and a machine-written one is worse than a short one.
+            A POLL IS OFFERED IT, which it was not before. The old gate refused polls too, on the grounds
+            that "a poll is a question" - true of the QUESTION, which is the title field above and still has
+            no assist, and not true of this one, which for a poll is "Description (optional)": the paragraph
+            saying why the poll is being run and what the options mean. The reasoning was about one field and
+            the gate was on another. The `poll` draft kind is told in so many words not to write the question
+            or invent the options. */}
+        {!isKudos && (
           <div className="mb-2 flex justify-end">
             <DraftButton
               collection="announcements"
               // THE KIND FOLLOWS THE POST, which it did not before. Both of these render this button and both
               // sent `announcement`, so a personal post was written by the prompt for an HR circular to
               // staff. Same collection either way, so the grant and the denylist check are unchanged.
-              kind={form.kind === "announcement" ? "announcement" : "post"}
+              kind={isPoll ? "poll" : form.kind === "announcement" ? "announcement" : "post"}
               existing={form.body}
-              hint={form.kind === "announcement"
-                ? "e.g. the office moves to the second floor from Monday, entry is by the side door"
-                : "e.g. thanks to everyone who helped at the open day on Saturday"}
+              hint={isPoll
+                ? "e.g. we need to pick a date for the offsite, and the venue is only free on two of them"
+                : form.kind === "announcement"
+                  ? "e.g. the office moves to the second floor from Monday, entry is by the side door"
+                  : "e.g. thanks to everyone who helped at the open day on Saturday"}
               onDraft={(text) => setForm((f) => ({ ...f, body: text }))}
             />
           </div>
