@@ -201,13 +201,36 @@ async function syncAccountEmail(deps: Deps, employeeId: string, workEmail: strin
       .where(and(sql`lower(${schema.users.email}) = ${workEmail.toLowerCase()}`, sql`${schema.users.employeeId} is not ${employeeId}`))
       .limit(1)
   ).length > 0;
-  if (taken) return;
+  // Said out loud rather than returned in silence. The employee row moves to the new address either way, so
+  // after this the person's work email and their sign-in address disagree - which is a state somebody has to
+  // reconcile and nothing else in the app will mention.
+  if (taken) {
+    console.warn(`[employees] work email for employees/${employeeId} moved to an address another account already holds; the sign-in address was left as it was`);
+    return;
+  }
   const linked = (
     await deps.db.select({ uuid: schema.users.uuid }).from(schema.users).where(eq(schema.users.employeeId, employeeId)).limit(1)
   )[0];
   if (!linked) return provisionAccount(deps, employeeId, workEmail);
   // Lowercased, for the reason `provisionAccount` gives: this column is what a login is looked up by.
-  await deps.db.update(schema.users).set({ email: workEmail.toLowerCase(), updatedAt: new Date() }).where(eq(schema.users.uuid, linked.uuid));
+  //
+  // AND THE LIVE SESSIONS END WITH IT. A session cookie carries the EMAIL and nothing else (lib/session.ts), and
+  // it is verified by signature alone for its full 12 hours - so moving this column leaves a valid cookie naming
+  // an address no account holds any more. The next request with it does not fail: middleware/auth.ts misses on
+  // both lookups, finds the old address still inside an allowed domain, finds no employee with that work email
+  // (this edit just moved it), and AUTO-PROVISIONS a second account - default `employee` role, no employee link.
+  // Every `me`-scoped grant matches by employee code, so the person carries on in an app with nothing in it and
+  // no error, while their real account sits unused with their real roles on it. The phantom row then owns the
+  // old address, so the `taken` check above silently declines to move anybody else onto it later.
+  //
+  // `sessionsValidFrom` is the mechanism already built for exactly this (routes/authRoutes.ts stamps it on sign
+  // out): every cookie issued before this instant is refused, so the person signs in again - silently, since
+  // Google re-auth is a redirect - and comes back on the account that moved. Stamped in the SAME write, so
+  // there is no window where the address has changed and the old sessions are still good.
+  await deps.db
+    .update(schema.users)
+    .set({ email: workEmail.toLowerCase(), sessionsValidFrom: new Date(), updatedAt: new Date() })
+    .where(eq(schema.users.uuid, linked.uuid));
 }
 
 /**

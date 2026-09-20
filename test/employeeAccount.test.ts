@@ -96,6 +96,27 @@ describe("employee sign-in accounts", () => {
     expect((await deps.db.select().from(schema.users)).length).toBe(1);
   });
 
+  it("ends the live sessions that were issued to the old address", async () => {
+    // A session cookie carries the EMAIL and nothing else (lib/session.ts), verified by signature alone for
+    // twelve hours. Move the column without this stamp and the next request with that cookie does not fail -
+    // middleware/auth.ts misses both lookups, finds the old address still inside an allowed domain, finds no
+    // employee holding it (this edit just moved it) and AUTO-PROVISIONS a second account at the default role
+    // with no employee link. The person then carries on in an app where every `me`-scoped grant matches
+    // nothing, while their real roles sit on the account that moved.
+    const before = Date.now();
+    const row = await hire("old.address@test.example");
+    expect((await accountFor(row.uuid))?.sessionsValidFrom).toBeNull(); // nothing revoked by the hire itself
+
+    await updateEmployee(deps, actor, row.uuid, { work_email: "new.address@test.example" });
+
+    const account = await accountFor(row.uuid);
+    expect(account?.email).toBe("new.address@test.example");
+    expect(account?.sessionsValidFrom).not.toBeNull();
+    expect(+new Date(account!.sessionsValidFrom!)).toBeGreaterThanOrEqual(before);
+    // And no phantom account was minted for the address that was left behind.
+    expect((await deps.db.select().from(schema.users)).length).toBe(1);
+  });
+
   // The account row IS the sign-in identity, and every lane resolves a caller by their lowercased address
   // (middleware/auth.ts - the Access JWT's email, the session cookie's, the dev bypass). Stored as typed, an
   // address HR entered with capitals was never found by that login: it minted a SECOND account at the default
