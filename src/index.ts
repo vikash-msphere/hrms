@@ -147,7 +147,7 @@ import { authRoutes } from "./routes/authRoutes";
  *  ahead of the assets, and this decides how a miss among them is answered. test/spaFallback.test.ts pins
  *  the two together, because a prefix added to one and not the other fails in a way nothing else catches:
  *  the route starts replying 200 with the app shell instead of its 404. */
-export const WORKER_OWNED_PREFIXES = ["/v1", "/esign", "/auth", "/found", "/calendar", "/diag"];
+export const WORKER_OWNED_PREFIXES = ["/v1", "/esign", "/auth", "/found", "/calendar", "/diag", "/__scheduled"];
 
 const app = new Hono<AppEnv>();
 app.onError(errorHandler);

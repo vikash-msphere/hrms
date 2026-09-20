@@ -9,7 +9,7 @@ import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import type { ListScope } from "../src/domain/access";
-import { attentionFor } from "../src/services/attention";
+import { attentionFor, weeklyAttentionDigest } from "../src/services/attention";
 import { rankAttention, ATTENTION_LIMIT, type AttentionItem } from "../src/domain/attention";
 import { STALE_AFTER_DAYS } from "../src/domain/goals";
 
@@ -243,6 +243,61 @@ describe("the one-line summary", () => {
     // The row already says it, in more detail than a sentence would, and a neuron spent here buys nothing.
     expect(summary).toBeUndefined();
     expect(s.seen).toEqual([]);
+  });
+});
+
+describe("the Monday roundup", () => {
+  const notifications = () => deps.db.select().from(schema.notifications);
+
+  /** Freeze the clock on a known weekday. `2026-09-21` is a Monday, `2026-09-22` a Tuesday. */
+  const on = (ymd: string) => { deps.clock = { now: () => new Date(`${ymd}T09:00:00Z`) }; };
+
+  it("sends nothing on the other six days", async () => {
+    await people();
+    await goal({ title: "Late", createdAt: new Date(Date.now() - 90 * DAY), dueDate: new Date(Date.now() + 10 * DAY), progress: 5 });
+    on("2026-09-22");
+    expect(await weeklyAttentionDigest(deps)).toBe(0);
+    expect(await notifications()).toHaveLength(0);
+  });
+
+  it("sends one notification to the person whose goal it is, naming what is wrong", async () => {
+    await people();
+    on("2026-09-21");
+    // Positioned against the FROZEN clock, not `Date.now()`, or the goal would be in trouble relative to a
+    // different week than the one being tested.
+    const now = deps.clock.now().getTime();
+    await goal({ title: "Platform rewrite", createdAt: new Date(now - 90 * DAY), dueDate: new Date(now + 10 * DAY), progress: 10 });
+    expect(await weeklyAttentionDigest(deps)).toBe(1);
+
+    const rows = await notifications();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.recipientId).toBe(ME.uuid);
+    expect(rows[0]!.title).toMatch(/1 thing needs you this week/);
+    // The specifics travel with it: a notification saying only "you have things to do" is one more thing to
+    // do rather than a reason to open the dashboard.
+    expect(rows[0]!.body).toContain("Platform rewrite");
+    expect(rows[0]!.body).toMatch(/expected by now/);
+  });
+
+  it("gives each person only their own, never their team's", async () => {
+    await people();
+    on("2026-09-21");
+    const now = deps.clock.now().getTime();
+    // OTHER reports to ME. On the dashboard a manager's scope can reach their team's goals; the digest is
+    // deliberately narrower - it is somebody's own week, and it is sent without anybody asking for it.
+    await goal({ title: "Their goal", employeeId: OTHER.uuid, createdAt: new Date(now - 90 * DAY), dueDate: new Date(now + 10 * DAY), progress: 5 });
+    expect(await weeklyAttentionDigest(deps)).toBe(1);
+    const rows = await notifications();
+    expect(rows.map((r) => r.recipientId)).toEqual([OTHER.uuid]);
+  });
+
+  it("says nothing to somebody with nothing wrong", async () => {
+    await people();
+    on("2026-09-21");
+    const now = deps.clock.now().getTime();
+    await goal({ title: "Fine", createdAt: new Date(now - 10 * DAY), dueDate: new Date(now + 90 * DAY), progress: 15 });
+    expect(await weeklyAttentionDigest(deps)).toBe(0);
+    expect(await notifications()).toHaveLength(0);
   });
 });
 

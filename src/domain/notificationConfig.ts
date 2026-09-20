@@ -36,6 +36,11 @@ export const NOTIFICATION_CATEGORIES: { key: string; label: string; defaultPrior
   { key: "ticket", label: "Support tickets", defaultPriority: "normal" },
   { key: "review", label: "Performance reviews", defaultPriority: "normal" },
   { key: "goal", label: "Goals", defaultPriority: "normal" },
+  // Its own category rather than folded into `goal`, for the reason `dayMark` is separate from
+  // `regularization`: somebody who wants to hear about their goals has not necessarily asked for a Monday
+  // roundup, and somebody who mutes the roundup should not thereby stop hearing that a goal was shared with
+  // them. `low` because nothing in it is new - it is a summary of things already true.
+  { key: "attention", label: "Weekly \"needs you\" roundup", defaultPriority: "low" },
   { key: "checkin", label: "Check-ins / 1:1s", defaultPriority: "normal" },
   { key: "compliance", label: "Compliance calendar", defaultPriority: "high" },
   { key: "referral", label: "Referrals", defaultPriority: "normal" },

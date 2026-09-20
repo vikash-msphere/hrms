@@ -177,7 +177,7 @@ cpu_ms = 60000
 directory = "./web/dist"
 binding = "ASSETS"
 not_found_handling = "none" # the Worker owns the SPA fallback - see the note on the top-level [assets]
-run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag"]
+run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag", "/__scheduled"]
 
 [env.staging.vars]
 # EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.

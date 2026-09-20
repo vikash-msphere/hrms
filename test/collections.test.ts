@@ -22,7 +22,7 @@ const indexSrc = Object.values(rawIndex)[0]!;
 // Fan-out envelopes rather than collections: the authz middleware exempts these from the collection decision
 // (AGGREGATE_ROUTES in src/middleware/authz.ts) and gates each one per underlying collection instead, so they
 // correctly have no entry of their own. Kept in step with that set by the assertion below.
-const AGGREGATE_ROUTES = ["search", "dashboard-summary", "people-analytics", "approvals-summary", "activity-counts", "changes"];
+const AGGREGATE_ROUTES = ["search", "dashboard-summary", "people-analytics", "approvals-summary", "activity-counts", "changes", "attention"];
 
 // Namespaces that are deliberately NOT routes: virtual capabilities gating an affordance or a cross-cutting
 // verb rather than a resource. Each must still be nameable in a grant, which is why they are in COLLECTIONS.

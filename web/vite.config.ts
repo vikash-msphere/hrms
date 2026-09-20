@@ -569,7 +569,7 @@ export default defineConfig(({ mode }) => ({
       // replay's recording item), so it could not go through Prism even if it were in the contract - Prism
       // re-encodes a binary body as text, which is precisely the corruption the relay itself was just fixed
       // for. Straight to the Worker, bytes intact.
-      "^/(auth|esign|found|calendar|diag)(/|$)": WORKER_ORIGIN,
+      "^/(auth|esign|found|calendar|diag|__scheduled)(/|$)": WORKER_ORIGIN,
     },
   },
 }));

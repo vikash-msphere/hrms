@@ -24,6 +24,8 @@ import { applyScope } from "./listScope";
 import { goalPace, staleDays, STALE_AFTER_DAYS } from "../domain/goals";
 import { fence } from "../domain/aiPolicy";
 import { aiFeatureOn, aiGenerate } from "./ai";
+import { notify } from "./notifications";
+import { orgToday } from "./orgDay";
 import { ATTENTION_LIMIT, rankAttention, type AttentionItem } from "../domain/attention";
 
 /** Rows read per source before filtering. See the header. */
@@ -104,6 +106,107 @@ async function summarise(deps: Deps, user: AppUser, items: AttentionItem[]): Pro
 }
 
 /**
+ * The Monday roundup: one notification per person who has something off track.
+ *
+ * NO MODEL, AND THAT IS ARITHMETIC RATHER THAN CAUTION. The dashboard's one-line summary costs a generation,
+ * which `ESTIMATED_NEURONS` puts at about 120. A hundred people is 12,000 against a daily ceiling of 7,000 -
+ * so a per-person written digest cannot fit in the free allocation at any company worth sending one to, and
+ * the version that fits is the one that does not ask. The wording here is assembled from the same details the
+ * list already carries.
+ *
+ * ONE QUERY PER SOURCE, NOT PER PERSON. `attentionFor` runs three queries for one caller, which is right on a
+ * dashboard load and wrong on a cron: at a hundred people it would be three hundred, on a tick that already
+ * runs twenty-two subtasks inside one invocation's subrequest budget. These read everyone's rows once and
+ * group them in memory.
+ *
+ * NO SCOPE IS BOUND, and it would be wrong to bind one. There is no caller: each person is sent THEIR OWN
+ * rows, selected by owner, so the only access question is "is this yours", which the grouping answers by
+ * construction. A manager's digest is their own work, not their team's - the dashboard is where breadth
+ * belongs, because there somebody is asking.
+ */
+export async function weeklyAttentionDigest(deps: Deps): Promise<number> {
+  const today = await orgToday(deps);
+  // Monday IN THE ORG'S TIMEZONE, not the Worker's. A cron at 02:00 UTC is already Monday in Auckland and
+  // still Sunday in Los Angeles; reading the day in UTC would send some people their week on the wrong one.
+  if (new Date(`${today}T00:00:00Z`).getUTCDay() !== 1) return 0;
+
+  const now = deps.clock.now().getTime();
+  const byPerson = new Map<string, AttentionItem[]>();
+  const add = (employeeId: string | null, item: AttentionItem) => {
+    if (!employeeId) return;
+    const list = byPerson.get(employeeId) ?? [];
+    list.push(item);
+    byPerson.set(employeeId, list);
+  };
+
+  for (const g of await deps.db
+    .select({
+      uuid: schema.goals.uuid, title: schema.goals.title, status: schema.goals.status, employeeId: schema.goals.employeeId,
+      progress: schema.goals.progress, dueDate: schema.goals.dueDate, createdAt: schema.goals.createdAt, updatedAt: schema.goals.updatedAt,
+    })
+    .from(schema.goals)
+    .where(and(isNull(schema.goals.deleteTime), inArray(schema.goals.status, ["not_started", "in_progress"])))
+    .limit(DIGEST_WINDOW)) {
+    for (const item of goalTrouble(g, now)) add(g.employeeId, item);
+  }
+
+  for (const c of await deps.db
+    .select({ uuid: schema.cards.uuid, title: schema.cards.title, columnKey: schema.cards.columnKey, columnSince: schema.cards.columnSince, employeeId: schema.cards.employeeId })
+    .from(schema.cards)
+    .where(and(isNull(schema.cards.deleteTime), lt(schema.cards.columnSince, new Date(now - CARD_AGED_DAYS * DAY))))
+    .limit(DIGEST_WINDOW)) {
+    add(c.employeeId, cardItem(c, now));
+  }
+
+  for (const r of await deps.db
+    .select({
+      uuid: schema.reviews.uuid, state: schema.reviews.state, employeeId: schema.reviews.employeeId,
+      reviewerId: schema.reviews.reviewerId, revieweeManagerId: schema.employees.managerId, cycleName: schema.reviewCycles.name,
+    })
+    .from(schema.reviews)
+    .leftJoin(schema.reviewCycles, eq(schema.reviewCycles.uuid, schema.reviews.cycleId))
+    .leftJoin(schema.employees, eq(schema.employees.uuid, schema.reviews.employeeId))
+    .where(inArray(schema.reviews.state, ["SELF", "MANAGER", "SHARED"]))
+    .limit(DIGEST_WINDOW)) {
+    // The same three cases as the dashboard, and the same reviewer fallback - but here the OWNER of the item
+    // is whoever it waits on, because that is who receives it.
+    const writer = r.reviewerId ?? r.revieweeManagerId;
+    if (r.state === "MANAGER") add(writer, reviewItem(r, "your review of this person is due"));
+    else if (r.state === "SELF") add(r.employeeId, reviewItem(r, "your self-assessment is due"));
+    else add(r.employeeId, reviewItem(r, "shared with you, waiting on your acknowledgement"));
+  }
+
+  let sent = 0;
+  for (const [employeeId, found] of byPerson) {
+    const items = rankAttention(found).slice(0, ATTENTION_LIMIT);
+    if (items.length === 0) continue;
+    // Best-effort per person: one recipient whose prefs or row is odd must not cost everybody else theirs.
+    try {
+      await notify(deps, {
+        recipient: employeeId,
+        type: "attention.weekly",
+        title: `${items.length} thing${items.length === 1 ? "" : "s"} need${items.length === 1 ? "s" : ""} you this week`,
+        // The top few, with their specifics. The rest are a count rather than a wall of text: this is a
+        // nudge to open the dashboard, and a notification that reproduces the whole list replaces it badly.
+        body: [
+          ...items.slice(0, 3).map((i) => `${i.title} - ${i.detail}`),
+          ...(items.length > 3 ? [`and ${items.length - 3} more`] : []),
+        ].join("\n"),
+        link: "/dashboard",
+      });
+      sent++;
+    } catch (e) {
+      console.error(`attention digest failed for employees/${employeeId}`, e);
+    }
+  }
+  return sent;
+}
+
+/** Rows read per source for the whole org's digest. See the header: this is the ceiling on one cron tick's
+ *  reads, not a page size, and a company past it gets a partial digest rather than a failed one. */
+const DIGEST_WINDOW = 2000;
+
+/**
  * Goals that will not land, and goals nobody has mentioned in three weeks.
  *
  * Both predicates live in domain/goals.ts and both decline to answer where there is no honest answer - a goal
@@ -131,29 +234,51 @@ async function goalItems(deps: Deps, scope: ListScope | undefined, now: number):
     .orderBy(schema.goals.dueDate)
     .limit(WINDOW);
 
-  const out: AttentionItem[] = [];
-  for (const g of rows) {
-    const path = `goals/${g.uuid}`;
-    const pace = goalPace({ createdAt: g.createdAt, dueDate: g.dueDate, progress: g.progress ?? 0, status: g.status }, now);
-    if (pace && (pace.state === "at_risk" || pace.state === "behind")) {
-      const left = g.dueDate ? Math.max(0, Math.ceil((+new Date(g.dueDate) + DAY - now) / DAY)) : 0;
-      out.push({
-        kind: pace.state === "at_risk" ? "goal_at_risk" : "goal_behind",
-        path,
-        title: g.title,
-        detail: `${Math.round(g.progress ?? 0)}% done, ${pace.expected}% expected by now, ${left} day${left === 1 ? "" : "s"} left`,
-        days: -pace.drift, // further behind sorts first within the kind
-      });
-      // One item per goal. A goal that is both behind AND silent is one problem with two symptoms, and
-      // listing it twice would push something else off a list of eight.
-      continue;
-    }
-    const silent = staleDays({ updatedAt: g.updatedAt, status: g.status }, null, now);
-    if (silent !== null && silent >= STALE_AFTER_DAYS) {
-      out.push({ kind: "goal_stale", path, title: g.title, detail: `no progress recorded in ${silent} days`, days: silent });
-    }
+  return rows.flatMap((g) => goalTrouble(g, now));
+}
+
+/**
+ * What, if anything, is wrong with one goal. Shared by the dashboard and the weekly digest.
+ *
+ * ONE IMPLEMENTATION, for the reason the module header gives: two surfaces that each decide what "in trouble"
+ * means will eventually disagree, and a person who sees a goal flagged on Monday and fine on Tuesday stops
+ * believing either. The digest reads different rows in a different query; it must not also read them
+ * differently.
+ *
+ * Returns at most one item. A goal that is both behind AND silent is one problem with two symptoms, and
+ * listing it twice would push something else off a list of eight.
+ */
+type GoalRow = { uuid: string; title: string; status: string; progress: number | null; dueDate: Date | null; createdAt: Date; updatedAt: Date };
+function goalTrouble(g: GoalRow, now: number): AttentionItem[] {
+  const path = `goals/${g.uuid}`;
+  const pace = goalPace({ createdAt: g.createdAt, dueDate: g.dueDate, progress: g.progress ?? 0, status: g.status }, now);
+  if (pace && (pace.state === "at_risk" || pace.state === "behind")) {
+    const left = g.dueDate ? Math.max(0, Math.ceil((+new Date(g.dueDate) + DAY - now) / DAY)) : 0;
+    return [{
+      kind: pace.state === "at_risk" ? "goal_at_risk" : "goal_behind",
+      path,
+      title: g.title,
+      detail: `${Math.round(g.progress ?? 0)}% done, ${pace.expected}% expected by now, ${left} day${left === 1 ? "" : "s"} left`,
+      days: -pace.drift, // further behind sorts first within the kind
+    }];
   }
-  return out;
+  const silent = staleDays({ updatedAt: g.updatedAt, status: g.status }, null, now);
+  if (silent !== null && silent >= STALE_AFTER_DAYS) {
+    return [{ kind: "goal_stale", path, title: g.title, detail: `no progress recorded in ${silent} days`, days: silent }];
+  }
+  return [];
+}
+
+/** One aged card as an item. Shared, for the same reason `goalTrouble` is. */
+type CardRow = { uuid: string; title: string; columnKey: string; columnSince: Date | null };
+function cardItem(c: CardRow, now: number): AttentionItem {
+  const days = c.columnSince ? Math.floor((now - +new Date(c.columnSince)) / DAY) : CARD_AGED_DAYS;
+  return { kind: "card_aged", path: `cards/${c.uuid}`, title: c.title, detail: `in ${c.columnKey} for ${days} days`, days };
+}
+
+/** One waiting review as an item. The WORDING is the caller's, because who it waits on decides what it says. */
+function reviewItem(r: { uuid: string; cycleName: string | null }, detail: string): AttentionItem {
+  return { kind: "review_waiting", path: `reviews/${r.uuid}`, title: r.cycleName ?? "Review", detail };
 }
 
 /** Cards that have sat in one column long enough that the board is no longer telling the truth about them. */
@@ -176,16 +301,7 @@ async function cardItems(deps: Deps, scope: ListScope | undefined, now: number):
     .orderBy(schema.cards.columnSince)
     .limit(WINDOW);
 
-  return rows.map((c) => {
-    const days = c.columnSince ? Math.floor((now - +new Date(c.columnSince)) / DAY) : CARD_AGED_DAYS;
-    return {
-      kind: "card_aged" as const,
-      path: `cards/${c.uuid}`,
-      title: c.title,
-      detail: `in ${c.columnKey} for ${days} days`,
-      days,
-    };
-  });
+  return rows.map((c) => cardItem(c, now));
 }
 
 /**
@@ -237,7 +353,7 @@ async function reviewItems(deps: Deps, user: AppUser, scope: ListScope | undefin
           : (r.state === "SHARED" && r.employeeId === me) ? "shared with you, waiting on your acknowledgement"
             : null;
     if (!waiting) continue;
-    out.push({ kind: "review_waiting", path: `reviews/${r.uuid}`, title: r.cycleName ?? "Review", detail: waiting });
+    out.push(reviewItem(r, waiting));
   }
   return out;
 }

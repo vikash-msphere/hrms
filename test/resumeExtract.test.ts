@@ -107,8 +107,15 @@ describe("the exception is narrow", () => {
     expect(() => assertConsentedPath("made.up.path", "candidates")).toThrow(/not a declared consented path/);
   });
 
-  it("covers extraction only - nothing here ranks or scores anybody", () => {
-    expect(Object.keys(CONSENTED_PATHS)).toEqual(["ats.resumeExtraction"]);
+  it("holds only the clerical exceptions - nothing here ranks or scores anybody", () => {
+    // LISTED, so adding one is a deliberate edit in front of a reviewer rather than a quiet append. Both
+    // entries are the same shape: a person already doing a task, and the model doing the clerical half of it
+    // under their hand. Extraction transcribes a document the candidate submitted; review drafting writes
+    // prose for the author of a review and reads no record at all.
+    //
+    // The name of anything that RANKS, SCORES or RECOMMENDS A VERDICT about a person does not appear here,
+    // and that is the property this test exists for.
+    expect(Object.keys(CONSENTED_PATHS).sort()).toEqual(["ats.resumeExtraction", "reviews.draft"]);
   });
 });
 

@@ -9,6 +9,7 @@ import type { Deps } from "./deps";
 import { processPayslipRunJob } from "./services/payroll";
 import { runDeferredActions, runWorkflowTimer, runScheduledAutomations, runScheduledFanOut, SCHEDULED_FAN_OUT_JOB, withDispatchBudget } from "./services/automationEngine";
 import { flushDigests } from "./services/notificationDigest";
+import { weeklyAttentionDigest } from "./services/attention";
 import { generateRecurringExpenses } from "./services/expenses";
 import { checkBudgetThresholds, openRecurringBudgetPeriods } from "./services/expenseBudgets";
 import { emitEvent } from "./services/eventBus";
@@ -177,6 +178,12 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     const scheduledAutomations = await run("runScheduledAutomations", () => runScheduledAutomations(deps));
     // Flush queued digest notifications into one summary per recipient (best-effort).
     const digestsFlushed = await run("flushDigests", () => flushDigests(deps));
+    // The Monday roundup: one notification to each person with something off track - a goal that will not
+    // land, one nobody has touched in three weeks, a card stuck in a column, a review waiting on them. A
+    // no-op on the other six days, decided in the ORG's timezone rather than the Worker's, so nobody gets
+    // their week on the wrong day. Reads each source once for the whole company rather than three times per
+    // person, which is what keeps it inside this invocation's subrequest budget (best-effort).
+    const attentionDigests = await run("weeklyAttentionDigest", () => weeklyAttentionDigest(deps));
     // Chase unconfirmed asset custody: nudge holders who owe a scan, flag stock nobody counted in, and mark
     // assets nobody has sighted in months as stale (best-effort).
     const assetCustody = await run("remindAssetCustody", () => remindAssetCustody(deps));
@@ -221,7 +228,7 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // that is not due, so it costs one settings read a night.
     const accessReviewed = await run("reviewStandingAccess", () => reviewStandingAccess(deps));
     return {
-      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, accessReviewed },
+      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, attentionDigests, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, accessReviewed },
       failures,
     };
   }

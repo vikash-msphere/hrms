@@ -56,7 +56,7 @@ const WITHHELD_SUBRESOURCES: Record<string, string> = {};
 
 const mounted = [...Object.values(rawIndex)[0]!.matchAll(/app\.route\("\/v1\/([a-z0-9-]+)"/g)].map((m) => m[1]!);
 // Fan-out envelopes: gated per underlying collection rather than as a collection of their own.
-const AGGREGATES = ["search", "dashboard-summary", "people-analytics", "approvals-summary", "activity-counts", "changes", "activity", "operations", "notifications", "preferences", "settings", "batch"];
+const AGGREGATES = ["search", "dashboard-summary", "people-analytics", "approvals-summary", "activity-counts", "changes", "attention", "activity", "operations", "notifications", "preferences", "settings", "batch"];
 
 // `.get("/:employee_id/<sub>", ...)` on the employees router - the sub-resource shape the finding is about.
 const subResources = [

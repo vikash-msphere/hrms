@@ -42,7 +42,11 @@ describe("SPA fallback", () => {
   // the route worked in production and 404'd on every developer's machine - the SPA's own index.html
   // answering a POST, which looks exactly like the route not existing.
   it("the Vite dev proxy forwards every worker-owned prefix", () => {
-    const alternation = viteConfig.match(/\^\/\(([a-z|]+)\)\(\/\|\$\)/);
+    // Underscores are part of the character class because a worker-owned prefix can carry one: wrangler's
+    // own `/__scheduled` is the case in point. Without them this regex simply stopped matching, and the
+    // failure was "expected null not to be null" - the gate going blind rather than reporting a mismatch,
+    // which is the worse of the two ways for a drift test to break.
+    const alternation = viteConfig.match(/\^\/\(([a-z_|]+)\)\(\/\|\$\)/);
     expect(alternation).not.toBeNull();
     const proxied = alternation![1]!.split("|").map((p) => `/${p}`);
     // /v1 is excluded here on purpose: it has its own two proxy entries above (Prism, plus the binary custom
