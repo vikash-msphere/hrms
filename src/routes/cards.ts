@@ -6,6 +6,7 @@ import {
   commentCard, addCardTodos, toggleCardTodo, removeCardTodo, promoteCardTodo, watchCard, deleteCard, restoreCard, purgeCard,
   type CardInput,
 } from "../services/cards";
+import { suggestCardTriage } from "../services/cardTriage";
 import { toCardResource } from "../http/serialize";
 import { MAX_RICH_COMMENT } from "../domain/richText";
 import { CARD_PRIORITIES } from "../domain/boards";
@@ -122,5 +123,19 @@ export const cards = collectionRoutes<CardInput, typeof schema.cards>({
     // double press rather than an error.
     watch: { run: (deps, user, id) => watchCard(deps, user, id, true) },
     unwatch: { run: (deps, user, id) => watchCard(deps, user, id, false) },
+    // What comparable delivered work says about this card, and whether it is already on the board twice.
+    //
+    // `raw`, so it owns its response: there is no card row to serialize here, and passing the analysis
+    // through the resource serializer would mean inventing a resource that does not exist.
+    //
+    // The caller's own list scope goes in and the service re-decides every neighbour against it - which is
+    // why this verb is registered in SCOPE_READING_VERBS (middleware/authz.ts). A card the caller could not
+    // list contributes nothing: not a link, not a vote.
+    triage: {
+      raw: async (c, id) => {
+        const triage = await suggestCardTriage(c.get("deps"), c.get("scope"), id);
+        return c.json({ triage });
+      },
+    },
   },
 });

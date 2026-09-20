@@ -43,7 +43,7 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   "leave-requests": ["update", "delete", "approve", "reject", "cancel", "upload", "download"],
   goals: ["update", "delete", "updateProgress", "comment", "setContributors", "watch", "unwatch"],
   boards: ["update", "delete", "configure", "metrics"],
-  cards: ["update", "delete", "move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo", "promoteTodo", "watch", "unwatch"],
+  cards: ["update", "delete", "move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo", "promoteTodo", "watch", "unwatch", "triage"],
   sprints: ["update", "delete", "activate", "complete"],
   "review-cycles": ["update", "delete", "launch", "enroll", "close", "reopen"],
   reviews: ["submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", "suggestFeedback", "assignReviewer", "nudge", "pdf"],

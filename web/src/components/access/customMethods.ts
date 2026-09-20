@@ -20,7 +20,7 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   "leave-requests": ["approve", "reject", "cancel", "upload", "download"],
   goals: ["updateProgress", "comment", "setContributors", "watch", "unwatch"],
   boards: ["configure", "metrics"],
-  cards: ["move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo", "promoteTodo", "watch", "unwatch"],
+  cards: ["move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo", "promoteTodo", "watch", "unwatch", "triage"],
   sprints: ["activate", "complete"],
   "review-cycles": ["launch", "enroll", "close", "reopen"],
   reviews: ["submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", "suggestFeedback", "assignReviewer", "nudge", "pdf"],

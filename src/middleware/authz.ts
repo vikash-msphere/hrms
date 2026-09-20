@@ -274,6 +274,7 @@ const AGGREGATE_ROUTES = new Set(["search", "dashboard-summary", "people-analyti
 export const SCOPE_READING_VERBS = new Map<string, string>([
   ["suggestions:similar", "suggestions"], // other suggestions asking the same thing (services/suggestionSimilar.ts)
   ["tickets:triage", "tickets"], // the resolved neighbours a routing suggestion is voted from (services/ticketTriage.ts)
+  ["cards:triage", "cards"], // the delivered neighbours a card's filing suggestion is voted from (services/cardTriage.ts)
   ["review-cycles:variablePay", "reviews"], // every review in the cycle, priced (services/variablePay.ts)
   ["review-cycles:award", "reviews"], // the same lines, then paid
 ]);

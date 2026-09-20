@@ -18,6 +18,7 @@ import { getSetting } from "@/lib/settingsStore";
 export type AiFeatureKey =
   | "search.semantic"
   | "tickets.triage"
+  | "cards.triage"
   | "drafting"
   | "ats.extraction"
   | "tables.describe"

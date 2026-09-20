@@ -13859,6 +13859,40 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ticket' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/cards/{card_id}:triage:
+    post:
+      description: "Custom method triage: what comparable DELIVERED cards say this one's department, priority and size should be, plus cards still in flight that look like duplicates of it. Evidence is delivered work only - an open card's filing is a guess the board has not tested - while duplicates are open only, because filing the same work twice is a problem exactly while both are live. A read, and a POST only because that is how this API spells a custom method. Every neighbour is re-checked against the caller's own card list scope, so it cites nothing they could not have listed. Nothing is written to the card. Returns { triage: null } when the card is not indexed yet, when no neighbour is visible, or when no field reaches the evidence floor."
+      operationId: ":TriageCard"
+      parameters: [ { in: path, name: card_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  triage:
+                    nullable: true
+                    type: object
+                    properties:
+                      department: { nullable: true, type: object, properties: { value: { type: string }, votes: { type: integer }, of: { type: integer } } }
+                      priority: { nullable: true, type: object, properties: { value: { type: string }, votes: { type: integer }, of: { type: integer } } }
+                      size: { nullable: true, type: object, properties: { value: { type: string }, votes: { type: integer }, of: { type: integer } } }
+                      basis:
+                        type: array
+                        items: { type: object, properties: { path: { type: string }, title: { type: string }, score: { type: number } } }
+                      duplicates:
+                        type: array
+                        items: { type: object, properties: { path: { type: string }, title: { type: string }, score: { type: number }, column: { type: string } } }
+                required: [triage]
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/tickets/{ticket_id}:triage:
     post:
       description: "Custom method triage: the nearest-neighbour suggestion for this ticket's servicing department, category and priority, taken from the RESOLVED tickets closest to it, plus open tickets that may be duplicates. A read, and a POST only because that is how this API spells a custom method. Every neighbour is re-checked against the caller's own ticket list scope, so it cites nothing the caller could not have listed. Returns { triage: null } when the ticket is not indexed yet, when no neighbour is visible, or when no field reaches the evidence floor."

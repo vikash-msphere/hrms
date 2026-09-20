@@ -18,7 +18,7 @@ import { getSetting, saveSetting } from "@/lib/settingsStore";
 // employee data. Each feature also states what it does WITHOUT AI, because every one of them has a working
 // non-AI path and switching it off is not a loss of function.
 
-type AiFeatureKey = "search.semantic" | "tickets.triage" | "drafting" | "ats.extraction" | "tables.describe" | "analytics.narrate" | "moderation" | "suggestions.similar" | "attention.summary";
+type AiFeatureKey = "search.semantic" | "tickets.triage" | "cards.triage" | "drafting" | "ats.extraction" | "tables.describe" | "analytics.narrate" | "moderation" | "suggestions.similar" | "attention.summary";
 type AiConfig = { features?: Partial<Record<AiFeatureKey, boolean>>; dailyNeurons?: number; perUserHourlyGenerations?: number; resume_fields?: string[] };
 
 // Which fields a CV may be read into, and which of those are the model doing more than copying. Mirrors
@@ -50,6 +50,12 @@ const FEATURES: { key: AiFeatureKey; title: string; on: string; off: string }[] 
     title: "Ticket triage suggestions",
     on: "A new ticket is compared to the resolved tickets nearest it, and the servicing department, category and priority they agree on is offered as a suggestion, with the tickets that voted. Possible duplicates are flagged. No text is generated and nothing is applied automatically.",
     off: "Tickets are routed and prioritised by hand, exactly as they are today.",
+  },
+  {
+    key: "cards.triage",
+    title: "Board task filing suggestions",
+    on: "On a task, show what comparable DELIVERED tasks say its department, priority and size should be, with the tasks that voted - and flag tasks still in flight that look like the same work. Evidence is finished work only: an open task's filing is a guess the board has not tested yet. No text is generated and nothing is applied automatically.",
+    off: "Tasks are filed and sized by hand, and duplicated work is noticed by somebody recognising it, as today.",
   },
   {
     key: "drafting",
