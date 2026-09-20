@@ -588,8 +588,35 @@ function validateAi(value: unknown) {
   }
 }
 
+/**
+ * The "Needs you" thresholds.
+ *
+ * Validated on write even though `attentionConfigOf` clamps on read, and the two are not redundant: the clamp
+ * keeps a bad stored value from breaking the surface, while this keeps somebody from saving 0 and being told
+ * it worked. A screen that accepts a number and then quietly uses a different one is worse than a refusal.
+ */
+function validateAttention(value: unknown): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw invalidArgument("attention must be an object");
+  const v = value as Record<string, unknown>;
+  const range = (key: string, lo: number, hi: number) => {
+    if (v[key] === undefined || v[key] === null) return;
+    const n = v[key];
+    if (typeof n !== "number" || !Number.isFinite(n) || !Number.isInteger(n) || n < lo || n > hi) {
+      throw invalidArgument(`attention.${key} must be a whole number between ${lo} and ${hi}`);
+    }
+  };
+  range("goalStaleDays", 1, 365);
+  range("cardAgedDays", 1, 365);
+  range("limit", 1, 25);
+  range("digestWeekday", 0, 6);
+  if (v.digestEnabled !== undefined && typeof v.digestEnabled !== "boolean") {
+    throw invalidArgument("attention.digestEnabled must be true or false");
+  }
+}
+
 const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
   ["ai", validateAi],
+  ["attention", validateAttention],
   ["ctc", validateCtc],
   ["esign", validateEsign],
   ["payslip", validatePayslip],

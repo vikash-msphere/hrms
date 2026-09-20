@@ -23,17 +23,14 @@ import * as schema from "../db/schema";
 import { applyScope } from "./listScope";
 import { byIdChunks } from "../lib/dbBatch";
 import { parseVectorId, vectorIdOf } from "../lib/vector";
-import { aiFeatureOn } from "./ai";
+import { aiConfig, aiFeatureOn } from "./ai";
+import { cardDuplicateScore } from "../domain/aiPolicy";
 import { vote, type TriageVote } from "./ticketTriage";
 
 /** Neighbours asked of the index. The SQL re-check throws most away for a narrowly-scoped caller, so this is
  *  generous on purpose - the same reasoning as the semantic search top-k. */
 const TOP_K = 40;
 
-/** How alike two cards must look before one is offered as "you may already have this". Deliberately high: a
- *  false duplicate sends somebody to read a card that has nothing to do with theirs, and two of those teach
- *  people to ignore the panel. */
-const DUPLICATE_SCORE = 0.82;
 
 export type CardTriage = {
   department: TriageVote<string> | null;
@@ -50,6 +47,9 @@ export async function suggestCardTriage(deps: Deps, scope: ListScope | undefined
   if (!deps.vectors) return null;
   // The org's switch, checked before anything is read: off must cost nothing, not merely produce nothing.
   if (!(await aiFeatureOn(deps, "cards.triage"))) return null;
+  // The org says how alike is alike enough, as a named position rather than a cosine value it could not
+  // sensibly pick (domain/aiPolicy.ts CARD_DUPLICATE_SCORES).
+  const duplicateScore = cardDuplicateScore((await aiConfig(deps)).cardDuplicateSensitivity);
 
   // The card's OWN vector, fetched rather than recomputed - re-embedding would cost a neuron per panel open
   // and could disagree with what is actually in the index, making the neighbours wrong in a way nothing would
@@ -110,7 +110,7 @@ export async function suggestCardTriage(deps: Deps, scope: ListScope | undefined
 
   const delivered = visible.filter((r) => r.deliveredAt !== null);
   const duplicates = visible
-    .filter((r) => r.deliveredAt === null && r.score >= DUPLICATE_SCORE)
+    .filter((r) => r.deliveredAt === null && r.score >= duplicateScore)
     .map((r) => ({ path: `cards/${r.uuid}`, title: r.title, score: r.score, column: r.columnKey }));
 
   const triage: CardTriage = {

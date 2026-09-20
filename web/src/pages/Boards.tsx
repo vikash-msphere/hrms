@@ -50,6 +50,7 @@ import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import type { Label as BoardLabel } from "@/types";
 import { RichTextToolbar } from "@/components/common/RichTextToolbar";
 import { DraftButton } from "@/components/common/DraftButton";
+import { CardTriageCard } from "@/components/common/CardTriageCard";
 import { RichText } from "@/lib/richText";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessTarget } from "@/components/access/AccessTarget";
@@ -1685,6 +1686,23 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
           <Field label="Department">
             <Combobox value={department} onValueChange={setDepartment} options={deptOptions} placeholder="Org default department" disabled={!canEdit} />
           </Field>
+          {/* Only on an existing card: the suggestion comes from this card's own place in the index, and a
+              card being created is not in it yet. Filing help for a NEW card would have to embed the text on
+              the fly, which is a neuron per keystroke-pause and a different feature. */}
+          {editing && card && (
+            <div className="sm:col-span-2">
+              <CardTriageCard
+                cardId={idOf(card.path)}
+                can={card.access?.can}
+                onUsePriority={(p: string) => setPriority(p as CardT["priority"])}
+                // Null: this dialog cannot step sideways. It is remounted per card and guards unsaved edits
+                // (`dirty`), so following a neighbour from here would either lose what somebody typed or
+                // prompt them mid-suggestion. Neighbour titles render as text, which is enough to recognise
+                // the duplicate and go and find it.
+                onOpenCard={null}
+              />
+            </div>
+          )}
           {/* Urgency + deadline */}
           <Field label="Priority">
             <Select value={priority} onValueChange={(v) => setPriority(v as CardT["priority"])} disabled={!canEdit}>

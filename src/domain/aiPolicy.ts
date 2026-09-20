@@ -386,6 +386,8 @@ export type AiConfig = {
   /** Org-wide neurons per UTC day; may only LOWER the ceiling below, never raise it past the free allocation. */
   dailyNeurons: number;
   perUserHourlyGenerations: number;
+  /** How alike two cards must look before `cards.triage` calls one a possible duplicate. See below. */
+  cardDuplicateSensitivity?: string;
 };
 
 /** The switchable features. A new one is added here, which is also what puts it in the settings panel. */
@@ -407,7 +409,23 @@ export const AI_CONFIG_DEFAULT: AiConfig = {
   },
   dailyNeurons: 7000,
   perUserHourlyGenerations: 20,
+  cardDuplicateSensitivity: "balanced",
 };
+
+/**
+ * How alike two cards must look before one is offered as "you may already have this".
+ *
+ * A CHOICE, NOT A NUMBER. The underlying knob is a cosine score, and 0.82 is not a thing an HR admin can
+ * reason about - shown the raw figure they would either leave it alone forever or move it blind. Three named
+ * positions carry the actual trade-off, which is symmetric and worth stating: too loose and the panel points
+ * at cards that have nothing to do with yours, which teaches people to ignore it; too strict and the
+ * duplicate you actually filed twice goes unmentioned.
+ */
+export const CARD_DUPLICATE_SCORES = { loose: 0.75, balanced: 0.82, strict: 0.9 } as const;
+export type CardDuplicateSensitivity = keyof typeof CARD_DUPLICATE_SCORES;
+
+export const cardDuplicateScore = (s: unknown): number =>
+  CARD_DUPLICATE_SCORES[(s as CardDuplicateSensitivity)] ?? CARD_DUPLICATE_SCORES.balanced;
 
 /** Rough neuron cost per call, for the pre-flight budget check. Replaced by measured values from `ai_usage`;
  *  until then they are deliberately pessimistic, so the app under-spends rather than over-spends. */

@@ -5,7 +5,7 @@ import {
   Coins, Layers, ListOrdered, Percent, Receipt, Wallet, FileSpreadsheet, FolderKanban,
   UserSearch, UserPlus, Target, ClipboardList, HeartPulse,
   FileText, PenLine, FileSignature, Bell, BellRing, LifeBuoy, ListTodo,
-  Users, Shield, KeyRound, Wrench, Plus, KanbanSquare, Tag, Sparkles,
+  Users, Shield, KeyRound, Wrench, Plus, KanbanSquare, Tag, Sparkles, AlertTriangle,
 } from "lucide-react";
 
 // One flat registry of every settings panel. This is the single source of truth for the Settings hub grid,
@@ -104,6 +104,10 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   // Under Access & security rather than Company, because what this panel decides is which of the org's text a
   // model may read - a data-handling decision, not a preference.
   { key: "ai", title: "AI features", desc: "Which AI-assisted features are switched on, and the daily budget they share. Every feature is off until turned on here, and each one works without AI when it is off.", group: "Access & security", icon: Sparkles, keywords: ["semantic search", "triage", "suggestions", "workers ai", "machine learning", "neurons", "budget", "model"], target: { collection: "settings", objectPath: "settings/ai", label: "AI features" } },
+  // Under Company rather than Access & security, unlike the panel above it: nothing here decides what a model
+  // may read. These are the lines the dashboard draws around somebody's own work, and they are worked out
+  // from dates and progress.
+  { key: "attention", title: "Needs you", desc: "When the dashboard calls a goal silent, a task stuck, or a week worth summarising - and whether the weekly roundup is sent. Worked out from dates and progress; no AI is involved.", group: "Company", icon: AlertTriangle, keywords: ["needs you", "attention", "stale", "stuck", "at risk", "digest", "roundup", "weekly", "dashboard", "reminder"], target: { collection: "settings", objectPath: "settings/attention", label: "Needs you" } },
 ];
 
 // Old routes (parent tabs + renamed children) → today's panel keys, so bookmarks and in-app links keep landing.

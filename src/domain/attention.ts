@@ -89,3 +89,49 @@ export function rankAttention(items: AttentionItem[]): AttentionItem[] {
  * cut is after ranking, so what survives is the worst of what there is rather than the first found.
  */
 export const ATTENTION_LIMIT = 8;
+
+/**
+ * The judgements behind this surface, which are an ORG'S to make and were hard-coded.
+ *
+ * Three weeks of silence on a goal is a reasonable default and nothing more: a team running two-week sprints
+ * wants it shorter, and a company whose goals are annual wants it longer. Hard-coding it meant the product
+ * had an opinion nobody could argue with, on the only screen that tells people their work is in trouble.
+ *
+ * Each field is CLAMPED rather than trusted, because these drive queries and a list. A stale threshold of
+ * zero would flag every goal in the company on the day it was saved; a limit of five hundred would turn a
+ * nudge into the inbox this exists to replace.
+ */
+export type AttentionConfig = {
+  /** Days of silence before a goal is worth mentioning. */
+  goalStaleDays: number;
+  /** Days a card may sit in one column before the board is lying about it being in flight. */
+  cardAgedDays: number;
+  /** How many items reach the surface, after ranking. */
+  limit: number;
+  /** Whether the Monday roundup is sent at all. */
+  digestEnabled: boolean;
+  /** Which weekday it goes out on, 0 = Sunday, in the ORG's timezone. */
+  digestWeekday: number;
+};
+
+export const ATTENTION_CONFIG_DEFAULT: AttentionConfig = {
+  goalStaleDays: 21,
+  cardAgedDays: 21,
+  limit: ATTENTION_LIMIT,
+  digestEnabled: true,
+  digestWeekday: 1,
+};
+
+/** Read one back with every field inside the range it has to be in for the surface to make sense. */
+export function attentionConfigOf(raw: Partial<AttentionConfig> | null | undefined): AttentionConfig {
+  const num = (v: unknown, fallback: number, lo: number, hi: number): number =>
+    typeof v === "number" && Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : fallback;
+  return {
+    // A day is the floor: "silent for zero days" is every goal, every time.
+    goalStaleDays: num(raw?.goalStaleDays, ATTENTION_CONFIG_DEFAULT.goalStaleDays, 1, 365),
+    cardAgedDays: num(raw?.cardAgedDays, ATTENTION_CONFIG_DEFAULT.cardAgedDays, 1, 365),
+    limit: num(raw?.limit, ATTENTION_CONFIG_DEFAULT.limit, 1, 25),
+    digestEnabled: raw?.digestEnabled !== false,
+    digestWeekday: num(raw?.digestWeekday, ATTENTION_CONFIG_DEFAULT.digestWeekday, 0, 6),
+  };
+}

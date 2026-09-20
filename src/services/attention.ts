@@ -21,22 +21,29 @@ import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import { applyScope } from "./listScope";
-import { goalPace, staleDays, STALE_AFTER_DAYS } from "../domain/goals";
+import { goalPace, staleDays } from "../domain/goals";
 import { fence } from "../domain/aiPolicy";
 import { aiFeatureOn, aiGenerate } from "./ai";
 import { notify } from "./notifications";
 import { orgToday } from "./orgDay";
-import { ATTENTION_LIMIT, rankAttention, type AttentionItem } from "../domain/attention";
+import { getSettingValue } from "./settings";
+import { attentionConfigOf, rankAttention, type AttentionConfig, type AttentionItem } from "../domain/attention";
 
 /** Rows read per source before filtering. See the header. */
 const WINDOW = 200;
 
-/** How long a card may sit in one column before the board is lying about it being in flight. Three weeks, the
- *  same threshold `STALE_AFTER_DAYS` uses for a silent goal, because it is the same judgement: this is not
- *  moving and nobody has said so. */
-const CARD_AGED_DAYS = 21;
-
 const DAY = 86_400_000;
+
+/**
+ * The org's thresholds, clamped.
+ *
+ * READ ONCE PER CALL and threaded down, rather than fetched inside each helper. `getSettingValue` is memoized
+ * per request so a second read would be free, but passing it makes the dependency visible: a helper that
+ * decides what "stale" means should say so in its signature rather than reach for it.
+ */
+async function config(deps: Deps): Promise<AttentionConfig> {
+  return attentionConfigOf(await getSettingValue<Partial<AttentionConfig>>(deps, "attention", {}));
+}
 
 export type Attention = { items: AttentionItem[]; summary?: string };
 
@@ -46,12 +53,13 @@ export async function attentionFor(
   scopes: ReadonlyMap<string, ListScope>,
 ): Promise<Attention> {
   const now = deps.clock.now().getTime();
+  const cfg = await config(deps);
   const found: AttentionItem[] = [
-    ...await goalItems(deps, scopes.get("goals"), now),
-    ...await cardItems(deps, scopes.get("cards"), now),
+    ...await goalItems(deps, scopes.get("goals"), now, cfg),
+    ...await cardItems(deps, scopes.get("cards"), now, cfg),
     ...await reviewItems(deps, user, scopes.get("reviews")),
   ];
-  const items = rankAttention(found).slice(0, ATTENTION_LIMIT);
+  const items = rankAttention(found).slice(0, cfg.limit);
   const summary = await summarise(deps, user, items);
   return { items, ...(summary ? { summary } : {}) };
 }
@@ -125,10 +133,12 @@ async function summarise(deps: Deps, user: AppUser, items: AttentionItem[]): Pro
  * belongs, because there somebody is asking.
  */
 export async function weeklyAttentionDigest(deps: Deps): Promise<number> {
+  const cfg = await config(deps);
+  if (!cfg.digestEnabled) return 0;
   const today = await orgToday(deps);
-  // Monday IN THE ORG'S TIMEZONE, not the Worker's. A cron at 02:00 UTC is already Monday in Auckland and
-  // still Sunday in Los Angeles; reading the day in UTC would send some people their week on the wrong one.
-  if (new Date(`${today}T00:00:00Z`).getUTCDay() !== 1) return 0;
+  // The chosen day IN THE ORG'S TIMEZONE, not the Worker's. A cron at 02:00 UTC is already Monday in Auckland
+  // and still Sunday in Los Angeles; reading the day in UTC would send some people their week on the wrong one.
+  if (new Date(`${today}T00:00:00Z`).getUTCDay() !== cfg.digestWeekday) return 0;
 
   const now = deps.clock.now().getTime();
   const byPerson = new Map<string, AttentionItem[]>();
@@ -147,15 +157,15 @@ export async function weeklyAttentionDigest(deps: Deps): Promise<number> {
     .from(schema.goals)
     .where(and(isNull(schema.goals.deleteTime), inArray(schema.goals.status, ["not_started", "in_progress"])))
     .limit(DIGEST_WINDOW)) {
-    for (const item of goalTrouble(g, now)) add(g.employeeId, item);
+    for (const item of goalTrouble(g, now, cfg)) add(g.employeeId, item);
   }
 
   for (const c of await deps.db
     .select({ uuid: schema.cards.uuid, title: schema.cards.title, columnKey: schema.cards.columnKey, columnSince: schema.cards.columnSince, employeeId: schema.cards.employeeId })
     .from(schema.cards)
-    .where(and(isNull(schema.cards.deleteTime), lt(schema.cards.columnSince, new Date(now - CARD_AGED_DAYS * DAY))))
+    .where(and(isNull(schema.cards.deleteTime), lt(schema.cards.columnSince, new Date(now - cfg.cardAgedDays * DAY))))
     .limit(DIGEST_WINDOW)) {
-    add(c.employeeId, cardItem(c, now));
+    add(c.employeeId, cardItem(c, now, cfg));
   }
 
   for (const r of await deps.db
@@ -178,7 +188,7 @@ export async function weeklyAttentionDigest(deps: Deps): Promise<number> {
 
   let sent = 0;
   for (const [employeeId, found] of byPerson) {
-    const items = rankAttention(found).slice(0, ATTENTION_LIMIT);
+    const items = rankAttention(found).slice(0, cfg.limit);
     if (items.length === 0) continue;
     // Best-effort per person: one recipient whose prefs or row is odd must not cost everybody else theirs.
     try {
@@ -214,7 +224,7 @@ const DIGEST_WINDOW = 2000;
  * JS rather than SQL: the rules about when the question has no answer are worth having in one place, and
  * re-expressing them as a WHERE clause is how the two drift apart.
  */
-async function goalItems(deps: Deps, scope: ListScope | undefined, now: number): Promise<AttentionItem[]> {
+async function goalItems(deps: Deps, scope: ListScope | undefined, now: number, cfg: AttentionConfig): Promise<AttentionItem[]> {
   const rows = await deps.db
     .select({
       uuid: schema.goals.uuid, title: schema.goals.title, status: schema.goals.status,
@@ -234,7 +244,7 @@ async function goalItems(deps: Deps, scope: ListScope | undefined, now: number):
     .orderBy(schema.goals.dueDate)
     .limit(WINDOW);
 
-  return rows.flatMap((g) => goalTrouble(g, now));
+  return rows.flatMap((g) => goalTrouble(g, now, cfg));
 }
 
 /**
@@ -249,7 +259,7 @@ async function goalItems(deps: Deps, scope: ListScope | undefined, now: number):
  * listing it twice would push something else off a list of eight.
  */
 type GoalRow = { uuid: string; title: string; status: string; progress: number | null; dueDate: Date | null; createdAt: Date; updatedAt: Date };
-function goalTrouble(g: GoalRow, now: number): AttentionItem[] {
+function goalTrouble(g: GoalRow, now: number, cfg: AttentionConfig): AttentionItem[] {
   const path = `goals/${g.uuid}`;
   const pace = goalPace({ createdAt: g.createdAt, dueDate: g.dueDate, progress: g.progress ?? 0, status: g.status }, now);
   if (pace && (pace.state === "at_risk" || pace.state === "behind")) {
@@ -263,7 +273,7 @@ function goalTrouble(g: GoalRow, now: number): AttentionItem[] {
     }];
   }
   const silent = staleDays({ updatedAt: g.updatedAt, status: g.status }, null, now);
-  if (silent !== null && silent >= STALE_AFTER_DAYS) {
+  if (silent !== null && silent >= cfg.goalStaleDays) {
     return [{ kind: "goal_stale", path, title: g.title, detail: `no progress recorded in ${silent} days`, days: silent }];
   }
   return [];
@@ -271,8 +281,8 @@ function goalTrouble(g: GoalRow, now: number): AttentionItem[] {
 
 /** One aged card as an item. Shared, for the same reason `goalTrouble` is. */
 type CardRow = { uuid: string; title: string; columnKey: string; columnSince: Date | null };
-function cardItem(c: CardRow, now: number): AttentionItem {
-  const days = c.columnSince ? Math.floor((now - +new Date(c.columnSince)) / DAY) : CARD_AGED_DAYS;
+function cardItem(c: CardRow, now: number, cfg: AttentionConfig): AttentionItem {
+  const days = c.columnSince ? Math.floor((now - +new Date(c.columnSince)) / DAY) : cfg.cardAgedDays;
   return { kind: "card_aged", path: `cards/${c.uuid}`, title: c.title, detail: `in ${c.columnKey} for ${days} days`, days };
 }
 
@@ -282,8 +292,8 @@ function reviewItem(r: { uuid: string; cycleName: string | null }, detail: strin
 }
 
 /** Cards that have sat in one column long enough that the board is no longer telling the truth about them. */
-async function cardItems(deps: Deps, scope: ListScope | undefined, now: number): Promise<AttentionItem[]> {
-  const cutoff = new Date(now - CARD_AGED_DAYS * DAY);
+async function cardItems(deps: Deps, scope: ListScope | undefined, now: number, cfg: AttentionConfig): Promise<AttentionItem[]> {
+  const cutoff = new Date(now - cfg.cardAgedDays * DAY);
   const rows = await deps.db
     .select({
       uuid: schema.cards.uuid, title: schema.cards.title,
@@ -301,7 +311,7 @@ async function cardItems(deps: Deps, scope: ListScope | undefined, now: number):
     .orderBy(schema.cards.columnSince)
     .limit(WINDOW);
 
-  return rows.map((c) => cardItem(c, now));
+  return rows.map((c) => cardItem(c, now, cfg));
 }
 
 /**

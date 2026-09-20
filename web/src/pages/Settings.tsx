@@ -69,6 +69,7 @@ const BoardConfigPanel = lazy(() => import("@/settings/BoardConfigPanel").then((
 const NotificationPrefsPanel = lazy(() => import("@/components/notifications/NotificationPrefsPanel").then((m) => ({ default: m.NotificationPrefsPanel })));
 const KudosLevelsTab = lazy(() => import("@/components/common/KudosLevelsTab").then((m) => ({ default: m.KudosLevelsTab })));
 const AiSettingsTab = lazy(() => import("@/components/common/AiSettingsTab").then((m) => ({ default: m.AiSettingsTab })));
+const AttentionSettingsTab = lazy(() => import("@/components/common/AttentionSettingsTab").then((m) => ({ default: m.AttentionSettingsTab })));
 const RolesPanel = lazy(() => import("@/components/common/RolesPanel").then((m) => ({ default: m.RolesPanel })));
 const RolesManagePanel = lazy(() => import("@/components/common/RolesManagePanel").then((m) => ({ default: m.RolesManagePanel })));
 const ApiKeysPanel = lazy(() => import("@/components/common/ApiKeysPanel").then((m) => ({ default: m.ApiKeysPanel })));
@@ -562,6 +563,7 @@ function pickSettingsPanel(key: string, me: Me, toast: Toast, slot: HTMLDivEleme
     case "dashboard": return <DashboardTab toast={toast} />;
     case "kudos": return <KudosLevelsTab />;
     case "ai": return <AiSettingsTab />;
+    case "attention": return <AttentionSettingsTab />;
     case "quick-actions": return <QuickActionsTab toast={toast} />;
     // Time & leave
     case "leave-policy": return <LeaveCapsTab toast={toast} />;
