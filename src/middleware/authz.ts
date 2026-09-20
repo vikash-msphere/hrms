@@ -240,6 +240,38 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
 // places that consult this would be half-gated.
 const AGGREGATE_ROUTES = new Set(["search", "dashboard-summary", "people-analytics", "approvals-summary", "activity-counts", "changes"]);
 
+/**
+ * ITEM-level custom methods whose handler LISTS OTHER RECORDS, mapped to the collection those records are in.
+ *
+ * Almost every custom method acts on the one record its path names, which is why the scope block below does
+ * not pay for an exception read on them - `announcements:markRead` fires on dwell, and a D1 read per scroll is
+ * not a cost this app can carry. These four are the exceptions: each answers with rows OTHER than the one it
+ * was called on, re-decided in SQL through `applyScope`.
+ *
+ * TWO THINGS WERE WRONG WITHOUT THIS MAP, and they are separate.
+ *
+ * The denies. `applyScope` can only subtract the denies it is handed (services/listScope.ts), and the block
+ * below loaded them for collection LISTS only - so on these paths `scope.denies` was always empty and a record
+ * an ACL deny explicitly hides from somebody came back to them anyway: a neighbouring suggestion or ticket
+ * with its title and its numbers, and a review with its attainment. A deny is the one half of a scope that
+ * must never soften, and it was softening on exactly the surfaces that go looking for records nobody named.
+ *
+ * The collection. The scope is computed for the collection in the PATH, which for `review-cycles:variablePay`
+ * is `review-cycles` while the rows it binds are `reviews` (services/variablePay.ts). The handler's own comment
+ * says reviews are read through the caller's reviews scope; it was being handed the cycle's. Naming the target
+ * here is what makes that sentence true, and it keeps the deciding in this middleware rather than letting a
+ * service resolve a second scope for itself.
+ *
+ * Adding a verb that reads `c.get("scope")` without adding it here is the drift this guards, so
+ * test/scopedVerbDrift.test.ts holds these keys against the route files.
+ */
+export const SCOPE_READING_VERBS = new Map<string, string>([
+  ["suggestions:similar", "suggestions"], // other suggestions asking the same thing (services/suggestionSimilar.ts)
+  ["tickets:triage", "tickets"], // the resolved neighbours a routing suggestion is voted from (services/ticketTriage.ts)
+  ["review-cycles:variablePay", "reviews"], // every review in the cycle, priced (services/variablePay.ts)
+  ["review-cycles:award", "reviews"], // the same lines, then paid
+]);
+
 // Per-collection list verdicts for a fan-out envelope (`GET /v1/search`, `GET /v1/dashboard-summary`): for
 // every named collection, run the very same decision a real `GET /v1/<collection>` would get here, and where
 // it passes, resolve that collection's list scope (breadth + the caller's per-object shares/denies).
@@ -710,19 +742,30 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // (announcements:markAllRead does) would get one computed against a resource that does not exist.
     const isCollectionVerb = (segs[0]?.indexOf(":") ?? -1) >= 0;
     const collection = collectionOf(pathname);
+    // An item verb that lists OTHER rows binds its own collection's scope, which is not always the one in the
+    // path - see SCOPE_READING_VERBS. Everything else scopes the collection it names.
+    const itemVerb = segs.length === 2 ? segs[1]!.split(":")[1] : undefined;
+    const boundCollection = itemVerb ? SCOPE_READING_VERBS.get(`${collection}:${itemVerb}`) : undefined;
+    const scopeCollection = boundCollection ?? collection;
     // Re-derived rather than reached for: the decision's `self` is scoped to the block above. Both calls hit the
     // same cache entry, so this costs no read.
-    const scope = scopeFor(user, collection, await selfContextFor(c.get("deps"), user));
+    const scope = scopeFor(user, scopeCollection, await selfContextFor(c.get("deps"), user));
     // A collection-level list also honors the caller's per-object shares/denies (one indexed read): shares
     // widen the result, denies remove rows (deny-wins). Covers user exceptions AND exact role rules. Item
-    // paths don't need it (handled in the decision) - and neither do custom methods, which act on what the
+    // paths don't need it (handled in the decision) - and neither do most custom methods, which act on what the
     // caller named rather than listing rows, so they stay off this extra read.
     // The aggregate ROUTES are not collections: no rule can carry their namespace, and their handlers read
     // searchScopes/summaryScopes/approvalScopes (each already scoped per collection below), never this scope -
     // so the read would be a guaranteed-empty one thrown away.
-    if (segs.length === 1 && !isCollectionVerb && !AGGREGATE_ROUTES.has(collection)) {
+    //
+    // ...AND THE ITEM VERBS THAT DO LIST ROWS (see SCOPE_READING_VERBS). The premise above - "a custom method
+    // acts on what the caller named" - stopped being true for the verbs that answer with OTHER records, and
+    // `applyScope` can only subtract the denies it is handed: on those paths `scope.denies` was always empty,
+    // so a record explicitly denied to somebody came back to them as a neighbour. Read against the collection
+    // the verb BINDS, which is the one the exceptions have to be about.
+    if (boundCollection || (segs.length === 1 && !isCollectionVerb && !AGGREGATE_ROUTES.has(collection))) {
       const roleSubjects = roleSubjectsOf(user, user.grant);
-      const exc = await loadObjectExceptionCodes(c.get("deps"), user.uuid, roleSubjects, collection);
+      const exc = await loadObjectExceptionCodes(c.get("deps"), user.uuid, roleSubjects, scopeCollection);
       scope.shares = exc.shares;
       scope.denies = exc.denies;
     }

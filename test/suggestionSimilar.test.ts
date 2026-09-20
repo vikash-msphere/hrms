@@ -176,6 +176,30 @@ describe("a neighbour the caller cannot list is not a neighbour", () => {
     const asAna = await similarSuggestions(deps, own(ana, "04"), subject);
     expect(asAna.map((s) => s.path)).toEqual(["suggestions/" + mine]);
   });
+
+  it("honours a per-object deny, even for a caller who may list everything", async () => {
+    // A deny is the half of a scope that must never soften, and this surface is where it was softening: the
+    // authz middleware loaded the caller's per-object exceptions for collection LISTS only, so on
+    // `suggestions/<id>:similar` the scope arrived with an empty `denies` and a suggestion an ACL explicitly
+    // hid from somebody came back to them as a neighbour, title and votes and all. The middleware now loads
+    // them for the item verbs that list rows (SCOPE_READING_VERBS); this pins the half that binds them.
+    const ana = await seedEmployee("04-a01", "Ana");
+    const bo = await seedEmployee("07-b01", "Bo");
+    const subject = await seedSuggestion(ana, "04-a01-s1", "Better coffee");
+    const open = await seedSuggestion(bo, "07-b01-s1", "Coffee upgrade");
+    const hidden = await seedSuggestion(bo, "07-b01-s2", "Coffee machine replacement");
+
+    deps.vectors = scriptedIndex(subject, () => [
+      { id: vectorIdOf("suggestions", hidden), score: 0.97 },
+      { id: vectorIdOf("suggestions", open), score: 0.95 },
+    ]);
+
+    const denied = { ...ALL, denies: ["07-b01-s2"] };
+    const out = await similarSuggestions(deps, denied, subject);
+    expect(out.map((s) => s.path)).toEqual(["suggestions/" + open]);
+    // Nothing of the denied row travels - not its title, which is the part a neighbour panel would show.
+    expect(JSON.stringify(out)).not.toContain("replacement");
+  });
 });
 
 describe("anonymity", () => {
