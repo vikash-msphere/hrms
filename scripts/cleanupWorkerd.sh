@@ -30,13 +30,20 @@
 # has to remember. Safe to run by hand at any time - with nothing to reap it says so and exits 0.
 set -euo pipefail
 
-# The miniflare-bundled binary specifically, not any workerd on the machine.
-PATTERN="node_modules/miniflare/node_modules/@cloudflare/workerd"
+# BOTH copies of the binary: vitest's pool runs miniflare's, `wrangler dev` runs wrangler's own. PPID 1 is
+# what makes covering the second one safe, and covering it matters because of how a dev stack is usually
+# stopped. `pkill -f "wrangler dev"` MATCHES NOTHING - the process is
+# `node --no-warnings .../wrangler/wrangler-dist/cli.js dev`, so the literal "wrangler dev" never appears in
+# it. Whoever typed that believes they stopped the stack; the parent is untouched, or is killed some other
+# way and leaves its workerd child holding port 8787 and answering requests. The next `npm run dev` then
+# fails to bind and the stale one replies instead - which is the zombie the project notes warn about, and it
+# reads as the app ignoring your changes.
+PATTERN="node_modules/(miniflare|wrangler)/node_modules/@cloudflare/workerd"
 
 orphans=()
 while read -r pid ppid; do
   [ "$ppid" = "1" ] && orphans+=("$pid")
-done < <(pgrep -f "$PATTERN" 2>/dev/null | xargs -r ps -o pid=,ppid= -p 2>/dev/null || true)
+done < <(pgrep -fE "$PATTERN" 2>/dev/null | xargs -r ps -o pid=,ppid= -p 2>/dev/null || true)
 
 if [ ${#orphans[@]} -eq 0 ]; then
   echo "→ [cleanup] no orphaned workerd processes"
