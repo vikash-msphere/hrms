@@ -55,6 +55,10 @@ const PAGES: PageCase[] = [
   { route: "delegations", heading: "Approval delegation" },
   { route: "notice-periods", heading: "Notice Periods" },
   { route: "suggestions", heading: "Suggestion Box" },
+  // The moderation queue. It had its own spec from the day it was built and was still missing here, which is
+  // the gap this gate exists to catch: a dedicated spec proves one page works, and this table is what proves
+  // no page was forgotten.
+  { route: "moderation", heading: "Flagged posts" },
   { route: "payslips", heading: "Payslips" },
   { route: "reimbursements", heading: "Reimbursements" },
   { route: "expenses", heading: "Expenses" },

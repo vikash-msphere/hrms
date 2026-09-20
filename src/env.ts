@@ -188,6 +188,9 @@ export type Variables = {
   // Same idea for GET /v1/dashboard-summary: per-collection list scopes for the KPI aggregates, decided by
   // the middleware; the summary service only binds them to COUNT/SUM queries.
   summaryScopes: Map<string, import("./domain/access").ListScope>;
+  // Per-collection list verdicts for `GET /v1/attention` (goals, cards, reviews), resolved the same way and
+  // for the same reason: the surface reads across collections and each one is decided on its own terms.
+  attentionScopes: Map<string, import("./domain/access").ListScope>;
   // Same idea for GET /v1/people-analytics: per-collection list scopes for the per-person measures (leave,
   // punctuality, tasks, goals, reviews, ...), decided by the middleware; the analytics service only binds them
   // to grouped aggregates. A collection missing from the map contributes no column to the report.
@@ -207,6 +210,12 @@ export type Variables = {
   // Whether that same caller may read the prior-employer verification queue (`tax-verifications.read`). It is a
   // virtual capability with no table, so it rides a boolean rather than a scope.
   taxVerificationsReadable: boolean;
+  // Whether this caller may DECIDE a moderation flag (`moderation.decide`), decided by the middleware for the
+  // two public walls only. It is what says whether an un-hide is a moderator lifting their own decision or an
+  // author trying to walk one back: the hide itself is an ordinary `disabled` / soft-delete stamp, so the
+  // inverse verbs (`:enable`, `:restore`) would otherwise undo it like any other. A virtual capability with no
+  // table of its own, so it rides a boolean rather than a scope - the same shape as the line above.
+  mayModerate: boolean;
   // The grant the middleware decided this request with: the role grant merged with any per-object exceptions
   // for the resolved item (item paths) - set so a handler can compute a share-accurate `access.can` hint
   // without re-loading. Absent on collection/non-item paths (the role grant alone applies).

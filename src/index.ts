@@ -98,6 +98,7 @@ import { search } from "./routes/search";
 import { activityCountsRoute } from "./routes/activityCounts";
 import { changes } from "./routes/changes";
 import { dashboardSummaryRoute } from "./routes/dashboardSummary";
+import { attentionRoute } from "./routes/attention";
 import { peopleAnalyticsRoute, peopleAnalyticsNarrate } from "./routes/peopleAnalytics";
 import { approvalsSummaryRoute } from "./routes/approvalsSummary";
 import { bankFormats } from "./routes/bankFormats";
@@ -262,6 +263,7 @@ app.route("/v1/access-rules", accessRules);
 app.route("/v1/batch:run", batch); // multi-read batch: re-dispatches GET sub-requests through the full chain
 app.route("/v1/search", search); // cross-collection search: per-collection list decision + scope inside the service
 app.route("/v1/dashboard-summary", dashboardSummaryRoute); // aggregated KPI counts: same per-collection gating as search
+app.route("/v1/attention", attentionRoute); // "what needs me": derived trouble across goals/cards/reviews, same gating
 app.route("/v1/people-analytics:narrate", peopleAnalyticsNarrate); // narrated period-on-period change, before the collection mount
 app.route("/v1/people-analytics", peopleAnalyticsRoute); // per-person report across the modules: same per-collection gating as search
 app.route("/v1/approvals-summary", approvalsSummaryRoute); // approval queue counts: per-queue `approve` gating, no rows

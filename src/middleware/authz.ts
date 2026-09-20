@@ -12,6 +12,7 @@ import { buildCodedPath, uuidToCode, resolveItemState, RESOURCE_COLLECTIONS, LIS
 import { loadObjectRulesForRequest, loadObjectExceptionCodes, loadObjectExceptionCodesFor } from "../lib/policyLoad";
 import { SEARCHABLE_COLLECTIONS } from "../domain/searchIndex";
 import { DASHBOARD_SUMMARY_COLLECTIONS } from "../domain/dashboardSummary";
+import { ATTENTION_COLLECTIONS } from "../domain/attention";
 import { ANALYTICS_COLLECTIONS } from "../domain/peopleAnalytics";
 import { TABLE_SOURCE_COLLECTIONS } from "../domain/tableFields";
 import { APPROVAL_SUMMARY_COLLECTIONS, TAX_VERIFICATION_QUEUE } from "../domain/approvalsSummary";
@@ -19,6 +20,7 @@ import { ancestorsOf, isUnder } from "../domain/codes";
 import { mergeGrants, rulesToGrant } from "../domain/compileGrants";
 import { isSuperGrant, roleSubjectsOf } from "../domain/grants";
 import { inScope } from "../domain/keyScope";
+import { isModeratable } from "../domain/moderation";
 // Which collections actually offer the `?force` hard purge. Written by the collection factory as each
 // collection is mounted, and every route module is imported at load (src/index.ts) - so the set is complete
 // before any request is served.
@@ -242,7 +244,7 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
 // scopesForCollections / approvalScopesFor), which is why they are exempt from the collection-level decision
 // and from its per-object exception read. Listed once, because a transport added to only some of the three
 // places that consult this would be half-gated.
-const AGGREGATE_ROUTES = new Set(["search", "dashboard-summary", "people-analytics", "approvals-summary", "activity-counts", "changes"]);
+const AGGREGATE_ROUTES = new Set(["search", "dashboard-summary", "people-analytics", "approvals-summary", "activity-counts", "changes", "attention"]);
 
 /**
  * ITEM-level custom methods whose handler LISTS OTHER RECORDS, mapped to the collection those records are in.
@@ -794,6 +796,10 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // Dashboard summary fans COUNT/SUM queries across the KPI collections - same per-collection decide/scope
     // pair as search, handed over as a map; the service only binds them.
     if (collection === "dashboard-summary") c.set("summaryScopes", await scopesForCollections(c.get("deps"), user, DASHBOARD_SUMMARY_COLLECTIONS));
+    // "What needs me" reads goals, cards and reviews and reports the ones in trouble. Same fan-out, same
+    // reason: each collection is decided by the exact list decision it would get on its own, so a caller who
+    // cannot list reviews is simply never told about one.
+    if (collection === "attention") c.set("attentionScopes", await scopesForCollections(c.get("deps"), user, [...ATTENTION_COLLECTIONS]));
     // The people report is the same fan-out one axis over: it answers per PERSON rather than per collection, so
     // the roster it lists (`employees`) and every measure's own collection are each decided here, by the exact
     // list decision they would get on their own. A collection missing from the map costs the report a column.
@@ -815,6 +821,15 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       c.set("approvalScopes", await approvalScopesFor(c.get("deps"), user));
       const asSelf = { employeeCode: user.employeeCode };
       c.set("taxVerificationsReadable", decide(user.grant, resolveRequest("GET", `/v1/${TAX_VERIFICATION_QUEUE}`), asSelf).allow);
+    }
+    // MAY THIS CALLER LIFT A MODERATION HIDE? Decided here, like every other question about authority, and
+    // handed to the two walls' un-hide verbs as a boolean (`:restore` on a suggestion, `:enable` on an
+    // announcement). Those verbs are ordinary self-service - an author undoing their own delete - and a
+    // moderation hide is written with the same two columns, so without this the service cannot tell the two
+    // apart and an author walks a moderator's decision back. Pure in-memory `decide()`, no read, and only on
+    // the two collections that can carry a hold.
+    if (isModeratable(collection)) {
+      c.set("mayModerate", decide(user.grant, resolveRequest("POST", "/v1/moderation:decide"), selfContextOf(user)).allow);
     }
   }
 

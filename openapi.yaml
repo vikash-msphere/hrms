@@ -16235,6 +16235,52 @@ paths:
                   type: hrms.example.com/people-analytics
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/attention:
+    get:
+      description: "What needs this caller, across their goals, board cards and reviews. Every item is derived at read time from a signal the app already computes - a goal behind the line from its start to its due date, a goal nobody has touched in three weeks, a card that has sat in one column for three weeks, a review at a stage waiting on this person - so nothing is stored and there is nothing to keep up to date. Each backing collection is bound by the caller's own list scope, so a collection they may not list contributes nothing rather than refusing the request. Ranked worst first and capped."
+      operationId: "AttentionForCaller"
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                # A SINGLETON, not a page. The AEP ruleset reads any GET on a path that does not end in a
+                # path parameter as a List, and then requires `next_page_token` and a `List...` operation id.
+                # This answers with one computed object rather than a page of a collection: there is no
+                # cursor to hand back, nothing to page through, and the cap is a judgement about how much a
+                # person will read rather than a page size. `/v1/search` sits in the same position.
+                x-aep-resource:
+                  singleton: true
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        kind:
+                          type: string
+                          enum: [goal_at_risk, goal_behind, goal_stale, review_waiting, card_aged]
+                        path:
+                          type: string
+                          description: The record this is about, as <collection>/<id>.
+                        title:
+                          type: string
+                        detail:
+                          type: string
+                          description: The specific fact, already in words.
+                        days:
+                          type: integer
+                      required: [kind, path, title, detail]
+                required: [items]
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/dashboard-summary:
     get:
       description: "Aggregated dashboard KPI counts. Each KPI is included only if the caller's list decision for its backing collection allows, and its COUNT/SUM is bound by that collection's own list scope - so every number equals what the caller would have counted from the list response. KPIs the caller may not see are absent from the map."

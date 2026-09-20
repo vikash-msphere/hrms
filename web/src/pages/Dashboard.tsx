@@ -22,6 +22,7 @@ import {
   RotateCcw,
   LayoutDashboard,
   Plane,
+  AlertTriangle,
   Banknote,
   ListTodo,
   BellRing,
@@ -95,10 +96,13 @@ const REJECT_NOTE = new Set(["overtime-requests", "remote-work-requests"]);
 // The dashboard's movable sections, in default order. The viewer drags them into order, or hides them, in the
 // "Customize layout" popover (hero row); the choice persists per user via preferences/dashboard. Rendering uses CSS
 // `order` on a flex column, so a reorder never remounts a section (the team timeline keeps its state).
-type SectionKey = "shortcuts" | "myday" | "kpis" | "approvals" | "timeline" | "calendar" | "board";
+type SectionKey = "shortcuts" | "myday" | "needsyou" | "kpis" | "approvals" | "timeline" | "calendar" | "board";
 const DASH_SECTIONS: { key: SectionKey; label: string }[] = [
   { key: "shortcuts", label: "Shortcuts" },
   { key: "myday", label: "My day" },
+  // Above the KPI wall on purpose. The wall is numbers about the org; this is the short list of things that
+  // are off track or waiting on the person reading it, and burying it under counts would defeat the point.
+  { key: "needsyou", label: "Needs you" },
   { key: "kpis", label: "KPI cards" },
   { key: "approvals", label: "Awaiting your approval" },
   { key: "timeline", label: "Team timeline" },
@@ -302,6 +306,27 @@ export default function Dashboard({ me }: { me: Me }) {
   type SummaryEntry = { value: number; extra?: number };
   const [summary, setSummary] = useState<Record<string, SummaryEntry> | null>(null);
   const [summaryState, setSummaryState] = useState<"loading" | "ready" | "error">("loading");
+
+  // ---- What needs this person: GET /v1/attention -----------------------------------------------------
+  // Derived server-side from signals the app already computes (a goal behind its own line, a goal nobody has
+  // touched in three weeks, a card sat in one column, a review waiting) and bound by the caller's ordinary
+  // list scope per collection, so this asks for no permission of its own.
+  //
+  // FAILS QUIET. An empty list and a failed request render identically - nothing - because this section is an
+  // addition to the dashboard rather than part of it. A red box saying the attention service is unavailable
+  // would be worse than the silence it replaced.
+  // Shaped here rather than imported from the server's domain: the browser gets this as JSON over the wire,
+  // and the contract it depends on is openapi.yaml's `/v1/attention`, not a TypeScript type in src/.
+  const [attention, setAttention] = useState<{ kind: string; path: string; title: string; detail: string }[]>([]);
+  useEffect(() => {
+    if (!showSection("needsyou")) return;
+    let live = true;
+    get<{ items?: { kind: string; path: string; title: string; detail: string }[] }>("attention")
+      .then((r) => { if (live) setAttention(r.items ?? []); })
+      .catch(() => { if (live) setAttention([]); });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfgReady, dashCfg, me.employee_id]);
   useEffect(() => {
     if (!cfgReady) return;
     // Counts, but not before they are wanted: every key below belongs to the KPI wall, bar the one my-day tile
@@ -1066,6 +1091,32 @@ export default function Dashboard({ me }: { me: Me }) {
         <StatRow ref={regionRef("myday")} caps={TILE_CAPS} gap={{ base: "1rem" }} style={sectionStyle("myday")} className="mb-6">
           {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[104px] rounded-xl" />)}
         </StatRow>
+      )}
+      {/* WHAT NEEDS THIS PERSON. Absent when there is nothing, rather than showing an empty state: "all
+          clear" is a message worth having once, and worth nothing on the hundred loads after it. Every row
+          is a link to the thing itself, because the point is to remove the hunting, not to describe it. */}
+      {showSection("needsyou") && attention.length > 0 && (
+        <section style={sectionStyle("needsyou")} className="mb-6">
+          <h2 className="mb-2 flex items-center gap-1.5 text-sm font-medium">
+            <AlertTriangle className="h-4 w-4 text-warning" /> Needs you
+            <span className="text-xs font-normal text-muted-foreground">{attention.length}</span>
+          </h2>
+          <div className="divide-y rounded-lg border">
+            {attention.map((a) => (
+              <button
+                key={a.path}
+                type="button"
+                className="flex w-full items-baseline gap-2 px-3 py-2 text-left hover:bg-muted/40"
+                onClick={() => navigate(a.path)}
+              >
+                <span className="truncate text-sm font-medium">{a.title}</span>
+                {/* The fact, not a label. "at risk" sends somebody to go and look, which is the work this is
+                    supposed to save; "18% done, 86% expected by now, 9 days left" is the answer. */}
+                <span className="ml-auto shrink-0 text-xs text-muted-foreground">{a.detail}</span>
+              </button>
+            ))}
+          </div>
+        </section>
       )}
       {/* Which tiles exist is data (a tile appears only when it has something to say), so the row is split
           into balanced rows rather than poured into fixed columns - five tiles are 3+2, never 4-and-a-hole. */}
