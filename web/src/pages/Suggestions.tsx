@@ -537,6 +537,7 @@ function RespondDialog({ suggestion: s, queue, onStep, mergeTargets, onClose, on
       {!s.merged_into && (
         <SimilarAsks
           suggestionPath={s.path}
+          can={s.access?.can}
           chosen={form.merge}
           onPick={(path) => setForm({ ...form, merge: path === form.merge ? "" : path })}
         />

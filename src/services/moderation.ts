@@ -65,6 +65,16 @@ export async function drainModeration(deps: Deps): Promise<ModerationDrainResult
     // common case by a wide margin, which is the whole reason the bookkeeping table exists.
     if (c.knownHash === hash && c.knownModel === MODELS.moderate) {
       await stampScan(deps, c.collection, c.recordId, hash, c.flagged);
+      // A POST THAT CAME BACK BRINGS ITS FLAG BACK WITH IT.
+      //
+      // `retireOrphans` closes a pending flag whose host the queue cannot see, which is right for a post that
+      // was deleted and wrong for one that is only temporarily out of view - an unpublished or disabled
+      // announcement, a soft-deleted suggestion, a reply under a hidden post. Restore the host and this branch
+      // is what it meets: the text has not changed, so the scan spends nothing and returns - and nothing ever
+      // re-created the flag, because only a CHANGED hash reaches `recordFlag` below. The objection stayed on
+      // record in `moderation_scans.flagged` while the post sat back on the wall with no queue item, which an
+      // author can arrange for themselves: post, delete, wait for one queue read, restore.
+      if (c.flagged) await reopenFlag(deps, c.collection, c.recordId);
       continue;
     }
 
@@ -309,6 +319,37 @@ async function recordFlag(deps: Deps, c: Candidate, hazards: string[]): Promise<
         updatedAt: now,
       },
     });
+}
+
+/**
+ * Put a retired flag back on the queue, for a post that has become visible again with its text unchanged.
+ *
+ * ONLY `superseded`, and that is the whole care of it. That state means "nobody judged this" - written either
+ * by `retireOrphans` when the host went out of view or by the edit-to-safe path - so re-raising it takes
+ * nothing away from anyone. `rejected` and `accepted` are a HUMAN's verdict on this exact text, and a scan
+ * must never overturn one: a moderator who said "this is fine" would otherwise find it back on their queue
+ * every time anything touched the post's visibility.
+ *
+ * The payload is checked rather than trusted. `retireOrphans` also closes a flag whose payload will not parse,
+ * and the queue drops such a row on sight - so reopening one without looking would put it back for the next
+ * queue read to retire again, a write apiece, for ever.
+ */
+async function reopenFlag(deps: Deps, collection: string, recordId: string): Promise<void> {
+  const row = await deps.db
+    .select({ uuid: schema.aiSuggestions.uuid, payloadJson: schema.aiSuggestions.payloadJson })
+    .from(schema.aiSuggestions)
+    .where(and(
+      eq(schema.aiSuggestions.hostCollection, collection),
+      eq(schema.aiSuggestions.hostRecordId, recordId),
+      eq(schema.aiSuggestions.feature, FEATURE),
+      eq(schema.aiSuggestions.state, "superseded"),
+    ))
+    .get();
+  if (!row || !readPayload(row.payloadJson)) return;
+  await deps.db
+    .update(schema.aiSuggestions)
+    .set({ state: "pending", decidedBy: null, decidedAt: null, updatedAt: deps.clock.now() })
+    .where(eq(schema.aiSuggestions.uuid, row.uuid));
 }
 
 /** Retire a flag whose post no longer reads the way it did, without pretending a person decided anything. */

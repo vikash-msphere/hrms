@@ -628,3 +628,53 @@ describe("the prompt the post travels in", () => {
     if (flag) expect(flag.payloadJson).toContain("ABCDE1234F");
   });
 });
+
+describe("a post that comes back brings its flag back", () => {
+  it("re-raises a flag the queue retired while the post was out of view", async () => {
+    // `retireOrphans` closes a flag whose host the queue cannot see, which is right for a deleted post and
+    // wrong for one that is only hidden for a while. The drain then never re-raised it: an unchanged hash
+    // takes the cheap path and only a CHANGED one reaches `recordFlag`. So the post came back to the wall
+    // carrying the model's objection in `moderation_scans.flagged` and nothing on anybody's queue - which an
+    // author can arrange for themselves: post, delete, wait for one queue read, restore.
+    const author = await seedPerson("Ana");
+    const id = await seedAnnouncement(author, { title: "Bad one", body: "Something the guard model objects to." });
+    // Held by its own name as well as assigned: `Deps.ai` is a `TextModel`, so the call counter this test
+    // asserts on is not reachable through `deps.ai`.
+    const model = scriptedModel(() => "unsafe\nS10");
+    deps.ai = model;
+
+    await drainModeration(deps);
+    expect((await flagFor("announcements", id))?.state).toBe("pending");
+
+    // Out of view: disabled is one half of the public test, so the queue stops seeing it and retires the flag.
+    await deps.db.update(schema.announcements).set({ disabled: true }).where(eq(schema.announcements.uuid, id));
+    await listModerationQueue(deps);
+    expect((await flagFor("announcements", id))?.state).toBe("superseded");
+
+    // Back on the wall, text untouched. The scan spends nothing - and the queue item returns.
+    await deps.db.update(schema.announcements).set({ disabled: false }).where(eq(schema.announcements.uuid, id));
+    const before = model.calls;
+    await drainModeration(deps);
+    expect(model.calls).toBe(before); // no second inference: this is the unchanged-hash path
+    const back = await flagFor("announcements", id);
+    expect(back?.state).toBe("pending");
+    expect((await listModerationQueue(deps)).results.map((r) => r.host)).toContain(`announcements/${id}`);
+  });
+
+  it("does NOT overturn a moderator who already said the post was fine", async () => {
+    // `superseded` means nobody judged it. `rejected` is a person's verdict on this exact text, and a scan
+    // that re-raised it would put the same post back on the queue every time anything touched its visibility.
+    const author = await seedPerson("Ana");
+    const mod = await seedPerson("Mo");
+    const id = await seedAnnouncement(author, { title: "Fine really", body: "The guard model is over-cautious here." });
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    await drainModeration(deps);
+
+    await decideModeration(deps, mod, `announcements/${id}`, "dismiss");
+    expect((await flagFor("announcements", id))?.state).toBe("rejected");
+
+    await drainModeration(deps);
+    expect((await flagFor("announcements", id))?.state).toBe("rejected");
+    expect((await listModerationQueue(deps)).results).toEqual([]);
+  });
+});

@@ -47,8 +47,15 @@ export interface PushSender {
 //
 // `embed` takes an array because the embedding model does: one subrequest for a batch of rows is the
 // difference between indexing a collection inside the free allocation and not.
-/** The generative models a caller may ask for by name: free-form generation, or the safety classifier. */
-export type GenerativeRole = "generate" | "moderate";
+/**
+ * The generative models a caller may ask for by name: free-form generation, or the safety classifier.
+ *
+ * Listed as VALUES as well as a type because the per-caller hourly ceiling counts rows by role
+ * (services/ai.ts) and has to ask about all of them. Written as a comparison against one literal it counted
+ * `generate` alone, which is a ceiling that quietly stops covering the next model added here.
+ */
+export const GENERATIVE_ROLES = ["generate", "moderate"] as const;
+export type GenerativeRole = (typeof GENERATIVE_ROLES)[number];
 
 export interface TextModel {
   embed(texts: string[]): Promise<number[][]>;

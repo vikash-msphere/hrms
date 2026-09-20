@@ -55,9 +55,15 @@ export function makeTextModel(binding: Ai, gatewayId?: string): TextModel {
           { role: "user", content: user },
         ],
         max_tokens: maxTokens ?? 512,
-        // Low but not zero. Drafting reads as a machine at 0, and the constrained-JSON callers validate their
-        // output anyway, so determinism buys them nothing a schema does not already give.
-        temperature: 0.3,
+        // Low but not zero for PROSE. Drafting reads as a machine at 0, and the constrained-JSON callers
+        // validate their output anyway, so determinism buys them nothing a schema does not already give.
+        //
+        // ZERO for the safety classifier, which is not prose. A verdict that can come out differently on two
+        // reads of the same text is not a classification, and the consequences are asymmetric either way: a
+        // sampled "safe" leaves an objectionable post unflagged, a sampled "unsafe" puts an innocuous one on a
+        // moderator's queue - and `aiGenerate` then caches whichever way it fell for seven days, so the coin
+        // toss is settled once and kept. This model was added to the method later than the number was chosen.
+        temperature: role === "moderate" ? 0 : 0.3,
       });
       return out?.response ?? "";
     },

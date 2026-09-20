@@ -19,18 +19,30 @@ import { useAiFeature } from "@/lib/aiFeatures";
 
 type Similar = { path: string; title: string | null; status: string; score: number; votes: number };
 
-export function SimilarAsks({ suggestionPath, chosen, onPick }: {
+export function SimilarAsks({ suggestionPath, can, chosen, onPick }: {
   suggestionPath: string;
+  /**
+   * The verbs this caller holds on THIS suggestion (`access.can`, server-computed).
+   *
+   * Required, not optional. `similar` is private by default like every custom method, so a caller can hold
+   * `merge` and not this - and the panel asks on MOUNT rather than on a press. Ungated it made a POST that
+   * 403s, and `api()` offers the permission wall for any non-GET 403 (web/src/api.ts): opening the merge
+   * dialog put a "request access to suggestions" prompt in front of somebody who had asked for nothing. The
+   * hide-never-disable rule with the request not made at all, which is the only version of it that costs
+   * nothing.
+   */
+  can?: string[];
   /** The path currently selected as the merge target, so the picked one reads as picked. */
   chosen: string;
   onPick: (path: string) => void;
 }) {
   const enabled = useAiFeature("suggestions.similar");
+  const allowed = !!can?.includes("similar");
   const [rows, setRows] = useState<Similar[]>([]);
   const [asked, setAsked] = useState(false);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !allowed) return;
     let live = true;
     // On open rather than on a button: unlike the ticket triage panel this costs no inference - the vector is
     // already there and this is one index read - and the moment somebody is deciding what to do with a
@@ -39,9 +51,9 @@ export function SimilarAsks({ suggestionPath, chosen, onPick }: {
       .then((r) => { if (live) { setRows(r.results ?? []); setAsked(true); } })
       .catch(() => { if (live) setAsked(true); /* a missing second opinion is not worth a toast */ });
     return () => { live = false; };
-  }, [enabled, suggestionPath]);
+  }, [enabled, allowed, suggestionPath]);
 
-  if (!enabled || !asked || rows.length === 0) return null;
+  if (!enabled || !allowed || !asked || rows.length === 0) return null;
 
   return (
     <div className="rounded-md border border-primary/30 bg-primary/5 p-3">

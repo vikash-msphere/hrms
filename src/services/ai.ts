@@ -16,7 +16,7 @@
 import { and, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import type { GenerativeRole } from "../ports";
+import { GENERATIVE_ROLES, type GenerativeRole } from "../ports";
 import {
   AI_CONFIG_DEFAULT,
   BUDGET,
@@ -208,7 +208,14 @@ async function withinUserRate(deps: Deps, ctx: AiCallContext): Promise<{ ok: tru
     // cost no neurons, and this limit exists to stop one person spending the org's day - not to ration
     // answers the app already had. Counting them meant a user who kept reopening the same summary hit their
     // ceiling having spent nothing.
-    .where(and(eq(schema.aiUsage.userId, ctx.userId), eq(schema.aiUsage.role, "generate"), eq(schema.aiUsage.cacheHit, false), gte(schema.aiUsage.createdAt, since)));
+    //
+    // EVERY GENERATIVE ROLE, not the one called `generate`. The ceiling is about the expensive primitive, and
+    // which model serves a prompt is a routing detail: `moderate` costs the same order of neurons as
+    // `generate` and is reached through the same function. Written as an equality it counted one role and let
+    // any other past, so the next user-initiated feature on a second model would have had no per-caller
+    // ceiling at all - silently, since nothing about a request says which role answered it. Cron calls carry
+    // no `userId` and are already exempt above, so this widens nothing that runs unattended today.
+    .where(and(eq(schema.aiUsage.userId, ctx.userId), inArray(schema.aiUsage.role, [...GENERATIVE_ROLES]), eq(schema.aiUsage.cacheHit, false), gte(schema.aiUsage.createdAt, since)));
   const used = Number(rows[0]?.n ?? 0);
   if (used >= perUserHourlyGenerations) {
     return refuse("rate", `hourly AI limit reached (${used}/${perUserHourlyGenerations})`);

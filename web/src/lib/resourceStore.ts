@@ -916,6 +916,10 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   // collection and the bell) on every press of "What changed", on a page that had just paid for the report.
   // `[]` is the decision recorded, as it is for the board verbs above.
   "people-analytics:narrate": [],
+  // A read too, for the same reason: `suggestions:similar` asks the search index for neighbours and writes
+  // nothing. It is a POST because the app's verb transport is, not because anything changes. Unmapped it
+  // refetched the suggestion list and the bell every time somebody opened the merge dialog.
+  "suggestions:similar": [],
 };
 
 // Collections a mutation on `path` (custom `verb` optional) should invalidate.
