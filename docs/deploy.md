@@ -235,6 +235,16 @@ From there, the super admin provisions departments, employees, and role assignme
 - **Webhooks** — automation `webhook`/`apiCall` egress stays off unless explicitly wired
   (`docs/deploy-security.md` §6).
 
+## 11. Optional: the AI layer
+
+Everything above deploys the app with no AI. The layer ships switched off and stays that way — no binding, no
+index, no feature enabled — so skipping this leaves the app working exactly as this document describes.
+
+To turn any of it on, follow `docs/deploy-ai.md`: it covers creating the Vectorize index, what to do about
+staging, migrating and deploying, the per-feature switches in Settings, the three capabilities nothing seeds,
+how to check it is actually working, and how to turn it off again. Note that `npm run preflight` does **not**
+check any of it.
+
 ## Automating deploys (CI/CD)
 
 Steps 0-4, 7, and 9 are **one-time setup** — run them once by hand. Everything per-commit (build → migrate →
