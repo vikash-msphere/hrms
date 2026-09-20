@@ -41,7 +41,7 @@ binding = "ASSETS"
 # The Worker's notFound handler does the fallback instead - 404 for a missing FILE, the shell for a real app
 # route. See src/index.ts.
 not_found_handling = "none"
-run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag"]
+run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag", "/__scheduled"]
 
 # Explicit CPU ceiling. This RAISES the limit, it does not lower it - say so plainly, because the comment here
 # used to claim the opposite and the number quietly said otherwise.
