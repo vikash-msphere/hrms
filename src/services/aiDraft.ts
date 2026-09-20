@@ -11,7 +11,7 @@
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { invalidArgument, failedPrecondition, resourceExhausted } from "../lib/errors";
-import { assertMayReachModel } from "../domain/aiPolicy";
+import { assertConsentedPath, assertMayReachModel } from "../domain/aiPolicy";
 import { MAX_DRAFT_INPUT, draftKind, draftPrompt, draftSystem } from "../domain/aiDraft";
 import { aiFeatureOn, aiGenerate } from "./ai";
 
@@ -32,7 +32,12 @@ export async function draftText(deps: Deps, user: AppUser, req: DraftRequest): P
   if (!kind) throw invalidArgument(`unknown draft kind "${req.kind}"`);
   // Belt to the braces in domain/aiDraft.ts: nothing from a record reaches the prompt, but the host is still
   // checked, so wiring a draft kind onto a sensitive collection fails loudly rather than reading as fine.
-  assertMayReachModel(kind.collection);
+  //
+  // A kind may instead name a CONSENTED_PATH, which is the declared exception and not a way around the gate:
+  // `assertConsentedPath` throws unless that path is declared AND names this exact collection, so the string
+  // cannot be borrowed to unlock a different one. A kind gets one door or the other, never both.
+  if (kind.consentedPath) assertConsentedPath(kind.consentedPath, kind.collection);
+  else assertMayReachModel(kind.collection);
 
   const instruction = (req.instruction ?? "").trim();
   if (!instruction) throw invalidArgument("say what to write");
@@ -49,7 +54,17 @@ export async function draftText(deps: Deps, user: AppUser, req: DraftRequest): P
       // learned, and "drafting cost 900 neurons today" does not say which of them to keep.
       feature: `draft.${kind.id}`,
       userId: user.uuid,
-      collection: kind.collection,
+      // `collection` DECLARES "content from this collection is going into the prompt", and `aiGenerate`
+      // answers it with the absolute `assertMayReachModel`. For an ordinary kind that is exactly right - a
+      // second gate behind the one above. For a consented kind it would be a false statement AND an
+      // immediate throw: `draftText` reads no record, so the only text sent is the instruction the author
+      // typed and whatever is already in their field. The declared exception is asserted above, by path and
+      // collection together; claiming the collection here as well would ask the general gate a question the
+      // exception exists to answer.
+      //
+      // Tied to `consentedPath` rather than to a kind id, so a future kind that genuinely does read rows
+      // cannot inherit the omission by accident - it would have to claim an exception of its own first.
+      ...(kind.consentedPath ? {} : { collection: kind.collection }),
     },
     {
       system: draftSystem(kind),

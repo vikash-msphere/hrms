@@ -26,6 +26,15 @@ export type DraftKind = {
   id: string;
   /** The collection whose write grant gates this draft. Also what the denylist is checked against. */
   collection: string;
+  /**
+   * The `CONSENTED_PATHS` key this kind goes through, for the few kinds whose collection is on the denylist.
+   *
+   * Absent for almost every kind, and that is the point: without it `draftText` runs the ordinary
+   * `assertMayReachModel` and a kind wired onto a sensitive collection fails loudly. Naming a path here is
+   * the deliberate, reviewable act of claiming an exception, and `assertConsentedPath` then checks the path
+   * and the collection AGREE, so the string cannot be borrowed to unlock a different collection.
+   */
+  consentedPath?: string;
   label: string;
   promptVersion: string;
   maxTokens: number;
@@ -105,6 +114,44 @@ export const DRAFT_KINDS: DraftKind[] = [
       "bullet lines if the request lists steps. " +
       "Do not invent acceptance criteria, dates, owners or ticket references that were not given, and do not " +
       "assess anybody's work or performance.",
+  },
+  // The two review kinds. Both go through `reviews.draft` (domain/aiPolicy.ts CONSENTED_PATHS), because
+  // `reviews` is on the denylist and this is a named exception rather than a hole.
+  //
+  // WHAT EVERY REVIEW PROMPT MUST SAY, and why it is repeated in both rather than folded into HOUSE_STYLE:
+  // the model must not judge, score or recommend a rating. It has nothing to judge FROM - `draftText` reads
+  // no record - but a model asked to "write a performance review" will happily invent an assessment out of
+  // the adjectives in the instruction, and that invented verdict would arrive in a field a person then signs.
+  // The instruction is the author's own observations; the model's job is to put them in sentences.
+  {
+    id: "review-self",
+    collection: "reviews",
+    consentedPath: "reviews.draft",
+    label: "Self-assessment",
+    promptVersion: "v1",
+    maxTokens: 500,
+    system:
+      `You help somebody write their own self-assessment for a performance review. ${HOUSE_STYLE} ` +
+      "Write in the first person, as the person themselves. Turn what they tell you into clear prose: what " +
+      "they worked on, what came of it, and what they want to do next. " +
+      "Use ONLY what the instruction gives you. Do not add achievements, metrics or dates that were not " +
+      "mentioned, do not rate or score anything, and do not say whether the year was good or bad - those are " +
+      "the author's to decide and the reader's to weigh.",
+  },
+  {
+    id: "review-summary",
+    collection: "reviews",
+    consentedPath: "reviews.draft",
+    label: "Review comments",
+    promptVersion: "v1",
+    maxTokens: 500,
+    system:
+      `You help a manager put their own review comments into sentences. ${HOUSE_STYLE} ` +
+      "The instruction is what the manager has observed. Your job is to write it clearly and specifically, " +
+      "addressed to the person being reviewed. " +
+      "Do NOT form a view of your own: add no judgement, no score, no rating, no recommendation about " +
+      "promotion, pay or performance, and nothing the manager did not say. If the instruction is thin, write " +
+      "less rather than filling it in.",
   },
   {
     id: "job-description",

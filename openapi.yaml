@@ -15448,6 +15448,22 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ai-draft' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/reviews:draft:
+    post:
+      description: "Custom method draft: write a first draft of a self-assessment or of a manager's review comments, from an instruction the caller types, and return it for them to edit. Nothing is written and no record is read - not the review, not a rating, not a goal - and the model is instructed not to judge, score or recommend a rating."
+      operationId: ":DraftReview"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ai-draft-request' } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ai-draft' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/cards:draft:
     post:
       description: "Custom method draft: write a first draft of a board card's description from an instruction the caller types, and return it for them to edit. Nothing is written, and the model is instructed not to invent acceptance criteria or assess anybody's work."

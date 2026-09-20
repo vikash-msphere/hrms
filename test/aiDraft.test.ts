@@ -11,8 +11,8 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import type { TextModel } from "../src/ports";
 import { draftText } from "../src/services/aiDraft";
-import { DRAFT_KINDS, DRAFT_COLLECTIONS, draftPrompt, MAX_DRAFT_INPUT } from "../src/domain/aiDraft";
-import { NEVER_TO_MODEL, BUDGET } from "../src/domain/aiPolicy";
+import { DRAFT_KINDS, DRAFT_COLLECTIONS, draftKind, draftPrompt, MAX_DRAFT_INPUT } from "../src/domain/aiDraft";
+import { NEVER_TO_MODEL, BUDGET, CONSENTED_PATHS, assertConsentedPath } from "../src/domain/aiPolicy";
 import { COLLECTIONS } from "../src/domain/collections";
 
 // Drafting. The claim the whole feature rests on is that a draft is built from the caller's own typed text
@@ -172,13 +172,41 @@ describe("the trail", () => {
   });
 });
 
+describe("the consented path is an exception, not a hole", () => {
+  it("refuses a draft whose kind claims a path declared for another collection", async () => {
+    // The whole security argument for CONSENTED_PATHS is that the path and the collection must AGREE. If the
+    // string alone were enough, any kind could name `ats.resumeExtraction` and reach a model with a
+    // collection the denylist forbids. This drives the real service so the check is exercised where it runs,
+    // not where it is declared.
+    await expect(
+      draftText(deps, user, { kind: "review-self", instruction: "a good year" } as never),
+    ).resolves.toBeDefined(); // the honest pairing works
+
+    const borrowed = { ...draftKind("review-self")!, consentedPath: "ats.resumeExtraction" };
+    expect(() => assertConsentedPath(borrowed.consentedPath, borrowed.collection)).toThrow(/candidates/);
+  });
+
+  it("refuses a path nobody declared", () => {
+    expect(() => assertConsentedPath("reviews.rank", "reviews")).toThrow(/not a declared consented path/);
+  });
+});
+
 describe("the registry is coherent", () => {
   it("every draft kind names a real collection that may reach a model", () => {
     for (const k of DRAFT_KINDS) {
       expect(COLLECTIONS.has(k.collection), `${k.id} names collection ${k.collection}`).toBe(true);
-      // A drafting prompt on a collection the denylist forbids would be a contradiction: the route would be
-      // mounted and every call would throw.
-      expect(NEVER_TO_MODEL.has(k.collection), `${k.id} drafts for a forbidden collection`).toBe(false);
+      // A drafting prompt on a denylisted collection would be a contradiction - the route would mount and
+      // every call would throw - UNLESS the kind names the consented path that permits exactly it. So the
+      // rule is "reachable by one door or the other", and a kind that names neither still fails here.
+      if (k.consentedPath) {
+        const entry = CONSENTED_PATHS[k.consentedPath];
+        expect(entry, `${k.id} names consented path ${k.consentedPath}, which is not declared`).toBeDefined();
+        // The path and the collection have to agree, or the string would be a skeleton key: naming
+        // `ats.resumeExtraction` from a review kind must not unlock `reviews`.
+        expect(entry!.collection, `${k.id} claims a consented path for a different collection`).toBe(k.collection);
+      } else {
+        expect(NEVER_TO_MODEL.has(k.collection), `${k.id} drafts for a forbidden collection`).toBe(false);
+      }
     }
   });
 

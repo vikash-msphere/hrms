@@ -30,6 +30,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { DraftButton } from "@/components/common/DraftButton";
 import { Input } from "@/components/ui/input";
 import { Field, FieldRow } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -931,6 +932,19 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                 </button>
               ))}
             </div>
+            {/* Writing assistance on your OWN assessment. Nothing is read to produce it: the model gets the
+                instruction typed into its dialog plus whatever is already in this box, never the review row,
+                a rating or a goal - which is why it can say nothing about how the year went. It writes the
+                sentences; the view stays the author's. */}
+            <div className="mb-2 flex justify-end">
+              <DraftButton
+                collection="reviews"
+                kind="review-self"
+                existing={selfText}
+                hint="e.g. led the payments migration, mentored two juniors, want to move into design work"
+                onDraft={(text) => { setSelfText(text); saveDraft("self", text); }}
+              />
+            </div>
             <Textarea rows={6} value={selfText} onChange={(e) => { setSelfText(e.target.value); saveDraft("self", e.target.value); }} placeholder="Summarise your impact, wins, and where you want to grow." />
             {/* Optional self ratings on the same scale the manager uses; the gap per competency becomes a
                 conversation flag once the manager's side lands. */}
@@ -1037,6 +1051,18 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                 )}
               </span>
               <ScalePicker scale={framework.scale} value={overall} onPick={(v) => { setOverall(v); saveDraft("overall", String(v)); }} />
+            </div>
+            {/* The manager's own observations, put into sentences. The prompt forbids the model adding a
+                judgement, a score or a recommendation of its own, and it has nothing to form one from - no
+                record is read. A thin instruction gets a short draft rather than an invented assessment. */}
+            <div className="mb-2 flex justify-end">
+              <DraftButton
+                collection="reviews"
+                kind="review-summary"
+                existing={mgrComment}
+                hint="e.g. shipped the migration on time, needs to delegate more, ready for a bigger scope next year"
+                onDraft={(text) => { setMgrComment(text); saveDraft("manager", text); }}
+              />
             </div>
             <Textarea rows={3} value={mgrComment} onChange={(e) => { setMgrComment(e.target.value); saveDraft("manager", e.target.value); }} placeholder="Overall feedback for the employee." />
             <div className="flex flex-wrap items-center gap-2">

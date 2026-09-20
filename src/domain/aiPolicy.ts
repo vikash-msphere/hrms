@@ -206,18 +206,35 @@ export const NEVER_TO_MODEL: ReadonlySet<string> = new Set<string>([
  *   - Each carries the lawful basis in prose, because the person who next reads this needs to know why it was
  *     thought acceptable, not merely that it was.
  *
- * ONE ENTRY TODAY. Resume extraction: a recruiter opens a candidate they are already working on, and the
- * document the candidate themselves submitted for exactly this purpose is turned into form fields the
- * recruiter then checks. It is clerical - the model transcribes, it does not judge - and no field is written
- * without the recruiter accepting it.
+ * TWO ENTRIES TODAY, and they are the same shape: a person is already doing a task, and the model does the
+ * clerical half of it under their hand.
  *
- * WHAT IS DELIBERATELY NOT HERE: anything that RANKS or SCORES a candidate. Extraction reads a document;
- * ranking makes a judgement about a person for a hiring decision, which is a different act with different
- * obligations (Annex III of the EU AI Act treats candidate-ranking as high risk, and Article 22 GDPR /
- * India's DPDP both bear on automated decisions about people). It stays out until somebody decides to take
- * that on with their eyes open.
+ * Resume extraction: a recruiter opens a candidate they are already working on, and the document the
+ * candidate themselves submitted for exactly this purpose is turned into form fields the recruiter then
+ * checks. The model transcribes, it does not judge, and no field is written without the recruiter accepting
+ * it.
+ *
+ * Review drafting: the author of a review types an instruction and gets prose back to edit. Nothing is read -
+ * not the review row, not a rating, not a goal, not anybody else's words - so there is no path by which the
+ * model could form a view about the person even if the prompt did not forbid it, which it does.
+ *
+ * WHAT IS DELIBERATELY NOT HERE, and the line is the same in both cases: anything that RANKS, SCORES or
+ * RECOMMENDS A VERDICT about a person. Extraction reads a document and drafting writes prose an author owns;
+ * ranking a candidate or suggesting somebody's rating is a judgement about a person, made by a machine,
+ * feeding a decision about their job. That stays out until somebody decides to take it on with their eyes
+ * open - and taking it on means arguing for it here, in this comment, not quietly adding a kind.
  */
 export const CONSENTED_PATHS: Readonly<Record<string, { collection: string; basis: string }>> = {
+  "reviews.draft": {
+    collection: "reviews",
+    basis:
+      "The person writing the review types the instruction themselves and presses a button to get prose back; " +
+      "no review row, rating, goal or anybody else's words are read, and the only text sent is what they " +
+      "typed plus whatever is already in the field they are writing in. The result lands in that field for " +
+      "them to edit, and nothing is saved until they save it. This is a writing tool for an author, not an " +
+      "assessment of a person: the model is told in the prompt that it must not judge, score or recommend a " +
+      "rating, and no path exists by which it could - `draftText` reads no record to judge FROM.",
+  },
   "ats.resumeExtraction": {
     collection: "candidates",
     basis:
