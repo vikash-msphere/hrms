@@ -455,6 +455,109 @@ tax) is `OWN_PII` - self-service and super, which is why those specs are written
 rather than HR's. A spec using a role that does not hold the grant would be testing an org this seed does not
 describe.
 
+## The AI layer, against a model on your machine
+
+Neither AI dependency can be emulated by the platform, and both fail in a way that costs money rather than
+erroring:
+
+- `wrangler dev` honours `[ai]` from `wrangler.toml` and proxies it to the real service. Its own log warns
+  that *"AI bindings always access remote resources, and so may incur usage charges even in local dev"*.
+- Miniflare's Vectorize plugin has no local implementation at all, only a remote proxy client. A `VEC`
+  binding locally is **production's index**, so a local run's upserts land under production's ids.
+
+So there was no local AI lane: exercising a feature spent the account's daily neuron allowance and wrote into
+the live index. The browser lane's AI specs were originally written pressing the buttons and made real
+inference calls on every run before that was caught.
+
+`AI_LOCAL_URL` replaces both with a model running on this machine. `src/deps.ts` prefers it over the
+bindings, so with it set **there is no remaining code path to Workers AI** - which is a stronger guarantee
+than remembering to leave the feature switches off.
+
+### Setting it up
+
+```bash
+ollama serve
+```
+
+Any instruct model answers the generative half - use `ollama list` and take what you have. **No chat model is
+an embedding model**, though, and four of the eight features need one:
+
+```bash
+ollama pull all-minilm
+```
+
+`all-minilm` is **384-wide, the same as `@cf/baai/bge-small-en-v1.5`**, so the local lane rehearses
+production's vector width. `embeddinggemma` and `nomic-embed-text` work too, at 768.
+
+In `.dev.vars`, with the chat model named as `ollama list` prints it, tag included:
+
+```
+AI_LOCAL_URL=http://127.0.0.1:11434
+AI_LOCAL_CHAT_MODEL=gemma4:26b-a4b-it-q8_0
+AI_LOCAL_EMBED_MODEL=all-minilm
+```
+
+**A reasoning model is fine.** `src/lib/aiLocal.ts` sends `think: false` on every generation, and that is
+load-bearing rather than tidy: reasoning tokens are generated, so they spend `num_predict`. Without the flag,
+the moderation prompt at its usual 64-token budget spent all of it deliberating and returned an empty answer,
+which `parseVerdict` reads as nothing - indistinguishable from the model finding the post acceptable. Every
+call site sizes `maxTokens` for an answer, because neither production model reasons.
+
+**Only loopback is accepted.** `assertLoopback` (`src/lib/aiLocal.ts`) throws for any other host, and
+`npm run preflight` refuses a deploy that sets the var at all. That is not politeness about configuration:
+`domain/aiPolicy.ts` keeps a model allowlist because the `AI` binding will proxy external providers given a
+provider-prefixed id, and a second transport taking a URL from config would be a way around it.
+
+The browser lane sets the same three vars in `e2e/e2e.vars`, for the same reason the `EMAIL_*` block is there.
+
+### Driving the features
+
+Four of the eight ride the five-minute cron - the embed drain, ticket triage, suggestion clustering and the
+moderation scan - and waiting five minutes per iteration is not a workflow. `wrangler dev --test-scheduled`
+exposes the trigger over HTTP (the flag is required; without it the path 404s):
+
+```bash
+curl "http://127.0.0.1:8787/__scheduled?cron=*/5+*+*+*+*"
+```
+
+`cron_runs.summary_json` records `embedded` and `moderated` per tick, so the effect is readable rather than
+guessed at. The other four are request-time and just need the feature switched on in
+**Settings → Access & security → AI features** (`docs/deploy-ai.md` has the table).
+
+Two tests exercise this lane, and **both skip themselves when Ollama is down** - so a green run does not mean
+they ran, and the skip count is the thing to read:
+
+- `test/aiLocalIntegration.test.ts` - the drains and the parsers against a real model. It holds the two
+  assertions a fake cannot make: that embeddings actually **discriminate** (a query sharing no words with a
+  row still ranks it first, which is the entire reason the semantic half exists), and that a real
+  generation comes back in a shape the strict parsers accept. It takes the two model names from `.dev.vars`
+  and, failing that, picks from Ollama's own inventory and **prints which two it used** - because a wrong
+  name here does not fail, it skips forever, and a test that quietly never runs is worse than one that
+  chooses.
+- `e2e/aiFeatures.spec.ts`, last describe - the affordances pressed in a browser. The other two describes in
+  that file assert the controls are absent when off and present when on, and must keep passing with nothing
+  local running. All three are one file on purpose: the switches are one org-wide settings row, and
+  Playwright runs different files in parallel, so split across files they raced and the retries hid it.
+
+### What a local pass proves, and what it does not
+
+| Provable locally | Only the real service can answer |
+|---|---|
+| Feature switches gate what they claim to | Whether `llama-3.1-8b-instruct-fast` drafts usefully |
+| Budget accounting and the `ai_usage` ledger | Whether `llama-guard-3-8b` judges content correctly |
+| `ai_cache` hits (the model *not* being called) | Real neuron cost per call, which `BUDGET` is guessed from |
+| Prompt construction, fencing, identifier scrubbing | Vectorize `topK` semantics and `$in` metadata filtering |
+| Output parsing and coercion | Vectorize upsert consistency timing |
+| Every fallback and refusal path | AI Gateway behaviour and its payload suppression |
+| Drain rotation, sweep order, orphan cleanup | |
+| The UI affordances and the moderation queue flow | |
+
+The second column is why this does not replace a production smoke - it shrinks it. The moderation test here
+deliberately asserts on the **format** of a verdict and never on the verdict itself, because Llama Guard's
+judgement is not a thing a local Gemma can stand in for. That distinction is the bug this layer already had
+once: moderation called the instruct model by mistake, it answered in prose, the strict parser rejected every
+answer, and the feature flagged nothing while looking healthy.
+
 ## Writing a new test
 
 - Pure domain logic: no runtime imports, no DB. Keep it in the fast lane.

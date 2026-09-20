@@ -6,6 +6,12 @@ which is the state it ships in. Nothing below changes behaviour for anybody unti
 
 Design and reasoning live in `ai-plan.md` and `ai-rollout-plan.md`. This file is only the doing.
 
+**Rehearse it locally first.** `docs/04-testing.md` has a lane that points the whole AI layer at a model on
+your own machine, so all eight features can be walked end to end before any of this is switched on - without
+spending the account's daily allowance or writing into the live index, which is what a local run did before
+that lane existed. It leaves exactly two things for the real service to answer: how the production models
+behave, and how Vectorize behaves.
+
 ## Before you start: nothing is on
 
 Two independent switches have to be thrown before any feature does anything.
@@ -180,7 +186,9 @@ being disabled.
 
 **Everything, permanently:** remove the `[ai]` and `[[vectorize]]` blocks from `wrangler.toml` and deploy.
 Every feature falls back to the path it had before the layer existed - FTS search, manual routing, typed
-drafts. This is covered by `e2e/aiFallback.spec.ts`, which runs against a stack with no bindings.
+drafts. This is covered by `e2e/aiFeatures.spec.ts`, which asserts every fallback in a browser - **with the
+features switched off, not with the bindings removed**, which is a weaker thing and the file says so. Nothing
+in the suite exercises a deployment that has no `[ai]` block at all.
 
 Data left behind: `ai_usage` (a hash per call, never the input), `ai_cache` (generated text, swept nightly
 after expiry), `ai_suggestions` (advisory rows), `search_vectors` and `moderation_scans` (bookkeeping). The

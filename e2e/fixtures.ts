@@ -432,6 +432,31 @@ export async function patchSettings(page: Page, key: string, mutate: (value: Rec
 export const patchOrgSettings = (page: Page, mutate: (value: Record<string, unknown>) => Record<string, unknown>): Promise<void> =>
   patchSettings(page, "organization", mutate);
 
+/**
+ * Is there a model answering on this machine?
+ *
+ * The lane points the whole AI layer at `AI_LOCAL_URL` (e2e/e2e.vars) so it can never reach Workers AI. That
+ * override stands whether or not anything is listening - with Ollama down the calls fail, services/ai.ts
+ * catches and returns an `error` refusal, and every feature falls back, which is the state nearly every spec
+ * in this suite expects anyway.
+ *
+ * Only the last describe of `aiFeatures.spec.ts` needs a model that actually answers, and Ollama is an
+ * optional dependency of this repository rather than part of the stack `scripts/e2eStack.sh` starts. So it
+ * skips itself
+ * rather than failing a run for a tool the machine was never required to have. The consequence worth stating:
+ * **a green suite does not mean the AI features were exercised.** Read the skip count.
+ */
+export async function aiLocalUp(page: Page): Promise<boolean> {
+  try {
+    // Straight at Ollama, not through the app: the question is whether the dependency is up, and asking the
+    // Worker would answer "a feature is off" and "the model is down" with the same silence.
+    const res = await page.request.get("http://127.0.0.1:11434/api/tags", { timeout: 3_000 });
+    return res.ok();
+  } catch {
+    return false;
+  }
+}
+
 /** The local day `n` days from now (negative for the past), as a date input wants it. */
 export function inDays(n: number): string {
   return ymd(new Date(Date.now() + n * 86_400_000));

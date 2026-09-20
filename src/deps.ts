@@ -9,6 +9,8 @@ import { makeEmailSender, EMAIL_PROVIDERS, type EmailProvider } from "./lib/emai
 import { makeDocumentStore } from "./lib/docstore";
 import { makeTextModel } from "./lib/ai";
 import { makeVectorIndex } from "./lib/vector";
+import { assertLoopback, makeLocalTextModel } from "./lib/aiLocal";
+import { makeLocalVectorIndex } from "./lib/vectorLocal";
 import type { Clock, Encryptor, EmailSender, DocumentStore, WebhookSender, PushSender, TextModel, VectorIndex } from "./ports";
 import { makePushSender } from "./lib/webPush";
 import type { EsignSecrets } from "./domain/esign";
@@ -84,6 +86,20 @@ function assertConfigured(env: Bindings): void {
       if (!env[k]) throw new Error(`${k} is not configured (or set GOOGLE_CLIENT_ID for Google sign-in)`);
     }
   }
+  // The local-model transport may only point at this machine. `makeLocalTextModel` asserts the same thing and
+  // would throw a moment later anyway; it is repeated here so the refusal sits with the other configuration
+  // refusals, where somebody looking for "what will stop this Worker booting" will find it. See lib/aiLocal.ts
+  // for why a configurable endpoint would be a hole in the model allowlist rather than a feature.
+  if (env.AI_LOCAL_URL) {
+    assertLoopback(env.AI_LOCAL_URL);
+    // Both model names are REQUIRED rather than defaulted. An Ollama model is named with its tag and the set
+    // installed differs per machine, so any default this file could pick would be wrong almost everywhere -
+    // and it would be wrong as a "model 'x' not found" on the first inference rather than at boot, which is
+    // a long way from the line that needs editing.
+    for (const k of ["AI_LOCAL_CHAT_MODEL", "AI_LOCAL_EMBED_MODEL"] as const) {
+      if (!env[k]) throw new Error(`${k} is required with AI_LOCAL_URL - name the model as \`ollama list\` prints it, tag included`);
+    }
+  }
   if (env.EMAIL_PROVIDER && !EMAIL_PROVIDERS.includes(env.EMAIL_PROVIDER as EmailProvider)) {
     throw new Error(`EMAIL_PROVIDER must be one of ${EMAIL_PROVIDERS.join(", ")}`);
   }
@@ -100,8 +116,15 @@ function assertConfigured(env: Bindings): void {
 export function makeDeps(env: Bindings): Deps {
   assertConfigured(env);
   const encryptor = makeEncryptor(env.FIELD_ENCRYPTION_KEY);
+  const db = drizzle(sessionBinding(env.DB), { schema });
+  // A model on this machine, when one is configured. Built ONCE, before the bindings are considered, because
+  // both halves of the AI layer have to come from the same place: a local model writing into the production
+  // Vectorize index would be the worst of both.
+  const localAi = env.AI_LOCAL_URL
+    ? makeLocalTextModel(env.AI_LOCAL_URL, { chat: env.AI_LOCAL_CHAT_MODEL!, embed: env.AI_LOCAL_EMBED_MODEL! })
+    : undefined;
   const deps: Deps = {
-    db: drizzle(sessionBinding(env.DB), { schema }),
+    db,
     clock: { now: () => new Date() },
     encryptor,
     // Shared per isolate (lib/idCodec.ts codecFor), NOT built per request: a fresh codec re-derives its HKDF
@@ -118,10 +141,18 @@ export function makeDeps(env: Bindings): Deps {
     },
     // Inference is opt-in per deployment: no `AI` binding = no model = every AI feature falls back to the
     // path the app had before it. Nothing about the app's behaviour is REQUIRED to go through a model.
-    ...(env.AI ? { ai: makeTextModel(env.AI, env.AI_GATEWAY_ID) } : {}),
+    //
+    // A LOCAL MODEL WINS OVER THE BINDING, and it is worth being explicit that this is a safety property and
+    // not a convenience. `wrangler dev` proxies `[ai]` to the real service ("AI bindings always access remote
+    // resources, and so may incur usage charges even in local dev"), so the binding is live in every local
+    // stack including the browser suite's. Preferring the local transport is what removes the last code path
+    // to Workers AI during a local run; the other order would leave the allowance one forgotten switch away.
+    ...(localAi ? { ai: localAi } : env.AI ? { ai: makeTextModel(env.AI, env.AI_GATEWAY_ID) } : {}),
     // The semantic index is bound independently of the model: an index with no model cannot be refreshed but
-    // can still be queried, and a model with no index is every AI feature except semantic search.
-    ...(env.VEC ? { vectors: makeVectorIndex(env.VEC) } : {}),
+    // can still be queried, and a model with no index is every AI feature except semantic search. The local
+    // index follows the local model for the reason given above it - vectors from one must never land in the
+    // other's store, because they are not comparable and the ids collide.
+    ...(localAi ? { vectors: makeLocalVectorIndex(db) } : env.VEC ? { vectors: makeVectorIndex(env.VEC) } : {}),
     // Browser push is opt-in per deployment: absent VAPID keys = no sender = notify() skips push entirely.
     ...(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
       ? { push: makePushSender(env.VAPID_PUBLIC_KEY, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT || `mailto:${env.EMAIL_FROM}`) }

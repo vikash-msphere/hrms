@@ -83,6 +83,20 @@ export type Bindings = {
   // is treated as a data store in its own right - what may be put in it is decided by domain/aiPolicy.ts, and
   // what may be read out of it is re-decided in SQL, never by the index's own metadata.
   VEC?: VectorizeIndex;
+  // A model running on THIS MACHINE, which replaces both of the two above when set. Development and the
+  // browser suite only - `npm run preflight` refuses a deploy that sets it (see lib/aiLocal.ts for why
+  // neither `AI` nor `VEC` can be emulated locally, and why this is a loopback-only transport rather than a
+  // configurable endpoint).
+  //
+  // IT TAKES PRECEDENCE OVER `AI` AND `VEC` (deps.ts), and that ordering is the safety property rather than a
+  // preference: with it set there is no code path left that reaches Workers AI, so a local run cannot spend
+  // the account's neuron allowance even if something presses every button in the app.
+  AI_LOCAL_URL?: string;
+  // Which local models answer, named as `ollama list` prints them, tag included. Any instruct model does for
+  // chat; the embedding one has to be an embedding model, and `all-minilm` is 384-wide like
+  // `@cf/baai/bge-small-en-v1.5`, so the local lane rehearses production's vector width.
+  AI_LOCAL_CHAT_MODEL?: string;
+  AI_LOCAL_EMBED_MODEL?: string;
   // The built SPA in web/dist. Bound so the Worker can decide the SPA fallback itself instead of letting the
   // asset layer answer every miss with index.html - see the notFound handler in src/index.ts.
   ASSETS: Fetcher;

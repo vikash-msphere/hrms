@@ -127,6 +127,30 @@ if (plan === "free" && hasLimits) {
   }
 }
 
+// --- 2b-ii. The local-model transport must not reach a deploy ------------------------------------------
+// AI_LOCAL_URL replaces BOTH the `AI` binding and the Vectorize index with a model on the developer's own
+// machine (src/lib/aiLocal.ts). Deployed, it would point the AI layer at the Worker's own loopback, where
+// nothing answers: every feature would fall back silently, which is the shape of outage that gets noticed
+// weeks later by somebody wondering why the draft button never appears.
+//
+// The var is already harmless in the sense that matters - `assertLoopback` refuses any host but this machine,
+// so it cannot become an egress channel wherever it is set. This check is about INTENT rather than safety: it
+// is a development setting, it belongs in .dev.vars and e2e/e2e.vars, and a deploy carrying it is a mistake
+// whichever environment it lands in. Unscoped for that reason, unlike the email sinks below, which are right
+// for a rehearsal environment and wrong only in production.
+{
+  let section: string | undefined;
+  for (const line of wrangler.split("\n")) {
+    const header = line.match(/^\s*\[+\s*(?:env\.([a-z0-9_-]+)|[a-z0-9_.]+)/i);
+    if (header) section = header[1];
+    if (!/^\s*AI_LOCAL_URL\s*=/.test(line)) continue;
+    const where = section ? `env.${section}` : "the default (production) environment";
+    errors.push(
+      `wrangler.toml: AI_LOCAL_URL is set in ${where} - that redirects the whole AI layer at a model on the developer's machine (src/lib/aiLocal.ts), which no deployed Worker can reach. Remove it; it belongs in .dev.vars and e2e/e2e.vars, neither of which is deployed.`,
+    );
+  }
+}
+
 // --- 2c. ...and the redirect sink must not reach production either -------------------------------------
 // EMAIL_REDIRECT_TO diverts every message to one address (src/lib/email.ts). In production that is the same
 // class of silent failure as `console`: the vendor accepts, the send resolves, the trail says "sent", and the

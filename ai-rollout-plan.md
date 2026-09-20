@@ -148,9 +148,15 @@ happened, and any of it may need reworking if the prompts disappoint.
 
 ### 2. E2E coverage of the features themselves
 
-`e2e/aiFallback.spec.ts` covers the OFF state: with no `AI` binding, search still finds records through the
-keyword index, and no AI affordance renders anywhere. That is the half that matters for a default
-deployment, and it is the half the unit suite structurally cannot reach.
+`e2e/aiFeatures.spec.ts` covers all three states in one file - off, on, and on with a model answering. They
+are one file because the switches are one org-wide settings row and Playwright runs different FILES in
+parallel: split across three, the "absent" and "present" assertions read and wrote that row from two workers
+at once, raced, and passed on retry.
+
+The OFF describe is the half that matters for a default deployment, and the half the unit suite structurally
+cannot reach: search still finds records through the keyword index, and no AI affordance renders anywhere.
+**What makes it true is the settings, not a missing binding** - `wrangler dev` honours `[ai]`, so the lane
+has always had a live one.
 
 Those tests assert ABSENCE plus CONTINUITY, and every absence half was checked for vacuity: the gate was
 temporarily removed, the spec was confirmed to fail, and the gate was put back. An absence assertion that has
@@ -172,9 +178,15 @@ and this stack has none - so the queue is empty in every run and rendering a fla
 carries a positive control (the super DOES see the nav item) so the employee's absence assertion is a
 contrast rather than a test that would pass if the nav item existed for nobody.
 
-What is still uncovered is every feature actually doing its job in a browser, which needs a stack with a
-model bound - so it waits on the smoke above. Candidates then: the triage panel, a draft round trip, the
-extraction panel, creating a table from a description, and a flag rendering on the moderation queue.
+Features actually doing their job no longer wait on the smoke. `AI_LOCAL_URL` (`src/lib/aiLocal.ts`) points
+the whole layer at a model on the developer's machine, and `src/deps.ts` prefers it over the bindings, so a
+local run reaches Workers AI through no code path at all. The last describe of `aiFeatures.spec.ts` presses
+the buttons, and `test/aiLocalIntegration.test.ts` drives the drains and the parsers against a real model -
+both skipping when Ollama is down, so a green run does not mean they ran. Setup and the full account of what
+a local pass proves are in `docs/04-testing.md`.
+
+Still uncovered in a browser: the triage panel, the extraction panel, and a flag rendering on the moderation
+queue.
 
 Note that `e2e/ticketTriage.spec.ts` is NOT this. It predates the AI layer and covers the manual assign /
 route / prioritize controls; the AI suggestion panel above them has no browser coverage at all.
