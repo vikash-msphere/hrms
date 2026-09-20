@@ -407,20 +407,30 @@ async function editBanks(page: Page, change: (banks: string[]) => string[]): Pro
  * re-reading fresh right before the write) is the same bug with extra steps: it discards not just this
  * spec's own change but whatever ANY other spec wrote to a DIFFERENT key of this row in between.
  */
-export async function patchOrgSettings(page: Page, mutate: (value: Record<string, unknown>) => Record<string, unknown>): Promise<void> {
+/**
+ * Read-modify-write one settings key, retrying the If-Match race.
+ *
+ * Generic because `organization` is not the only key a spec needs to move: the AI switches live under `ai`,
+ * and a spec that turns one on has the same lost-update problem against a parallel worker that this has
+ * always had.
+ */
+export async function patchSettings(page: Page, key: string, mutate: (value: Record<string, unknown>) => Record<string, unknown>): Promise<void> {
   for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await page.request.get("/v1/settings/organization");
+    const res = await page.request.get(`/v1/settings/${key}`);
     const body = res.ok() ? ((await res.json()) as { value?: Record<string, unknown>; etag?: string }) : {};
     const next = mutate(body.value ?? {});
-    const wrote = await page.request.patch("/v1/settings/organization", {
+    const wrote = await page.request.patch(`/v1/settings/${key}`, {
       headers: { ...SPA_HEADERS, ...(body.etag ? { "If-Match": body.etag } : {}) },
       data: { value: next },
     });
     if (wrote.ok()) return;
-    if (wrote.status() !== 409) throw new Error(`e2e: could not update org settings: ${await wrote.text()}`);
+    if (wrote.status() !== 409) throw new Error(`e2e: could not update settings/${key}: ${await wrote.text()}`);
   }
-  throw new Error("e2e: could not update org settings - kept losing the race to a concurrent writer");
+  throw new Error(`e2e: could not update settings/${key} - kept losing the race to a concurrent writer`);
 }
+
+export const patchOrgSettings = (page: Page, mutate: (value: Record<string, unknown>) => Record<string, unknown>): Promise<void> =>
+  patchSettings(page, "organization", mutate);
 
 /** The local day `n` days from now (negative for the past), as a date input wants it. */
 export function inDays(n: number): string {

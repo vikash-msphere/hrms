@@ -93,7 +93,20 @@ export async function suggestTableView(
 
   const out = await aiGenerate(
     deps,
-    { feature: "tables.describe", userId: user.uuid, collection: base },
+    // NO `collection`, deliberately, and this was a 500 before it said so.
+    //
+    // `ctx.collection` declares "content from this collection is going into the prompt", and `aiGenerate`
+    // answers it with `assertMayReachModel` - which THROWS for anything on the denylist, because sending a
+    // payslip's text to a model is a bug rather than a runtime condition to degrade around. Passing `base`
+    // here declared something untrue: the prompt is catalogue field KEYS and the caller's own sentence, and
+    // no row is ever read. The result was that describing a grid built on `applications`, `candidates`,
+    // `compensation` or any other denylisted base answered 500 - a correct assertion, fired at a call site
+    // that had mis-described itself.
+    //
+    // What guards this path instead is `buildCatalogue` above, which was already handed the caller's own
+    // `listable` set and field gate: the keys offered to the model are exactly the keys the picker would
+    // have offered them, and those are labels they can already see on screen.
+    { feature: "tables.describe", userId: user.uuid },
     {
       system: systemFor(offered),
       user: fence("what the table should show", scrubIdentifiers(q)),

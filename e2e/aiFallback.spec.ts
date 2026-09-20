@@ -3,8 +3,13 @@ import { gotoRoute, test, expect } from "./fixtures";
 // The app with the AI layer switched off, which is how it ships and how this stack runs.
 //
 // THE CLAIM THIS PINS: "every feature degrades to its non-AI self". It is stated in ai-plan.md, asserted all
-// over the unit tests with fake models, and until now never checked in a browser against a stack that has no
-// `AI` binding at all - which is the configuration every deployment starts in and most will stay in.
+// over the unit tests with fake models, and until now never checked in a browser.
+//
+// WHAT MAKES IT TRUE HERE IS THE SETTINGS, NOT A MISSING BINDING, and an earlier version of this comment had
+// that wrong. `wrangler dev` honours `[ai]` from wrangler.toml, so this lane DOES have a live AI binding -
+// its own log warns that "AI bindings always access remote resources, and so may incur usage charges even in
+// local dev". Every feature is off by default, which is why nothing below reaches a model; it is not because
+// there is nothing to reach. See `aiFeatureSwitch.spec.ts` for the rule that follows.
 //
 // The unit suite cannot check this half. It proves that `semanticHits` returns [] with no binding and that
 // `draftText` throws when the feature is off; it cannot prove that the search box still finds things, or that
