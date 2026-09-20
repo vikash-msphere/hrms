@@ -31,6 +31,19 @@ export default defineWorkersConfig({
     // specs into the workers pool - where `@playwright/test` cannot even be imported (workerd forbids I/O in
     // global scope) and where they mean nothing anyway. The browser lane is `npm run test:e2e`.
     include: ["test/**/*.test.ts"],
+    // The local-model integration test is OPT-IN (`npm run test:ai`), and this is the one exclusion in the
+    // suite.
+    //
+    // It is the only test that loads a large language model into this machine's memory, and the chat models
+    // people actually have installed are tens of gigabytes. Run beside the other 309 files - each booting its
+    // own workerd isolate - it does not merely run slowly: it saturates the box, and the damage lands on
+    // OTHER files. One measured run had it take 250s and fail two of its own assertions on a two-minute
+    // timeout, while `rateLimit` failed on a Retry-After that was one second stale and `moderation` timed out
+    // at five seconds. Three red files, one cause, none of them a defect.
+    //
+    // So it does not belong in the gate that runs on every commit. Keeping it in would either make the gate
+    // unreliable or force every other test's timeouts up to cover a dependency most machines do not have.
+    exclude: ["node_modules/**", ...(process.env.AI_LOCAL_TEST ? [] : ["test/aiLocalIntegration.test.ts"])],
     poolOptions: {
       workers: {
         wrangler: { configPath: "./wrangler.toml" },

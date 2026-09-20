@@ -521,8 +521,12 @@ curl "http://127.0.0.1:8787/__scheduled?cron=*/5+*+*+*+*"
 ```
 
 `scripts/e2eStack.sh` passes that flag, and `runCron(page)` in `e2e/fixtures.ts` is the browser lane's way in.
-It returns only once the handler has run, so it is a synchronisation point rather than a nudge - which is what
-lets a spec create a record, embed it, and search for it in one test.
+
+**It returns when the event is dispatched, not when the work is done.** The worker log is unambiguous:
+`GET /__scheduled 200 OK (1ms)` while the drain behind it embeds hundreds of rows against a model. A spec
+must wait for the *effect* - the semantic-search test polls the search API until its row is indexed, firing
+another tick each round. Asserting straight after `runCron` returns makes a test pass or fail on timing, and
+it looks exactly like a flake.
 
 `cron_runs.summary_json` records `embedded` and `moderated` per tick, so the effect is readable rather than
 guessed at. The other four are request-time and just need the feature switched on in
@@ -531,13 +535,20 @@ guessed at. The other four are request-time and just need the feature switched o
 Two tests exercise this lane, and **both skip themselves when Ollama is down** - so a green run does not mean
 they ran, and the skip count is the thing to read:
 
-- `test/aiLocalIntegration.test.ts` - the drains and the parsers against a real model. It holds the two
-  assertions a fake cannot make: that embeddings actually **discriminate** (a query sharing no words with a
-  row still ranks it first, which is the entire reason the semantic half exists), and that a real
-  generation comes back in a shape the strict parsers accept. It takes the two model names from `.dev.vars`
-  and, failing that, picks from Ollama's own inventory and **prints which two it used** - because a wrong
-  name here does not fail, it skips forever, and a test that quietly never runs is worse than one that
-  chooses.
+- `test/aiLocalIntegration.test.ts` - **opt-in, `npm run test:ai`**, and excluded from `npm run test` on
+  purpose. It is the only test that loads a language model into memory, and the chat models people actually
+  install are tens of gigabytes. Run beside the other 309 files it does not merely go slowly, it saturates
+  the machine and the damage lands elsewhere: one measured run had it take 250s and blow its own two-minute
+  timeouts while `rateLimit` failed on a one-second-stale `Retry-After` and `moderation` timed out at five
+  seconds - three red files, one cause, no defects. **Unload the model afterwards** (`ollama stop <model>`);
+  Ollama's keep-alive holds it for minutes, and a `npm run verify` started in that window crawls.
+
+  It holds the two assertions a fake cannot make: that embeddings actually **discriminate** (a query sharing
+  no words with a row still ranks it first, which is the entire reason the semantic half exists), and that a
+  real generation comes back in a shape the strict parsers accept. It takes the two model names from
+  `.dev.vars` and, failing that, picks the **smallest** of each kind from Ollama's inventory and **prints
+  which two it used**. Smallest is for reproducibility, not speed: taking Ollama's own order picked a 24 GB
+  model on one run and a 28 GB one on the next, and a test whose subject changes between runs is not a test.
 - `e2e/aiFeatures.spec.ts`, last two describes - the affordances pressed in a browser: a draft written into
   the composer, the narration badge, a CV read into the candidate form, and a ticket found by semantic search
   through a query sharing **no word** with it. The first two describes assert the controls are absent when
@@ -573,6 +584,30 @@ deliberately asserts on the **format** of a verdict and never on the verdict its
 judgement is not a thing a local Gemma can stand in for. That distinction is the bug this layer already had
 once: moderation called the instruct model by mistake, it answered in prose, the strict parser rejected every
 answer, and the feature flagged nothing while looking healthy.
+
+## After a suite run: reap the workers
+
+`@cloudflare/vitest-pool-workers` starts one workerd per test file. A run that **exits cleanly takes them with
+it** - a full green gate went from 311 processes to 0 unaided. A run that is **interrupted, or dies on a
+timeout, does not**: a session of failing and abandoned runs left **310 alive with their parent gone**.
+
+They hide in the obvious place. Each holds only ~14 MB resident, so nothing stands out in `ps` - but each also
+holds a much larger set of swapped-out pages, and the accumulated set had pushed swap to **32 GB of a 34 GB
+swap file**. Reaping them took it to 2.8 GB. Nothing reclaims them on their own; they sit until somebody
+notices the RAM is gone.
+
+`npm test`, `npm run test:gate` and `npm run test:ai` now reap on the way out (`posttest*` hooks). By hand:
+
+```bash
+npm run cleanup:workerd
+```
+
+It kills only processes that are **both** miniflare's own workerd binary **and** reparented to init, which is
+what keeps it from touching a running `wrangler dev` (a different binary, under `node_modules/wrangler/`) or a
+vitest run in another terminal (children whose parent is still alive).
+
+**Unload the model too, after `npm run test:ai`** - `ollama stop <model>`. Ollama's keep-alive holds a
+multi-gigabyte model for minutes, and a `npm run verify` started in that window crawls or stalls outright.
 
 ## Writing a new test
 

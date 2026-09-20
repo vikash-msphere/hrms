@@ -434,13 +434,21 @@ export const patchOrgSettings = (page: Page, mutate: (value: Record<string, unkn
   patchSettings(page, "organization", mutate);
 
 /**
- * Fire the five-minute cron tick and wait for it to finish.
+ * Fire the five-minute cron tick. **Returns as soon as it is dispatched, NOT when the work is done.**
  *
  * Four AI features are fed by the tick and by nothing else - the embed drain that semantic search, ticket
  * triage and suggestion clustering all read from, and the moderation scan. Waiting five real minutes per
  * assertion is not a test, so `scripts/e2eStack.sh` passes `--test-scheduled`, which serves the cron handler
- * at this path. It answers only once the handler has RUN, which is what makes this a synchronisation point
- * rather than a nudge.
+ * at this path.
+ *
+ * THIS IS A NUDGE, NOT A SYNCHRONISATION POINT, and an earlier version of this comment claimed the opposite -
+ * that it "answers only once the handler has RUN". The worker log settles it: `GET /__scheduled` returns
+ * `200 OK (1ms)`, `(2ms)`, `(4ms)` while the drain behind it is embedding hundreds of rows against a model.
+ * Wrangler dispatches the scheduled event and answers; the handler runs on after that.
+ *
+ * So a caller must WAIT FOR THE EFFECT rather than for this call. The semantic-search spec polls the search
+ * API until its row is indexed, firing another tick each round; asserting straight after this returned made
+ * that test pass or fail on timing, which is precisely the flake it looked like.
  *
  * Straight at the Worker, not through Vite or Prism: `/__scheduled` is wrangler's own route, in neither the
  * SPA's proxy table nor openapi.yaml, so it exists at exactly one origin.
@@ -471,7 +479,11 @@ export async function aiLocalUp(page: Page): Promise<boolean> {
   try {
     // Straight at Ollama, not through the app: the question is whether the dependency is up, and asking the
     // Worker would answer "a feature is off" and "the model is down" with the same silence.
-    const res = await page.request.get("http://127.0.0.1:11434/api/tags", { timeout: 3_000 });
+    // Twenty seconds, not three. A server busy paging a 28 GB model into memory answers nothing, and at a
+    // short timeout that is indistinguishable from a machine with no Ollama - so the specs skipped silently
+    // while a model was in fact right there, which is the failure this probe exists to avoid reporting as
+    // success.
+    const res = await page.request.get("http://127.0.0.1:11434/api/tags", { timeout: 20_000 });
     return res.ok();
   } catch {
     return false;

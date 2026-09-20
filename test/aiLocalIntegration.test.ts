@@ -52,14 +52,27 @@ const BASE = "http://127.0.0.1:11434";
  * A test that quietly never runs is worse than one that picks a reasonable model and says which. The name
  * test is what distinguishes the two kinds: every embedding model on Ollama carries one of these markers and
  * no instruct model does.
+ *
+ * SMALLEST FIRST, AND THAT IS THE ORDERING RULE RATHER THAN A PREFERENCE. Taking the first candidate in
+ * Ollama's own order picked a different model on two consecutive runs of this file - a 24 GB one, then a
+ * 28 GB one - because that order is the server's, not ours. A test whose SUBJECT changes between runs is not
+ * a stable test, and here the two choices were seconds apart in one run and past a two-minute timeout in the
+ * next. Size is the honest tie-break: the job is to exercise the plumbing, a smaller model does it sooner,
+ * and sorting makes the choice reproducible.
+ *
+ * The probe is given real time for the same reason. At two seconds, a server busy paging a 28 GB model into
+ * memory answers nothing and is indistinguishable from a machine with no Ollama at all - so the file skipped
+ * silently, which is exactly the "quietly never runs" outcome the discovery above exists to prevent.
  */
 const [CHAT, EMBED, LIVE] = await (async () => {
   const none: [string, string, boolean] = ["", "", false];
   try {
-    const res = await fetch(`${BASE}/api/tags`, { signal: AbortSignal.timeout(2_000) });
+    const res = await fetch(`${BASE}/api/tags`, { signal: AbortSignal.timeout(20_000) });
     if (!res.ok) return none;
-    const names = (((await res.json()) as { models?: { name?: string }[] }).models ?? [])
-      .map((m) => m.name ?? "").filter(Boolean);
+    const installed = (((await res.json()) as { models?: { name?: string; size?: number }[] }).models ?? [])
+      .filter((m) => m.name)
+      .sort((a, b) => (a.size ?? 0) - (b.size ?? 0));
+    const names = installed.map((m) => m.name!);
     const isEmbed = (n: string): boolean => /embed|minilm|bge-|gte-|e5-/i.test(n);
     const pick = (want: string | undefined, fallback: () => string | undefined): string => {
       const named = want && names.find((n) => n === want || n.split(":")[0] === want.split(":")[0]);

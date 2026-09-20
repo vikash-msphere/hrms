@@ -348,9 +348,19 @@ test.describe("the AI features fed by the cron tick", () => {
 
     await patchSettings(page, "ai", on("search.semantic"));
     try {
-      // The row is brand new, so it is NEVER-SCANNED - which is the front of the drain's rotation, not the
-      // back. That is what makes one tick enough here rather than however many it takes to sweep the seed.
-      await runCron(page);
+      // WAIT FOR THE ROW TO BE INDEXED, not for the tick to be dispatched. `runCron` returns in a millisecond
+      // - wrangler answers `/__scheduled` as soon as it hands the event over, while the drain behind it is
+      // still embedding against a model. Asserting straight after it made this test pass or fail on timing.
+      //
+      // Polled through the search API rather than the palette, because this loop is about the INDEX being
+      // ready; the browser assertion below is the actual subject and should run once, on a settled index. The
+      // row is brand new, so it is never-scanned and sits at the front of the drain's rotation - one tick is
+      // normally enough, and the extra rounds are for the tick that lands mid-sweep.
+      await expect.poll(async () => {
+        await runCron(page);
+        const res = await page.request.get(`/v1/search?q=${encodeURIComponent("my computer gets too hot")}`);
+        return res.ok() ? (await res.text()).includes(title) : false;
+      }, { timeout: 180_000, intervals: [2_000] }).toBe(true);
 
       await gotoRoute(page, "dashboard");
       await page.keyboard.press("ControlOrMeta+k");
@@ -393,7 +403,14 @@ test.describe("the AI features fed by the cron tick", () => {
       // answer is nothing. Embedded first, so this is the feature switch being obeyed rather than an empty
       // index answering by accident.
       await patchSettings(page, "ai", on("search.semantic"));
-      await runCron(page);
+      // Same wait as the test above, for the same reason: this control is only worth anything if the record
+      // really IS indexed when the feature goes off. Without it, "nothing found" could just mean the drain
+      // had not got there yet, and the assertion would be about timing rather than about the switch.
+      await expect.poll(async () => {
+        await runCron(page);
+        const res = await page.request.get(`/v1/search?q=${encodeURIComponent("my computer gets too hot")}`);
+        return res.ok() ? (await res.text()).includes(title) : false;
+      }, { timeout: 180_000, intervals: [2_000] }).toBe(true);
       await patchSettings(page, "ai", off("search.semantic"));
 
       await gotoRoute(page, "dashboard");
