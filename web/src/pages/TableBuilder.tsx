@@ -113,6 +113,27 @@ const BLANK_GROUP = "(blank)";
 // How many bars the summary draws. Past this the chart stops being a picture and becomes a hedge of
 // one-pixel bars, so the tail is said in a sentence under it instead.
 const GROUP_CAP = 12;
+// A pie is unreadable long before a bar chart is, and the library pools whatever is past this into one "Rest"
+// slice of its own accord.
+const SLICE_CAP = 8;
+
+/**
+ * The pictures a grouped table can be drawn as.
+ *
+ * `share` marks the ones that say "out of the whole": a slice is a FRACTION OF A TOTAL, so it means something
+ * only where the groups add up to that total. Averages do not add up, and neither does a sum with a negative
+ * in it - the library silently drops the negative group and draws the rest as if it were everything. Those are
+ * offered only when the numbers in hand can carry them, which is why the list is filtered per table rather
+ * than fixed.
+ */
+const CHART_TYPES = [
+  { value: "bar", label: "Bars", mark: "bar", share: false },
+  { value: "line", label: "Line", mark: "point", share: false },
+  { value: "pie", label: "Pie", mark: "slice", share: true },
+  { value: "donut", label: "Donut", mark: "slice", share: true },
+  { value: "percentage", label: "Share bar", mark: "slice", share: true },
+] as const;
+type ChartChoice = (typeof CHART_TYPES)[number];
 
 // Which group one row falls in. A date groups by MONTH: grouping a joining date by the day gives three
 // hundred one-row groups and no picture, and the month is the bucket every other date chart in the app uses.
@@ -191,6 +212,21 @@ function nameFromKey(key: string): string {
  *  reader does not get. */
 const labelOfField = (field: string, cols: TableRunColumn[]) => cols.find((c) => c.key === field)?.label ?? nameFromKey(field);
 const kindOfField = (field: string, cols: TableRunColumn[]): TableFieldKind => cols.find((c) => c.key === field)?.kind ?? "text";
+
+/**
+ * One control of the summary card, with the word for what it changes beside it. A `<label>` around the
+ * trigger rather than text next to it, so the word is part of the control: pressing "Measure" opens the
+ * measure list. The trigger keeps its own `aria-label` - it is what a screen reader announces, and it is the
+ * same word - so nothing is said twice.
+ */
+function ChartControl({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="flex items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}
 
 /** One saved filter as a sentence: "Status is any of open, blocked", "Annual CTC is at least 1200000". */
 function filterPhrase(f: ViewFilter, cols: TableRunColumn[]): string {
@@ -843,6 +879,22 @@ function OneTable({ id }: { id: string }) {
   // A bar per group, up to a readable number of them; the tail is said in words rather than drawn as a hedge
   // of one-pixel bars.
   const drawnGroups = useMemo(() => groups.slice(0, GROUP_CAP), [groups]);
+
+  // WHICH PICTURE. The same tally answers a different question drawn a different way - a spend by department
+  // is a bar chart, its share of the budget is a pie, a headcount by joining month is a line - so the shape is
+  // the reader's to choose, and it rides in the URL beside the group and the measure because a chart somebody
+  // sends on should arrive as the chart they were looking at.
+  //
+  // The default is the group column's own kind: time reads as a line, everything else as bars. It stays a
+  // default rather than a one-off initial value, so a table whose group-by changes is drawn the way that
+  // grouping wants until somebody says otherwise.
+  const chartTypes = useMemo(
+    () => CHART_TYPES.filter((t) => !t.share || (!measure.startsWith("avg:") && groups.every((g) => g.value >= 0))),
+    [measure, groups],
+  );
+  const chart: ChartChoice =
+    chartTypes.find((t) => t.value === route.query.chart) ??
+    chartTypes.find((t) => t.value === (groupCol?.kind === "date" || groupCol?.kind === "datetime" ? "line" : "bar"))!;
   const sliceSpecs = useMemo(() => {
     const specs: Record<string, FocusSpec<TableRunRow>> = {};
     if (!groupCol) return specs;
@@ -1037,39 +1089,57 @@ function OneTable({ id }: { id: string }) {
           title={`${measureLabel} by ${groupCol.label}`}
           description={
             groups.length > GROUP_CAP
-              ? `The ${GROUP_CAP} biggest of ${groups.length} groups. Click a bar to narrow the grid to it.`
-              : "Click a bar to narrow the grid to that group."
+              ? `The ${GROUP_CAP} biggest of ${groups.length} groups. Click a ${chart.mark} to narrow the grid to it.`
+              : `Click a ${chart.mark} to narrow the grid to that group.`
           }
           actions={
-            <div className="flex flex-wrap items-center gap-2">
-              <Select value={groupKey} onValueChange={(v) => setQueryParams({ group: v, slice: null })}>
-                <SelectTrigger className="h-8 w-44" aria-label="Group by"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {groupable.map((c) => <SelectItem key={c.key} value={c.key}>{c.label}</SelectItem>)}
-                </SelectContent>
-              </Select>
-              <Select value={measure} onValueChange={(v) => setQueryParams({ measure: v === "count" ? null : v })}>
-                <SelectTrigger className="h-8 w-52" aria-label="Measure"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="count">Number of rows</SelectItem>
-                  {cols.filter((c) => isNumericKind(c.kind)).flatMap((c) => [
-                    <SelectItem key={`sum:${c.key}`} value={`sum:${c.key}`}>Total {c.label.toLowerCase()}</SelectItem>,
-                    <SelectItem key={`avg:${c.key}`} value={`avg:${c.key}`}>Average {c.label.toLowerCase()}</SelectItem>,
-                  ])}
-                </SelectContent>
-              </Select>
-              <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Close summary" onClick={() => setQueryParams({ group: null, measure: null, slice: null })}>
+            // Every control says what it CHANGES. Three unlabelled dropdowns in a card corner are three
+            // dropdowns you have to open to find out what they are, and the one that had a value the reader
+            // recognised ("Department") read as a filter rather than as the axis of the picture.
+            <div className="flex flex-wrap items-center gap-3">
+              <ChartControl label="Group by">
+                <Select value={groupKey} onValueChange={(v) => setQueryParams({ group: v, slice: null })}>
+                  <SelectTrigger className="h-8 w-44" aria-label="Group by"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {groupable.map((c) => <SelectItem key={c.key} value={c.key}>{c.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </ChartControl>
+              <ChartControl label="Measure">
+                <Select value={measure} onValueChange={(v) => setQueryParams({ measure: v === "count" ? null : v })}>
+                  <SelectTrigger className="h-8 w-52" aria-label="Measure"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="count">Number of rows</SelectItem>
+                    {cols.filter((c) => isNumericKind(c.kind)).flatMap((c) => [
+                      <SelectItem key={`sum:${c.key}`} value={`sum:${c.key}`}>Total {c.label.toLowerCase()}</SelectItem>,
+                      <SelectItem key={`avg:${c.key}`} value={`avg:${c.key}`}>Average {c.label.toLowerCase()}</SelectItem>,
+                    ])}
+                  </SelectContent>
+                </Select>
+              </ChartControl>
+              <ChartControl label="Chart">
+                <Select value={chart.value} onValueChange={(v) => setQueryParams({ chart: v })}>
+                  <SelectTrigger className="h-8 w-32" aria-label="Chart type"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {chartTypes.map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </ChartControl>
+              <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Close summary" onClick={() => setQueryParams({ group: null, measure: null, slice: null, chart: null })}>
                 <X className="h-4 w-4" />
               </Button>
             </div>
           }
         >
           <Chart
-            type="bar"
+            type={chart.value}
             labels={drawnGroups.map((g) => g.label)}
             datasets={[{ name: measureLabel, values: drawnGroups.map((g) => g.value) }]}
             ariaLabel={`${measureLabel} for each ${groupCol.label.toLowerCase()} in this table`}
             height={240}
+            // A pie reads as a picture of the biggest few and a sentence about the rest, the same bargain the
+            // bars already make at GROUP_CAP.
+            maxSlices={chart.value === "pie" || chart.value === "donut" ? SLICE_CAP : undefined}
             format={formatMeasure}
             emptyText="Nothing to summarise yet."
             selected={drawnSlice < 0 ? null : drawnSlice}
@@ -1113,7 +1183,7 @@ function OneTable({ id }: { id: string }) {
                   size="sm"
                   disabled={!groupable.length}
                   title={groupable.length ? "Group the rows and chart them" : "No column on this table has repeated values to group by"}
-                  onClick={() => setQueryParams(groupCol ? { group: null, measure: null, slice: null } : { group: groupable[0]?.key ?? null, slice: null })}
+                  onClick={() => setQueryParams(groupCol ? { group: null, measure: null, slice: null, chart: null } : { group: groupable[0]?.key ?? null, slice: null })}
                 >
                   <BarChart3 className="h-4 w-4" /> Summarise
                 </Button>

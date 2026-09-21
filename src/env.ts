@@ -163,6 +163,8 @@ export type Bindings = {
   VAPID_SUBJECT?: string; // "mailto:ops@example.com"; defaults to mailto:EMAIL_FROM
   DEV_FAKE_EMAIL?: string; // local-only; never set in production
   ALLOW_DEV_AUTH?: string; // local-only gate ("true") that must accompany DEV_FAKE_EMAIL; never set in production
+  /** "true" to read through a D1 session (read replicas). Deployed only - see wrangler.toml and deps.ts. */
+  D1_SESSIONS?: string;
   // Internal, never a real Cloudflare binding: set ONLY by the /v1/batch:run handler when it re-dispatches
   // sub-requests in-process. Lets the auth + dbContext middleware reuse the already-resolved caller and Deps
   // instead of re-verifying the JWT and re-deriving the HKDF subkeys (codec/encryptor) per sub-request - the

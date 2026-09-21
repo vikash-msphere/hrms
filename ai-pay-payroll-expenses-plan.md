@@ -318,6 +318,43 @@ disagree about in a file neither owns.
   and the rule as written understates by part of one month and never overstates - the safe direction for a
   floor. Whole currency units for the same reason. Full company cost (`ctcMonthly`), not gross, so it means
   the same thing as the number on the offer letter.
+- **10** - receipt extraction, and the plan was wrong about it twice. It needs NO vision model: the CV path
+  this item cites as its precedent never used one either - the SPA extracts PDF text with the pdfjs it
+  already runs for the viewer and posts TEXT to the ordinary generate model. And it needs NO consented path:
+  `expenses` is not in `NEVER_TO_MODEL`, so `assertMayReachModel` admits it outright. Both checked against
+  the code rather than taken from this document.
+  A VISION MODEL WAS REFUSED, not postponed, and the reason is structural rather than a preference. An image
+  CANNOT BE SCRUBBED: `scrubStatutoryIds` runs over text before it reaches a model, and there is no
+  equivalent for a photograph, which would have to be seen to be redacted. Receipts carry whatever is
+  printed on them and the incidental content is exactly the sensitive kind - a pharmacy receipt names the
+  drug. Secondary: the allowlist gates the MODEL, not the use, so adding one would decide "may anything in
+  this app send an image to a model", which is a larger question than receipts. The cost is that
+  photographed till receipts stay manual, said in the module header, the openapi description and the
+  settings copy rather than left to be discovered.
+  Six registries, per the custom-method checklist. Granted to the two roles that already record vendor
+  invoices rather than withheld, because a withheld verb renders as if the feature does not exist for the
+  people who file claims; it is doubly gated anyway (org switch plus per-field choice).
+- **6** - PART, and the deterministic half is the whole of it deliberately. `domain/payrollNarrate.ts` says
+  what changed in a run in one sentence, built over `reconcileRun`'s own decomposition rather than a second
+  comparison - a cruder run-to-run diff would eventually disagree with the statement on the same screen and
+  a reader could not tell which was right. NO `CONSENTED_PATHS` entry and no model, which this document
+  itself preferred: a model rephrasing five labelled figures adds wording, not information.
+- **11 + 12** - the DETERMINISTIC halves only, which this document already called the stronger ones.
+  `findDuplicateClaims` (same invoice number, or same amount + vendor/category + date within two days),
+  scoped to the filer so it can never surface a row they could not already read; and the cost-centre default
+  from the submitter's own department, which needs no model and is the larger share of the saved clicks.
+  THE MODEL HALVES ARE DROPPED, not deferred. They need `expenses` in `INDEXABLE`, and what gets embedded is
+  the search TITLE - which for expenses IS the description. So there is no configuration that keeps
+  description out of the vector without degrading every expense search result to a bare invoice number, and
+  `expenses.reimbursement_id` means that description can carry medical text bridged from a personal
+  reimbursement. Put to the user as a privacy decision and left undecided, which correctly means no change.
+- **19** - ALREADY DONE before this item was written. `globalSearch` runs a keyword half over FTS5 for
+  everything in `search_docs`, and `expenses` has been in `searchIndex.ts` all along, so "aws invoices
+  march" works today. Only the SEMANTIC half needed `INDEXABLE`, and that is the dropped half above.
+- **13** - NOT BUILT. Vendor deduplication at creation is an embed of the typed name against the existing
+  list, so it depends on the same question as 11/12's model halves. `vendors` is already `INDEXABLE` and a
+  vendor name carries none of the medical risk a claim description does, so this one is buildable on its own
+  terms - it was simply never reached.
 - **25** - DONE, including the run pickup that the coverage note below used to except.
   The ENFORCEMENT half is now built too - the LOP carry. `domain/lopAdjust.ts` (pure), a `lop_adjustments`
   table, `services/lopAdjustments.ts`, the run pickup and settle marker in `buildRunItems`, and five hooks:

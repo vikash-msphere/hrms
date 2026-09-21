@@ -378,6 +378,8 @@ export default function Goals({ me, openId, scope: forcedScope }: {
   // Whether the measure card is unfolded although the form holds no measure yet - the one piece of the
   // dialog's state that is not a field. Cleared when the dialog closes, so every fresh goal starts folded.
   const [measureOpen, setMeasureOpen] = useState(false);
+  // The edit dialog's form as it was loaded, serialized. Only the Rebalance link reads it - see `openEdit`.
+  const [editBaseline, setEditBaseline] = useState("");
   // The version the edit dialog is writing against. Refreshed from the server when a save loses a race, so the
   // next press can deliberately overwrite what the other person did.
   const [etag, setEtag] = useState<string | undefined>(undefined);
@@ -711,7 +713,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
   function openEdit(g: Goal) {
     setEditing(g);
     setEtag(g.etag);
-    setForm({
+    const loaded = {
       title: g.title,
       description: g.description ?? "",
       weight: g.weight != null ? String(g.weight) : "",
@@ -727,7 +729,11 @@ export default function Goals({ me, openId, scope: forcedScope }: {
       baseline: g.baseline_value != null ? String(g.baseline_value) : "",
       target: g.target_value != null ? String(g.target_value) : "",
       current: g.current_value != null ? String(g.current_value) : "",
-    });
+    };
+    setForm(loaded);
+    // What this editing session started from. WriteDialog's own discard guard holds its baseline privately, and
+    // the Rebalance link below leaves by a door the guard does not watch - so the page keeps one too.
+    setEditBaseline(JSON.stringify(loaded));
     setOpen(true);
   }
 
@@ -737,7 +743,14 @@ export default function Goals({ me, openId, scope: forcedScope }: {
       title: form.title.trim(),
       description: form.description.trim(),
       weight: form.weight === "" ? 0 : Number(form.weight),
-      status: form.status,
+      // STATUS TRAVELS ONLY WHEN IT IS AN ANSWER. Sending back the value the dialog loaded (or the default it
+      // opened with) made every save an EXPLICIT status, and an explicit status is exactly what stops the
+      // server completing a goal whose measure reached its target - `!has("status")` in services/goals.ts.
+      // So a goal edited to "60 of 60 customers" saved at 100% and "In progress", under a form that had just
+      // said saving it would complete it.
+      ...(editing
+        ? (form.status === editing.status ? {} : { status: form.status })
+        : (form.status === EMPTY.status ? {} : { status: form.status })),
       // A date field is `format: date` in the contract, and "" is not a date - an empty one is left out.
       ...(form.due_date ? { due_date: form.due_date } : {}),
       parent: form.parent === "none" ? "" : form.parent,
@@ -1022,6 +1035,15 @@ export default function Goals({ me, openId, scope: forcedScope }: {
   const measurePct = measuredPct(num(form.baseline), num(form.target), num(currentFor(!!editing, form)));
   const targetEqualsBaseline = num(form.target) != null && num(form.target) === (num(form.baseline) ?? 0);
   const countsDown = num(form.target) != null && num(form.target)! < (num(form.baseline) ?? 0);
+  // A measure that reaches its target completes the goal - the rule the slider follows and the one the server
+  // applies to a measured write. The form said so in a sentence and then sent the status the Select still
+  // held, so it was a promise the save broke. Flipped here, where the reader can see it happen and change it
+  // back. Nothing auto-reopens a goal whose number later comes down, which is the server's rule too, and a
+  // cancelled goal is not quietly revived by its numbers.
+  useEffect(() => {
+    if (!open || measurePct !== 100) return;
+    setForm((f) => (f.status === "completed" || f.status === "cancelled" ? f : { ...f, status: "completed" }));
+  }, [open, measurePct]);
   // THE MEASURE IS OPTIONAL, AND LOOKED COMPULSORY. Five boxes sat open in the middle of the form for every
   // goal, between what it is called and what it is worth, so "ship the billing revamp" - moved by hand, like
   // most goals - was asked five questions it has no answers to and had to be scrolled past to reach Save. It
@@ -1029,6 +1051,14 @@ export default function Goals({ me, openId, scope: forcedScope }: {
   // goal being edited that has one, an accepted suggestion, or the press of the button.
   const hasMeasureValues = !!(form.target.trim() || form.unit.trim() || form.baseline.trim() || form.current.trim());
   const showMeasure = measureOpen || hasMeasureValues;
+
+  // A CLOSED cycle is not a cycle to file new work against: its review has already scored what was attached to
+  // it, so a goal added now is scored by something that has happened. The one closed cycle worth listing is the
+  // one this goal is already on - dropping it would silently detach the goal on the next save.
+  const pickableCycles = useMemo(
+    () => reviewCycles.filter((c) => c.state !== "CLOSED" || (!!editing?.cycle && idOf(editing.cycle) === idOf(c.path))),
+    [reviewCycles, editing],
+  );
 
   // WHO THE LEAD CAN BE, once a department owns the goal.
   //
@@ -1564,7 +1594,15 @@ export default function Goals({ me, openId, scope: forcedScope }: {
           targetEqualsBaseline && "The target and the baseline are the same number.",
         ]}
         onSubmit={submit}
-        addAnother={editing ? undefined : () => { setForm({ ...EMPTY, employee: form.employee }); setFromTemplate(""); setMeasureOpen(false); }}
+        // WHAT CARRIES OVER TO THE NEXT GOAL. Somebody pressing this is filing a SET - a team's quarter, a
+        // joiner's first month - so the answers that describe the set stay and the ones that describe the goal
+        // go. Keeping only the owner meant retyping the department, the cycle and the date for every goal in
+        // the batch, which is the batch's whole point.
+        addAnother={editing ? undefined : () => {
+          setForm({ ...EMPTY, employee: form.employee, department: form.department, cycle: form.cycle, due_date: form.due_date });
+          setFromTemplate("");
+          setMeasureOpen(false);
+        }}
         addAnotherLabel="Save & add another"
         submitAccess={(b) => (editing
           ? <AccessAction label="Edit goal" can={editing.access?.can}>{b}</AccessAction>
@@ -1667,27 +1705,43 @@ export default function Goals({ me, openId, scope: forcedScope }: {
               is half done, not nearly finished.
 
               Folded until it is wanted (`showMeasure`), because most goals do not count anything and the ones
-              that do are better asked two questions than five. */}
+              that do are better asked two questions than five.
+
+              Folded, the sentence sits BESIDE the button and centred on it: `min-w-0 flex-1` on the text and no
+              `flex-wrap` on the row, so the buttons keep their width and the prose wraps inside what is left
+              instead of dropping to a line of its own. */}
           {!showMeasure ? (
-            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed p-2.5">
-              <Button type="button" variant="outline" size="sm" onClick={() => setMeasureOpen(true)}>
+            <div className="flex items-center gap-3 rounded-lg border border-dashed p-2.5">
+              <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={() => setMeasureOpen(true)}>
                 <Ruler className="h-4 w-4" /> Add a measure
               </Button>
               {/* Offered in the folded state too, so a saved goal with no measure can be given one without
                   first opening boxes the model is about to fill in. */}
               {editing && (
-                <GoalMeasureSuggest
-                  goalId={idOf(editing.path)}
-                  can={editing.access?.can}
-                  onPropose={(p) => setForm((f) => ({
-                    ...f,
-                    unit: p.unit ?? f.unit,
-                    baseline: p.baseline_value != null ? String(p.baseline_value) : f.baseline,
-                    target: p.target_value != null ? String(p.target_value) : f.target,
-                  }))}
-                />
+                // Wrapped, because the row no longer wraps: without this the second button is the thing the
+                // flex line squashes when the sentence beside it is long.
+                <div className="shrink-0">
+                  <GoalMeasureSuggest
+                    goalId={idOf(editing.path)}
+                    can={editing.access?.can}
+                    onPropose={(p) => setForm((f) => ({
+                      ...f,
+                      unit: p.unit ?? f.unit,
+                      baseline: p.baseline_value != null ? String(p.baseline_value) : f.baseline,
+                      target: p.target_value != null ? String(p.target_value) : f.target,
+                    }))}
+                  />
+                </div>
               )}
-              <p className="text-xs text-muted-foreground">Optional. Without one, progress on this goal is moved by hand.</p>
+              {/* NOT "moved by hand" flat: a goal has three other ways to know where it is. An objective with
+                  key results takes theirs (weighted), a goal with linked board tasks takes their delivered
+                  share (services/cards.ts#recomputeGoalProgress), and only a goal with none of the four is
+                  somebody's estimate on a slider. */}
+              <p className="min-w-0 flex-1 text-xs text-muted-foreground">
+                {form.kind === "key_result"
+                  ? "Optional, and the thing a key result usually is - a number its objective can count."
+                  : "Optional. Without one, progress follows this goal's key results or linked tasks, and otherwise moves by hand."}
+              </p>
             </div>
           ) : (
           <div className="rounded-lg border p-3">
@@ -1717,7 +1771,9 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                 explaining before the one the goal is actually about - and gave "Current" no hint at all, so a
                 new goal was asked where it had got to on the day it was written. It is last now, and optional:
                 left empty on a new goal it takes the baseline (`currentFor`), which is where a goal starts. */}
-            <div className="mt-3 grid gap-3 sm:grid-cols-4">
+            {/* Two across on a laptop, four only when there is room for four: this sits inside a dialog, and
+                four number boxes over 640px are narrower than the numbers some of them hold. */}
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <Field label="Target" field="target_value" hint="Where it has to get to." error={targetEqualsBaseline ? "Target and baseline are the same, so there is nothing to measure." : undefined}>
                 <Input type="number" value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })} placeholder="60" autoFocus={measureOpen && !hasMeasureValues} />
               </Field>
@@ -1813,7 +1869,28 @@ export default function Goals({ me, openId, scope: forcedScope }: {
           {!weightInvalid && weightTotal > 100 && (
             <p className="text-xs font-medium text-warning">
               Open goals would total {weightTotal} weight, over the usual 100.{" "}
-              <button type="button" className="font-medium text-primary hover:underline" onClick={() => { setOpen(false); setRebalanceFor(dialogOwnerId || null); }}>
+              {/* THIS LINK LEAVES BY A DOOR THE DISCARD GUARD DOES NOT WATCH. It closes the dialog itself
+                  rather than through `onOpenChange`, and an edit carries no draft (`draftKey` is create-only),
+                  so pressing it used to throw away everything typed without a word. A new goal is safe - its
+                  draft is in sessionStorage - so only an edit with changes is worth stopping for. */}
+              <button
+                type="button"
+                className="font-medium text-primary hover:underline"
+                onClick={async () => {
+                  if (editing && JSON.stringify(form) !== editBaseline) {
+                    const ok = await confirm({
+                      title: "Leave this goal to rebalance?",
+                      description: "Rebalancing closes this editor, and the changes you have made to this goal have not been saved.",
+                      confirmLabel: "Leave and rebalance",
+                      destructive: true,
+                    });
+                    if (!ok) return;
+                  }
+                  setOpen(false);
+                  setMeasureOpen(false);
+                  setRebalanceFor(dialogOwnerId || null);
+                }}
+              >
                 Rebalance
               </button>
             </p>
@@ -1822,14 +1899,20 @@ export default function Goals({ me, openId, scope: forcedScope }: {
               own a full-width row: the fields that matter most (title, measure, weight, due date) were pushed
               off the top of a dialog the reader then scrolled through looking for Save. */}
           <FieldRow>
-            <Field label="Status">
-              <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v as GoalStatus })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {STATUSES.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </Field>
+            {/* ONLY ON A GOAL THAT EXISTS. A goal being written is "Not started" - that is what writing one
+                means - and the only other honest answer at birth comes from the measure, which sets it above
+                without asking. Offering Completed and Cancelled in the same breath as Create was offering to
+                file work as finished or abandoned before it had been agreed with anybody. */}
+            {editing && (
+              <Field label="Status">
+                <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v as GoalStatus })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {STATUSES.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
             {/* Objective or key result. A KR is one of the numbers under an objective, so choosing it makes
                 the alignment below mandatory - and hands the objective's percentage to the arithmetic. */}
             <Field label="Kind" hint={form.kind === "key_result" ? "A number under an objective. Its objective's progress is the weighted average of its key results." : "A goal in its own right. Add key results under it and its progress becomes theirs."}>
@@ -1841,46 +1924,26 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                 </SelectContent>
               </Select>
             </Field>
+            {/* The review cycle this goal answers to. A cycle's review scores exactly the goals attached to it,
+                so this is the field that decides whether the goal shows up in someone's review at all. In the
+                same row as the two enums above: on a new goal that makes a pair of the two questions left
+                (what kind, and which cycle), instead of one half-empty row and one full-width Select. */}
+            {pickableCycles.length > 0 && (
+              <Field label="Review cycle (optional)" hint="The cycle whose review scores this goal.">
+                <Select value={form.cycle} onValueChange={(v) => setForm({ ...form, cycle: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No cycle</SelectItem>
+                    {pickableCycles.map((c) => (
+                      <SelectItem key={c.path} value={`review-cycles/${idOf(c.path)}`}>
+                        {c.name}{c.state === "CLOSED" ? " (closed)" : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
           </FieldRow>
-          {/* The review cycle this goal answers to. A cycle's review scores exactly the goals attached to it,
-              so this is the field that decides whether the goal shows up in someone's review at all. */}
-          {reviewCycles.length > 0 && (
-            <Field label="Review cycle (optional)" hint="The cycle whose review scores this goal.">
-              <Select value={form.cycle} onValueChange={(v) => setForm({ ...form, cycle: v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">No cycle</SelectItem>
-                  {reviewCycles.map((c) => (
-                    <SelectItem key={c.path} value={`review-cycles/${idOf(c.path)}`}>
-                      {c.name}{c.state === "CLOSED" ? " (closed)" : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-          )}
-          {/* Waiting on another goal. Distinct from alignment: that says what this rolls UP into, this says
-              what has to move first - and it is the answer to "why did this sit at 20% all quarter" far more
-              often than effort is. */}
-          {/* Gated on its OWN options, not on the alignment field's. `alignables` drops every key result -
-              nothing parents a KR - so in an org whose visible goals are all key results this field vanished,
-              although every one of them is a perfectly good thing to be waiting on. */}
-          {blockables.length > 0 && (
-            <Field label="Waiting on (optional)" hint="Another goal that has to move before this one can.">
-              <Combobox
-                value={form.blockedBy}
-                onValueChange={(v) => setForm({ ...form, blockedBy: v })}
-                searchPlaceholder="Search goals…"
-                options={[
-                  { value: "none", label: "Not blocked" },
-                  ...blockables.map((g) => ({
-                    value: `goals/${idOf(g.path)}`,
-                    label: g.employee && idOf(g.employee) !== me.employee_id ? `${g.title} - ${empName(g.employee)}` : g.title,
-                  })),
-                ]}
-              />
-            </Field>
-          )}
           {/* A key result cannot be saved without an objective, and the picker for one was hidden whenever
               there were no objectives to pick - so choosing "Key result" in an empty org left the form
               refusing to save, explaining why, and offering no control that could put it right. */}
@@ -1889,25 +1952,52 @@ export default function Goals({ me, openId, scope: forcedScope }: {
               There are no objectives to put this under yet. Create the objective first, then add its key results.
             </p>
           )}
-          {alignables.length > 0 && (
-            <Field
-              label={form.kind === "key_result" ? "Objective" : "Aligns to"}
-              hint={form.kind === "key_result" ? "The objective this key result proves. Required." : "Optional parent goal this one rolls up under."}
-              error={form.kind === "key_result" && form.parent === "none" ? "A key result needs an objective to sit under." : undefined}
-            >
-              <Combobox
-                value={form.parent}
-                onValueChange={(v) => setForm({ ...form, parent: v })}
-                searchPlaceholder="Search goals…"
-                options={[
-                  { value: "none", label: "No alignment" },
-                  ...alignables.map((g) => ({
-                    value: `goals/${idOf(g.path)}`,
-                    label: g.employee && idOf(g.employee) !== me.employee_id ? `${g.title} - ${empName(g.employee)}` : g.title,
-                  })),
-                ]}
-              />
-            </Field>
+          {/* THE TWO GOAL LINKS, SIDE BY SIDE. Same control, same "Search goals…", asking two questions that
+              are only told apart by their labels - stacked full-width they read as one field rendered twice.
+              Up first is what this rolls UP into; beside it what has to move FIRST, which is the answer to
+              "why did this sit at 20% all quarter" far more often than effort is. */}
+          {(alignables.length > 0 || blockables.length > 0) && (
+            <FieldRow>
+              {alignables.length > 0 && (
+                <Field
+                  label={form.kind === "key_result" ? "Objective" : "Aligns to"}
+                  hint={form.kind === "key_result" ? "The objective this key result proves. Required." : "Optional parent goal this one rolls up under."}
+                  error={form.kind === "key_result" && form.parent === "none" ? "A key result needs an objective to sit under." : undefined}
+                >
+                  <Combobox
+                    value={form.parent}
+                    onValueChange={(v) => setForm({ ...form, parent: v })}
+                    searchPlaceholder="Search goals…"
+                    options={[
+                      { value: "none", label: "No alignment" },
+                      ...alignables.map((g) => ({
+                        value: `goals/${idOf(g.path)}`,
+                        label: g.employee && idOf(g.employee) !== me.employee_id ? `${g.title} - ${empName(g.employee)}` : g.title,
+                      })),
+                    ]}
+                  />
+                </Field>
+              )}
+              {/* Gated on its OWN options, not on the alignment field's. `alignables` drops every key result -
+                  nothing parents a KR - so in an org whose visible goals are all key results this field
+                  vanished, although every one of them is a perfectly good thing to be waiting on. */}
+              {blockables.length > 0 && (
+                <Field label="Waiting on (optional)" hint="Another goal that has to move before this one can.">
+                  <Combobox
+                    value={form.blockedBy}
+                    onValueChange={(v) => setForm({ ...form, blockedBy: v })}
+                    searchPlaceholder="Search goals…"
+                    options={[
+                      { value: "none", label: "Not blocked" },
+                      ...blockables.map((g) => ({
+                        value: `goals/${idOf(g.path)}`,
+                        label: g.employee && idOf(g.employee) !== me.employee_id ? `${g.title} - ${empName(g.employee)}` : g.title,
+                      })),
+                    ]}
+                  />
+                </Field>
+              )}
+            </FieldRow>
           )}
           {/* Same title already open for the same person: warned, never blocked - two goals may honestly share a
               name, and the owner is the one who knows. */}

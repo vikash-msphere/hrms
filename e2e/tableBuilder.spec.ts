@@ -273,6 +273,30 @@ test("a table renames a column, summarises its rows, saves a filter, and opens t
     await expect(numbers.locator("caption")).toHaveText(caption);
     await expect(numbers.locator("tbody tr").first()).toBeAttached({ timeout: 30_000 });
 
+    // Each control over the picture says what it changes, rather than leaving the reader to open it and find
+    // out - and one of them is the picture itself. The shape rides in the URL with the group and the measure,
+    // so the chart somebody sends on is the chart they were looking at.
+    for (const control of ["Group by", "Measure", "Chart"]) {
+      await expect(page.getByText(control, { exact: true })).toBeVisible();
+    }
+    await page.getByLabel("Chart type").click();
+    await page.getByRole("option", { name: "Pie", exact: true }).click();
+    await expect(page).toHaveURL(/chart=pie/, { timeout: 15_000 });
+    await expect(page.getByText(/Click a slice/)).toBeVisible({ timeout: 15_000 });
+
+    // A share is a fraction of a total, so it is offered only where the groups add up to one. An average does
+    // not, and the picture falls back to the bars it can honestly draw.
+    await page.getByLabel("Measure").click();
+    await page.getByRole("option", { name: /^Average/ }).first().click();
+    await expect(page.getByText(/Click a bar/)).toBeVisible({ timeout: 15_000 });
+    await page.getByLabel("Chart type").click();
+    await expect(page.getByRole("option", { name: "Bars", exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("option", { name: "Pie", exact: true })).toHaveCount(0);
+    await page.getByRole("option", { name: "Bars", exact: true }).click();
+    // Back to the count, so what follows reads the table it started with.
+    await page.getByLabel("Measure").click();
+    await page.getByRole("option", { name: "Number of rows", exact: true }).click();
+
     // The table's OWN filter - saved on the view, applied by the server to every page. "is not empty" needs no
     // typed value, so what this proves is the round trip rather than one particular comparison.
     await page.getByRole("button", { name: /^Filter & sort/ }).click();

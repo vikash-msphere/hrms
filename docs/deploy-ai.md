@@ -110,7 +110,7 @@ one at a time - the ledger in step 6 is much easier to read that way.
 | `ats.extraction` | Read a CV into the candidate form | no |
 | `tables.describe` | Describe a grid in words in the table builder | no |
 | `analytics.narrate` | Written summary on the team report | no |
-| `moderation` | Public walls scanned for dangerous content, flagged posts queued | no |
+| `moderation` | A gate on the public walls: nothing is posted until a model has read it | no |
 | `moderation.conduct` | The same posts read a second time against this org's conduct rules | no |
 
 Two settings on the same screen are worth a decision rather than a default:
@@ -129,9 +129,21 @@ Two settings on the same screen are worth a decision rather than a default:
   triage the same until cards have been delivered. Both vote from finished work only.
 - **The nightly duplicate sweep examines 60 open cards a tick**, least-recently-swept first, so a large
   backlog is covered over several nights.
-- **A new post is read as it is written**, not on the next tick: the write path scans it in the background
-  (`ctx.waitUntil`), so a flag appears about as fast as the post does. The cron pass is the backstop for
-  edits, scheduled publishes, and anything the immediate scan could not finish.
+- **`moderation` is a GATE, not a warning.** With it on, nothing reaches a wall until a model has read it:
+  a post, reply or suggestion is written invisible, checked, and only then published. There is no moment at
+  which a post is both public and unread. The gate meets every route onto a wall - a new post, an edit to
+  one already up, the `:publish` verb, and the tick that publishes a scheduled draft.
+- **A held post is invisible at the API, not just in the UI.** It is absent from the board feed, the
+  suggestion box, a thread's replies, search and a direct `GET` (which answers 404) - including for HR and
+  for its own author. It appears in one place: **Flagged posts**.
+- **It fails closed.** If the model is down, out of budget or answers nonsense, the post is HELD, with the
+  reason `Not checked`. During an outage, posting appears not to work and the queue fills up. That is the
+  deliberate trade: a gate that opens when the guard is asleep is not a gate. An org that would rather have
+  the opposite failure should switch the feature off, which is an honest switch.
+- **Releasing is `dismiss` on the queue.** On a held post the buttons read "Release it" / "Keep it hidden",
+  and releasing sends the broadcast that was held back with it - the bell, the email and the mentions.
+- **With the feature off**, nothing changes from before: posts go up unread and the cron sweep flags them
+  afterwards.
 - **The cron pass scans 8 posts per tick**, newest unread first. It is a generation call, unlike embedding.
   With `moderation.conduct` on, a post costs up to two calls: the guard model, then the conduct model on
   whatever the guard model passed.
@@ -156,6 +168,26 @@ testing it with a rude post.
 noticeboard needs a person for is not dangerous, which is what the second pass is for. It is a general model
 reading our rubric, so it is less accurate than the first in both directions; both only ever add a queue item,
 and neither can hide anything.
+
+### Acting on a flag without waiting for the queue
+
+A flag emits `moderation.flagged`, so what happens next is a rule in **Workflows** rather than behaviour
+baked in. Two ship with the app:
+
+| Rule | Ships | What it does |
+|---|---|---|
+| Tell the moderators about a flagged post | **enabled** | Notifies and emails whoever holds `moderation.read`, with the reason and a link. Touches nothing. |
+| Take down a post the safety model flagged | **disabled** | Hides the post immediately, then tells the moderators it came down. |
+
+The takedown is off by default and conditioned on `pass == "hazard"` - the guard model's fixed taxonomy -
+never on a conduct flag. Turn it on only if an hour of exposure is worse for you than an occasional
+wrongly-hidden post; a conduct flag is a general model's read of a tone rubric, and hiding on it will
+eventually take down a post somebody merely disagreed with. The hide is reversible, the author is told, and
+the flag stays on the queue to be upheld or dismissed either way.
+
+Both rules address their audience as **whoever holds an access right** rather than a department or a list of
+names, which is new in the workflow builder: the engine asks the ACL at send time, so the right people are
+told after moderation moves to another role.
 
 ## 6. Grant the capabilities that nothing seeds
 

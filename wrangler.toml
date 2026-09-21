@@ -81,6 +81,24 @@ run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "
 cpu_ms = 60000
 
 [vars]
+# D1 READ REPLICAS (Sessions), which are a DEPLOYED-ONLY optimisation.
+#
+# `sessionBinding` (src/deps.ts) used to decide this by feature-detection - sessions if the runtime has
+# `withSession`, which local runtimes did not. A runtime upgrade gave the local one the method, and a session
+# opened against a local database tries to reach the real one: every request in `wrangler dev` then died at
+# its first query with `internal error; reference = …`, which reads like a Cloudflare outage rather than a
+# configuration mismatch. It is therefore declared rather than detected, and it is OPT-IN - off is slower,
+# never wrong, so the default has to be the safe one.
+#
+# OFF HERE, ON AT DEPLOY (`npm run deploy` passes `--var D1_SESSIONS:true`), because this file is read by
+# `wrangler dev` as well as by `wrangler deploy` and the two want opposite answers. Defaulting it on meant a
+# fresh clone had a stack that 500s on every request until somebody added a line to their own `.dev.vars` -
+# a broken default that each person has to discover and fix privately. Off is slower where it is wrong and
+# working everywhere, which is the right way round for a default.
+#
+# A hand-run `wrangler deploy` therefore deploys WITHOUT replicas: correct, just not as fast. Use the npm
+# script.
+D1_SESSIONS = "false"
 # EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.
 # Also `console`, which logs the message instead of sending it - for a preview stack and the browser suite
 # only; `npm run preflight` refuses it for the environment being deployed.

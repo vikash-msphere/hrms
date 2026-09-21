@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "89925bf2-2934-4b6a-be3c-84c12afb9cdf",
+  "id": "074bc515-3581-4cf8-9dfb-48d5a3c0709c",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -969,6 +969,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "held_at": {
+          "name": "held_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -1126,6 +1133,13 @@
         },
         "pinned_at": {
           "name": "pinned_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "held_at": {
+          "name": "held_at",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,
@@ -16678,6 +16692,13 @@
         },
         "delete_time": {
           "name": "delete_time",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "held_at": {
+          "name": "held_at",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,

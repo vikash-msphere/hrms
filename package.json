@@ -9,7 +9,7 @@
     "build:web": "vite build --config web/vite.config.ts",
     "build": "npm run build:web",
     "preflight": "node --import ./scripts/tsResolve.mjs scripts/preflight.ts",
-    "deploy": "npm run preflight && npm run verify && npm run build && wrangler deploy",
+    "deploy": "npm run preflight && npm run verify && npm run build && wrangler deploy --var D1_SESSIONS:true",
     "db:generate": "drizzle-kit generate && node --import ./scripts/tsResolve.mjs scripts/genSearchDdl.ts && node --import ./scripts/tsResolve.mjs scripts/genChangeDdl.ts",
     "db:migrate:local": "wrangler d1 migrations apply hrms --local",
     "db:migrate:remote": "wrangler d1 migrations apply hrms --remote",

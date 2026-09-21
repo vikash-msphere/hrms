@@ -36,6 +36,10 @@ type QueueItem = {
   edited_since_flag: boolean;
   author: string | null;
   flagged_time: string;
+  /** The gate withheld this one: it was written but never seen, and nobody was notified about it. The whole
+   *  page reads differently for these - the question is "may this go up", not "should this come down". */
+  held: boolean;
+  visible: boolean;
 };
 
 const WALL_LABEL: Record<string, string> = {
@@ -64,13 +68,27 @@ export default function Moderation() {
   useEffect(load, [load]);
 
   const decide = async (row: QueueItem, action: "hide" | "dismiss") => {
-    // Only hiding asks. Dismissing leaves the post exactly where it is and can be undone by the next scan, so
-    // a dialog in front of it would train people to click through the one that matters.
-    if (action === "hide" && !(await confirmDecision(confirm, "hide", `"${row.title}"`))) return;
+    // WHICH DECISION ASKS FOR CONFIRMATION FLIPS WITH `held`, because the consequential half does.
+    //
+    //  - Post on the wall: `hide` takes it down in public, `dismiss` changes nothing. Hiding asks.
+    //  - Post being held: `dismiss` RELEASES it - puts it on the wall and tells the audience, which is the
+    //    irreversible one here - while `hide` just leaves it where it already is. Releasing asks.
+    //
+    // A dialog in front of the harmless one is what trains people to click through the one that matters.
+    const consequential = row.held ? "dismiss" : "hide";
+    if (action === consequential) {
+      const what = row.held ? "release" : "hide";
+      if (!(await confirmDecision(confirm, what, `"${row.title}"`))) return;
+    }
     setBusy(row.host);
     try {
       await invoke("moderation", "decide", undefined, { host: row.host, action });
-      toast({ title: action === "hide" ? "Post hidden" : "Flag dismissed", variant: "success" });
+      toast({
+        title: row.held
+          ? (action === "dismiss" ? "Post released" : "Post kept hidden")
+          : (action === "hide" ? "Post hidden" : "Flag dismissed"),
+        variant: "success",
+      });
       setRows((rs) => rs.filter((r) => r.host !== row.host));
     } catch (e) {
       toast({ title: "Couldn't apply that", description: (e as Error).message, variant: "destructive" });
@@ -87,7 +105,10 @@ export default function Moderation() {
         eyebrow="Connect"
         accessCollection="moderation"
         title="Flagged posts"
-        description="Public posts a safety model objected to. Nothing here has been hidden - each one is still on the wall until you decide."
+        // The page can now hold two kinds of row and the difference matters more than anything else on it,
+        // so the description says so rather than asserting the old one-liner ("nothing here is hidden"),
+        // which is now false for every held post.
+        description="Posts a safety check objected to. A HELD post was stopped before anyone saw it and is waiting on you to release it; anything else is still on the wall until you decide."
       />
 
       <DataState state={state} error={error} onRetry={load}>
@@ -120,6 +141,9 @@ export default function Moderation() {
                     <ShieldAlert className="h-4 w-4 text-warning" />
                     <span className="font-medium">{row.title}</span>
                     <Badge variant="secondary">{WALL_LABEL[row.collection] ?? row.collection}</Badge>
+                    {/* The most important thing on the row, so it sits before the reasons: whether anybody
+                        has seen this post. Everything else on the card reads differently depending on it. */}
+                    {row.held && <Badge variant="outline" className="border-warning text-warning">Held - nobody has seen it</Badge>}
                     {row.hazard_labels.map((h) => <Badge key={h} variant="outline">{h}</Badge>)}
                   </div>
 
@@ -139,19 +163,36 @@ export default function Moderation() {
                       <span>Posted anonymously</span>
                     )}
                     <span>Flagged {new Date(row.flagged_time).toLocaleString()}</span>
-                    {row.edited_since_flag && <span className="text-warning">Edited since it was flagged - the quote above is what the model read</span>}
+                    {/* Only meaningful for a post that is UP: a held post is the same text nobody has read,
+                        so "edited since" would be a warning about a discrepancy that cannot matter yet. */}
+                    {row.edited_since_flag && !row.held && <span className="text-warning">Edited since it was flagged - the quote above is what the model read</span>}
                   </div>
 
                   {/* One target for both buttons: deciding is a single verb, and offering separate grants for
                       "may dismiss" and "may hide" would invite a moderator who can only clear the queue. */}
                   <AccessAction verb="decide" collection="moderation" label="Decide on a flagged post">
+                    {/* THE SAME TWO VERBS, NAMED FOR WHAT THEY DO TO THIS POST. `dismiss` on a post that is
+                        up leaves it up; on a held post it publishes it. Labelling both "Leave it up" would
+                        be wrong on exactly the rows where being wrong puts something on the wall. The
+                        primary button is the one that makes the post visible, because that is the decision
+                        a held post is waiting on. */}
                     <div className="flex flex-wrap gap-2">
-                      <Button size="sm" variant="outline" disabled={busy === row.host} onClick={() => void decide(row, "dismiss")}>
-                        Leave it up
+                      <Button
+                        size="sm"
+                        variant={row.held ? "default" : "outline"}
+                        disabled={busy === row.host}
+                        onClick={() => void decide(row, "dismiss")}
+                      >
+                        {row.held ? "Release it" : "Leave it up"}
                       </Button>
-                      <Button size="sm" variant="destructive" disabled={busy === row.host} onClick={() => void decide(row, "hide")}>
+                      <Button
+                        size="sm"
+                        variant={row.held ? "outline" : "destructive"}
+                        disabled={busy === row.host}
+                        onClick={() => void decide(row, "hide")}
+                      >
                         <EyeOff className="mr-1.5 h-3.5 w-3.5" />
-                        Hide it
+                        {row.held ? "Keep it hidden" : "Hide it"}
                       </Button>
                     </div>
                   </AccessAction>

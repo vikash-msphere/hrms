@@ -62,8 +62,14 @@ export type ActingAs = { kind: "automation" | "cron"; name: string; ref?: string
 // sequential consistency keeps read-your-writes intact for the rest of the request. Behavior-neutral
 // otherwise: a D1DatabaseSession exposes the same prepare/batch the drizzle D1 driver uses (it just
 // lacks exec/dump, hence the cast).
-export function sessionBinding(d1: D1Database): D1Database {
-  return typeof d1.withSession === "function"
+export function sessionBinding(d1: D1Database, enabled: boolean): D1Database {
+  // DECLARED, NOT DETECTED, and that changed after a runtime upgrade. This used to be feature-detection -
+  // sessions if the runtime has `withSession` - on the premise that local runtimes lack it. The local
+  // runtime now HAS it, and a session opened against a local database tries to reach the real one: every
+  // request in `wrangler dev` died at its first query with `internal error; reference = …` and
+  // `remote: true`, which reads like a Cloudflare outage rather than a configuration mismatch. The two
+  // runtimes can no longer be told apart by asking, so the deployment says which it is (`D1_SESSIONS`).
+  return enabled && typeof d1.withSession === "function"
     ? (d1.withSession("first-unconstrained") as unknown as D1Database)
     : d1;
 }
@@ -130,7 +136,9 @@ function assertConfigured(env: Bindings): void {
 export function makeDeps(env: Bindings): Deps {
   assertConfigured(env);
   const encryptor = makeEncryptor(env.FIELD_ENCRYPTION_KEY);
-  const db = drizzle(sessionBinding(env.DB), { schema });
+  // Off unless the deployment says otherwise (wrangler.toml `D1_SESSIONS`): a read replica is an
+  // optimisation, so the wrong default costs latency rather than correctness.
+  const db = drizzle(sessionBinding(env.DB, env.D1_SESSIONS === "true"), { schema });
   // A model on this machine, when one is configured. Built ONCE, before the bindings are considered, because
   // both halves of the AI layer have to come from the same place: a local model writing into the production
   // Vectorize index would be the worst of both.

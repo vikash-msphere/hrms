@@ -86,7 +86,20 @@ export const HAZARDS: Record<string, string> = {
  *
  *  Conduct codes (`W*`, domain/conduct.ts) resolve here too, because the queue holds one `hazards` array per
  *  flag and a moderator reading it should not have to know which of the two passes objected. */
-export const hazardLabel = (code: string): string => HAZARDS[code] ?? CONDUCT_HAZARDS[code] ?? code;
+export const hazardLabel = (code: string): string => HAZARDS[code] ?? CONDUCT_HAZARDS[code] ?? OUTCOME_LABELS[code] ?? code;
+
+/**
+ * The reason on a flag that no model produced.
+ *
+ * With the gate on, a post is held when the check could not be completed - the model was down, out of
+ * budget, or answered with something that was not a verdict - as well as when it objected. That hold needs
+ * a reason a moderator can act on, and "no hazards" would render as a blank column on a post they are being
+ * asked to release. It is deliberately not one of Llama Guard's codes: nothing was found, because nothing
+ * was read.
+ */
+export const UNCHECKED = "UNCHECKED";
+
+const OUTCOME_LABELS: Record<string, string> = { [UNCHECKED]: "Not checked" };
 
 /** Hazard labels, lower-cased, back to their codes. Built once: the object dialect below sometimes names a
  *  category rather than coding it. */
@@ -220,4 +233,24 @@ export type ModerationPayload = {
   /** Whether the host row hides its author from readers, carried onto the flag so the queue cannot leak an
    *  identity the wall itself withholds. See `services/moderation.ts` for why this is decided at scan time. */
   anonymous: boolean;
+  /**
+   * THE POST NEVER WENT PUBLIC: the gate withheld it at the moment it was written.
+   *
+   * This is the difference between the two things a flag can mean, and everything downstream turns on it:
+   *
+   *  - WITHOUT it, the post is on the wall and the flag is advisory. A moderator's `hide` takes it down and
+   *    `dismiss` leaves it where it is. That is the original design and still what happens when the gate is
+   *    off (a flag raised by the cron sweep over posts that predate it).
+   *  - WITH it, the post is already invisible and was never announced. `hide` confirms that; `dismiss`
+   *    RELEASES it - publishes it and sends the broadcast that was held back with it.
+   *
+   * It is also what keeps the flag ON the queue. `liveHosts` drops a flag whose host nobody can see, which
+   * is right for a post its author withdrew and catastrophic for one the gate is holding: the post would be
+   * invisible on the wall AND absent from the queue, with nothing left that could release it.
+   *
+   * Carried in the payload rather than as a new `ai_suggestions.state`: the states are shared with every
+   * other advisory feature and mean "has a human answered this yet", which is a different question, and a
+   * held flag is still `pending` in exactly that sense.
+   */
+  held?: boolean;
 };

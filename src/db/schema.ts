@@ -752,6 +752,14 @@ export const announcements = sqliteTable("announcements", {
   // Pinned to the top of the board (HR/moderation - the :pin/:unpin verbs). The timestamp rather than a flag
   // so several pinned posts keep a stable order (most recently pinned first). Null = not pinned.
   pinnedAt: integer("pinned_at", { mode: "timestamp_ms" }),
+  // WITHHELD BY THE MODERATION GATE: written, never seen. Set at the moment the row is created while a model
+  // reads it, cleared when it is released; a post that fails the check keeps it until somebody decides.
+  //
+  // A COLUMN RATHER THAN A STATE INFERRED FROM `published`/`disabled`, because those two are somebody's
+  // editorial choice and this is not: an editor who may see drafts and disabled posts must NOT see a held
+  // one, which is the whole point of holding it. It is also what lets every read path exclude held rows in
+  // SQL (`services/withheld.ts`) instead of each one remembering to join the flag that is holding it.
+  heldAt: integer("held_at", { mode: "timestamp_ms" }),
   // Kudos (kind="kudos"): the recognized employee + recognition meta. The kudo message lives in `body`; `title`
   // is unused (""). `points` is snapshotted server-side from `level` via the kudos config so a giver can't
   // inflate their recognition. Null for every non-kudos kind. The author (board column) is the giver.
@@ -870,6 +878,9 @@ export const announcementReplies = sqliteTable("announcement_replies", {
   // abusive comment would take down the author's post for what a commenter wrote. Append-only was right
   // while nothing could withdraw one; it stopped being right the moment a moderator could.
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }),
+  /** Withheld by the moderation gate - see `announcements.held_at`. A held reply is off the thread for
+   *  everyone, including its author, until it is released or the hold is upheld. */
+  heldAt: integer("held_at", { mode: "timestamp_ms" }),
   createdAt: created(),
 }, (t) => ({ annIdx: index("arp_ann_idx").on(t.announcementId) }));
 
@@ -3258,6 +3269,9 @@ export const suggestions = sqliteTable("suggestions", {
   // submitter can see what happened to their words, and `:merge` is the only thing that writes it.
   mergedIntoId: text("merged_into_id").references((): AnySQLiteColumn => suggestions.uuid),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete (moderation)
+  /** Withheld by the moderation gate - see `announcements.held_at`. Distinct from the soft-delete above: a
+   *  held suggestion was never on the box, and releasing it is not a restore. */
+  heldAt: integer("held_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ pageIdx: index("suggestions_page_idx").on(t.createdAt, t.uuid), submitterIdx: index("sugg_submitter_idx").on(t.submitterId, t.createdAt, t.uuid), statusIdx: index("sugg_status_idx").on(t.status) }));

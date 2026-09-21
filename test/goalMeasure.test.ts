@@ -11,6 +11,7 @@ import { genId } from "../src/lib/idCodec";
 import { measureGaps, GAP_MESSAGE } from "../src/domain/goalMeasure";
 import { measureGaps as webMeasureGaps, GAP_MESSAGE as WEB_GAP_MESSAGE } from "../web/src/lib/goalMeasure";
 import { proposeGoalMeasure, parseProposal } from "../src/services/goalMeasure";
+import { createGoal, updateGoal } from "../src/services/goals";
 
 // A goal that cannot measure itself, and the three numbers a model may propose for it.
 //
@@ -165,5 +166,57 @@ describe("the call", () => {
     expect(usage).toHaveLength(1);
     expect(usage[0]!.feature).toBe("goals.measure");
     expect(usage[0]!.subject).toBe(`goals/${id}`);
+  });
+});
+
+// A measure that already reads its target is finished work, and the record has to say so on the way in.
+//
+// The rule existed on the UPDATE path only ("reaching the target completes the goal"), so a goal CREATED at
+// its target was written progress 100 with whatever status the default supplied - "Not started" - and the form
+// offering to record it said in so many words that saving would complete it. One rule, both doors.
+describe("a goal filed at its target", () => {
+  const TABLES = [schema.auditLog, schema.eventLog, schema.goals, schema.users, schema.employees, schema.roles];
+  beforeEach(async () => {
+    for (const t of TABLES) await deps.db.delete(t);
+  });
+
+  async function seedActor(): Promise<AppUser> {
+    await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee" }).onConflictDoNothing();
+    const employeeId = genId();
+    await deps.db.insert(schema.employees).values({ uuid: employeeId, code: `04-${genId().slice(0, 3)}`, firstName: "Test", lastName: "User", workEmail: `${employeeId}@test.example`, status: "active" });
+    const uuid = genId();
+    await deps.db.insert(schema.users).values({ uuid, code: `u-${genId().slice(0, 4)}`, email: `${uuid}@test.example`, role: "employee", employeeId });
+    return { uuid, email: `${uuid}@test.example`, role: "employee", status: "active", employeeId, employeeCode: null, name: "Test User" } as unknown as AppUser;
+  }
+
+  it("is created completed, not 'not started' at 100%", async () => {
+    const actor = await seedActor();
+    const g = await createGoal(deps, actor, { title: "Sign the last three customers", unit: "customers", baseline_value: 0, target_value: 3, current_value: 3 });
+    expect(g.progress).toBe(100);
+    expect(g.status).toBe("completed");
+  });
+
+  it("leaves a status the caller named alone", async () => {
+    // "Cancelled at the target" is a thing somebody can mean - work that landed and was then called off.
+    const actor = await seedActor();
+    const g = await createGoal(deps, actor, { title: "Abandoned at the line", status: "cancelled", baseline_value: 0, target_value: 3, current_value: 3 });
+    expect(g.progress).toBe(100);
+    expect(g.status).toBe("cancelled");
+  });
+
+  it("does not complete a goal that is only part of the way there", async () => {
+    const actor = await seedActor();
+    const g = await createGoal(deps, actor, { title: "Sign three customers", unit: "customers", baseline_value: 0, target_value: 3, current_value: 1 });
+    expect(g.progress).toBe(33);
+    expect(g.status).toBe("not_started");
+  });
+
+  it("completes on an edit that reaches the target without naming a status", async () => {
+    const actor = await seedActor();
+    const g = await createGoal(deps, actor, { title: "Cut churn", unit: "%", baseline_value: 8, target_value: 4, current_value: 8 });
+    expect(g.status).toBe("not_started");
+    const done = await updateGoal(deps, actor, g.uuid, { current_value: 4 });
+    expect(done.progress).toBe(100);
+    expect(done.status).toBe("completed");
   });
 });

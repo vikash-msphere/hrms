@@ -18,7 +18,7 @@ import { assertNotLocked } from "./lockGuard";
 import { boardPostLink, postedTitle } from "../domain/board";
 import { notifyMentions } from "./mentions";
 import { isModeratable } from "../domain/moderation";
-import { scanSoon } from "./moderation";
+import { moderationGate, moderationGateOn, scanSoon } from "./moderation";
 
 type Table = any;
 type Row = {
@@ -86,6 +86,19 @@ export async function setPublished(
   const row = await fetchRow(deps, table, id);
   if (!row) throw notFound(`${singular} not found`);
   assertNotLocked(row);
+
+  // THE GATE, at the moment a post becomes public - which is what publishing is. A draft is read here
+  // rather than when it was written, because until now there was nothing for anybody to see. Held means the
+  // flip does not happen at all: the row stays a draft, the broadcast below never runs, and the post is on
+  // the Flagged posts queue for somebody to release. `moderationGate` clears the hold when it passes, and
+  // the scan bookkeeping makes a second look at unchanged text free, so releasing from the queue does not
+  // pay for the check twice.
+  if (published && isModeratable(collection) && (await moderationGateOn(deps))) {
+    const { setHeld } = await import("./moderation");
+    await setHeld(deps, collection, id);
+    if (!(await moderationGate(deps, collection, id))) return row;
+  }
+
   const fields: Record<string, unknown> = { published, updatedAt: new Date() };
   if (withPublishTime) fields.publishTime = published ? new Date() : null;
   // Guarded flip: only the call that actually changes the state gets to audit + broadcast. A double-clicked
@@ -125,6 +138,8 @@ export async function setPublished(
   // Going live is the moment the text first reaches a wall, whichever direction the flip went - so it is
   // also the moment it becomes worth reading. Unpublishing needs no scan: the post is off the wall, and
   // `retireOrphans` closes any flag standing over it.
-  if (isModeratable(collection) && published) await scanSoon(deps, collection, id);
+  // Gate OFF only. With it on, the post was read above - before the flip - and a second call here would be
+  // two mechanisms answering one question, which is how the two of them drift.
+  if (isModeratable(collection) && published && !(await moderationGateOn(deps))) await scanSoon(deps, collection, id);
   return out;
 }

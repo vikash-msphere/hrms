@@ -523,6 +523,29 @@ delay or lose a post, it just leaves the row for the sweep. That is the test to 
 work out of a cron and onto a write path: if the deferred half failing would change what the user's request
 did, it does not belong there.
 
+### A gate is a column, not a hook on the write path
+
+"Check posts before they go up" sounds like work for the write paths and mostly is not. The write paths
+decide WHEN to ask; what makes the answer enforceable is a `held_at` column on each wall and one predicate
+(`services/withheld.ts notHeld`) bound into every read. Two things fall out of choosing it that way.
+
+**It must not be an absence of `published`.** A draft and a held post are both invisible, and they are
+invisible to different people: a draft is withheld from readers and deliberately shown to editors, which is
+what `STATE_VISIBILITY` and `seeRestricted` exist for. A held post is withheld from everyone, including
+those editors and its own author. Expressed as a `published` flag it leaks into every drafts view HR opens,
+which is precisely the audience most likely to be looking.
+
+**The queue is the one read that must ignore the predicate**, and getting that backwards is unrecoverable.
+`liveHosts` dropped any flag whose host nobody could see - correct for a post its author withdrew, fatal
+for one the gate is holding, because the post would be invisible on the wall AND absent from the queue with
+nothing left that could release it. The author's writing would be gone and no page in the app would admit
+it existed.
+
+The same asymmetry decides the failure mode. Fail closed: a model that is down holds posts rather than
+letting them through unread, because the posts that go out during an outage are exactly the ones nobody
+checked. The cost is real and lands on the author, so the reason on the queue says `Not checked` rather
+than inventing a hazard, and releasing is one click.
+
 ### A safety classifier is not a conduct policy
 
 Llama Guard answers "is this content dangerous" against a fixed taxonomy: violent crime, weapons, self-harm,

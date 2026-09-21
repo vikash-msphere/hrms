@@ -680,6 +680,9 @@ export async function createGoal(deps: Deps, actor: AppUser, input: GoalInput, i
   // the approver, and asking them to approve their own instruction is ceremony with no reader.
   const stage: Stage = (await goalApprovalOn(deps)) && employeeId === actor.employeeId ? "DRAFT" : "AGREED";
   const code = await allocOwnedCode(deps, schema.goals, schema.goals.employeeId, employeeId);
+  // The measure's own verdict on where this goal starts, read once: it decides both the progress and, at the
+  // target, the status.
+  const measuredAtCreate = measuredProgress({ baselineValue: input.baseline_value, targetValue: input.target_value, currentValue: input.current_value });
   const row = (await deps.db
     .insert(schema.goals)
     .values({
@@ -707,9 +710,13 @@ export async function createGoal(deps: Deps, actor: AppUser, input: GoalInput, i
       currentValue: input.current_value ?? null,
       // A measured goal's progress is its measure, from the first save: an owner who typed "0 of 60 customers"
       // must not also have to say "0%".
-      ...(measuredProgress({ baselineValue: input.baseline_value, targetValue: input.target_value, currentValue: input.current_value }) != null
-        ? { progress: measuredProgress({ baselineValue: input.baseline_value, targetValue: input.target_value, currentValue: input.current_value })! }
-        : {}),
+      ...(measuredAtCreate != null ? { progress: measuredAtCreate } : {}),
+      // And a goal filed AT its target is filed complete, the same rule `updateGoal` applies to a measure that
+      // reaches it. Without this a goal could be born at 100% and "Not started": the create path derived the
+      // progress and left the status to a default that nobody chose, and the form that offered to record
+      // finished work said it would complete the goal and then did not.
+      // Only when the caller named no status - "cancelled at 100%" is a thing somebody can mean.
+      ...(measuredAtCreate === 100 && !input.status ? { status: "completed" as const } : {}),
     })
     .returning())[0]!;
   await audit(deps, actor, "goal.create", "goals", row.uuid, createdMeta(row, "goals"), row);

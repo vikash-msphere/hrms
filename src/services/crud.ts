@@ -23,6 +23,7 @@ import { softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDe
 import { keysetPage } from "./keysetPage";
 import { applyScope } from "./listScope";
 import { publicStateFilter } from "./stateFilter";
+import { isHeld, notHeld } from "./withheld";
 import type { ListScope } from "../domain/access";
 import { assertNotLocked } from "./lockGuard";
 
@@ -172,6 +173,14 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
   const required = async (deps: Deps, id: string): Promise<Row> => {
     const row = (await deps.db.select().from(table).where(eq(table.uuid, id)).limit(1))[0] as unknown as Row | undefined;
     if (!row) throw notFound(spec.notFound);
+    // A post the gate is holding answers NOT FOUND, not 403: it is not a thing the caller is being refused,
+    // it is a thing that has not been published. Anything else - an error that distinguishes "held" from
+    // "absent" - tells the whole org that a specific post exists and is in trouble, which is a disclosure
+    // about its author that the queue exists to keep to the people who may act on it.
+    //
+    // The WRITE paths reach their rows through their own reads, not this one, so an author can still edit
+    // and delete what they wrote while it waits.
+    if (isHeld(row as { heldAt?: Date | null })) throw notFound(spec.notFound);
     return row;
   };
 
@@ -195,6 +204,11 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
       // visibility leak in its own right - a draft's title in a list is the disclosure, whether or not the row
       // can then be opened.
       conds.push(publicStateFilter(actor.policy.state_visibility?.[collection], table, scope?.seeRestricted ?? false));
+      // Withheld by the moderation gate: invisible to EVERYONE, including the callers `seeRestricted` lets
+      // past the state filter above. The two are next to each other because they read alike and are not:
+      // one is an editorial state with an audience, the other is a post that has not been allowed to exist
+      // publicly yet. See services/withheld.ts.
+      conds.push(notHeld(table));
       // Three states, not two: exclude the trash (the default), include it, or ask for it ALONE - the last is
       // what makes a "Deleted" view a fetch of its own instead of a filter over a page of mostly-live rows.
       if (table.deleteTime) {

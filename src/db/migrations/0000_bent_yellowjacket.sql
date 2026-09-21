@@ -134,6 +134,7 @@ CREATE TABLE `announcement_replies` (
 	`author_email` text,
 	`body` text NOT NULL,
 	`delete_time` integer,
+	`held_at` integer,
 	`created_at` integer NOT NULL,
 	FOREIGN KEY (`announcement_id`) REFERENCES `announcements`(`uuid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`author_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
@@ -156,6 +157,7 @@ CREATE TABLE `announcements` (
 	`poll_multiple` integer DEFAULT false NOT NULL,
 	`poll_closes_at` integer,
 	`pinned_at` integer,
+	`held_at` integer,
 	`recipient_employee_id` text,
 	`recipient_department_id` text,
 	`audience_scope` text DEFAULT 'everyone' NOT NULL,
@@ -2300,6 +2302,7 @@ CREATE TABLE `suggestions` (
 	`responded_by_id` text,
 	`merged_into_id` text,
 	`delete_time` integer,
+	`held_at` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`submitter_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action,
@@ -3082,12 +3085,12 @@ CREATE TRIGGER "search_ad_letter_templates" AFTER DELETE ON "letter_templates" B
 END;
 --> statement-breakpoint
 CREATE TRIGGER "search_ai_announcements" AFTER INSERT ON "announcements" BEGIN
-  INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) VALUES ('announcements', new."uuid", new."code", new."author_employee_id", nullif(trim(new."title"), ''), nullif(trim(new."kind"), ''), (new."delete_time" IS NOT NULL), (coalesce(new."published", 0) <> 1 OR coalesce(new."disabled", 0) <> 0), new."created_at");
+  INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) VALUES ('announcements', new."uuid", new."code", new."author_employee_id", nullif(trim(new."title"), ''), nullif(trim(new."kind"), ''), (new."delete_time" IS NOT NULL OR new."held_at" IS NOT NULL), (coalesce(new."published", 0) <> 1 OR coalesce(new."disabled", 0) <> 0), new."created_at");
   INSERT INTO "search_fts" ("rowid", "text") VALUES (last_insert_rowid(), coalesce(new."title", '') || ' ' || coalesce(new."body_text", '') || ' ' || coalesce(new."category", '') || ' ' || coalesce(new."kind", ''));
 END;
 --> statement-breakpoint
 CREATE TRIGGER "search_au_announcements" AFTER UPDATE ON "announcements" BEGIN
-  UPDATE "search_docs" SET "code" = new."code", "owner_id" = new."author_employee_id", "title" = nullif(trim(new."title"), ''), "subtitle" = nullif(trim(new."kind"), ''), "deleted" = (new."delete_time" IS NOT NULL), "restricted" = (coalesce(new."published", 0) <> 1 OR coalesce(new."disabled", 0) <> 0) WHERE "collection" = 'announcements' AND "record_id" = new."uuid";
+  UPDATE "search_docs" SET "code" = new."code", "owner_id" = new."author_employee_id", "title" = nullif(trim(new."title"), ''), "subtitle" = nullif(trim(new."kind"), ''), "deleted" = (new."delete_time" IS NOT NULL OR new."held_at" IS NOT NULL), "restricted" = (coalesce(new."published", 0) <> 1 OR coalesce(new."disabled", 0) <> 0) WHERE "collection" = 'announcements' AND "record_id" = new."uuid";
   UPDATE "search_fts" SET "text" = coalesce(new."title", '') || ' ' || coalesce(new."body_text", '') || ' ' || coalesce(new."category", '') || ' ' || coalesce(new."kind", '') WHERE "rowid" = (SELECT "rowid" FROM "search_docs" WHERE "collection" = 'announcements' AND "record_id" = new."uuid");
 END;
 --> statement-breakpoint
@@ -3502,12 +3505,12 @@ CREATE TRIGGER "search_ad_ticket_checklists" AFTER DELETE ON "ticket_checklists"
 END;
 --> statement-breakpoint
 CREATE TRIGGER "search_ai_suggestions" AFTER INSERT ON "suggestions" BEGIN
-  INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) VALUES ('suggestions', new."uuid", new."code", new."submitter_id", nullif(trim(new."title"), ''), coalesce(nullif(trim(new."category"), ''), nullif(trim(new."status"), '')), (new."delete_time" IS NOT NULL), 0, new."created_at");
+  INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) VALUES ('suggestions', new."uuid", new."code", new."submitter_id", nullif(trim(new."title"), ''), coalesce(nullif(trim(new."category"), ''), nullif(trim(new."status"), '')), (new."delete_time" IS NOT NULL OR new."held_at" IS NOT NULL), 0, new."created_at");
   INSERT INTO "search_fts" ("rowid", "text") VALUES (last_insert_rowid(), coalesce(new."title", '') || ' ' || coalesce(new."body", '') || ' ' || coalesce(new."category", '') || ' ' || coalesce(new."response", '') || ' ' || coalesce(new."status", ''));
 END;
 --> statement-breakpoint
 CREATE TRIGGER "search_au_suggestions" AFTER UPDATE ON "suggestions" BEGIN
-  UPDATE "search_docs" SET "code" = new."code", "owner_id" = new."submitter_id", "title" = nullif(trim(new."title"), ''), "subtitle" = coalesce(nullif(trim(new."category"), ''), nullif(trim(new."status"), '')), "deleted" = (new."delete_time" IS NOT NULL), "restricted" = 0 WHERE "collection" = 'suggestions' AND "record_id" = new."uuid";
+  UPDATE "search_docs" SET "code" = new."code", "owner_id" = new."submitter_id", "title" = nullif(trim(new."title"), ''), "subtitle" = coalesce(nullif(trim(new."category"), ''), nullif(trim(new."status"), '')), "deleted" = (new."delete_time" IS NOT NULL OR new."held_at" IS NOT NULL), "restricted" = 0 WHERE "collection" = 'suggestions' AND "record_id" = new."uuid";
   UPDATE "search_fts" SET "text" = coalesce(new."title", '') || ' ' || coalesce(new."body", '') || ' ' || coalesce(new."category", '') || ' ' || coalesce(new."response", '') || ' ' || coalesce(new."status", '') WHERE "rowid" = (SELECT "rowid" FROM "search_docs" WHERE "collection" = 'suggestions' AND "record_id" = new."uuid");
 END;
 --> statement-breakpoint
@@ -3742,7 +3745,7 @@ INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitl
 --> statement-breakpoint
 INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."label", '') || ' ' || coalesce(t."category", '') || ' ' || coalesce(t."filename", '') FROM "search_docs" d JOIN "letter_templates" t ON t."uuid" = d."record_id" WHERE d."collection" = 'letter-templates' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
 --> statement-breakpoint
-INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'announcements', t."uuid", t."code", t."author_employee_id", nullif(trim(t."title"), ''), nullif(trim(t."kind"), ''), (t."delete_time" IS NOT NULL), (coalesce(t."published", 0) <> 1 OR coalesce(t."disabled", 0) <> 0), t."created_at" FROM "announcements" t;
+INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'announcements', t."uuid", t."code", t."author_employee_id", nullif(trim(t."title"), ''), nullif(trim(t."kind"), ''), (t."delete_time" IS NOT NULL OR t."held_at" IS NOT NULL), (coalesce(t."published", 0) <> 1 OR coalesce(t."disabled", 0) <> 0), t."created_at" FROM "announcements" t;
 --> statement-breakpoint
 INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."title", '') || ' ' || coalesce(t."body_text", '') || ' ' || coalesce(t."category", '') || ' ' || coalesce(t."kind", '') FROM "search_docs" d JOIN "announcements" t ON t."uuid" = d."record_id" WHERE d."collection" = 'announcements' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
 --> statement-breakpoint
@@ -3854,7 +3857,7 @@ INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitl
 --> statement-breakpoint
 INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."name", '') FROM "search_docs" d JOIN "ticket_checklists" t ON t."uuid" = d."record_id" WHERE d."collection" = 'ticket-checklists' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
 --> statement-breakpoint
-INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'suggestions', t."uuid", t."code", t."submitter_id", nullif(trim(t."title"), ''), coalesce(nullif(trim(t."category"), ''), nullif(trim(t."status"), '')), (t."delete_time" IS NOT NULL), 0, t."created_at" FROM "suggestions" t;
+INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'suggestions', t."uuid", t."code", t."submitter_id", nullif(trim(t."title"), ''), coalesce(nullif(trim(t."category"), ''), nullif(trim(t."status"), '')), (t."delete_time" IS NOT NULL OR t."held_at" IS NOT NULL), 0, t."created_at" FROM "suggestions" t;
 --> statement-breakpoint
 INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."title", '') || ' ' || coalesce(t."body", '') || ' ' || coalesce(t."category", '') || ' ' || coalesce(t."response", '') || ' ' || coalesce(t."status", '') FROM "search_docs" d JOIN "suggestions" t ON t."uuid" = d."record_id" WHERE d."collection" = 'suggestions' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
 --> statement-breakpoint

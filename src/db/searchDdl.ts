@@ -51,9 +51,17 @@ function titleExpr(entry: SearchEntry, prefix: string): string {
 // list never closes it, so every following `;` is swallowed and the rest of the migration is sent as one
 // oversized statement (SQLITE_TOOBIG). SQLite yields 0/1 from a comparison anyway, so `CASE` buys nothing
 // here. test/searchDdlDrift.test.ts replays the splitter's own rules to keep this from regressing.
+// It also covers the moderation gate's `held_at`, and the column is really "withheld from results" rather
+// than "deleted". The two stamps want identical treatment and for the same reason the comment above gives:
+// the row stays in the index, is filtered out of every query, and comes back the moment the stamp clears -
+// so releasing a held post needs no reindex, exactly as restoring a deleted one does not. Folding it in here
+// is also what keeps a held post out of ⌘K without a second flag for every query to remember.
 function deletedExpr(entry: SearchEntry, prefix: string): string {
-  const c = col(entry.table, "deleteTime");
-  return c ? `(${qualify(prefix, c)} IS NOT NULL)` : "0";
+  const stamps = ["deleteTime", "heldAt"]
+    .map((prop) => col(entry.table, prop))
+    .filter(Boolean)
+    .map((c) => `${qualify(prefix, c!)} IS NOT NULL`);
+  return stamps.length ? `(${stamps.join(" OR ")})` : "0";
 }
 
 // Mirrors the state-visibility manifest's `public_when` for this collection: 1 when the row is NOT public, so
