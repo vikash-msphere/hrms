@@ -365,6 +365,30 @@ Two scope lines moved from the original plan, deliberately:
   makes handing somebody a saved table safe: they run it under their own access, so they get the same grid
   with fewer columns and fewer rows. See `table-builder-plan.md`.
 
+### Silence is not an answer
+
+The three records below are about code that misleads. This one is about EVIDENCE that misleads, and it is the
+general case: in each instance the mistake was not a missing check but an act that hid the check's result.
+
+  - `git diff --numstat src/db/seed.sql 2>/dev/null` against a path that does not exist. Git exits 128 with
+    "no such path in the working tree"; the redirect swallows it; stdout is empty. An empty stdout from a
+    suppressed error is indistinguishable from a legitimate empty result, so "no output" was read as "no
+    changes" and reported as a finding. The file was `scripts/seed.sql` and had 240 changed lines.
+  - A count quoted as "counted with grep" that had not been grepped. Naming the check reads, to the writer as
+    much as the reader, as having performed it.
+  - A test whose fixture asserted a state the schema forbids, and another whose fixture described a month that
+    could not exist. Both passed their own authors' reading because the assertion agreed with the fixture;
+    what neither agreed with was the app.
+
+THE RULE. For any command whose output backs a claim, run it bare or print `$?` beside it, and treat "no
+output" as "no answer" until the exit code says otherwise. `2>/dev/null` belongs in a script that handles the
+failure, never in a check whose result you are about to report.
+
+WHY IT IS WORTH A RECORD RATHER THAN A RESOLUTION TO BE CAREFUL: this was got wrong four times in one day by
+two people who both understood the rule and had each spent that day pressing it on the other. Knowing a rule
+and reaching for it under time pressure are separate skills, and only the second one catches anything. What
+makes the failure survivable is the exit code, which is always available and costs one character to print.
+
 ### A comment can be true and still point the wrong way
 
 Not a note about stale comments. A stale comment is caught by reading the code beside it, because the code
@@ -453,6 +477,69 @@ when the credit does not, which is why `repaidCreditStmt` moves `repaid` relativ
 re-derives it from the ledger rather than subtracting an amount.
 
 What is genuinely still open is release-path, not product: see `production-readiness.md`.
+
+### A port hides the wire, so the wire needs a test of its own
+
+`TextModel` (`src/ports/index.ts`) exists so a test can replace a model in one line, and it does its job: 23
+tests drove the moderation scan through a fake and every one passed while the feature was incapable of
+flagging anything in production. Both faults were in the shape of the call, which is exactly what the port
+abstracts away.
+
+  - We sent a `system` message to `@cf/meta/llama-guard-3-8b`, whose input schema declares `messages[].role`
+    as `"user" | "assistant"`. Llama Guard builds its own prompt and has no instruction slot; the system turn
+    was written for a model that cannot read one.
+  - We read `response` as a `string`. The binding post-processes that model's answer into
+    `{safe, categories}`, so the parser called `.trim()` on an object, threw inside the call, and the failure
+    was recorded as an inference error - indistinguishable from the model being down.
+
+Each on its own was enough to empty the queue permanently, and the drain's `break`-on-failure turned both
+into silence rather than noise. The generalisation is not "write more tests": it is that a fake injected AT a
+port cannot falsify a claim ABOUT the port's other side. Where a transport encodes somebody else's schema,
+the test has to be against a fake of the BACKEND, comparing what was sent and what was accepted -
+`test/transportParity.test.ts` is where that lives here, and it now pins both shapes. The binding's own
+`.d.ts` is the cheapest available spec, and `run()` casting its input to `never` is what let the compiler
+miss a mismatch the types could have caught.
+
+### A reconciliation is a backstop, not a delivery mechanism
+
+The moderation scan was built as a bounded cron pass over "what has changed since we last looked", which is
+the right shape for a sweep and was quietly the wrong shape for the product. Two defects fell out of it, and
+both presented identically: somebody posts something abusive, nothing happens, the feature looks broken.
+
+  - **The rotation preferred the oldest post.** Never-scanned rows all have a NULL `scanned_at`, so they tied
+    on the sort, SQLite returned them in rowid order, and `limit` took the oldest inserted. A post made a
+    minute ago queued behind the whole history of the wall. Ordering unscanned rows newest-first is the fix,
+    and the tie nobody wrote an ORDER BY for is the general lesson: a sort whose key is NULL for the rows
+    that matter most is not a sort.
+  - **Even fixed, a five-minute tick is the wrong latency for this.** The value of a flag decays with the
+    post: a queue item about a conversation that already happened is a worse product than one that arrives
+    while people are still reading. So the write paths now scan the row they just wrote, through
+    `ctx.waitUntil` (`Deps#defer`), and the cron pass keeps doing what a reconciliation is for - edits,
+    scheduled publishes, and whatever the immediate attempt could not finish.
+
+What makes the immediate scan safe is that it changed no guarantee. It runs AFTER the commit and outside the
+response, it swallows its own failures, and it cannot hide anything - so a model that is down cannot refuse,
+delay or lose a post, it just leaves the row for the sweep. That is the test to apply before moving other
+work out of a cron and onto a write path: if the deferred half failing would change what the user's request
+did, it does not belong there.
+
+### A safety classifier is not a conduct policy
+
+Llama Guard answers "is this content dangerous" against a fixed taxonomy: violent crime, weapons, self-harm,
+child exploitation, hate against a protected attribute. A noticeboard needs a person for something else -
+somebody sneering at a named colleague, a post disclosing another employee's pay or disciplinary outcome, an
+accusation of fraud against the company stated as fact. Llama Guard answers "safe" to all of those, correctly
+by its own definition, so the queue stayed empty on exactly the posts people expected it to catch and the
+feature read as broken when it was working.
+
+The fix is a second pass with its own rubric (`src/domain/conduct.ts`, codes `W1`-`W6`) run by the general
+instruct model, behind its own switch (`moderation.conduct`) rather than folded into the existing one. Three
+things make that affordable: it cannot hide anything either, both passes write one flag into one queue, and
+an org that wants statutory-grade scanning is not signed up to a tone judgement by an upgrade. What it costs
+is accuracy - a general model reading our rubric is wrong in both directions more often than a fine-tuned
+classifier on its own ground - so the prompt is written to under-flag, and the rubric names the two mistakes
+that would make a moderator stop trusting the queue: disagreement read as abuse, criticism of the company
+read as defamation.
 
 ---
 

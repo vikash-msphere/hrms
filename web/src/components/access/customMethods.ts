@@ -64,7 +64,7 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   interviews: ["complete", "cancel", "invite"],
   "interview-feedback": [],
   offers: ["approve", "extend", "accept", "decline", "rescind", "letter"],
-  expenses: ["submit", "approve", "reject", "cancel", "pay", "upload", "download"],
+  expenses: ["submit", "approve", "reject", "cancel", "pay", "upload", "download", "extractReceipt"],
   automations: ["enable", "disable", "test"],
   "access-rules": ["preview", "requestAccess", "approve", "reject", "clone", "review", "scopeCounts"],
 };

@@ -30,7 +30,21 @@ export type DB = ReturnType<typeof drizzle<typeof schema>>;
 // `trace` is the correlation id of the workflow execution currently running on this Deps. emitEvent mints it at
 // the ROOT emission and every event/run/instance in the synchronous fan-out (incl. apiCall re-dispatch, which
 // reuses this Deps) records it - so the UI can group one workflow's events/runs/waits together and show cause.
-export type Deps = { db: DB; refCache?: Map<string, Promise<unknown>>; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; apiKeySigner: ApiKeySigner; email: EmailSender; docs: DocumentStore; ai?: TextModel; vectors?: VectorIndex; webhook?: WebhookSender; push?: PushSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number; dropped: number }; trace?: string; actingAs?: ActingAs };
+export type Deps = { db: DB; refCache?: Map<string, Promise<unknown>>; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; apiKeySigner: ApiKeySigner; email: EmailSender; docs: DocumentStore; ai?: TextModel; vectors?: VectorIndex; webhook?: WebhookSender; push?: PushSender; dispatch?: Dispatch; defer?: Defer; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number; dropped: number }; trace?: string; actingAs?: ActingAs };
+
+/**
+ * Work that outlives the response: `ctx.waitUntil`, handed to services so they do not need the Hono context.
+ *
+ * WHAT BELONGS HERE is work whose RESULT the caller is not waiting for and whose FAILURE must not fail the
+ * request - today, the moderation scan of a post that was just written. The post is committed and the
+ * response is sent; the model is asked afterwards, and if it is down the cron pass picks the row up later.
+ *
+ * WHAT DOES NOT: anything the response describes, anything that must happen exactly once, and anything whose
+ * failure the caller should hear about. Deferred work has nowhere to report to but the log, and on a runtime
+ * that does not give us an execution context (a test, a batch sub-request) this is undefined and the caller
+ * falls back to awaiting - so a deferred task must also be correct when it is NOT deferred.
+ */
+export type Defer = (work: Promise<unknown>) => void;
 
 /**
  * WHAT is acting, when the actor is not a person at the keyboard.

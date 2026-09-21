@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Target, Plus, Pencil, Trash2, CheckCircle2, CalendarDays, ClipboardCheck, Clock3, Eye, Hourglass, Network, Sparkles, TrendingDown, Users, Search, Link2, X, ChevronDown, ChevronLeft, ChevronRight , ListChecks } from "lucide-react";
+import { Target, Plus, Pencil, Trash2, CheckCircle2, CalendarDays, ClipboardCheck, Clock3, Eye, Hourglass, Network, Sparkles, TrendingDown, Users, Search, Link2, X, ChevronDown, ChevronLeft, ChevronRight , ListChecks, Ruler } from "lucide-react";
 import { create, patch, invoke, remove, get, getAllPages } from "@/api";
 import { navigate, setRouteRecord, recordUrl, routeRecord } from "@/router";
 import { describeError, isConflict } from "@/lib/formError";
@@ -95,6 +95,19 @@ const EMPTY = {
   unit: "", baseline: "", target: "", current: "",
 };
 const num = numOrNone;
+// The units a measure is nearly always in, offered as chips beside the box. Typing "%" is not the work; the
+// work was knowing the field wanted a word like "customers" rather than a sentence.
+const QUICK_UNITS = ["%", "days", "hours", "customers", "tickets"];
+/**
+ * The measure's "current" for a form: asked on an edit, implied on a new goal.
+ *
+ * A goal written today is where its baseline says it is - a box asking where it has got to, answered by the box
+ * above it, is a question with one right answer. With a target and no baseline the start is 0, which is what
+ * the percentage already assumes, so a target-only goal is measured from the moment it is created instead of
+ * quietly staying manual.
+ */
+const currentFor = (editing: boolean, f: { current: string; baseline: string; target: string }) =>
+  editing ? f.current : (f.current.trim() || f.baseline.trim() || (num(f.target) != null ? "0" : ""));
 // The month index (0-11) of a "YYYY-MM-DD", and the last calendar day of the month `ahead` months on. Day 0
 // of the following month is the last of this one, and it is stated in UTC so the answer is the date itself.
 // These used to be built from `new Date()`'s LOCAL parts and formatted with a local `ymd`, which made the
@@ -362,6 +375,9 @@ export default function Goals({ me, openId, scope: forcedScope }: {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Goal | null>(null);
   const [form, setForm] = useState(EMPTY);
+  // Whether the measure card is unfolded although the form holds no measure yet - the one piece of the
+  // dialog's state that is not a field. Cleared when the dialog closes, so every fresh goal starts folded.
+  const [measureOpen, setMeasureOpen] = useState(false);
   // The version the edit dialog is writing against. Refreshed from the server when a save loses a race, so the
   // next press can deliberately overwrite what the other person did.
   const [etag, setEtag] = useState<string | undefined>(undefined);
@@ -735,7 +751,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
       unit: form.unit.trim(),
       baseline_value: num(form.baseline) ?? null,
       target_value: num(form.target) ?? null,
-      current_value: num(form.current) ?? null,
+      current_value: num(currentFor(!!editing, form)) ?? null,
     };
     if (editing) {
       try {
@@ -1003,9 +1019,44 @@ export default function Goals({ me, openId, scope: forcedScope }: {
 
   // The measure, read back live: the percentage the server will compute, and the two shapes worth naming (a
   // target that equals the baseline measures nothing; a target below it counts down).
-  const measurePct = measuredPct(num(form.baseline), num(form.target), num(form.current));
+  const measurePct = measuredPct(num(form.baseline), num(form.target), num(currentFor(!!editing, form)));
   const targetEqualsBaseline = num(form.target) != null && num(form.target) === (num(form.baseline) ?? 0);
   const countsDown = num(form.target) != null && num(form.target)! < (num(form.baseline) ?? 0);
+  // THE MEASURE IS OPTIONAL, AND LOOKED COMPULSORY. Five boxes sat open in the middle of the form for every
+  // goal, between what it is called and what it is worth, so "ship the billing revamp" - moved by hand, like
+  // most goals - was asked five questions it has no answers to and had to be scrolled past to reach Save. It
+  // is folded away now, and unfolds itself whenever there IS a measure to show: a template that carries one, a
+  // goal being edited that has one, an accepted suggestion, or the press of the button.
+  const hasMeasureValues = !!(form.target.trim() || form.unit.trim() || form.baseline.trim() || form.current.trim());
+  const showMeasure = measureOpen || hasMeasureValues;
+
+  // WHO THE LEAD CAN BE, once a department owns the goal.
+  //
+  // Its own people first - that is who leads its goals - and everybody else after, carrying the name of the
+  // department they are actually in. SORTED, NOT FILTERED: a Support goal is quite often led from outside
+  // Support, an org part-way through filling in `employees.department` would offer a list with almost nobody
+  // on it, and a picker that cannot name the right person is one people work around by leaving the department
+  // blank - which loses the fact the goal belongs to the team. The order carries the recommendation; the
+  // suffix says when a pick is a crossing.
+  const ownerOptions = useMemo(() => {
+    const pickedDept = form.department === "none" ? null : idOf(form.department);
+    const named = (e: Employee) => `${e.first_name} ${e.last_name}`;
+    const inPicked = (e: Employee) => !!pickedDept && !!e.department && idOf(e.department) === pickedDept;
+    const elsewhere = (e: Employee) => `${named(e)} · ${deptName(e.department) ?? "No department"}`;
+    const others = employees.filter((e) => idOf(e.path) !== me.employee_id);
+    const mine = employees.find((e) => idOf(e.path) === me.employee_id);
+    const meOutside = !!pickedDept && !(mine && inPicked(mine));
+    return [
+      // Myself stays at the top whatever the department: it is the default and the commonest answer. It says
+      // where the reader sits when that is not the department picked, so "Myself" is not a silent crossing.
+      { value: "me", label: meOutside ? `Myself · ${deptName(mine?.department) ?? "No department"}` : "Myself" },
+      ...others.filter(inPicked).map((e) => ({ value: `employees/${idOf(e.path)}`, label: named(e) })),
+      ...others.filter((e) => !inPicked(e)).map((e) => ({
+        value: `employees/${idOf(e.path)}`,
+        label: pickedDept ? elsewhere(e) : named(e),
+      })),
+    ];
+  }, [employees, form.department, me.employee_id, deptName]);
 
   // Duplicate guard: an open goal the same owner already has under this title.
   const dupTitle = useMemo(() => {
@@ -1492,7 +1543,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
 
       <WriteDialog
         open={open}
-        onClose={() => setOpen(false)}
+        onClose={() => { setOpen(false); setMeasureOpen(false); }}
         title={<span className="flex items-center gap-2"><Target className="h-4 w-4 text-primary" /> {editing ? "Edit goal" : "New goal"}</span>}
         description={editing
           ? "Changes show on the owner's Goals page. Weight only counts while the goal is open."
@@ -1503,7 +1554,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
         form={form}
         draftKey={editing ? undefined : "goal:new"}
         applyDraft={(d) => setForm(d)}
-        onStartOver={editing ? undefined : () => { setForm({ ...EMPTY }); setFromTemplate(""); }}
+        onStartOver={editing ? undefined : () => { setForm({ ...EMPTY }); setFromTemplate(""); setMeasureOpen(false); }}
         submitLabel={editing ? "Save changes" : "Create goal"}
         canSubmit={!!form.title.trim() && !weightInvalid && !targetEqualsBaseline && !(form.kind === "key_result" && form.parent === "none")}
         whyNot={[
@@ -1513,7 +1564,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
           targetEqualsBaseline && "The target and the baseline are the same number.",
         ]}
         onSubmit={submit}
-        addAnother={editing ? undefined : () => { setForm({ ...EMPTY, employee: form.employee }); setFromTemplate(""); }}
+        addAnother={editing ? undefined : () => { setForm({ ...EMPTY, employee: form.employee }); setFromTemplate(""); setMeasureOpen(false); }}
         addAnotherLabel="Save & add another"
         submitAccess={(b) => (editing
           ? <AccessAction label="Edit goal" can={editing.access?.can}>{b}</AccessAction>
@@ -1565,46 +1616,146 @@ export default function Goals({ me, openId, scope: forcedScope }: {
             </div>
             <Textarea rows={3} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What does success look like?" />
           </Field>
-          {!editing && (
-            <Field label="For" hint="Who this goal belongs to.">
-              <Combobox
-                value={form.employee}
-                onValueChange={(v) => setForm({ ...form, employee: v })}
-                searchPlaceholder="Search people…"
-                options={[{ value: "me", label: "Myself" }, ...employees.filter((e) => idOf(e.path) !== me.employee_id).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))]}
-              />
-            </Field>
+          {/* WHOSE GOAL IS THIS - one question, answered left to right.
+              It used to be two, a form apart and both of them called something with "team" in it: a full-width
+              "For" up here, and a full-width "Owned by a team (optional)" six fields below, on a page where
+              "team" already means the reader's direct reports. Nothing said the second one did not replace the
+              first, and a department goal still needs the one person who answers for it.
+              So the shape of the goal is asked first, and the second column relabels itself to say what the
+              person picked in it IS - the owner, or the lead the department's goal hangs on. */}
+          {(departments.length > 0 || !editing) && (
+            <FieldRow>
+              {departments.length > 0 && (
+                <Field label="Owned by" hint="A department's goal reads as the whole team's, and still has one lead.">
+                  <Select value={form.department} onValueChange={(v) => setForm({ ...form, department: v })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">One person</SelectItem>
+                      {departments.filter((d) => !d.delete_time).map((d) => (
+                        <SelectItem key={d.path} value={`departments/${idOf(d.path)}`}>{d.display_name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              )}
+              <Field
+                label={form.department === "none" ? "Owner" : "Accountable lead"}
+                hint={form.department === "none"
+                  ? "Whose goal this is. They see it on their own Goals page."
+                  : `The one person answerable for it. ${deptName(form.department) ?? "That team"}'s people come first, but anybody can lead it.`}
+              >
+                {/* The owner is fixed once the goal exists - only the create path sends it - so on an edit the
+                    column states who it is rather than disappearing and leaving "Owned by" to explain a pairing
+                    with nothing beside it. Stated, not disabled: a greyed-out box reads as a control this
+                    reader is locked out of, and nobody can change this one. */}
+                {editing ? (
+                  <p className="flex h-9 items-center text-sm">{empName(editing.employee) || "Somebody else"}</p>
+                ) : (
+                  <Combobox
+                    value={form.employee}
+                    onValueChange={(v) => setForm({ ...form, employee: v })}
+                    searchPlaceholder="Search people…"
+                    options={ownerOptions}
+                  />
+                )}
+              </Field>
+            </FieldRow>
           )}
           {/* The measure. A goal that counts something doesn't need anyone's estimate of how far along it is:
               with a target and a current value the percentage is arithmetic, and the slider stops being an
               opinion poll. Baseline matters for the goals that start above zero - churn 8% to 4% with 6% today
-              is half done, not nearly finished. */}
+              is half done, not nearly finished.
+
+              Folded until it is wanted (`showMeasure`), because most goals do not count anything and the ones
+              that do are better asked two questions than five. */}
+          {!showMeasure ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed p-2.5">
+              <Button type="button" variant="outline" size="sm" onClick={() => setMeasureOpen(true)}>
+                <Ruler className="h-4 w-4" /> Add a measure
+              </Button>
+              {/* Offered in the folded state too, so a saved goal with no measure can be given one without
+                  first opening boxes the model is about to fill in. */}
+              {editing && (
+                <GoalMeasureSuggest
+                  goalId={idOf(editing.path)}
+                  can={editing.access?.can}
+                  onPropose={(p) => setForm((f) => ({
+                    ...f,
+                    unit: p.unit ?? f.unit,
+                    baseline: p.baseline_value != null ? String(p.baseline_value) : f.baseline,
+                    target: p.target_value != null ? String(p.target_value) : f.target,
+                  }))}
+                />
+              )}
+              <p className="text-xs text-muted-foreground">Optional. Without one, progress on this goal is moved by hand.</p>
+            </div>
+          ) : (
           <div className="rounded-lg border p-3">
             <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-medium">Measure (optional)</p>
-              {measurePct != null && (
-                <span className="text-xs font-medium tabular-nums text-primary">{measurePct}% complete</span>
-              )}
+              <p className="text-sm font-medium">Measure</p>
+              <div className="flex items-center gap-3">
+                {measurePct != null && (
+                  <span className="text-xs font-medium tabular-nums text-primary">{measurePct}% complete</span>
+                )}
+                {/* The way back out. Emptying four boxes by hand was the only way to un-measure a goal, and
+                    a half-emptied measure is the state that saves a target with no unit. */}
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+                  onClick={() => { setForm({ ...form, unit: "", baseline: "", target: "", current: "" }); setMeasureOpen(false); }}
+                >
+                  Remove
+                </button>
+              </div>
             </div>
             <p className="mt-0.5 text-xs text-muted-foreground">
               {measurePct != null
                 ? "Progress is computed from these numbers, so the slider is read-only for this goal."
-                : "Give it a target and progress stops being a guess. Leave empty to move progress by hand."}
+                : "Give it a target and progress stops being a guess."}
             </p>
+            {/* TARGET FIRST. The old order asked for the baseline before the target - the number that needs
+                explaining before the one the goal is actually about - and gave "Current" no hint at all, so a
+                new goal was asked where it had got to on the day it was written. It is last now, and optional:
+                left empty on a new goal it takes the baseline (`currentFor`), which is where a goal starts. */}
             <div className="mt-3 grid gap-3 sm:grid-cols-4">
-              <Field label="Baseline" field="baseline_value" hint="Where it started.">
-                <Input type="number" value={form.baseline} onChange={(e) => setForm({ ...form, baseline: e.target.value })} placeholder="0" />
+              <Field label="Target" field="target_value" hint="Where it has to get to." error={targetEqualsBaseline ? "Target and baseline are the same, so there is nothing to measure." : undefined}>
+                <Input type="number" value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })} placeholder="60" autoFocus={measureOpen && !hasMeasureValues} />
               </Field>
-              <Field label="Current" field="current_value">
-                <Input type="number" value={form.current} onChange={(e) => setForm({ ...form, current: e.target.value })} placeholder="0" />
-              </Field>
-              <Field label="Target" field="target_value" error={targetEqualsBaseline ? "Target and baseline are the same, so there is nothing to measure." : undefined}>
-                <Input type="number" value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })} placeholder="60" />
-              </Field>
-              <Field label="Unit" field="unit" hint="customers, %, days">
+              <Field label="Unit" field="unit" hint="What the numbers count.">
                 <Input value={form.unit} maxLength={24} onChange={(e) => setForm({ ...form, unit: e.target.value })} placeholder="customers" />
               </Field>
+              <Field label="Baseline" field="baseline_value" hint="Where it started. 0 for most goals.">
+                <Input type="number" value={form.baseline} onChange={(e) => setForm({ ...form, baseline: e.target.value })} placeholder="0" />
+              </Field>
+              <Field label="Current" field="current_value" hint={editing ? "Where it is today." : "Only if it has already moved."}>
+                <Input type="number" value={form.current} onChange={(e) => setForm({ ...form, current: e.target.value })} placeholder={form.baseline.trim() || "0"} />
+              </Field>
             </div>
+            {/* The unit is a word, and a blank box does not say which kind of word. Same toggle-off behaviour
+                as the due-date chips above. */}
+            <div className="mt-2 flex flex-wrap items-center gap-1">
+              {QUICK_UNITS.map((u) => (
+                <button
+                  key={u}
+                  type="button"
+                  aria-pressed={form.unit === u}
+                  onClick={() => setForm({ ...form, unit: form.unit === u ? "" : u })}
+                  className={cn(
+                    "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
+                    form.unit === u ? "border-primary text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                  )}
+                >
+                  {u}
+                </button>
+              ))}
+            </div>
+            {/* The measure said back as a sentence, because four boxes of digits are not one. */}
+            {num(form.target) != null && !targetEqualsBaseline && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                {countsDown ? "Counting down from " : "From "}{form.baseline.trim() || "0"} to {form.target}{form.unit ? ` ${form.unit}` : ""}
+                {form.current.trim() ? `, at ${form.current} today` : ""}.
+              </p>
+            )}
             {/* The fix for the gap the line above names. Only on a SAVED goal with the measure still empty:
                 the proposal is read off the goal's own title and description, and a goal being created has
                 not got either of them on the server yet. */}
@@ -1626,10 +1777,8 @@ export default function Goals({ me, openId, scope: forcedScope }: {
             {measurePct === 100 && (
               <p className="mt-2 text-xs text-success">Saving this hits the target, which completes the goal.</p>
             )}
-            {countsDown && (
-              <p className="mt-2 text-xs text-muted-foreground">Counting down from {form.baseline} to {form.target}{form.unit ? ` ${form.unit}` : ""}.</p>
-            )}
           </div>
+          )}
           <FieldRow>
             <Field
               label="Weight"
@@ -1705,19 +1854,6 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                     <SelectItem key={c.path} value={`review-cycles/${idOf(c.path)}`}>
                       {c.name}{c.state === "CLOSED" ? " (closed)" : ""}
                     </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-          )}
-          {departments.length > 0 && (
-            <Field label="Owned by a team (optional)" hint="Set when a department owns this goal. The person above stays the accountable lead.">
-              <Select value={form.department} onValueChange={(v) => setForm({ ...form, department: v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">One person owns it</SelectItem>
-                  {departments.filter((d) => !d.delete_time).map((d) => (
-                    <SelectItem key={d.path} value={`departments/${idOf(d.path)}`}>{d.display_name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>

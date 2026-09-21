@@ -21,7 +21,7 @@ import type { AiFeatureKey } from "@/lib/aiFeatures";
 // employee data. Each feature also states what it does WITHOUT AI, because every one of them has a working
 // non-AI path and switching it off is not a loss of function.
 
-type AiConfig = { features?: Partial<Record<AiFeatureKey, boolean>>; dailyNeurons?: number; perUserHourlyGenerations?: number; resume_fields?: string[] };
+type AiConfig = { features?: Partial<Record<AiFeatureKey, boolean>>; dailyNeurons?: number; perUserHourlyGenerations?: number; resume_fields?: string[]; receipt_fields?: string[] };
 
 // Which fields a CV may be read into, and which of those are the model doing more than copying. Mirrors
 // src/domain/resumeFields.ts; the server validates the names on write, so a drift here is a 400 rather than a
@@ -37,6 +37,18 @@ const RESUME_FIELDS: { key: string; label: string; caution?: string }[] = [
   { key: "summary", label: "Summary of experience", caution: "A paraphrase in the model's words, which a recruiter will read as what the CV said." },
 ];
 const DEFAULT_RESUME_FIELDS = ["name", "email", "phone", "skills", "current_employer", "current_title"];
+
+// Mirrors src/domain/receiptFields.ts; the server validates the names on write, so a drift here is a 400
+// rather than a silent mismatch. `caution` marks the ones where the model is doing more than copying a
+// number off the page.
+const RECEIPT_FIELDS: { key: string; label: string; caution?: string }[] = [
+  { key: "amount", label: "Total amount", caution: "A receipt often shows several totals - subtotal, tax, tip, amount paid. The model picks one, and the person accepting it is the check." },
+  { key: "tax_amount", label: "Tax amount" },
+  { key: "incurred_on", label: "Date incurred", caution: "An invoice can carry an issue date, a service date and a due date. Only the person filing knows which one the claim is for." },
+  { key: "vendor_name", label: "Vendor name", caution: "Shown as text to match against the vendor list, never picked for them - a wrong vendor misattributes spend silently." },
+  { key: "invoice_number", label: "Invoice number" },
+];
+const DEFAULT_RECEIPT_FIELDS = ["amount", "tax_amount", "incurred_on", "invoice_number"];
 
 // Copy lives next to the key so adding a feature is one edit, and so no switch can ship without an
 // explanation of what it turns on and what happens when it is off.
@@ -90,6 +102,12 @@ const FEATURES: { key: AiFeatureKey; title: string; on: string; off: string }[] 
     off: "CVs are read by people. Candidate data is never sent to a model at all.",
   },
   {
+    key: "expenses.receiptExtraction",
+    title: "Read a receipt into the expense form",
+    on: "On a draft claim with a PDF invoice attached, the person filing can have it read into the form and accept or discard each field. The model transcribes only: it does not judge whether a claim is reasonable, in policy or a duplicate, and it is not asked to. Nothing is saved until the person accepts it, and the vendor is never picked for them - the name is shown as printed so they choose the catalogue entry themselves. PDFs only: a photographed receipt has no text to read, and images are deliberately not sent to a model, because text can be stripped of statutory ids before it goes and a picture cannot.",
+    off: "Receipts are typed in by hand, as they are today. No expense data is sent to a model.",
+  },
+  {
     key: "tables.describe",
     title: "Describe a table in words",
     on: "In the table builder, someone can say what they want the grid to show and get columns, filters and sorting laid out for them to adjust. The model is shown only the field names that person can already pick from, and can only answer with those - anything it invents is reported back as not found rather than used. No rows are read and nothing is saved.",
@@ -106,6 +124,12 @@ const FEATURES: { key: AiFeatureKey; title: string; on: string; off: string }[] 
     title: "Check public posts for harmful content",
     on: "Announcements, kudos and suggestions are read by a safety model shortly after they are posted, and anything it objects to goes to a queue for a person to look at. Nothing is hidden automatically: a flagged post stays exactly as visible as it was until somebody decides. Whoever holds the moderation permission can then hide it - which is reversible, and tells the author - or dismiss the flag. Anonymous suggestions stay anonymous on the queue.",
     off: "Nothing posted is read by a model, and there is no queue. Posts are moderated by people noticing them, as they are today.",
+  },
+  {
+    key: "moderation.conduct",
+    title: "Also check public posts against our conduct rules",
+    on: "A second reading of the same posts, against this organisation's conduct rules rather than a safety standard: personal abuse, discriminatory remarks, threats, disclosing somebody's pay or medical or disciplinary details, accusations stated as fact, and material plainly out of place at work. The safety check above catches dangerous content and answers \"safe\" to most of that list, which is why this is separate. Same queue, same rule that nothing is hidden automatically. It costs a second model call per post and it is a judgement about tone, so expect it to be wrong in both directions more often than the safety check.",
+    off: "Posts are read for dangerous content only. A post that is merely abusive, discriminatory or indiscreet does not reach the queue.",
   },
   {
     key: "suggestions.similar",
@@ -127,6 +151,7 @@ export function AiSettingsTab() {
   const { toast } = useToast();
   const [features, setFeatures] = useState<Record<string, boolean>>({});
   const [resumeFields, setResumeFields] = useState<string[]>([...DEFAULT_RESUME_FIELDS]);
+  const [receiptFields, setReceiptFields] = useState<string[]>([...DEFAULT_RECEIPT_FIELDS]);
   const [dailyNeurons, setDailyNeurons] = useState(DEFAULTS.dailyNeurons);
   const [perUserHourly, setPerUserHourly] = useState(DEFAULTS.perUserHourlyGenerations);
   const [ready, setReady] = useState(false);
@@ -137,6 +162,7 @@ export function AiSettingsTab() {
       .then((s) => {
         setFeatures({ ...(s.value?.features ?? {}) });
         if (Array.isArray(s.value?.resume_fields)) setResumeFields(s.value.resume_fields);
+        if (Array.isArray(s.value?.receipt_fields)) setReceiptFields(s.value.receipt_fields);
         if (typeof s.value?.dailyNeurons === "number") setDailyNeurons(s.value.dailyNeurons);
         if (typeof s.value?.perUserHourlyGenerations === "number") setPerUserHourly(s.value.perUserHourlyGenerations);
       })
@@ -144,7 +170,7 @@ export function AiSettingsTab() {
       .finally(() => setReady(true));
   }, []);
 
-  const { markSaved } = useUnsaved({ features, resumeFields, dailyNeurons, perUserHourly }, ready, save);
+  const { markSaved } = useUnsaved({ features, resumeFields, receiptFields, dailyNeurons, perUserHourly }, ready, save);
   async function save() {
     setSaving(true);
     try {
@@ -154,6 +180,7 @@ export function AiSettingsTab() {
           // Sent in the canonical order rather than click order, so the stored blob is stable for one chosen
           // set - the server derives a cache key from it.
           resume_fields: RESUME_FIELDS.map((f) => f.key).filter((k) => resumeFields.includes(k)),
+          receipt_fields: RECEIPT_FIELDS.map((f) => f.key).filter((k) => receiptFields.includes(k)),
           // Clamped here as well as on the server. The server's clamp is the one that matters - a number
           // above the free allocation cannot buy any more of it - and this only keeps the field from
           // displaying a figure the app will not honour.
@@ -243,6 +270,43 @@ export function AiSettingsTab() {
               <p className="text-sm text-warning">
                 Nothing is ticked, so extraction will refuse rather than read the whole CV. Tick at least one
                 field, or switch the feature off above.
+              </p>
+            )}
+          </div>
+        )}
+
+        {features["expenses.receiptExtraction"] === true && (
+          <div className="space-y-3 border-t pt-5">
+            <div>
+              <p className="text-sm font-medium">Which fields a receipt may be read into</p>
+              <p className="text-sm text-muted-foreground">
+                Only the fields ticked here are asked for, and anything else the model returns is discarded.
+                The person filing still accepts or discards each value before it is saved to the claim.
+              </p>
+            </div>
+            <div className="space-y-2">
+              {RECEIPT_FIELDS.map((f) => {
+                const on = receiptFields.includes(f.key);
+                return (
+                  <label key={f.key} className="flex cursor-pointer items-start gap-3 rounded-md border p-2.5">
+                    <Checkbox
+                      checked={on}
+                      onCheckedChange={(v) => setReceiptFields((cur) => (v === true ? [...cur, f.key] : cur.filter((k) => k !== f.key)))}
+                      aria-label={f.label}
+                      className="mt-0.5"
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-sm">{f.label}</span>
+                      {f.caution && <span className="block text-sm text-warning">{f.caution}</span>}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            {receiptFields.length === 0 && (
+              <p className="text-sm text-warning">
+                Nothing is ticked, so extraction will refuse rather than read the whole receipt. Tick at
+                least one field, or switch the feature off above.
               </p>
             )}
           </div>

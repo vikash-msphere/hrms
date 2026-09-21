@@ -16,6 +16,7 @@ import { activeDelegatesFor } from "./approvalDelegations";
 import { ENCODABLE } from "../middleware/encodeWireIds";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 import { liveEmployee, isLiveEmployee, LIVE_EMPLOYEE_COLUMNS, type LiveEmployeeColumns } from "./liveEmployee";
+import { holdsCapability, roleHolderEmployeeIds } from "./capabilityHolders";
 
 // Full name of an employee-ish row, or null. Used to denormalize the actor's display name onto a notification.
 const nameOf = (p?: { firstName?: string | null; lastName?: string | null } | null): string | null =>
@@ -38,11 +39,20 @@ async function pushLink(deps: Deps, link?: string | null): Promise<string | unde
 }
 
 // Audience for a broadcast emission. `everyone` = all active employees; `department` = direct members of a dept
-// (by uuid); `employees` = an explicit list of employee uuids; `none` = emit nothing.
+// (by uuid); `employees` = an explicit list of employee uuids; `capability` = whoever currently holds a
+// capability; `none` = emit nothing.
+//
+// WHY `capability` EXISTS. Some messages are addressed to a JOB rather than to people: "a post was flagged"
+// goes to whoever may act on a flag, which is `moderation.read`, which is an ACL decision an org makes and
+// changes. Spelled as a department it is wrong the day moderation moves; spelled as a list of employees it
+// is wrong the day somebody leaves; spelled as an address it stops being about this app's access model at
+// all. Asked of the grants, it is right by construction and it re-reads on every send - the same question
+// `services/suggestions.ts` already asks in code to find its reviewers, now available to a rule.
 export type Audience =
   | { kind: "everyone" }
   | { kind: "department"; department: string }
   | { kind: "employees"; employees: string[] }
+  | { kind: "capability"; capability: string }
   | { kind: "none" };
 
 // In-app notifications. Owned by the RECIPIENT (code-scoped, owner = recipientId), private by default. Rows
@@ -292,6 +302,12 @@ const bareId = (ref: string) => (ref.includes("/") ? ref.slice(ref.lastIndexOf("
 export async function audienceEmployeeIds(deps: Deps, audience: Audience): Promise<string[]> {
   if (audience.kind === "none") return [];
   if (audience.kind === "everyone") return activeEmployeeIds(deps);
+  // Asked of the ACL, every time, so the answer follows the grants rather than a list somebody kept in step
+  // by hand. `roleHolderEmployeeIds` already filters to live employees, like the arms below.
+  if (audience.kind === "capability") {
+    const capability = audience.capability.trim();
+    return capability ? roleHolderEmployeeIds(deps, holdsCapability(capability)) : [];
+  }
   if (audience.kind === "employees") {
     // NAMED PEOPLE ARE STILL FILTERED FOR LIVENESS. This arm used to return the rule's list verbatim - no
     // liveness check and no existence check - while the two arms either side of it bind `LIVE_EMPLOYEE`, so

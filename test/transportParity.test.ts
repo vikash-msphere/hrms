@@ -144,6 +144,42 @@ describe("the two text transports", () => {
     expect(localMsgs[0]!.content).toBe("SYS");
   });
 
+  it("send the guard model no system turn, and the local stand-in its own instructions", async () => {
+    const { binding, calls } = fakeBinding(() => ({ response: "safe" }));
+    const localCalls = fakeOllama(() => ({ message: { content: "safe" } }));
+
+    await makeTextModel(binding).generate({ system: "", user: "USR", role: "moderate" });
+    await makeLocalTextModel(LOCAL_URL, LOCAL_MODELS).generate({ system: "", user: "USR", role: "moderate" });
+
+    // THE BUG THIS PINS took the feature out entirely. `@cf/meta/llama-guard-3-8b` declares
+    // `messages[].role` as "user" | "assistant" - it builds its own prompt and has no instruction slot - so
+    // the system turn this used to send failed the call, the moderation drain saw a failed inference and
+    // stopped, and the flagged-posts queue stayed empty on a wall that was being scanned.
+    const hostedMsgs = calls.at(-1)!.input.messages as { role: string; content: string }[];
+    expect(hostedMsgs.map((m) => m.role)).toEqual(["user"]);
+    expect(hostedMsgs[0]!.content).toBe("USR");
+
+    // The local lane is the legitimate asymmetry: there is no Llama Guard behind it, so the job and the
+    // answer format have to be stated in a prompt. Same port, same caller, different backend.
+    const localMsgs = localCalls.at(-1)!.body.messages as { role: string; content: string }[];
+    expect(localMsgs.map((m) => m.role)).toEqual(["system", "user"]);
+    expect(localMsgs[0]!.content).toContain("safety classifier");
+    expect(localMsgs[0]!.content).toContain("ANSWER FORMAT");
+  });
+
+  it("serialise a post-processed object answer rather than handing back an object typed as a string", async () => {
+    // Workers AI post-processes the guard model's verdict into `{safe, categories}`
+    // (`Ai_Cf_Meta_Llama_Guard_3_8B_Output`). Typed as `string`, that object flowed out of the port untouched
+    // and the parser called `.trim()` on it - a TypeError recorded as a failed inference, which is
+    // indistinguishable from the model being down and is why nothing was ever flagged.
+    const { binding } = fakeBinding(() => ({ response: { safe: false, categories: ["S10"] } }));
+
+    const answer = await makeTextModel(binding).generate({ system: "", user: "u", role: "moderate" });
+
+    expect(typeof answer).toBe("string");
+    expect(JSON.parse(answer)).toEqual({ safe: false, categories: ["S10"] });
+  });
+
   it("both return indices into the candidate list, best first", async () => {
     // `rerank` hands back positions, not strings, and a transport that returns its own ordering without the
     // indices would have the caller score the wrong rows. Production reads them off the response; the local

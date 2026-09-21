@@ -4,12 +4,17 @@ Candidate features for the money surfaces, written against what the AI layer alr
 `ai-rollout-plan.md`, `ai-boards-goals-reviews-plan.md`) rather than against what an AI feature list usually
 looks like.
 
-**Built so far (38 of 46): items 1, 2, 3, 4, 5, 7, 8, 9 (part), 14, 15, 16, 17, 18, 20, 21 (additive half), 22, 23, 24, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35 (part), 36, 37, 38, 39, 40, 41, 42, 43, 44 and 46 (part).** Kept in NUMERIC ORDER and with the count stated, because three sessions append to this line independently and every one of us has since miscounted it by tracking our own increments instead of re-reading the list.
+**Built so far (41 of 46): items 1, 2, 3, 4, 5, 7, 8, 9 (part), 10, 14, 15, 16, 17, 18, 20, 21 (additive half), 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35 (part), 36, 37, 38, 39, 40, 41, 42, 43, 44, 45 and 46 (part).** Kept in NUMERIC ORDER and with the count stated, because three sessions append to this line independently and every one of us has since miscounted it by tracking our own increments instead of re-reading the list.
 
 **What the evidence actually is, item by item, because "the suite is green" is not the same claim.** Behind a
-test AND RUN: 1, 2, 3, 4, 5, 7, 14, 15, 16, 17, 18, 20, 22, 24, 26, 27, 28, 29, 31, 36, 37, 38, 39, 40, 41,
-42, 43 and 46 - 28 of the 38. Typecheck, lint and reasoning only: 8, 9, 21, 23, 30, 32, 33, 34, 44, and the
-part of 35 that shipped.
+test AND RUN: 1, 2, 3, 4, 5, 7, 10, 14, 15, 16, 17, 18, 20, 22, 24, 25, 26, 27, 28, 29, 31, 36, 37, 38, 39,
+40, 41, 42, 43, 45 and 46 - 31 of the 41. Typecheck, lint and reasoning only: 8, 9, 21, 23, 30, 32, 33, 34,
+44, and the part of 35 that shipped.
+
+Items 10 and 45 were built and tested but went uncounted on this line for a while, which is the same drift
+the paragraph above warns about: a session adds the work, writes the item note, and does not re-read the
+header. The count is the thing that gets quoted, so it is the thing to re-derive from the notes rather than
+increment.
 
 Nothing is in a "written but not run" state any more: `payrollVariance.test.ts` (28), `payoutCheck.test.ts`
 (8) and `payrollJournal.test.ts` (11, including a 200-round property check that the journal balances) were
@@ -313,7 +318,7 @@ disagree about in a file neither owns.
   and the rule as written understates by part of one month and never overstates - the safe direction for a
   floor. Whole currency units for the same reason. Full company cost (`ctcMonthly`), not gross, so it means
   the same thing as the number on the offer letter.
-- **25** - PART, and read the coverage note at the end before quoting this item as done.
+- **25** - DONE, including the run pickup that the coverage note below used to except.
   The ENFORCEMENT half is now built too - the LOP carry. `domain/lopAdjust.ts` (pure), a `lop_adjustments`
   table, `services/lopAdjustments.ts`, the run pickup and settle marker in `buildRunItems`, and five hooks:
   leave approved, leave cancelled, regularization approved, and a day-mark created, re-valued or withdrawn.
@@ -321,11 +326,16 @@ disagree about in a file neither owns.
   is priced at the rate that period's own run docked at - so an org that changed `lop_basis` afterwards
   cannot refund at a rate the period never used. Best-effort: it never throws into the write that triggered
   it, because refusing a leave approval to protect a payroll number is the trade this whole item rejected.
-  COVERAGE, stated plainly because "built" and "tested" are different claims. The arithmetic has 12 pure
-  cases and the service has 8 database ones, including the double-pay (a correction paid, then attendance
-  moves again) and the two-period range. What is NOT covered end to end is the run PICKUP: nothing exercises
-  an adjustment becoming a `LOPADJ` line on the next run and being marked settled, so a marker that never
-  fired would pay the same correction on every subsequent run and no test would say so.
+  COVERAGE. The arithmetic has 12 pure cases and the service has 8 database ones, including the double-pay
+  (a correction paid, then attendance moves again) and the two-period range. The run PICKUP now has 6 more in
+  `test/lopAdjustPickup.test.ts`, and that file exists because the gap was specific rather than general: the
+  service's double-pay test settled its first correction with a direct write commented "exactly as a run
+  pickup would", which is an assumption wearing a comment. `settled` is summed from rows where
+  `paid_run_id is not null`, so a build that wrote the payslip line and skipped the marker would refund the
+  same days every month and the whole suite would stay green. The new file asserts `paid_run_id` off the row
+  after a real `buildRunItems`, then runs the second correction against a marker the RUN wrote rather than one
+  the test wrote - plus the negative direction (a recovery, which had no run-level test at all) and the
+  cancelled-before-payment case, where a zero row must GO rather than sit in the queue to be priced at nothing.
 - **25 (first half)** - the DETECTION half, and the split was deliberate.
   What was actually wrong turned out to be narrower than this document assumed, and finding that out changed
   the work. Three of the four "income-affecting writes dated into a closed period" are not silently applied

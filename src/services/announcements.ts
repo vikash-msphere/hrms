@@ -18,6 +18,7 @@ import { notify, notifyAudience, audienceEmployeeIds, type Audience } from "./no
 import { renderEmail, loadEmailBrand, textParagraphs } from "../lib/emailLayout";
 import { fanOutEmail } from "./emailFanOut";
 import { emitEvent } from "./eventBus";
+import { scanSoon } from "./moderation";
 import { DEFAULT_KUDOS_CONFIG, pointsForLevel } from "../domain/kudos";
 import { normalizeIllustration, normalizeIllustrationLayout, normalizeRecipientLayout, type RecipientLayout, type IllustrationLayout } from "../domain/illustration";
 import { richExcerpt, richToPlain } from "../domain/richText";
@@ -247,6 +248,9 @@ export async function createAnnouncement(deps: Deps, actor: AppUser, input: Anno
   // Anyone the body names hears about it directly, on top of whatever broadcast this kind does - being named
   // is addressed at you, which a company-wide "new post" is not. A draft stays silent until it is published.
   if (published) await notifyMentions(deps, actor, { ...announcementMention(row.uuid), body: row.body, title: row.title });
+  // Read it for moderation now rather than waiting for the five-minute sweep to come round to it. Deferred
+  // past the response, and it cannot refuse the post: see `scanSoon`.
+  await scanSoon(deps, "announcements", row.uuid);
   return row;
 }
 
@@ -351,6 +355,9 @@ export async function publishDueAnnouncements(deps: Deps): Promise<number> {
       // A scheduled post's mentions land when it does. The "actor" is the post's own author, not the tick: it
       // is their words that named someone, and naming yourself still notifies nobody.
       await notifyMentions(deps, { employeeId: row.authorEmployeeId } as AppUser, { ...announcementMention(row.uuid), body: row.body, title: row.title });
+      // It is on the wall as of now, so it is due a read as of now - not on whichever later tick the sweep
+      // reaches it. Awaited here rather than deferred: this IS the tick, and it has the time.
+      await scanSoon(deps, "announcements", row.uuid);
     } catch (err) {
       failed++;
       console.error(`[announcements] published ${row.uuid} but could not broadcast it`, err);
@@ -445,6 +452,9 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
   // An edit notifies the people it NEWLY names (the old body is the baseline, so nobody hears about the same
   // mention twice). A draft stays silent - publishing is what tells anyone anything about it.
   if (updated.published) await notifyMentions(deps, actor, { ...announcementMention(id), body: updated.body, previousBody: row.body, title: updated.title });
+  // An edit is new text, so it is a new question for the scan - including the edit that PUBLISHES a draft,
+  // which is the moment the text first reaches a wall. The scan's own hash check makes a no-op edit free.
+  await scanSoon(deps, "announcements", id);
   return updated;
 }
 
@@ -586,7 +596,10 @@ export async function addReply(deps: Deps, actor: AppUser, id: string, body?: st
   if (!text) throw invalidArgument("reply body is required");
   const row = await getAnnouncement(deps, id);
   assertNotLocked(row);
-  await deps.db.insert(schema.announcementReplies).values({ announcementId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
+  const reply = (await deps.db
+    .insert(schema.announcementReplies)
+    .values({ announcementId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text })
+    .returning())[0]!;
   // A reply on the board is read by the whole org, so a snippet in the trail is no wider than the thing it
   // describes - `announcements` is the one collection opted in for that (lib/audit.ts#SNIPPETABLE_NOTES).
   await audit(deps, actor, "announcement.reply", "announcements", id, noteMeta("announcements", text), row);
@@ -595,6 +608,9 @@ export async function addReply(deps: Deps, actor: AppUser, id: string, body?: st
     await notify(deps, { recipient: row.authorEmployeeId, type: "announcement.reply", title: "New reply to your post", body: richExcerpt(text, 120), link: boardPostLink(id), subject: `announcements/${id}`, actorId: actor.employeeId });
   // Someone named in the reply hears about it too - that is how a thread pulls in the person who can answer.
   await notifyMentions(deps, actor, { ...announcementMention(id), body: text, title: row.title });
+  // A reply is the surface most worth reading promptly: it is the one public text written by somebody other
+  // than the post's author, and it is where a thread turns.
+  await scanSoon(deps, "announcement-replies", reply.uuid);
   return row;
 }
 

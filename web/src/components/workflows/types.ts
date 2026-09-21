@@ -23,14 +23,22 @@ export type WaitArm =
 export type Action =
   | { kind: "notify"; recipient: RecipientSpec; title: string; type?: string; body?: string; link?: string; action?: string }
   | { kind: "notifyManager"; noun: string; type?: string }
-  | { kind: "notifyAudience"; audience: { kind: "everyone" } | { kind: "department"; department: string } | { kind: "employees"; employees: string[] }; title: string; type?: string; body?: string; link?: string }
+  | { kind: "notifyAudience"; audience: AudienceSpec; title: string; type?: string; body?: string; link?: string }
   | { kind: "apiCall"; method: string; path: string; body?: unknown; captureAs?: string }
   | { kind: "emitEvent"; type: string; payload?: Record<string, unknown> }
   | { kind: "wait"; delayDays?: number; delayHours?: number; then: Action[] }
   | { kind: "waitFor"; on: WaitArm[] }
   | { kind: "webhook"; url: string; includeFields?: string[] }
   | { kind: "email"; to: RecipientSpec; subject: string; html: string; attachments?: EmailAttachmentSpec[] }
-  | { kind: "emailAudience"; audience: { kind: "everyone" } | { kind: "department"; department: string } | { kind: "employees"; employees: string[] }; subject: string; html: string };
+  | { kind: "emailAudience"; audience: AudienceSpec; subject: string; html: string };
+
+// Mirrors AudienceSpec in src/domain/automations.ts. `capability` addresses a job rather than a list of
+// people: the server resolves it to whoever currently holds that capability, every time the rule runs.
+export type AudienceSpec =
+  | { kind: "everyone" }
+  | { kind: "department"; department: string }
+  | { kind: "employees"; employees: string[] }
+  | { kind: "capability"; capability: string };
 
 // Recurrence for a time-driven rule (trigger_type === SCHEDULE_TRIGGER). Mirrors src/domain/automations.ts.
 export type ScheduleFreq = "daily" | "weekly" | "monthly";

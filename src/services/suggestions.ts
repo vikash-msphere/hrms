@@ -16,7 +16,7 @@ import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { deleteStateFilter, purgeRow, restoreRow, type PurgeCascade } from "./softDelete";
-import { assertMayUnhide, reopenOnUnhide } from "./moderation";
+import { assertMayUnhide, reopenOnUnhide, scanSoon } from "./moderation";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Suggestion box: employee ideas, optionally anonymous, peer-upvoted, HR-responded. NO access control here
@@ -153,6 +153,9 @@ export async function createSuggestion(deps: Deps, actor: AppUser, input: Sugges
     subject: `suggestions/${row.uuid}`,
     actorId: input.anonymous ? undefined : submitterId,
   });
+  // Read for moderation now rather than on whichever tick the sweep reaches it. Anonymity is preserved by
+  // the flag itself (the payload carries it), so an anonymous suggestion is scanned like any other.
+  await scanSoon(deps, "suggestions", row.uuid);
   return row;
 }
 
@@ -170,6 +173,9 @@ export async function updateSuggestion(deps: Deps, actor: AppUser, id: string, p
   // Same rule as the create: the submitter editing their own anonymous suggestion must not be named by the
   // trail either - an edit entry beside the create would give away exactly what the create no longer does.
   await audit(deps, anonymousActor(actor, updated), "suggestion.update", "suggestions", id, diffMeta(row, updated, set, "suggestions"), updated);
+  // New text is a new question for the scan; the hash check makes an edit that changed neither title nor
+  // body (a category change, say) cost nothing.
+  await scanSoon(deps, "suggestions", id);
   return updated;
 }
 

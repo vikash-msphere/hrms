@@ -554,6 +554,11 @@ const hr_admin: Grant = {
     "expenses.*.pay", // record out-of-band vendor payment
     "expenses.*.upload", // attach/replace any expense's invoice
     "expenses.*.download",
+    // Read a DRAFT claim's PDF invoice into suggested fields. Granted to whoever already records the claim,
+    // because it fills a form they are filling anyway - a level grant carries no custom methods, so writing
+    // the row is not enough on its own. Doubly gated beyond this: the org must switch the feature on AND
+    // choose which fields a model may propose, so the grant alone sends nothing anywhere.
+    "expenses.*.extractReceipt",
     "expense-categories.**",
     "vendors.**",
     "expense-budgets.**",
@@ -635,6 +640,7 @@ const payroll_admin: Grant = {
     "expenses.*.pay", // record out-of-band vendor payment
     "expenses.*.upload",
     "expenses.*.download",
+    "expenses.*.extractReceipt", // same reason as hr_admin above: payroll also records vendor invoices
     "vendors.**",
     "expense-budgets.**",
     "compensation.reapplySplit", // re-derive every current row's basic/special under the live ctc config (CTC held fixed)

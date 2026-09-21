@@ -134,7 +134,9 @@ test.describe("with the AI features switched off", () => {
       await expect(form.getByRole("button", { name: "Suggest a measure" })).toHaveCount(0);
 
       // The three fields the suggestion would have filled still take one typed by hand, which is what makes
-      // the absence above a narrowing rather than a removal.
+      // the absence above a narrowing rather than a removal. They are behind the fold on a goal with no
+      // measure, which is also where the suggestion button would have been.
+      await form.getByRole("button", { name: "Add a measure" }).click();
       await form.getByLabel("Baseline").fill("14");
       await form.getByLabel("Target").fill("3");
       await form.getByLabel("Unit").fill("days");

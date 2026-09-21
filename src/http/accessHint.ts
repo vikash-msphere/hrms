@@ -98,7 +98,7 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   interviews: ["update", "delete", "complete", "cancel", "invite"],
   "interview-feedback": ["update", "delete"],
   offers: ["update", "delete", "approve", "extend", "accept", "decline", "rescind", "letter"],
-  expenses: ["update", "delete", "submit", "approve", "reject", "cancel", "pay", "upload", "download"],
+  expenses: ["update", "delete", "submit", "approve", "reject", "cancel", "pay", "upload", "download", "extractReceipt"],
   automations: ["update", "delete", "enable", "disable", "test"],
   "access-rules": ["update", "delete", "preview", "requestAccess", "approve", "reject", "clone", "review", "scopeCounts"],
   // The flagged-post queue. Listed so `decide` is offerable BY NAME in the ACL modal: the capability is
@@ -135,6 +135,7 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "suggestSteps", // the checklist items that comparable delivered work actually carried (cards)
   "draft", // collection-level: write a first draft of some text from the caller's own instruction (announcements, job-requisitions, goals, suggestions)
   "extractResume", // read a CV into suggested form fields for the recruiter to accept one by one (candidates)
+  "extractReceipt", // read a PDF receipt into suggested fields for the submitter to accept one by one (expenses)
   "suggestMeasure", // propose a unit, a starting value and a target for a goal that has none (goals)
   "describe", // collection-level: turn a description of a grid into a spec the builder renders (table-fields)
   "narrate", // write up how measures changed against the previous window (people-analytics collection-level; boards per item)

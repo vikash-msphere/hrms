@@ -46,14 +46,24 @@ export function makeTextModel(binding: Ai, gatewayId?: string): TextModel {
     },
 
     async generate({ system, user, maxTokens, role }) {
-      // `MODELS[role]`, not `MODELS.generate`: the safety classifier is a different model reached through the
-      // same method, and hardcoding one here silently answered every moderation prompt with the instruct
-      // model. `assertModelAllowed` inside `run` still refuses anything off the allowlist.
-      const out = await run<{ response?: string }>(MODELS[role ?? "generate"], {
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
+      // THE SAFETY CLASSIFIER TAKES NO SYSTEM TURN, and sending one broke the feature outright.
+      //
+      // `@cf/meta/llama-guard-3-8b` declares `messages[].role` as `"user" | "assistant"` and nothing else
+      // (`Ai_Cf_Meta_Llama_Guard_3_8B_Input` in @cloudflare/workers-types). Guard builds its own prompt from
+      // the conversation and judges the last turn against its fixed taxonomy; there is no instruction slot to
+      // write into, so a system message is at best dropped and at worst rejects the call. Either way the
+      // moderation drain saw a failed call, broke out of its loop, and the wall was never scanned - which is
+      // exactly how a switched-on feature flagged nothing for a queue nobody could tell was empty.
+      //
+      // The cast at `run` is what let this compile: the binding's per-model input types never reach it.
+      const guard = role === "moderate";
+      const out = await run<{ response?: unknown }>(MODELS[role ?? "generate"], {
+        messages: guard
+          ? [{ role: "user", content: user }]
+          : [
+              { role: "system", content: system },
+              { role: "user", content: user },
+            ],
         max_tokens: maxTokens ?? 512,
         // Low but not zero for PROSE. Drafting reads as a machine at 0, and the constrained-JSON callers
         // validate their output anyway, so determinism buys them nothing a schema does not already give.
@@ -63,9 +73,17 @@ export function makeTextModel(binding: Ai, gatewayId?: string): TextModel {
         // sampled "safe" leaves an objectionable post unflagged, a sampled "unsafe" puts an innocuous one on a
         // moderator's queue - and `aiGenerate` then caches whichever way it fell for seven days, so the coin
         // toss is settled once and kept. This model was added to the method later than the number was chosen.
-        temperature: role === "moderate" ? 0 : 0.3,
+        temperature: guard ? 0 : 0.3,
       });
-      return out?.response ?? "";
+      // `response` IS NOT ALWAYS A STRING. The guard model's post-processed output is
+      // `{ safe?: boolean; categories?: string[] }` (same types file), and the instruct models answer with
+      // text. Typed as `string`, the object flowed out of here untouched and the first thing that touched it
+      // called `.trim()` on it - a TypeError inside the call, recorded as a failed inference, indistinguishable
+      // from the model being down. Serialised here so the port keeps its one return type and the dialect stays
+      // a parsing question for whoever asked; `domain/moderation.ts parseVerdict` reads both.
+      const res = out?.response;
+      if (res == null) return "";
+      return typeof res === "string" ? res : JSON.stringify(res);
     },
 
     async rerank(query, candidates) {

@@ -54,6 +54,7 @@ import { Combobox } from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
+import { ReceiptExtractPanel } from "@/components/common/ReceiptExtractPanel";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -1821,6 +1822,20 @@ export default function Expenses({ me }: { me: Me }) {
               <Field label={invoiceRequired ? "Invoice" : "Invoice (optional)"} hint={invoiceRequired && !file && !editing ? "This category requires an invoice." : undefined}>
                 <FileDrop file={file} onFile={setFile} capture={isPhone} />
               </Field>
+            )}
+            {/* Read the stored invoice into these fields. Renders nothing unless there IS one, the claim is
+                still a draft, and the org has the feature on - the server refuses all three, so offering the
+                button in those states would only produce an error. It reads the SAVED invoice, which is why
+                it appears on an edit rather than while first attaching a file. */}
+            {editing && !form.recurring && (
+              <ReceiptExtractPanel
+                expenseId={idOf(editing.path)}
+                expensePath={editing.path}
+                can={editing.access?.can}
+                hasInvoice={!!editing.has_invoice}
+                isDraft={up(editing.state) === "DRAFT"}
+                onSaved={reload}
+              />
             )}
             {!editing && !form.recurring && (
               <div className="flex items-center gap-2">

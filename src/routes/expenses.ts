@@ -3,6 +3,8 @@ import { positiveMoney, nonNegativeMoney } from "../http/moneyField";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { jsonBody } from "../http/jsonRequest";
+import { extractReceipt, MAX_RECEIPT_CHARS } from "../services/receiptExtract";
+import { invalidArgument } from "../lib/errors";
 import {
   listExpenses, getExpense, createExpense, updateExpense,
   submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense, seriesDriftFor, paymentDueFor, allocationsFor, expenseTriageFor,
@@ -16,6 +18,8 @@ const COL = "expenses";
 const INVOICE = "invoice"; // the attachment slot for an expense's invoice/receipt
 
 const paymentMethod = z.enum(["bank", "card", "cash", "upi", "cheque"]);
+const receiptSchema = z.object({ text: z.string().min(1).max(MAX_RECEIPT_CHARS) }).strict();
+
 const writeSchema = z
   .object({
     employee: z.string().nullable().optional(),
@@ -111,6 +115,21 @@ export const expenses = collectionRoutes<ExpenseInput, typeof schema.expenses>({
       run: (deps, user, id, body: { note?: string | null }) => rejectExpense(deps, user, id, body?.note ?? null),
     },
     cancel: { run: (deps, user, id) => cancelExpense(deps, user, id) },
+    // Fill a DRAFT claim's fields from its receipt. The TEXT is posted by the client because the Worker
+    // cannot read a PDF - the SPA already runs pdfjs for the viewer - which also keeps a PDF parser out of
+    // the Worker and a large parse off its CPU budget. That is why this reads invoices and not photographs;
+    // see services/receiptExtract.ts for why a vision model was refused rather than postponed.
+    //
+    // `raw`, because the answer is a set of SUGGESTED values, not an expense resource. Nothing is written to
+    // the claim here: accepting a field is the ordinary PATCH, with its ordinary audit row.
+    extractReceipt: {
+      raw: async (c, id) => {
+        const parsed = receiptSchema.safeParse(await jsonBody(c));
+        if (!parsed.success) throw invalidArgument("body must be { text }");
+        const out = await extractReceipt(c.get("deps"), c.get("user"), id, parsed.data.text);
+        return c.json({ fields: out.fields, cached: out.cached });
+      },
+    },
     // The payment details are optional and shaped by the service, so the body is taken as sent.
     pay: { run: async (deps, user, id, _body, c) => payExpense(deps, user, id, await jsonBody(c)) },
     // The invoice goes up as raw bytes, but the answer is the expense itself (now carrying its invoice flag).

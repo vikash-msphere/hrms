@@ -143,8 +143,8 @@ export type Action =
   | { kind: "notify"; recipient: RecipientSpec; title: string; type?: string; body?: string; link?: string; action?: string }
   // Notify the event employee's manager (the natural approver), pointing at the Approvals inbox.
   | { kind: "notifyManager"; noun: string; type?: string }
-  // Broadcast to an audience (everyone / a department / an explicit list).
-  | { kind: "notifyAudience"; audience: { kind: "everyone" } | { kind: "department"; department: string } | { kind: "employees"; employees: string[] }; title: string; type?: string; body?: string; link?: string }
+  // Broadcast to an audience (everyone / a department / an explicit list / whoever holds a capability).
+  | { kind: "notifyAudience"; audience: AudienceSpec; title: string; type?: string; body?: string; link?: string }
   // Call any endpoint through the app's own middleware (authz + validation + wire codec), as the system
   // principal. `path`/`body` support {{...}} templating over the context + results bag; `captureAs` stores the
   // response body into the bag for later actions to consume. This is how an action chains off another's output.
@@ -166,7 +166,22 @@ export type Action =
   | { kind: "email"; to: RecipientSpec; subject: string; html: string; attachments?: EmailAttachmentSpec[] }
   // Broadcast email to an audience (everyone / a department / an explicit list) - the email twin of
   // notifyAudience. Each active member with a work email gets one message. `subject`/`html` are templated.
-  | { kind: "emailAudience"; audience: { kind: "everyone" } | { kind: "department"; department: string } | { kind: "employees"; employees: string[] }; subject: string; html: string };
+  | { kind: "emailAudience"; audience: AudienceSpec; subject: string; html: string };
+
+/**
+ * Who a broadcast goes to. Mirrors `Audience` in services/notifications.ts, minus `none` (a rule that
+ * broadcasts to nobody is a rule that should not have been written).
+ *
+ * `capability` is the one that is not a list of people: it asks the ACL who currently holds a capability
+ * and sends to them. That is how a rule addresses a JOB - "whoever may act on a flagged post" is
+ * `moderation.read`, and it stays right when the org moves moderation to a different role, which a
+ * department or a hand-kept list of employees does not.
+ */
+export type AudienceSpec =
+  | { kind: "everyone" }
+  | { kind: "department"; department: string }
+  | { kind: "employees"; employees: string[] }
+  | { kind: "capability"; capability: string };
 
 export type Automation = {
   name: string;
@@ -296,6 +311,15 @@ function checkTerminal(list: Action[], path: string, errors: string[]): void {
   list.forEach((a, i) => { if (a?.kind === "waitFor" && i !== list.length - 1) errors.push(`${path}[${i}]: waitFor must be the last action (put continuation in an arm's then)`); });
 }
 
+/** An audience is only as good as the thing it names: a department with no id, a capability with no
+ *  capability and an empty employee list all resolve to nobody, and a rule that silently reaches nobody is
+ *  the hardest kind to notice is broken. */
+function validateAudience(audience: AudienceSpec, path: string, errors: string[]): void {
+  if (audience.kind === "department" && !audience.department) errors.push(`${path}: a department audience needs a department`);
+  if (audience.kind === "employees" && !audience.employees?.length) errors.push(`${path}: an employees audience needs at least one employee`);
+  if (audience.kind === "capability" && !audience.capability?.trim()) errors.push(`${path}: a capability audience needs a capability, e.g. "moderation.read"`);
+}
+
 function validateAction(a: Action, trigger: string, path: string, errors: string[], depth: number): void {
   if (!a || typeof (a as Action).kind !== "string") { errors.push(`${path}: action needs a kind`); return; }
   if (!(ACTION_KINDS as readonly string[]).includes(a.kind)) { errors.push(`${path}: unknown action kind "${a.kind}"`); return; }
@@ -303,7 +327,11 @@ function validateAction(a: Action, trigger: string, path: string, errors: string
   switch (a.kind) {
     case "notify": if (!a.title) errors.push(`${path}: notify needs a title`); if (!a.recipient?.of) errors.push(`${path}: notify needs a recipient`); break;
     case "notifyManager": if (!a.noun) errors.push(`${path}: notifyManager needs a noun`); break;
-    case "notifyAudience": if (!a.title) errors.push(`${path}: notifyAudience needs a title`); if (!a.audience?.kind) errors.push(`${path}: notifyAudience needs an audience`); break;
+    case "notifyAudience":
+      if (!a.title) errors.push(`${path}: notifyAudience needs a title`);
+      if (!a.audience?.kind) errors.push(`${path}: notifyAudience needs an audience`);
+      else validateAudience(a.audience, `${path}.audience`, errors);
+      break;
     case "apiCall":
       if (!a.method) errors.push(`${path}: apiCall needs a method`);
       if (!a.path) errors.push(`${path}: apiCall needs a path`);
@@ -342,6 +370,7 @@ function validateAction(a: Action, trigger: string, path: string, errors: string
       break;
     case "emailAudience":
       if (!a.audience?.kind) errors.push(`${path}: emailAudience needs an audience`);
+      else validateAudience(a.audience, `${path}.audience`, errors);
       if (!a.subject) errors.push(`${path}: emailAudience needs a subject`);
       if (!a.html) errors.push(`${path}: emailAudience needs a body`);
       break;

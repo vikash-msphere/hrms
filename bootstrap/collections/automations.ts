@@ -335,6 +335,50 @@ export const AUTOMATIONS: AutomationSeed[] = [
     actions: [{ kind: "notify", recipient: { of: "subject" }, title: "Thanks for your suggestion!", body: "HR will review it. You can track its status on the Suggestions page.", link: "suggestions" }],
   },
 
+  // ---- Moderation: act on a flag without waiting for somebody to open the queue - opt-in ----
+  //
+  // TWO RULES, AND THE SPLIT IS THE POINT. Telling the moderators costs nothing if the model was wrong;
+  // taking a post down in public does. So the notification ships ENABLED and the takedown ships DISABLED,
+  // and the takedown is conditioned on `pass == "hazard"` - Llama Guard's fixed taxonomy of dangerous
+  // content - never on a conduct flag, which is a general model reading this org's own rubric and is wrong
+  // in both directions far more often (src/domain/conduct.ts says so in as many words).
+  {
+    name: "Tell the moderators about a flagged post",
+    description:
+      "When a model objects to something on a public wall, notify and email whoever holds `moderation.read` - " +
+      "the people who can actually decide about it - with the reason and a link to the queue. Nothing is hidden: " +
+      "the post stays exactly as visible as it was until a person decides.",
+    trigger: "moderation.flagged",
+    actions: [
+      { kind: "notifyAudience", audience: { kind: "capability", capability: "moderation.read" }, title: "A post was flagged for review", body: '{{hazardLabels}} - "{{title}}". Nothing has been hidden; it is waiting on a decision.', link: "moderation" },
+      {
+        kind: "emailAudience",
+        audience: { kind: "capability", capability: "moderation.read" },
+        subject: "A post was flagged for review",
+        html: '<p>A safety check objected to a post on the {{collection}} wall.</p><p><strong>Reason:</strong> {{hazardLabels}}<br><strong>Post:</strong> {{title}}</p><p>Nothing has been hidden - the post is still visible to everyone who could see it before, and stays that way until somebody decides. Open the Flagged posts tab under Connect to hide it or dismiss the flag.</p>',
+      },
+    ],
+  },
+  {
+    name: "Take down a post the safety model flagged",
+    description:
+      "When the SAFETY model (not the conduct rubric) objects to a public post, hide it immediately and tell the " +
+      "moderators it came down. The hide is reversible, the author is told automatically, and the flag stays on the " +
+      "queue to be dismissed or upheld. DISABLED by default: this takes real posts down on a model's say-so, and a " +
+      "false positive is a visible, public mistake. Turn it on only if an hour of exposure is worse for you than an " +
+      "occasional wrongly-hidden post.",
+    trigger: "moderation.flagged",
+    // `pass`, not the presence of a flag: a conduct flag (W-codes) is a judgement about tone and must not
+    // take a post down automatically. Disagreement reads as abuse often enough that this would eventually
+    // hide somebody for criticising a decision.
+    condition: { field: "pass", op: "eq", value: "hazard" },
+    enabled: false,
+    actions: [
+      { kind: "apiCall", method: "POST", path: "/v1/moderation:decide", body: { host: "{{subject}}", action: "hide" } },
+      { kind: "notifyAudience", audience: { kind: "capability", capability: "moderation.read" }, title: "A flagged post was hidden automatically", body: '{{hazardLabels}} - "{{title}}". It is off the wall and the author has been told. Review it on the queue and restore it if the model was wrong.', link: "moderation" },
+    ],
+  },
+
   // ---- Approval SLAs (durable, conditional, multi-branch) - opt-in ----
   {
     name: "High-value reimbursement SLA",

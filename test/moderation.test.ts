@@ -11,11 +11,12 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import type { TextModel } from "../src/ports";
 import { BUDGET, ESTIMATED_NEURONS, MODELS } from "../src/domain/aiPolicy";
-import { excerptOf, parseVerdict } from "../src/domain/moderation";
+import { excerptOf, hazardLabel, parseVerdict } from "../src/domain/moderation";
+import { CONDUCT_RULES, parseConduct } from "../src/domain/conduct";
 import { drainModeration, listModerationQueue, decideModeration, reopenOnUnhide, assertMayUnhide, QUEUE_PAGE } from "../src/services/moderation";
-import { restoreSuggestion } from "../src/services/suggestions";
-import { setDisabled } from "../src/services/lifecycle";
-import { repliesFor } from "../src/services/announcements";
+import { createSuggestion, restoreSuggestion } from "../src/services/suggestions";
+import { setDisabled, setPublished } from "../src/services/lifecycle";
+import { addReply, createAnnouncement, repliesFor, updateAnnouncement } from "../src/services/announcements";
 
 // Moderation: what the model is allowed to say, and what a person does with it.
 //
@@ -40,22 +41,27 @@ const b = env as unknown as Bindings;
  * every test passed, and in production the strict parser would have rejected every prose reply and flagged
  * nothing. Recording `roles` is what makes the port's own contract testable from here.
  */
-function scriptedModel(answer: (prompt: string) => string): TextModel & { calls: number; roles: string[]; prompts: string[] } {
+function scriptedModel(answer: (prompt: string, role: string) => string): TextModel & { calls: number; roles: string[]; prompts: string[]; systems: string[] } {
   const model = {
     calls: 0,
     roles: [] as string[],
     prompts: [] as string[],
+    systems: [] as string[],
     async embed(texts: string[]) { return texts.map(() => new Float32Array([0.1, 0.2, 0.3])); },
     // The prompt is handed to the script so a test can answer differently per POST rather than per call,
     // which is what lets one drain cover a wall holding both an innocuous post and an objectionable one.
-    async generate(req: { role?: string; user: string }) {
+    // The ROLE is handed over too, because a post can now be read twice - the guard model first, then the
+    // conduct model on what it passed - and a script that could not tell them apart would have to answer both
+    // with one string.
+    async generate(req: { role?: string; user: string; system: string }) {
       model.calls += 1;
       model.roles.push(req.role ?? "generate");
       model.prompts.push(req.user);
-      return answer(req.user);
+      model.systems.push(req.system);
+      return answer(req.user, req.role ?? "generate");
     },
   };
-  return model as unknown as TextModel & { calls: number; roles: string[]; prompts: string[] };
+  return model as unknown as TextModel & { calls: number; roles: string[]; prompts: string[]; systems: string[] };
 }
 
 async function seedReply(announcementId: string, author: AppUser, body: string): Promise<string> {
@@ -87,6 +93,10 @@ beforeEach(async () => {
   // behaviour has its own tests, which clear this.
   await deps.db.insert(schema.settings).values({ key: "ai", value: JSON.stringify({ features: { moderation: true } }) });
   deps.ai = undefined;
+  // Reset with the model: one test installs a `defer` to prove the write path does not wait for the scan, and
+  // left on `deps` it would make every later test's scan a floating promise that writes to D1 after the test
+  // has ended - which surfaces as miniflare's "Isolated storage failed", nowhere near the cause.
+  deps.defer = undefined;
 });
 
 async function seedPerson(first: string): Promise<AppUser> {
@@ -137,11 +147,33 @@ describe("reading the guard model's answer", () => {
     expect(parseVerdict("unsafe\nS10, S10 ,S5")).toEqual({ safe: false, hazards: ["S10", "S5"] });
   });
 
+  it("accepts the object shape Workers AI actually returns", () => {
+    // THE SHAPE THAT SHIPPED BROKEN. The binding post-processes the guard model's two lines into
+    // `{safe, categories}` before returning it (`Ai_Cf_Meta_Llama_Guard_3_8B_Output`), and this parser only
+    // read the text form - so every verdict in production was an object, nothing parsed, and the queue stayed
+    // empty on a wall that was being scanned correctly. `lib/ai.ts` serialises it back to JSON rather than
+    // choosing a dialect, which is why both arrive here.
+    expect(parseVerdict('{"safe":true}')).toEqual({ safe: true });
+    expect(parseVerdict('{"safe":false,"categories":["S10"]}')).toEqual({ safe: false, hazards: ["S10"] });
+    expect(parseVerdict('{"safe":false,"categories":["S5","S10"]}')).toEqual({ safe: false, hazards: ["S10", "S5"] });
+    // Three spellings of a category have been seen from this model family, and a queue that empties itself
+    // over the second one is the same outage again in a smaller font.
+    expect(parseVerdict('{"safe":false,"categories":["S10: Hate"]}')).toEqual({ safe: false, hazards: ["S10"] });
+    expect(parseVerdict('{"safe":false,"categories":["Hate"]}')).toEqual({ safe: false, hazards: ["S10"] });
+    // An object that answers something else entirely is not a verdict.
+    expect(parseVerdict('{"categories":["S10"]}')).toBeNull();
+    expect(parseVerdict("{not json")).toBeNull();
+  });
+
   it("refuses an objection it cannot give a reason for", () => {
     // A flag whose reason column is empty is a queue item nobody can act on, so "unsafe" with no parseable
     // code is discarded rather than shown. "The model said so" is not a reason a person can weigh.
     expect(parseVerdict("unsafe")).toBeNull();
     expect(parseVerdict("unsafe\nnot a code")).toBeNull();
+    // Same rule in the object dialect: `safe:false` is unambiguous, but a flag with no nameable category is
+    // still a queue item a moderator cannot act on.
+    expect(parseVerdict('{"safe":false}')).toBeNull();
+    expect(parseVerdict('{"safe":false,"categories":[]}')).toBeNull();
   });
 
   it("refuses an answer that is not a verdict", () => {
@@ -197,6 +229,22 @@ describe("the scan", () => {
     const [usage] = await deps.db.select().from(schema.aiUsage);
     expect(usage?.model).toBe(MODELS.moderate);
     expect(usage?.estimatedNeurons).toBe(ESTIMATED_NEURONS.moderate);
+  });
+
+  it("sends the guard model no system prompt", async () => {
+    const author = await seedPerson("Ana");
+    await seedAnnouncement(author);
+    const model = scriptedModel(() => "safe");
+    deps.ai = model;
+
+    await drainModeration(deps);
+
+    // `@cf/meta/llama-guard-3-8b` accepts `user` and `assistant` turns and nothing else: it builds its own
+    // instructions around the conversation. The system prompt this call used to carry was an instruction slot
+    // that does not exist, and sending it failed the call - so the drain broke out of its loop on the first
+    // post and the wall was never read. Asserted at the port because that is where the caller's intent is
+    // visible; `test/transportParity.test.ts` asserts the messages array that intent turns into.
+    expect(model.systems).toEqual([""]);
   });
 
   it("writes nothing when the org has not switched it on", async () => {
@@ -263,6 +311,34 @@ describe("the scan", () => {
     expect(model.calls).toBe(0);
   });
 
+  it("spends the tick on the NEWEST unread posts, not the oldest", async () => {
+    const author = await seedPerson("Ana");
+    // Eleven posts, oldest first, against a window of eight.
+    const day = 86_400_000;
+    for (let i = 0; i < BUDGET.moderationsPerDrain + 3; i += 1) {
+      await seedAnnouncement(author, { title: `Post ${i}`, createdAt: new Date(Date.now() - (20 - i) * day) });
+    }
+    deps.ai = scriptedModel(() => "safe");
+
+    await drainModeration(deps);
+
+    const scanned = await deps.db
+      .select({ title: schema.announcements.title })
+      .from(schema.moderationScans)
+      .innerJoin(schema.announcements, eq(schema.announcements.uuid, schema.moderationScans.recordId));
+    const titles = scanned.map((r) => r.title).sort();
+
+    // THE BUG THIS PINS. Every never-scanned row has a NULL `scanned_at`, so they all tied on the old
+    // ordering, SQLite returned them in rowid order and `limit` took the oldest inserted. A post made a
+    // minute ago queued behind the entire history of the wall - five ticks on a seeded dev database - which
+    // is indistinguishable from the feature not working, and was the first thing anybody testing it hit.
+    expect(titles).not.toContain("Post 0");
+    expect(titles).not.toContain("Post 1");
+    expect(titles).not.toContain("Post 2");
+    expect(titles).toContain("Post 10");
+    expect(titles).toHaveLength(BUDGET.moderationsPerDrain);
+  });
+
   it("stops at the per-tick budget", async () => {
     const author = await seedPerson("Ana");
     for (let i = 0; i < BUDGET.moderationsPerDrain + 3; i += 1) {
@@ -287,6 +363,266 @@ describe("the scan", () => {
     // the front of every window and starve the rest of the wall.
     const scan = await deps.db.select().from(schema.moderationScans).where(eq(schema.moderationScans.recordId, id)).get();
     expect(scan?.flagged).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+/** The org's AI switches, replaced wholesale. `moderation` on and nothing else is what `beforeEach` sets. */
+const setFeatures = (features: Record<string, boolean>) =>
+  deps.db.update(schema.settings).set({ value: JSON.stringify({ features }) }).where(eq(schema.settings.key, "ai"));
+
+/** A model that answers the guard pass and the conduct pass separately, by role. */
+const twoPassModel = (guard: string, conduct: string) =>
+  scriptedModel((_prompt, role) => (role === "moderate" ? guard : conduct));
+
+describe("the conduct pass", () => {
+  // WHAT THIS PASS IS FOR, because the tests below only make sense against it: Llama Guard judges DANGEROUS
+  // content - violent crime, weapons, self-harm, hate against a protected attribute. An employee sneering at
+  // a named colleague, or pasting somebody's salary onto the noticeboard, is "safe" by that taxonomy and
+  // correctly so. It is not safe by the rules of a workplace, and a queue that never showed it was a queue
+  // that looked broken to everybody who tried the feature on a real post.
+
+  it("is not run unless the org switches it on", async () => {
+    const author = await seedPerson("Ana");
+    const id = await seedAnnouncement(author);
+    const model = twoPassModel("safe", '{"codes":["W1"]}');
+    deps.ai = model;
+
+    await drainModeration(deps);
+
+    // One call, to the classifier, and no flag: the conduct rubric is a second decision about employee text
+    // reaching a model, so it is a second switch and it defaults off like every other one.
+    expect(model.roles).toEqual(["moderate"]);
+    expect(await flagFor("announcements", id)).toBeUndefined();
+  });
+
+  it("flags what the safety taxonomy has no category for, and leaves the post up", async () => {
+    await setFeatures({ moderation: true, "moderation.conduct": true });
+    const author = await seedPerson("Ana");
+    const id = await seedAnnouncement(author, { title: "About Bob", body: "Bob is a useless idiot and everyone knows it." });
+    const model = twoPassModel("safe", '{"codes":["W1"]}');
+    deps.ai = model;
+
+    const out = await drainModeration(deps);
+    expect(out.flagged).toBe(1);
+    // The guard model first, then the general model on what it passed.
+    expect(model.roles).toEqual(["moderate", "generate"]);
+
+    const flag = await flagFor("announcements", id);
+    expect(JSON.parse(flag!.payloadJson).hazards).toEqual(["W1"]);
+    // Which model objected, not the scan identity: this column answers "who said so" about THIS flag.
+    expect(flag?.model).toBe(MODELS.generate);
+
+    // Same rule as the hazard pass, and it is the rule the whole feature rests on.
+    const post = await deps.db.select().from(schema.announcements).where(eq(schema.announcements.uuid, id)).get();
+    expect(post?.disabled).toBe(false);
+  });
+
+  it("does not pay for a second opinion about a post already on the queue", async () => {
+    await setFeatures({ moderation: true, "moderation.conduct": true });
+    const author = await seedPerson("Ana");
+    await seedAnnouncement(author);
+    const model = twoPassModel("unsafe\nS10", '{"codes":["W1"]}');
+    deps.ai = model;
+
+    await drainModeration(deps);
+    // The moderator is going to read the post either way; a second reason to queue it costs a generation call
+    // and changes nothing they do.
+    expect(model.roles).toEqual(["moderate"]);
+  });
+
+  it("asks anyway when the guard model answered with something that was not a verdict", async () => {
+    await setFeatures({ moderation: true, "moderation.conduct": true });
+    const author = await seedPerson("Ana");
+    const id = await seedAnnouncement(author);
+    const model = twoPassModel("I'm sorry, I can't help with that.", '{"codes":["W4"]}');
+    deps.ai = model;
+
+    await drainModeration(deps);
+    // "Unparseable" is the ABSENCE of an opinion, not a clean bill, so it must not stand in for one.
+    expect(model.roles).toEqual(["moderate", "generate"]);
+    expect(JSON.parse((await flagFor("announcements", id))!.payloadJson).hazards).toEqual(["W4"]);
+  });
+
+  it("reads the whole wall again when the pass is switched on", async () => {
+    const author = await seedPerson("Ana");
+    const id = await seedAnnouncement(author, { body: "Bob is a useless idiot." });
+    const model = twoPassModel("safe", '{"codes":["W1"]}');
+    deps.ai = model;
+
+    await drainModeration(deps);
+    expect(model.calls).toBe(1);
+    // Unchanged text, same switches: nothing to do.
+    await drainModeration(deps);
+    expect(model.calls).toBe(1);
+
+    await setFeatures({ moderation: true, "moderation.conduct": true });
+    await drainModeration(deps);
+
+    // A post read by the guard model alone has NOT been read against the conduct rules, so turning the pass on
+    // has to bring it back round. The scan row names both passes for exactly this reason: stamping the guard
+    // model alone made every post already on the wall permanently exempt from a rubric it had never seen.
+    expect(JSON.parse((await flagFor("announcements", id))!.payloadJson).hazards).toEqual(["W1"]);
+    const scan = await deps.db.select().from(schema.moderationScans).where(eq(schema.moderationScans.recordId, id)).get();
+    expect(scan?.model).toBe(`${MODELS.moderate}+${MODELS.generate}`);
+    // Only the conduct call reached the model: the guard prompt is identical to the one this post was already
+    // scanned with, so `aiGenerate` answered it from the cache. The re-read costs one call, not two.
+    expect(model.roles.slice(1)).toEqual(["generate"]);
+  });
+
+  it("retires its own flag when the post is rewritten", async () => {
+    await setFeatures({ moderation: true, "moderation.conduct": true });
+    const author = await seedPerson("Ana");
+    const id = await seedAnnouncement(author, { body: "Bob is a useless idiot." });
+    deps.ai = twoPassModel("safe", '{"codes":["W1"]}');
+    await drainModeration(deps);
+    expect((await flagFor("announcements", id))?.state).toBe("pending");
+
+    await deps.db.update(schema.announcements).set({ body: "Thanks to Bob for covering the release." }).where(eq(schema.announcements.uuid, id));
+    deps.ai = twoPassModel("safe", '{"codes":[]}');
+    await drainModeration(deps);
+
+    // The empty list is an answer, and an answer may retire a flag: left standing it would be a queue item
+    // about text that no longer exists.
+    expect((await flagFor("announcements", id))?.state).toBe("superseded");
+  });
+
+  it("leaves a standing flag alone when neither pass answered", async () => {
+    await setFeatures({ moderation: true, "moderation.conduct": true });
+    const author = await seedPerson("Ana");
+    const id = await seedAnnouncement(author, { body: "Bob is a useless idiot." });
+    deps.ai = twoPassModel("safe", '{"codes":["W1"]}');
+    await drainModeration(deps);
+    expect((await flagFor("announcements", id))?.state).toBe("pending");
+
+    await deps.db.update(schema.announcements).set({ body: "Bob is a useless idiot, still." }).where(eq(schema.announcements.uuid, id));
+    deps.ai = twoPassModel("I'm sorry, I can't help with that.", "Sure! Here is my analysis of the post:");
+    await drainModeration(deps);
+
+    // Prose from both models is no information at all. Clearing the queue on the strength of a broken model
+    // is the one failure mode that loses a post nobody ever sees again.
+    expect((await flagFor("announcements", id))?.state).toBe("pending");
+  });
+});
+
+describe("a post is read when it is written, not when the sweep reaches it", () => {
+  // WHY THIS EXISTS BESIDE THE DRAIN. The cron pass is bounded and periodic, so on any wall with history a
+  // new post waited minutes to hours for its turn - and a flag is worth most while the post is still what
+  // people are reading. These tests pin the two halves that make the immediate path safe: it flags, and it
+  // cannot fail or delay the write that triggered it.
+
+  it("flags a new announcement without waiting for a tick", async () => {
+    const author = await seedPerson("Ana");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+
+    // No `drainModeration` anywhere in this test.
+    const flag = await flagFor("announcements", row.uuid);
+    expect(flag?.state).toBe("pending");
+    expect(JSON.parse(flag!.payloadJson).hazards).toEqual(["S10"]);
+  });
+
+  it("flags a reply, and a new suggestion, the same way", async () => {
+    const author = await seedPerson("Ana");
+    const commenter = await seedPerson("Ben");
+    const post = await seedAnnouncement(author);
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+
+    await addReply(deps, commenter, post, "Something hateful.");
+    const reply = await deps.db.select().from(schema.announcementReplies).get();
+    expect((await flagFor("announcement-replies", reply!.uuid))?.state).toBe("pending");
+
+    const suggestion = await createSuggestion(deps, commenter, { title: "Idea", body: "Something hateful." });
+    expect((await flagFor("suggestions", suggestion.uuid))?.state).toBe("pending");
+  });
+
+  it("does not make the writer wait for the model", async () => {
+    const author = await seedPerson("Ana");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    // What `ctx.waitUntil` is on a real request: work the platform finishes after the response is sent.
+    const background: Promise<unknown>[] = [];
+    deps.defer = (work) => { background.push(work); };
+
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+
+    // The post is committed and the call has returned while the model has not been asked yet. This is the
+    // property that makes scanning on write safe to do at all: a model that is down, slow or out of budget
+    // cannot refuse, delay or lose a post - it just leaves the row for the cron pass.
+    expect(await flagFor("announcements", row.uuid)).toBeUndefined();
+    expect(background).toHaveLength(1);
+
+    await Promise.all(background);
+    expect((await flagFor("announcements", row.uuid))?.state).toBe("pending");
+  });
+
+  it("does not read a draft, and reads it the moment it is published", async () => {
+    const author = await seedPerson("Ana");
+    const model = scriptedModel(() => "unsafe\nS10");
+    deps.ai = model;
+
+    const draft = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful.", published: false });
+    // A draft is on nobody's wall. Scanning it would spend a call on text no reader can reach and queue a
+    // decision about a post that is already invisible.
+    expect(model.calls).toBe(0);
+    expect(await flagFor("announcements", draft.uuid)).toBeUndefined();
+
+    // `updateAnnouncement` deliberately ignores `published` - going live is the `:publish` verb, one gate and
+    // one broadcast - so the scan hangs off the verb, not off the edit.
+    await setPublished(deps, author, schema.announcements, "announcement", "announcements", draft.uuid, true, true);
+    expect((await flagFor("announcements", draft.uuid))?.state).toBe("pending");
+  });
+
+  it("survives a model that is down, and leaves the post for the sweep", async () => {
+    const author = await seedPerson("Ana");
+    deps.ai = {
+      embed: async () => [],
+      rerank: async () => [],
+      generate: async () => { throw new Error("model is down"); },
+    } as unknown as TextModel;
+
+    // The write must not fail, and must not be rolled back.
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+    expect(row.uuid).toBeTruthy();
+    expect(await flagFor("announcements", row.uuid)).toBeUndefined();
+    // Nothing was stamped either, so the post is still due and the next tick picks it up - the backstop the
+    // cron pass exists to be.
+    expect(await deps.db.select().from(schema.moderationScans).get()).toBeUndefined();
+
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    await drainModeration(deps);
+    expect((await flagFor("announcements", row.uuid))?.state).toBe("pending");
+  });
+});
+
+describe("reading the conduct model's answer", () => {
+  it("takes the codes it was given and nothing else", () => {
+    expect(parseConduct('{"codes":[]}')).toEqual({ codes: [] });
+    expect(parseConduct('{"codes":["W1"]}')).toEqual({ codes: ["W1"] });
+    expect(parseConduct('{"codes":["W4","W1","W1"]}')).toEqual({ codes: ["W1", "W4"] });
+    expect(parseConduct('{"codes":["w1"]}')).toEqual({ codes: ["W1"] });
+    // A model asked for JSON wraps it in a sentence or a code fence often enough that refusing to look for it
+    // would throw away real answers.
+    expect(parseConduct('Here you go:\n```json\n{"codes":["W2"]}\n```')).toEqual({ codes: ["W2"] });
+    // An invented code is dropped; the known ones in the same answer are not. A model that returns
+    // ["W1","harassment"] has still identified W1.
+    expect(parseConduct('{"codes":["W1","harassment"]}')).toEqual({ codes: ["W1"] });
+    expect(parseConduct('{"codes":["S10"]}')).toEqual({ codes: [] });
+  });
+
+  it("refuses an answer that is not one", () => {
+    expect(parseConduct("I'm sorry, I can't help with that.")).toBeNull();
+    expect(parseConduct("")).toBeNull();
+    expect(parseConduct("{not json")).toBeNull();
+    expect(parseConduct('{"verdict":"bad"}')).toBeNull();
+  });
+
+  it("gives every code a label the queue can show", () => {
+    // The queue renders one `hazards` array per flag and both passes write into it, so a conduct code that
+    // resolved to nothing would reach a moderator as a bare "W4".
+    for (const rule of CONDUCT_RULES) expect(hazardLabel(rule.code)).toBe(rule.label);
+    expect(hazardLabel("S10")).toBe("Hate");
   });
 });
 

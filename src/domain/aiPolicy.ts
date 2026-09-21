@@ -373,6 +373,12 @@ export const BUDGET = {
    * something. Eight per five-minute tick is about two thousand posts a day, far more than any real wall
    * produces, while a runaway - a bulk import of every historic announcement - costs a bounded slice of the
    * allocation per tick instead of the whole day before anyone notices.
+   *
+   * WITH `moderation.conduct` ON A POST CAN COST TWO CALLS, not one: the guard model first, then the conduct
+   * model on whatever the guard model passed as safe - which is nearly everything, so assume the worst case.
+   * The number is NOT halved to compensate. It is a ceiling on posts, and halving it would make the wall drain
+   * at half speed for every org that turns conduct on; the daily neuron budget already stops the day being
+   * spent, and it stops it whichever pass is doing the spending.
    */
   moderationsPerDrain: 8,
 } as const;
@@ -396,7 +402,7 @@ export type AiConfig = {
 };
 
 /** The switchable features. A new one is added here, which is also what puts it in the settings panel. */
-export const AI_FEATURES = ["search.semantic", "tickets.triage", "cards.triage", "goals.similar", "goals.measure", "boards.narrate", "drafting", "ats.extraction", "tables.describe", "analytics.narrate", "budgets.narrate", "moderation", "suggestions.similar", "attention.summary"] as const;
+export const AI_FEATURES = ["search.semantic", "tickets.triage", "cards.triage", "goals.similar", "goals.measure", "boards.narrate", "drafting", "ats.extraction", "expenses.receiptExtraction", "tables.describe", "analytics.narrate", "budgets.narrate", "moderation", "moderation.conduct", "suggestions.similar", "attention.summary"] as const;
 export type AiFeature = (typeof AI_FEATURES)[number];
 
 export const AI_CONFIG_DEFAULT: AiConfig = {
@@ -409,11 +415,15 @@ export const AI_CONFIG_DEFAULT: AiConfig = {
     "boards.narrate": false,
     drafting: false,
     "ats.extraction": false,
+    // Reads a PDF receipt into expense fields the submitter accepts one by one. Off like every other
+    // feature: nothing reaches a model until an org turns it on AND picks the fields (domain/receiptFields).
+    "expenses.receiptExtraction": false,
     "tables.describe": false,
     "analytics.narrate": false,
     "budgets.narrate": false,
     "suggestions.similar": false,
     moderation: false,
+    "moderation.conduct": false,
     "attention.summary": false,
   },
   dailyNeurons: 7000,

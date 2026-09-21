@@ -12,6 +12,7 @@ import { makeLocalVectorIndex } from "../src/lib/vectorLocal";
 import { drainSearchEmbeddings } from "../src/services/searchEmbed";
 import { vectorIdOf } from "../src/lib/vector";
 import { parseVerdict } from "../src/domain/moderation";
+import { parseConduct } from "../src/domain/conduct";
 
 // The AI layer against a model that actually answers, instead of a fake.
 //
@@ -114,7 +115,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
   deps.ai = makeLocalTextModel(BASE, { chat: CHAT, embed: EMBED });
   deps.vectors = makeLocalVectorIndex(deps.db);
-  await deps.db.insert(schema.settings).values({ key: "ai", value: JSON.stringify({ features: { "search.semantic": true, moderation: true } }) }).onConflictDoNothing();
+  await deps.db.insert(schema.settings).values({ key: "ai", value: JSON.stringify({ features: { "search.semantic": true, moderation: true, "moderation.conduct": true } }) }).onConflictDoNothing();
 });
 
 beforeEach(async () => {
@@ -230,6 +231,22 @@ describe.skipIf(!LIVE)("generations come back in a shape the parsers accept", ()
       maxTokens: 64,
     });
     expect(parseVerdict(raw)).not.toBeNull();
+  }, SLOW);
+
+  it("answers the conduct rubric in JSON rather than in prose", async () => {
+    // ON THE FORMAT, NOT THE JUDGEMENT, for the same reason as the case above - with one difference worth
+    // stating: the conduct pass DOES run on a general instruct model in production, so unlike Llama Guard
+    // this local model is at least the same class of thing. It is still not the same model, so what is
+    // asserted is the property the drain depends on: an answer `parseConduct` can read. A model that writes
+    // "Sure! Here is my analysis" leaves every post unflagged and the queue looks healthy and empty.
+    const { CONDUCT_SYSTEM } = await import("../src/services/moderation");
+    for (const post of [
+      "The canteen is serving biryani on Friday, come early.",
+      "Bob in accounts is a useless idiot and everyone knows it.",
+    ]) {
+      const raw = await deps.ai!.generate({ system: CONDUCT_SYSTEM, user: post, maxTokens: 48 });
+      expect(parseConduct(raw), `no parseable answer for: ${post}`).not.toBeNull();
+    }
   }, SLOW);
 
   it("answers a constrained-JSON prompt with something the coercer can read", async () => {

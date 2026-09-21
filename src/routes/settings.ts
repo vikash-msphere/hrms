@@ -13,6 +13,7 @@ import { validateStateMachine, type StateMachine } from "../domain/stateMachines
 import { validateRestrictions } from "../domain/leaveRestrictions";
 import { AI_FEATURES } from "../domain/aiPolicy";
 import { EXTRACTABLE_FIELDS } from "../domain/resumeFields";
+import { RECEIPT_FIELDS } from "../domain/receiptFields";
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
 import { validateAtsConfig, orphanedStages, type AtsStage } from "../domain/ats";
 import { stagesInUse } from "../services/ats";
@@ -634,6 +635,16 @@ function validateAi(value: unknown) {
     for (const f of value.resume_fields) {
       if (typeof f !== "string" || !(EXTRACTABLE_FIELDS as readonly string[]).includes(f)) {
         throw invalidArgument(`ai.resume_fields contains "${String(f)}", which is not an extractable field (${EXTRACTABLE_FIELDS.join(", ")})`);
+      }
+    }
+  }
+  // WHICH receipt fields a model may propose, validated by name for the same reason: an unknown field is
+  // dropped silently at read time, so the screen would show it saved while extraction never asked for it.
+  if (value.receipt_fields !== undefined) {
+    if (!Array.isArray(value.receipt_fields)) throw invalidArgument("ai.receipt_fields must be an array");
+    for (const f of value.receipt_fields) {
+      if (typeof f !== "string" || !(RECEIPT_FIELDS as readonly string[]).includes(f)) {
+        throw invalidArgument(`ai.receipt_fields contains "${String(f)}", which is not an extractable receipt field (${RECEIPT_FIELDS.join(", ")})`);
       }
     }
   }

@@ -39,6 +39,7 @@ function audienceLabel(a: { kind?: string } | undefined): string {
     case "everyone": return "Announce to everyone";
     case "department": return "Notify a department";
     case "employees": return "Notify selected people";
+    case "capability": return "Notify whoever holds an access right";
     default: return "Broadcast a notice";
   }
 }

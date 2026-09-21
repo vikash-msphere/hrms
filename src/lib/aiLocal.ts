@@ -177,12 +177,19 @@ export function makeLocalTextModel(baseUrl: string, models: LocalModels): TextMo
 function systemFor(system: string, role?: GenerativeRole): string {
   if (role !== "moderate") return system;
   return [
+    // THE CALLER SENDS NOTHING FOR THIS ROLE, and that is correct rather than an omission to paper over:
+    // Llama Guard takes no system turn at all, so `lib/ai.ts` drops it and `services/moderation.ts` passes an
+    // empty string. Production's instructions are the model's own fine-tuning. The local lane has no such
+    // model, so the whole prompt - the job as well as the format - is stated here, and the `filter(Boolean)`
+    // keeps a caller that does send something (a future role, a test) from losing it.
     system,
+    "You are a content safety classifier for an internal workplace noticeboard.",
+    "Decide whether the post inside the untrusted-content block violates any hazard category.",
     "",
     "ANSWER FORMAT, which is not optional:",
     "Reply with the single word `safe`, or with `unsafe` on its own line followed by one line of",
     "comma-separated hazard codes (S1 to S13). No explanation, no apology, no other text.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 /** Cosine similarity. Zero for a zero-length vector rather than NaN, so one degenerate embedding cannot make

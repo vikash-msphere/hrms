@@ -207,6 +207,33 @@ export const EVENT_TYPES: EventTypeDef[] = [
   // Engagement & comms
   { type: "announcement.published", label: "Announcement published", module: "Engagement", subjectCollection: "announcements", fields: [{ name: "title", type: "string" }] },
   { type: "suggestion.submitted", label: "Suggestion submitted", module: "Engagement", subjectCollection: "suggestions", fields: [{ name: "anonymous", type: "boolean" }] },
+  // A model objected to a public post. The queue is the normal answer to this; the event is what lets an org
+  // say "and do something about it without waiting for a person" - take it down, mail the moderators, open a
+  // ticket. `subject` is the post itself (`announcements/<id>`, `suggestions/<id>`,
+  // `announcement-replies/<id>`), so an `apiCall` action can address it directly.
+  //
+  // `pass` IS THE FIELD A DESTRUCTIVE RULE MUST CONDITION ON. "hazard" is Llama Guard on its fixed taxonomy
+  // of dangerous content; "conduct" is a general model reading this org's own rubric (domain/conduct.ts) and
+  // is wrong more often in both directions. A rule that takes posts down on either is a rule that will take
+  // down a post somebody merely disagreed with.
+  //
+  // NO EXCERPT, deliberately: `event_log` rows are readable wherever the activity feed is, and the post's
+  // text is already on the queue for whoever may act on it. The title is carried because the same field is
+  // already on `announcement.published`, and because an email saying only "a post was flagged" makes the
+  // recipient hunt for which one.
+  {
+    type: "moderation.flagged",
+    label: "Post flagged by moderation",
+    module: "Engagement",
+    fields: [
+      { name: "collection", type: "string", label: "Wall" },
+      { name: "pass", type: "string", label: "Which pass objected (hazard/conduct)" },
+      { name: "hazards", type: "string", label: "Codes (comma-separated)" },
+      { name: "hazardLabels", type: "string", label: "Reasons" },
+      { name: "title", type: "string", label: "Post title" },
+      { name: "anonymous", type: "boolean", label: "Anonymous post" },
+    ],
+  },
   { type: "document.published", label: "Document published", module: "Compliance", subjectCollection: "org-documents", fields: [{ name: "requiresAck", type: "boolean" }] },
   // Emitted by the daily chase-up once a policy has gone unsigned for two weeks, so escalation (manager ping,
   // a ticket, an email) is a rule someone writes rather than code someone adds.

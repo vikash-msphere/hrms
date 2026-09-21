@@ -10,7 +10,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { idOf } from "@/lib/utils";
 import type { Department } from "@/types";
 import { TemplatedInput } from "./TemplatedInput";
-import type { Action, WaitArm, WorkflowMeta, Variable } from "./types";
+import type { Action, AudienceSpec, WaitArm, WorkflowMeta, Variable } from "./types";
 import { variablesFor } from "./useWorkflowMeta";
 import { bodyToRows, isFieldMap, rowsToBody, type BodyRow } from "./bodyValue";
 
@@ -46,6 +46,48 @@ function DepartmentPicker({ value, onChange }: { value: string; onChange: (ref: 
         {rows.map((d) => <SelectItem key={d.path} value={`departments/${idOf(d.path)}`}>{d.display_name}</SelectItem>)}
       </SelectContent>
     </Select>
+  );
+}
+
+/**
+ * Who a broadcast goes to, for both the in-app and the email action - one editor, because two copies of a
+ * four-armed union are two places to forget an arm.
+ *
+ * The `capability` arm addresses a JOB rather than people: the server asks the ACL who holds it at send
+ * time. That is what makes "tell whoever moderates" survive the org moving moderation to another role, and
+ * it is why the hint names a real capability rather than leaving the field to guesswork.
+ */
+function AudiencePicker({ value, onChange }: { value: AudienceSpec; onChange: (a: AudienceSpec) => void }) {
+  return (
+    <>
+      <Select
+        value={value.kind}
+        onValueChange={(k) => onChange(
+          k === "department" ? { kind: "department", department: "" }
+          : k === "employees" ? { kind: "employees", employees: [] }
+          : k === "capability" ? { kind: "capability", capability: "" }
+          : { kind: "everyone" },
+        )}
+      >
+        <SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="everyone">Everyone</SelectItem>
+          <SelectItem value="department">A department</SelectItem>
+          <SelectItem value="employees">Specific employees</SelectItem>
+          <SelectItem value="capability">Whoever holds an access right</SelectItem>
+        </SelectContent>
+      </Select>
+      {value.kind === "department" && <DepartmentPicker value={value.department} onChange={(department) => onChange({ kind: "department", department })} />}
+      {value.kind === "capability" && (
+        <Input
+          className="h-9 flex-1"
+          aria-label="Access right"
+          placeholder="e.g. moderation.read"
+          value={value.capability}
+          onChange={(e) => onChange({ kind: "capability", capability: e.target.value })}
+        />
+      )}
+    </>
   );
 }
 
@@ -144,11 +186,7 @@ function ActionEditor({ action, onChange, meta, triggerType, vars }: { action: A
         <div className="space-y-2">
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">Audience</span>
-            <Select value={a.audience.kind} onValueChange={(k) => onChange({ ...a, audience: k === "department" ? { kind: "department", department: "" } : k === "employees" ? { kind: "employees", employees: [] } : { kind: "everyone" } })}>
-              <SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger>
-              <SelectContent><SelectItem value="everyone">Everyone</SelectItem><SelectItem value="department">A department</SelectItem><SelectItem value="employees">Specific employees</SelectItem></SelectContent>
-            </Select>
-            {a.audience.kind === "department" && <DepartmentPicker value={a.audience.department} onChange={(department) => onChange({ ...a, audience: { kind: "department", department } })} />}
+            <AudiencePicker value={a.audience} onChange={(audience) => onChange({ ...a, audience })} />
           </div>
           {/* Placeholders, like the email twin below: two stacked templated inputs with nothing in them are
               told apart only by their labels, and a label alone is easy to miss at a glance. */}
@@ -242,11 +280,7 @@ function ActionEditor({ action, onChange, meta, triggerType, vars }: { action: A
         <div className="space-y-2">
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">Audience</span>
-            <Select value={a.audience.kind} onValueChange={(k) => onChange({ ...a, audience: k === "department" ? { kind: "department", department: "" } : k === "employees" ? { kind: "employees", employees: [] } : { kind: "everyone" } })}>
-              <SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger>
-              <SelectContent><SelectItem value="everyone">Everyone</SelectItem><SelectItem value="department">A department</SelectItem><SelectItem value="employees">Specific employees</SelectItem></SelectContent>
-            </Select>
-            {a.audience.kind === "department" && <DepartmentPicker value={a.audience.department} onChange={(department) => onChange({ ...a, audience: { kind: "department", department } })} />}
+            <AudiencePicker value={a.audience} onChange={(audience) => onChange({ ...a, audience })} />
           </div>
           <Field label="Subject"><TemplatedInput value={a.subject} onChange={(subject) => onChange({ ...a, subject })} vars={vars} placeholder="Email subject" /></Field>
           <Field label="Body (HTML)"><TemplatedInput value={a.html} onChange={(html) => onChange({ ...a, html })} vars={vars} textarea placeholder="<p>…</p>" /></Field>

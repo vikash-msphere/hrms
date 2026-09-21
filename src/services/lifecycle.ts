@@ -17,6 +17,8 @@ import { notFound } from "../lib/errors";
 import { assertNotLocked } from "./lockGuard";
 import { boardPostLink, postedTitle } from "../domain/board";
 import { notifyMentions } from "./mentions";
+import { isModeratable } from "../domain/moderation";
+import { scanSoon } from "./moderation";
 
 type Table = any;
 type Row = {
@@ -120,5 +122,9 @@ export async function setPublished(
     // `emailed_at`, so a Publish racing the scheduler's tick still sends one copy.
     await emailAnnouncement(deps, out as typeof schema.announcements.$inferSelect);
   }
+  // Going live is the moment the text first reaches a wall, whichever direction the flip went - so it is
+  // also the moment it becomes worth reading. Unpublishing needs no scan: the post is off the wall, and
+  // `retireOrphans` closes any flag standing over it.
+  if (isModeratable(collection) && published) await scanSoon(deps, collection, id);
   return out;
 }

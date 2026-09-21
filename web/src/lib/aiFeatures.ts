@@ -24,9 +24,11 @@ export type AiFeatureKey =
   | "boards.narrate"
   | "drafting"
   | "ats.extraction"
+  | "expenses.receiptExtraction"
   | "tables.describe"
   | "analytics.narrate"
   | "moderation"
+  | "moderation.conduct"
   | "suggestions.similar"
   | "attention.summary";
 

@@ -4006,6 +4006,32 @@ components:
             years_experience: { type: number, nullable: true }
             summary: { type: string, nullable: true, description: "At most three sentences, in the document's own terms." }
         cached: { type: boolean, readOnly: true, description: "True when this exact text had already been read and the stored result was served." }
+    receipt-extraction:
+      type: object
+      description: >-
+        Fields read out of a receipt, for the submitter to accept or discard one at a time. Every value is
+        nullable and null means the document did not say - the model is instructed not to guess, calculate
+        or estimate, because a filled amount reads to the person filing as something the receipt stated.
+        Nothing here judges the claim: whether it is in policy or a duplicate is decided by deterministic
+        code elsewhere, and the response shape has nowhere to put an opinion.
+      required: [fields]
+      properties:
+        fields:
+          type: object
+          readOnly: true
+          properties:
+            amount: { type: number, nullable: true, description: "The total the payer paid. Null when several totals appear and none is clearly the amount paid." }
+            tax_amount: { type: number, nullable: true, description: "The tax component only. Null when the document does not separate it." }
+            incurred_on: { type: string, nullable: true, description: "YYYY-MM-DD, the date of supply. Null when only an invoice or due date appears - a due date is not when the cost was incurred." }
+            vendor_name:
+              type: string
+              nullable: true
+              description: >-
+                The seller's name as printed, as TEXT and never a vendor reference. Matching it to an
+                existing vendor is the submitter's act: a model picking the wrong one from the catalogue
+                would misattribute spend with nothing on screen admitting it had guessed.
+            invoice_number: { type: string, nullable: true }
+        cached: { type: boolean, readOnly: true, description: "True when this exact text had already been read and the stored result was served." }
     ai-draft-request:
       type: object
       description: "An instruction for the drafting model, plus optionally the text being improved. Both come from the caller's own keyboard; nothing from a record is added server-side. `kind` and `instruction` are both mandatory - enforced by the route's own schema, which answers 400 - but they are deliberately not listed in `required` here: this document's `required` lists may name only readOnly properties (see test/requiredReadOnlyDrift.test.ts)."
@@ -13413,6 +13439,37 @@ paths:
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/expenses/{expense_id}:extractReceipt:
+    post:
+      description: >-
+        Custom method extractReceipt: read a DRAFT claim's receipt into suggested field values for the
+        submitter to accept one by one. The TEXT is sent by the client, which already runs a PDF reader for
+        the document viewer - the Worker has no PDF text extractor, and keeping a PDF parser out of it is
+        also the safer and cheaper arrangement. That is why this reads PDF invoices and NOT photographs: a
+        photo would need a vision model, and an image cannot be scrubbed the way text is before it reaches
+        the model, while a receipt carries whatever else is printed on it. The model transcribes and makes
+        no judgement about the claim. Nothing is written to the expense - accepting a field is an ordinary
+        PATCH, with its ordinary audit row. Refused unless the org has switched the feature on AND chosen
+        which fields it may propose.
+      operationId: ":ExtractReceiptExpense"
+      parameters: [ { in: path, name: expense_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text: { type: string, maxLength: 8000, description: "The receipt text, extracted client-side. Mandatory; the route answers 400 without it." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/receipt-extraction' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/expenses/{expense_id}:cancel:

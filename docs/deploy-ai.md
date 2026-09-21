@@ -110,7 +110,8 @@ one at a time - the ledger in step 6 is much easier to read that way.
 | `ats.extraction` | Read a CV into the candidate form | no |
 | `tables.describe` | Describe a grid in words in the table builder | no |
 | `analytics.narrate` | Written summary on the team report | no |
-| `moderation` | Public walls scanned, flagged posts queued | no |
+| `moderation` | Public walls scanned for dangerous content, flagged posts queued | no |
+| `moderation.conduct` | The same posts read a second time against this org's conduct rules | no |
 
 Two settings on the same screen are worth a decision rather than a default:
 
@@ -128,7 +129,33 @@ Two settings on the same screen are worth a decision rather than a default:
   triage the same until cards have been delivered. Both vote from finished work only.
 - **The nightly duplicate sweep examines 60 open cards a tick**, least-recently-swept first, so a large
   backlog is covered over several nights.
-- **Moderation only scans 8 posts per tick.** It is a generation call, unlike embedding.
+- **A new post is read as it is written**, not on the next tick: the write path scans it in the background
+  (`ctx.waitUntil`), so a flag appears about as fast as the post does. The cron pass is the backstop for
+  edits, scheduled publishes, and anything the immediate scan could not finish.
+- **The cron pass scans 8 posts per tick**, newest unread first. It is a generation call, unlike embedding.
+  With `moderation.conduct` on, a post costs up to two calls: the guard model, then the conduct model on
+  whatever the guard model passed.
+- **Switching `moderation.conduct` on re-reads the whole wall.** A post already scanned by the guard model
+  has not been read against the conduct rules, so every post comes back round, 8 per tick.
+
+### What the two passes each catch
+
+They are different questions, and running only the first is what makes the queue look broken to somebody
+testing it with a rude post.
+
+| The post | `moderation` (Llama Guard) | `moderation.conduct` |
+|---|---|---|
+| Threats, weapons, self-harm, sexual content, child exploitation | flags | - |
+| Hate against a protected attribute | flags | also flags |
+| "Bob in accounts is a useless idiot" | **safe** | flags (W1) |
+| Someone's salary, illness or warning letter posted on the wall | usually safe | flags (W4) |
+| "This company is run by crooks who are cooking the books" | usually safe | flags (W5) |
+| Blunt criticism of a decision or a process | safe | safe, deliberately |
+
+`moderation` is a safety classifier answering "is this content dangerous". Most of what a workplace
+noticeboard needs a person for is not dangerous, which is what the second pass is for. It is a general model
+reading our rubric, so it is less accurate than the first in both directions; both only ever add a queue item,
+and neither can hide anything.
 
 ## 6. Grant the capabilities that nothing seeds
 
@@ -168,6 +195,20 @@ Compare with `select count(*) from search_docs` - it should climb towards it ove
 **Are the crons running?** `search_vectors` and moderation both ride the five-minute tick; the `ai_cache`
 sweep runs nightly. `cron_runs.summary_json` records `embedded` and `moderated` counts per tick.
 
+**The queue is empty and you expected it not to be.** Read it in this order, because the three causes look
+identical from the page:
+
+```bash
+npx wrangler d1 execute hrms --remote --command "select outcome, error, count(*) n from ai_usage where feature='moderation' group by 1,2 order by n desc"
+```
+
+- No rows at all: nothing called a model. The feature is off, there is no `AI` binding, or the day's budget
+  was spent before the tick came round.
+- Rows with `outcome='error'`: the calls are landing and failing, and `error` says how.
+- All `outcome='ok'` and `select count(*) from moderation_scans where flagged=1` is 0: the models are
+  answering and objecting to nothing. Check what you posted against the table in section 5 - if it is rude
+  rather than dangerous, it needs `moderation.conduct`.
+
 ## 8. Retune the budget from evidence
 
 `BUDGET` in `src/domain/aiPolicy.ts` holds deliberately pessimistic guesses - the app under-spends rather
@@ -179,8 +220,12 @@ Rough per-call estimates the app currently assumes, and what a day's 7000 neuron
 | Call | Estimate | Per day |
 |---|---|---|
 | embed (search index, one row) | 1 | ~7,000 rows |
-| moderation scan | 60 | ~116 posts |
+| moderation scan, guard pass | 60 | ~116 posts |
+| moderation scan, conduct pass | 120 | ~58 posts |
 | generation (draft, extraction, table, narration) | 120 | ~58 calls |
+
+A post scanned by both passes costs 180, so ~38 posts a day on the budget alone. That is the number to watch
+after switching the conduct pass on, and the reason it is a separate switch.
 
 They share one budget, so a busy drafting day leaves less for moderation. When it runs out every feature
 falls back to its non-AI behaviour until midnight UTC - nothing breaks, things just stop being clever.

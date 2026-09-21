@@ -1,5 +1,9 @@
 // What may be moderated, what a model is allowed to say about it, and how to read the answer.
 //
+// TWO PASSES, ONE QUEUE. This file owns the hazard pass (Llama Guard, statutory-grade harm); `domain/conduct.ts`
+// owns the workplace-conduct pass that catches what a safety taxonomy has no category for. Both write the
+// same flag with the same `hazards` array, so a moderator reads one queue.
+//
 // THE MODEL FLAGS; IT NEVER HIDES. Llama Guard returns a verdict on text, and that verdict becomes a row in
 // `ai_suggestions` with `feature: "moderation"` - the same advisory record triage and extraction use, with
 // the same one-live-suggestion-per-record index. Hiding a post is a separate act, performed by a person.
@@ -16,6 +20,7 @@
 // kudos post is a worse failure than a true positive that sits in a queue for ten minutes: the first breaks
 // trust in the product and is invisible to the person it happened to, the second is a delay. So a flagged
 // post stays exactly as visible as it was, and the only thing that changes is that it appears on a queue.
+import { CONDUCT_HAZARDS } from "./conduct";
 
 /**
  * The collections whose rows post publicly.
@@ -77,8 +82,32 @@ export const HAZARDS: Record<string, string> = {
 
 /** A hazard code's label, or the bare code when the model names one outside the taxonomy it was given. An
  *  unknown code is still shown rather than dropped: it is evidence about the model, and hiding it would make
- *  a misbehaving model look like a quiet one. */
-export const hazardLabel = (code: string): string => HAZARDS[code] ?? code;
+ *  a misbehaving model look like a quiet one.
+ *
+ *  Conduct codes (`W*`, domain/conduct.ts) resolve here too, because the queue holds one `hazards` array per
+ *  flag and a moderator reading it should not have to know which of the two passes objected. */
+export const hazardLabel = (code: string): string => HAZARDS[code] ?? CONDUCT_HAZARDS[code] ?? code;
+
+/** Hazard labels, lower-cased, back to their codes. Built once: the object dialect below sometimes names a
+ *  category rather than coding it. */
+const CODE_BY_LABEL: Record<string, string> = Object.fromEntries(
+  Object.entries(HAZARDS).map(([code, label]) => [label.toLowerCase(), code]),
+);
+
+/**
+ * One category the model named, as a taxonomy code, or null when it is not one.
+ *
+ * Three spellings are accepted because all three have been observed from the same model family: the bare
+ * code (`S10`), the code with its name after it (`S10: Hate`), and the name alone (`Hate`). Anything else is
+ * null - a category this app cannot name is a reason a moderator cannot weigh.
+ */
+export function hazardCode(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+  const coded = /^(S\d{1,2})\b/i.exec(s);
+  if (coded) return coded[1]!.toUpperCase();
+  return CODE_BY_LABEL[s.toLowerCase()] ?? null;
+}
 
 export type Verdict =
   /** The model read it and had nothing to say. No row is written. */
@@ -98,19 +127,47 @@ export type Verdict =
  * queue item a moderator cannot act on, and "the model said so" is not a reason a person can weigh.
  */
 export function parseVerdict(raw: string): Verdict | null {
-  const lines = raw.trim().toLowerCase().split("\n").map((l) => l.trim()).filter(Boolean);
+  const text = raw.trim();
+  if (text.startsWith("{")) return parseObjectVerdict(text);
+
+  const lines = text.toLowerCase().split("\n").map((l) => l.trim()).filter(Boolean);
   if (lines.length === 0) return null;
   const [head, ...rest] = lines;
   if (head === "safe") return { safe: true };
   if (head !== "unsafe") return null;
 
-  const hazards = (rest[0] ?? "")
-    .split(",")
-    .map((s) => s.trim().toUpperCase())
-    .filter((s) => /^S\d{1,2}$/.test(s));
+  return unsafeWith((rest[0] ?? "").split(","));
+}
+
+/**
+ * The OBJECT dialect: `{"safe":true}` or `{"safe":false,"categories":["S10"]}`.
+ *
+ * Workers AI post-processes the guard model's two-line answer into this shape before the binding returns it
+ * (`Ai_Cf_Meta_Llama_Guard_3_8B_Output`), so in production this is the branch that runs and the text branch
+ * above is what a raw model or a test hands over. Reading only the text form is what made a working scan
+ * look like a broken one: every verdict arrived as an object, nothing could parse it, and no post was ever
+ * flagged. `lib/ai.ts` serialises it back to JSON rather than picking a dialect for us.
+ */
+function parseObjectVerdict(text: string): Verdict | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const o = parsed as { safe?: unknown; categories?: unknown };
+  if (typeof o.safe !== "boolean") return null;
+  if (o.safe) return { safe: true };
+  return unsafeWith(Array.isArray(o.categories) ? o.categories.map((c) => String(c)) : []);
+}
+
+/** The unsafe half of both dialects: codes in, one verdict out, or null when none of them is a code we can
+ *  name. De-duplicated and ordered, so two scans of the same text produce the same row and the unique index
+ *  does not churn on ordering alone. */
+function unsafeWith(categories: string[]): Verdict | null {
+  const hazards = categories.map(hazardCode).filter((c): c is string => c !== null);
   if (hazards.length === 0) return null;
-  // De-duplicated and ordered, so two scans of the same text produce the same row and the unique index does
-  // not churn on ordering alone.
   return { safe: false, hazards: [...new Set(hazards)].sort() };
 }
 

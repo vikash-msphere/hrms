@@ -49,7 +49,8 @@ const TABLES = [
   schema.ticketTodos, schema.tickets, schema.notifications, schema.transitions, schema.checkIns, schema.goals,
   schema.bonuses, schema.workflowInstances, schema.jobs, schema.automationRuns, schema.eventLog,
   schema.automations, schema.jobRequisitions, schema.overtimeRequests, schema.backgroundChecks,
-  schema.assetRequests, schema.assets, schema.assetCategories, schema.users, schema.employees, schema.roles,
+  schema.assetRequests, schema.assets, schema.assetCategories, schema.aiSuggestions, schema.announcements,
+  schema.accessRules, schema.users, schema.employees, schema.roles,
 ];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
@@ -423,5 +424,120 @@ describe("workflows e2e: an exhausted dispatch budget is visible, not just logge
 
     // The rule never ran, so nothing it would have done exists.
     expect((await ticketsFor(emp)).length).toBe(0);
+  });
+});
+
+// A person who may act on a flagged post: an active user whose ROLE grant carries `moderation.read`. Nothing
+// seeds that capability for any role, which is the posture the feature ships with - so the test states it,
+// the way an org does, by putting somebody in a role that holds it.
+async function seedModerator(): Promise<string> {
+  const employeeId = await seedEmployee({ code: "04-960" });
+  await deps.db.insert(schema.roles).values({ name: "moderator", label: "Moderator" }).onConflictDoNothing();
+  // THE GRANT IS THE POINT, not the role name. `moderation` is private by default - nothing seeds it for
+  // anybody - so an org that wants a moderation queue grants it, and that ACL row is what the capability
+  // audience asks about. Seeding a role NAME alone proves nothing: with no rule behind it the grant is empty
+  // and the audience is empty, which is exactly how this test failed first time round.
+  await deps.db.insert(schema.accessRules).values({
+    uuid: genId(), subject: "moderator", subjectKind: "role", namespace: "moderation",
+    pattern: "moderation.*", scopeKind: "all", scopeCode: "", level: "read", effect: "allow",
+  });
+  await deps.db.insert(schema.users).values({ uuid: genId(), code: `u-${genId().slice(0, 4)}`, email: `mod-${genId().slice(0, 4)}@test.example`, role: "moderator", employeeId });
+  return employeeId;
+}
+
+// A post on the wall WITH the flag already standing against it, which is the state the event is emitted in:
+// `recordFlag` writes the advisory row and then emits, in that order, precisely so a rule reacting to the
+// event finds the flag it is reacting to. Seeding only the post made `moderation:decide` answer 404 - "there
+// is nothing to decide" - and the takedown rule silently did nothing, which is what a wrong emit order would
+// look like in production too.
+async function seedFlaggedPost(title: string): Promise<string> {
+  const uuid = genId();
+  await deps.db.insert(schema.announcements).values({
+    uuid, code: `a-${genId().slice(0, 6)}`, title, body: "The body.", published: true, disabled: false,
+  });
+  await deps.db.insert(schema.aiSuggestions).values({
+    hostCollection: "announcements", hostRecordId: uuid, feature: "moderation",
+    payloadJson: JSON.stringify({ hazards: ["S10"], excerpt: "The body.", anonymous: false }),
+    model: "@cf/meta/llama-guard-3-8b", basis: 1,
+  });
+  return uuid;
+}
+
+// The flag as `services/moderation.ts recordFlag` emits it, minus the scan that produced it: this file tests
+// what a RULE does with an event, and the scanner's half (that a flag emits this) is pinned in
+// test/moderation.test.ts.
+const flagEvent = (post: string, pass: "hazard" | "conduct") =>
+  emitEvent(deps, actor, "moderation.flagged", {
+    subject: `announcements/${post}`,
+    employeeId: null,
+    payload: { collection: "announcements", pass, hazards: pass === "hazard" ? "S10" : "W1", hazardLabels: pass === "hazard" ? "Hate" : "Personal abuse", title: "About Bob", anonymous: false },
+  });
+
+describe("workflows e2e: acting on a flagged post", () => {
+  it("tells whoever may moderate, without touching the post", async () => {
+    const mod = await seedModerator();
+    const post = await seedFlaggedPost("About Bob");
+    await seedRule("Tell the moderators about a flagged post");
+
+    await flagEvent(post, "hazard");
+
+    // THE AUDIENCE IS THE CAPABILITY, not a department or a list: the rule says `moderation.read` and the
+    // engine asks the ACL who holds it. That is what keeps it right when an org moves moderation to another
+    // role - a hand-kept list of employees would go on notifying whoever was in it the day it was written.
+    expect((await notifsFor(mod)).length).toBe(1);
+    // And the post is untouched, which is the whole posture of the feature: this rule informs, it does not act.
+    const row = (await deps.db.select().from(schema.announcements).where(eq(schema.announcements.uuid, post)))[0];
+    expect(row?.disabled).toBe(false);
+  });
+
+  it("takes the post down when the org has opted into that, and says so", async () => {
+    const mod = await seedModerator();
+    const post = await seedFlaggedPost("About Bob");
+    await seedRule("Take down a post the safety model flagged");
+
+    await flagEvent(post, "hazard");
+
+    // The apiCall re-dispatched `POST /v1/moderation:decide` through the app's own middleware as the system
+    // principal, and the post really came off the wall - `disabled`, the same column a moderator's own hide
+    // sets, so every visibility filter honours it and the hide is reversible.
+    const row = (await deps.db.select().from(schema.announcements).where(eq(schema.announcements.uuid, post)))[0];
+    expect(row?.disabled).toBe(true);
+    expect((await notifsFor(mod)).length).toBe(1); // ...and the moderators were told it happened.
+
+    // `done`, not `partial`. The flag row's `decided_by` is a foreign key into `users` and the automation
+    // runs as a principal that has no row there: written verbatim it failed the FK AFTER the post had been
+    // hidden, so the post came down, the flag stayed pending, and the call answered 500. A rule that half
+    // works is the worst of the three outcomes, so it is asserted rather than left to the two rows below.
+    const runs = await deps.db.select().from(schema.automationRuns);
+    expect(runs[0]!.status).toBe("done");
+    const flag = (await deps.db.select().from(schema.aiSuggestions))[0];
+    expect(flag?.state).toBe("accepted"); // upheld, and off the queue
+    expect(flag?.decidedBy).toBeNull(); // by nobody: no person decided this
+  });
+
+  it("does NOT take a post down on a conduct flag, only on the safety model's", async () => {
+    await seedModerator();
+    const post = await seedFlaggedPost("About Bob");
+    await seedRule("Take down a post the safety model flagged");
+
+    await flagEvent(post, "conduct");
+
+    // THE CONDITION THAT MAKES THE RULE SAFE TO SHIP AT ALL. A conduct flag is a general model reading this
+    // org's rubric about tone; hiding on it would eventually take down a post somebody merely disagreed
+    // with. The rule is `pass == "hazard"` and this is the case that proves the other half is excluded.
+    const row = (await deps.db.select().from(schema.announcements).where(eq(schema.announcements.uuid, post)))[0];
+    expect(row?.disabled).toBe(false);
+    expect((await deps.db.select().from(schema.automationRuns)).length).toBe(0);
+  });
+
+  it("ships the takedown disabled and the notification enabled", () => {
+    // A rule that hides real posts on a model's say-so must be something an org turns ON deliberately; a rule
+    // that tells the moderators costs nothing when the model is wrong. If these two ever flip, an upgrade
+    // starts hiding posts for every org that took it.
+    const takedown = AUTOMATIONS.find((a) => a.name === "Take down a post the safety model flagged");
+    const tell = AUTOMATIONS.find((a) => a.name === "Tell the moderators about a flagged post");
+    expect(takedown?.enabled).toBe(false);
+    expect(takedown?.condition).toEqual({ field: "pass", op: "eq", value: "hazard" });
+    expect(tell?.enabled ?? true).toBe(true);
   });
 });
