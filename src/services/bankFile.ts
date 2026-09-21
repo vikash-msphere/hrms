@@ -1,11 +1,15 @@
 import * as XLSX from "xlsx";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, isNotNull, ne } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import { byIdChunks } from "../lib/dbBatch";
+import type { AppUser } from "../env";
+import { assertMayGenerateBankFile } from "./payroll";
+import { byIdChunks, runBatch } from "../lib/dbBatch";
+import { audit } from "../lib/audit";
 import { notFound, invalidArgument, failedPrecondition } from "../lib/errors";
 import { getBankFormats, getBankTemplate, getPayrollDebit, type BankFormatColumn } from "./bankFormats";
 import { sameBankName, type BankField } from "./bankDetails";
+import { checkPayouts, describePayoutFindings, type PayoutRow } from "../domain/payoutCheck";
 import { getSettingValue } from "./settings";
 import { decimalsFor, roundMoney, type CurrencyDecimals } from "../domain/currency";
 
@@ -26,6 +30,43 @@ async function decryptBank(deps: Deps, enc: string | null): Promise<StoredBank> 
   } catch {
     return {};
   }
+}
+
+/**
+ * A one-way fingerprint of an account number, for comparison only.
+ *
+ * Normalised first - spaces and case stripped - so the same account typed two ways is one account and a
+ * cosmetic edit is not reported as a change of bank. SHA-256 with no salt ON PURPOSE: the point is that the
+ * SAME account gives the same answer across runs and across employees, which a per-row salt would destroy.
+ * That does mean a determined holder of the hashes could confirm a guessed account number, which is why the
+ * fingerprint stays inside this module and the run item, is never rendered, and never leaves in an export.
+ */
+async function fingerprint(accountNumber: string): Promise<string> {
+  const normalised = accountNumber.replace(/\s+/g, "").toUpperCase();
+  if (!normalised) return "";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalised));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** What the last run that PAID each of these people paid them into. Reads stored fingerprints only, so this
+ *  decrypts nothing: the comparison the next run makes is against a hash written when that run's file was
+ *  produced. Most recent wins where somebody appears in several. */
+async function previousPayoutFingerprints(deps: Deps, runId: string, employeeIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!employeeIds.length) return out;
+  const rows = await byIdChunks(employeeIds, (group) =>
+    deps.db
+      .select({ employeeId: schema.payrollRunItems.employeeId, hash: schema.payrollRunItems.bankAccountHash, at: schema.payrollRunItems.updatedAt })
+      .from(schema.payrollRunItems)
+      .where(and(inArray(schema.payrollRunItems.employeeId, group), isNotNull(schema.payrollRunItems.bankAccountHash), ne(schema.payrollRunItems.runId, runId))),
+  );
+  const newest = new Map<string, number>();
+  for (const r of rows) {
+    if (!r.hash) continue;
+    const at = r.at ? +new Date(r.at) : 0;
+    if (at >= (newest.get(r.employeeId) ?? -1)) { newest.set(r.employeeId, at); out.set(r.employeeId, r.hash); }
+  }
+  return out;
 }
 
 const ddmmyyyy = (d: Date) => `${String(d.getUTCDate()).padStart(2, "0")}/${String(d.getUTCMonth() + 1).padStart(2, "0")}/${d.getUTCFullYear()}`;
@@ -68,11 +109,14 @@ function cellValue(col: BankFormatColumn, c: Ctx): string | number | undefined {
   }
 }
 
-export async function buildBankFile(deps: Deps, runId: string, bank: string): Promise<{ bytes: Uint8Array; fileName: string }> {
+export async function buildBankFile(deps: Deps, actor: AppUser | null, runId: string, bank: string, acknowledged = false): Promise<{ bytes: Uint8Array; fileName: string }> {
   if (!bank) throw invalidArgument("bank query parameter is required");
   const run = (await deps.db.select().from(schema.payrollRuns).where(eq(schema.payrollRuns.uuid, runId)).limit(1))[0];
   if (!run) throw notFound("payroll run not found");
   if (run.state !== "APPROVED" && run.state !== "PUBLISHED") throw failedPrecondition("run must be approved before the bank file can be downloaded");
+  // Separation of duties on the step where the money leaves: off unless the org asks for it, and refused
+  // BEFORE any of the work below, so a caller who may not do this never reaches the decrypted accounts.
+  await assertMayGenerateBankFile(deps, actor, run);
 
   const fmt = (await getBankFormats(deps))[bank];
   if (!fmt?.columns?.length) throw invalidArgument(`no format configured for ${bank}`);
@@ -116,6 +160,7 @@ export async function buildBankFile(deps: Deps, runId: string, bank: string): Pr
   // bank. Surfacing the names lets payroll fix the details (or arrange an alternate payout) and regenerate.
   const rows: (string | number | undefined)[][] = [];
   const missingAccount: string[] = [];
+  const payouts: PayoutRow[] = [];
   for (const it of ordered) {
     if (!(it.net > 0.005)) continue; // no payout row for a zero/negative net
     const emp = emps.get(it.employeeId)!;
@@ -131,8 +176,33 @@ export async function buildBankFile(deps: Deps, runId: string, bank: string): Pr
     // an internal account settles; the reverse can be rejected) but costs more, so getting the match right
     // matters even though getting it wrong is not dangerous.
     const sameBank = sameBankName(bankDet.bank_name, bank);
+    // The FINGERPRINT of where this money is going, computed here because this is already the one place that
+    // decrypts an account number - doing it in the build would add a second decryption point to get the same
+    // answer. Normalised first, so the same account written with spaces or in another case is the same
+    // account and a cosmetic edit does not read as a change of bank.
+    payouts.push({
+      employeeId: it.employeeId,
+      label: `${emp.firstName} ${emp.lastName}${emp.code ? ` (${emp.code})` : ""}`,
+      fingerprint: await fingerprint(bankDet.account_number ?? ""),
+    });
     rows.push(fmt.columns.map((col) => cellValue(col, { emp, it, bank: bankDet, debit, valueDate, sameBank, dp })));
   }
+  // THE PAYOUT CHECK, before the file exists and therefore before the money can leave.
+  //
+  // Both findings REFUSE by default and are overridable together, which is the shape item 24's reasoning
+  // argues for: a control somebody cannot satisfy is one they route around, and an account genuinely changing
+  // is an ordinary event. So this is not "no", it is "say yes on the record" - the acknowledgement is a
+  // deliberate act by a named person and the audit row below carries what they were shown.
+  const previous = await previousPayoutFingerprints(deps, runId, payouts.map((p) => p.employeeId));
+  const findings = checkPayouts(payouts, previous);
+  if (findings.length && !acknowledged) {
+    const lines = describePayoutFindings(findings);
+    throw failedPrecondition(
+      `${lines.length} thing(s) about where this money is going need confirming: ${lines.join("; ")}. ` +
+      `Check them, then generate the file again with acknowledge=1 to confirm on the record.`,
+    );
+  }
+
   if (missingAccount.length) {
     throw failedPrecondition(`${missingAccount.length} payable employee(s) have no bank account on file: ${missingAccount.slice(0, 8).join(", ")}${missingAccount.length > 8 ? ", …" : ""}. Add their bank details, then regenerate the bank file.`);
   }
@@ -166,6 +236,37 @@ export async function buildBankFile(deps: Deps, runId: string, bank: string): Pr
   // from paying the same bonuses, encashments and claims all over again on the next run.
   if (!run.bankFileAt) {
     await deps.db.update(schema.payrollRuns).set({ bankFileAt: new Date() }).where(and(eq(schema.payrollRuns.uuid, runId), isNull(schema.payrollRuns.bankFileAt)));
+  }
+
+  // Record where each payment actually went, as a fingerprint, so the NEXT run can tell whether an account
+  // changed. Written after the file is built rather than before: a run that failed to produce one paid
+  // nobody, and a stored fingerprint for a payment that never happened would make the next run compare
+  // against a destination the money never reached.
+  //
+  // Best-effort. The file is already built and the run already stamped by this point, so a failure here costs
+  // the NEXT run its comparison - worth a loud log and nothing more, because throwing would refuse a payout
+  // file that is correct and already committed.
+  try {
+    await runBatch(
+      deps.db,
+      payouts.map((p) =>
+        deps.db
+          .update(schema.payrollRunItems)
+          .set({ bankAccountHash: p.fingerprint })
+          .where(and(eq(schema.payrollRunItems.runId, runId), eq(schema.payrollRunItems.employeeId, p.employeeId))),
+      ),
+    );
+  } catch (err) {
+    console.error("[bankFile] could not record payout fingerprints - the next run cannot compare accounts", err);
+  }
+
+  // What was confirmed, and by whom. An acknowledgement that leaves no trace is not a control, and this is
+  // the row somebody reads when asking why a changed account was paid.
+  if (findings.length) {
+    await audit(deps, actor ?? "system", "payroll.payout_confirmed", "payroll-runs", runId, {
+      bank,
+      confirmed: describePayoutFindings(findings),
+    });
   }
 
   const out = XLSX.write(wb, { type: "array", bookType: "xlsx" }) as ArrayBuffer;

@@ -11,12 +11,33 @@ export type VendorInput = {
   contact_email?: string | null;
   contact_phone?: string | null;
   tax_id?: string | null;
-  payment_terms?: string | null;
+  payment_terms_days?: number | null;
   bank_details?: string | null;
   default_category?: string | null; // "expense-categories/<id>"
   notes?: string | null;
 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
+
+/**
+ * Payment terms as a whole number of days, or null for a vendor with none agreed.
+ *
+ * Validated rather than coerced, because every wrong answer here is silent: a negative term would make an
+ * invoice overdue before it was raised, a fractional one would put a due date at half past a day, and a typo
+ * that read as 0 would file every invoice from that vendor as payable immediately and put a permanent false
+ * entry at the top of the aged-payables list. There is nothing downstream that could notice any of those - a
+ * due date is plausible whatever it says - so it is refused at the write.
+ *
+ * Null and zero are deliberately different: null is "no agreed terms, do not compute a due date", zero is
+ * "due on the invoice date". The SPA sends "" for an emptied number box, which clears rather than meaning 0.
+ */
+function paymentTermsDays(v: number | string | null | undefined): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0 || n > 365) {
+    throw invalidArgument("payment_terms_days must be a whole number of days between 0 and 365");
+  }
+  return n;
+}
 
 // A vendor's default category must be a live one: a deleted category would silently stop applying.
 async function resolveCategory(deps: Deps, path?: string | null): Promise<string | null> {
@@ -41,7 +62,7 @@ export const vendorSpec: CrudSpec<VendorInput, typeof schema.vendors> = {
       contactEmail: input.contact_email?.trim() || null,
       contactPhone: input.contact_phone?.trim() || null,
       taxId: input.tax_id?.trim() || null,
-      paymentTerms: input.payment_terms?.trim() || null,
+      paymentTermsDays: paymentTermsDays(input.payment_terms_days),
       bankDetails: input.bank_details?.trim() || null,
       defaultCategoryId: await resolveCategory(deps, input.default_category),
       notes: input.notes?.trim() || null,
@@ -53,7 +74,7 @@ export const vendorSpec: CrudSpec<VendorInput, typeof schema.vendors> = {
     if (has(patch, "contact_email")) set.contactEmail = patch.contact_email?.trim() || null;
     if (has(patch, "contact_phone")) set.contactPhone = patch.contact_phone?.trim() || null;
     if (has(patch, "tax_id")) set.taxId = patch.tax_id?.trim() || null;
-    if (has(patch, "payment_terms")) set.paymentTerms = patch.payment_terms?.trim() || null;
+    if (has(patch, "payment_terms_days")) set.paymentTermsDays = paymentTermsDays(patch.payment_terms_days);
     if (has(patch, "bank_details")) set.bankDetails = patch.bank_details?.trim() || null;
     if (has(patch, "default_category")) set.defaultCategoryId = await resolveCategory(deps, patch.default_category);
     if (has(patch, "notes")) set.notes = patch.notes?.trim() || null;

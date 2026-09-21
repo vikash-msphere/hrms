@@ -10,7 +10,7 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import type { ListScope } from "../src/domain/access";
 import { vectorIdOf } from "../src/lib/vector";
-import { suggestCardTriage } from "../src/services/cardTriage";
+import { suggestCardTriage, suggestGoalForCard, suggestStepsForCard } from "../src/services/cardTriage";
 
 // What comparable finished work says about a card, and whether it is already on the board twice.
 //
@@ -51,7 +51,7 @@ function fakeIndex(neighbours: { id: string; score: number }[], selfVector: numb
   };
 }
 
-const TABLES = [schema.cards, schema.boards, schema.departments, schema.employees, schema.settings];
+const TABLES = [schema.eventLog, schema.cardTodos, schema.goals, schema.cards, schema.boards, schema.departments, schema.employees, schema.settings];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
   await deps.db.insert(schema.settings).values({ key: "ai", value: JSON.stringify({ features: { "cards.triage": true } }) });
@@ -75,6 +75,13 @@ async function card(over: Partial<typeof schema.cards.$inferInsert> = {}) {
 
 const all = (): ListScope => ({ breadth: "all", deptCode: null, ownerId: null, seeRestricted: true });
 const near = (ids: string[], score = 0.9) => ids.map((id) => ({ id: vectorIdOf("cards", id), score }));
+const nearGoals = (ids: string[], score = 0.9) => ids.map((id) => ({ id: vectorIdOf("goals", id), score }));
+
+async function goal(over: Partial<typeof schema.goals.$inferInsert> = {}) {
+  const uuid = genId();
+  await deps.db.insert(schema.goals).values({ uuid, code: `g-${uuid.slice(0, 6)}`, employeeId: ME, title: "Cut onboarding time", ...over });
+  return uuid;
+}
 
 describe("what finished work says about this card", () => {
   it("votes department, priority and size from DELIVERED neighbours only", async () => {
@@ -112,6 +119,158 @@ describe("what finished work says about this card", () => {
     // The panel still appears, because priority is NOT tied here - all four cards carry the default. That is
     // the right behaviour and worth pinning: a tie silences one field, not the whole suggestion.
     expect(out?.priority?.value).toBe("medium");
+  });
+});
+
+describe("what the same neighbours also say", () => {
+  const DAY = 86_400_000;
+
+  it("reports how long comparable work took, start to delivery", async () => {
+    const subject = await card();
+    const now = Date.now();
+    const ids = [];
+    for (const days of [2, 4, 6]) {
+      ids.push(await card({ startedAt: new Date(now - days * DAY), deliveredAt: new Date(now), departmentId: DEPT_A }));
+    }
+    deps.vectors = fakeIndex(near([...ids, subject]));
+    const out = await suggestCardTriage(deps, all(), subject);
+    expect(out?.took).toMatchObject({ p50: 4, p85: 6, count: 3 });
+  });
+
+  it("falls back to when the card was filed, on a board that stamps neither start nor commitment", async () => {
+    const subject = await card();
+    const old = await card({ createdAt: new Date(Date.now() - 10 * DAY), deliveredAt: new Date() });
+    deps.vectors = fakeIndex(near([old, subject]));
+    const out = await suggestCardTriage(deps, all(), subject);
+    // "We have no idea" is the answer this replaces, so a board with no commitment point still gets a number.
+    expect(out?.took?.count).toBe(1);
+    expect(out?.took?.p50).toBeGreaterThanOrEqual(9.9);
+  });
+
+  it("reads what blocked them from the event log, not from the card row", async () => {
+    const subject = await card();
+    const a = await card({ deliveredAt: new Date(), departmentId: DEPT_A });
+    const b2 = await card({ deliveredAt: new Date(), departmentId: DEPT_A });
+    // Both were blocked and then unblocked, which CLEARS `block_reason` on the row - the card table cannot
+    // answer this question afterwards at all.
+    for (const [id, reason] of [[a, "waiting on vendor access"], [b2, "waiting on vendor access"]] as const) {
+      await deps.db.insert(schema.eventLog).values({
+        uuid: genId(), code: `e-${genId().slice(0, 6)}`, type: "card.blocked", subject: `cards/${id}`,
+        payloadJson: JSON.stringify({ reason }),
+      });
+    }
+    deps.vectors = fakeIndex(near([a, b2, subject]));
+    const out = await suggestCardTriage(deps, all(), subject);
+    expect(out?.blocked).toMatchObject({ cards: 2, of: 2, reasons: ["waiting on vendor access"] });
+  });
+
+  it("says nothing about blocking when nothing was blocked", async () => {
+    const subject = await card();
+    const a = await card({ deliveredAt: new Date() });
+    deps.vectors = fakeIndex(near([a, subject]));
+    expect((await suggestCardTriage(deps, all(), subject))?.blocked).toBeUndefined();
+  });
+});
+
+describe("the goal a card is serving", () => {
+  it("offers live goals the card reads like, best first", async () => {
+    const subject = await card();
+    const g = await goal();
+    deps.vectors = fakeIndex(nearGoals([g], 0.9));
+    const out = await suggestGoalForCard(deps, all(), subject);
+    expect(out.map((x) => x.path)).toEqual([`goals/${g}`]);
+    expect(out[0]!.owner).toBe("Me X");
+  });
+
+  it("says nothing about a card that already names a goal", async () => {
+    const g = await goal();
+    const subject = await card({ goalId: g });
+    let asked = false;
+    deps.vectors = { ...fakeIndex(nearGoals([g])), async query() { asked = true; return nearGoals([g]); } };
+    expect(await suggestGoalForCard(deps, all(), subject)).toEqual([]);
+    // That decision was made by a person, so the index is not even asked.
+    expect(asked).toBe(false);
+  });
+
+  it("never offers a finished goal", async () => {
+    const subject = await card();
+    const done = await goal({ status: "completed" });
+    deps.vectors = fakeIndex(nearGoals([done], 0.95));
+    expect(await suggestGoalForCard(deps, all(), subject)).toEqual([]);
+  });
+
+  it("names no goal the caller could not have listed", async () => {
+    const subject = await card();
+    const g = await goal();
+    deps.vectors = fakeIndex(nearGoals([g], 0.95));
+    expect(await suggestGoalForCard(deps, undefined, subject)).toEqual([]);
+  });
+});
+
+describe("the steps comparable work took", () => {
+  async function todos(cardId: string, texts: string[]) {
+    for (const text of texts) await deps.db.insert(schema.cardTodos).values({ uuid: genId(), cardId, text });
+  }
+
+  it("offers what several delivered cards wrote down, commonest first", async () => {
+    const subject = await card();
+    const a = await card({ deliveredAt: new Date() });
+    const b2 = await card({ deliveredAt: new Date() });
+    const c = await card({ deliveredAt: new Date() });
+    await todos(a, ["Raise a change request", "Update the runbook"]);
+    await todos(b2, ["Raise a change request", "Tell the on-call"]);
+    await todos(c, ["Raise a change request"]);
+    deps.vectors = fakeIndex(near([a, b2, c, subject], 0.9));
+    const out = await suggestStepsForCard(deps, all(), subject);
+    // Three cards wrote the change request; one wrote each of the others, which is an anecdote.
+    expect(out).toEqual([{ text: "Raise a change request", seen: 3, of: 3 }]);
+  });
+
+  it("counts a step once per card, however often that card repeated it", async () => {
+    const subject = await card();
+    const a = await card({ deliveredAt: new Date() });
+    const b2 = await card({ deliveredAt: new Date() });
+    const c = await card({ deliveredAt: new Date() });
+    await todos(a, ["Deploy", "Deploy", "Deploy"]);
+    await todos(b2, ["Deploy"]);
+    await todos(c, ["Something else"]);
+    deps.vectors = fakeIndex(near([a, b2, c, subject], 0.9));
+    // Three comparable cards were read; two of them wrote "Deploy", and a's three copies count once.
+    expect((await suggestStepsForCard(deps, all(), subject))[0]).toEqual({ text: "Deploy", seen: 2, of: 3 });
+  });
+
+  it("reads checklists off DELIVERED work only", async () => {
+    const subject = await card();
+    const openOne = await card();
+    const openTwo = await card();
+    await todos(openOne, ["A plan, not a record"]);
+    await todos(openTwo, ["A plan, not a record"]);
+    deps.vectors = fakeIndex(near([openOne, openTwo, subject], 0.9));
+    expect(await suggestStepsForCard(deps, all(), subject)).toEqual([]);
+  });
+
+  it("says nothing on a board with too little comparable history", async () => {
+    const subject = await card();
+    const a = await card({ deliveredAt: new Date() });
+    const b2 = await card({ deliveredAt: new Date() });
+    await todos(a, ["Something"]);
+    await todos(b2, ["Something"]);
+    deps.vectors = fakeIndex(near([a, b2, subject], 0.9));
+    // Two neighbours is an anecdote, which is what MIN_NEIGHBOURS says and now what it does; the
+    // `task-checklist` draft kind is the fallback for this case.
+    expect(await suggestStepsForCard(deps, all(), subject)).toEqual([]);
+  });
+
+  it("reads nothing from cards the caller could not have listed", async () => {
+    const subject = await card();
+    const a = await card({ deliveredAt: new Date() });
+    const b2 = await card({ deliveredAt: new Date() });
+    const c = await card({ deliveredAt: new Date() });
+    await todos(a, ["Step"]);
+    await todos(b2, ["Step"]);
+    await todos(c, ["Step"]);
+    deps.vectors = fakeIndex(near([a, b2, c, subject], 0.9));
+    expect(await suggestStepsForCard(deps, undefined, subject)).toEqual([]);
   });
 });
 

@@ -191,6 +191,12 @@ export type Variables = {
   // Per-collection list verdicts for `GET /v1/attention` (goals, cards, reviews), resolved the same way and
   // for the same reason: the surface reads across collections and each one is decided on its own terms.
   attentionScopes: Map<string, import("./domain/access").ListScope>;
+  closeScopes: Map<string, import("./domain/access").ListScope>;
+  // `POST /v1/reviews/{id}:evidence`: per-collection list scopes for the four collections an evidence pack
+  // reads (goals, cards, announcements, check-ins). An item verb rather than an aggregate route, and the only
+  // one that needs a map instead of the single `scope` - it answers with records from collections the path
+  // does not name, so each of them is decided on its own terms. See MULTI_SCOPE_VERBS in middleware/authz.ts.
+  evidenceScopes: Map<string, import("./domain/access").ListScope>;
   // Same idea for GET /v1/people-analytics: per-collection list scopes for the per-person measures (leave,
   // punctuality, tasks, goals, reviews, ...), decided by the middleware; the analytics service only binds them
   // to grouped aggregates. A collection missing from the map contributes no column to the report.

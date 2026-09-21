@@ -53,6 +53,7 @@ import { loans } from "./routes/loans";
 import { taxDeclarations } from "./routes/taxDeclarations";
 import { leaveBalances } from "./routes/leaveBalances";
 import { payrollRuns } from "./routes/payrollRuns";
+import { payrollBudgets } from "./routes/payrollBudgets";
 import { operations } from "./routes/operations";
 import { cronRuns } from "./routes/cronRuns";
 import { cronTrigger } from "./routes/cronTrigger";
@@ -101,11 +102,16 @@ import { dashboardSummaryRoute } from "./routes/dashboardSummary";
 import { attentionRoute } from "./routes/attention";
 import { peopleAnalyticsRoute, peopleAnalyticsNarrate } from "./routes/peopleAnalytics";
 import { approvalsSummaryRoute } from "./routes/approvalsSummary";
+import { expenseCloseRoute } from "./routes/expenseClose";
+import { payrollForecastRoute } from "./routes/payrollForecast";
+import { cardTransactions } from "./routes/cardTransactions";
 import { bankFormats } from "./routes/bankFormats";
 import { letterheads } from "./routes/letterheads";
 import { payrollDebit } from "./routes/payrollDebit";
 import { compensation } from "./routes/compensation";
 import { compensationReapply } from "./routes/compensationReapply";
+import { compensationPreview } from "./routes/compensationPreview";
+import { compensationIncrement } from "./routes/compensationIncrement";
 import { exportRecord } from "./routes/exportRecord";
 import { esignCallback } from "./routes/esignCallback";
 import { found } from "./routes/found";
@@ -267,6 +273,9 @@ app.route("/v1/attention", attentionRoute); // "what needs me": derived trouble 
 app.route("/v1/people-analytics:narrate", peopleAnalyticsNarrate); // narrated period-on-period change, before the collection mount
 app.route("/v1/people-analytics", peopleAnalyticsRoute); // per-person report across the modules: same per-collection gating as search
 app.route("/v1/approvals-summary", approvalsSummaryRoute); // approval queue counts: per-queue `approve` gating, no rows
+app.route("/v1/payroll-forecast", payrollForecastRoute); // committed salary cost, 12 months, no rows
+app.route("/v1/expense-close", expenseCloseRoute); // month-end close checklist: per-collection list gating, no rows
+app.route("/v1/card-transactions", cardTransactions); // corporate card charges, imported and matched to claims
 app.route("/v1/activity-counts", activityCountsRoute); // "new since I last looked" counts: same gating as search, no rows
 app.route("/v1/changes", changes); // which collections were written to since a moment: lets a client trust its stored copies
 app.route("/v1/employees:upcomingCelebrations", celebrations); // collection custom method, before the employees mount
@@ -300,6 +309,7 @@ app.route("/v1/loans", loans);
 app.route("/v1/tax-declarations", taxDeclarations);
 app.route("/v1/leave-balances", leaveBalances);
 app.route("/v1/payroll-runs", payrollRuns);
+app.route("/v1/payroll-budgets", payrollBudgets);
 app.route("/v1/operations", operations);
 app.route("/v1/cron-runs:run", cronTrigger); // collection custom method, before the cron-runs mount
 app.route("/v1/cron-runs", cronRuns);
@@ -350,6 +360,8 @@ app.route("/v1/bank-formats", bankFormats);
 app.route("/v1/letterheads", letterheads);
 app.route("/v1/payroll-debit-accounts", payrollDebit);
 app.route("/v1/compensation:reapplySplit", compensationReapply); // collection custom method, before the compensation mount
+app.route("/v1/compensation:preview", compensationPreview); // prices a proposed revision, writes nothing
+app.route("/v1/compensation:increment", compensationIncrement); // a whole increment round: price it, or apply it
 app.route("/v1/export:record", exportRecord); // the audit entry for a browser-side bulk export
 app.route("/v1/compensation", compensation);
 app.route("/v1/positions", positions);

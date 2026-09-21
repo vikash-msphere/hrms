@@ -41,83 +41,12 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/components/ui/use-toast";
 import { getSetting } from "@/lib/settingsStore";
+import { MONTHS, DAY, periodRange, periodLabel, keyFor, nextKey, prevKey, phaseOf, paceOf, type PeriodType, type Phase } from "@/lib/budgetPeriod";
+import { PeriodPicker } from "@/components/common/PeriodPicker";
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-type PeriodType = "monthly" | "quarterly" | "yearly";
-// Where a period sits relative to today. A budgets list is almost always asked "what are we spending against
-// NOW" - a wall of finished periods is history, not a working set - so the page opens on the live ones.
-type Phase = "current" | "upcoming" | "past" | "all";
-const DAY = 86400000;
-
-// ---- period keys ----------------------------------------------------------------------------------------
-// The key format is the server's own (domain/expenses periodKeyFor): "2026" | "2026-Q3" | "2026-07". These
-// helpers let the page sort chronologically, label a period in prose, measure how much of it has elapsed and
-// roll one forward - all without asking the server, which only ever hands back the opaque key.
-function periodRange(type: string, key: string): { start: number; end: number } | null {
-  const y = Number(key.slice(0, 4));
-  if (!Number.isFinite(y) || key.length < 4) return null;
-  if (type === "yearly") return { start: Date.UTC(y, 0, 1), end: Date.UTC(y + 1, 0, 1) };
-  if (type === "quarterly") {
-    const q = Number(key.slice(6));
-    if (!(q >= 1 && q <= 4)) return null;
-    return { start: Date.UTC(y, (q - 1) * 3, 1), end: Date.UTC(y, q * 3, 1) };
-  }
-  const m = Number(key.slice(5, 7));
-  if (!(m >= 1 && m <= 12)) return null;
-  return { start: Date.UTC(y, m - 1, 1), end: Date.UTC(y, m, 1) };
-}
-
-function periodLabel(type: string, key: string): string {
-  const r = periodRange(type, key);
-  if (!r) return key;
-  const d = new Date(r.start);
-  if (type === "yearly") return String(d.getUTCFullYear());
-  if (type === "quarterly") return `Q${Math.floor(d.getUTCMonth() / 3) + 1} ${d.getUTCFullYear()}`;
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
-}
-
-function keyFor(type: PeriodType, at: Date): string {
-  const y = at.getUTCFullYear();
-  const m = at.getUTCMonth();
-  if (type === "yearly") return String(y);
-  if (type === "quarterly") return `${y}-Q${Math.floor(m / 3) + 1}`;
-  return `${y}-${String(m + 1).padStart(2, "0")}`;
-}
-
-// The period straight after this one, in the same type - what "duplicate to next period" and roll-forward mean.
-function nextKey(type: string, key: string): string | null {
-  const r = periodRange(type, key);
-  if (!r) return null;
-  return keyFor(type as PeriodType, new Date(r.end));
-}
-
-// The period straight before this one - what the create dialog reads to anchor a new cap on the last one.
-function prevKey(type: string, key: string): string | null {
-  const r = periodRange(type, key);
-  if (!r) return null;
-  return keyFor(type as PeriodType, new Date(r.start - DAY));
-}
-
-function phaseOf(b: ExpenseBudget, now: number): Exclude<Phase, "all"> {
-  const r = periodRange(b.period_type, b.period_key);
-  if (!r) return "current"; // an unparseable key is never hidden behind a phase filter
-  if (now >= r.end) return "past";
-  if (now < r.start) return "upcoming";
-  return "current";
-}
-
-// How far into its period a cap is, and the spend that pace implies. A cap at 60% on day 5 of 30 is in
-// trouble; one at 60% on day 26 is fine. Without this, every number on the page is a post-mortem.
-function paceOf(b: ExpenseBudget, now: number): { elapsed: number; day: number; days: number; projected: number | null } | null {
-  const r = periodRange(b.period_type, b.period_key);
-  if (!r) return null;
-  const days = Math.max(1, Math.round((r.end - r.start) / DAY));
-  const elapsed = Math.min(1, Math.max(0, (now - r.start) / (r.end - r.start)));
-  const day = Math.min(days, Math.max(0, Math.ceil((now - r.start) / DAY)));
-  // Below a fiftieth of the period the divisor is noise ("₹500 on day 1" is not a ₹15,000 month), so no forecast.
-  const projected = elapsed >= 0.02 ? (b.utilization ?? 0) / elapsed : null;
-  return { elapsed, day, days, projected };
-}
+// Period keys, labels, phase and pace all live in lib/budgetPeriod - the payroll budget page runs the same
+// arithmetic over the same key format, and a second copy is how two pages start disagreeing about which
+// quarter a date is in.
 
 const scopeKey = (b: { department?: string; category?: string; period_type: string; period_key: string }) =>
   `${b.department ? idOf(b.department) : "-"}|${b.category ? idOf(b.category) : "-"}|${b.period_type}|${b.period_key}`;
@@ -735,6 +664,7 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
         description="Spend caps per category, department and period. Spend is derived from approved and paid expenses."
         actions={<>{createBtn}<PageSettings me={me} host="expense-budgets" /></>}
       />
+      <BudgetNarration />
       <DataState state={state} error={error} onRetry={reload}>
         {rows.length === 0 ? (
           <EmptyState icon={PiggyBank} title="No budgets" description="Set a cap for a category, cost centre and period - spend against it is tracked from approved and paid expenses." action={createBtn} />
@@ -1160,7 +1090,7 @@ function BudgetBar({ b, warnAt, now, money }: { b: ExpenseBudget; warnAt: number
           <div>Spent {money(b.spent ?? 0)} of {money(b.amount)} ({pct}%)</div>
           {(b.pending ?? 0) > 0 && <div>{money(b.pending ?? 0)} awaiting approval</div>}
           {p && p.elapsed > 0 && p.elapsed < 1 && <div>Day {p.day} of {p.days} - {Math.round(p.elapsed * 100)}% of the period elapsed</div>}
-          {p?.projected != null && <div>At this pace: {money(p.projected * b.amount)} ({Math.round(p.projected * 100)}%)</div>}
+          {p?.projected != null && p.projectedAmount != null && <div>At this pace: {money(p.projectedAmount)} ({Math.round(p.projected * 100)}%)</div>}
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -1472,11 +1402,14 @@ function BudgetDetail({
           <BudgetBar b={b} warnAt={warnAt} now={now} money={money} />
           <p className="text-sm text-muted-foreground">
             {p && p.elapsed > 0 && p.elapsed < 1
-              ? <>Day {p.day} of {p.days} - {Math.round(p.elapsed * 100)}% of the period elapsed. {p.projected != null && <>At this pace the period ends at <span className={p.projected >= 1 ? "font-medium text-destructive" : "font-medium text-foreground"}>{money(p.projected * b.amount)} ({Math.round(p.projected * 100)}%)</span>.</>}</>
+              ? <>Day {p.day} of {p.days} - {Math.round(p.elapsed * 100)}% of the period elapsed. {p.projected != null && p.projectedAmount != null && <>At this pace the period ends at <span className={p.projected >= 1 ? "font-medium text-destructive" : "font-medium text-foreground"}>{money(p.projectedAmount)} ({Math.round(p.projected * 100)}%)</span>.</>}</>
               : p && p.elapsed >= 1
                 ? "Period closed."
                 : "Period hasn't started."}
           </p>
+          {b.projection_alerted_time && (
+            <p className="flex items-center gap-1.5 text-sm text-muted-foreground"><Bell className="h-3.5 w-3.5" /> Forecast warning already sent for this period - raising the cap or moving the period re-arms it.</p>
+          )}
           {(b.alert_level ?? 0) > 0 && (
             <p className="flex items-center gap-1.5 text-sm text-muted-foreground"><Bell className="h-3.5 w-3.5" /> {b.alert_level}% budget alert already sent for this period.</p>
           )}
@@ -1602,30 +1535,58 @@ function ScopeSpendSoFar({ open, category, department, periodType, periodKey, am
 // The period a cap covers, entered in the shape of its own type - a month input, a year+quarter pair, or a
 // year. It emits exactly the key format the server validates ("2026-07" | "2026-Q3" | "2026"), so nobody has
 // to learn that format to author a budget.
-function PeriodPicker({ type, value, onChange }: { type: PeriodType; value: string; onChange: (key: string) => void }) {
-  const thisYear = Number(thisYearStr()); // the org's year, like the selector above
-  const years = Array.from({ length: 7 }, (_, i) => thisYear - 2 + i);
-  const parsed = periodRange(type, value);
-  const year = parsed ? new Date(parsed.start).getUTCFullYear() : thisYear;
-  const quarter = parsed ? Math.floor(new Date(parsed.start).getUTCMonth() / 3) + 1 : 1;
+/**
+ * How this period's budgets moved against the previous one, in a sentence.
+ *
+ * NOT `WhatChanged`, deliberately. That panel is bound to `people-analytics:narrate` and to a window of two
+ * DATES; budgets narrate over a period KEY, through a GET, and compare against the previous period rather
+ * than the preceding span of equal length. The presentation is the same shape and a future merge is obvious -
+ * lift the loader and the labels out of both - but bending the shared one to two different period models to
+ * save twenty lines would make the component harder to read than either caller.
+ *
+ * LAZY, for the same reason WhatChanged is: narrating runs the budget rollup a second time over the previous
+ * period, so it is a second set of reads on a page that has already paid for one. It waits to be asked.
+ */
+function BudgetNarration() {
+  const [state, setState] = useState<"shut" | "loading" | "ready" | "error">("shut");
+  const [data, setData] = useState<{ text: string; source: string; compared_to: string | null } | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  if (type === "monthly") {
-    return <Input type="month" value={/^\d{4}-\d{2}$/.test(value) ? value : ""} onChange={(e) => onChange(e.target.value)} />;
+  if (state === "shut") {
+    return (
+      <div className="mb-4">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            setState("loading");
+            get<{ text: string; source: string; compared_to: string | null }>("expense-budgets/narration")
+              .then((r) => { setData(r); setState("ready"); setError(null); })
+              .catch((e: unknown) => { setState("error"); setError(e instanceof Error ? e.message : String(e)); });
+          }}
+        >
+          <TrendingUp className="mr-1.5 h-3.5 w-3.5" />
+          What changed since the previous period
+        </Button>
+      </div>
+    );
   }
-  const yearSelect = (
-    <Select value={String(year)} onValueChange={(y) => onChange(type === "yearly" ? y : `${y}-Q${quarter}`)}>
-      <SelectTrigger><SelectValue /></SelectTrigger>
-      <SelectContent>{years.map((y) => <SelectItem key={y} value={String(y)}>{y}</SelectItem>)}</SelectContent>
-    </Select>
-  );
-  if (type === "yearly") return yearSelect;
   return (
-    <div className="flex gap-2">
-      {yearSelect}
-      <Select value={String(quarter)} onValueChange={(q) => onChange(`${year}-Q${q}`)}>
-        <SelectTrigger><SelectValue /></SelectTrigger>
-        <SelectContent>{[1, 2, 3, 4].map((q) => <SelectItem key={q} value={String(q)}>Q{q}</SelectItem>)}</SelectContent>
-      </Select>
+    <div className="mb-4 rounded-xl border bg-card p-4 text-sm">
+      {state === "loading" && <p className="text-muted-foreground">Comparing…</p>}
+      {state === "error" && <p className="text-destructive">{error}</p>}
+      {state === "ready" && data && (
+        <>
+          <p>{data.text}</p>
+          {/* Said out loud rather than hidden: a deterministic summary is not prose somebody wrote, and a
+              reader deciding how much weight to give it deserves to know which they are looking at. */}
+          {data.source === "plain" && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Written from the figures{data.compared_to ? ` against ${data.compared_to}` : ""}, not by a model.
+            </p>
+          )}
+        </>
+      )}
     </div>
   );
 }

@@ -201,12 +201,28 @@ describe("budgetFor: which surface a request is charged to", () => {
 describe("the limiter in the request chain", () => {
   it("refuses with 429 and a Retry-After once a budget is spent", async () => {
     const { limit } = budgetFor("POST", "/v1/personal-documents:previewLetter");
+    // THE PRECONDITION, checked rather than assumed. The counter is a FIXED 60s window opened by the first
+    // call (lib/isolateRate.ts), and the middleware reads `Date.now()` with no seam - so this test only means
+    // anything if all `limit + 2` calls land inside one window. Unloaded that is 42 requests in ~300ms, but
+    // under a saturated gate a worker can stall, and if the window rolls mid-loop the counter resets, 429
+    // never comes and the assertion below fails with nothing to say about why.
+    //
+    // This once failed in a full-gate run and never reproduced (the run in question was starved by an
+    // unmemoized Intl formatter, since fixed). It is left instrumented rather than rewritten because the two
+    // candidate fixes - a clock seam in the middleware, or exhausting the budget through the limiter directly
+    // - are both design choices for whoever owns this, and a guess would produce a test that passes for the
+    // wrong reason.
+    const startedAt = Date.now();
     let last = await call("/v1/personal-documents:previewLetter", { method: "POST", body: "{}", headers: { "content-type": "application/json" } });
     // Below the ceiling the limiter is transparent: whatever the route answers (a validation error here) is
     // NOT a 429. That is the half that proves the assertion after the loop is about the budget.
     expect(last.status).not.toBe(429);
     for (let i = 0; i < limit + 2 && last.status !== 429; i++) {
       last = await call("/v1/personal-documents:previewLetter", { method: "POST", body: "{}", headers: { "content-type": "application/json" } });
+    }
+    const elapsed = Date.now() - startedAt;
+    if (last.status !== 429 && elapsed >= 60_000) {
+      throw new Error(`the rate-limit window rolled over mid-test (${elapsed}ms for ${limit + 2} calls, window is 60000ms), so the budget reset and 429 was never reachable - this is the test losing its precondition under load, not the limiter failing`);
     }
     expect(last.status).toBe(429);
     // Without this header a client cannot honour the refusal and simply retries into a closed door.

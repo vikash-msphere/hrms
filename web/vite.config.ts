@@ -253,12 +253,12 @@ function preloadUiFont(): Plugin {
 const PAGE_GROUPS: Record<string, readonly string[]> = {
   "ws-team": ["Directory", "EmployeeProfile", "OrgChart", "TeamAnalytics", "Onboarding", "NoticePeriods", "BackgroundChecks"],
   "ws-progress": ["Boards", "Goals", "Reviews", "CheckIns"],
-  "ws-connect": ["Announcements", "Suggestions", "Events"],
+  "ws-connect": ["Announcements", "Suggestions", "Events", "Moderation"],
   "ws-hiring": ["Pipeline", "Requisitions", "Candidates", "CandidateProfile", "Interviews", "Offers", "Referrals", "RecruitingAnalytics"],
   "ws-time": ["Attendance", "Schedule", "Timesheets", "Overtime", "RemoteWork", "Delegations"],
   "ws-leave": ["Leaves", "LeaveCalendar", "Holidays"],
   "ws-pay": ["Payslips", "Reimbursements", "Loans", "TaxDeclarations", "Benefits", "PayrollRuns"],
-  "ws-expenses": ["Expenses", "Vendors", "ExpenseBudgets"],
+  "ws-expenses": ["Expenses", "Vendors", "ExpenseBudgets", "CardTransactions"],
   "ws-assets": ["Assets", "Stocktakes"],
   // The Home group. Three small pages every session touches; one chunk between them is one request, not three.
   "ws-home": ["Approvals", "Profile", "Notifications"],

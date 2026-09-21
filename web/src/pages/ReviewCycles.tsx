@@ -3,6 +3,7 @@ import { Plus, Pencil, Trash2, Rocket, UserPlus, Lock, Unlock, BarChart3, Coins 
 import { create, patch, invoke, remove, get } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { calibrationNote } from "@/lib/calibrationNote";
 import { todayStr, addDaysYmd, daysBetweenYmd } from "@/lib/orgDay";
 import { DEFAULT_PERFORMANCE, ratingLabel, type PerformanceFramework } from "@/lib/performance";
 import type { BurnupPoint, Department, Employee, Review, ReviewCycle } from "@/types";
@@ -581,6 +582,13 @@ function CalibrationPanel({ cycle, employees, departments }: { cycle: ReviewCycl
   // Rating against delivery: the two halves of a performance conversation, which a single distribution bar
   // can't separate. Only reviews carrying both a rating and a goal score can be placed.
   const placed = rated.filter((r) => r.goal_attainment);
+  // One sentence about the shape of this distribution, from the rows already on screen.
+  const note = calibrationNote(
+    rated.filter((r) => r.overall_rating != null).map((r) => ({ rating: r.overall_rating!, departmentId: deptOf(r.employee) })),
+    framework.scale,
+    (id) => departments.find((d) => idOf(d.path) === id)?.display_name ?? "",
+  );
+
   const empName = (ref?: string) => {
     const e = employees.find((x) => idOf(x.path) === idOf(ref ?? ""));
     return e ? `${e.first_name} ${e.last_name}` : "Someone";
@@ -612,6 +620,15 @@ function CalibrationPanel({ cycle, employees, departments }: { cycle: ReviewCycl
         <span><span className="font-semibold tabular-nums">{done}</span> <span className="text-muted-foreground">acknowledged</span></span>
         {avg != null && <span><span className="font-semibold tabular-nums">{avg.toFixed(1)}</span> <span className="text-muted-foreground">average · {ratingLabel(framework.scale, Math.round(avg))}</span></span>}
       </div>
+      {/* THE SHAPE OF THE DISTRIBUTION, IN WORDS. Assembled from the counts, not written by a model - see
+          lib/calibrationNote.ts for why that is the design rather than a limitation. It names cohorts and
+          counts; it never names a person and never suggests moving anybody's rating. */}
+      {note.text && (
+        <p className="text-sm">
+          {note.text}
+          <span className="ml-1.5 text-xs text-muted-foreground">Facts only. What to do about it is the meeting's.</span>
+        </p>
+      )}
       {rated.length === 0 ? (
         <p className="text-sm text-muted-foreground">No shared ratings {dept === "all" ? "yet" : "in this department yet"}. The distribution fills in as managers share reviews.</p>
       ) : (

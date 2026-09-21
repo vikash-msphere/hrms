@@ -191,19 +191,41 @@ export function surcharge(taxAfterRebate: number, taxable: number, cfg: RegimeCo
 // The Chapter VI-A deduction a regime actually allows, from the employee's VERIFIED declarations keyed by
 // section. Sections the regime doesn't list are dropped; the rest are capped by `sectionCaps`. Pure, so the
 // projection, the payroll build and the Tax page all reduce income by exactly the same figure.
-export type DeductionRow = { section: string; declared: number; allowed: number };
-export function allowedDeductions(bySection: Record<string, number>, cfg: RegimeConfig): { total: number; rows: DeductionRow[] } {
+/** `cap` is the regime's limit for the section, null where it has none. Carried so a reader can be told "you
+ *  have declared 60,000 of a 150,000 limit" - a figure the app has always known and never stated, and the
+ *  only form of this that is useful BEFORE the window shuts. */
+export type DeductionRow = { section: string; declared: number; allowed: number; cap: number | null };
+
+/** A capped section the employee has declared NOTHING against. Reported separately from `rows` rather than as
+ *  a zero row, so no existing reader's list changes shape - and it is the case the reminder is most useful
+ *  for, since somebody who has declared nothing is exactly who does not know they could. */
+export type DeductionHeadroom = { section: string; cap: number; declared: number; remaining: number };
+
+export function allowedDeductions(bySection: Record<string, number>, cfg: RegimeConfig): { total: number; rows: DeductionRow[]; headroom: DeductionHeadroom[] } {
   const rows: DeductionRow[] = [];
+  const permittedIn = (section: string) => !cfg.deductionSections || cfg.deductionSections.includes(section);
   for (const [section, declared] of Object.entries(bySection)) {
     const amount = Math.max(0, declared);
     if (!amount) continue;
-    const permitted = !cfg.deductionSections || cfg.deductionSections.includes(section);
+    const permitted = permittedIn(section);
     const cap = cfg.sectionCaps?.[section];
     const allowed = !permitted ? 0 : cap != null ? Math.min(amount, cap) : amount;
-    rows.push({ section, declared: amount, allowed: r0(allowed) });
+    rows.push({ section, declared: amount, allowed: r0(allowed), cap: permitted && cap != null ? cap : null });
   }
   rows.sort((a, b) => a.section.localeCompare(b.section));
-  return { total: r0(rows.reduce((s, r) => s + r.allowed, 0)), rows };
+
+  // Every capped section this regime allows, with what is left in it. An UNCAPPED section has no headroom to
+  // report - "unlimited minus what you used" is not a number anybody can act on - and a section the regime
+  // disallows is not an opportunity, so neither appears.
+  const headroom: DeductionHeadroom[] = Object.entries(cfg.sectionCaps ?? {})
+    .filter(([section]) => permittedIn(section))
+    .map(([section, cap]) => {
+      const declared = Math.max(0, bySection[section] ?? 0);
+      return { section, cap, declared: r0(declared), remaining: r0(Math.max(0, cap - declared)) };
+    })
+    .filter((h) => h.remaining > 0)
+    .sort((a, b) => b.remaining - a.remaining); // most left first: the biggest opportunity is the useful one
+  return { total: r0(rows.reduce((s, r) => s + r.allowed, 0)), rows, headroom };
 }
 
 export type TaxBreakdown = {

@@ -6,7 +6,8 @@ import {
   commentCard, addCardTodos, toggleCardTodo, removeCardTodo, promoteCardTodo, watchCard, deleteCard, restoreCard, purgeCard,
   type CardInput,
 } from "../services/cards";
-import { suggestCardTriage } from "../services/cardTriage";
+import { suggestCardTriage, suggestGoalForCard, suggestStepsForCard } from "../services/cardTriage";
+import { cardFlowFor } from "../services/cardFlow";
 import { toCardResource } from "../http/serialize";
 import { MAX_RICH_COMMENT } from "../domain/richText";
 import { CARD_PRIORITIES } from "../domain/boards";
@@ -123,6 +124,25 @@ export const cards = collectionRoutes<CardInput, typeof schema.cards>({
     // double press rather than an error.
     watch: { run: (deps, user, id) => watchCard(deps, user, id, true) },
     unwatch: { run: (deps, user, id) => watchCard(deps, user, id, false) },
+    // The steps comparable DELIVERED work actually took, in the board's own words. Evidence where the draft
+    // button has to imagine, and free where the draft costs a generation.
+    suggestSteps: {
+      raw: async (c, id) => c.json({ steps: await suggestStepsForCard(c.get("deps"), c.get("scope"), id) }),
+    },
+    // The goal this card is probably serving, so `deliveryAdvancesGoal` has something to roll up into.
+    //
+    // Registered in SCOPE_READING_VERBS against GOALS, not cards: everything it answers with is a goal.
+    suggestGoal: {
+      raw: async (c, id) => c.json({ goals: await suggestGoalForCard(c.get("deps"), c.get("scope"), id) }),
+    },
+    // How long work like this takes on this board, from the board's own movement log.
+    //
+    // No model and no feature flag - this is arithmetic over rows the board already writes - but the same
+    // scope rule as `triage`, and for the same reason: the percentiles are computed from OTHER cards, so the
+    // corpus is the set this caller could have listed (SCOPE_READING_VERBS in middleware/authz.ts).
+    flow: {
+      raw: async (c, id) => c.json({ flow: await cardFlowFor(c.get("deps"), c.get("scope"), id) }),
+    },
     // What comparable delivered work says about this card, and whether it is already on the board twice.
     //
     // `raw`, so it owns its response: there is no card row to serialize here, and passing the analysis

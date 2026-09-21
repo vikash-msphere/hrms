@@ -21,6 +21,9 @@ const createSchema = z
     amount: positiveMoney(),
     incurred_on: z.string().nullable().optional(),
     description: z.string().nullable().optional(),
+    // The advance this claim spends, when there is one. Validated in the service against the employee it
+    // belongs to and its outstanding balance - the shape check here only says a string arrived.
+    advance: z.string().nullable().optional(),
   })
   .strict();
 

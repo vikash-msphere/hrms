@@ -17,6 +17,7 @@ export type PayComponentInput = {
   recurring?: boolean;
   in_ctc?: boolean; // employer_contribution only: inside CTC (default) vs paid over and above it
   pf_wages?: boolean; // earning only, and only under the "basic_plus" PF wage basis: counts as PF wages
+  gl_code?: string | null; // the account this component posts to in a payroll journal
 };
 
 // The PF family: employee/employer share (epf) plus the employer's EDLI and administration charges. All three
@@ -158,11 +159,15 @@ export const payComponentSpec: CrudSpec<PayComponentInput, typeof schema.payComp
       // Counting an allowance as PF wages is only meaningful for an EARNING (see pfWagesOf); pinned false
       // elsewhere so no row carries a flag its kind ignores.
       pfWages: input.kind === "earning" ? input.pf_wages ?? false : false,
+      // Trimmed, and an empty string is no mapping rather than an account called "". Applies to every kind:
+      // an employer contribution posts to an account exactly as an earning does.
+      glCode: input.gl_code?.trim() || null,
     };
   },
   patch: async (patch, row, deps) => {
     const set: SetOf<typeof schema.payComponents> = {};
     if (has(patch, "display_name")) set.name = patch.display_name;
+    if (has(patch, "gl_code")) set.glCode = patch.gl_code?.trim() || null;
     if (has(patch, "kind")) set.kind = patch.kind;
     if (has(patch, "method")) set.method = patch.method;
     if (has(patch, "rate")) set.rate = patch.rate ?? null;

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PlayCircle, Plus, Hammer, Send, CheckCircle2, Rocket, Loader2, FileSpreadsheet, Trash2, Eye, ChevronRight, AlertTriangle } from "lucide-react";
 import { api, get, create, invoke, download, remove, ApiError } from "@/api";
 import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreviewDialog";
@@ -8,8 +8,12 @@ import { cn, idOf, formatDate, formatMoney, round2 } from "@/lib/utils";
 import { todayStr } from "@/lib/orgDay";
 import { daysUntil, fmtDaysCount } from "@/lib/tableDerive";
 import { navigate } from "@/router";
+import { exportTable } from "@/lib/exportTable";
 import { useOrg, currencyDecimals } from "@/lib/org";
-import type { BankFormat, Me, Operation, PayPeriod, PayrollRun, PayrollRunItem } from "@/types";
+import type { BankFormat, Me, Operation, PayPeriod, PayrollRun, PayrollRunItem, RunReconciliation, RunJournal, RunVariance } from "@/types";
+// The statement's row labels live with the arithmetic that produces them, so a bucket cannot be renamed on the
+// server and keep its old caption here.
+import { MOVEMENT_LABEL } from "../../../src/domain/payrollReconcile";
 import { Chart } from "@/components/common/Chart";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -41,10 +45,29 @@ import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { useConfirm } from "@/components/common/confirm";
 import PayPeriods from "@/pages/PayPeriods";
 import { PayrollBonuses } from "@/components/common/PayrollBonuses";
+import { PayrollBudgets } from "@/components/common/PayrollBudgets";
 
 // A run's state as the page compares it. The API's casing is not guaranteed, which is why every comparison
 // in this file upper-cases first.
 const up = (s?: string) => (s ?? "").toUpperCase();
+
+// The run's own steps, named for a reader rather than for the state machine. `pay_date` is the only planned
+// one; every other entry is a fact about something that has already happened.
+// What a flag means when its own line set does not explain it - a fallback caption, never a substitute for
+// the reasons, which are the point.
+const VARIANCE_LABEL: Record<string, string> = {
+  net_moved_gross_flat: "same gross, different take-home",
+  net_moved: "take-home moved",
+  gross_moved: "gross moved",
+  component_added: "a new pay line",
+  component_removed: "a pay line stopped",
+  first_run: "first run for this person",
+};
+
+const MILESTONE_LABEL: Record<string, string> = {
+  cutoff: "Inputs close", created: "Created", built: "Built", submitted: "Sent for review", approved: "Approved",
+  bank_file: "Bank file", published: "Published", pay_date: "Pay date",
+};
 // How close a pay date has to be before an unfinished run is worth chasing. A week: long enough to build,
 // review and approve without a rush, short enough that the chip means something when it appears.
 const PAY_DATE_SOON_DAYS = 7;
@@ -128,7 +151,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
   const reviewFor = useRef<string | null>(null);
   const [items, setItems] = useState<PayrollRunItem[] | null>(null);
   type SplitDrift = { stale: string[]; skipped: string[] };
-  const [reviewStale, setReviewStale] = useState<{ stale: boolean; changes: string[]; split_drift?: SplitDrift; unpriced?: string[] } | null>(null);
+  const [reviewStale, setReviewStale] = useState<{ stale: boolean; diverged?: boolean; changes: string[]; split_drift?: SplitDrift; unpriced?: string[] } | null>(null);
   // Re-apply machinery for the split-drift warning below (prompt-only; the banner here is the surface).
   const { canReapply, reapplying, reapply: doReapply } = useSplitStaleness({ auto: false });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -138,9 +161,23 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
   // waits for an explicit ask rather than riding along with every review.
   const [compare, setCompare] = useState<{ label: string; net: Map<string, number> } | null>(null);
   const [comparing, setComparing] = useState(false);
+  // The org-level half of the same question. `compare` answers "whose pay moved"; this answers "what the
+  // movement is made of", and the two are fetched by one gesture because nobody wants one without the other.
+  const [reconcile, setReconcile] = useState<RunReconciliation | null>(null);
+  // Which rows to look at, and what must be true before approving. Loaded WITH the review rather than behind
+  // a gesture like the comparison is: the reconciliation answers a question somebody chose to ask, while this
+  // answers the one they are about to be asked anyway - a reviewer who has to press something to find out
+  // which rows are wrong will approve first and press second.
+  const [variance, setVariance] = useState<RunVariance | null>(null);
+  // The flags name employees by id; the breakdown already carries their names, so the band borrows them
+  // rather than the server sending a second copy or the page reading `employees` for a dialog.
+  const empName = useCallback(
+    (id?: string | null) => (id ? items?.find((it) => idOf(it.employee ?? "") === id)?.employee_name ?? id : ""),
+    [items],
+  );
   // Fetch the run DETAIL (carries staleness: inputs changed since the last build) + the per-employee breakdown.
   // The detail response has a fresh etag, so it's stored as reviewRun and drives an in-place rebuild.
-  type RunDetail = PayrollRun & { stale?: boolean; changes?: string[]; built_time?: string | null; split_drift?: SplitDrift; unpriced?: string[] };
+  type RunDetail = PayrollRun & { stale?: boolean; diverged?: boolean; changes?: string[]; built_time?: string | null; split_drift?: SplitDrift; unpriced?: string[] };
   async function openReview(run: PayrollRun) {
     reviewFor.current = idOf(run.path);
     setReviewRun(run);
@@ -149,17 +186,23 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     setExpanded(new Set());
     setItemQuery("");
     setCompare(null);
+    setReconcile(null);
+    setVariance(null);
     try {
-      const [detail, r] = await Promise.all([
+      const [detail, r, v] = await Promise.all([
         get<RunDetail>("payroll-runs/" + idOf(run.path)),
         get<{ results: PayrollRunItem[] }>("payroll-runs/" + idOf(run.path) + "/items"),
+        // A review that cannot compute its flags is still a usable review, so a failure here drops the band
+        // rather than the dialog.
+        get<RunVariance>("payroll-runs/" + idOf(run.path) + "/variance").catch(() => null),
       ]);
       // Closed (or moved to another run) while these were in flight: their answers belong to a dialog that is
       // no longer open, and setting the run again would put it back on screen.
       if (reviewFor.current !== idOf(run.path)) return;
       setReviewRun(detail);
-      setReviewStale({ stale: !!detail.stale, changes: detail.changes ?? [], split_drift: detail.split_drift, unpriced: detail.unpriced });
+      setReviewStale({ stale: !!detail.stale, diverged: !!detail.diverged, changes: detail.changes ?? [], split_drift: detail.split_drift, unpriced: detail.unpriced });
       setItems(r.results ?? []);
+      setVariance(v);
     } catch (e) {
       if (reviewFor.current !== idOf(run.path)) return;
       setItems([]);
@@ -184,8 +227,15 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     if (!priorRun) return;
     setComparing(true);
     try {
-      const r = await get<{ results: PayrollRunItem[] }>("payroll-runs/" + idOf(priorRun.run.path) + "/items");
+      // The statement is computed server-side against the run's OWN idea of the previous run (by pay date,
+      // finalized only), which is the same rule `priorRun` uses here for the label. Fetched together so the
+      // per-person diff and the totals above it can never describe two different comparisons.
+      const [r, rec] = await Promise.all([
+        get<{ results: PayrollRunItem[] }>("payroll-runs/" + idOf(priorRun.run.path) + "/items"),
+        get<RunReconciliation>("payroll-runs/" + idOf(reviewRun!.path) + "/reconciliation").catch(() => null),
+      ]);
       setCompare({ label: priorRun.period.display_name, net: new Map((r.results ?? []).map((it) => [it.employee, it.net])) });
+      setReconcile(rec);
     } catch (e) {
       toast({ title: "Couldn't load the previous run", description: (e as Error).message, variant: "destructive" });
     } finally {
@@ -612,12 +662,58 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
             { label: "Statutory report (.xlsx)", icon: <FileSpreadsheet className="h-4 w-4" />, onClick: () => downloadStatutory(run), verb: "statutoryReport" },
             { label: "PF ECR file (.txt)", icon: <FileSpreadsheet className="h-4 w-4" />, onClick: () => downloadStatutory(run, "ecr"), verb: "statutoryReport" },
           ] : []),
+          // Built onward, the same point the statutory report becomes meaningful: before the run is priced
+          // there is nothing to post. No verb gate - the journal is a GET on the run, so seeing the row is
+          // already the read decision.
+          ...(["REVIEW", "APPROVED", "PUBLISHED"].includes(run.state?.toUpperCase() ?? "")
+            ? [{ label: "Accounting journal (.csv)", icon: <FileSpreadsheet className="h-4 w-4" />, onClick: () => downloadJournal(run) }]
+            : []),
           ...(canDelete ? [{ label: "Delete run", icon: <Trash2 className="h-4 w-4" />, onClick: () => removeRun(run), destructive: true, verb: "delete" }] : []),
         ];
         return <RowActions actions={actions} objectPath={run.path} can={run.access?.can} />;
       },
     },
   ];
+
+  /**
+   * The month as a journal, for the accounting system.
+   *
+   * THE REFUSAL IS REAL HERE, not only in the API. An entry that does not balance, or one missing a component
+   * nobody mapped, must not reach a CSV somebody imports - an unmapped component dropped silently would still
+   * produce a file whose debits equal its credits, just for less money than the run actually paid. So the
+   * failure is a toast naming the reason and no download at all, which is the one outcome that cannot be
+   * posted by mistake.
+   */
+  async function downloadJournal(run: PayrollRun) {
+    try {
+      const j = await get<RunJournal>("payroll-runs/" + idOf(run.path) + "/journal");
+      if (j.unmapped?.length) {
+        toast({
+          title: "No journal yet",
+          description: `These pay components have no GL code: ${j.unmapped.join(", ")}. Map them in Pay components, then try again.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      if (!j.balanced) {
+        toast({
+          title: "The journal does not balance",
+          description: `Debits ${money(j.total_debit ?? 0)} against credits ${money(j.total_credit ?? 0)}, out by ${money(j.residual ?? 0)}. This is a problem with the run's figures, not with the export - report it rather than posting it.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      await exportTable(
+        `payroll-journal-${j.posted_from || idOf(run.path)}`,
+        ["Account", "Cost centre", "Debit", "Credit", "Narration", "Reference"],
+        (j.lines ?? []).map((l) => [l.account, l.department ?? "", l.debit || "", l.credit || "", l.label, j.posted_from ?? ""]),
+        "csv",
+        "payroll-runs",
+      );
+    } catch (e) {
+      toast({ title: "Couldn't build the journal", description: (e as Error).message, variant: "destructive" });
+    }
+  }
 
   const quickRunBtn = canQuick ? (
     <Button variant="outline" onClick={openQuick}><Rocket className="h-4 w-4" /> Quick monthly run</Button>
@@ -636,7 +732,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     </>
   );
 
-  const activeTab = ["periods", "bonuses"].includes(tab ?? "") ? tab! : "runs";
+  const activeTab = ["periods", "bonuses", "budgets"].includes(tab ?? "") ? tab! : "runs";
   // `payroll-runs/runs/<id>` opens that run's breakdown - the link you send when asking someone to check a run.
   useDeepOpen(activeTab === "runs" ? openId : undefined, rows, openReview);
   // "New since last looked" counts per sub-tab; the tab you're on is suppressed and marked seen.
@@ -644,6 +740,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     { key: "payroll-runs:runs", collection: "payroll-runs" },
     { key: "payroll-runs:periods", collection: "pay-periods" },
     { key: "payroll-runs:bonuses", collection: "bonuses" },
+    { key: "payroll-runs:budgets", collection: "payroll-budgets" },
   ]);
   useEffect(() => {
     markTabSeen(`payroll-runs:${activeTab}`);
@@ -666,6 +763,9 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
           <AccessTab value="runs" target={{ collection: "payroll-runs", label: "Payroll Runs" }}>Runs<ActivityBadge count={tabBadge("runs")} /></AccessTab>
           <AccessTab value="periods" target={{ collection: "pay-periods", label: "Pay periods" }}>Pay periods<ActivityBadge count={tabBadge("periods")} /></AccessTab>
           <AccessTab value="bonuses" target={{ collection: "bonuses", label: "Bonuses" }}>Bonuses<ActivityBadge count={tabBadge("bonuses")} /></AccessTab>
+          {/* The pay bill against what was budgeted for it. Here rather than on the expenses budget page:
+              spend comes from these runs, and the two are read together. */}
+          <AccessTab value="budgets" target={{ collection: "payroll-budgets", label: "Payroll budgets" }}>Budgets<ActivityBadge count={tabBadge("budgets")} /></AccessTab>
         </TabsList>
 
         <TabsContent value="runs">
@@ -700,6 +800,10 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
 
         <TabsContent value="bonuses">
           <PayrollBonuses />
+        </TabsContent>
+
+        <TabsContent value="budgets">
+          <PayrollBudgets />
         </TabsContent>
       </Tabs>
 
@@ -831,8 +935,30 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
                 ? "Published - these are the figures on the payslips employees can see."
                 : "Draft figures. Nothing reaches an employee until the run is published."}
               {reviewPeriod ? ` Pays for ${formatDate(reviewPeriod.period_start)} - ${formatDate(reviewPeriod.period_end)}, on ${formatDate(reviewPeriod.pay_date)}.` : ""}
+              {/* Publishing writes the payslips; this is the only place that says whether anybody received one.
+                  Counted from the owner's own first view, so it is a delivery figure and not a record of who
+                  has been reading what. Silent once everybody has opened theirs - a line that always reads
+                  "0 outstanding" is a line people stop seeing. */}
+              {(reviewRun?.payslips_unopened ?? 0) > 0 && (
+                <> <span className="text-warning">{reviewRun!.payslips_unopened} {reviewRun!.payslips_unopened === 1 ? "person has" : "people have"} not opened their payslip yet.</span></>
+              )}
             </DialogDescription>
           </DialogHeader>
+          {/* Where the month has got to. Planned dates and actual ones on one line, so "are we late" is a
+              glance rather than a reconstruction across three pages. Steps that have not happened are shown
+              greyed rather than hidden - the gap IS the information, and a list that only showed what was done
+              would read as complete at every stage. */}
+          {(reviewRun?.timeline?.length ?? 0) > 0 && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+              {reviewRun!.timeline!.map((m) => (
+                <span key={m.key} className={cn("whitespace-nowrap", m.at_time ? "text-foreground" : "text-muted-foreground/60")}>
+                  <span className="font-medium">{MILESTONE_LABEL[m.key] ?? m.key}</span>{" "}
+                  {m.at_time ? formatDate(m.at_time) : "-"}
+                  {m.actor ? <span className="text-muted-foreground"> · {m.actor}</span> : null}
+                </span>
+              ))}
+            </div>
+          )}
           {/* `scroll-pt-10` is the height of the table's own sticky header row: it pins to THIS scroller, so
               anything that scrolls a row into view here has to leave room for it or the row lands underneath
               it, unreadable and unclickable. */}
@@ -851,6 +977,25 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
                   {acting === idOf(reviewRun.path) ? "Rebuilding…" : "Rebuild now"}
                 </Button>
               )}
+            </div>
+          )}
+          {/* The same scan on a COMMITTED run, and deliberately a different banner with NO rebuild button.
+              A published run is the record of what was actually paid; rebuilding it is the one thing nobody
+              should do here, so offering the button would be offering the mistake. This states the fact and
+              names where the correction belongs instead. Before this, a committed run reported nothing at
+              all and the payslip and the live data could disagree with nothing on screen saying which was
+              true. */}
+          {reviewStale?.diverged && (
+            <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground dark:text-warning">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p className="font-medium">Inputs have changed since this run was built, and it can no longer be rebuilt.</p>
+                <p className="mt-0.5 text-xs">
+                  Changed: {reviewStale.changes.join(", ")}. The payslips here remain the record of what was paid. Anything owed as a
+                  result belongs in a later run - a back-dated pay revision is paid as arrears, and bonuses, claims, encashments and
+                  overtime stay queued until the next run picks them up.
+                </p>
+              </div>
             </div>
           )}
           {/* Split drift: the run priced a CACHED basic / Special Allowance that the current pay-component setup no
@@ -943,6 +1088,94 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
               </div>
               {/* The headline a reviewer actually needs: not the total, but how many people's pay moved since
                   last month, and who is new. Everything else can be left unread. */}
+              {/* THE POINTER. A reviewer with 240 rows and nothing saying where to look reads the first screen and
+              approves; the whole value of this band is that it names the rows and the reason each one moved.
+              Blocking issues are separated out because they will refuse :approve - saying so here is cheaper
+              than letting somebody find out by pressing it. Absent entirely when there is nothing to say,
+              which on a quiet month is most months. */}
+          {variance && (variance.flags?.length || variance.preflight?.length) ? (
+            <div className="space-y-2">
+              {(variance.preflight ?? []).some((i) => i.blocking) && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm">
+                  <p className="font-medium text-destructive">
+                    {(variance.preflight ?? []).filter((i) => i.blocking).length} item(s) are arithmetically wrong - this run cannot be approved until it is rebuilt.
+                  </p>
+                  {(variance.preflight ?? []).filter((i) => i.blocking).slice(0, 5).map((i, n) => (
+                    <p key={n} className="text-xs text-muted-foreground">{i.employee_id ? empName(i.employee_id) : "This run"}: {i.detail}</p>
+                  ))}
+                </div>
+              )}
+              {(variance.flags ?? []).length > 0 && (
+                <details className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
+                  <summary className="cursor-pointer select-none">
+                    <span className="font-medium">{(variance.flags ?? []).length}</span> of {items?.length ?? 0} worth a look
+                    {variance.compared_against ? <span className="text-muted-foreground"> · against the last {variance.compared_against} run{variance.compared_against === 1 ? "" : "s"}</span> : null}
+                  </summary>
+                  <div className="mt-2 space-y-1">
+                    {(variance.flags ?? []).slice(0, 25).map((f, n) => (
+                      <div key={n} className="flex items-baseline justify-between gap-3 text-xs">
+                        <span>
+                          <span className="font-medium">{empName(f.employee_id)}</span>
+                          {" "}
+                          <span className="text-muted-foreground">
+                            {f.reasons?.length ? f.reasons.join(", ") : VARIANCE_LABEL[f.kind] ?? f.kind}
+                          </span>
+                        </span>
+                        {f.kind !== "first_run" && (
+                          <span className={cn("shrink-0 tabular-nums", (f.delta ?? 0) < 0 ? "text-destructive" : "text-foreground")}>
+                            {(f.delta ?? 0) > 0 ? "+" : ""}{money(f.delta ?? 0)}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+              {(variance.preflight ?? []).some((i) => !i.blocking) && (
+                <p className="text-xs text-muted-foreground">
+                  Also worth checking: {(variance.preflight ?? []).filter((i) => !i.blocking).slice(0, 4).map((i) => `${i.employee_id ? empName(i.employee_id) : "run"} - ${i.detail}`).join("; ")}.
+                </p>
+              )}
+            </div>
+          ) : null}
+          {/* What the movement is MADE of, above the per-person diff. Every row is signed and they sum to
+                  the difference between the two runs' gross, so the statement closes: a reviewer who accepts
+                  these five lines has accounted for the whole month without opening anybody's breakdown.
+                  `residual` is zero unless the server's own bucketing is broken, so it is shown ONLY when it
+                  is not - a zero on screen every month teaches people to stop reading it. */}
+              {reconcile && reconcile.compared_to && (
+                <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
+                  <table className="w-full tabular-nums">
+                    <tbody>
+                      <tr className="text-muted-foreground">
+                        <td className="py-0.5">Gross last run ({reconcile.opening.employees} paid)</td>
+                        <td className="py-0.5 text-right">{money(reconcile.opening.gross)}</td>
+                      </tr>
+                      {reconcile.movements.filter((m) => m.amount !== 0 || m.employees > 0).map((m) => (
+                        <tr key={m.key}>
+                          <td className="py-0.5 pl-3 text-muted-foreground">
+                            {MOVEMENT_LABEL[m.key]}
+                            {m.employees > 0 ? <span className="text-xs"> ({m.employees})</span> : null}
+                          </td>
+                          <td className={cn("py-0.5 text-right", m.amount < 0 ? "text-muted-foreground" : "text-foreground")}>
+                            {m.amount > 0 ? "+" : ""}{money(m.amount)}
+                          </td>
+                        </tr>
+                      ))}
+                      <tr className="border-t font-medium">
+                        <td className="py-0.5">Gross this run ({reconcile.closing.employees} paid)</td>
+                        <td className="py-0.5 text-right">{money(reconcile.closing.gross)}</td>
+                      </tr>
+                      {(reconcile.residual !== 0 || reconcile.headcount_residual !== 0) && (
+                        <tr className="text-destructive">
+                          <td className="py-0.5">Unexplained - report this, the breakdown above is incomplete</td>
+                          <td className="py-0.5 text-right">{money(reconcile.residual)}</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
               {compare && (
                 <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
                   {(() => {
@@ -1027,10 +1260,21 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
                                     that was never earned, so it leaves gross and every tax/statutory base) and
                                     deductions. */}
                                 {it.lines.filter((l) => l.kind === "earning" || l.kind === "deduction").map((l, i) => (
-                                  <div key={i} className="flex justify-between text-xs">
-                                    <span className={l.kind === "deduction" ? "text-destructive" : ""}>{l.name}{l.kind === "earning" && l.taxable === false ? " (non-taxable)" : ""}</span>
-                                    <span className="tabular-nums">{l.kind === "deduction" ? "-" : ""}{money(l.amount)}</span>
-                                  </div>
+                                  <Fragment key={i}>
+                                    <div className="flex justify-between text-xs">
+                                      <span className={l.kind === "deduction" ? "text-destructive" : ""}>{l.name}{l.kind === "earning" && l.taxable === false ? " (non-taxable)" : ""}</span>
+                                      <span className="tabular-nums">{l.kind === "deduction" ? "-" : ""}{money(l.amount)}</span>
+                                    </div>
+                                    {/* What the line is made of, where the lump alone cannot be checked - arrears
+                                        naming the months they cover. Indented and muted: this explains a figure
+                                        already counted above, so it must not read as more money. */}
+                                    {l.parts?.map((pt, pi) => (
+                                      <div key={pi} className="flex justify-between pl-3 text-[11px] text-muted-foreground">
+                                        <span>{pt.label}</span>
+                                        <span className="tabular-nums">{money(pt.amount)}</span>
+                                      </div>
+                                    ))}
+                                  </Fragment>
                                 ))}
                                 {/* Perquisites: taxable VALUE the employee never receives in cash (e.g. the interest
                                     concession on a cheap employer loan). They lift the taxable gross - and so the

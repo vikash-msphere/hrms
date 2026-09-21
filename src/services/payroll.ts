@@ -8,17 +8,23 @@ import type { AppUser } from "../env";
 import { audit, createdMeta, removedMeta, stateMeta } from "../lib/audit";
 import { notifyMany } from "./notifications";
 import { emitEvent } from "./eventBus";
-import { notFound, failedPrecondition, aborted } from "../lib/errors";
+import { notFound, failedPrecondition, aborted, invalidArgument } from "../lib/errors";
 import { computeRunItem, canTransition, isEditable, applyStructure, overtimePay, employerCostLines, componentLineCode, pfWagesOf, DEFAULT_OVERTIME_CONFIG, DEFAULT_CTC_CONFIG, type Line, type RunState, type OvertimeConfig, type CtcConfig } from "../domain/payroll";
 import { round2 } from "../domain/money";
+import { reconcileRuns, type Reconciliation, type RunItemSnapshot } from "../domain/payrollReconcile";
+import { buildJournal, type Journal, type ComponentAccounts } from "../domain/payrollJournal";
+import { reconcilePayments, type PaymentReconciliation, type PaymentResultRow } from "../domain/paymentResult";
+import { findVariances, preflight, DEFAULT_VARIANCE_FRACTION, type VarianceFlag, type VarianceItem, type PreflightIssue } from "../domain/payrollVariance";
 import { decimalsFor, roundMoney, type CurrencyDecimals } from "../domain/currency";
-import { loanPerquisiteMonthly, DEFAULT_LOAN_PERQUISITE_CONFIG, type LoanPerquisiteConfig } from "../domain/loans";
+import { loanPerquisiteMonthly, recoverableFrom, DEFAULT_LOAN_PERQUISITE_CONFIG, type LoanPerquisiteConfig } from "../domain/loans";
 import { allStructureLines } from "./salaryStructures";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import { tdsComponent, loadTaxConfig, finalizedTotals, fyWindow, monthKey, compAsOf, compGrossPricer, unpaidEarningMonths, projectedGrossForMonths, employedMonthsInFy, collectibleMonths, assembleProjection, readDeclarations, verifiedDeductionsAll, EMPTY_FINALIZED_TOTALS } from "./taxProjection";
 import { reimbursementPayoutMode, approvedUnpaidReimbursementsAll, resetReimbursementsPaidByRun, markReimbursementsPaidByRun } from "./reimbursements";
 import { approvedUnpaidEncashmentsAll, resetEncashmentsPaidByRun, markEncashmentsPaidByRun } from "./leaveEncashments";
+import { LOP_ADJUST_CODE, lopAdjustLabel } from "../domain/lopAdjust";
+import { openAdjustmentsFor, markLopAdjustmentsPaidByRun, closedPeriodFor, restateLop } from "./lopAdjustments";
 import { unpaidBonusesAll, markBonusesPaidByRun, resetBonusesPaidByRun } from "./bonuses";
 import { dueLoanInstallmentsAll, outstandingLoansAll, loanRepaymentWrites, resetLoanRepaymentStmts } from "./loans";
 import { runBatch, runBatchChecked, chunk, byIdChunks, insertBatches, groupBy, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
@@ -146,6 +152,462 @@ export async function listRunItems(deps: Deps, runId: string) {
       };
     })
     .sort((a, b) => a.code.localeCompare(b.code) || a.employee_name.localeCompare(b.employee_name));
+}
+
+/** A compensation row's frozen arrears breakdown, or [] for a row that carries none or an unreadable one. A
+ *  display detail must never be the thing that fails a payroll build. */
+function parseArrearsPeriods(json: string | null | undefined): { label: string; amount: number }[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json) as unknown;
+    if (!Array.isArray(v)) return [];
+    return v
+      .filter((x): x is { label: string; amount: number } =>
+        !!x && typeof (x as any).label === "string" && Number.isFinite((x as any).amount))
+      .map((x) => ({ label: x.label, amount: x.amount }));
+  } catch {
+    return [];
+  }
+}
+
+// ---- What to look at before approving (items 1, 2, 3, 5) ------------------------------------------------
+
+/** How many of an employee's own previous runs the comparison is made against. Three is enough that one
+ *  unusual month cannot decide the baseline, and few enough that a raise six months ago is not still being
+ *  argued with. */
+const VARIANCE_HISTORY = 3;
+
+export type RunVariance = { flags: VarianceFlag[]; preflight: PreflightIssue[]; compared_against: number };
+
+/**
+ * The rows of this run worth a reviewer's attention, and everything that should be true before it is
+ * approved.
+ *
+ * Derived on read rather than stamped at build, for the same reason the reconciliation is: a rebuild changes
+ * the numbers, and a stored answer would then describe a run that no longer exists.
+ *
+ * THE HISTORY READ IS THE COST, and it is bounded: the trailing finalized runs for the periods immediately
+ * before this one, which is three runs' worth of items rather than the whole table. `payroll_run_items` is
+ * read by run id, which `rri_run_idx` covers.
+ */
+export async function runVariance(deps: Deps, runId: string): Promise<RunVariance> {
+  const run = await getRun(deps, runId);
+  const items = await deps.db
+    .select({
+      employeeId: schema.payrollRunItems.employeeId,
+      linesJson: schema.payrollRunItems.linesJson,
+      gross: schema.payrollRunItems.gross,
+      net: schema.payrollRunItems.net,
+    })
+    .from(schema.payrollRunItems)
+    .where(eq(schema.payrollRunItems.runId, runId));
+  const current: VarianceItem[] = items.map((it) => ({ employeeId: it.employeeId, lines: JSON.parse(it.linesJson) as Line[], gross: it.gross, net: it.net }));
+
+  // The runs to compare against: finalized, for periods earlier than this one, most recent first. Same rule
+  // `priorFinalizedRun` applies for the reconciliation, widened from one run to three - a draft is somebody's
+  // working copy and must not become the baseline another month is judged against.
+  const periods = await refPayPeriods(deps);
+  const own = periods.find((p) => p.uuid === run.payPeriodId);
+  const order = new Map(
+    periods
+      .filter((p) => own && +new Date(p.payDate) < +new Date(own.payDate))
+      .sort((a, b) => +new Date(b.payDate) - +new Date(a.payDate))
+      .map((p, i) => [p.uuid, i]),
+  );
+  const priorRuns = order.size
+    ? (await byIdChunks([...order.keys()], (group) =>
+        deps.db
+          .select({ uuid: schema.payrollRuns.uuid, payPeriodId: schema.payrollRuns.payPeriodId })
+          .from(schema.payrollRuns)
+          .where(and(inArray(schema.payrollRuns.payPeriodId, group), inArray(schema.payrollRuns.state, ["APPROVED", "PUBLISHED"]), ne(schema.payrollRuns.uuid, runId))),
+      ))
+        .sort((a, b) => (order.get(a.payPeriodId) ?? Infinity) - (order.get(b.payPeriodId) ?? Infinity))
+        .slice(0, VARIANCE_HISTORY)
+    : [];
+
+  const history = new Map<string, VarianceItem[]>();
+  if (priorRuns.length) {
+    // In run order, so each employee's list stays most-recent-first - which is what lets the reason codes
+    // compare against LAST month while the threshold compares against the median.
+    for (const pr of priorRuns) {
+      for (const it of await deps.db
+        .select({
+          employeeId: schema.payrollRunItems.employeeId,
+          linesJson: schema.payrollRunItems.linesJson,
+          gross: schema.payrollRunItems.gross,
+          net: schema.payrollRunItems.net,
+        })
+        .from(schema.payrollRunItems)
+        .where(eq(schema.payrollRunItems.runId, pr.uuid))) {
+        const held = history.get(it.employeeId);
+        const entry: VarianceItem = { employeeId: it.employeeId, lines: JSON.parse(it.linesJson) as Line[], gross: it.gross, net: it.net };
+        if (held) held.push(entry);
+        else history.set(it.employeeId, [entry]);
+      }
+    }
+  }
+
+  const cfg = await getSettingValue<{ net_fraction?: number }>(deps, "payroll-variance", {});
+  const fraction = Number.isFinite(Number(cfg.net_fraction)) && Number(cfg.net_fraction) > 0 ? Number(cfg.net_fraction) : DEFAULT_VARIANCE_FRACTION;
+
+  // Who has no account on file, by hash-free presence alone: the pre-flight needs to know THAT a payout has
+  // nowhere to go, never the number itself.
+  const empIds = [...new Set(current.map((c) => c.employeeId))];
+  const bankRows = empIds.length
+    ? await byIdChunks(empIds, (group) =>
+        deps.db.select({ uuid: schema.employees.uuid, enc: schema.employees.bankDetailsEnc }).from(schema.employees).where(inArray(schema.employees.uuid, group)),
+      )
+    : [];
+  const missingBankAccount = new Set(bankRows.filter((r) => !r.enc).map((r) => r.uuid));
+  const taxedLastRun = new Set(
+    [...history.entries()].filter(([, past]) => past[0]?.lines.some((l) => l.code === "TDS" && l.amount > 0)).map(([id]) => id),
+  );
+
+  return {
+    flags: findVariances(current, history, fraction),
+    preflight: preflight({ items: current, missingBankAccount, unpriced: parseIdList(run.unpricedJson), taxedLastRun }),
+    compared_against: priorRuns.length,
+  };
+}
+
+// ---- What the bank did with the money (item 30) ----------------------------------------------------------
+
+export type PaymentResultSummary = PaymentReconciliation & { run: string };
+
+/**
+ * Record a bank's response against the run that produced the payout file.
+ *
+ * ONLY FOR A RUN WHOSE FILE WENT OUT. A response about a run that never produced one is not a reconciliation,
+ * it is the wrong file, and accepting it would write payment outcomes for money that never moved.
+ *
+ * The matching is `domain/paymentResult.ts` and the parsing is the caller's: every bank returns a different
+ * file exactly as every bank takes a different one, so a new bank is a parser rather than a change to how a
+ * payment is reconciled.
+ *
+ * WHAT THIS DOES NOT DO, and it is a deliberate stop rather than an omission: it does not release the
+ * payables a failed transfer was meant to settle. The bonuses, claims and encashments that run marked paid
+ * stay marked, because un-paying them would reopen a PUBLISHED run's queue and the ordinary remedy for a
+ * bounced transfer is to re-send it out of band, not to rebuild payroll. What the app owes here is an honest
+ * record that the money did not arrive, and somebody told. Requeueing is a larger decision about what a
+ * published run means and belongs to whoever takes it.
+ */
+export async function recordPaymentResults(
+  deps: Deps,
+  actor: AppUser,
+  runId: string,
+  rows: readonly PaymentResultRow[],
+): Promise<PaymentResultSummary> {
+  const run = await getRun(deps, runId);
+  if (!run.bankFileAt) {
+    throw failedPrecondition("no payout file has been generated for this run, so there is no payment for a bank to report on");
+  }
+
+  // Who the file actually carried. A zero-net row was never sent and cannot come back, so it is not payable
+  // and a response naming it is unmatched rather than unreported.
+  const items = await deps.db
+    .select({ employeeId: schema.payrollRunItems.employeeId, net: schema.payrollRunItems.net })
+    .from(schema.payrollRunItems)
+    .where(eq(schema.payrollRunItems.runId, runId));
+  const payable = new Set(items.filter((it) => it.net > 0.005).map((it) => it.employeeId));
+
+  const result = reconcilePayments(payable, rows);
+  const at = new Date();
+  if (result.matched.length) {
+    await runBatch(
+      deps.db,
+      result.matched.map((m) =>
+        deps.db
+          .update(schema.payrollRunItems)
+          .set({ paymentStatus: m.status, paymentAt: at, paymentRef: m.reference, paymentReason: m.reason, updatedAt: at })
+          .where(and(eq(schema.payrollRunItems.runId, runId), eq(schema.payrollRunItems.employeeId, m.employeeId))),
+      ),
+    );
+  }
+
+  // The trail carries the COUNTS and the unmatched ids rather than the rows: a response file is a statement
+  // about named people's money, and the audit meta is read by more people than the run is.
+  await audit(deps, actor, "payroll.payment_result", "payroll-runs", runId, {
+    ...result.counts,
+    ...(result.unmatched.length ? { unmatched: result.unmatched.length } : {}),
+  });
+
+  // A failure is the whole reason this exists, so it is said out loud rather than left on a page somebody may
+  // not open. Best-effort: the outcomes are already recorded and a notification must not undo that.
+  const failed = result.matched.filter((m) => m.status !== "paid");
+  if (failed.length) {
+    try {
+      // ONE FAN-OUT, not a call per person: `notifyMany` sends one body to many, which costs a bounded number
+      // of subrequests where a per-person message would cost one each. The body is therefore generic, and the
+      // BANK'S OWN REASON is deliberately not in it - it is recorded on the run item and in the trail for
+      // payroll, who are the ones who can act on "account closed" as opposed to merely reading it. What the
+      // employee needs from this message is that their money did not arrive and that somebody already knows.
+      await notifyMany(deps, failed.map((f) => f.employeeId), {
+        type: "payroll.payment_failed",
+        title: "Your salary payment did not go through",
+        body: "The bank did not complete the transfer. Payroll has been told and will be in touch.",
+        link: "payslips",
+        subject: `payroll-runs/${runId}`,
+      });
+    } catch (err) {
+      console.error("[payroll] payment-failure notifications failed (the outcomes are recorded)", err);
+    }
+  }
+
+  return { ...result, run: `payroll-runs/${runId}` };
+}
+
+// ---- The accounting handoff ------------------------------------------------------------------------------
+
+/** The accounts that are not derived from a pay component, held in the `payroll-gl` settings blob. */
+type PayrollGlConfig = { net_payable?: string; rounding?: string };
+
+export type RunJournal = Journal & { run: string; period: string | null; posted_from: string };
+
+/**
+ * This run as a journal entry, derived on read and stored nowhere.
+ *
+ * The arithmetic and the side-of-the-entry rules live in `domain/payrollJournal.ts`; this resolves the three
+ * things that come from the database - which account each component posts to, which cost centre each item was
+ * stamped with, and the two accounts that are not components - and hands them over.
+ *
+ * NOT stored, for the same reason the reconciliation is not: a rebuild changes the numbers, and a stored
+ * journal would then describe a run that no longer exists. Read it when you need it.
+ */
+export async function runJournal(deps: Deps, runId: string): Promise<RunJournal> {
+  const run = await getRun(deps, runId);
+  const items = await deps.db
+    .select({
+      employeeId: schema.payrollRunItems.employeeId,
+      departmentId: schema.payrollRunItems.departmentId,
+      linesJson: schema.payrollRunItems.linesJson,
+      net: schema.payrollRunItems.net,
+    })
+    .from(schema.payrollRunItems)
+    .where(eq(schema.payrollRunItems.runId, runId));
+
+  // Every component, including disabled and soft-deleted ones: a run priced months ago may carry a line whose
+  // component has since been retired, and its money still has to post somewhere.
+  const accounts: ComponentAccounts = new Map(
+    (await refPayComponents(deps)).map((c) => [componentLineCode(c.name), { glCode: c.glCode ?? null, name: c.name }]),
+  );
+  const gl = await getSettingValue<PayrollGlConfig>(deps, "payroll-gl", {});
+  const period = (await refPayPeriods(deps)).find((p) => p.uuid === run.payPeriodId);
+
+  const journal = buildJournal(
+    items.map((it) => ({ employeeId: it.employeeId, departmentId: it.departmentId, lines: JSON.parse(it.linesJson) as Line[], net: it.net })),
+    accounts,
+    // An org that has mapped nothing gets an empty account here, which `buildJournal` treats as unmapped and
+    // refuses on - the same answer as a component with no code, and the right one: there is nowhere to post.
+    { netPayable: gl.net_payable ?? "", rounding: gl.rounding },
+  );
+  // Cost centres by NAME, not by id. This is an artefact somebody imports into an accounting system or reads
+  // in a spreadsheet, and an internal uuid in the cost-centre column is unusable in both. Resolved here rather
+  // than in the domain, which has no business reading a table.
+  const deptNames = new Map((await refDepartments(deps)).map((d) => [d.uuid, d.name]));
+  const named = journal.lines.map((l) => ({ ...l, department: l.department ? deptNames.get(l.department) ?? l.department : null }));
+  return { ...journal, lines: named, run: `payroll-runs/${runId}`, period: period ? `pay-periods/${period.uuid}` : null, posted_from: run.code ?? runId };
+}
+
+// ---- The payroll calendar, as numbers a scheduled rule can reason about --------------------------------
+
+/**
+ * Where the payroll month stands, for the org-level (`scope: "once"`) scheduled firing.
+ *
+ * Payroll is the one workflow in this application where being late is not a matter of taste, and it is
+ * currently the one that waits to be asked. Every date that matters is known well in advance, so the reminders
+ * can be planned BACKWARDS from the pay date - which is only possible if a rule can ask how far away it is.
+ *
+ * ORG-LEVEL ON PURPOSE. The existing scheduled metrics are per employee ("your goals are overdue"); these are
+ * facts about the company's month, and fanning them out over the roster would tell four hundred people that
+ * the payroll run is unbuilt. They ride the `once` firing, where the audience is whoever the rule notifies.
+ *
+ * Everything is relative to the NEXT period whose pay date has not passed - the one being worked on. A period
+ * already paid needs no reminder, and a period after that is not yet anybody's problem.
+ */
+export type PayrollScheduleMetrics = {
+  daysToPayDate: number;
+  daysToCutoff: number;
+  payrollRunBuilt: boolean;
+  payrollRunState: string;
+  payrollBankFileDone: boolean;
+  reimbursementsPending: number;
+};
+
+/** Whole days from `from` to `to`, both taken as org days. Negative once the date is behind us, which is what
+ *  lets a rule say "two days before" and "three days late" with the same comparison. */
+const daysBetweenUtc = (from: Date, to: Date): number =>
+  Math.round((Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate()) - Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate())) / 86_400_000);
+
+/** A sentinel for "there is no such date to count towards", far enough out that no sane rule threshold
+ *  (`daysToCutoff <= 2`) fires on it. A 0 here would read as "today", which is the reminder nobody wants. */
+const NO_DATE = 9999;
+
+export async function payrollScheduleMetrics(deps: Deps, today: Date = new Date()): Promise<PayrollScheduleMetrics> {
+  const periods = await refPayPeriods(deps);
+  // The period being worked on: the earliest whose pay date is still ahead of (or is) today.
+  const upcoming = periods
+    .filter((p) => !p.deleteTime && daysBetweenUtc(today, new Date(p.payDate)) >= 0)
+    .sort((a, b) => +new Date(a.payDate) - +new Date(b.payDate))[0];
+
+  const pending = await deps.db
+    .select({ uuid: schema.reimbursements.uuid })
+    .from(schema.reimbursements)
+    .where(eq(schema.reimbursements.state, "PENDING"));
+
+  if (!upcoming) {
+    // No period ahead is itself worth a rule ("the calendar has run out"), and it is stated as absent dates
+    // rather than as zeroes, which would read as "today".
+    return { daysToPayDate: NO_DATE, daysToCutoff: NO_DATE, payrollRunBuilt: false, payrollRunState: "none", payrollBankFileDone: false, reimbursementsPending: pending.length };
+  }
+
+  const run = (await deps.db
+    .select({ state: schema.payrollRuns.state, itemsBuiltAt: schema.payrollRuns.itemsBuiltAt, bankFileAt: schema.payrollRuns.bankFileAt })
+    .from(schema.payrollRuns)
+    .where(eq(schema.payrollRuns.payPeriodId, upcoming.uuid))
+    .limit(1))[0];
+
+  return {
+    daysToPayDate: daysBetweenUtc(today, new Date(upcoming.payDate)),
+    daysToCutoff: upcoming.inputCutoffOn ? daysBetweenUtc(today, new Date(upcoming.inputCutoffOn)) : NO_DATE,
+    payrollRunBuilt: !!run?.itemsBuiltAt,
+    // "none" rather than an empty string: a rule reads `payrollRunState == "none"` to mean nobody has started.
+    payrollRunState: run?.state ?? "none",
+    payrollBankFileDone: !!run?.bankFileAt,
+    reimbursementsPending: pending.length,
+  };
+}
+
+// ---- The run's own timeline ------------------------------------------------------------------------------
+
+/**
+ * Where this month's payroll has got to, and when each step actually happened.
+ *
+ * ASSEMBLED FROM THE AUDIT TRAIL, not from the run row, and that is the whole reason this is cheap. The run
+ * records WHO did each thing (`createdBy`, `submittedBy`, `approvedBy`) and not WHEN - there is no
+ * `submitted_at` or `approved_at` column and adding a pair would duplicate what `lib/audit` already writes on
+ * every one of those transitions. One indexed read (`audit_entity_idx`) answers the lot, and it answers it
+ * with the actor's name as of the event, which the run's own foreign keys cannot do once somebody leaves.
+ *
+ * The two exceptions come off the run because they are not transitions: `itemsBuiltAt` is the LAST build
+ * rather than the first (a rebuild is the point), and `bankFileAt` is the stamp the payout path writes.
+ *
+ * `pay_date` is the only PLANNED entry. Everything else is a fact about what has happened, so a milestone with
+ * no timestamp has not happened yet - which is what makes the list readable as "where are we" rather than as a
+ * history.
+ */
+export type RunMilestone = { key: string; at_time: string | null; actor: string | null };
+
+const MILESTONE_ACTIONS: readonly { key: string; action: string }[] = [
+  { key: "created", action: "payroll.create" },
+  { key: "submitted", action: "payroll.review" },
+  { key: "approved", action: "payroll.approved" },
+  { key: "published", action: "payroll.published" },
+];
+
+export async function runTimeline(deps: Deps, run: { uuid: string; payPeriodId: string; itemsBuiltAt: Date | null; bankFileAt: Date | null }): Promise<RunMilestone[]> {
+  const rows = await deps.db
+    .select({ action: schema.auditLog.action, at: schema.auditLog.at, actorName: schema.auditLog.actorName })
+    .from(schema.auditLog)
+    .where(and(
+      eq(schema.auditLog.entity, "payroll-runs"),
+      eq(schema.auditLog.entityId, run.uuid),
+      inArray(schema.auditLog.action, MILESTONE_ACTIONS.map((m) => m.action)),
+    ));
+  // EARLIEST wins. A run can be sent back and re-approved, and the question this list answers is "when did
+  // this month reach that step", not "when was the paperwork last touched" - the latest would make a returned
+  // run look as though it had only just been submitted.
+  const first = new Map<string, { at: Date; actorName: string | null }>();
+  for (const r of rows) {
+    const held = first.get(r.action);
+    if (!held || +r.at < +held.at) first.set(r.action, { at: r.at, actorName: r.actorName });
+  }
+
+  const period = (await refPayPeriods(deps)).find((p) => p.uuid === run.payPeriodId);
+  const milestone = (key: string, at: Date | null | undefined, actor: string | null = null): RunMilestone =>
+    ({ key, at_time: at ? new Date(at).toISOString() : null, actor });
+
+  const out: RunMilestone[] = [];
+  // The cutoff opens the list because it is the deadline everything else is measured against, and it is the
+  // only entry that is about the period rather than about the run. Omitted entirely when the org has not set
+  // one - an empty row on a calendar reads as a step nobody did, which is the opposite of "not adopted".
+  if (period?.inputCutoffOn) out.push(milestone("cutoff", period.inputCutoffOn));
+  for (const m of MILESTONE_ACTIONS) {
+    const hit = first.get(m.action);
+    out.push(milestone(m.key, hit?.at ?? null, hit?.actorName ?? null));
+    // `built` sits between created and submitted, and is the one entry that deliberately reports the LATEST
+    // rather than the first: a rebuild replaces the numbers, so the build that matters is the one the current
+    // figures came from.
+    if (m.key === "created") out.push(milestone("built", run.itemsBuiltAt));
+    if (m.key === "approved") out.push(milestone("bank_file", run.bankFileAt));
+  }
+  out.push(milestone("pay_date", period ? period.payDate : null));
+  return out;
+}
+
+// ---- Run-to-run reconciliation ---------------------------------------------------------------------------
+
+/**
+ * The run this one should be read against: the most recent FINALIZED run for an earlier pay date.
+ *
+ * Finalized, because a draft is a working document - reconciling against a colleague's half-built run would
+ * make this month's statement change under the reader as somebody else rebuilds. By PAY DATE rather than by
+ * creation, because that is the order payroll actually happened in, and an off-cycle run created late for an
+ * earlier period would otherwise become "the previous run" for every month after it.
+ *
+ * Returns null when there is no earlier run, which is a real state (the first run an org builds) and reads as
+ * "everybody is a joiner" rather than as an error.
+ */
+async function priorFinalizedRun(deps: Deps, run: { uuid: string; payPeriodId: string }): Promise<{ uuid: string } | null> {
+  const periods = await refPayPeriods(deps);
+  const own = periods.find((p) => p.uuid === run.payPeriodId);
+  if (!own) return null;
+  const earlier = periods.filter((p) => +new Date(p.payDate) < +new Date(own.payDate));
+  if (!earlier.length) return null;
+  // Newest first, so the first finalized run found is the one immediately before this period.
+  const order = new Map(
+    [...earlier].sort((a, b) => +new Date(b.payDate) - +new Date(a.payDate)).map((p, i) => [p.uuid, i]),
+  );
+  const candidates = await byIdChunks([...order.keys()], (group) =>
+    deps.db
+      .select({ uuid: schema.payrollRuns.uuid, payPeriodId: schema.payrollRuns.payPeriodId })
+      .from(schema.payrollRuns)
+      .where(and(
+        inArray(schema.payrollRuns.payPeriodId, group),
+        inArray(schema.payrollRuns.state, ["APPROVED", "PUBLISHED"]),
+        ne(schema.payrollRuns.uuid, run.uuid),
+      )),
+  );
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => (order.get(a.payPeriodId) ?? Infinity) - (order.get(b.payPeriodId) ?? Infinity));
+  return { uuid: candidates[0]!.uuid };
+}
+
+/** Only what reconciliation reads: the employee and their lines. The totals on the row are not used - gross is
+ *  re-summed from the lines so the statement and its attribution come from one source. */
+async function reconcileSnapshot(deps: Deps, runId: string): Promise<RunItemSnapshot[]> {
+  const rows = await deps.db
+    .select({ employeeId: schema.payrollRunItems.employeeId, linesJson: schema.payrollRunItems.linesJson })
+    .from(schema.payrollRunItems)
+    .where(eq(schema.payrollRunItems.runId, runId));
+  return rows.map((r) => ({ employeeId: r.employeeId, lines: JSON.parse(r.linesJson) as Line[] }));
+}
+
+export type RunReconciliation = Reconciliation & { compared_to: string | null };
+
+/**
+ * Why this run costs what it costs, against the run before it.
+ *
+ * Read-only and derived on demand: the inputs are two sets of line arrays that already exist, and storing the
+ * answer would mean invalidating it on every rebuild. Rides the run's own access gate via `getRun`.
+ */
+export async function reconcileRun(deps: Deps, runId: string): Promise<RunReconciliation> {
+  const run = await getRun(deps, runId);
+  const prior = await priorFinalizedRun(deps, run);
+  const [before, after] = await Promise.all([
+    prior ? reconcileSnapshot(deps, prior.uuid) : Promise.resolve([]),
+    reconcileSnapshot(deps, runId),
+  ]);
+  return { ...reconcileRuns(before, after), compared_to: prior ? `payroll-runs/${prior.uuid}` : null };
 }
 
 export async function listRuns(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string) {
@@ -380,9 +842,21 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   const bonusByEmp = groupBy(await unpaidBonusesAll(deps), (r) => r.employeeId);
   const otByEmp = otCfg.enabled ? groupBy(await approvedUnpaidOvertimeAll(deps, periodEndMs), (r) => r.employeeId) : new Map<string, never[]>();
   const reimbByEmp = payViaPayroll ? groupBy(await approvedUnpaidReimbursementsAll(deps), (r) => r.employeeId) : new Map<string, never[]>();
+  // Loss-of-pay corrections for periods that already closed. Read for EVERY employee this run may price, not
+  // just those with attendance this period: the whole point is that the correction belongs to a different
+  // month from the one paying it.
+  const lopAdjByEmp = groupBy(await openAdjustmentsFor(deps, employees.map((e) => e.uuid)), (r) => r.employeeId);
+  // Period labels for those corrections, so a line can name the month it is about. One read of the periods
+  // the adjustments reference, not one per line.
+  const periodLabelById = new Map(
+    (await refPayPeriods(deps)).map((p) => [p.uuid, p.label] as const),
+  );
   // Loans due IN THIS PERIOD: not started yet, or already collected by another run whose period covers the same
   // month, and nothing is due (see dueLoanInstallmentsAll).
   const dueLoansByEmp = await dueLoanInstallmentsAll(deps, { payDate: period?.payDate, periodEnd: period?.periodEnd, excludeRunId: runId });
+  // How much of the period's wages recovery may not touch. Read once for the whole build rather than per
+  // employee: it is one org-wide policy number and the loop below runs per person.
+  const recoveryFloorFraction = await recoveryFloor(deps);
   // Interest concession on a cheap employer loan is a taxable perquisite (Rule 3(7)(i)) - opt-in policy data.
   const perqCfg = await getSettingValue<LoanPerquisiteConfig>(deps, "loan-perquisite", DEFAULT_LOAN_PERQUISITE_CONFIG);
   const perqLoansByEmp = perqCfg.enabled ? await outstandingLoansAll(deps) : new Map<string, { principal: number; installments: number; monthlyAmount: number; repaid: number }[]>();
@@ -399,6 +873,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   const paidOtIds: string[] = [];
   const paidArrearIds: string[] = [];
   const paidReimbIds: string[] = [];
+  const paidLopAdjIds: string[] = [];
   const loanEntries: { loanId: string; amount: number }[] = [];
   const itemRows: (typeof schema.payrollRunItems.$inferInsert)[] = [];
   // Employees the loop below considered and could not price. Recorded on the run so the omission is visible -
@@ -589,6 +1064,24 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // so the statutory register can count it as non-contributing days.
     let manualLop = 0;
     for (const l of oneOffs[e.uuid] ?? []) {
+      // THE INVARIANT THE PRE-FLIGHT'S HARD BLOCK RESTS ON, asserted here rather than assumed.
+      //
+      // `preflight` refuses to approve a run whose net is negative or above its own gross, on the grounds
+      // that net IS gross minus deductions so neither can happen on a correct run. That is only true while
+      // every line amount is non-negative - and this loop used to push whatever a caller sent. A negative
+      // deduction (refunding an over-deducted TDS, the ordinary way to correct last month) would make net
+      // exceed gross and the block would then refuse a legitimate approval on a pay date, with no setting to
+      // decline it. So the property is enforced at the one place a caller can introduce a line, and the
+      // refusal downstream is safe because of it rather than in spite of it.
+      //
+      // The route types this too; the check lives here as well because the service is the boundary the
+      // invariant belongs to, and a test or a future internal caller does not go through the route.
+      if (!Number.isFinite(l.amount) || l.amount < 0) {
+        throw invalidArgument(`a one-off line must not be negative (${l.code} for ${e.firstName} ${e.lastName} is ${l.amount}); the build decides the sign, and a manual loss of pay is a POSITIVE deduction coded LOP`);
+      }
+      if (l.kind !== "earning" && l.kind !== "deduction") {
+        throw invalidArgument(`a one-off line is an earning or a deduction (${l.code} is "${l.kind}"); employer contributions and perquisites are derived from components, not passed in`);
+      }
       if (l.kind === "deduction" && l.code === "LOP" && l.amount > 0) {
         manualLop = round2(manualLop + l.amount);
         const units = lopDailyRate > 0 ? round2(l.amount / lopDailyRate) : 0;
@@ -648,6 +1141,30 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // again by every later build, and quietly widened the staleness surface for a payable nobody could clear.
     paidEncashIds.push(...encashments.map((r) => r.uuid));
 
+    // Loss of pay corrected after its period closed. A SIGNED earning, on the same side loss of pay itself
+    // sits on (`lopDayUnits` produces a negative earning), so a refund and the original dock net out instead
+    // of appearing as unrelated figures. One line per corrected period, named for that period - the whole
+    // point of the line is that it is not about this month.
+    //
+    // TAXABLE, deliberately: the wage it restores or reclaims was taxable when it was docked, so the
+    // correction has to move the TDS base with it or the year's tax stops matching the year's pay.
+    //
+    // Marked settled whenever the queue is non-empty, following the encashment rule immediately above for
+    // the same reason: a correction that priced to nothing must still leave the queue, or every later build
+    // reads it again forever.
+    const lopAdjs = lopAdjByEmp.get(e.uuid) ?? [];
+    for (const a of lopAdjs) {
+      const label = periodLabelById.get(a.payPeriodId) ?? "an earlier period";
+      lines.push({
+        code: LOP_ADJUST_CODE,
+        name: lopAdjustLabel(label, a.dayUnits),
+        kind: "earning",
+        amount: round2(a.amount),
+        units: a.dayUnits,
+      });
+    }
+    paidLopAdjIds.push(...lopAdjs.map((a) => a.uuid));
+
     // Bonuses (individual + group awards): each unpaid award is a TAXABLE earning line, so it lifts the TDS
     // base below; then mark them paid by this run. One line per award, labelled by its kind.
     const empBonuses = bonusByEmp.get(e.uuid) ?? [];
@@ -685,7 +1202,25 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // wages, ESI on the whole arrears amount.
     const arrearsPfWages = round2(unpaidArrears.reduce((s, c) => s + c.arrearsBaseAmount, 0));
     if (arrearsTotal > 0) {
-      lines.push({ code: "ARREARS", name: "Salary arrears", kind: "earning", amount: arrearsTotal });
+      // The months this covers, pooled across every unpaid revision and merged where two revisions owe for the
+      // same period - an employee who was raised twice in a quarter should see one line per month, not one per
+      // revision. Each row's breakdown was frozen when its amount was, so this only ever reads what was
+      // already decided.
+      const byPeriod = new Map<string, number>();
+      for (const c of unpaidArrears) {
+        for (const part of parseArrearsPeriods(c.arrearsPeriodsJson)) {
+          byPeriod.set(part.label, round2((byPeriod.get(part.label) ?? 0) + part.amount));
+        }
+      }
+      // Only when the parts actually account for the lump. A row written before the breakdown existed carries
+      // none, and a partial list beside a full total would read as though the rest were unexplained - worse
+      // than the single line this replaces. Compared to the paisa, since both sides are already rounded.
+      const parts = [...byPeriod.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([label, amount]) => ({ label, amount }));
+      const partsTotal = round2(parts.reduce((sum, pt) => sum + pt.amount, 0));
+      lines.push({
+        code: "ARREARS", name: "Salary arrears", kind: "earning", amount: arrearsTotal,
+        ...(parts.length && Math.abs(partsTotal - arrearsTotal) < 0.01 ? { parts } : {}),
+      });
     }
     // Settled on the QUEUE, not on the amount - the same rule the encashment, overtime and reimbursement
     // blocks above follow. Every row here has `arrearsAmount > 0`, but the total is rounded to the paise, so a
@@ -696,7 +1231,11 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // Reimbursement payouts: non-taxable earning (paid in net, excluded from the income-tax base).
     if (payViaPayroll) {
       const claims = reimbByEmp.get(e.uuid) ?? [];
-      const total = claims.reduce((s, r) => s + r.amount, 0);
+      // PAID NET OF THE ADVANCE. A claim filed against a travel float has already been settled against it at
+      // approval (services/reimbursements.ts), so paying its full amount here would hand the employee the same
+      // money twice - once as the advance, once as the claim - while payroll separately recovers the advance
+      // from salary. A claim inside the advance adds nothing; one that overspends it pays only the excess.
+      const total = claims.reduce((s, r) => s + Math.max(0, round2(r.amount - (r.advanceSettled ?? 0))), 0);
       if (total > 0) {
         lines.push({ code: "REIMB", name: "Reimbursement", kind: "earning", amount: round2(total), taxable: false });
       }
@@ -804,7 +1343,21 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     const dueLoans = dueLoansByEmp.get(e.uuid) ?? [];
     if (dueLoans.length) {
       const reimbInNet = lines.filter((l) => l.kind === "earning" && l.taxable === false).reduce((s, l) => s + l.amount, 0);
-      let available = Math.max(0, round2(computeRunItem(lines).net - reimbInNet));
+      const { gross: grossNow, net: netNow } = computeRunItem(lines);
+      // THE FLOOR UNDER TAKE-HOME. Capping recovery at "net does not go negative" still allows a month where
+      // an employee is recovered down to nothing, which is the failure the person experiences before anybody
+      // in payroll notices.
+      //
+      // What recovery may take: net, less the reimbursement it must not garnish, less the share of wages the
+      // org protects. The arithmetic and the reasoning for it live in domain/loans.ts#recoverableFrom, where
+      // they are unit-tested - the two exclusions COMPOSE, and getting that wrong under-protects exactly the
+      // months an expense claim lands in.
+      //
+      // The floor defaults to 0, which is this block's behaviour before it existed, so an org that has set no
+      // policy gets the arithmetic it had. The unrecovered remainder needs no new machinery: a shortfall
+      // already stays outstanding for the next run, which is what makes a floor safe rather than a way to lose
+      // money.
+      let available = recoverableFrom(netNow, reimbInNet, grossNow, recoveryFloorFraction);
       for (const d of dueLoans) {
         const take = round2(Math.min(d.amount, available));
         if (take <= 0.005) continue;
@@ -836,7 +1389,9 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     }
 
     const totals = computeRunItem(lines);
-    itemRows.push({ runId, employeeId: e.uuid, linesJson: JSON.stringify(lines), ...totals, tax });
+    // The department AS OF THIS BUILD. Stamped, not resolved at read time: a transfer in March must not
+    // rewrite what February's accounts said about where the cost sat.
+    itemRows.push({ runId, employeeId: e.uuid, departmentId: e.departmentId ?? null, linesJson: JSON.stringify(lines), ...totals, tax });
   }
 
   // Commit the whole build in ONE atomic batch: every paid-by-run marker, the loan ledger + balances, the
@@ -859,6 +1414,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     ...chunk(paidOtIds, 90).map((ids) => ({ stmt: markOvertimePaidByRun(deps, ids, runId, now).returning({ uuid: schema.overtimeRequests.uuid }), expect: ids.length, label: "overtime" })),
     ...chunk(paidArrearIds, 90).map((ids) => ({ stmt: markCompArrearsPaidByRun(deps, ids, runId, now).returning({ uuid: schema.compensation.uuid }), expect: ids.length, label: "salary arrears" })),
     ...chunk(paidReimbIds, 90).map((ids) => ({ stmt: markReimbursementsPaidByRun(deps, ids, runId, now).returning({ uuid: schema.reimbursements.uuid }), expect: ids.length, label: "reimbursements" })),
+    ...chunk(paidLopAdjIds, 90).map((ids) => ({ stmt: markLopAdjustmentsPaidByRun(deps, ids, runId, now).returning({ uuid: schema.lopAdjustments.uuid }), expect: ids.length, label: "loss-of-pay corrections" })),
   ];
   // The build stamp is taken HERE, once every statement above has been CONSTRUCTED - not from the `now` the
   // build opened with, which is a whole pricing pass earlier.
@@ -989,15 +1545,34 @@ async function employeeNames(deps: Deps, ids: string[]): Promise<string[]> {
 // runs because re-solving a split under a committed run says nothing actionable; an approved or published run
 // that left somebody out is the case where saying so matters most, and by then it is the only trace there is.
 export type SplitDrift = { stale: string[]; skipped: string[] }; // employee display names
-export type RunStaleness = { built_time: string | null; stale: boolean; changes: string[]; split_drift?: SplitDrift; unpriced?: string[] };
+/**
+ * `stale` and `diverged` are the SAME SCAN asked of runs in two different states, and they are separate
+ * fields because the answers mean opposite things to the person reading them.
+ *
+ *   `stale`    - an EDITABLE run whose inputs moved since it was built. The remedy is a rebuild, and
+ *                `transition` gates the approve on it.
+ *   `diverged` - a COMMITTED (approved/published) run whose inputs have moved since. There is NO remedy of
+ *                this kind: the payslips are the record of what was paid, the run cannot be rebuilt, and the
+ *                live data now says something different. It is a statement, not a task.
+ *
+ * Reporting divergence as staleness would tell somebody to rebuild a published run, which is the one thing
+ * they must not do; reporting nothing at all is what happened before, and left the published payslip and the
+ * live data disagreeing with nothing on screen saying which was true. Exactly one of the two is ever set.
+ */
+export type RunStaleness = { built_time: string | null; stale: boolean; changes: string[]; diverged?: boolean; split_drift?: SplitDrift; unpriced?: string[] };
 export async function runStaleness(deps: Deps, run: { uuid: string; state: string; payPeriodId: string; itemsBuiltAt: Date | null; unpricedJson?: string | null }): Promise<RunStaleness> {
   const builtAt = run.itemsBuiltAt;
   // Ids only; names are resolved below, in the same read the split-drift names use.
   const unpricedIds = parseIdList(run.unpricedJson);
   if (!isEditable(run.state as RunState) || !builtAt) {
     const built_time = builtAt ? builtAt.toISOString() : null;
-    if (!unpricedIds.length) return { built_time, stale: false, changes: [] };
-    return { built_time, stale: false, changes: [], unpriced: await employeeNames(deps, unpricedIds) };
+    const unpriced = unpricedIds.length ? await employeeNames(deps, unpricedIds) : undefined;
+    // A committed run that was actually built gets the divergence question instead of the staleness one: the
+    // same scan, reported as a fact about the record rather than as work to do. A run with no build stamp is
+    // skipped because there is no moment to measure "since" from - nothing was ever computed to diverge from.
+    if (!builtAt) return { built_time, stale: false, changes: [], ...(unpriced ? { unpriced } : {}) };
+    const changes = await changedInputsSince(deps, run, builtAt);
+    return { built_time, stale: false, changes, ...(changes.length ? { diverged: true } : {}), ...(unpriced ? { unpriced } : {}) };
   }
   // Split drift for the people this run actually priced, named for the reviewer. Editable runs only: an approved
   // or published run is a historical record, and re-solving splits under it would say nothing actionable.
@@ -1014,7 +1589,20 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
     split_drift = { stale: names(drift.stale), skipped: names(drift.skipped) };
   }
   const unpriced = unpricedIds.length ? names(unpricedIds) : undefined;
-  // Each source: does any row's updatedAt post-date the build? `updatedAt` also bumps on create + soft-delete
+  const changes = await changedInputsSince(deps, run, builtAt);
+  return { built_time: builtAt.toISOString(), stale: changes.length > 0, changes, ...(split_drift ? { split_drift } : {}), ...(unpriced ? { unpriced } : {}) };
+}
+
+/**
+ * Which income-affecting inputs to `run` have moved since `since`, as the labels a person reads.
+ *
+ * Shared by the two questions that ask it, because they are the same scan and must never disagree about what
+ * counts as an input: `runStaleness` asks it of an EDITABLE run, where the answer means "rebuild before you
+ * approve", and `runDivergence` asks it of a COMMITTED one, where a rebuild is not available and the answer
+ * means "the payslips and the live data no longer agree". One list, so a source added for one is not missing
+ * from the other.
+ */
+  // Each source: does any row's updatedAt post-date `since`? `updatedAt` also bumps on create + soft-delete
   // + enable/disable, so joiners, removals and toggles are all covered by the same comparison.
   // `ownRun`: the column by which a row says THIS run paid it. Those rows are the build's own markers, and a
   // build that pays a payable is not an input moving under the run - so they are excluded by WHO WROTE THEM
@@ -1048,6 +1636,11 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
   // direction and it stays: a rebuild is idempotent and cheap, and the alternative - a second "payroll inputs"
   // timestamp that every relevant writer must remember to stamp - fails OPEN the first time one forgets, which
   // is a wrong payslip instead of an extra rebuild.
+async function changedInputsSince(
+  deps: Deps,
+  run: { uuid: string; payPeriodId: string },
+  since: Date,
+): Promise<string[]> {
   type Source = {
     label: string;
     table: { updatedAt: unknown };
@@ -1138,7 +1731,7 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
   // a single row of booleans. Each subquery still stops at its first newer row (the LIMIT rides inside EXISTS).
   // Bound as epoch millis, not as a Date: these columns are `timestamp_ms`, and outside a column-aware
   // comparison there is nothing to tell the driver which encoding this parameter wants.
-  const since = +builtAt;
+  const sinceMs = +since;
   const probes = sources.map((s, i) => {
     // A row this very run marked paid is the build's own write, whatever its stamp says.
     const notOurs = s.ownRun ? sql` and (${s.ownRun as never} is null or ${s.ownRun as never} <> ${run.uuid})` : sql``;
@@ -1148,11 +1741,10 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
       ? sql` and ${s.employee as never} in (select ${schema.payrollRunItems.employeeId} from ${schema.payrollRunItems} where ${schema.payrollRunItems.runId} = ${run.uuid})`
       : sql``;
     const win = s.window ? sql` and (${s.window})` : sql``;
-    return sql`exists (select 1 from ${s.table as never} where ${(s.table as { updatedAt: never }).updatedAt} > ${since}${notOurs}${mine}${win} limit 1) as "c${sql.raw(String(i))}"`;
+    return sql`exists (select 1 from ${s.table as never} where ${(s.table as { updatedAt: never }).updatedAt} > ${sinceMs}${notOurs}${mine}${win} limit 1) as "c${sql.raw(String(i))}"`;
   });
   const [row] = await deps.db.all<Record<string, number>>(sql`select ${sql.join(probes, sql`, `)}`);
-  const changes = sources.filter((_, i) => !!row?.[`c${i}`]).map((s) => s.label);
-  return { built_time: builtAt.toISOString(), stale: changes.length > 0, changes, ...(split_drift ? { split_drift } : {}), ...(unpriced ? { unpriced } : {}) };
+  return sources.filter((_, i) => !!row?.[`c${i}`]).map((s) => s.label);
 }
 
 // Segregation of duties on the payroll commit, opt-in per org via the `payroll-approval` settings blob. Turned
@@ -1165,9 +1757,68 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
 //
 // Role-level separation is a different, already-enforced thing (the seeded grant denies `payroll-runs.*.approve`
 // to payroll_admin, so approving needs super). That says which ROLE may approve; this says which PERSON may not.
+/**
+ * The share of a period's wages that loan and advance recovery may not take, as a fraction (0.5 = half).
+ *
+ * POLICY DATA, and deliberately not a constant. India's Payment of Wages Act caps total deductions at half of
+ * wages (three quarters where a co-operative society loan is involved), other jurisdictions differ, and an
+ * employer may choose to be more generous than any of them - so this is a number somebody sets, not one this
+ * file decides.
+ *
+ * DEFAULT 0, which is exactly the behaviour that existed before the floor: recovery may take net down to
+ * zero. Defaulting to a real floor would quietly change what every existing run pays, which is not a change
+ * that should arrive with an upgrade. Clamped to [0, 1) - at 1 no recovery could ever be collected, and the
+ * loan queue would grow forever while appearing to be working.
+ */
+async function recoveryFloor(deps: Deps): Promise<number> {
+  const cfg = await getSettingValue<{ min_net_fraction?: number }>(deps, "payroll-recovery", {});
+  const v = Number(cfg.min_net_fraction);
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  return Math.min(v, 0.99);
+}
+
 async function separateApproverRequired(deps: Deps): Promise<boolean> {
   const cfg = await getSettingValue<{ enabled?: boolean }>(deps, "payroll-approval", {});
   return cfg.enabled === true;
+}
+
+/**
+ * The same rule one step later: may the person who APPROVED a run also be the one who generates its payout
+ * file?
+ *
+ * Generating the bank file is where the money actually leaves (services/bankFile.ts stamps the run for exactly
+ * that reason), and it was the one action in the module with no separation-of-duties rule at all. An approver
+ * who can also produce the file can move money end to end alone, which is the control an auditor asks about
+ * first.
+ *
+ * A SECOND FLAG, not a reuse of `enabled`, because the two guard different pairs of hands - submit/approve
+ * against approve/pay - and an org may well want the second without the first. Off by default for the reason
+ * stated above `separateApproverRequired`, which applies here with more force: a finance team of one has
+ * nobody else to hand the file to, and a control they cannot satisfy is one they work around. Turning it on is
+ * a setting rather than an override on the request, so there is nothing a caller can pass to skip it.
+ */
+async function separateBankFileRequired(deps: Deps): Promise<boolean> {
+  const cfg = await getSettingValue<{ separate_bank_file?: boolean }>(deps, "payroll-approval", {});
+  return cfg.separate_bank_file === true;
+}
+
+/**
+ * Throw when this caller approved the run and the org requires different hands on the payout. Lives here
+ * beside the approve-side rule so both readings of "four eyes on payroll" are in one place; called from
+ * services/bankFile.ts, which owns the file itself.
+ *
+ * `actor` is null when no person asked - an automation rule attaching the file to an email. The rule is about
+ * WHICH PERSON may do two things, so there is nobody for it to be about, and it does not apply.
+ *
+ * THE GAP THAT LEAVES, stated rather than discovered: an approver who can write automation rules can have one
+ * mail them the file, which is the control gone. Closing it properly is a question about who may configure a
+ * bank-file attachment at all, not about this check, and it is not answered here.
+ */
+export async function assertMayGenerateBankFile(deps: Deps, actor: AppUser | null, run: { approvedBy: string | null }): Promise<void> {
+  if (!actor) return;
+  if (!run.approvedBy || run.approvedBy !== actor.uuid) return;
+  if (!(await separateBankFileRequired(deps))) return;
+  throw failedPrecondition("the payout file must be generated by someone other than the person who approved the run");
 }
 
 // :submit / :approve / :lock map here.
@@ -1186,6 +1837,20 @@ export async function transition(deps: Deps, actor: AppUser, runId: string, to: 
     if (!run.itemsBuiltAt) throw failedPrecondition("build the run before approving it");
     const [anyItem] = await deps.db.select({ uuid: schema.payrollRunItems.uuid }).from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId)).limit(1);
     if (!anyItem) throw failedPrecondition("this run has no payslip items - build it before approving");
+    // THE PRE-FLIGHT, and only its BLOCKING half. A run whose net is negative, or above its own gross, is not
+    // a policy question - the arithmetic is wrong, and approving it pays a figure nobody computed. Every other
+    // check the pre-flight makes (no bank account on file, tax that stopped, an unpriced component) is a
+    // judgement somebody may legitimately overrule, so those are reported on the run and never refuse it.
+    //
+    // Deliberately NOT a setting, unlike the four-eyes rule beside it. A control an org may reasonably decline
+    // gets a switch; "do not pay a negative amount" is not one of those, and a switch would only ever be
+    // turned off by somebody trying to get past it. This is also why it can be refused with no escape hatch:
+    // it cannot fire on a correct run, only on a broken one, so there is nothing legitimate for it to block.
+    const blocking = (await runVariance(deps, runId)).preflight.filter((i) => i.blocking);
+    if (blocking.length) {
+      const named = blocking.slice(0, 5).map((i) => i.detail).join("; ");
+      throw failedPrecondition(`${blocking.length} payslip item(s) in this run are arithmetically wrong and must be fixed before approval: ${named}${blocking.length > 5 ? "; ..." : ""}. Rebuild the run.`);
+    }
     // Four-eyes, when the org has asked for it. `submittedBy` is stamped on the DRAFT -> REVIEW step below, so
     // it names the maker; a run with none (submitted before the setting existed) is not blocked by a rule it
     // was never subject to.
@@ -1430,7 +2095,7 @@ async function payslipDataForItem(deps: Deps, ctx: PayslipRunContext, it: typeof
     // Employee-side money columns: earnings + deductions only. The employer's own contributions are their own
     // block (they are not paid to the employee, so they must never sit in Earnings), and a perquisite is taxable
     // value rather than money paid, so it belongs in neither column. All from the item's frozen lines.
-    lines: lines.filter((l) => l.kind === "earning" || l.kind === "deduction") as { name: string; kind: "earning" | "deduction"; amount: number }[],
+    lines: lines.filter((l) => l.kind === "earning" || l.kind === "deduction") as { name: string; kind: "earning" | "deduction"; amount: number; parts?: { label: string; amount: number }[] }[],
     employerLines: lines.filter((l) => l.kind === "employer_contribution").map((l) => ({ name: l.name, amount: l.amount, ...(l.aboveCtc ? { aboveCtc: true } : {}) })),
     gross: it.gross,
     totalDeductions: it.totalDeductions,
@@ -1521,4 +2186,95 @@ export async function processPayslipRunJob(deps: Deps, jobId: string, payload: {
     })
     .where(eq(schema.jobs.uuid, jobId));
   return { done: true };
+}
+
+// ---- Loss of pay corrected after the period closed -------------------------------------------------------
+// The detection side of `services/lopAdjustments.ts`. That module owns the arithmetic and the queue; this
+// owns the one thing it cannot: what the period's loss of pay SHOULD be now, which needs the whole LOP
+// assembly (holidays, leave ranges, punches, day-marks, the employment clamp) that this file already has.
+// Putting the recompute here rather than there keeps exactly one implementation of "how many day-units does
+// this period dock", so a correction can never be priced against a different reading of the attendance than
+// the run itself used.
+
+/**
+ * The loss-of-pay day-units one employee's period works out to, read from attendance as it stands NOW.
+ *
+ * Returns null when loss of pay is switched off for the org, because then no attendance change can move pay
+ * and there is nothing to correct - and returning 0 instead would restate every closed period to zero and
+ * refund every dock the org ever made.
+ */
+export async function recomputeLopUnits(deps: Deps, employeeId: string, payPeriodId: string): Promise<number | null> {
+  const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
+  if (!att.lop_enabled) return null;
+  const period = (await deps.db.select().from(schema.payPeriods).where(eq(schema.payPeriods.uuid, payPeriodId)).limit(1))[0];
+  if (!period) return null;
+  const emp = (await deps.db
+    .select({ uuid: schema.employees.uuid, startDate: schema.employees.startDate, endDate: schema.employees.endDate })
+    .from(schema.employees)
+    .where(eq(schema.employees.uuid, employeeId))
+    .limit(1))[0];
+  if (!emp) return null;
+
+  const lop = await assembleLop(deps, period, att);
+  // The same employment clamp the build applies: days before joining or after leaving are handled by
+  // proration, not counted as unauthorised absence, or a joiner is docked twice.
+  const empStartYmd = emp.startDate ? utcDay(+new Date(emp.startDate)) : null;
+  const empEndYmd = emp.endDate ? utcDay(+new Date(emp.endDate)) : null;
+  const startYmd = empStartYmd && empStartYmd > lop.startYmd ? empStartYmd : lop.startYmd;
+  const endYmd = empEndYmd && empEndYmd < lop.endYmd ? empEndYmd : lop.endYmd;
+  return lopDayUnits({
+    startYmd,
+    endYmd,
+    workDays: att.work_days,
+    holidays: lop.holidays,
+    leaveRanges: lop.leaveByEmp.get(employeeId) ?? [],
+    workedByDay: lop.workedByEmp.get(employeeId) ?? new Map<string, number>(),
+    marksByDay: lop.marksByEmp.get(employeeId),
+    fullDayMinutes: att.full_day_minutes ?? 480,
+    halfDayMinutes: att.half_day_minutes ?? 240,
+  });
+}
+
+/**
+ * Restate an employee's loss of pay for whichever CLOSED period a day falls in.
+ *
+ * The entry point every attendance-shaped write calls after it commits: approving leave, approving a
+ * regularization, setting a day-mark. Cheap and silent in the ordinary case - a day in an open period, or in
+ * no period at all, costs one indexed read and returns.
+ *
+ * BEST-EFFORT BY DESIGN. It never throws into its caller: the attendance fact has already been recorded and
+ * is correct, and failing the approval because a correction could not be raised would refuse a true statement
+ * about somebody's attendance in order to protect a number. A correction that does not land is recoverable
+ * (the next change to that period restates it, and it is visible as a run that disagrees with its own
+ * attendance); a leave request that could not be approved is a person unable to do their job.
+ */
+export async function restateLopForDay(deps: Deps, employeeId: string, dayMs: number): Promise<void> {
+  try {
+    const periodId = await closedPeriodFor(deps, dayMs);
+    if (!periodId) return; // the period is still open: its own build will read the new attendance
+    const units = await recomputeLopUnits(deps, employeeId, periodId);
+    if (units === null) return;
+    await restateLop(deps, employeeId, periodId, units);
+  } catch (err) {
+    console.error("lop restatement failed", { employeeId, dayMs, err });
+  }
+}
+
+/** The same, for a RANGE of days - a leave request spans several and may straddle two periods. Each distinct
+ *  closed period is restated once, because a restatement is about the whole period rather than the day that
+ *  triggered it. */
+export async function restateLopForRange(deps: Deps, employeeId: string, fromMs: number, toMs: number): Promise<void> {
+  const seen = new Set<string>();
+  for (let at = fromMs; at <= toMs; at += 86_400_000) {
+    try {
+      const periodId = await closedPeriodFor(deps, at);
+      if (!periodId || seen.has(periodId)) continue;
+      seen.add(periodId);
+      const units = await recomputeLopUnits(deps, employeeId, periodId);
+      if (units === null) continue;
+      await restateLop(deps, employeeId, periodId, units);
+    } catch (err) {
+      console.error("lop restatement failed", { employeeId, at, err });
+    }
+  }
 }

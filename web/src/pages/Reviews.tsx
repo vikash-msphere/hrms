@@ -31,6 +31,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { DraftButton } from "@/components/common/DraftButton";
+import { ReviewEvidenceCard } from "@/components/common/ReviewEvidenceCard";
+import { ReviewDraftCheck } from "@/components/common/ReviewDraftCheck";
 import { Input } from "@/components/ui/input";
 import { Field, FieldRow } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -613,6 +615,30 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
     [framework, cycle?.competency_keys],
   );
   const [nominating, setNominating] = useState(false);
+  // Who actually worked with this person this cycle, from the record of shared cards, shared goals and
+  // kudos. Fetched when a picker opens rather than on every review, because it is four reads for a dialog
+  // most readers never open. `getSuggested()` - the client-side same-board-and-department guess - stays as
+  // the fallback for a caller whose verb or scope leaves this empty.
+  // What the reader took from the evidence panel into their draft. Held here rather than inside the panel so
+  // the Draft button can seed its box with it: the panel shows the record, the author decides what of it is
+  // worth writing about, and the instruction they send is the two of those combined.
+  const [evidenceSeed, setEvidenceSeed] = useState("");
+  /** Whether a writing box is on screen for THIS caller: the self-assessment in SELF, or the manager's
+   *  write-up in MANAGER. Only then does "add the delivered work to my draft" have somewhere to put it. */
+  const writingOpen = (review.state === "SELF" && mine && can.includes("submitSelf"))
+    || (review.state === "MANAGER" && can.includes("submitManager"));
+  const [collaborators, setCollaborators] = useState<{ employee: string; name: string; reasons: { detail: string }[] }[] | null>(null);
+  const loadCollaborators = useCallback(async () => {
+    if (collaborators || !(review.access?.can ?? []).includes("collaborators")) return;
+    try {
+      const res = await invoke<{ collaborators: { employee: string; name: string; reasons: { detail: string }[] }[] }>(`reviews/${idOf(review.path ?? "")}`, "collaborators");
+      setCollaborators(res.collaborators);
+    } catch {
+      setCollaborators([]); // silent: the picker still works off the client-side guess
+    }
+  }, [collaborators, review.access, review.path]);
+  const collaboratorRefs = (collaborators ?? []).map((c) => c.employee);
+  const collaboratorWhy = Object.fromEntries((collaborators ?? []).map((c) => [idOf(c.employee), c.reasons.map((r) => r.detail).join(" · ")]));
   const [suggesting, setSuggesting] = useState(false);
   const [reassigning, setReassigning] = useState(false);
   // The review line being carried into a new goal, and the goal that comes out of it.
@@ -930,6 +956,21 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
           </Section>
         )}
 
+        {/* WHAT THE RECORD HOLDS ABOUT THIS CYCLE, mounted ONCE and above the writing panes rather than inside
+            them. It lived inside the self and manager panes, which meant it existed only for the person whose
+            turn it was: a manager waiting on a self-assessment, or HR chasing a stalled cycle, got nothing -
+            and they are readers of exactly the same record. The verb grant decides who may ask at all, and
+            each section is decided server-side by the list verdict its own collection gives this caller.
+
+            `onUse` is passed only where there IS a box to put the text in, because "add this to my draft" is
+            a promise about a field that has to be on screen. */}
+        <ReviewEvidenceCard
+          reviewId={idOf(review.path ?? "")}
+          can={can}
+          subject={mine ? undefined : employeeName || "they"}
+          onUse={writingOpen ? (t) => setEvidenceSeed(t) : undefined}
+        />
+
         {/* Self-assessment: editable while in SELF (by the owner); read-only after. */}
         {review.state === "SELF" && mine && can.includes("submitSelf") ? (
           <div className="space-y-2">
@@ -964,7 +1005,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                 existing={selfText}
                 // Pre-filled with your own goals and where they got to. Editable in the box: add what the
                 // record does not know, cut what did not matter, then draft.
-                seedInstruction={goalSeed("What I worked on this cycle:")}
+                seedInstruction={[goalSeed("What I worked on this cycle:"), evidenceSeed].filter(Boolean).join("\n") || undefined}
                 hint="e.g. led the payments migration, mentored two juniors, want to move into design work"
                 onDraft={(text) => { setSelfText(text); saveDraft("self", text); }}
               />
@@ -1087,12 +1128,16 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                 // The same list, so a manager writing about the year is not re-reading it off the panel
                 // above. Their own observations still have to be typed in: the goals say what was worked on,
                 // not what the manager makes of it, and the prompt will not fill that in for them.
-                seedInstruction={goalSeed("Goals this cycle, for reference:")}
+                seedInstruction={[goalSeed("Goals this cycle, for reference:"), evidenceSeed].filter(Boolean).join("\n") || undefined}
                 hint="e.g. shipped the migration on time, needs to delegate more, ready for a bigger scope next year"
                 onDraft={(text) => { setMgrComment(text); saveDraft("manager", text); }}
               />
             </div>
             <Textarea rows={3} value={mgrComment} onChange={(e) => { setMgrComment(e.target.value); saveDraft("manager", e.target.value); }} placeholder="Overall feedback for the employee." />
+            {/* The draft read back to its author before it is shared: no specific work named, a word that
+                describes the person rather than what they did, an absolute nobody can answer, a comparison to
+                a colleague. Advisory and dismissible - it cannot touch a rating and it cannot stop a share. */}
+            <ReviewDraftCheck text={mgrComment} />
             <div className="flex flex-wrap items-center gap-2">
               <AccessAction verb="submitManager" can={can} label="Submit manager review">
                 <Button size="sm" loading={busy === "manager"} disabled={managerEmpty} onClick={submitManagerReview}>Share with employee <ChevronRight className="h-3.5 w-3.5" /></Button>
@@ -1124,12 +1169,12 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                     known to the person who did it - a manager two projects away is guessing at a list. */}
                 {mine && can.includes("suggestFeedback") && review.state !== "SHARED" && review.state !== "ACKNOWLEDGED" && (
                   <AccessAction verb="suggestFeedback" can={can} label="Suggest who saw your work">
-                    <Button variant="outline" size="sm" onClick={() => setSuggesting(true)}><UserPlus className="h-3.5 w-3.5" /> Suggest peers</Button>
+                    <Button variant="outline" size="sm" onClick={() => (setSuggesting(true), void loadCollaborators())}><UserPlus className="h-3.5 w-3.5" /> Suggest peers</Button>
                   </AccessAction>
                 )}
                 {can.includes("nominate") && (
                   <AccessAction verb="nominate" can={can} label="Request 360 feedback">
-                    <Button variant="outline" size="sm" onClick={() => setNominating(true)}><UserPlus className="h-3.5 w-3.5" /> Request feedback</Button>
+                    <Button variant="outline" size="sm" onClick={() => (setNominating(true), void loadCollaborators())}><UserPlus className="h-3.5 w-3.5" /> Request feedback</Button>
                   </AccessAction>
                 )}
               </span>
@@ -1229,7 +1274,8 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
           departments={departments}
           // The reviewee's own suggestions lead the picker: they are the people who actually saw the work,
           // and asking one of them upgrades that suggestion in place rather than asking them twice.
-          suggested={[...suggestedPeers.map((f) => f.author!), ...getSuggested()]}
+          suggested={[...suggestedPeers.map((f) => f.author!), ...collaboratorRefs, ...getSuggested()]}
+          suggestedWhy={collaboratorWhy}
           exclude={[review.employee ?? "", ...askedFeedback.map((f) => f.author ?? "")].filter(Boolean)}
           onClose={() => setNominating(false)}
           onConfirm={(refs) => { onNominate(refs); setNominating(false); }}
@@ -1296,7 +1342,8 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
           confirmLabel="Save suggestions"
           employees={employees}
           departments={departments}
-          suggested={getSuggested()}
+          suggested={[...collaboratorRefs, ...getSuggested()]}
+          suggestedWhy={collaboratorWhy}
           initial={suggestedPeers.map((f) => f.author!)}
           exclude={[review.employee ?? "", ...askedFeedback.map((f) => f.author ?? "")].filter(Boolean)}
           onClose={() => setSuggesting(false)}

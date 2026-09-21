@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { TrendingUp, Plus, Wallet, Building2, ArrowUpRight, ArrowDownRight, Pencil, Trash2 } from "lucide-react";
-import { get, getAllPages, create, patch, remove } from "@/api";
+import { TrendingUp, Plus, Wallet, Building2, ArrowUpRight, ArrowDownRight, Pencil, Trash2, TriangleAlert } from "lucide-react";
+import { get, getAllPages, create, patch, remove, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { formatMoney, cn, idOf, round2 as r2 } from "@/lib/utils";
 import { todayStr as todayYmd } from "@/lib/orgDay";
 import { currentFy } from "@/lib/fy";
 import { useOrg, currencyDecimals } from "@/lib/org";
-import type { Compensation, PayComponent, PayGrade, SalaryStructure, Bonus } from "@/types";
+import type { Compensation, PayComponent, PayGrade, SalaryStructure, Bonus, RevisionPreview } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -308,6 +308,31 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
   // Saveable when the CTC is positive, dated, and actually solvable against the chosen structure - the same
   // three conditions the footer and the Enter key both need, so they read it from one place.
   const canSave = !busy && !!form.effective_from && Number(form.ctc) > 0 && !!splitPreview(Number(form.ctc), form.salary_structure || undefined);
+
+  // The server's read on this revision: arrears owed, and the statutory boundaries it crosses. DEBOUNCED,
+  // because the CTC box is typed into a digit at a time and this prices a revision on the server each call -
+  // firing per keystroke would cost a pricing pass for "1", "12", "120"... on the way to a real figure.
+  // Cleared the moment the inputs change so a stale answer never sits under a number it no longer describes,
+  // and dropped entirely on a failure: this panel is extra information, never a reason a raise cannot be saved.
+  const [serverPreview, setServerPreview] = useState<RevisionPreview | null>(null);
+  useEffect(() => {
+    setServerPreview(null);
+    const ctc = Number(form.ctc);
+    if (!open || editing || !(ctc > 0) || !form.effective_from || !employeeId) return;
+    let live = true;
+    const t = setTimeout(() => {
+      invoke<RevisionPreview>("compensation", "preview", undefined, {
+        employee: `employees/${employeeId}`,
+        annual_ctc: r2(ctc),
+        effective_from: form.effective_from,
+        ...(form.pay_grade ? { pay_grade: form.pay_grade } : {}),
+        ...(form.salary_structure ? { salary_structure: form.salary_structure } : {}),
+      })
+        .then((p) => { if (live) setServerPreview(p); })
+        .catch(() => { /* a preview that cannot be fetched says nothing, and blocks nothing */ });
+    }, 400);
+    return () => { live = false; clearTimeout(t); };
+  }, [open, editing, form.ctc, form.effective_from, form.pay_grade, form.salary_structure, employeeId]);
 
   // The revisions on either side of `row` in the timeline (`rows` is newest first). A correction may move a
   // date only BETWEEN these two - past a neighbour it would silently re-order which revision supersedes which
@@ -753,6 +778,32 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
               </div>
             );
           })()}
+          {/* What the SERVER says this revision would do, which is the half the client cannot work out: arrears
+              depend on which periods have already published, and the statutory crossings depend on the live
+              component setup. Fetched from the same pricer the save runs, so nothing here can promise a figure
+              the save then contradicts. Silent while it loads and silent when it has nothing to say. */}
+          {serverPreview && (serverPreview.arrears.amount > 0 || serverPreview.crossings.length > 0) && (
+            <div className="space-y-2 rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm">
+              {serverPreview.arrears.amount > 0 && (
+                <div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Arrears owed on saving</span>
+                    <span className="font-medium tabular-nums">{money(serverPreview.arrears.amount)}</span>
+                  </div>
+                  {/* The months, because a lump nobody can check is a lump nobody trusts. */}
+                  <div className="mt-0.5 pl-3 text-xs text-muted-foreground">
+                    {serverPreview.arrears.periods.map((pr) => pr.label).join(", ")}
+                  </div>
+                </div>
+              )}
+              {serverPreview.crossings.map((line, i) => (
+                <p key={i} className="flex items-start gap-1.5 text-xs text-warning">
+                  <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{line}</span>
+                </p>
+              ))}
+            </div>
+          )}
           <Field label="Pay grade (optional)" hint={selectedBand}>
             <Select value={form.pay_grade || "none"} onValueChange={(v) => setForm({ ...form, pay_grade: v === "none" ? "" : v })}>
               <SelectTrigger><SelectValue placeholder="No grade" /></SelectTrigger>

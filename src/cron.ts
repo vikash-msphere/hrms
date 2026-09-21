@@ -9,9 +9,11 @@ import type { Deps } from "./deps";
 import { processPayslipRunJob } from "./services/payroll";
 import { runDeferredActions, runWorkflowTimer, runScheduledAutomations, runScheduledFanOut, SCHEDULED_FAN_OUT_JOB, withDispatchBudget } from "./services/automationEngine";
 import { flushDigests } from "./services/notificationDigest";
-import { weeklyAttentionDigest } from "./services/attention";
+import { weeklyAttentionDigest, attentionSettings, goalTrouble } from "./services/attention";
+import { rankAttention, type AttentionItem } from "./domain/attention";
 import { generateRecurringExpenses } from "./services/expenses";
 import { checkBudgetThresholds, openRecurringBudgetPeriods } from "./services/expenseBudgets";
+import { openRecurringPayrollBudgets } from "./services/payrollBudgets";
 import { emitEvent } from "./services/eventBus";
 import { accrueLeave } from "./services/leaveAccrual";
 import { generateComplianceOccurrences } from "./services/complianceRules";
@@ -22,6 +24,7 @@ import { reconcilePendingEsign } from "./services/esign/callback";
 import { publishDueAnnouncements } from "./services/announcements";
 import { drainSearchEmbeddings } from "./services/searchEmbed";
 import { drainModeration } from "./services/moderation";
+import { sweepCardDuplicates, pruneDuplicateSuggestions } from "./services/cardDuplicateSweep";
 import { sweepAiCache } from "./services/ai";
 import { nextOccurrence } from "./services/events";
 import { purgeExpiredAccessRules, reviewStandingAccess } from "./services/accessRules";
@@ -192,6 +195,9 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     const budgetAlerts = await run("checkBudgetThresholds", () => checkBudgetThresholds(deps));
     // Recurring caps open their next period once the current one closes, so no month goes unbudgeted.
     const budgetPeriodsOpened = await run("openRecurringBudgetPeriods", () => openRecurringBudgetPeriods(deps));
+    // Salary caps roll the same way, for the same reason. Its own step rather than a branch inside the one
+    // above: a failure rolling expense periods must not leave payroll unbudgeted, and `run` isolates each.
+    const payrollBudgetPeriodsOpened = await run("openRecurringPayrollBudgets", () => openRecurringPayrollBudgets(deps));
     // Reconcile e-sign documents stuck pending (missed/dropped vendor webhook): poll the vendor or auto-expire
     // past the signing window. Best-effort - never aborts the tick.
     const esignReconciled = await run("reconcilePendingEsign", () => reconcilePendingEsign(deps));
@@ -227,8 +233,16 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // for one project or one person's leave cover that nobody's job it is to remove. No-ops on every tick
     // that is not due, so it costs one settings read a night.
     const accessReviewed = await run("reviewStandingAccess", () => reviewStandingAccess(deps));
+    // The board's duplicate check, run on the backlog rather than on whoever happens to open a panel. The
+    // pair that matters is the one two people filed in two different weeks, and nobody goes looking for it.
+    // Queries only - every card already has its vector - and bounded per tick, so a large backlog is swept
+    // over several nights. No-ops with no index bound or the feature switched off.
+    const duplicatesFlagged = await run("sweepCardDuplicates", async () => (await sweepCardDuplicates(deps)).flagged);
+    // And the hygiene half: answers about cards that have since been delivered or deleted are cleared, so a
+    // groomer is never sent to check a pair that stopped existing.
+    const duplicatesPruned = await run("pruneDuplicateSuggestions", () => pruneDuplicateSuggestions(deps));
     return {
-      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, attentionDigests, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, accessReviewed },
+      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, attentionDigests, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, payrollBudgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, accessReviewed, duplicatesFlagged, duplicatesPruned },
       failures,
     };
   }
@@ -1280,6 +1294,46 @@ export async function remindUpcomingCheckIns(deps: Deps): Promise<number> {
     }
   }
   if (!perRecipient.size) return 0;
+
+  // WHAT THERE IS TO TALK ABOUT, not just that there is a meeting. "Jot down talking points beforehand" is
+  // advice nobody has ever acted on; the app already knows which of this person's goals are behind or have
+  // gone quiet, and naming one of them is the difference between a reminder and a prompt. Same predicate the
+  // dashboard uses (services/attention.ts#goalTrouble), so the 1:1 note and the "needs you" list can never
+  // disagree about which goal is in trouble.
+  //
+  // ONE QUERY FOR EVERYBODY being reminded, not one per person: this runs on a tick that already has twenty
+  // subtasks to get through.
+  const cfg = await attentionSettings(deps);
+  const trouble = new Map<string, AttentionItem[]>();
+  const recipients = [...perRecipient.keys()];
+  const goalRows = await byIdChunks(recipients, (group) =>
+    deps.db
+      .select({
+        uuid: schema.goals.uuid, title: schema.goals.title, status: schema.goals.status, employeeId: schema.goals.employeeId,
+        progress: schema.goals.progress, dueDate: schema.goals.dueDate, createdAt: schema.goals.createdAt, updatedAt: schema.goals.updatedAt,
+      })
+      .from(schema.goals)
+      .where(and(
+        inArray(schema.goals.employeeId, group),
+        isNull(schema.goals.deleteTime),
+        inArray(schema.goals.status, ["not_started", "in_progress"]),
+      )),
+  );
+  const nowMs = deps.clock.now().getTime();
+  for (const g of goalRows) {
+    for (const item of goalTrouble(g, nowMs, cfg)) {
+      const arr = trouble.get(g.employeeId) ?? [];
+      arr.push(item);
+      trouble.set(g.employeeId, arr);
+    }
+  }
+  /** At most two, and each with its own specifics: a list of six is an agenda nobody reads on a phone. */
+  const talkingPoints = (rid: string): string => {
+    const items = rankAttention(trouble.get(rid) ?? []).slice(0, 2);
+    if (items.length === 0) return "";
+    return `\n\nWorth raising: ${items.map((i) => `${i.title} (${i.detail})`).join("; ")}.`;
+  };
+
   await notifyMany(deps, [...perRecipient.keys()], {
     type: "checkin.reminder",
     title: "1:1 tomorrow",
@@ -1288,10 +1342,10 @@ export async function remindUpcomingCheckIns(deps: Deps): Promise<number> {
       const mine = perRecipient.get(rid) ?? [];
       if (mine.length === 1) {
         const withWho = mine[0]!.with ? ` with ${mine[0]!.with}` : "";
-        return `Your 1:1${withWho} is tomorrow - jot down talking points beforehand.`;
+        return `Your 1:1${withWho} is tomorrow.${talkingPoints(rid) || " Jot down talking points beforehand."}`;
       }
       const who = mine.map((m) => m.with).filter(Boolean).join(", ");
-      return `You have ${mine.length} 1:1s tomorrow${who ? ` (${who})` : ""} - jot down talking points beforehand.`;
+      return `You have ${mine.length} 1:1s tomorrow${who ? ` (${who})` : ""}.${talkingPoints(rid) || " Jot down talking points beforehand."}`;
     },
     link: "check-ins",
     subjectFor: (rid) => {

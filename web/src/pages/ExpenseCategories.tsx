@@ -16,7 +16,7 @@ import type { TableInsight } from "@/components/common/TableInsights";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
 import { FormError } from "@/components/common/FormError";
 import { useDialogGuard } from "@/components/common/dialogGuard";
 import { AccessScope } from "@/components/access/AccessScope";
@@ -27,6 +27,7 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
@@ -44,7 +45,7 @@ export default function ExpenseCategories({ embedded, openId }: { me?: Me; embed
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<ExpenseCategory | null>(null);
-  const [form, setForm] = useState({ name: "", requiresReceipt: false, glCode: "" });
+  const [form, setForm] = useState({ name: "", requiresReceipt: false, glCode: "", rateKind: "", rate: "", amountCap: "", maxAgeDays: "" });
   const [err, setErr] = useState<string | null>(null);
   const [again, setAgain] = useState(false);
   const guard = useDialogGuard(open, form, () => setOpen(false), { label: "category" });
@@ -60,13 +61,13 @@ export default function ExpenseCategories({ embedded, openId }: { me?: Me; embed
 
   function openCreate() {
     setEditing(null);
-    setForm({ name: "", requiresReceipt: false, glCode: "" });
+    setForm({ name: "", requiresReceipt: false, glCode: "", rateKind: "", rate: "", amountCap: "", maxAgeDays: "" });
     setErr(null);
     setOpen(true);
   }
   function openEdit(c: ExpenseCategory) {
     setEditing(c);
-    setForm({ name: c.display_name, requiresReceipt: !!c.requires_receipt, glCode: c.gl_code ?? "" });
+    setForm({ name: c.display_name, requiresReceipt: !!c.requires_receipt, glCode: c.gl_code ?? "", rateKind: c.rate_kind ?? "", rate: c.rate == null ? "" : String(c.rate), amountCap: c.amount_cap == null ? "" : String(c.amount_cap), maxAgeDays: c.max_age_days == null ? "" : String(c.max_age_days) });
     setErr(null);
     setOpen(true);
   }
@@ -75,7 +76,15 @@ export default function ExpenseCategories({ embedded, openId }: { me?: Me; embed
     setBusy(true);
     setErr(null);
     try {
-      const body = { display_name: form.name, requires_receipt: form.requiresReceipt, gl_code: form.glCode.trim() || null };
+      // Both or neither. Clearing the kind clears the rate, which is how a category stops being rated; the
+      // server validates the pair and refuses a half-set one.
+      const rated = form.rateKind === "per_km" || form.rateKind === "per_day";
+      const body = {
+        display_name: form.name, requires_receipt: form.requiresReceipt, gl_code: form.glCode.trim() || null,
+        rate_kind: rated ? form.rateKind : null, rate: rated ? Number(form.rate) : null,
+        amount_cap: form.amountCap === "" ? null : Number(form.amountCap),
+        max_age_days: form.maxAgeDays === "" ? null : Number(form.maxAgeDays),
+      };
       if (editing) {
         await patch("expense-categories/" + idOf(editing.path), body, editing.etag);
         toast({ title: "Category updated", variant: "success" });
@@ -85,7 +94,7 @@ export default function ExpenseCategories({ embedded, openId }: { me?: Me; embed
       }
       // GL codes run in sequence, so the invoice rule carries but the code is cleared rather than duplicated.
       if (again && !editing) {
-        const next = { name: "", requiresReceipt: form.requiresReceipt, glCode: "" };
+        const next = { name: "", requiresReceipt: form.requiresReceipt, glCode: "", rateKind: form.rateKind, rate: form.rate, amountCap: form.amountCap, maxAgeDays: form.maxAgeDays };
         setForm(next);
         guard.markSaved(next);
         // The just-cleared Name loses focus the instant its own Create button disables with it - see
@@ -235,11 +244,43 @@ export default function ExpenseCategories({ embedded, openId }: { me?: Me; embed
           <Field label="GL code (optional)" hint="Carried onto every expense in this category, so the export lands in the right ledger account.">
             <Input value={form.glCode} onChange={(e) => setForm({ ...form, glCode: e.target.value })} placeholder="e.g. 6020" />
           </Field>
+          {/* A category paid at a published rate rather than against a receipt. Mileage and subsistence have no
+              invoice to attach, so today somebody multiplies in their head and types a total - the rate lives in
+              one person's memory and gets applied inconsistently. Set it here and the claimant enters distance
+              or days instead, with the arithmetic done server-side. */}
+          <Field label="Paid at a rate (optional)" hint="For mileage and per diem: the claimant enters distance or days and the amount is computed.">
+            <Select value={form.rateKind || "none"} onValueChange={(v) => setForm({ ...form, rateKind: v === "none" ? "" : v, rate: v === "none" ? "" : form.rate })}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">Not rated - claimed as an amount</SelectItem>
+                <SelectItem value="per_km">Per kilometre</SelectItem>
+                <SelectItem value="per_day">Per day</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          {(form.rateKind === "per_km" || form.rateKind === "per_day") && (
+            <Field label={form.rateKind === "per_km" ? "Rate per kilometre" : "Rate per day"} hint="Changing this applies to claims filed from now on; claims already filed keep their amount.">
+              <Input type="number" min={0} step="0.01" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} placeholder="e.g. 12" />
+            </Field>
+          )}
+          {/* Both checked when a claim is SUBMITTED, so the submitter is told before filing rather than being
+              rejected days later by somebody who had to write a note explaining the rule. */}
+          <FieldRow>
+            <Field label="Most per claim (optional)" hint="A claim over this can't be submitted.">
+              <Input type="number" min={0} step="0.01" value={form.amountCap} onChange={(e) => setForm({ ...form, amountCap: e.target.value })} placeholder="no cap" />
+            </Field>
+            <Field label="Claim within (days, optional)" hint="Counted from the date incurred.">
+              <Input type="number" min={1} value={form.maxAgeDays} onChange={(e) => setForm({ ...form, maxAgeDays: e.target.value })} placeholder="no limit" />
+            </Field>
+          </FieldRow>
           <div className="flex items-center gap-2">
             <Checkbox id="requiresReceipt" checked={form.requiresReceipt} onCheckedChange={(v) => setForm({ ...form, requiresReceipt: v === true })} />
             <Label htmlFor="requiresReceipt">Require an invoice</Label>
           </div>
-          <p className="-mt-2 text-xs text-muted-foreground">When on, an expense in this category can't be submitted without an invoice.</p>
+          <p className="-mt-2 text-xs text-muted-foreground">
+            When on, an expense in this category can't be submitted without an invoice.
+            {form.rateKind ? " A rated category is exempt - there is no invoice for a journey or a day away." : ""}
+          </p>
           {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
           {!editing && (
             <label className="flex items-center gap-2 text-sm text-muted-foreground">

@@ -278,15 +278,70 @@ export type AccrualInputs = {
   currentMs: number;
   frequency?: AccrualFrequency; // default "monthly"
   joiningRule?: JoiningRule | null; // null/absent = prorate the joining month, as before
+  /**
+   * THE EMPLOYMENT WINDOW THE MARKER WAS PRICED AGAINST, as recorded when those periods were credited.
+   *
+   * The marker is a high-water mark and the walk only ever adds, which is correct while the window only grows
+   * and silently wrong the moment somebody CORRECTS it. Three ordinary edits move it the other way: a start
+   * date fixed earlier (the months before the old start are never credited - the walk resumes past them), a
+   * departure rescinded (the exit month keeps the partial credit the claw-back left it with), and a start date
+   * fixed later (months before the real start stay credited). None of them is detectable from the marker
+   * alone, which names a period and says nothing about the window it was priced for.
+   *
+   * `pricedStartMs` null means "not recorded" - a balance credited before this was carried - and the walk then
+   * assumes the window it has always assumed: the current start, with no end date. That is exactly what the
+   * exit reconciliation used to hard-code (`creditedFractionAt`), so an unrecorded row is priced today the way
+   * it was priced yesterday, and the correction below reduces to the reconciliation it replaces.
+   */
+  pricedStartMs?: number | null;
+  pricedEndMs?: number | null;
 };
 
-export type AccrualResult = { add: number; newLastYm: string | null };
+/** `pricedStart`/`pricedEnd` come back so the caller can store the window these periods were priced against. */
+export type AccrualResult = { add: number; newLastYm: string | null; pricedStartMs: number | null; pricedEndMs: number | null };
 
 // Pure: returns the days to add since the last credited period and the new high-water marker. Idempotent
 // (running twice in the same period adds nothing). Branches on frequency; the monthly path is unchanged.
 export function computeAccrual(i: AccrualInputs): AccrualResult {
-  if (!i.startMs || (!i.accrualDaysPerYear && !i.probationAccrualDaysPerYear)) return { add: 0, newLastYm: i.lastAccrualYm };
+  if (!i.startMs || (!i.accrualDaysPerYear && !i.probationAccrualDaysPerYear)) {
+    return { add: 0, newLastYm: i.lastAccrualYm, pricedStartMs: i.pricedStartMs ?? null, pricedEndMs: i.pricedEndMs ?? null };
+  }
   return i.frequency === "semi_monthly" ? computeSemiMonthly(i) : computeMonthly(i);
+}
+
+/**
+ * What the already-credited periods are worth NOW, less what they were worth when they were credited.
+ *
+ * ONE correction, not two. This replaces the exit reconciliation that used to sit in each frequency's walk,
+ * and it is the same arithmetic generalised: that block compared "what a month was credited at, assuming
+ * employment continued" against "what it is worth now the last working day is known", which is this function
+ * with the old window taken to be `(start, null)` - which is exactly what an unrecorded window means below. So
+ * a balance with no recorded window is priced identically to before, and a recorded one additionally survives
+ * the corrections the marker cannot see: a start date moved either way, and an exit that was withdrawn.
+ *
+ * `rateAt` is the CURRENT rate. A correction to the window is priced at today's rate even for an old period,
+ * which is the one approximation here: a rate that also changed makes the difference slightly off. Re-pricing
+ * history at the current rate is the alternative, and it is worse - it would make every rate edit retroactive,
+ * silently restating balances nobody touched.
+ */
+function windowCorrection(args: {
+  fromIdx: number; // the first period either window credits
+  markerIdx: number; // the last period the marker says was credited
+  rateAt: (idx: number) => number;
+  /** The period's value under the window it was CREDITED against, and under the window as it reads now. */
+  wasFractionAt: (idx: number) => number;
+  nowFractionAt: (idx: number) => number;
+  /** Which periods each window actually covers - outside its own range a period is worth nothing at all. */
+  wasCovers: (idx: number) => boolean;
+  nowCovers: (idx: number) => boolean;
+}): number {
+  let delta = 0;
+  for (let idx = args.fromIdx; idx <= args.markerIdx; idx++) {
+    const was = args.wasCovers(idx) ? args.wasFractionAt(idx) : 0;
+    const now = args.nowCovers(idx) ? args.nowFractionAt(idx) : 0;
+    if (was !== now) delta += args.rateAt(idx) * (now - was);
+  }
+  return delta;
 }
 
 function computeMonthly(i: AccrualInputs): AccrualResult {
@@ -316,10 +371,6 @@ function computeMonthly(i: AccrualInputs): AccrualResult {
   };
   const fractionAt = (idx: number) =>
     applyJoiningRule(monthFraction(idx, i.startMs!, i.endMs), idx === startIdx, i.startMs!, i.joiningRule, () => fullOrWorked(idx));
-  // The same fraction as it stood when the month was first credited - i.e. with no last working day known.
-  // The exit reconciliation below is a difference between these two, so it needs both.
-  const creditedFractionAt = (idx: number) =>
-    applyJoiningRule(monthFraction(idx, i.startMs!, null), idx === startIdx, i.startMs!, i.joiningRule, () => 1);
 
   let add = 0;
   let credited = i.lastAccrualYm;
@@ -330,6 +381,52 @@ function computeMonthly(i: AccrualInputs): AccrualResult {
     // Prorated at BOTH ends of employment, not just the joining month - see monthFraction. A full month in the
     // middle is 1, so this is the same arithmetic as before everywhere except the first and last months.
     add += rateAt(idx) * fractionAt(idx);
+  }
+
+  // ---- The window correction ------------------------------------------------------------------------------
+  //
+  // Everything above prices months from the marker FORWARD. This is the other direction: months already behind
+  // the marker, whose price changed because the employment window moved under them. See `windowCorrection` for
+  // why this is one rule rather than the exit-only reconciliation it replaces.
+  // ONLY PERIODS AN EARLIER TICK CREDITED. The months the walk above just priced were priced against the
+  // window as it reads NOW, so there is nothing about them to correct - and correcting them anyway subtracts
+  // the leaver clamp a second time, which is what the first draft of this did.
+  const priorMarkerIdx = i.lastAccrualYm ? ymIndex(i.lastAccrualYm) : null;
+  if (credited && priorMarkerIdx !== null) {
+    const markerIdx = priorMarkerIdx;
+    // The window those months were credited against.
+    //
+    // Unrecorded (a balance carried from before the columns existed) falls back to what the marker itself
+    // says, which is all the old design ever recorded: this start, and an end date only where the FINAL MARK
+    // says the month was already priced with one. That mark was a one-bit version of exactly this window -
+    // which is why reading it here reproduces the old reconciliation's "only once" guarantee rather than
+    // clawing the same exit back on every tick.
+    const wasStartMs = i.pricedStartMs ?? i.startMs!;
+    const wasEndMs = i.pricedStartMs != null ? i.pricedEndMs ?? null : isFinalMarker(i.lastAccrualYm) ? i.endMs : null;
+    const wasStartIdx = ymIndex(ymOf(wasStartMs));
+    const wasEndIdx = wasEndMs != null ? ymIndex(ymOf(wasEndMs)) : null;
+    const wasJoining = (idx: number) => idx === wasStartIdx;
+    const wasFullOrWorked = (idx: number) => {
+      const capped = monthFraction(idx, monthStartOf(idx), wasEndMs);
+      return capped < 1 ? monthFraction(idx, wasStartMs, wasEndMs) : 1;
+    };
+    add += windowCorrection({
+      // From whichever window starts earlier: a start corrected EARLIER has months the old walk never reached,
+      // and they are the ones nothing else will ever credit.
+      fromIdx: Math.min(startIdx, wasStartIdx),
+      markerIdx,
+      rateAt,
+      wasFractionAt: (idx) => applyJoiningRule(monthFraction(idx, wasStartMs, wasEndMs), wasJoining(idx), wasStartMs, i.joiningRule, () => wasFullOrWorked(idx)),
+      nowFractionAt: fractionAt,
+      wasCovers: (idx) => idx >= wasStartIdx && (wasEndIdx == null || idx <= wasEndIdx),
+      nowCovers: (idx) => idx >= startIdx && (i.endMs == null || idx <= endIdx),
+    });
+    // The marker follows the window. It stays where it is while employment continues; where the window now
+    // ENDS before it, the exit month becomes the marker (and is final), which is what the reconciliation this
+    // replaces did explicitly. Computed from the marker as the walk above left it, not from the prior one.
+    const reached = Math.max(ymIndex(credited), lastIdx);
+    const coveredIdx = i.endMs != null ? Math.min(reached, endIdx) : reached;
+    if (coveredIdx >= startIdx) credited = ymFromIndex(coveredIdx) + (i.endMs != null && coveredIdx >= endIdx ? FINAL_MARK : "");
   }
 
   // ---- The exit reconciliation ---------------------------------------------------------------------------
@@ -347,20 +444,7 @@ function computeMonthly(i: AccrualInputs): AccrualResult {
   // earned. A month entirely after the exit reconciles to zero, which is the backdated-exit case. It runs at
   // most once - the final mark is what says so - and never against a month already priced with the end date
   // known, because that month carries the mark already.
-  if (i.endMs != null && credited && !isFinalMarker(credited)) {
-    const markerIdx = ymIndex(credited);
-    if (markerIdx >= endIdx && endIdx >= startIdx) {
-      // WHAT WAS CREDITED, not "a whole month". The claw-back is the difference between the two prices, so
-      // both halves of it have to be the price this walk would really have paid: the month was credited with
-      // `endMs` unknown, which is `monthFraction(idx, start, null)` - exactly 1 for every month after the
-      // joining one, but the joining PRORATION for the joining month, and whatever the joining-date rule says
-      // where one is configured. Hard-coding 1 took back a full month's entitlement from someone who joined
-      // and left inside the same month, having only ever been credited part of it.
-      for (let idx = endIdx; idx <= markerIdx; idx++) add -= rateAt(idx) * (creditedFractionAt(idx) - fractionAt(idx));
-      credited = ymFromIndex(endIdx) + FINAL_MARK;
-    }
-  }
-  return { add: round2(add), newLastYm: credited };
+  return { add: round2(add), newLastYm: credited, pricedStartMs: i.startMs!, pricedEndMs: i.endMs ?? null };
 }
 
 // ---- Semi-monthly accrual ----
@@ -420,8 +504,6 @@ function computeSemiMonthly(i: AccrualInputs): AccrualResult {
   };
   const fractionAt = (idx: number) =>
     applyJoiningRule(halfFraction(idx, i.startMs!, i.endMs), isJoiningMonth(idx), i.startMs!, i.joiningRule, () => fullOrWorked(idx));
-  const creditedFractionAt = (idx: number) =>
-    applyJoiningRule(halfFraction(idx, i.startMs!, null), isJoiningMonth(idx), i.startMs!, i.joiningRule, () => 1);
 
   let add = 0;
   let credited = i.lastAccrualYm;
@@ -429,17 +511,37 @@ function computeSemiMonthly(i: AccrualInputs): AccrualResult {
     credited = halfMarker(idx) + (i.endMs != null && idx >= endIdx ? FINAL_MARK : "");
     add += rateAt(idx) * fractionAt(idx);
   }
-  // The exit reconciliation, on half-periods - see the monthly twin for the whole argument. The window is
-  // narrower here (half a period rather than a whole month), and the failure is the same one: a half-period
-  // credited in advance, before anyone knew it would be the employee's last.
-  if (i.endMs != null && credited && !isFinalMarker(credited)) {
-    const markerIdx = halfMarkerToIndex(credited);
-    if (markerIdx >= endIdx && endIdx >= startIdx) {
-      // The difference between what was credited and what was earned - see the monthly twin for why it is not
-      // `1 - fraction`.
-      for (let idx = endIdx; idx <= markerIdx; idx++) add -= rateAt(idx) * (creditedFractionAt(idx) - fractionAt(idx));
-      credited = halfMarker(endIdx) + FINAL_MARK;
-    }
+
+  // The window correction, on half-periods - see the monthly twin for the whole argument. The only difference
+  // is the period: half a month rather than a month, so an exit or a corrected start lands inside one twice as
+  // often.
+  // Periods an earlier tick credited, only - see the monthly twin.
+  const priorMarkerIdx = i.lastAccrualYm ? halfMarkerToIndex(i.lastAccrualYm) : null;
+  if (credited && priorMarkerIdx !== null) {
+    const markerIdx = priorMarkerIdx;
+    // Unrecorded falls back to the marker's own one-bit record of it - see the monthly twin.
+    const wasStartMs = i.pricedStartMs ?? i.startMs!;
+    const wasEndMs = i.pricedStartMs != null ? i.pricedEndMs ?? null : isFinalMarker(i.lastAccrualYm) ? i.endMs : null;
+    const wasStartIdx = halfIndexOf(wasStartMs);
+    const wasEndIdx = wasEndMs != null ? halfIndexOf(wasEndMs) : null;
+    const wasJoiningMonthIdx = Math.floor(wasStartIdx / 2);
+    const wasJoining = (hIdx: number) => Math.floor(hIdx / 2) === wasJoiningMonthIdx;
+    const wasFullOrWorked = (idx: number) => {
+      const capped = halfFraction(idx, monthStartOfHalf(idx), wasEndMs);
+      return capped < 1 ? halfFraction(idx, wasStartMs, wasEndMs) : 1;
+    };
+    add += windowCorrection({
+      fromIdx: Math.min(startIdx, wasStartIdx),
+      markerIdx,
+      rateAt,
+      wasFractionAt: (idx) => applyJoiningRule(halfFraction(idx, wasStartMs, wasEndMs), wasJoining(idx), wasStartMs, i.joiningRule, () => wasFullOrWorked(idx)),
+      nowFractionAt: fractionAt,
+      wasCovers: (idx) => idx >= wasStartIdx && (wasEndIdx == null || idx <= wasEndIdx),
+      nowCovers: (idx) => idx >= startIdx && (i.endMs == null || idx <= endIdx),
+    });
+    const reached = Math.max(halfMarkerToIndex(credited), lastIdx);
+    const coveredIdx = i.endMs != null ? Math.min(reached, endIdx) : reached;
+    if (coveredIdx >= startIdx) credited = halfMarker(coveredIdx) + (i.endMs != null && coveredIdx >= endIdx ? FINAL_MARK : "");
   }
-  return { add: round2(add), newLastYm: credited };
+  return { add: round2(add), newLastYm: credited, pricedStartMs: i.startMs!, pricedEndMs: i.endMs ?? null };
 }

@@ -365,6 +365,93 @@ Two scope lines moved from the original plan, deliberately:
   makes handing somebody a saved table safe: they run it under their own access, so they get the same grid
   with fewer columns and fewer rows. See `table-builder-plan.md`.
 
+### A comment can be true and still point the wrong way
+
+Not a note about stale comments. A stale comment is caught by reading the code beside it, because the code
+contradicts it. This is the other kind: the code AGREES with the sentence, and what disagrees is the adjacent
+property a reader assumes came with it. Three of these were found in one day, all in load-bearing places, none
+of them out of date.
+
+  - `runBatchChecked` "reports any statement that touched fewer rows than expected". True. It was read as
+    "so the batch cannot half-apply", which it never said and which is false - a zero-row UPDATE is not an
+    error, so the loser of a guarded flip ran its other statements to completion and credited an advance
+    twice. The comment described DETECTION and was silent about PREVENTION.
+  - `AGGREGATE_ROUTES` "listed once, because a transport added to only some of the three places that consult
+    this would be half-gated". True of the constant, and it names the risk exactly - while two test-side
+    copies had to agree with it and were not mentioned. Adding one entry failed two drift gates.
+  - A duplicate matcher's "a vendor match is the stronger claim, so it is tested first and the two never both
+    fire for one row". True: they never both fired. The failure was the WRONG one firing alone, because the
+    branch listened to vendors that agreed and discarded the evidence of vendors that disagreed. The comment
+    was accurate about double-firing and silent about mis-firing.
+
+The pattern: each sentence states the property its author was thinking about, and a reader completes it with
+the property they needed. The author is not careless and the comment is not wrong, so neither review nor a
+later reading catches it - the check that does is asking what the sentence does NOT say, and whether anything
+depends on the unsaid half.
+
+WHAT TO WRITE INSTEAD. Where a mechanism stops short of the guarantee people will read into it, say what it
+does not do, in the same breath: "detects, does not prevent"; "this list is copied, here is where"; "a vendor
+DIFFERENCE is evidence and is handled below, not here". A negative clause is what makes the silence audible,
+and it is cheaper than the incident.
+
+### A constant is not a single source of truth if it has satellites
+
+Three registries in this codebase read as "the one list" and each has copies that must agree with it. The
+failure is always the same: an entry added to the constant and not to a satellite, surfacing as something that
+names neither the list nor the omission.
+
+  - `AGGREGATE_ROUTES` (`src/middleware/authz.ts`) says in its own comment that it is "listed once". It is
+    not: `test/collections.test.ts` keeps a copy and asserts it against this file's source text, and
+    `test/grantReach.test.ts` keeps a deliberately WIDER one that must not be derived from it. Adding
+    `expense-close` to the constant alone failed two drift gates.
+  - A measure's collection in `src/domain/peopleAnalytics.ts` is declared on `MetricDef.collection`, flows
+    into the derived `ANALYTICS_COLLECTIONS` for free, and must ALSO appear in `SCOPE_COLUMNS` inside
+    `src/services/peopleAnalytics.ts`, which binds it to its (code, owner) columns. Omitting the third gave
+    twelve failures reading `undefined is not iterable`, from a non-null assertion on a map miss.
+  - A new collection touches the six registries in `docs/03-add-a-resource.md`, which is why that list exists.
+
+WHAT TO DO ABOUT IT, in preference order. DERIVE the satellite from the constant where the satellite is not
+asserting anything independent - `ANALYTICS_COLLECTIONS` already does this and never drifts. Where the
+satellite IS the check (`collections.test.ts` compares its copy against this file's text on purpose, and
+deriving it would make it assert nothing), keep the copy and say so where the constant is defined, naming
+every satellite. What does not work is a comment claiming the list is singular when it is not: that is the
+state `AGGREGATE_ROUTES` was in, and it is worse than no comment, because it tells the next person to stop
+looking.
+
+Prefer a map miss that THROWS with the collection name over `MAP[key]!`. The non-null assertion is what turned
+a missing registration into `undefined is not iterable` fifteen frames away.
+
+### A checked batch is not an atomic one
+
+Written down because it was got wrong by careful reasoning rather than by carelessness, and the next person to
+write a guarded money flip will reason the same way.
+
+`lib/dbBatch.ts#runBatchChecked` reports any statement that touched fewer rows than expected. It is tempting to
+read that as "the batch either applies wholly or not at all, and a guarded flip that loses protects everything
+riding with it". It does not. D1 runs a batch as one transaction, but **a zero-row UPDATE is not an error** - so
+a guarded flip matching nothing does not stop its siblings, the batch commits, and `runBatchChecked` compares
+the counts only after `db.batch()` has returned. It DETECTS; it does not PREVENT.
+
+That cost a real double payment. `reimbursements.decide()` approved a claim and credited the advance it was
+filed against in one checked batch. Two concurrent approvals each ran to completion: the loser's flip matched
+nothing, its credit landed anyway, and the advance was discharged twice for one claim. Neither review nor a
+fully green suite showed it - the suite had no test that approved the same claim twice at once.
+
+So there are exactly two ways to make a batch refuse to half-apply, and a guard is not one of them:
+
+1. **Make the losing statement an ERROR.** A constraint violation aborts the transaction and rolls the whole
+   batch back. `loan_repayments.reimbursement_id` carries a partial unique index for precisely this: the ledger
+   row is written first and is the LOCK, not the record, so a second credit for the same claim cannot commit.
+   This is the shape to prefer - it needs no compensating write and makes a retry after a timeout safe.
+2. **Compensate after the fact.** Where a shortfall is a real post-commit condition rather than a race (a loan
+   closed between the read and the write), detect it with `runBatchChecked` and undo explicitly.
+   `payroll.buildRunItems` already does this - on drift it deletes its items, releases every payable it marked,
+   and returns the run to never-built.
+
+The corollary that was already true and easy to miss: a ledger insert riding beside a guarded credit lands even
+when the credit does not, which is why `repaidCreditStmt` moves `repaid` relatively and the run rollback
+re-derives it from the ledger rather than subtracting an amount.
+
 What is genuinely still open is release-path, not product: see `production-readiness.md`.
 
 ---

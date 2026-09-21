@@ -13,6 +13,7 @@ import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
+import { restateLopForRange } from "./payroll";
 import { dateWindow } from "./dateWindow";
 import { leaveDays } from "../domain/leave";
 import {
@@ -689,6 +690,13 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
     employeeId: row.employeeId,
     payload: { leaveTypeId: row.leaveTypeId, days: row.days, from: new Date(row.startDate).toISOString(), to: new Date(row.endDate).toISOString() },
   });
+  // Approved leave EXCUSES an absence, and cancelling approved leave un-excuses it, so both directions can
+  // change what a period should have docked. A request spanning a month boundary touches two periods, which
+  // is why this is the range form. Only periods with a committed run do anything; an open one is re-read by
+  // its own build. Best-effort, and deliberately after the state is committed - see `restateLopForDay`.
+  if (to === "APPROVED" || to === "CANCELLED") {
+    await restateLopForRange(deps, row.employeeId, +new Date(row.startDate), +new Date(row.endDate));
+  }
   return updated;
 }
 

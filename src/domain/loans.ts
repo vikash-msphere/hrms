@@ -62,3 +62,30 @@ export function loanPerquisiteMonthly(loans: LoanFacts[], cfg: LoanPerquisiteCon
   if (outstanding <= 0) return 0;
   return round2((outstanding * (netRate / 100)) / 12);
 }
+
+/**
+ * How much of a period's pay loan and advance recovery may actually take.
+ *
+ * Two exclusions, and they COMPOSE rather than compete - which is the whole subtlety, and the thing this was
+ * written wrong once already:
+ *
+ *   REIMBURSEMENTS are money the employee already spent out of their own pocket. Recovering a debt out of a
+ *   refund takes back something that was never pay, so the refund is not a base to recover from.
+ *
+ *   THE FLOOR protects a share of the period's WAGES. Capping recovery at "net does not go negative" still
+ *   allows a month where somebody is recovered down to nothing, which is the failure the person experiences
+ *   before anyone in payroll notices. India's Payment of Wages Act caps deductions at half of wages; other
+ *   jurisdictions differ and an employer may choose to be kinder, so the fraction is policy data, not a
+ *   constant.
+ *
+ * SUBTRACTING BOTH is what makes wage take-home land ON the floor. Taking the smaller of the two caps instead
+ * lets the reimbursement stand in for protected wages and recovery runs straight through it: with a 5,000
+ * claim in a 100,000 month at a half floor, the `min` form leaves wage take-home at 44.7%.
+ *
+ * `floorFraction` 0 is the behaviour that existed before the floor: recovery may take net to zero.
+ */
+export function recoverableFrom(net: number, reimbursementsInNet: number, gross: number, floorFraction: number): number {
+  const wages = Math.max(0, round2(gross - reimbursementsInNet));
+  const protectedWages = round2(Math.max(0, Math.min(1, floorFraction)) * wages);
+  return Math.max(0, round2(net - reimbursementsInNet - protectedWages));
+}

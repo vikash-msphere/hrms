@@ -14,6 +14,10 @@ import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { getSettingValue } from "./settings";
+import { outstandingOf } from "../domain/loans";
+import { repaidCreditStmt } from "./loans";
+import { runBatch, runBatchChecked } from "../lib/dbBatch";
+import { genId } from "../lib/idCodec";
 
 export type ReimbursementInput = {
   employee?: string | null;
@@ -21,6 +25,7 @@ export type ReimbursementInput = {
   amount?: number;
   incurred_on?: string | null; // YYYY-MM-DD
   description?: string | null;
+  advance?: string | null; // "loans/<id>" - the advance this claim spends
 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
@@ -54,6 +59,7 @@ export async function createReimbursement(deps: Deps, actor: AppUser, input: Rei
     const cat = (await deps.db.select().from(schema.reimbursementCategories).where(eq(schema.reimbursementCategories.uuid, categoryId)).limit(1))[0];
     if (!cat || cat.deleteTime || cat.disabled) throw invalidArgument("that reimbursement category is unavailable");
   }
+  const advanceId = await resolveAdvance(deps, input.advance, employeeId);
   const incurred = dayMs(input.incurred_on);
   const row = (await deps.db
     .insert(schema.reimbursements)
@@ -61,6 +67,7 @@ export async function createReimbursement(deps: Deps, actor: AppUser, input: Rei
       code: await allocOwnedCode(deps, schema.reimbursements, schema.reimbursements.employeeId, employeeId),
       employeeId,
       categoryId,
+      advanceId,
       amount: round2(amount),
       incurredOn: Number.isNaN(incurred) ? null : new Date(incurred),
       // Empty string clears, like an omitted field (see web/src/api.ts: nothing on the wire is ever null).
@@ -74,6 +81,27 @@ export async function createReimbursement(deps: Deps, actor: AppUser, input: Rei
   return row;
 }
 
+/**
+ * The advance a claim may be filed against, validated to the point where settling it cannot be wrong.
+ *
+ * Four conditions, and each one is a way the money goes astray if it is not checked: it has to BE an advance
+ * (a housing loan is not a float somebody spends on a trip), it has to belong to the SAME employee (or one
+ * person's claim discharges another's debt), it has to be DISBURSED (an advance that was never paid out has
+ * funded nothing), and it has to still owe something (settling against a closed advance credits a balance that
+ * is already zero and quietly turns a payable claim into an unpaid one).
+ */
+async function resolveAdvance(deps: Deps, path: string | null | undefined, employeeId: string): Promise<string | null> {
+  const advanceId = idFromPath(path);
+  if (!advanceId) return null;
+  const adv = (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, advanceId)).limit(1))[0];
+  if (!adv || adv.deleteTime) throw invalidArgument("that advance is unavailable");
+  if (adv.kind !== "advance") throw invalidArgument("only an advance can fund a claim - a loan is repaid, not spent");
+  if (adv.employeeId !== employeeId) throw invalidArgument("that advance belongs to a different employee");
+  if (adv.status !== "DISBURSED") throw invalidArgument("that advance has not been disbursed, so there is nothing to spend");
+  if (outstandingOf(adv) <= 0.005) throw invalidArgument("that advance is already fully settled");
+  return advanceId;
+}
+
 async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED") {
   const row = await getReimbursement(deps, actor, id);
   // Who may approve/reject/cancel is enforced centrally by the verb's grant (middleware). Here only the
@@ -81,10 +109,83 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   if (row.state !== "PENDING") {
     throw failedPrecondition(to === "CANCELLED" ? "only pending claims can be cancelled" : "claim is not pending");
   }
+  // APPROVING A CLAIM FILED AGAINST AN ADVANCE discharges the advance instead of paying the money out again.
+  //
+  // ONE ATOMIC BATCH with the state flip, and that is the whole difficulty. The flip is the exactly-once guard
+  // (0 rows = a concurrent call got there first); crediting the advance afterwards, as a second await, would
+  // mean a failure in the gap leaves the claim approved and payable with the advance still owing the full
+  // amount - the employee paid twice, which is the exact outcome this feature exists to prevent. Checked, so a
+  // credit the loan refuses (closed or soft-deleted between the read above and this commit) fails the approval
+  // rather than approving a claim whose settlement never landed.
+  const at = new Date();
+  if (to === "APPROVED" && row.advanceId) {
+    const adv = (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, row.advanceId)).limit(1))[0];
+    // An advance closed or withdrawn since the claim was filed settles nothing; the claim is approved and paid
+    // normally, which is the honest outcome - the money was spent either way.
+    const outstanding = adv && !adv.deleteTime && adv.status === "DISBURSED" ? outstandingOf(adv) : 0;
+    const settled = round2(Math.min(row.amount, Math.max(0, outstanding)));
+    if (settled > 0.005) {
+      // THE LEDGER ROW IS THE LOCK, and it goes FIRST.
+      //
+      // A guarded UPDATE is not enough here, and that is the whole lesson of this block: D1 runs a batch as one
+      // transaction, but a zero-row UPDATE is not an ERROR, so the batch still commits. Two approvals racing
+      // each other therefore both ran to completion - the loser's claim-flip matched nothing, its credit landed
+      // anyway, and the advance was discharged twice for one claim. `runBatchChecked` noticed afterwards, by
+      // which point the money had moved; it detects, it does not prevent.
+      //
+      // `loan_repayment_claim_idx` makes a second credit for the same claim a UNIQUE VIOLATION, and a violation
+      // IS an error, which is the one thing that rolls a D1 batch back. So the loser writes nothing: no credit,
+      // no ledger row, no approval. It is also what makes a retry after a timeout safe.
+      let done: string[];
+      try {
+        done = await runBatchChecked(deps.db, [
+          deps.db.insert(schema.loanRepayments).values({ uuid: genId(), loanId: row.advanceId, runId: null, reimbursementId: id, amount: settled, at }),
+          {
+            stmt: repaidCreditStmt(deps, row.advanceId, settled, at).returning({ uuid: schema.loans.uuid }),
+            expect: 1,
+            label: "credit the advance",
+          },
+          {
+            stmt: deps.db
+              .update(schema.reimbursements)
+              .set({ state: to, decidedBy: actor.uuid, advanceSettled: settled, updatedAt: at })
+              .where(and(eq(schema.reimbursements.uuid, id), eq(schema.reimbursements.state, "PENDING")))
+              .returning({ uuid: schema.reimbursements.uuid }),
+            expect: 1,
+            label: "approve the claim",
+          },
+        ]);
+      } catch {
+        // The unique violation, or any other statement error: the transaction rolled back, so nothing happened
+        // and the caller is told the same thing a losing guarded flip would have told them.
+        throw failedPrecondition("claim is not pending");
+      }
+      if (done.length) {
+        // The batch COMMITTED but a guarded statement matched nothing - the advance was closed or withdrawn
+        // between the read above and this write, so the credit is not there to justify the approval that is.
+        // Compensate rather than leave the pair inconsistent: take the claim back to pending and remove the
+        // ledger row that now describes a credit which never landed.
+        await runBatch(deps.db, [
+          deps.db.delete(schema.loanRepayments).where(eq(schema.loanRepayments.reimbursementId, id)),
+          deps.db
+            .update(schema.reimbursements)
+            .set({ state: "PENDING", decidedBy: null, advanceSettled: 0, updatedAt: at })
+            .where(eq(schema.reimbursements.uuid, id)),
+        ]);
+        throw failedPrecondition(`could not settle this claim against the advance (${[...new Set(done)].join(", ")}) - nothing was approved`);
+      }
+      const settledRow = await getReimbursement(deps, actor, id);
+      await audit(deps, actor, "reimbursement.approved", "reimbursements", id, stateMeta(row.state, to, { employee: `employees/${row.employeeId}`, advance: `loans/${row.advanceId}`, settled }), settledRow);
+      await notify(deps, { recipient: row.employeeId, type: "reimbursement.approved", title: "Reimbursement approved", body: `Approved, and ${settled} was set against your advance.`, link: "reimbursements/history", subject: `reimbursements/${id}`, actorId: actor.employeeId });
+      await emitEvent(deps, actor, "reimbursement.approved", { subject: `reimbursements/${id}`, employeeId: row.employeeId, payload: { amount: row.amount } });
+      return settledRow;
+    }
+  }
+
   // Guard the flip on PENDING so the decision is EXACTLY-ONCE (0 rows = already decided by a concurrent call).
   const [updated] = await deps.db
     .update(schema.reimbursements)
-    .set({ state: to, decidedBy: actor.uuid, updatedAt: new Date() })
+    .set({ state: to, decidedBy: actor.uuid, updatedAt: at })
     .where(and(eq(schema.reimbursements.uuid, id), eq(schema.reimbursements.state, "PENDING")))
     .returning();
   if (!updated) throw failedPrecondition(to === "CANCELLED" ? "only pending claims can be cancelled" : "claim is not pending");

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Target, Plus, Pencil, Trash2, CheckCircle2, CalendarDays, ClipboardCheck, Clock3, Eye, Hourglass, Network, Sparkles, TrendingDown, Users, Search, Link2, X, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
+import { Target, Plus, Pencil, Trash2, CheckCircle2, CalendarDays, ClipboardCheck, Clock3, Eye, Hourglass, Network, Sparkles, TrendingDown, Users, Search, Link2, X, ChevronDown, ChevronLeft, ChevronRight , ListChecks } from "lucide-react";
 import { create, patch, invoke, remove, get, getAllPages } from "@/api";
 import { navigate, setRouteRecord, recordUrl, routeRecord } from "@/router";
 import { describeError, isConflict } from "@/lib/formError";
-import { measuredPct, measureLabel, numOrNone, weightedProgress } from "@/lib/goalMeasure";
+import { measuredPct, measureLabel, numOrNone, weightedProgress, measureGaps, GAP_MESSAGE } from "@/lib/goalMeasure";
 import {
-  STALE_DAYS, TONE_FILL, confidenceOf, dueRel, goalTone, isBehind, isOpen, sortGoals, statusForProgress,
+  STALE_DAYS, TONE_FILL, confidenceOf, dueRel, goalTone, isBehind, isOpen, matchingTemplates, retroSeed, sortGoals, statusForProgress,
 } from "@/lib/goalState";
 import {
   ConfidencePicker, GoalDueChip, GoalKindMark, GoalMeasureChip, GoalPaceChip, GoalProgressBar, GoalQuietChip,
@@ -29,6 +29,10 @@ import { readUrlQuery, writeUrlQuery } from "@/lib/urlQuery";
 import { useCanReadOthers } from "@/lib/perm";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { TeamTriage } from "@/components/common/TeamTriage";
+import { GoalBlockers } from "@/components/common/GoalBlockers";
+import { GoalCoverage } from "@/components/common/GoalCoverage";
+import { GoalSimilarCard } from "@/components/common/GoalSimilarCard";
+import { GoalMeasureSuggest } from "@/components/common/GoalMeasureSuggest";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { useDebounced } from "@/hooks/useDebounced";
 import { DataState } from "@/components/common/DataState";
@@ -576,6 +580,12 @@ export default function Goals({ me, openId, scope: forcedScope }: {
   // Which one the form was filled from - held so the picker reads back what it did rather than snapping to
   // "Select…" the moment it fills eight fields.
   const [fromTemplate, setFromTemplate] = useState("");
+  // Recomputed as they type, over rows the dialog already holds. Only while the title is long enough to be
+  // a phrase rather than a first word.
+  const titleMatches = useMemo(
+    () => (form.title.trim().length < 6 ? [] : matchingTemplates(`${form.title} ${form.description}`, usableTemplates)),
+    [form.title, form.description, usableTemplates],
+  );
   function applyTemplate(t: GoalTemplate) {
     setFromTemplate(t.path);
     setForm((f) => ({
@@ -1109,6 +1119,31 @@ export default function Goals({ me, openId, scope: forcedScope }: {
         </div>
       )}
 
+      {/* WHOSE, then WHICH - and it has to be ON SCREEN for that order to mean anything.
+          This row decides what the whole page is about, and it used to sit below two charts and a scoreboard:
+          a reader looking for their team's goals, or for everybody's, had to scroll past a donut of their own
+          to find out the page could answer that at all. The charts describe whatever the scope selected, so
+          they belong after it.
+          ABOVE `DataState` for the same reason: an empty read is a state of one SCOPE. "My team - no goals
+          yet" is an answer; the same words with no way to switch back read as the page being broken.
+          Hidden entirely for a reader whose grant reaches no further than their own goals - "Mine" alone is
+          not a choice, and the sidebar applies the same gate to the Team goals tab. */}
+      {canSeeOthers && (
+        <div className="mb-4 flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">Showing</span>
+          {SCOPES.map((sc) => (
+            <FilterChip key={sc.value} active={activeScope === sc.value} onClick={() => setScope(sc.value)}>{sc.label}</FilterChip>
+          ))}
+          {/* The triage layout for the same goals: one row per goal, worst first, with agree and
+              ask-for-an-update on the row. It lands on Needs attention, which is the set being chased. */}
+          {activeScope !== "mine" && (
+            <button type="button" className="ml-auto text-xs font-medium text-primary hover:underline" onClick={() => navigate("team-goals?filter=trouble")}>
+              Chase up
+            </button>
+          )}
+        </div>
+      )}
+
       <DataState state={state} error={error} onRetry={reload}>
         {/* AN EMPTY READ IS NOT AN EMPTY COLLECTION.
             Every filter narrows the READ now - the chip and the search as well as the cycle - so `rows` is
@@ -1212,25 +1247,6 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                 </div>
               );
             })()}
-
-            {/* WHOSE, then WHICH. The scope row leads because it decides what the rest of the page is about;
-                the chips under it narrow inside that answer. Hidden entirely for a reader whose grant reaches
-                no further than their own goals - "Mine" alone is not a choice, and the sidebar applies the
-                same gate to the Team goals tab. */}
-            {canSeeOthers && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                {SCOPES.map((s) => (
-                  <FilterChip key={s.value} active={activeScope === s.value} onClick={() => setScope(s.value)}>{s.label}</FilterChip>
-                ))}
-                {/* The triage layout for the same goals: one row per goal, worst first, with agree and
-                    ask-for-an-update on the row. It lands on Needs attention, which is the set being chased. */}
-                {activeScope !== "mine" && (
-                  <button type="button" className="ml-auto text-xs font-medium text-primary hover:underline" onClick={() => navigate("team-goals?filter=trouble")}>
-                    Chase up
-                  </button>
-                )}
-              </div>
-            )}
 
             <div className="flex flex-wrap items-center gap-1.5">
               {filterChip("all", "All")}
@@ -1423,7 +1439,15 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                     a page of its own with its own filters, its own counts and copy explaining how it differed
                     from this grid. Same rows, same scope, drawn the way the question wants. */}
                 {picked.length > 0 && activeScope !== "mine" && view === "flat" ? (
-                  <TeamTriage goals={picked} employees={employees} me={me} deptName={deptName} onChanged={reload} onOpen={openDetail} />
+                  <>
+                    {/* WHAT TO UNBLOCK FIRST, above the chasing pass rather than inside it: a triage row asks
+                        "who is sliding", and this answers "why", which is the question to settle first. */}
+                    <GoalBlockers goals={picked} onOpen={openDetail} />
+                    {/* The two questions a wall of cards cannot answer: which goals roll up to nothing, and
+                        who has not set one. Counted over the rows already on screen. */}
+                    <GoalCoverage goals={picked} employees={employees} onOpen={openDetail} />
+                    <TeamTriage goals={picked} employees={employees} me={me} deptName={deptName} onChanged={reload} onOpen={openDetail} />
+                  </>
                 ) : picked.length > 0
                   // The owner's face rides on the card in any scope but `mine`, where every card is the
                   // reader's and a row of identical avatars says nothing.
@@ -1511,6 +1535,24 @@ export default function Goals({ me, openId, scope: forcedScope }: {
             </Field>
           )}
           <Field label="Title" field="title"><Input value={form.title} placeholder="e.g. Ship the billing revamp" onChange={(e) => setForm({ ...form, title: e.target.value })} autoFocus /></Field>
+          {/* THE TEMPLATE THAT MATCHES WHAT THEY ARE TYPING, which the dropdown above cannot offer: a list of
+              thirty blueprints is a list nobody scrolls, so the org's agreed wording goes unused and the
+              ramp-up goal gets retyped from memory every time. Words shared, nothing sent anywhere. */}
+          {!editing && !fromTemplate && usableTemplates.length > 0 && titleMatches.length > 0 && (
+            <div className="-mt-1 flex flex-wrap items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">Templates like this:</span>
+              {titleMatches.map(({ template }) => (
+                <button
+                  key={template.path}
+                  type="button"
+                  onClick={() => applyTemplate(template)}
+                  className="max-w-56 truncate rounded-full border px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent"
+                >
+                  + {template.group_name ? `${template.group_name} · ` : ""}{template.title}
+                </button>
+              ))}
+            </div>
+          )}
           <Field label="Description (optional)" field="description">
             <div className="mb-2 flex justify-end">
               <DraftButton
@@ -1563,6 +1605,24 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                 <Input value={form.unit} maxLength={24} onChange={(e) => setForm({ ...form, unit: e.target.value })} placeholder="customers" />
               </Field>
             </div>
+            {/* The fix for the gap the line above names. Only on a SAVED goal with the measure still empty:
+                the proposal is read off the goal's own title and description, and a goal being created has
+                not got either of them on the server yet. */}
+            {editing && !form.unit.trim() && !form.target.trim() && (
+              <div className="mt-3">
+                <GoalMeasureSuggest
+                  goalId={idOf(editing.path)}
+                  can={editing.access?.can}
+                  onPropose={(p) => setForm((f) => ({
+                    ...f,
+                    // A null means "the goal does not say", which must not wipe what somebody has typed.
+                    unit: p.unit ?? f.unit,
+                    baseline: p.baseline_value != null ? String(p.baseline_value) : f.baseline,
+                    target: p.target_value != null ? String(p.target_value) : f.target,
+                  }))}
+                />
+              </div>
+            )}
             {measurePct === 100 && (
               <p className="mt-2 text-xs text-success">Saving this hits the target, which completes the goal.</p>
             )}
@@ -2462,6 +2522,27 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
           </div>
         )}
 
+        {/* WHAT THIS GOAL CANNOT ANSWER ABOUT ITSELF, while it is still cheap to fix. No measure means its
+            progress is an estimate for the whole cycle and its review reads "70%" with nothing behind it.
+            Arithmetic, so it appears with the AI layer switched off - the suggest button in Edit is the only
+            part that costs anything. Hidden on a finished goal, where none of it can be acted on. */}
+        {!closed && measureGaps(goal).length > 0 && (
+          <div className="space-y-0.5 rounded-lg border border-dashed p-3">
+            {measureGaps(goal).map((g) => (
+              <p key={g} className="text-xs text-muted-foreground">{GAP_MESSAGE[g]}</p>
+            ))}
+            {canEdit && <button type="button" className="text-xs font-medium text-primary hover:underline" onClick={onEdit}>Fix it in Edit</button>}
+          </div>
+        )}
+
+        {/* Duplicated effort and missing alignment, both read off the index rather than off somebody having
+            read all ninety goals. Asked for, so it costs nothing on a goal nobody is questioning. */}
+        <GoalSimilarCard
+          goalId={idOf(goal.path)}
+          can={goal.access?.can}
+          onOpenGoal={(path) => { const g = kids.find((k) => k.path === path); if (g) onOpenGoal(g); else navigate(path); }}
+        />
+
         {/* Where this stands, in the two senses that matter: the arithmetic (pace, silence, the shape of the
             climb) and the owner's own call. Hidden on a finished goal - neither question applies any more. */}
         {!closed && (
@@ -2510,6 +2591,20 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
         {(closed || (goal.progress ?? 0) >= 80) && canEdit && (
           <div className="space-y-2 rounded-lg border p-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">What happened</p>
+            {/* START FROM THE RECORD, not from a blank box. By the time a goal closes nobody remembers the
+                shape of the quarter, so the answer is usually a sentence and a percentage that says nothing.
+                The app holds the rest: where it started, where it got to, what was delivered against it. No
+                model and no request - every line here is already on this page - and it lands as editable
+                text the owner rewrites in their own words. */}
+            {!retroDraft.trim() && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setRetroDraft(retroSeed(goal, linked, history))}
+              >
+                <ListChecks className="h-4 w-4" /> Start from the record
+              </Button>
+            )}
             <Textarea
               rows={3}
               value={retroDraft}

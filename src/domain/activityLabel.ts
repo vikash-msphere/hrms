@@ -97,6 +97,7 @@ const LABELERS: Record<string, Labeler> = {
   "document-acknowledgements": (r) => u(shortDate(get(r, "acknowledged_time"))),
   "leave-balances": (r) => u(txt(String(get(r, "balance_days") ?? "")) && `${get(r, "balance_days")} days`),
   "payroll-runs": (r) => u(txt(get(r, "state"))),
+  "payroll-budgets": (r) => u(txt(get(r, "period_key"))),
 };
 
 // The label for a record. A per-collection labeler wins for transactional rows (so a stray name-ish column can't

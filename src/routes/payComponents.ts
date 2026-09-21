@@ -17,6 +17,7 @@ export const writeSchema = z.object({
   recurring: z.boolean().optional(),
   in_ctc: z.boolean().optional(), // employer contributions: inside CTC (default) vs over and above it
   pf_wages: z.boolean().optional(), // earnings: counts as PF wages under the "basic_plus" wage basis
+  gl_code: z.string().max(64).nullable().optional(), // the account this component posts to in a payroll journal
   active: z.boolean().optional(),
 }).strict();
 

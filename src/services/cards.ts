@@ -782,7 +782,13 @@ export async function moveCard(deps: Deps, actor: AppUser, id: string, to: MoveC
 export async function recomputeGoalProgress(deps: Deps, actor: AppUser, goalId: string | null | undefined) {
   if (!goalId) return;
   try {
-    const goal = (await deps.db.select({ del: schema.goals.deleteTime }).from(schema.goals).where(eq(schema.goals.uuid, goalId)).limit(1))[0];
+    // The goal's OWN figures ride along, so the write below can be skipped when nothing actually moved - see
+    // the guard under the arithmetic.
+    const goal = (await deps.db
+      .select({ del: schema.goals.deleteTime, progress: schema.goals.progress, status: schema.goals.status })
+      .from(schema.goals)
+      .where(eq(schema.goals.uuid, goalId))
+      .limit(1))[0];
     if (!goal || goal.del) return;
     const linked = await deps.db
       .select({ size: schema.cards.size, delivered: schema.cards.deliveredAt })
@@ -797,9 +803,26 @@ export async function recomputeGoalProgress(deps: Deps, actor: AppUser, goalId: 
     const done = linked.reduce((s, c) => s + (c.delivered ? weight(c) : 0), 0);
     const progress = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
     const status = progress >= 100 ? "completed" : progress > 0 ? "in_progress" : undefined;
+    // NOTHING MOVED, NOTHING WRITTEN - the same guard the objective roll-up next door has always had
+    // (services/goals.ts recomputeObjectiveProgress: "don't write an audit entry saying so").
+    //
+    // `updateGoalProgress` writes the row, files a `goal.updateProgress` audit entry and emits
+    // `goal.progress` every time it is called, and this function is reached from the commonest write on the
+    // board: moving a card between two columns that are both undelivered leaves the percentage identical. So
+    // every such move filed an audit entry recording a change from a number to itself, and emitted a domain
+    // event the automation engine then dispatched against its per-action budget.
+    //
+    // The STATUS is part of the comparison, not just the percentage: a goal sitting at 100% whose status was
+    // put back by hand still needs the write, and guarding on the number alone would skip it.
+    if (progress === goal.progress && (status === undefined || status === goal.status)) return;
     await updateGoalProgress(deps, actor, goalId, progress, status);
-  } catch {
-    // best-effort: the triggering card change already committed; a roll-up failure must not undo it.
+  } catch (err) {
+    // Best-effort: the triggering card change already committed, and a roll-up failure must not undo it. LOGGED
+    // for the reason the objective roll-up states in full (services/goals.ts) - the goal is now quoting a
+    // figure its linked tasks no longer support, and that figure is what a review scores
+    // (domain/performance.ts goalAttainment) and what `review-cycles:award` turns into money. The error tracker
+    // and the cron subtask wrapper both read console.error, which is what makes a run of these visible at all.
+    console.error(`[cards] goal roll-up failed for ${goalId}; its progress is now stale`, err);
   }
 }
 

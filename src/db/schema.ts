@@ -409,6 +409,20 @@ export const leaveBalances = sqliteTable("leave_balances", {
   balanceDays: real("balance_days").notNull().default(0),
   // Last calendar month (YYYY-MM, UTC) credited for this balance; makes monthly accrual idempotent.
   lastAccrualYm: text("last_accrual_ym"),
+  // The EMPLOYMENT WINDOW those credited periods were priced against (domain/leave.ts AccrualInputs).
+  //
+  // The marker above is a high-water mark and the accrual walk only ever adds, which is right while the window
+  // only grows and silently wrong when somebody corrects it: a start date fixed earlier leaves the months
+  // before the old start uncredited for ever, a rescinded departure leaves the exit month stuck at the
+  // fraction the claw-back reduced it to, and a start date fixed later leaves months credited that nobody
+  // worked. The marker names a period and says nothing about the window, so none of the three is detectable
+  // from it - which is why the window is recorded beside it rather than inferred.
+  //
+  // Null start = not recorded (a balance credited before these existed). The walk then falls back to what the
+  // marker's own FINAL MARK implies, which is the one bit of this the old design did keep, so such a row is
+  // priced exactly as it was before and starts recording its window on the next tick.
+  accrualPricedStart: integer("accrual_priced_start", { mode: "timestamp_ms" }),
+  accrualPricedEnd: integer("accrual_priced_end", { mode: "timestamp_ms" }),
   // Last calendar year (YYYY, UTC) the year-end carry-forward cap was applied; makes rollover idempotent.
   lastCarryForwardYear: text("last_carry_forward_year"),
   createdAt: created(),
@@ -1587,9 +1601,24 @@ export const loanRepayments = sqliteTable("loan_repayments", {
   // so runId is null. resetLoanRepaymentStmts matches a specific runId, so null (manual) rows are never
   // reversed by a run delete - which is correct, a manual repayment isn't undone by deleting a payroll run.
   runId: text("run_id").references((): AnySQLiteColumn => payrollRuns.uuid),
+  // The reimbursement claim whose approval produced this credit, for a claim settled against an ADVANCE.
+  // Null for a payroll installment and for a manual repayment, which is why the uniqueness below is partial.
+  //
+  // THIS COLUMN IS A LOCK, not a cross-reference. D1 runs a batch as one transaction, but a zero-row UPDATE is
+  // not an error - so two concurrent approvals of the same claim each ran their batch to completion, the
+  // loser's guarded claim-flip matched nothing, and its credit landed anyway: the advance was discharged
+  // TWICE for one claim. `runBatchChecked` reported the mismatch afterwards, which is too late, because the
+  // money had already moved. A UNIQUE VIOLATION is an error, and an error is the one thing that makes D1 roll
+  // the whole batch back - so the loser now writes nothing at all.
+  reimbursementId: text("reimbursement_id").references((): AnySQLiteColumn => reimbursements.uuid),
   amount: real("amount").notNull(),
   at: integer("at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
-}, (t) => ({ loanIdx: index("loan_repayment_loan_idx").on(t.loanId), runIdx: index("loan_repayment_run_idx").on(t.runId) }));
+}, (t) => ({
+  loanIdx: index("loan_repayment_loan_idx").on(t.loanId),
+  runIdx: index("loan_repayment_run_idx").on(t.runId),
+  // One credit per claim, ever. Partial, so the payroll and manual rows (which carry no claim) are unaffected.
+  claimUniq: uniqueIndex("loan_repayment_claim_idx").on(t.reimbursementId).where(sql`${t.reimbursementId} is not null`),
+}));
 
 // ---- Investment / tax declarations ----
 // One declared tax-saving item for a financial year (e.g. 80C: ELSS 50000). Employee-owned + code-scoped
@@ -2021,6 +2050,15 @@ export const compensation = sqliteTable("compensation", {
   // wages, not on the whole gross delta, so the payroll run needs the two figures apart; ESI is due on the
   // whole arrears amount and uses `arrearsAmount`.
   arrearsBaseAmount: real("arrears_base_amount").notNull().default(0),
+  // Which already-published periods `arrearsAmount` is owed FOR, as a JSON array of
+  // {label, months, amount} - the breakdown the pricing already computes on its way to the total.
+  //
+  // STORED rather than derived, and that is the whole point: `arrearsAmount` is frozen at the moment of the
+  // revision, because it depends on which periods had published by then. Recomputing the breakdown later - once
+  // more runs have published - would produce a list that no longer describes the money actually paid, so the
+  // payslip would explain an arrear with months it never covered. Null on rows written before this existed and
+  // on rows that owe nothing; the payslip then shows the total alone, exactly as it did.
+  arrearsPeriodsJson: text("arrears_periods_json"),
   arrearsPaidRunId: text("arrears_paid_run_id").references((): AnySQLiteColumn => payrollRuns.uuid),
   arrearsPaidAt: integer("arrears_paid_at", { mode: "timestamp_ms" }),
   createdAt: created(),
@@ -2485,6 +2523,16 @@ export const payComponents = sqliteTable("pay_components", {
   // payroll run costs it; this only decides which side of the CTC number it lands on. Ignored (always true)
   // for earnings and employee deductions, which are inside CTC by construction.
   inCtc: integer("in_ctc", { mode: "boolean" }).notNull().default(true),
+  // The accounting code this component posts to, mirroring `expense_categories.gl_code`. Null until an org
+  // maps its chart of accounts, and a run refuses to produce a journal while any component it priced is
+  // unmapped - a partial journal is worse than none, because it balances by leaving money out.
+  //
+  // WHICH SIDE it posts to is NOT stored: it follows from `kind`, and storing it would let the two disagree.
+  // An earning debits an expense, an employee deduction credits a liability, and an employer contribution does
+  // BOTH (its own expense, and the liability the company will later discharge). Net pay is not a component at
+  // all - it is the balancing payable, and its account lives in the `payroll-gl` settings blob with the
+  // rounding account, because neither is derived from anything an org configures per component.
+  glCode: text("gl_code"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
   locked: integer("locked", { mode: "boolean" }).notNull().default(false),
@@ -2500,6 +2548,16 @@ export const payPeriods = sqliteTable("pay_periods", {
   periodStart: integer("period_start", { mode: "timestamp_ms" }).notNull(),
   periodEnd: integer("period_end", { mode: "timestamp_ms" }).notNull(),
   payDate: integer("pay_date", { mode: "timestamp_ms" }).notNull(),
+  // The day after which this period's inputs are meant to stop moving, so payroll can be built against a
+  // settled set of figures. NULLABLE, and null means the org has not adopted a cutoff - the periods that exist
+  // today were written without one and must keep behaving exactly as they did.
+  //
+  // It is a DATE THE ORG PUBLISHES, not a lock. A reimbursement approved the evening before pay date is a
+  // legitimate write that happens to invalidate a run somebody already reviewed, and the app's only response
+  // today is `runStaleness` reporting it afterwards. Naming the day in advance is what lets everyone upstream
+  // of payroll see the deadline they are working to; refusing the late write is a separate decision, and
+  // deliberately not this column's job.
+  inputCutoffOn: integer("input_cutoff_on", { mode: "timestamp_ms" }),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
   locked: integer("locked", { mode: "boolean" }).notNull().default(false),
@@ -2569,6 +2627,33 @@ export const payrollRunItems = sqliteTable("payroll_run_items", {
   totalDeductions: real("total_deductions").notNull(),
   tax: real("tax").notNull().default(0), // TDS withheld this run (also a deduction line in lines_json)
   net: real("net").notNull(),
+  // The employee's department AS OF THIS BUILD, stamped rather than resolved later. Payroll is the largest
+  // line in the company and the only one with no cost-centre attribution; `expenses.department_id` exists for
+  // exactly this reason. Stamped because a transfer in March must not rewrite what February's accounts said -
+  // resolving through `employees.department_id` at read time would do precisely that. Null for an employee
+  // with no department, which posts to the org-wide account rather than being dropped.
+  departmentId: text("department_id").references(() => departments.uuid),
+  // A FINGERPRINT of the account this row was actually paid into, written when the bank file is generated.
+  // Never the account number: it answers "same or different" against the next run and nothing else, and it
+  // cannot be read back. That is what lets the payout check say "this person's account has changed since the
+  // last run that paid them" without holding, comparing or displaying anybody's account number.
+  //
+  // Null until a payout file is produced for the run, and null for a row with nothing to pay.
+  bankAccountHash: text("bank_account_hash"),
+  // WHETHER THE MONEY ARRIVED, which the module could not previously answer at all: `bank_file_at` records
+  // the moment a payout file was produced and nothing records what the bank then did with it. A wrong
+  // account number, a closed account or a bank-side rejection was discovered when the employee said they had
+  // not been paid.
+  //
+  // Null until a bank response is recorded, which is the honest state for "sent, nothing heard back" - and
+  // distinct from "paid", which must only ever mean the bank confirmed it.
+  paymentStatus: text("payment_status", { enum: ["paid", "failed", "returned"] }),
+  paymentAt: integer("payment_at", { mode: "timestamp_ms" }),
+  // What the bank called it, so a failure can be chased with the bank using their own reference.
+  paymentRef: text("payment_ref"),
+  // Why it did not land, in the bank's words. The reason is the whole value of a failure row: "account
+  // closed" and "name mismatch" need different people to do different things.
+  paymentReason: text("payment_reason"),
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ runIdx: index("rri_run_idx").on(t.runId), runEmpUniq: uniqueIndex("rri_run_emp_idx").on(t.runId, t.employeeId) }));
@@ -2585,6 +2670,15 @@ export const payslips = sqliteTable("payslips", {
   totalDeductions: real("total_deductions").notNull().default(0),
   tax: real("tax").notNull().default(0), // TDS withheld
   net: real("net").notNull().default(0),
+  // When the EMPLOYEE THEMSELVES first opened this slip, and nothing else about their reading of it.
+  //
+  // A delivery record, not a reading record, and the difference is the whole justification. "Did everybody get
+  // their payslip" is a question payroll has to be able to answer; "what has this person been looking at, and
+  // when" is the question domain/auditAccess.ts refuses to let anybody ask of their own data ("Reading your OWN
+  // sensitive data is expected, not an abuse signal - never audited"). So this is one timestamp, written once,
+  // by the owner's own first view - never a counter, never a log, and never touched when HR or a manager opens
+  // somebody else's slip, which the audit trail already covers as the accountability event it is.
+  firstOpenedAt: integer("first_opened_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ pageIdx: index("payslips_page_idx").on(t.createdAt, t.uuid),
@@ -2622,6 +2716,19 @@ export const reimbursements = sqliteTable("reimbursements", {
   description: text("description"),
   state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED", "PAID"] }).notNull().default("PENDING"),
   decidedBy: text("decided_by").references(() => users.uuid),
+  // The advance this claim spends, when the employee was given money UP FRONT for it (a travel float). A
+  // `loans` row of kind "advance" - an advance IS a zero-interest short-term loan here, which is why it reuses
+  // that machinery rather than becoming a second way for the company to be owed money.
+  //
+  // WITHOUT THIS the employee is paid twice: they take a 50,000 travel advance, file 45,000 of claims, and the
+  // claims pay out in full while payroll separately recovers the 50,000 from their salary.
+  advanceId: text("advance_id").references((): AnySQLiteColumn => loans.uuid),
+  // How much of this claim went to discharging that advance instead of being paid out. The payout queue pays
+  // `amount - advance_settled`, so a claim inside the advance pays nothing and one that overspends it pays only
+  // the excess. Held on the CLAIM rather than inferred from the advance, because the advance's outstanding
+  // balance moves as later claims settle against it: recomputing this later would not give back the split that
+  // was actually applied to the money.
+  advanceSettled: real("advance_settled").notNull().default(0),
   paidRunId: text("paid_run_id").references((): AnySQLiteColumn => payrollRuns.uuid), // set when paid via a payroll run
   paidAt: integer("paid_at", { mode: "timestamp_ms" }),
   createdAt: created(),
@@ -2658,6 +2765,32 @@ export const expenseCategories = sqliteTable("expense_categories", {
   name: text("name").notNull(),
   requiresReceipt: integer("requires_receipt", { mode: "boolean" }).notNull().default(false),
   glCode: text("gl_code"), // accounting general-ledger code
+  // A category the org pays at a PUBLISHED RATE rather than against a receipt: mileage per kilometre, a
+  // subsistence allowance per day. Both are null on an ordinary category, and both are set together - a rate
+  // with no kind cannot be applied and a kind with no rate cannot compute.
+  //
+  // What this buys is correctness by construction. A car journey and a day away have no invoice, so today the
+  // claimant multiplies in their head and types a total: the rate lives in somebody's memory, it is applied
+  // inconsistently, and an approver has no way to check the arithmetic without knowing the rate themselves.
+  // With these set the submitter enters distance or days and the amount follows, `requires_receipt` stops
+  // applying (there is nothing to attach), and the claim carries what it was computed from.
+  //
+  // NOT EFFECTIVE-DATED, and that is a real limitation rather than an oversight. Changing the rate here changes
+  // what is computed from that moment on; claims already filed keep their own stored `amount`, so history is
+  // not rewritten, but a claim filed TODAY for a trip LAST YEAR is priced at today's rate. Rates do change by
+  // year, so an org that backdates claims across a rate change needs a per-period rate table - that is the
+  // follow-up, and it is deliberately not pretended at with a single column.
+  rateKind: text("rate_kind", { enum: ["per_km", "per_day"] }),
+  rate: real("rate"),
+  // The two limits a finance team actually applies, as policy DATA rather than as a habit in somebody's head.
+  // Both null on an unrestricted category.
+  //
+  // What they buy is WHERE the rule lands. Both are things a claim gets rejected for days later today, and a
+  // rejection for a rule that could have been stated at submit is the interaction that makes people resent an
+  // expenses module. `decision_note` exists so a submitter is told the reason rather than the verdict; the
+  // same reason is worth more before the claim is filed than after.
+  amountCap: real("amount_cap"), // most a single claim in this category may be
+  maxAgeDays: integer("max_age_days"), // how late a claim may be filed, counted from the date incurred
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
   locked: integer("locked", { mode: "boolean" }).notNull().default(false),
@@ -2674,7 +2807,14 @@ export const vendors = sqliteTable("vendors", {
   contactEmail: text("contact_email"),
   contactPhone: text("contact_phone"),
   taxId: text("tax_id"), // GSTIN / tax registration
-  paymentTerms: text("payment_terms"), // e.g. "Net 30"
+  // How many days after the invoice date this vendor is paid. A NUMBER, not the free text it was ("Net 30"),
+  // because nothing could compute with the text: an approved expense had no due date, so the app could not say
+  // what was payable this week, could not age its payables and could not count a late payment. Null means the
+  // vendor has no agreed terms, which is different from zero (due immediately).
+  //
+  // Terms run from the INVOICE date (`expenses.incurred_on`), which is what "Net 30" means in the trade and
+  // also what lets the due date exist before anybody approves anything.
+  paymentTermsDays: integer("payment_terms_days"),
   bankDetails: text("bank_details"),
   defaultCategoryId: text("default_category_id").references(() => expenseCategories.uuid),
   notes: text("notes"),
@@ -2696,6 +2836,12 @@ export const expenses = sqliteTable("expenses", {
   categoryId: text("category_id").references(() => expenseCategories.uuid),
   departmentId: text("department_id").references(() => departments.uuid), // cost-centre attribution (not scope key)
   amount: real("amount").notNull(),
+  // How many kilometres, or how many days, on a claim against a rated category (expense_categories.rate_kind).
+  // Null on every ordinary expense. Stored rather than derived back out of the amount because it is what the
+  // claimant actually asserted - dividing an amount by today's rate to recover it would give the wrong
+  // distance the moment the rate changed, and an approver reading "412 km" is checking a different claim from
+  // one reading "₹4,120".
+  quantity: real("quantity"),
   taxAmount: real("tax_amount").notNull().default(0), // GST / tax component of the amount
   incurredOn: integer("incurred_on", { mode: "timestamp_ms" }),
   description: text("description"),
@@ -2706,6 +2852,18 @@ export const expenses = sqliteTable("expenses", {
   reimbursable: integer("reimbursable", { mode: "boolean" }).notNull().default(false), // an employee fronted it
   reimbursementId: text("reimbursement_id").references((): AnySQLiteColumn => reimbursements.uuid), // set when bridged
   decidedBy: text("decided_by").references(() => users.uuid),
+  // The FIRST of two approvals, on a claim large enough that the org wants two pairs of hands
+  // (settings/expenses `second_approval_threshold`). Null on everything below the threshold and on everything
+  // filed before an org set one.
+  //
+  // A COLUMN RATHER THAN A STATE, deliberately, and the trade is worth writing down. A claim holding one
+  // approval is still awaiting an approval, so leaving it SUBMITTED keeps `domain/approvalsSummary.ts` and
+  // every queue filter correct for free; a new enum member would have had to be added to each of them, and
+  // missing one would silently drop these claims out of somebody's queue - which is the failure that loses
+  // money quietly. What the state cannot carry, this column does: who has already approved, so the second
+  // approver is told, and so the same person cannot be both.
+  firstApprovedBy: text("first_approved_by").references(() => users.uuid),
+  firstApprovedAt: integer("first_approved_at", { mode: "timestamp_ms" }),
   decisionNote: text("decision_note"), // why it was rejected - the submitter is told the reason, not just the verdict
   paidBy: text("paid_by").references(() => users.uuid),
   paidAt: integer("paid_at", { mode: "timestamp_ms" }),
@@ -2736,6 +2894,93 @@ export const expenses = sqliteTable("expenses", {
 // Budget: a spend cap for a (department?, category?, period). NULL dept = org-wide; NULL category = all
 // categories. `spent`/`remaining`/`utilization` are derived (never stored) from APPROVED+PAID expenses.
 // `alertLevel` records the highest threshold already alerted (0/80/100) so a budget alert fires once.
+// One invoice split across cost centres. A single bill that is sixty per cent Engineering and forty per cent
+// Sales was previously filed as TWO expenses, which meant the invoice could only be attached to one of them -
+// the second row was evidence-free by construction, and neither row was the amount the company actually paid.
+//
+// A CHILD ROW, not a collection: reached only through its parent expense, exactly like `attachments`, so it
+// needs no code, no authz entry and no routes of its own - the parent's read and write gates are its gates.
+//
+// The lines must sum to the expense's own amount, which is what keeps `expenses.amount` the single answer to
+// "what did this cost" while the lines answer "who paid for it". Budget attribution consumes the LINES where
+// they exist and the row where they do not (services/expenseBudgets.ts), which is the only place in the app
+// that has to understand a split at all.
+export const expenseAllocations = sqliteTable("expense_allocations", {
+  uuid: pk(),
+  expenseId: text("expense_id").notNull().references(() => expenses.uuid),
+  departmentId: text("department_id").references(() => departments.uuid),
+  categoryId: text("category_id").references(() => expenseCategories.uuid),
+  amount: real("amount").notNull(),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({ expIdx: index("exp_alloc_expense_idx").on(t.expenseId) }));
+
+// A row off a corporate card statement, and the claim it accounts for.
+//
+// The point of holding these at all is that an UNCLAIMED charge is otherwise invisible: the app only knows
+// about spending somebody remembered to file. With the statement imported, the statement is the list - a row
+// with no expense behind it is work outstanding, and a claim with no row is one to ask about.
+//
+// `import_key` is what makes re-uploading a statement safe. Card issuers hand out overlapping periods and
+// people upload the same file twice, so the key is derived from the row's own content (services/cardStatements.ts)
+// and carries a unique index: a second import of the same charge is a no-op rather than a duplicate the
+// matcher then has to be clever about.
+//
+// `employee_id` is the CARDHOLDER, not whoever files the claim. It is nullable because a statement may name a
+// card this app cannot resolve to a person, and a row nobody owns is still a charge the company paid - it
+// belongs on the list rather than being dropped for want of an owner.
+export const cardTransactions = sqliteTable("card_transactions", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").references(() => employees.uuid),
+  cardLast4: text("card_last4"),
+  postedOn: integer("posted_on", { mode: "timestamp_ms" }).notNull(),
+  amount: real("amount").notNull(),
+  merchant: text("merchant"),
+  reference: text("reference"), // the issuer's own row id, where the format carries one
+  importKey: text("import_key").notNull(),
+  // The claim this charge accounts for. `match_confidence` records HOW it was decided, because "the amount
+  // and the week agreed" and "a person said so" are different warrants and an approver should be able to
+  // tell them apart.
+  expenseId: text("expense_id").references((): AnySQLiteColumn => expenses.uuid),
+  matchConfidence: text("match_confidence", { enum: ["exact", "likely", "manual"] }),
+  matchedAt: integer("matched_at", { mode: "timestamp_ms" }),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  pageIdx: index("card_transactions_page_idx").on(t.createdAt, t.uuid),
+  keyUniq: uniqueIndex("card_txn_import_key_idx").on(t.importKey),
+  empIdx: index("card_txn_emp_idx").on(t.employeeId, t.postedOn),
+  expenseIdx: index("card_txn_expense_idx").on(t.expenseId),
+}));
+
+// Payroll budgets: a spend cap for a (department?, period), with SPEND DERIVED FROM PAYROLL RUNS rather than
+// from expenses. Salary is the largest line in the company and was the only one with no budget surface at all.
+//
+// A SEPARATE TABLE rather than a `source` column on `expense_budgets`, deliberately. The two share a shape -
+// a scope, a period, a cap, a recurrence - but nothing else: they are filled from different collections, read
+// by different people, and every existing expense-budget query would have had to learn to exclude payroll
+// rows. One forgotten filter there would silently count salary as expense spend against a department's
+// expense cap, which is a wrong number nobody would question because both figures are real.
+//
+// No category dimension, unlike an expense budget: payroll's equivalent of a category is a pay component, and
+// capping "basic pay for Engineering" is not a budget anybody sets. Department and period are the whole scope.
+export const payrollBudgets = sqliteTable("payroll_budgets", {
+  uuid: pk(),
+  code: codeCol(),
+  departmentId: text("department_id").references(() => departments.uuid), // null = org-wide
+  periodType: text("period_type", { enum: ["monthly", "quarterly", "yearly"] }).notNull(),
+  periodKey: text("period_key").notNull(), // "2026" | "2026-Q1" | "2026-07"
+  amount: real("amount").notNull(),
+  recurring: integer("recurring", { mode: "boolean" }).notNull().default(false),
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  pageIdx: index("payroll_budgets_page_idx").on(t.createdAt, t.uuid),
+  periodIdx: index("payrollbudget_period_idx").on(t.periodType, t.periodKey),
+}));
+
 export const expenseBudgets = sqliteTable("expense_budgets", {
   uuid: pk(),
   code: codeCol(),
@@ -2751,6 +2996,12 @@ export const expenseBudgets = sqliteTable("expense_budgets", {
   // Travel/Engineering does not".
   recurring: integer("recurring", { mode: "boolean" }).notNull().default(false),
   alertLevel: integer("alert_level").notNull().default(0), // highest budget-alert threshold already fired
+  // When the daily sweep last said this cap is FORECAST to breach. Its own guard rather than a second
+  // `alertLevel`, because the two answer different questions and must be able to fire independently: a cap
+  // can be forecast over in week one (this stamps) and then actually cross 80% in week three (`alertLevel`
+  // rises), and neither should silence the other. Cleared wherever `alertLevel` resets - changing the cap or
+  // the period re-arms both - so a re-armed budget can warn again about the period it is now describing.
+  projectionAlertedAt: integer("projection_alerted_at", { mode: "timestamp_ms" }),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
@@ -3310,4 +3561,45 @@ export const tableViews = sqliteTable("table_views", {
   updatedAt: updated(),
 }, (t) => ({ pageIdx: index("table_views_page_idx").on(t.createdAt, t.uuid),
   ownerIdx: index("table_view_owner_idx").on(t.ownerId),
+}));
+
+// Loss of pay corrected after its period closed.
+//
+// One row per (employee, closed period) while unpaid, enforced below. That uniqueness IS the design: an
+// adjustment RESTATES what a period should have docked rather than adding to a running total, so a second
+// retroactive change to the same period must overwrite the first, not queue behind it. Three late approvals
+// against one March leave one row worth three days. See domain/lopAdjust.ts for why the restatement is
+// recomputed from scratch each time instead of accumulated.
+//
+// Signed throughout: positive = the run over-docked and the employee is owed it back, negative = it
+// under-docked and the money is recovered. Loss of pay is itself a NEGATIVE EARNING, so the correction sits
+// on the earning side too, or the two never net out on a payslip.
+//
+// `charged_units` and `correct_units` are stored beside the result rather than derived from it because they
+// are the ARGUMENT for the figure - "the run docked 2, attendance says 1" is what makes the line defensible
+// to the person it is paid to, and recomputing them later would read the period's attendance as it stands
+// then rather than as it stood when the adjustment was raised.
+export const lopAdjustments = sqliteTable("lop_adjustments", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  // The CLOSED period being corrected, not the one that will pay it.
+  payPeriodId: text("pay_period_id").notNull().references(() => payPeriods.uuid),
+  chargedUnits: real("charged_units").notNull(),
+  correctUnits: real("correct_units").notNull(),
+  dayUnits: real("day_units").notNull(),
+  amount: real("amount").notNull(),
+  // The run that settled it. Null while queued, which is the same shape bonuses, encashments, overtime and
+  // reimbursements use - so the run build picks this up by the mechanism it already has for every other
+  // late-arriving payable.
+  paidRunId: text("paid_run_id").references((): AnySQLiteColumn => payrollRuns.uuid),
+  paidAt: integer("paid_at", { mode: "timestamp_ms" }),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  pageIdx: index("lop_adjustments_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("lopadj_emp_idx").on(t.employeeId, t.createdAt, t.uuid),
+  // At most ONE unpaid adjustment per (employee, period). A paid one is history and may sit beside a new
+  // correction to the same period, which is why the index is partial rather than total.
+  openUniq: uniqueIndex("lopadj_open_idx").on(t.employeeId, t.payPeriodId).where(sql`${t.paidRunId} is null`),
 }));

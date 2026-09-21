@@ -15,7 +15,15 @@ import {
 // caller (org settings, the employee, the run item). Shared font/encoding/number-formatting helpers live in
 // pdfPrimitives.ts (reused by the letter renderer).
 
-export type PayslipLine = { name: string; kind: "earning" | "deduction"; amount: number };
+export type PayslipLine = {
+  name: string;
+  kind: "earning" | "deduction";
+  amount: number;
+  /** What the line is made of, where the lump alone cannot be checked by the person holding the payslip.
+   *  Salary arrears use it to name the months they cover. Drawn under the line, indented and muted; it is never
+   *  totalled, because the line's own amount is already the whole of the money. */
+  parts?: { label: string; amount: number }[];
+};
 // The employer's own cost for the period. `aboveCtc` = the org puts this contribution over and above CTC
 // (its pay component's `in_ctc` is false), so it is excluded from the CTC figure.
 export type PayslipEmployerLine = { name: string; amount: number; aboveCtc?: boolean };
@@ -262,8 +270,16 @@ export async function renderPayslipPdf(
     const deductions = d.lines.filter((l) => l.kind === "deduction");
     const rowSize = sizeOf(st, 9);
     const pitch = ds(15);
-    // Both columns are drawn from the same top, so the block needs room for the taller of the two.
-    room(ds(36) + Math.max(earnings.length, deductions.length) * pitch + ds(24));
+    // A part is a sub-row: smaller type, tighter pitch, indented under the line it explains.
+    const partSize = sizeOf(st, 7.5);
+    const partPitch = ds(11);
+    const partIndent = ds(10);
+    // Both columns are drawn from the same top, so the block needs room for the taller of the two - and a
+    // column's height is its lines PLUS their parts, or an arrears breakdown would be measured as one row and
+    // draw over whatever the block reserved space for next.
+    const heightOf = (rows: PayslipLine[]) =>
+      rows.length * pitch + rows.reduce((n, r) => n + (r.parts?.length ?? 0), 0) * partPitch;
+    room(ds(36) + Math.max(heightOf(earnings), heightOf(deductions)) + ds(24));
     const sp = (MR - ML) * (b.split ?? 0.5); // left column's share of the content width
     const lcL = ML, lcR = ML + sp - 10; // left column
     const rcL = ML + sp + 10, rcR = MR; // right column
@@ -286,6 +302,13 @@ export async function renderPayslipPdf(
         right(money(r.amount, dp), xR, ty, { f: mono, size: rowSize, color: rowInk });
         if (b.rowBorders) rule(xL, ty - 4, xR, 0.4, LINE);
         ty -= pitch;
+        // The months an arrear covers, under the arrear itself. Muted and indented so the column still reads as
+        // a list of lines with one total - these are an explanation of a figure already counted, not more money.
+        for (const part of r.parts ?? []) {
+          at(part.label, xL + partIndent, ty, { f: fontOf(st, font), size: partSize, color: SOFT });
+          right(money(part.amount, dp), xR, ty, { f: mono, size: partSize, color: SOFT });
+          ty -= partPitch;
+        }
       });
       ty -= 1;
       rule(xL, ty + 9, xR);

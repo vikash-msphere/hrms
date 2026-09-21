@@ -37,7 +37,7 @@ beforeAll(async () => {
 
 // `settings` and `aiUsage` are cleared with the rest: the summary reads the org's AI switch and records what
 // it spends, and a test that asserts "asked nothing" is only meaningful against a clean slate.
-const TABLES = [schema.cards, schema.boards, schema.reviews, schema.reviewCycles, schema.goals, schema.employees, schema.settings, schema.aiUsage, schema.aiCache];
+const TABLES = [schema.cards, schema.boards, schema.reviewFeedback, schema.reviews, schema.reviewCycles, schema.goals, schema.employees, schema.settings, schema.aiUsage, schema.aiCache];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
   // Absent unless a test wires one. The list must stand up with no model at all, which is most of these.
@@ -162,6 +162,155 @@ describe("reviews waiting on this person", () => {
   });
 });
 
+describe("cards that are ageing, and cards that are finished", () => {
+  const BOARD = genId();
+  /** One card on a board, positioned by how long ago it last changed column. */
+  async function boardCard(over: Partial<typeof schema.cards.$inferInsert> & { title: string }) {
+    await deps.db.insert(schema.boards).values({ uuid: BOARD, code: `b-${BOARD.slice(0, 5)}`, name: "Delivery", columnsJson: JSON.stringify([{ key: "done", label: "Done" }]) }).onConflictDoNothing();
+    const uuid = genId();
+    await deps.db.insert(schema.cards).values({
+      uuid, code: `c-${uuid.slice(0, 6)}`, boardId: BOARD, employeeId: ME.uuid, columnKey: "done", ...over,
+    });
+    return uuid;
+  }
+  const longAgo = () => new Date(Date.now() - 100 * DAY);
+
+  it("says nothing about a card that was delivered, however long ago it last moved", async () => {
+    await people();
+    // `column_since` is restamped by EVERY move, the delivery one included, so a card delivered months ago
+    // carries an old stamp and would otherwise read as "in done for 100 days" - filling all eight slots of
+    // this surface with finished work on any board older than the threshold.
+    await boardCard({ title: "Long since done", columnSince: longAgo(), deliveredAt: longAgo() });
+    const { items } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    expect(items).toEqual([]);
+  });
+
+  it("still flags one that is genuinely stuck", async () => {
+    await people();
+    await boardCard({ title: "Stuck in review", columnKey: "review", columnSince: longAgo() });
+    const { items } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    expect(items.map((i) => i.kind)).toEqual(["card_aged"]);
+  });
+
+  it("keeps the roundup clear of delivered work too", async () => {
+    await people();
+    // The digest reads its own query rather than calling `attentionFor`, so the same gap had to be closed
+    // twice - and without this it mails everybody a list of their long-closed cards.
+    //
+    // The clock is frozen on a Monday (the digest is a no-op on the other six days) and PUT BACK after: the
+    // suites below position their fixtures against the real clock, and a frozen one left behind moves the
+    // week they are testing.
+    const real = deps.clock;
+    deps.clock = { now: () => new Date("2026-09-21T09:00:00Z") };
+    try {
+      await boardCard({ title: "Long since done", columnSince: longAgo(), deliveredAt: longAgo() });
+      expect(await weeklyAttentionDigest(deps)).toBe(0);
+    } finally {
+      deps.clock = real;
+    }
+  });
+});
+
+describe("the cycle's own deadline", () => {
+  async function dated(state: "SELF" | "MANAGER", employeeId: string, due: { selfDueDate?: Date; managerDueDate?: Date }) {
+    const cycle = genId();
+    await deps.db.insert(schema.reviewCycles).values({ uuid: cycle, code: `c-${cycle.slice(0, 6)}`, name: "H1", state: "ACTIVE", ...due });
+    const uuid = genId();
+    await deps.db.insert(schema.reviews).values({ uuid, code: `r-${uuid.slice(0, 6)}`, cycleId: cycle, employeeId, reviewerId: null, state });
+    return uuid;
+  }
+
+  it("says how long is left, not just that it is due", async () => {
+    await people();
+    await dated("SELF", ME.uuid, { selfDueDate: new Date(Date.now() + 3 * DAY) });
+    const { items } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    // "Due" reads the same on the first day of the window as on the last, which is how a cycle closes with a
+    // third of the self-assessments unwritten.
+    expect(items[0]!.detail).toMatch(/due in 3 days/);
+  });
+
+  it("says overdue once the day has passed, and ranks it above one not yet due", async () => {
+    await people();
+    await dated("SELF", ME.uuid, { selfDueDate: new Date(Date.now() - 2 * DAY) });
+    await dated("MANAGER", OTHER.uuid, { managerDueDate: new Date(Date.now() + 5 * DAY) });
+    const { items } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    expect(items[0]!.detail).toMatch(/1 day overdue|2 days overdue/);
+    expect(items[1]!.detail).toMatch(/due in 5 days/);
+  });
+
+  it("claims no deadline for a cycle that set none", async () => {
+    await people();
+    await dated("SELF", ME.uuid, {});
+    const { items } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    expect(items[0]!.detail).toBe("your self-assessment is due");
+  });
+});
+
+describe("360 feedback nobody has answered", () => {
+  async function request(authorId: string, revieweeId: string, state: "REQUESTED" | "SUGGESTED" | "SUBMITTED", daysAgo = 6) {
+    const cycle = genId();
+    await deps.db.insert(schema.reviewCycles).values({ uuid: cycle, code: `c-${cycle.slice(0, 6)}`, name: "H1", state: "ACTIVE" });
+    const review = genId();
+    // Written by the reviewee's own nominee rather than by the caller: this block is about the FEEDBACK
+    // request, and a review the caller also owes would put a second item on the list.
+    await deps.db.insert(schema.reviews).values({ uuid: review, code: `r-${review.slice(0, 6)}`, cycleId: cycle, employeeId: revieweeId, reviewerId: revieweeId, state: "MANAGER" });
+    const uuid = genId();
+    await deps.db.insert(schema.reviewFeedback).values({
+      uuid, code: `f-${uuid.slice(0, 6)}`, reviewId: review, revieweeId, authorId, state,
+      createdAt: new Date(Date.now() - daysAgo * DAY),
+    });
+    return uuid;
+  }
+
+  it("flags a request addressed to me, naming who it is about and how long it has waited", async () => {
+    await people();
+    await request(ME.uuid, OTHER.uuid, "REQUESTED");
+    const { items } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews", "review-feedback"));
+    expect(items.map((i) => i.kind)).toEqual(["feedback_requested"]);
+    expect(items[0]!.title).toBe("360 feedback on Other Y");
+    expect(items[0]!.detail).toMatch(/asked 6 days ago/);
+    // The reviews page, where the requests are answered and where the notification for the same thing goes.
+    expect(items[0]!.path).toBe("reviews");
+  });
+
+  it("folds several requests into one errand, naming the oldest", async () => {
+    await people();
+    await request(ME.uuid, OTHER.uuid, "REQUESTED", 9);
+    await request(ME.uuid, OTHER.uuid, "REQUESTED", 2);
+    const { items } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews", "review-feedback"));
+    // Eight slots have to hold everything off track for a person; three of them spent on one errand pushes
+    // out the goal that is about to miss its date.
+    expect(items).toHaveLength(1);
+    expect(items[0]!.title).toBe("360 feedback on Other Y and 1 other");
+    expect(items[0]!.detail).toMatch(/asked 9 days ago/);
+  });
+
+  it("says nothing about a suggestion or an answered request", async () => {
+    await people();
+    await request(ME.uuid, OTHER.uuid, "SUGGESTED");
+    await request(ME.uuid, OTHER.uuid, "SUBMITTED");
+    const { items } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews", "review-feedback"));
+    // A suggestion asks nobody for anything; a submitted one is done.
+    expect(items).toEqual([]);
+  });
+
+  it("says nothing about a request addressed to somebody else", async () => {
+    await people();
+    // A request asked OF the other person, about the caller. Visible to the caller by scope, and still not
+    // theirs to answer. (The caller's own review of themselves is on the list, which is a different signal.)
+    await request(OTHER.uuid, ME.uuid, "REQUESTED");
+    const { items } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews", "review-feedback"));
+    expect(items.filter((i) => i.kind === "feedback_requested")).toEqual([]);
+  });
+
+  it("contributes nothing when the caller may not list the collection", async () => {
+    await people();
+    await request(ME.uuid, OTHER.uuid, "REQUESTED");
+    const { items } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    expect(items).toEqual([]);
+  });
+});
+
 describe("the one-line summary", () => {
   /** A model that records what it was asked, so the test can assert on the PROMPT rather than the answer. */
   function spy(answer = "Automate the payroll regression pack is furthest behind.") {
@@ -231,6 +380,26 @@ describe("the one-line summary", () => {
     const { items, summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
     expect(items).toHaveLength(2);
     expect(summary).toBeUndefined();
+  });
+
+  it("sends a 360 request as a count, never as the name of who is being reviewed", async () => {
+    await people();
+    await enable();
+    await goal({ title: "A goal", createdAt: new Date(Date.now() - 90 * DAY), dueDate: new Date(Date.now() + 10 * DAY), progress: 5 });
+    const cycle = genId();
+    await deps.db.insert(schema.reviewCycles).values({ uuid: cycle, code: `c-${cycle.slice(0, 6)}`, name: "H1", state: "ACTIVE" });
+    const review = genId();
+    await deps.db.insert(schema.reviews).values({ uuid: review, code: `r-${review.slice(0, 6)}`, cycleId: cycle, employeeId: OTHER.uuid, reviewerId: OTHER.uuid, state: "MANAGER" });
+    const fb = genId();
+    await deps.db.insert(schema.reviewFeedback).values({ uuid: fb, code: `f-${fb.slice(0, 6)}`, reviewId: review, revieweeId: OTHER.uuid, authorId: ME.uuid, state: "REQUESTED" });
+    const s = spy();
+    deps.ai = s.model as unknown as Deps["ai"];
+    await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews", "review-feedback"));
+    const prompt = s.seen.join("\n");
+    // `reviews` is on NEVER_TO_MODEL, and the name of somebody being reviewed is the same category of fact
+    // arriving by a different route.
+    expect(prompt).not.toContain("Other Y");
+    expect(prompt).toContain("360 feedback request");
   });
 
   it("does not bother summarising a single item", async () => {

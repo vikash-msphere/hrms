@@ -869,7 +869,18 @@ async function convertCandidate(
         // in the early hours east of UTC took effect a day before it was agreed. See services/orgDay.ts.
         effective_from: terms.startDate ?? (await orgToday(deps)),
       });
-    } catch { /* best-effort: leave comp for manual entry if the agreed CTC can't be split under current config */ }
+    } catch (err) {
+      // Best-effort: the employee already exists by this point, so a compensation that cannot be split under
+      // the current config must not fail the hire. SAID OUT LOUD, though, because the comment this replaces
+      // ("leave comp for manual entry") described something nobody was ever told to do: the hire completes,
+      // the agreed figure stays on the offer, and the employee has no compensation row - which surfaces weeks
+      // later as their name in a payroll run's `unpriced_json`, by which time the reason is gone. The agreed
+      // figure is in the message so the manual entry can be made from the log alone.
+      console.error(
+        `[ats] hire ${app.uuid}: seeding compensation for employees/${employee.uuid} failed - the agreed ${terms.currency ?? "CTC"} ${terms.baseComp} was not applied and has to be entered by hand`,
+        err,
+      );
+    }
   }
 
   const cfg = await cfgOf(deps);

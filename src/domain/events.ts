@@ -136,6 +136,11 @@ export const EVENT_TYPES: EventTypeDef[] = [
   { type: "expense.rejected", label: "Expense rejected", module: "Expenses", subjectCollection: "expenses", fields: [{ name: "amount", type: "number" }] },
   { type: "expense.paid", label: "Expense paid", module: "Expenses", subjectCollection: "expenses", fields: [{ name: "amount", type: "number" }, { name: "paymentMethod", type: "string" }] },
   { type: "expense.budgetThreshold", label: "Expense budget threshold crossed", module: "Expenses", subjectCollection: "expense-budgets", fields: [{ name: "level", type: "number" }, { name: "periodKey", type: "string" }, { name: "spent", type: "number" }, { name: "budget", type: "number" }] },
+  // The same cap, seen forwards. `budgetThreshold` fires when the money is already spent; this fires as soon
+  // as the run rate says the period will not hold, which is weeks earlier and is the point at which somebody
+  // can still do something about it. Once per budget per period (`projectionAlertedAt`), so a rate that
+  // wobbles either side of the cap does not notify every night.
+  { type: "expense.budgetProjectedBreach", label: "Expense budget forecast to breach", module: "Expenses", subjectCollection: "expense-budgets", fields: [{ name: "periodKey", type: "string" }, { name: "spent", type: "number" }, { name: "projected", type: "number" }, { name: "budget", type: "number" }] },
 
   // Employee lifecycle
   { type: "employee.created", label: "Employee created", module: "Lifecycle", subjectCollection: "employees", fields: [{ name: "departmentId", type: "ref" }, { name: "startDate", type: "date" }] },
@@ -263,6 +268,18 @@ export const EVENT_TYPES: EventTypeDef[] = [
     { name: "teamReviewsDue", type: "number", label: "Reviews they owe as a manager" },
     { name: "goalSettingMissing", type: "number", label: "Active cycles they have set no goals in" },
     { name: "teamGoalSettingMissing", type: "number", label: "Reports who have set no goals" },
+    // THE PAYROLL CALENDAR, and these are the only fields here that arrive on an ORG-LEVEL ("once") firing
+    // rather than a per-employee one - they are facts about the company's month, not about a person, and a
+    // perEmployee rule would announce to the whole roster that payroll is unbuilt. Together they are what lets
+    // a reminder be planned BACKWARDS from the pay date: "two days before inputs close, if claims are still
+    // pending, tell payroll". Days are negative once the date is behind, so "late" and "soon" are the same
+    // comparison; 9999 means there is no such date to count towards, which no threshold fires on.
+    { name: "daysToPayDate", type: "number", label: "Days until the next pay date" },
+    { name: "daysToCutoff", type: "number", label: "Days until that period's inputs close" },
+    { name: "payrollRunBuilt", type: "boolean", label: "That period's run has been built" },
+    { name: "payrollRunState", type: "string", label: "That period's run state (none/DRAFT/REVIEW/APPROVED/PUBLISHED)" },
+    { name: "payrollBankFileDone", type: "boolean", label: "A payout file has been generated for it" },
+    { name: "reimbursementsPending", type: "number", label: "Claims still awaiting approval" },
   ] },
 ];
 

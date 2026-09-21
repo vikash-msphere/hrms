@@ -98,6 +98,18 @@ export const HIERARCHICAL_TABLES: HierTable[] = [
   // Internal: credited by the comp-off cron, no wire collection, so no access rule can name it. Its code is
   // owner-embedded all the same, and a code left behind is a trap for whoever exposes the collection next.
   { table: schema.compOffCredits, collection: null },
+  // Loss-of-pay corrections for closed periods. Same shape as comp-off credits above and here for the same
+  // reason: no wire collection today, an owner-embedded code regardless, and re-parenting it on a transfer
+  // costs nothing now while back-filling it later would mean repairing codes on rows that already exist.
+  //
+  // KEEPING THE OWNED CODE WAS A DECISION, not an inheritance. Nothing resolves it today - the rows are read
+  // by the run build and become a payslip line - so the allocation could have been dropped instead of
+  // cascaded. Two things decided it. An employee who is owed a refund has a real claim to SEE it before it
+  // turns up on a payslip, which makes serving this collection likely rather than hypothetical; and an
+  // adjustment is raised only when attendance moves for an ALREADY-PAID period, which is rare, so the
+  // allocation is not on any hot path. Dropping the code to avoid this entry would also have been optimising
+  // against the guard rather than satisfying it.
+  { table: schema.lopAdjustments, collection: null },
 ];
 
 export const HIER_COLLECTIONS = HIERARCHICAL_TABLES.map((h) => h.collection).filter((c): c is string => c !== null);

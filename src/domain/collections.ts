@@ -13,10 +13,10 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   "api-keys",
   "employees", "departments", "leave-requests", "leave-types", "leave-balances", "holidays",
   "holiday-selections", "org-documents", "personal-documents", "announcements", "pay-components", "pay-grades", "salary-structures",
-  "pay-periods", "payroll-runs", "payslips", "operations", "users", "compensation", "positions", "bonuses", "assets", "asset-categories", "asset-requests", "stocktakes", "settlements", "goal-templates",
+  "pay-periods", "payroll-runs", "payroll-budgets", "payslips", "operations", "users", "compensation", "positions", "bonuses", "assets", "asset-categories", "asset-requests", "stocktakes", "settlements", "goal-templates",
   "leave-encashments", "reimbursements", "reimbursement-categories",
   // operational/company expenses: employee-owned expense (submitter-scoped) + flat vendor/category masters + finance budgets
-  "expenses", "expense-categories", "vendors", "expense-budgets",
+  "expenses", "expense-categories", "vendors", "expense-budgets", "card-transactions",
   "attendance", "attendance-regularizations", "attendance-day-marks", "overtime-requests", "remote-work-requests", "approval-delegations", "notice-periods", "suggestions", "notifications",
   // compliance: per-employee acknowledgement (e-signature) of an org-document version; employee-owned, private-by-default
   "document-acknowledgements",

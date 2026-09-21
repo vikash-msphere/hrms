@@ -107,12 +107,28 @@ test("the picker follows a reference into another collection, and its fields bec
     await picker.getByRole("checkbox").first().check();
     await picker.getByRole("button", { name: "Save columns" }).click();
 
-    // Both columns are on the grid: one from the person, one from their manager's department.
+    // Both columns are on the grid: one from the person, one from their manager's department. The second is
+    // headed "Department" rather than "Name" - a linked column is named by the link that reaches it, and the
+    // trail above that link is spent only on telling two columns apart, which nothing here needs.
     await expect(page.getByRole("columnheader", { name: "First name" })).toBeVisible({ timeout: 30_000 });
-    // A column header's accessible name carries its filter button too ("Name Filter by name"), so this is
-    // anchored rather than exact.
-    await expect(page.getByRole("columnheader", { name: /^Name\b/ })).toBeVisible({ timeout: 30_000 });
+    // A column header's accessible name carries its filter button too ("Department Filter by department"),
+    // so this is anchored rather than exact.
+    await expect(page.getByRole("columnheader", { name: /^Department\b/ })).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText(/hidden from you/)).toHaveCount(0);
+
+    // Reopening the picker: the chosen list calls each column what the grid calls it, and says the trail
+    // under it. It used to name a column off the nodes this picker session had WALKED, so a column two hops
+    // out came back as `manager_id.department_id.name` - the storage key - until somebody went and found it
+    // again.
+    // Once the table HAS columns the page header counts them ("Columns (2)"), and "Pick columns" is the
+    // empty state's own button, which is gone.
+    await page.getByRole("button", { name: "Columns (2)" }).click();
+    const reopened = page.getByRole("dialog");
+    await expect(reopened.getByText("On the table, in order")).toBeVisible({ timeout: 15_000 });
+    await expect(reopened.getByRole("textbox", { name: "Header for Manager -> Department: Name" })).toHaveAttribute("placeholder", "Department");
+    await expect(reopened.getByText("Manager -> Department: Name")).toBeVisible();
+    await expect(reopened.getByText(/manager_id\./)).toHaveCount(0);
+    await reopened.getByRole("button", { name: "Cancel" }).click();
   } finally {
     if (path) await purge(page, `table-views/${path}`);
   }

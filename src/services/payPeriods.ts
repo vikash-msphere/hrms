@@ -9,6 +9,7 @@ export type PayPeriodInput = {
   period_start?: string;
   period_end?: string;
   pay_date?: string;
+  input_cutoff_on?: string | null;
 };
 
 const parseDate = (s?: string) => {
@@ -31,6 +32,23 @@ async function assertValidRange(deps: Deps, start: Date, end: Date, selfId?: str
   }
 }
 
+/**
+ * A cutoff only means anything between the period opening and the money going out.
+ *
+ * Before the period starts there is nothing yet to freeze, and after the pay date the freeze is moot - the run
+ * is built and paid. Both mistakes are silent: a cutoff outside the window would sit on the calendar looking
+ * like a deadline while never being one, which is worse than having no cutoff at all, because people would
+ * work to it.
+ *
+ * The pay date itself is allowed, at the far edge: a same-day cutoff is a real (if tight) policy, and refusing
+ * it would be this file inventing a rule the org did not ask for.
+ */
+function assertCutoffSane(cutoff: Date | null, periodStart: Date, payDate: Date): void {
+  if (!cutoff) return;
+  if (+cutoff < +periodStart) throw invalidArgument("input_cutoff_on cannot be before the period starts");
+  if (+cutoff > +payDate) throw invalidArgument("input_cutoff_on cannot be after the pay date - inputs are already paid by then");
+}
+
 export const payPeriodSpec: CrudSpec<PayPeriodInput, typeof schema.payPeriods> = {
   table: schema.payPeriods,
   collection: "pay-periods",
@@ -45,7 +63,9 @@ export const payPeriodSpec: CrudSpec<PayPeriodInput, typeof schema.payPeriods> =
     if (!periodEnd) throw invalidArgument("period_end is required (YYYY-MM-DD)");
     if (!payDate) throw invalidArgument("pay_date is required (YYYY-MM-DD)");
     await assertValidRange(deps, periodStart, periodEnd);
-    return { label: input.display_name, periodStart, periodEnd, payDate };
+    const inputCutoffOn = parseDate(input.input_cutoff_on ?? undefined) ?? null;
+    assertCutoffSane(inputCutoffOn, periodStart, payDate);
+    return { label: input.display_name, periodStart, periodEnd, payDate, inputCutoffOn };
   },
   patch: async (patch, row, deps) => {
     const set: SetOf<typeof schema.payPeriods> = {};
@@ -53,10 +73,17 @@ export const payPeriodSpec: CrudSpec<PayPeriodInput, typeof schema.payPeriods> =
     if (has(patch, "period_start") && patch.period_start) set.periodStart = parseDate(patch.period_start);
     if (has(patch, "period_end") && patch.period_end) set.periodEnd = parseDate(patch.period_end);
     if (has(patch, "pay_date") && patch.pay_date) set.payDate = parseDate(patch.pay_date);
+    // Clearable: an org that adopted a cutoff and changed its mind sends null, which is a different thing from
+    // omitting the field. `has` is what separates the two, so a patch that touches only the label leaves it be.
+    if (has(patch, "input_cutoff_on")) set.inputCutoffOn = parseDate(patch.input_cutoff_on ?? undefined) ?? null;
     // Check the range as it WILL be, and exclude this period from the overlap scan.
     const effStart = (set.periodStart as Date | undefined) ?? new Date(row.periodStart);
     const effEnd = (set.periodEnd as Date | undefined) ?? new Date(row.periodEnd);
     await assertValidRange(deps, effStart, effEnd, row.uuid);
+    // Against the period as it WILL be, for the same reason the range check is: moving the pay date earlier
+    // than an existing cutoff has to fail, and it is the pay date that moved.
+    const effCutoff = has(patch, "input_cutoff_on") ? (set.inputCutoffOn as Date | null) : (row.inputCutoffOn ? new Date(row.inputCutoffOn) : null);
+    assertCutoffSane(effCutoff, effStart, (set.payDate as Date | undefined) ?? new Date(row.payDate));
     return set;
   },
 };

@@ -101,12 +101,19 @@ export default function Payslips({ me }: { me: Me }) {
     const year = thisYearStr();
     const slips = mine.filter((s) => yearOf(s) === year);
     const net = slips.reduce((sum, s) => sum + (s.net ?? 0), 0);
+    const sum = (pick: (s: Payslip) => number | undefined) => slips.reduce((t, s) => t + (pick(s) ?? 0), 0);
     return {
       net,
       count: slips.length,
       // Tax withheld so far and the typical month: the two numbers people open a payslip page to work out.
-      tax: slips.reduce((sum, s) => sum + (s.tax ?? 0), 0),
+      tax: sum((s) => s.tax),
       avgNet: slips.length ? Math.round(net / slips.length) : 0,
+      // Earned and withheld, not just received. Net alone cannot answer "what have I been paid this year" in
+      // the sense anybody means when filling in a form or checking a loan application - that is gross - and it
+      // hides deductions entirely, which is where the year's surprises live. Both are already on every row
+      // here; they were summed for the latest slip and thrown away for the year.
+      gross: sum((s) => s.gross),
+      deductions: sum((s) => s.total_deductions),
     };
   }, [mine]);
   const thisYear = thisYearStr();
@@ -391,6 +398,7 @@ export default function Payslips({ me }: { me: Me }) {
                 { label: "Latest net pay", value: money(latest.net), icon: Banknote, tone: "primary", hint: `Issued ${formatDate(latest.create_time)}`, onClick: () => onPreview(latest) },
                 { label: "Latest gross", value: money(latest.gross), icon: Sigma, hint: `${money(latest.total_deductions)} deducted`, onClick: () => onPreview(latest) },
                 { label: `Net paid in ${thisYear}`, value: money(ytd.net), icon: CalendarDays, hint: `${ytd.count} payslip${ytd.count === 1 ? "" : "s"}`, onClick: focusYtd, active: ytdActive },
+                ...(ytd.gross > 0 ? [{ label: `Gross in ${thisYear}`, value: money(ytd.gross), icon: Sigma, hint: `${money(ytd.deductions)} deducted`, onClick: focusYtd, active: ytdActive }] : []),
                 ...(ytd.count > 1 ? [{ label: "Average month", value: money(ytd.avgNet), icon: Sigma, hint: `net, over ${ytd.count} slips`, onClick: focusYtd, active: ytdActive }] : []),
                 ...(ytd.tax > 0 ? [{ label: `TDS in ${thisYear}`, value: money(ytd.tax), icon: CalendarDays, tone: "muted" as const, hint: "tax withheld so far", onClick: focusYtd, active: ytdActive }] : []),
               ]}

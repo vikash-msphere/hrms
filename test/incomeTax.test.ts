@@ -117,7 +117,11 @@ describe("allowedDeductions", () => {
   it("drops sections the regime disallows and keeps the ones it lists", () => {
     const { total, rows } = allowedDeductions({ "80C": 150000, "80CCD(2)": 40000 }, NEW);
     expect(total).toBe(40000);
-    expect(rows.find((r) => r.section === "80C")).toEqual({ section: "80C", declared: 150000, allowed: 0 });
+    // `cap` is null for a DISALLOWED section, and that is deliberate rather than a gap: the regime does not
+    // permit 80C at all, so its statutory limit is not a limit that applies to this person. What carries the
+    // refusal is `allowed: 0` - a reader distinguishing "unlimited" from "not permitted" reads that, not the
+    // absent cap, and the tax panel already lists disallowed sections separately for exactly this reason.
+    expect(rows.find((r) => r.section === "80C")).toEqual({ section: "80C", declared: 150000, allowed: 0, cap: null });
     expect(rows.find((r) => r.section === "80CCD(2)")!.allowed).toBe(40000);
   });
   it("caps a section at its statutory limit when the regime allows it", () => {
@@ -127,6 +131,11 @@ describe("allowedDeductions", () => {
     expect(rows.find((r) => r.section === "80D")!.allowed).toBe(25000); // capped
     expect(rows.find((r) => r.section === "80G")!.allowed).toBe(5000); // no cap configured
     expect(total).toBe(180000);
+    // The cap travels with the row where it APPLIES, which is what lets a reader be told "150,000 of the
+    // 150,000 allowed" rather than a bare figure they have to trust. A permitted-but-uncapped section has
+    // none, and says so with null rather than with a number nobody set.
+    expect(rows.find((r) => r.section === "80C")!.cap).toBe(150000);
+    expect(rows.find((r) => r.section === "80G")!.cap).toBeNull();
   });
   it("comes off taxable income, so it moves the tax", () => {
     const bare = computeAnnualTax(1500000, NEW);

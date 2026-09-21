@@ -129,14 +129,20 @@ describe("re-parenting: a flat code in a mixed table is not collateral", () => {
 describe("re-parenting: coverage tripwire", () => {
   it("HIERARCHICAL_TABLES are all real resource collections, unique, and include employees + departments", () => {
     const cols = HIERARCHICAL_TABLES.map((h) => h.collection);
-    expect(new Set(cols).size).toBe(cols.length); // no duplicates
+    // Duplicates are checked over the NAMED collections only. A `null` is the absence of a name, not a name
+    // two tables share, and every null collapses to one entry in a Set - so asking this of the raw list
+    // passed with one internal table and failed with two, on a list containing no duplicate collection at
+    // all. It is not a parity bug that would come right again: with N nulls the Set is short by N-1, so it
+    // stays red for every internal table added after the first.
+    const named = cols.filter((c): c is string => c !== null);
+    expect(new Set(named).size).toBe(named.length); // no duplicates
     expect(cols).toContain("employees");
     expect(cols).toContain("departments");
-    // A null collection is an INTERNAL table (comp_off_credits): its code is owner-embedded and must be
-    // rewritten, but it has no wire collection, so no access rule can name it.
-    for (const c of cols) if (c !== null) expect(RESOURCE_COLLECTIONS).toContain(c);
+    // A null collection is an INTERNAL table (comp_off_credits, lop_adjustments): its code is owner-embedded
+    // and must be rewritten, but it has no wire collection, so no access rule can name it.
+    for (const c of named) expect(RESOURCE_COLLECTIONS).toContain(c);
     // Tripwire: bump this when a new employee-owned (allocOwnedCode) collection is added AND wired into the cascade.
-    expect(cols.length).toBe(46);
+    expect(cols.length).toBe(47);
   });
 
   // The OWNER KEY's registry, kept honest from the other side. `OWNER_COLUMN_COLLECTIONS` (lib/authzResolve.ts)

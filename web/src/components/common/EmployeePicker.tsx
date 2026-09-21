@@ -13,13 +13,16 @@ const empRef = (e: Employee) => `employees/${idOf(e.path)}`;
 // A filtered multi-select of employees (department + name search), as a modal. Used to pick review-cycle
 // participants and to nominate 360 feedback givers. `exclude` drops employees that shouldn't be selectable.
 // `suggested` (ranked employee refs) floats likely picks to the top and offers them as one-click chips.
-export function EmployeePicker({ title, confirmLabel, employees, departments, exclude, suggested, initial, onClose, onConfirm }: {
+export function EmployeePicker({ title, confirmLabel, employees, departments, exclude, suggested, suggestedWhy, initial, onClose, onConfirm }: {
   title: string;
   confirmLabel: string;
   employees: Employee[];
   departments: Department[];
   exclude?: string[]; // employee refs to omit (e.g. the reviewee, already-picked)
   suggested?: string[]; // employee refs, best first (e.g. same team, recent collaborators)
+  // Why each suggestion is there, keyed by employee id: "3 tasks together · exchanged kudos". A suggestion
+  // with its reason attached is a fact somebody can weigh; without one it is the app asking to be trusted.
+  suggestedWhy?: Record<string, string>;
   /** Already-picked refs, for a picker that EDITS a set rather than adding to one (removing a name withdraws it). */
   initial?: string[];
   onClose: () => void;
@@ -82,6 +85,7 @@ export function EmployeePicker({ title, confirmLabel, employees, departments, ex
                   type="button"
                   aria-pressed={on}
                   onClick={() => toggle(ref)}
+                  title={suggestedWhy?.[idOf(e.path)]}
                   className={`rounded-full border px-2 py-0.5 text-xs transition-colors ${on ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}
                 >
                   <span aria-hidden="true">{on ? "✓ " : "+ "}</span>{e.first_name} {e.last_name}
@@ -89,6 +93,15 @@ export function EmployeePicker({ title, confirmLabel, employees, departments, ex
               );
             })}
           </div>
+        )}
+        {/* The reasons, spelled out rather than hidden in a tooltip: on a phone there is no hover, and the
+            reason is the part that decides whether the suggestion is any good. */}
+        {suggestedWhy && suggestedRows.some((e) => suggestedWhy[idOf(e.path)]) && (
+          <ul className="space-y-0.5 text-xs text-muted-foreground">
+            {suggestedRows.filter((e) => suggestedWhy[idOf(e.path)]).map((e) => (
+              <li key={e.path}><span className="font-medium text-foreground">{e.first_name} {e.last_name}</span> - {suggestedWhy[idOf(e.path)]}</li>
+            ))}
+          </ul>
         )}
         <div className="max-h-72 space-y-0.5 overflow-y-auto rounded-lg border p-1.5">
           <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-sm font-medium hover:bg-accent">

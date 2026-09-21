@@ -15,7 +15,8 @@ import { holdsVerbForAnyone, roleHolderEmployeeIds } from "./capabilityHolders";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { deleteStateFilter, purgeRow, type PurgeCascade } from "./softDelete";
+import { deleteStateFilter, purgeRow, restoreRow, type PurgeCascade } from "./softDelete";
+import { assertMayUnhide, reopenOnUnhide } from "./moderation";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Suggestion box: employee ideas, optionally anonymous, peer-upvoted, HR-responded. NO access control here
@@ -268,4 +269,19 @@ export const SUGGESTION_PURGE_CASCADE: PurgeCascade = {
 
 export async function purgeSuggestion(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   await purgeRow(deps, actor, schema.suggestions, "suggestion", "suggestions", id, ifMatch, undefined, SUGGESTION_PURGE_CASCADE);
+}
+
+/**
+ * The ordinary restore, plus the half moderation needs: a suggestion is HIDDEN by its soft-delete stamp
+ * (services/moderation.ts hideHost), so `:restore` is the inverse of a moderator's `hide` as well as of an
+ * author's own delete - and the two are indistinguishable from here. Whichever it was, a post that is back on
+ * the wall carrying a flag that says it came down is a flag nobody will look at again, so the decision is
+ * asked for afresh rather than left standing over a state it no longer describes.
+ */
+export async function restoreSuggestion(deps: Deps, actor: AppUser, id: string, mayModerate = false) {
+  // BEFORE the write: a refusal must leave the row exactly where the moderator left it.
+  await assertMayUnhide(deps, "suggestions", id, mayModerate);
+  const row = await restoreRow(deps, actor, schema.suggestions, "suggestion", "suggestions", id);
+  await reopenOnUnhide(deps, actor, "suggestions", id);
+  return row;
 }

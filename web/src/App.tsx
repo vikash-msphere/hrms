@@ -149,6 +149,7 @@ const Reimbursements = lazy(() => import("./pages/Reimbursements"));
 const Expenses = lazy(() => import("./pages/Expenses"));
 const Vendors = lazy(() => import("./pages/Vendors"));
 const ExpenseBudgets = lazy(() => import("./pages/ExpenseBudgets"));
+const CardTransactions = lazy(() => import("./pages/CardTransactions"));
 const Referrals = lazy(() => import("./pages/Referrals"));
 const Pipeline = lazy(() => import("./pages/Pipeline"));
 const Requisitions = lazy(() => import("./pages/Requisitions"));
@@ -193,6 +194,7 @@ const PAGE_CHUNK: Record<string, () => Promise<unknown>> = {
   "notice-periods": () => import("./pages/NoticePeriods"), suggestions: () => import("./pages/Suggestions"),
   payslips: () => import("./pages/Payslips"), reimbursements: () => import("./pages/Reimbursements"),
   expenses: () => import("./pages/Expenses"), vendors: () => import("./pages/Vendors"), "expense-budgets": () => import("./pages/ExpenseBudgets"),
+  "card-transactions": () => import("./pages/CardTransactions"),
   referrals: () => import("./pages/Referrals"), pipeline: () => import("./pages/Pipeline"),
   "job-requisitions": () => import("./pages/Requisitions"), candidates: () => import("./pages/Candidates"),
   interviews: () => import("./pages/Interviews"), offers: () => import("./pages/Offers"),
@@ -621,6 +623,8 @@ export default function App() {
         return <Vendors me={gme} />;
       case "expense-budgets":
         return <ExpenseBudgets me={gme} openId={route.id ?? undefined} />;
+      case "card-transactions":
+        return <CardTransactions me={gme} />;
       case "referrals":
         return <Referrals me={gme} openId={route.id ?? undefined} />;
       case "pipeline":

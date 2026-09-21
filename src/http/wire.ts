@@ -62,6 +62,7 @@ type AlwaysPresent = {
   event: "title" | "start_time" | "end_time" | "all_day" | "count_as_work" | "requires_clock_in" | "attendees";
   expense: "amount" | "tax_amount" | "reimbursable" | "recurring";
   "expense-budget": "period_type" | "period_key" | "amount" | "recurring";
+  "payroll-budget": "period_type" | "period_key" | "amount" | "recurring";
   "expense-category": "display_name" | "requires_receipt";
   goal: "title" | "weight" | "progress" | "status";
   holiday: "display_name" | "date" | "kind";

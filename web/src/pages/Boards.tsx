@@ -51,6 +51,9 @@ import type { Label as BoardLabel } from "@/types";
 import { RichTextToolbar } from "@/components/common/RichTextToolbar";
 import { DraftButton } from "@/components/common/DraftButton";
 import { CardTriageCard } from "@/components/common/CardTriageCard";
+import { CardFlowCard } from "@/components/common/CardFlowCard";
+import { CardGoalSuggest } from "@/components/common/CardGoalSuggest";
+import { CardStepsSuggest } from "@/components/common/CardStepsSuggest";
 import { RichText } from "@/lib/richText";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessTarget } from "@/components/access/AccessTarget";
@@ -1689,6 +1692,13 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
           {/* Only on an existing card: the suggestion comes from this card's own place in the index, and a
               card being created is not in it yet. Filing help for a NEW card would have to embed the text on
               the fly, which is a neuron per keystroke-pause and a different feature. */}
+          {/* Ageing against the board's own history. Separate from the triage panel above because it needs no
+              model and no binding: a deployment with the AI layer switched off still has a movement log. */}
+          {editing && card && (
+            <div className="sm:col-span-2">
+              <CardFlowCard cardId={idOf(card.path)} can={card.access?.can} />
+            </div>
+          )}
           {editing && card && (
             <div className="sm:col-span-2">
               <CardTriageCard
@@ -1772,6 +1782,12 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
           {/* Linkage */}
           <Field label="Linked goal">
             <Combobox value={goal} onValueChange={setGoal} options={goalOptions} placeholder="No goal" disabled={!canEdit} />
+            {/* Which goal this task is probably serving. Only on a saved task with the field still empty:
+                the suggestion comes from the task's own place in the index, and a task being created is not
+                in it yet. */}
+            {editing && card && canEdit && (
+              <CardGoalSuggest cardId={idOf(card.path)} can={card.access?.can} current={goal} onPick={setGoal} />
+            )}
           </Field>
           {board.swimlane_mode === "custom" && (
             <Field label="Swimlane">
@@ -1861,6 +1877,15 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                   </div>
                 ))}
               </div>
+            )}
+            {/* What comparable DELIVERED tasks actually carried. Only here, on a saved task: the neighbours
+                come from this card's own place in the index, and a task being created is not in it yet. */}
+            {can.includes("addTodos") && card && (
+              <CardStepsSuggest
+                cardId={idOf(card.path)}
+                can={card.access?.can}
+                onAdd={(text) => { void todoAct("addTodos", { texts: [text] }); }}
+              />
             )}
             {can.includes("addTodos") && (
               <div className="flex items-center gap-2">
@@ -2134,11 +2159,22 @@ function NewBoardDialog({ existing, onClose, onSaved }: { existing: Board[]; onC
 // The categorical palette this board's flow bands used to keep to itself now lives in lib/chartTheme.ts, where
 // every chart in the app draws from it - a column called "In review" is the same hue here as anywhere else.
 
+type Narration = { text: string; source: "model" | "plain"; cached: boolean; days: number; findings: { key: string; label: string; previous: number; current: number; movement: "up" | "down" }[] };
+type DuplicatePair = { card: { path: string; title: string }; duplicates: { path: string; title: string; column: string; score: number }[] };
+
 function AnalyticsTab({ board, onOpenCards }: { board: Board; onOpenCards?: () => void }) {
   const { toast } = useToast();
   const [days, setDays] = useState(30);
   const [metrics, setMetrics] = useState<BoardMetrics | null>(null);
   const [loading, setLoading] = useState(true);
+  // What the nightly sweep found: open cards that look like the same work filed twice. Read here rather than
+  // on the board itself because this is the grooming surface, and because the answer is already computed -
+  // the request is one indexed read, not a fresh comparison.
+  const [duplicates, setDuplicates] = useState<DuplicatePair[]>([]);
+  // What moved, in a sentence. The findings are arithmetic and always arrive; `source` says whether a model
+  // wrote the sentence or the deterministic summary did, and the panel says so rather than passing a list
+  // off as prose.
+  const [narration, setNarration] = useState<Narration | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -2151,6 +2187,25 @@ function AnalyticsTab({ board, onOpenCards }: { board: Board; onOpenCards?: () =
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [board.path, days]);
+
+  useEffect(() => {
+    let live = true;
+    if (!(board.access?.can ?? []).includes("narrate")) return;
+    invoke<Narration>(`boards/${idOf(board.path)}`, `narrate?days=${days}`, undefined)
+      .then((n) => { if (live) setNarration(n); })
+      .catch(() => { if (live) setNarration(null); });
+    return () => { live = false; };
+  }, [board.path, board.access, days]);
+
+  useEffect(() => {
+    let live = true;
+    if (!(board.access?.can ?? []).includes("duplicates")) return;
+    invoke<{ duplicates: DuplicatePair[] }>(`boards/${idOf(board.path)}`, "duplicates")
+      .then((res) => { if (live) setDuplicates(res.duplicates); })
+      // Silent: a panel that does not appear is the right failure for a grooming aid.
+      .catch(() => { if (live) setDuplicates([]); });
+    return () => { live = false; };
+  }, [board.path, board.access]);
 
   // Four figures over two charts - the shape the analytics tab settles into.
   if (loading && !metrics) return <div className="space-y-5"><StatsSkeleton count={4} /><Skeleton className="h-48 w-full rounded-xl" /></div>;
@@ -2180,6 +2235,56 @@ function AnalyticsTab({ board, onOpenCards }: { board: Board; onOpenCards?: () =
         </div>
         <CfdChart metrics={metrics} />
       </div>
+
+      {/* WHAT MOVED, over the top of the four figures above. The findings are the feature; the sentence is
+          an addition to them, and it is labelled when it is the deterministic one. */}
+      {narration && narration.findings.length > 0 && (
+        <div className="rounded-lg border p-4">
+          <p className="text-sm">{narration.text}</p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {narration.findings.map((f) => `${f.label}: ${f.previous} to ${f.current}`).join(" · ")}
+          </p>
+        </div>
+      )}
+
+      {/* WHAT WAS FILED TWICE. Found overnight rather than when somebody opens a card, because the pair that
+          matters was filed by two people in two different weeks and neither of them goes looking. */}
+      {duplicates.length > 0 && (
+        <div className="rounded-lg border border-warning/40 bg-warning/5 p-4">
+          <h4 className="text-sm font-semibold">Possibly the same work, filed twice</h4>
+          <p className="mb-3 text-xs text-muted-foreground">Open tasks that read alike. Nothing has been changed - merging or closing one is a decision for whoever grooms this board.</p>
+          <div className="space-y-2">
+            {duplicates.map((d) => (
+              <div key={d.card.path} className="text-sm">
+                <span className="font-medium">{d.card.title}</span>
+                {d.duplicates.map((o) => (
+                  <p key={o.path} className="text-xs text-muted-foreground">
+                    looks like <span className="text-foreground">{o.title}</span> · in {o.column}
+                  </p>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* WHERE THE TIME GOES, which the diagram above makes somebody estimate by eye. Completed stays only,
+          so a column full of cards sitting still does not read as a fast one. */}
+      {metrics.column_dwell.length > 0 && (
+        <div className="rounded-lg border p-4">
+          <h4 className="mb-3 text-sm font-semibold">Time in each column</h4>
+          <div className="space-y-1.5">
+            {metrics.column_dwell.map((c) => (
+              <div key={c.key} className="flex flex-wrap items-baseline gap-2 text-sm">
+                <span className="min-w-24">{c.label}</span>
+                <span className="font-medium tabular-nums">{c.p50}d</span>
+                <span className="text-xs text-muted-foreground">p85 {c.p85}d · {c.count} task{c.count === 1 ? "" : "s"}</span>
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">Measured over stays that ended. A task still sitting in a column has not said how long it will be there.</p>
+        </div>
+      )}
     </div>
   );
 }

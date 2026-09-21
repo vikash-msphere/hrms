@@ -4,7 +4,7 @@ import { fmtDurationShort, fmtMinOfDay } from "@/lib/attendance";
 // labels, units, which way is good, how each rolls up - so the table renders whatever it is handed instead of
 // keeping a second copy of the list that would drift the day a measure is added.
 
-export type MetricUnit = "count" | "days" | "hours" | "minutes" | "percent" | "rating" | "time_of_day";
+export type MetricUnit = "count" | "days" | "hours" | "minutes" | "percent" | "rating" | "time_of_day" | "money";
 
 export type MetricDef = {
   key: string;
@@ -56,10 +56,23 @@ export const HIGHLIGHT_METRICS = [
   "latest_rating",
 ];
 
-/** A measure's number as text. One formatter for every column, driven by the unit the server declared. */
-export function formatMetric(value: number | null | undefined, unit: MetricUnit): string {
+/**
+ * A measure's number as text. One formatter for every column, driven by the unit the server declared.
+ *
+ * `money` is the one unit this cannot format alone: the symbol and the decimal places are the ORG's
+ * (lib/org.ts), and a currency-free number beside a count of people reads as a count of people.
+ *
+ * REQUIRED, not optional, and that was a correction. Optional, a caller that forgot rendered money as a bare
+ * number and nothing said so - which is precisely the fail-open shape this codebase argues against everywhere
+ * else (`NEVER_TO_MODEL` denying by default, a team-only measure flag defaulting to team-only). Required, a
+ * caller that forgets does not compile. The cost is one argument at four call sites; the alternative was a
+ * silent wrong render that shipped once already.
+ */
+export function formatMetric(value: number | null | undefined, unit: MetricUnit, money: (n: number) => string): string {
   if (value == null) return "-";
   switch (unit) {
+    case "money":
+      return money(value);
     case "percent":
       return `${Math.round(value)}%`;
     case "hours":

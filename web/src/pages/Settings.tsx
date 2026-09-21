@@ -1485,18 +1485,30 @@ function ReimbursementsPanel({ toast, openId }: { toast: Toast; openId?: string 
 
 // Operational-expenses config (settings/expenses blob) + the expense categories collection below. Controls the
 // auto-approve threshold, the state recurring occurrences are generated in, and the budget-alert thresholds.
+// The straight-through guards, named for a reader. Keys match domain/expenses.ts#AUTO_APPROVE_GUARDS.
+const AUTO_GUARDS = [
+  { key: "in_budget", label: "stays within its budget" },
+  { key: "not_duplicate", label: "does not look like a claim already filed" },
+  { key: "known_vendor", label: "names a vendor on file" },
+  { key: "has_receipt", label: "has a receipt attached" },
+];
+
 function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
   const [autoApprove, setAutoApprove] = useState("");
+  const [secondApproval, setSecondApproval] = useState("");
+  const [autoGuards, setAutoGuards] = useState<string[]>([]);
   const [recurringState, setRecurringState] = useState<"SUBMITTED" | "DRAFT">("SUBMITTED");
   const [thresholds, setThresholds] = useState("80, 100");
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    getSetting<{ auto_approve_threshold?: number; recurring_default_state?: string; budget_alert_thresholds?: number[] }>("expenses")
+    getSetting<{ auto_approve_threshold?: number; auto_approve_requires?: string[]; second_approval_threshold?: number; recurring_default_state?: string; budget_alert_thresholds?: number[] }>("expenses")
       .then((s) => {
         const v = s.value ?? {};
         if (typeof v.auto_approve_threshold === "number" && v.auto_approve_threshold > 0) setAutoApprove(String(v.auto_approve_threshold));
+        if (typeof v.second_approval_threshold === "number" && v.second_approval_threshold > 0) setSecondApproval(String(v.second_approval_threshold));
+        if (Array.isArray(v.auto_approve_requires)) setAutoGuards(v.auto_approve_requires);
         if (v.recurring_default_state === "DRAFT") setRecurringState("DRAFT");
         if (Array.isArray(v.budget_alert_thresholds) && v.budget_alert_thresholds.length) setThresholds(v.budget_alert_thresholds.join(", "));
       })
@@ -1504,7 +1516,7 @@ function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
       .finally(() => setReady(true));
   }, []);
 
-  const { markSaved } = useUnsaved({ autoApprove, recurringState, thresholds }, ready, save);
+  const { markSaved } = useUnsaved({ autoApprove, secondApproval, autoGuards, recurringState, thresholds }, ready, save);
   async function save() {
     setSaving(true);
     try {
@@ -1512,6 +1524,8 @@ function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
       await saveSetting("expenses", {
         value: {
           auto_approve_threshold: Number(autoApprove) > 0 ? Number(autoApprove) : 0,
+          second_approval_threshold: Number(secondApproval) > 0 ? Number(secondApproval) : 0,
+          auto_approve_requires: autoGuards,
           recurring_default_state: recurringState,
           budget_alert_thresholds: parsedThresholds.length ? parsedThresholds : [80, 100],
         },
@@ -1538,6 +1552,40 @@ function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
             <Field label="Auto-approve threshold" hint="Expenses at or below this amount skip approval on submit. 0 (blank) disables auto-approval.">
               <Input type="number" min={0} step="1" value={autoApprove} onChange={(e) => setAutoApprove(e.target.value)} placeholder="e.g. 5000" className="max-w-48" />
             </Field>
+            {/* Amount alone decides only whether a claim is CONSIDERED routine. Without these, a duplicate
+                under the threshold approves itself and so does a claim that puts its budget over - which is how
+                an auto-approval rule becomes the thing finance stops trusting. A claim held back is not
+                rejected; it just goes to a person, with the reason recorded. */}
+            {Number(autoApprove) > 0 && (
+              <div className="space-y-1.5 rounded-lg border p-3">
+                <p className="text-sm font-medium">...and only when the claim also</p>
+                {AUTO_GUARDS.map((g) => (
+                  <label key={g.key} className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Checkbox
+                      checked={autoGuards.includes(g.key)}
+                      onCheckedChange={(v) => setAutoGuards(v === true ? [...autoGuards, g.key] : autoGuards.filter((k) => k !== g.key))}
+                    />
+                    {g.label}
+                  </label>
+                ))}
+                {autoGuards.length === 0 && (
+                  <p className="text-xs text-warning">Nothing checked: every claim at or below the threshold approves itself on amount alone.</p>
+                )}
+              </div>
+            )}
+            <Field
+              label="Second approval above"
+              hint="Expenses above this amount need two approvals from two different people. 0 (blank) means one approval is always enough."
+            >
+              <Input type="number" min={0} step="1" value={secondApproval} onChange={(e) => setSecondApproval(e.target.value)} placeholder="e.g. 100000" className="max-w-48" />
+            </Field>
+            {/* The two thresholds are meant to bracket opposite ends. Overlapping them is a real misconfiguration
+                and the server resolves it the strict way, so say which way before somebody discovers it. */}
+            {Number(autoApprove) > 0 && Number(secondApproval) > 0 && Number(secondApproval) < Number(autoApprove) && (
+              <p className="-mt-2 text-xs text-warning">
+                Auto-approval stops at the second-approval line: claims above it always need two people, whatever the auto-approve amount says.
+              </p>
+            )}
             <div className="space-y-1.5">
               <p className="text-sm font-medium">Recurring expenses are generated as</p>
               <div className="flex items-center gap-2">

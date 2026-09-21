@@ -277,6 +277,11 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
     // full pay breakdown before the run is published.
     "payroll-runs:approve", "payroll-runs:bankFile", "payroll-runs:previewPayslip",
     "payroll-runs:statutoryReport",
+    // Recording what the bank did with the payout file follows the FILE, not the run: whoever could not
+    // generate it cannot reconcile the response to it either. Granting this to the run operator while
+    // withholding `bankFile` would let them assert that money arrived for a payment they were never able to
+    // send - so it is withheld for the same reason and by the same rule.
+    "payroll-runs:paymentResult",
     // The flagged-post queue, which nothing seeds for any role. Acting on a flag means taking somebody else's
     // post off a public wall, so who may do it is a decision each org makes in the ACL rather than one this
     // app makes for them - the same posture as `tax-verifications` and the access system itself. It is

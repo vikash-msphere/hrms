@@ -41,12 +41,12 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   operations: ["run"],
   "cron-runs": ["run"],
   "leave-requests": ["update", "delete", "approve", "reject", "cancel", "upload", "download"],
-  goals: ["update", "delete", "updateProgress", "comment", "setContributors", "watch", "unwatch"],
-  boards: ["update", "delete", "configure", "metrics"],
-  cards: ["update", "delete", "move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo", "promoteTodo", "watch", "unwatch", "triage"],
+  goals: ["update", "delete", "updateProgress", "comment", "setContributors", "watch", "unwatch", "similar", "suggestMeasure"],
+  boards: ["update", "delete", "configure", "metrics", "duplicates", "narrate"],
+  cards: ["update", "delete", "move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo", "promoteTodo", "watch", "unwatch", "triage", "flow", "suggestGoal", "suggestSteps"],
   sprints: ["update", "delete", "activate", "complete"],
   "review-cycles": ["update", "delete", "launch", "enroll", "close", "reopen"],
-  reviews: ["submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", "suggestFeedback", "assignReviewer", "nudge", "pdf"],
+  reviews: ["submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", "suggestFeedback", "assignReviewer", "nudge", "pdf", "evidence", "collaborators"],
   "review-feedback": ["submitFeedback", "decline"],
   "time-entries": ["update", "delete", "submit", "approve", "reject"],
   loans: ["update", "delete", "approve", "reject", "disburse", "recordRepayment"],
@@ -65,7 +65,7 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   "pay-grades": ["update", "delete"],
   "salary-structures": ["update", "delete"],
   "pay-periods": ["update", "delete"],
-  "payroll-runs": ["delete", "submit", "approve", "publish", "build", "bankFile", "statutoryReport", "previewPayslip"],
+  "payroll-runs": ["delete", "submit", "approve", "publish", "build", "bankFile", "statutoryReport", "previewPayslip", "paymentResult"],
   reimbursements: ["update", "delete", "approve", "reject", "cancel", "pay", "upload", "download"],
   "leave-encashments": ["approve", "reject", "cancel"],
   "reimbursement-categories": ["update", "delete"],
@@ -126,15 +126,20 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "updateProgress", // move a goal's progress without full edit rights (goals)
   "setContributors", // credit a share of a goal to the people who delivered it (goals)
   "configure", "metrics", // kanban board config (columns/WIP/policies/lanes) + flow analytics (boards)
+  "duplicates", // the open cards a nightly sweep found to be the same work filed twice (boards)
   "move", "block", "unblock", "assign", "prioritize", "comment", // kanban card actions (cards)
   "addTodos", "toggleTodo", "removeTodo", // card checklist (cards; tickets use the same verbs)
   "triage", "decideTriage", // read the nearest-neighbour triage suggestion, and record what was done with it (tickets)
+  "flow", // how long work like this card has taken on this board, from its movement log (cards)
+  "suggestGoal", // which goal a card is probably serving, so delivering it can roll up (cards)
+  "suggestSteps", // the checklist items that comparable delivered work actually carried (cards)
   "draft", // collection-level: write a first draft of some text from the caller's own instruction (announcements, job-requisitions, goals, suggestions)
   "extractResume", // read a CV into suggested form fields for the recruiter to accept one by one (candidates)
+  "suggestMeasure", // propose a unit, a starting value and a target for a goal that has none (goals)
   "describe", // collection-level: turn a description of a grid into a spec the builder renders (table-fields)
-  "narrate", // collection-level: write up how the team's measures changed against the previous window (people-analytics)
+  "narrate", // write up how measures changed against the previous window (people-analytics collection-level; boards per item)
   "decide", // uphold or clear a moderation flag on a public post (moderation)
-  "similar", // other suggestions asking for the same thing, for somebody deciding what to merge (suggestions)
+  "similar", // other records asking for or aiming at the same thing (suggestions: what to merge; goals: duplicated effort and what to align to)
   "promoteTodo", // turn a checklist item into a card of its own (cards)
   "watch", "unwatch", // follow a card or a goal you do not own (cards, goals)
   "activate", // start a sprint (sprints) - complete reuses the existing verb
@@ -142,12 +147,15 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", "nudge", "pdf", // review workflow stages + 360 nomination + stall reminder + record copy (reviews)
   "suggestFeedback", // the reviewee's own list of who saw their work, inert until a manager nominates (reviews)
   "assignReviewer", // name who writes one review, instead of re-parenting the employee (reviews)
+  "evidence", // what the person actually did in the cycle - delivered cards, kudos, contributions, 1:1 notes (reviews)
+  "collaborators", // who worked with the reviewee this cycle, for the 360 picker to lead with (reviews)
   "submitFeedback", "decline", // 360 peer feedback (review-feedback)
   "complete", "appendTask", // onboarding/offboarding transitions + tasks (transitions, transition-tasks)
   "disburse", "recordRepayment", // loan lifecycle (loans)
   "verify", // verify a tax declaration (tax-declarations)
   "approve", "reject", "cancel", "submit", "build", "download", "upload", "pay", // domain custom
   "bankFile", // download a payroll run as a bank's bulk-payment .xlsx
+  "paymentResult", // record what the bank did with that file: paid, failed or returned, per person
   "statutoryReport", // download a payroll run's PF/ESI/PT/TDS statutory report (.xlsx)
   "previewPayslip", // render one employee's payslip for an unpublished run, inline, nothing persisted (payroll-runs)
   "preview", // view a stored document inline, without the right to keep a copy (payslips); effective-access view-as (access-rules); render a sample page on a letterhead design (letterheads)

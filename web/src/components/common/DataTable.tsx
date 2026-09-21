@@ -51,6 +51,12 @@ function focusSiblingRow(from: HTMLElement, dir: 1 | -1): void {
 export type Column<T> = {
   id: string;
   header: string;
+  /**
+   * The long form of the header, shown on hover. For a header that has been shortened to fit beside its
+   * neighbours (a custom grid qualifies a column only as far as the columns next to it force it to), so the
+   * full answer to "whose column is this?" is one hover away rather than in the header of every row.
+   */
+  headerTitle?: string;
   /** Value used for sorting and filtering. */
   accessor?: (row: T) => string | number | boolean | null | undefined;
   /** Custom cell renderer; defaults to the accessor value. */
@@ -2125,6 +2131,7 @@ export function DataTable<T>({
                         className={cn("inline-flex items-center gap-1", canSort && "hover:text-foreground")}
                         onClick={() => toggleSort(col)}
                         disabled={!canSort}
+                        title={col.headerTitle}
                       >
                         {col.header}
                         {canSort &&

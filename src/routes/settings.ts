@@ -481,6 +481,57 @@ function validateLeaveEncashment(value: unknown) {
   enumLeaf("leave_encashment", value as Record<string, unknown>, "rate_basis", ["base", "gross"]);
 }
 
+/**
+ * `payroll-recovery`: how much of a period's wages loan and advance recovery may not take.
+ *
+ * Validated rather than exempted, because it is the kind of number the exemption list's own note warns about:
+ * it shapes money, it is written from a form, and a wrong value fails SILENTLY in the direction that hurts.
+ * A fraction stored as a PERCENTAGE (50 rather than 0.5) would clamp to 0.99 at the read and take almost
+ * nothing from anybody, so the loan queue would grow month after month while every run looked correct. The
+ * upper bound is refused here for the same reason: at 1 no recovery is ever collectable.
+ */
+/**
+ * `payroll-gl`: the two accounts a payroll journal needs that are not pay components.
+ *
+ * Strings, not numbers - a chart of accounts is codes like "6010" or "SALARY-EXP", and coercing them would
+ * strip a leading zero off half the charts in existence. Unset is a legitimate state (an org that has not
+ * mapped its accounts gets no journal, which `domain/payrollJournal.ts` reports as unmapped rather than
+ * producing a lopsided entry), so only the TYPE is checked here.
+ */
+/**
+ * `payroll-variance`: how far a person's pay may move from their own recent median before the run review
+ * points at it.
+ *
+ * Validated for the same reason `payroll-recovery` is: a fraction stored as a PERCENTAGE (15 rather than
+ * 0.15) fails silently and in the dangerous direction - no row would ever reach the threshold, the band would
+ * read "nothing to look at" every month, and the one wrong payslip would go out unremarked.
+ */
+function validatePayrollVariance(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("payroll-variance must be an object");
+  if (value.net_fraction == null) return;
+  const v = Number(value.net_fraction);
+  if (!Number.isFinite(v) || v <= 0 || v >= 1) {
+    throw invalidArgument("payroll-variance.net_fraction must be a fraction between 0 and 1 (0.15 flags a 15% move), not a percentage");
+  }
+}
+
+function validatePayrollGl(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("payroll-gl must be an object");
+  for (const k of ["net_payable", "rounding"]) {
+    const v = (value as Record<string, unknown>)[k];
+    if (v != null && typeof v !== "string") throw invalidArgument(`payroll-gl.${k} must be an account code (a string)`);
+  }
+}
+
+function validatePayrollRecovery(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("payroll-recovery must be an object");
+  if (value.min_net_fraction == null) return;
+  const v = Number(value.min_net_fraction);
+  if (!Number.isFinite(v) || v < 0 || v >= 1) {
+    throw invalidArgument("payroll-recovery.min_net_fraction must be a fraction between 0 and 1 (0.5 protects half of wages from recovery), not a percentage");
+  }
+}
+
 function validateLoanPerquisite(value: unknown) {
   // A taxable perquisite added to withholding. Off by default, and only checked when it is ON: a disabled
   // policy values nothing whatever the numbers say.
@@ -641,6 +692,9 @@ const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
   ["leave_accrual", validateLeaveAccrual],
   ["leave_encashment", validateLeaveEncashment],
   ["loan-perquisite", validateLoanPerquisite],
+  ["payroll-recovery", validatePayrollRecovery],
+  ["payroll-gl", validatePayrollGl],
+  ["payroll-variance", validatePayrollVariance],
   ["performance", validatePerformance],
   ["referrals", validateReferrals],
 ]);

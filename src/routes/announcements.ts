@@ -10,6 +10,8 @@ import {
   reactionsFor, addReply, repliesFor, castVote, pollDataFor, setPinned, markAllAnnouncementsRead, readersVisibleTo,
   type AnnouncementInput,
 } from "../services/announcements";
+import { setDisabled } from "../services/lifecycle";
+import { assertMayUnhide, reopenOnUnhide } from "../services/moderation";
 import { toAnnouncementResource } from "../http/serialize";
 import { MAX_RICH_BODY, MAX_RICH_COMMENT } from "../domain/richText";
 import { accessHint, withAccess } from "../http/accessHint";
@@ -230,5 +232,23 @@ export const announcements = collectionRoutes<AnnouncementInput, typeof schema.a
     // Pin the post to the top of the board / take it down (moderation - gated by the verb grant).
     pin: { run: (deps, user, id) => setPinned(deps, user, id, true) },
     unpin: { run: (deps, user, id) => setPinned(deps, user, id, false) },
+    // `:enable` MEANS SOMETHING SPECIFIC HERE, which is why it is answered by the collection rather than by the
+    // shared lifecycle lane (http/collectionRoute.ts answers a collection's own verb first, for exactly this).
+    //
+    // `disabled` is how MODERATION takes an announcement off the wall (services/moderation.ts hideHost), so
+    // turning it back on is the inverse of a moderator's decision as well as of an ordinary disable - and the
+    // two are indistinguishable from here. The write itself is the generic one; what is added is that the flag
+    // returns to the queue, because a post that is back up carrying a flag saying it came down is a flag
+    // nobody looks at again.
+    enable: {
+      run: async (deps, user, id, _body, c) => {
+        // Refused BEFORE the write, so a post a moderator took down stays down. Whether this caller may lift
+        // that is the middleware's answer, not this file's.
+        await assertMayUnhide(deps, COL, id, c.get("mayModerate") === true);
+        const row = await setDisabled(deps, user, schema.announcements, "announcement", COL, id, false);
+        await reopenOnUnhide(deps, user, COL, id);
+        return row;
+      },
+    },
   },
 });

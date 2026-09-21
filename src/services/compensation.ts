@@ -3,7 +3,8 @@ import { has } from "./crud";
 import { and, eq, isNull, isNotNull, inArray, sql, type SQL } from "drizzle-orm";
 import { keysetPage } from "./keysetPage";
 import { applyScope } from "./listScope";
-import { applyStructure, ctcLines, splitCtc, pfWagesOf, DEFAULT_CTC_CONFIG, type CtcConfig } from "../domain/payroll";
+import { applyStructure, ctcLines, splitCtc, pfWagesOf, employerCostLines, ONE_OFF_EARNING_CODES, DEFAULT_CTC_CONFIG, type CtcConfig } from "../domain/payroll";
+import { esiEmployeeContribution, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { round2 } from "../domain/money";
 import { structureLinesById } from "./salaryStructures";
 import { monthlyRecurringGross } from "./taxProjection";
@@ -38,7 +39,8 @@ import { refPayComponents, refPayPeriods, refPayGrades, refSalaryStructures } fr
 
 // One-off payments a run carries alongside the regular monthly wage. They are not part of the recurring rate a
 // raise moves, so they never count toward how much of a month was paid at the old rate.
-const ONE_OFF_EARNING_CODES = new Set(["BONUS", "ENCASH", "OT", "ARREARS", "REIMB", "ROUND"]);
+// Moved to domain/payroll.ts: services/lopAdjustments.ts asks the same question of the same lines, and the
+// copy there had already gained `LOPADJ` while this one had not.
 
 // How many MONTH-EQUIVALENTS of regular wage this employee was ALREADY PAID at the old rate inside
 // [fromMs, toMs). Drives backdated-increment arrears: only PUBLISHED periods are immutable and priced at the
@@ -53,13 +55,23 @@ const ONE_OFF_EARNING_CODES = new Set(["BONUS", "ENCASH", "OT", "ARREARS", "REIM
 //   the effective date)
 // The first factor comes from the run's own stored lines - the regular earnings including the negative
 // loss-of-pay line - so it reflects exactly what the payslip paid, whatever prorated or docked it.
-async function publishedRegularMonthsPaid(deps: Deps, employeeId: string, fromMs: number, toMs: number, oldMonthlyGross: number): Promise<number> {
-  if (!(oldMonthlyGross > 0)) return 0;
+/** One already-published period a backdated raise owes a delta for. `months` is the month-EQUIVALENT credited
+ *  for it, which is a fraction wherever the period was part-worked, docked or only partly inside the backdated
+ *  window - so the employee can see that a half month is being paid as half a month rather than wonder. */
+export type ArrearsPeriod = { label: string; months: number };
+
+async function publishedRegularMonthsPaid(deps: Deps, employeeId: string, fromMs: number, toMs: number, oldMonthlyGross: number): Promise<{ months: number; periods: ArrearsPeriod[] }> {
+  const none = { months: 0, periods: [] as ArrearsPeriod[] };
+  if (!(oldMonthlyGross > 0)) return none;
   const items = await deps.db.select().from(schema.payrollRunItems).where(eq(schema.payrollRunItems.employeeId, employeeId));
-  if (!items.length) return 0;
+  if (!items.length) return none;
   const itemByRun = new Map(items.map((it) => [it.runId, it]));
   const periods = new Map((await refPayPeriods(deps)).map((p) => [p.uuid, p]));
   let months = 0;
+  // The per-period detail, which this loop already computes and used to discard. An employee shown one arrears
+  // figure has no way to check it; shown the months it covers, they can. Collected here because this is the
+  // only place that knows which published periods were in the window and what share of each was credited.
+  const periods_: ArrearsPeriod[] = [];
   // Only the runs this employee actually has an item in: every other run is skipped below anyway, so reading
   // the whole table grew this query with the org's payroll history for nothing.
   //
@@ -97,9 +109,13 @@ async function publishedRegularMonthsPaid(deps: Deps, employeeId: string, fromMs
     const periodDays = Math.max(1, Math.round((pe - ps) / 86_400_000) + 1);
     const coveredFrom = Math.max(ps, fromMs);
     const coveredDays = Math.max(0, Math.round((Math.min(pe, toMs - 1) - coveredFrom) / 86_400_000) + 1);
-    months += paidShare * Math.min(1, coveredDays / periodDays);
+    const credited = paidShare * Math.min(1, coveredDays / periodDays);
+    months += credited;
+    if (credited > 0) periods_.push({ label: p.label, months: round2(credited) });
   }
-  return round2(months);
+  // Oldest first, so the list reads as a history rather than in whatever order the runs came back.
+  periods_.sort((a, b) => a.label.localeCompare(b.label));
+  return { months: round2(months), periods: periods_ };
 }
 export type CompensationInput = {
   employee?: string | null;
@@ -177,7 +193,8 @@ async function priceRevision(
   const newGross = monthlyRecurringGross(basePay, effective, specialAllowance);
   // Month-EQUIVALENTS already paid at the old rate, not a period count: a part-month or docked period owes only
   // the delta on the wage it actually paid.
-  const paidMonths = prev ? await publishedRegularMonthsPaid(deps, employeeId, fromMs, untilMs, oldGross) : 0;
+  const paid = prev ? await publishedRegularMonthsPaid(deps, employeeId, fromMs, untilMs, oldGross) : { months: 0, periods: [] };
+  const paidMonths = paid.months;
   // The PF-wage slice of those arrears: the rise in BASIC (plus, under the "basic_plus" wage basis, the same
   // allowances PF counts) over the same months. PF is due on arrears of basic wages while ESI is due on the whole
   // amount, so the run needs the two figures apart - deriving it later from a single lump is guesswork.
@@ -189,6 +206,14 @@ async function priceRevision(
     specialAllowance,
     arrearsAmount: paidMonths > 0 ? Math.max(0, round2((newGross - oldGross) * paidMonths)) : 0,
     arrearsBaseAmount: paidMonths > 0 ? Math.max(0, round2((newPfWages - oldPfWages) * paidMonths)) : 0,
+    // The same figure, broken out by the period each part of it is owed for. Priced at the SAME monthly delta
+    // the total uses, so the parts sum to the total by construction rather than by a second calculation that
+    // could disagree with it. Frozen here with the amount: `paidMonths` is a statement about which periods were
+    // published at the moment of the revision, and recomputing it later - once more runs have published - would
+    // silently restate what an already-paid arrear covered.
+    arrearsPeriods: paidMonths > 0 && newGross > oldGross
+      ? paid.periods.map((pr) => ({ label: pr.label, months: pr.months, amount: round2((newGross - oldGross) * pr.months) }))
+      : [],
   };
 }
 
@@ -301,6 +326,264 @@ export async function getCompensation(deps: Deps, id: string) {
  * the one after it (which keeps governing from its own date on, untouched). Both are the same operation on
  * the same chain; only which neighbour exists differs.
  */
+// ---- Revision preview (item 32) --------------------------------------------------------------------------
+
+/** One side of a revision comparison: what the employee's REGULAR month looks like at that CTC. */
+export type RevisionSide = {
+  annualCtc: number;
+  monthlyGross: number;
+  basePay: number;
+  specialAllowance: number;
+  pfWages: number;
+  employeePf: number;
+  employeeEsi: number;
+  professionalTax: number;
+  employerCost: number;      // employer contributions counted INSIDE CTC
+  aboveCtcCost: number;      // employer contributions the org pays over and above CTC
+  lines: { name: string; monthly: number; aboveCtc?: boolean }[];
+};
+
+export type RevisionPreview = {
+  current: RevisionSide | null;  // null for an employee with no compensation row yet
+  proposed: RevisionSide;
+  /** Arrears this revision would owe if saved now, and the periods they cover - the same pricing the save
+   *  performs, so the preview cannot promise a different figure from the one that lands. */
+  arrears: { amount: number; periods: ArrearsPeriod[] };
+  /** Statutory boundaries this revision crosses. These produce the counter-intuitive outcomes - a raise that
+   *  moves take-home the wrong way - and they are the reason a preview is worth having at all. */
+  crossings: string[];
+};
+
+/**
+ * The statutory boundaries a revision crosses, in plain words.
+ *
+ * These are the whole reason a preview earns its place. Most of a raise is arithmetic anybody can do in their
+ * head; the surprises live at the thresholds, where a rise in CTC can LOWER take-home - crossing the ESI
+ * ceiling removes the employee's contribution but also the employer's, so the CTC the raise bought is not the
+ * pay the employee sees, and someone has to be able to explain that in the conversation rather than after the
+ * payslip.
+ *
+ * Sentences rather than flags, because every one of them needs saying out loud to a person. A caller that
+ * wanted to branch on them would be making a decision this file has no business encoding.
+ */
+function crossingsBetween(current: RevisionSide | null, proposed: RevisionSide): string[] {
+  if (!current) return [];
+  const out: string[] = [];
+  if (current.employeeEsi > 0 && proposed.employeeEsi === 0) {
+    out.push("This takes the employee above the ESI wage ceiling: their ESI contribution stops, and so does the employer's, so cover ends with it.");
+  }
+  if (current.employeeEsi === 0 && proposed.employeeEsi > 0) {
+    out.push("This brings the employee under the ESI wage ceiling, so ESI starts being deducted.");
+  }
+  // PF wages capped at the ceiling means a rise in basic stops adding to PF once it is past - the raise is
+  // real, the retirement saving it buys is not.
+  if (proposed.pfWages > current.pfWages && proposed.employeePf === current.employeePf && current.employeePf > 0) {
+    out.push("PF wages are already at the ceiling, so this raise adds nothing to the PF contribution on either side.");
+  }
+  if (proposed.professionalTax !== current.professionalTax) {
+    out.push(`Professional tax moves from ${current.professionalTax} to ${proposed.professionalTax} a month (the slab before any annual cap).`);
+  }
+  // The headline sanity check, and the one nobody expects to fire.
+  const currentTakeHome = round2(current.monthlyGross - current.employeePf - current.employeeEsi - current.professionalTax);
+  const proposedTakeHome = round2(proposed.monthlyGross - proposed.employeePf - proposed.employeeEsi - proposed.professionalTax);
+  if (proposed.annualCtc > current.annualCtc && proposedTakeHome < currentTakeHome) {
+    out.push(`CTC goes up but regular monthly take-home goes DOWN, from ${currentTakeHome} to ${proposedTakeHome}, before tax.`);
+  }
+  return out;
+}
+
+/**
+ * What a proposed revision would do, priced but not written.
+ *
+ * Runs the SAME `priceRevision` the save runs, so the arrears figure and the split cannot differ between what
+ * somebody is shown and what they then commit. Everything else is assembled from the same domain helpers the
+ * payroll run and the CTC letter use (`splitCtc`, `ctcLines`, `pfWagesOf`, `esiEmployeeContribution`,
+ * `professionalTax`), which is what keeps this from becoming a second, drifting definition of what a salary is.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT SHOW, because a number that will not match the payslip is worse than no
+ * number on a conversation about somebody's pay:
+ *
+ *   TDS. Withholding depends on the employee's verified declarations and on what the year has already
+ *   collected, so a projection against a hypothetical salary would differ from what the run actually withholds
+ *   - and it would differ by more for the people whose declarations are still unverified.
+ *
+ *   PERIOD EFFECTS. Loss of pay, one-offs, loan recovery and the annual PT cap are facts about a MONTH, not
+ *   about a salary. This prices a full regular month at the new rate, which is the question a revision is
+ *   actually asking. The professional tax shown is the monthly slab for the new wage BEFORE any annual cap.
+ */
+export async function previewRevision(deps: Deps, input: CompensationInput): Promise<RevisionPreview> {
+  const employeeId = idFromPath(input.employee);
+  const from = dayMs(input.effective_from);
+  if (!employeeId) throw invalidArgument("employee is required");
+  const annualCtc = input.annual_ctc;
+  if (typeof annualCtc !== "number" || annualCtc <= 0) throw invalidArgument("annual_ctc must be greater than 0");
+  if (Number.isNaN(from)) throw invalidArgument("effective_from is required");
+  const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
+  if (!emp || emp.deleteTime) throw notFound("employee not found");
+  const { structureId } = await refsOf(deps, input);
+
+  const timeline = await timelineOf(deps, employeeId);
+  const { prev, next } = slotAt(timeline, from);
+  const nowMs = +deps.clock.now();
+  const until = Math.min(nowMs, next ? +new Date(next.effectiveFrom) : nowMs);
+  const priced = await priceRevision(deps, employeeId, emp.epfEnrolled, annualCtc, structureId, from, until, prev);
+
+  const cfg = await getSettingValue<CtcConfig>(deps, "ctc", DEFAULT_CTC_CONFIG);
+  const components = (await refPayComponents(deps)).filter((c) => !c.disabled && !c.deleteTime);
+  const pfBasis = cfg.pf_wage_basis ?? "basic";
+  // PT lives in its own blob, not in `ctc` - the same one services/payroll.ts reads, so the slab shown here is
+  // the slab the run will charge.
+  const ptCfg = await getSettingValue<PtConfig>(deps, "professional-tax", DEFAULT_PT_CONFIG);
+  const side = async (basePay: number, specialAllowance: number, ctc: number, sId: string | null): Promise<RevisionSide> => {
+    const effective = applyStructure(components, await structureLinesById(deps, sId));
+    const { lines } = ctcLines(basePay, effective, emp.epfEnrolled, specialAllowance, pfBasis);
+    const monthlyGross = monthlyRecurringGross(basePay, effective, specialAllowance);
+    const pfWages = pfWagesOf(basePay, specialAllowance, effective, pfBasis);
+    const employerCosts = employerCostLines(basePay, round2(monthlyGross), effective, emp.epfEnrolled, undefined, pfWages);
+    const epfComp = effective.find((c) => c.method === "epf" && c.kind === "deduction");
+    const esiComp = effective.find((c) => c.method === "esi" && c.kind === "deduction");
+    const ptComp = effective.find((c) => c.method === "pt");
+    const esiCeiling = esiComp?.cap ?? 21000;
+    return {
+      annualCtc: ctc,
+      monthlyGross: round2(monthlyGross),
+      basePay: round2(basePay),
+      specialAllowance: round2(specialAllowance),
+      pfWages: round2(pfWages),
+      // The employee's own PF, at the component's configured rate on PF wages capped at its ceiling - the same
+      // shape services/payroll.ts prices it with.
+      employeePf: epfComp ? round2(Math.min(pfWages, epfComp.cap ?? Infinity) * ((epfComp.rate ?? 12) / 100)) : 0,
+      // ESI only while the wage is within the ceiling. The run's stickiness rule (already contributing earlier
+      // in the contribution period keeps you in until it ends) is a fact about a PERIOD, not about a salary, so
+      // a preview that applied it would be answering a different question.
+      employeeEsi: esiComp && monthlyGross > 0 && monthlyGross <= esiCeiling
+        ? esiEmployeeContribution(monthlyGross, esiComp.rate ?? 0.75, Infinity) : 0,
+      // The monthly slab for this wage, BEFORE the annual cap - the cap depends on what the year has already
+      // collected, which is a period fact and not a property of the salary.
+      professionalTax: ptComp ? round2(professionalTax(monthlyGross, ptCfg)) : 0,
+      // Split by which side of CTC each contribution sits on, from the same helper the run and the letter use.
+      employerCost: round2(employerCosts.filter((ec) => !ec.aboveCtc).reduce((sum, ec) => sum + ec.monthly, 0)),
+      aboveCtcCost: round2(employerCosts.filter((ec) => ec.aboveCtc).reduce((sum, ec) => sum + ec.monthly, 0)),
+      lines: lines.map((l) => ({ name: l.name, monthly: l.monthly, ...(l.aboveCtc ? { aboveCtc: true } : {}) })),
+    };
+  };
+
+  const proposed = await side(priced.basePay, priced.specialAllowance, annualCtc, structureId);
+  const current = prev ? await side(prev.basePay, prev.specialAllowance, prev.ctcAnnual, prev.structureId) : null;
+
+  return { current, proposed, arrears: { amount: priced.arrearsAmount, periods: priced.arrearsPeriods }, crossings: crossingsBetween(current, proposed) };
+}
+
+// ---- The increment cycle (item 33) -----------------------------------------------------------------------
+
+/**
+ * How many people one increment batch may carry.
+ *
+ * NOT a taste judgement. `previewRevision` costs a handful of D1 reads per person - the timeline, the
+ * published run items the arrears are priced off, the structure lines - and a Worker invocation has a
+ * subrequest ceiling. An unbounded batch would work for a team and fail for a department, which is the worst
+ * shape a limit can have: it passes every test somebody writes and breaks on the day it is used for real.
+ * Twenty-five covers a team, which is the unit an increment round is actually decided in; a whole-org round
+ * is several batches, and the caller is told so rather than being given a truncated answer.
+ */
+export const MAX_INCREMENT_BATCH = 25;
+
+/** One proposed increment. The same fields a single revision takes, per person. */
+export type IncrementLine = {
+  employee?: string | null;
+  annual_ctc?: number;
+  effective_from?: string;
+  pay_grade?: string | null;
+  salary_structure?: string | null;
+};
+
+export type IncrementPreviewRow = {
+  employee: string;
+  /** Null when this line could not be priced - the reason is in `error`, and the rest of the batch is
+   *  unaffected. One bad row must not cost the reviewer the other twenty-four. */
+  preview: RevisionPreview | null;
+  error: string | null;
+};
+
+export type IncrementPreview = {
+  rows: IncrementPreviewRow[];
+  /** What the round costs, summed over the rows that priced. Annual CTC is the figure a budget is set in;
+   *  monthly gross is what the next run actually pays. */
+  totals: { people: number; priced: number; annualCtcDelta: number; monthlyGrossDelta: number; arrears: number; crossings: number };
+};
+
+/**
+ * Price a whole increment round without writing any of it.
+ *
+ * This is the surface that replaces the spreadsheet: the per-person figures, what the round costs in total,
+ * and every statutory boundary it crosses, before anybody commits. Each row goes through the SAME
+ * `previewRevision` a single raise uses, so nothing here can disagree with what one person's preview says.
+ *
+ * A row that cannot be priced - no employee, a CTC too low for the structure, a revision already on that date
+ * - reports its reason and leaves the others alone. A batch that failed wholesale because one person's
+ * structure does not fit would be useless for the job it exists for.
+ */
+export async function previewIncrementBatch(deps: Deps, lines: readonly IncrementLine[]): Promise<IncrementPreview> {
+  if (!lines.length) throw invalidArgument("no increments to price");
+  if (lines.length > MAX_INCREMENT_BATCH) {
+    throw invalidArgument(`an increment batch carries at most ${MAX_INCREMENT_BATCH} people; split the round and run it again`);
+  }
+  const rows: IncrementPreviewRow[] = [];
+  for (const line of lines) {
+    const employee = line.employee ?? "";
+    try {
+      rows.push({ employee, preview: await previewRevision(deps, line), error: null });
+    } catch (e) {
+      rows.push({ employee, preview: null, error: (e as Error).message });
+    }
+  }
+  const priced = rows.filter((r) => r.preview);
+  const totals = {
+    people: rows.length,
+    priced: priced.length,
+    // Against the CURRENT figure where there is one. A first compensation row has no delta to take - the whole
+    // of it is new cost, which is what comparing against zero says.
+    annualCtcDelta: round2(priced.reduce((sum, r) => sum + (r.preview!.proposed.annualCtc - (r.preview!.current?.annualCtc ?? 0)), 0)),
+    monthlyGrossDelta: round2(priced.reduce((sum, r) => sum + (r.preview!.proposed.monthlyGross - (r.preview!.current?.monthlyGross ?? 0)), 0)),
+    arrears: round2(priced.reduce((sum, r) => sum + r.preview!.arrears.amount, 0)),
+    crossings: priced.reduce((sum, r) => sum + r.preview!.crossings.length, 0),
+  };
+  return { rows, totals };
+}
+
+export type IncrementResult = { employee: string; applied: boolean; error: string | null };
+
+/**
+ * Apply an increment round, one revision at a time.
+ *
+ * DELIBERATELY NOT ATOMIC ACROSS PEOPLE, and saying so is the honest part. Each `reviseCompensation` is its
+ * own guarded, checked batch - closing the predecessor and opening the successor together - but there is no
+ * transaction spanning twenty-five of them in D1, and pretending otherwise would be a lie told in a function
+ * signature. So this reports PER PERSON: what applied, what did not, and why.
+ *
+ * That is recoverable in a way a silent partial failure is not. Every applied row is an ordinary revision,
+ * visible in that employee's timeline and correctable through the ordinary correction path; the caller
+ * re-runs the batch with the rows that failed. The alternative - refusing the whole round because one
+ * person's structure does not fit their new CTC - makes the feature useless at the moment it matters.
+ */
+export async function applyIncrementBatch(deps: Deps, actor: AppUser, lines: readonly IncrementLine[]): Promise<{ results: IncrementResult[]; applied: number }> {
+  if (!lines.length) throw invalidArgument("no increments to apply");
+  if (lines.length > MAX_INCREMENT_BATCH) {
+    throw invalidArgument(`an increment batch carries at most ${MAX_INCREMENT_BATCH} people; split the round and run it again`);
+  }
+  const results: IncrementResult[] = [];
+  for (const line of lines) {
+    const employee = line.employee ?? "";
+    try {
+      await reviseCompensation(deps, actor, line);
+      results.push({ employee, applied: true, error: null });
+    } catch (e) {
+      results.push({ employee, applied: false, error: (e as Error).message });
+    }
+  }
+  return { results, applied: results.filter((r) => r.applied).length };
+}
+
 export async function reviseCompensation(deps: Deps, actor: AppUser, input: CompensationInput) {
   const employeeId = idFromPath(input.employee);
   const from = dayMs(input.effective_from);
@@ -384,6 +667,7 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
       effectiveTo: next ? new Date(next.effectiveFrom) : null,
       arrearsAmount: priced.arrearsAmount,
       arrearsBaseAmount: priced.arrearsBaseAmount,
+      arrearsPeriodsJson: priced.arrearsPeriods.length ? JSON.stringify(priced.arrearsPeriods) : null,
     }),
   ]).catch((e: unknown) => {
     // The other ordering of the same race: our close matched nothing and the insert then collided on
@@ -470,7 +754,12 @@ export async function updateCompensation(deps: Deps, actor: AppUser, id: string,
     // Absent = leave alone; explicit null = clear (this person no longer plays for a variable component).
     ...(has(patch, "variable_pay_target") ? { variablePayTarget: patch.variable_pay_target ?? null } : {}),
     effectiveFrom: new Date(from),
-    ...(settled ? {} : { arrearsAmount: priced.arrearsAmount, arrearsBaseAmount: priced.arrearsBaseAmount }),
+    ...(settled ? {} : {
+      arrearsAmount: priced.arrearsAmount,
+      arrearsBaseAmount: priced.arrearsBaseAmount,
+      // Repriced with the amount, or the breakdown would describe the figure this correction replaced.
+      arrearsPeriodsJson: priced.arrearsPeriods.length ? JSON.stringify(priced.arrearsPeriods) : null,
+    }),
     updatedAt: new Date(),
   };
   // COMPARE-AND-SWAP on the version the ETag was computed from, exactly as the generic crudService patch does:

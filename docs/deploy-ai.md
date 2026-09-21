@@ -93,13 +93,17 @@ Nothing is switched on yet. At this point every AI feature still behaves as thou
 
 **Settings → Access & security → AI features.**
 
-Nine switches, all off, each with a line saying what it does when on and what happens when off. Turn on one
-at a time - the ledger in step 6 is much easier to read that way.
+Thirteen switches, all off, each with a line saying what it does when on and what happens when off. Turn on
+one at a time - the ledger in step 6 is much easier to read that way.
 
 | Setting key | What turns on | Needs the index |
 |---|---|---|
 | `search.semantic` | ⌘K also matches by meaning | yes |
 | `tickets.triage` | Suggested department/category/priority, duplicate hints | yes |
+| `cards.triage` | On a board task: what comparable delivered work says about its filing, how long it took, what blocked it, the goal it probably serves, the steps it needs, and open tasks that look like duplicates (including the nightly sweep) | yes |
+| `goals.similar` | Goals that are the same work in other words, and the goal one could roll up under | yes |
+| `goals.measure` | A proposed unit, baseline and target for a goal that has none | no |
+| `boards.narrate` | A paragraph over a board's analytics saying how flow moved | no |
 | `suggestions.similar` | "Others asked for this" on a suggestion | yes |
 | `attention.summary` | A line over the dashboard's "Needs you" list saying what to look at first | no |
 | `drafting` | Draft buttons on announcements, JDs, goals, suggestion replies | no |
@@ -120,7 +124,10 @@ Two settings on the same screen are worth a decision rather than a default:
 
 - **Semantic search returns nothing useful for a while.** The embed drain backfills 200 rows per five-minute
   tick, bounded by the daily budget, so a large database takes several ticks. This is designed, not a fault.
-- **Ticket triage correctly suggests nothing** until there are resolved tickets to learn from.
+- **Ticket triage correctly suggests nothing** until there are resolved tickets to learn from, and board task
+  triage the same until cards have been delivered. Both vote from finished work only.
+- **The nightly duplicate sweep examines 60 open cards a tick**, least-recently-swept first, so a large
+  backlog is covered over several nights.
 - **Moderation only scans 8 posts per tick.** It is a generation call, unlike embedding.
 
 ## 6. Grant the capabilities that nothing seeds
@@ -134,8 +141,8 @@ Three things are deliberately ungranted, so they do nothing until somebody is gi
 | `moderation.decide` | whoever may take a post down | It removes other people's posts from a public wall |
 | `suggestions.similar` + `suggestions.merge` | whoever triages the suggestion box | Merging rewrites somebody's suggestion and moves their votes |
 
-Without `moderation.read` the queue is invisible and the nav item does not appear - so if you turn moderation
-on and nobody can see the queue, this is the step you skipped.
+Without `moderation.read` the queue is invisible and its "Flagged posts" tab under Connect does not appear -
+so if you turn moderation on and nobody can see the queue, this is the step you skipped.
 
 ## 7. Check it is actually working
 

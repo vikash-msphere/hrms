@@ -33,7 +33,7 @@ beforeAll(async () => {
   todayMs = dayStartMs(await orgToday(deps));
 });
 
-const TABLES = [schema.checkIns, schema.notifications, schema.eventLog, schema.auditLog, schema.users, schema.employees, schema.roles];
+const TABLES = [schema.goals, schema.checkIns, schema.notifications, schema.eventLog, schema.auditLog, schema.users, schema.employees, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
 });
@@ -183,6 +183,28 @@ describe("remindUpcomingCheckIns", () => {
     expect(await remindUpcomingCheckIns(deps)).toBe(2);
     const notifs = (await deps.db.select().from(schema.notifications)).filter((n) => n.type === "checkin.reminder");
     expect(notifs.map((n) => n.recipientId).sort()).toEqual([emp, mgr].sort());
+  });
+
+  it("says what is worth raising, from the recipient's own goals in trouble", async () => {
+    const emp = await mkEmployee();
+    const mgr = await mkEmployee();
+    await mkCheckIn({ employeeId: emp, counterpartId: mgr, meetingDate: daysFromToday(1) });
+    // A goal three quarters through its window at 5%: behind by the same predicate the dashboard uses.
+    await deps.db.insert(schema.goals).values({
+      uuid: genId(), code: short("g"), employeeId: emp, title: "Cut onboarding time",
+      status: "in_progress", progress: 5,
+      createdAt: daysFromToday(-90), dueDate: daysFromToday(10),
+    });
+    await remindUpcomingCheckIns(deps);
+    const mine = (await deps.db.select().from(schema.notifications)).find((n) => n.recipientId === emp);
+    // "Jot down talking points beforehand" is advice nobody has ever acted on. The app already knows which
+    // goal is behind, and naming it is the difference between a reminder and a prompt.
+    expect(mine!.body).toContain("Worth raising");
+    expect(mine!.body).toContain("Cut onboarding time");
+    // The other attendee has no goals in trouble, so they get the plain wording rather than somebody else's.
+    const theirs = (await deps.db.select().from(schema.notifications)).find((n) => n.recipientId === mgr);
+    expect(theirs!.body).not.toContain("Cut onboarding time");
+    expect(theirs!.body).toContain("Jot down talking points");
   });
 
   it("handles a missing counterpart (single nudge)", async () => {

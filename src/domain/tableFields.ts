@@ -105,6 +105,7 @@ export const BASES: Record<string, BaseDef> = {
   "salary-structures": { label: "Salary structures" },
   "pay-periods": { label: "Pay periods" },
   "payroll-runs": { label: "Payroll runs" },
+  "payroll-budgets": { label: "Payroll budgets" },
   "document-acknowledgements": { label: "Policy acknowledgements" },
   "letter-templates": { label: "Letter templates" },
   letterheads: { label: "Letterheads" },

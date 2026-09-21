@@ -121,6 +121,11 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
       leaveTypeId: schema.leaveBalances.leaveTypeId,
       balanceDays: schema.leaveBalances.balanceDays,
       lastAccrualYm: schema.leaveBalances.lastAccrualYm,
+      // The window those periods were priced against, so a correction to it can be detected and re-priced -
+      // see db/schema.ts and domain/leave.ts. Two more columns on a read that is already the tick's memory
+      // floor, and the alternative is the silence this replaces.
+      accrualPricedStart: schema.leaveBalances.accrualPricedStart,
+      accrualPricedEnd: schema.leaveBalances.accrualPricedEnd,
     })
     .from(schema.leaveBalances)
     .where(onlyLeaveTypeId ? eq(schema.leaveBalances.leaveTypeId, onlyLeaveTypeId) : undefined);
@@ -142,7 +147,7 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
   // the cost is a constant few subrequests whatever the headcount. Steady state was never affected - after the
   // first night these rows exist and the loop takes the update path - which is exactly why this only bites once,
   // on the night nobody gets a second try at.
-  type PlannedRow = { employeeId: string; leaveTypeId: string; balanceDays: number; lastAccrualYm: string | null };
+  type PlannedRow = { employeeId: string; leaveTypeId: string; balanceDays: number; lastAccrualYm: string | null; pricedStart: Date | null; pricedEnd: Date | null };
   const planned: PlannedRow[] = [];
   for (const emp of employees) {
     if (!emp.startDate) continue;
@@ -152,7 +157,7 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
     for (const lt of leaveTypes) {
       if (!lt.accrualDaysPerYear || lt.deleteTime || lt.disabled) continue;
       const existing = balByKey.get(`${emp.uuid}|${lt.uuid}`);
-      const { add, newLastYm } = computeAccrual({
+      const { add, newLastYm, pricedStartMs, pricedEndMs } = computeAccrual({
         accrualDaysPerYear: lt.accrualDaysPerYear,
         probationAccrualDaysPerYear: lt.probationAccrualDaysPerYear,
         startMs,
@@ -162,6 +167,8 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
         currentMs: now,
         frequency: lt.accrualFrequency === "semi_monthly" ? "semi_monthly" : "monthly",
         joiningRule: rulesByType.get(lt.uuid)?.accrual.joining_rule ?? null,
+        pricedStartMs: existing?.accrualPricedStart ? +new Date(existing.accrualPricedStart) : null,
+        pricedEndMs: existing?.accrualPricedEnd ? +new Date(existing.accrualPricedEnd) : null,
       });
       if (existing) {
         // Round the resulting balance to the configured increment; also re-rounds (normalizes) an existing
@@ -174,7 +181,13 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
         // those days, and a negative balance is not a thing this schema means anything by - the claw-back can
         // remove days that are still there and no more.
         const newBalance = Math.max(0, roundToIncrement(existing.balanceDays + add, inc));
-        if (newBalance === existing.balanceDays && newLastYm === existing.lastAccrualYm) continue; // nothing changed
+        // The WINDOW counts as a change even when nothing else moved. A correction whose days round away to the
+        // same balance still has to be recorded, or the row keeps claiming it was priced against the old window
+        // and the same correction is computed again on every tick from here on.
+        const windowMoved =
+          (existing.accrualPricedStart ? +new Date(existing.accrualPricedStart) : null) !== pricedStartMs ||
+          (existing.accrualPricedEnd ? +new Date(existing.accrualPricedEnd) : null) !== pricedEndMs;
+        if (newBalance === existing.balanceDays && newLastYm === existing.lastAccrualYm && !windowMoved) continue; // nothing changed
         // Compare-and-set on the balance we read: `newBalance` is absolute, so writing it blind would undo any
         // debit/credit committed between the snapshot at the top of this function and the batch at the bottom
         // (an approved leave request, an encashment) - restoring days the employee already spent, which is real
@@ -189,7 +202,13 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
         updates.push({
           stmt: deps.db
             .update(schema.leaveBalances)
-            .set({ balanceDays: newBalance, lastAccrualYm: newLastYm, updatedAt: new Date() })
+            .set({
+              balanceDays: newBalance,
+              lastAccrualYm: newLastYm,
+              accrualPricedStart: pricedStartMs != null ? new Date(pricedStartMs) : null,
+              accrualPricedEnd: pricedEndMs != null ? new Date(pricedEndMs) : null,
+              updatedAt: new Date(),
+            })
             .where(and(eq(schema.leaveBalances.uuid, existing.uuid), eq(schema.leaveBalances.balanceDays, existing.balanceDays)))
             .returning({ uuid: schema.leaveBalances.uuid }),
           expect: 1,
@@ -200,7 +219,14 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
         if (add === 0 && newLastYm === null) continue; // employee hasn't started yet
         // Recorded without its code: the codes for every row this tick creates are reserved together below, so
         // nothing inside the walk touches the database at all.
-        planned.push({ employeeId: emp.uuid, leaveTypeId: lt.uuid, balanceDays: roundToIncrement(add, inc), lastAccrualYm: newLastYm });
+        planned.push({
+          employeeId: emp.uuid,
+          leaveTypeId: lt.uuid,
+          balanceDays: roundToIncrement(add, inc),
+          lastAccrualYm: newLastYm,
+          pricedStart: pricedStartMs != null ? new Date(pricedStartMs) : null,
+          pricedEnd: pricedEndMs != null ? new Date(pricedEndMs) : null,
+        });
         credited++;
       }
     }
@@ -235,7 +261,7 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
       credited--;
       continue;
     }
-    newRows.push({ code, employeeId: p.employeeId, leaveTypeId: p.leaveTypeId, balanceDays: p.balanceDays, lastAccrualYm: p.lastAccrualYm });
+    newRows.push({ code, employeeId: p.employeeId, leaveTypeId: p.leaveTypeId, balanceDays: p.balanceDays, lastAccrualYm: p.lastAccrualYm, accrualPricedStart: p.pricedStart, accrualPricedEnd: p.pricedEnd });
   }
   // The tick's writes, as a small number of batches rather than one unbounded one. Each batch is one D1
   // round-trip and one implicit transaction; the inserts are additionally split to stay inside the bound-

@@ -228,7 +228,22 @@ const employee: Grant = {
     // deliberately, because the notifications carry that goal's title to whoever is following it.
     "goals.me.watch",
     "goals.me.unwatch",
+    // Goals that are the same work in other words, and the goal yours could roll up under. A read of OTHER
+    // goals, re-decided against this caller's own goal list scope, so it can name nothing they could not
+    // already list.
+    "goals.me.similar",
+    // Ask for a unit, a starting value and a target for your own goal. One generation on a press, and the
+    // three values land in the form for the owner to accept or discard.
+    "goals.me.suggestMeasure",
     "reviews.me.suggestFeedback", // name the people who saw your work; nominating from it stays the manager's
+    // What the app recorded about YOUR cycle - tasks you delivered, kudos you were written, goals you were
+    // credited a share of, your own 1:1 notes - beside the box you write your self-assessment in. Each
+    // section is separately decided by the list verdict its own collection gives this caller, so the verb is
+    // the affordance and not the access: somebody who cannot list 1:1s gets that section empty.
+    "reviews.me.evidence",
+    // Who worked with you this cycle, which is what makes `suggestFeedback` above answerable: the list it
+    // leads with is the people who actually saw the work rather than the whole directory.
+    "reviews.me.collaborators",
     "tax-declarations.me.upload", // attach/download own investment proofs
     "tax-declarations.me.download",
     "tickets.me.**", // every ticket verb on OWN tickets (comment/cancel/todos/...); others' via category shares
@@ -331,6 +346,11 @@ const manager: Grant = {
     "reviews.my-dept.submitManager", // manager assessment + 360 nominations for the team's reviews
     "reviews.my-dept.nominate",
     "reviews.my-dept.nudge", // remind the current stage's owner on a stalled team review
+    // Writing about somebody is the case the evidence pack was built for: what they delivered, what was said
+    // about them and what they contributed to, gathered under the cycle's window instead of across four tabs.
+    "reviews.my-dept.evidence",
+    // Who saw the work, so the 360 picker leads with them rather than with the whole directory.
+    "reviews.my-dept.collaborators",
     "reviews.my-dept.pdf", // record copy of a report's finished review
     "goals.my-dept.setConfidence", // the same call on a goal the manager set for the team
     "goals.my-dept.comment", // coach on the team's goals - the thread under a goal is where that happens
@@ -339,6 +359,8 @@ const manager: Grant = {
     // Credit a share of a team goal to whoever delivered it. The manager's call and not the owner's: a share
     // scores in the CONTRIBUTOR's review, so it is a statement about somebody else's performance.
     "goals.my-dept.setContributors",
+    "goals.my-dept.similar", // duplicated effort across the team, and what a report's goal should align to
+    "goals.my-dept.suggestMeasure", // a measure for a report's goal that has none, offered while agreeing it
     "boards.**", // configure the board's shape (columns, WIP limits, swimlanes, labels) + restore
     "sprints.**", // activate/complete the team's sprints + restore
     "goal-templates.*.apply", // stamp a blueprint onto a report or the whole team
@@ -507,6 +529,8 @@ const hr_admin: Grant = {
     // Hand one review to a different writer (a transfer mid-cycle, a manager on leave). HR's rather than the
     // manager's: it reassigns who is accountable for the write-up, which is the cycle administrator's call.
     "reviews.*.assignReviewer",
+    "reviews.*.evidence", // the same pack on any review HR reads - the cycle's own record, not an assessment
+    "reviews.*.collaborators", // and the 360 picker's list of who actually worked with them
     "shifts.**",
     "shift-assignments.**",
     "projects.**",
@@ -584,8 +608,11 @@ const payroll_admin: Grant = {
     ...OWN_ATTENDANCE, // payroll clocks in/out + files own regularizations like any employee
     ...OWN_WORK, // boards/cards/sprints, own approval delegation, own saved grids
   },
-  // Payroll runs the workflow but NOT approve (separation of duties) and NOT bankFile - the bank file
-  // exposes the employer debit account + every employee's account number, so it is super_admin-only.
+  // Payroll runs the workflow but NOT approve (separation of duties), NOT bankFile, and NOT paymentResult -
+  // the bank file exposes the employer debit account + every employee's account number, so it is
+  // super_admin-only, and recording what the bank DID with that file follows the file rather than the run:
+  // granting it here while withholding `bankFile` would let the run operator assert that money arrived for a
+  // payment they were never able to send.
   // These two verbs are deliberately NOT granted (private-by-default) rather than granted-then-denied, so
   // no future broad grant can ever re-expose them: only super_admin's `**` reaches them.
   allow: [
@@ -611,6 +638,8 @@ const payroll_admin: Grant = {
     "vendors.**",
     "expense-budgets.**",
     "compensation.reapplySplit", // re-derive every current row's basic/special under the live ctc config (CTC held fixed)
+    "compensation.preview", // price a PROPOSED revision without writing it - the conversation before the raise
+    "compensation.increment", // an increment ROUND: price a team's raises, or apply them one at a time
     "pay-grades.**", // lifecycle/restore on the comp catalogs
     "salary-structures.**",
     "loans.**", // approve/reject/disburse/recordRepayment

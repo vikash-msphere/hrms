@@ -46,10 +46,25 @@ const MONEY = new Set([
   "backgroundChecks.cost", // what the verification vendor charged for this check
   "benefitPlans.employeeCost", "benefitPlans.employerCost",
   "bonuses.amount",
+  "cardTransactions.amount", // what the card issuer says the charge was
+  "expenseAllocations.amount", // one cost centre's share of an invoice; it sums to the expense's own amount
+  "expenseCategories.amountCap", // most a single claim in this category may be
+  "expenseCategories.rate", // currency PER unit (per km, per day) - a rate, but denominated in money and
+                            // multiplied straight into a claim's amount, so it is rounded like one
   "compensation.arrearsAmount", "compensation.arrearsBaseAmount", "compensation.basePay",
   "compensation.ctcAnnual", "compensation.specialAllowance", "compensation.variablePayTarget",
   "expenseBudgets.amount", "expenses.amount", "expenses.taxAmount",
+  // A salary cap, the same kind of figure as `expenseBudgets.amount` beside it. Spend against it is DERIVED
+  // (never stored), so this column is the only money payroll budgets persist.
+  "payrollBudgets.amount",
+  // A loss-of-pay correction, signed: positive is owed back to the employee, negative is recovered. Priced
+  // from the closed run's own daily rate, so it is currency even though the three columns beside it are
+  // day-units.
+  "lopAdjustments.amount",
   "leaveEncashments.amount", "leaveEncashments.ratePerDay",
+  // How much of a claim went to discharging an advance instead of being paid out. Currency, and the payout
+  // subtracts it from the claim's amount, so it is rounded exactly like the amount it is taken off.
+  "reimbursements.advanceSettled",
   "loanRepayments.amount", "loans.monthlyAmount", "loans.principal", "loans.repaid",
   "offers.baseComp",
   "payComponents.cap", // a ceiling in rupees (payComponents.rate is a percentage - see below)
@@ -68,7 +83,14 @@ const MONEY = new Set([
 // (where they are rounded at all) on their own terms, so the money rule would be noise on them.
 const NOT_MONEY: Record<string, string> = {
   "cards.rank": "lexicographic ordering key - a float precisely so a card can be dropped between two others",
+  "expenses.quantity": "kilometres or days claimed against a rated category - the multiplicand, not the money",
   "compOffCredits.days": "leave days (half-days are legitimate)",
+  // Day-units of absence, not rupees: what the closed run docked, what its attendance now says, and the
+  // signed residual between them. Half-days are legitimate throughout, and the money they price to is
+  // `lopAdjustments.amount`, which IS on the money list.
+  "lopAdjustments.chargedUnits": "day-units the closed run docked, not currency",
+  "lopAdjustments.correctUnits": "day-units the period's attendance says it should have docked",
+  "lopAdjustments.dayUnits": "the signed residual in day-units; the priced figure is `amount`",
   "goals.baselineValue": "arbitrary goal metric, unit chosen per goal",
   "goalTemplates.baselineValue": "the same arbitrary metric, held as a blueprint",
   "goalTemplates.targetValue": "the same arbitrary metric, held as a blueprint",

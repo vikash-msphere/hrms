@@ -155,7 +155,14 @@ describe("every collection is built by the factory", () => {
     // it can never be the shared lane's column write. `automations:enable/disable` write the SAME `disabled`
     // column the shared verb would, with the same audit stem - they exist to drop the engine's rule cache, which
     // the shared verb knows nothing about.
-    expect(shadowed.sort()).toEqual(["automations:disable", "automations:enable", "payrollRuns:publish"]);
+    //
+    // `announcements:enable` is the same shape one step further: `disabled` is what MODERATION writes to take a
+    // post off the wall (services/moderation.ts hideHost), so turning it back on is the inverse of a
+    // moderator's decision and has to put that decision's flag back on the queue. The column write is still the
+    // shared one (`setDisabled`); what the collection claims is what happens AROUND it.
+    // `suggestions:restore` is the same case on the other wall: the soft-delete stamp is both an author's own
+    // withdrawal and moderation's hide, so the collection owns whether a restore is allowed to happen at all.
+    expect(shadowed.sort()).toEqual(["announcements:enable", "automations:disable", "automations:enable", "payrollRuns:publish", "suggestions:restore"]);
   });
 
   // The generic list binds the caller's scope (services/crud.ts), and these tables are FLAT catalogs: a `code`
@@ -164,14 +171,14 @@ describe("every collection is built by the factory", () => {
   // pay component belongs. Every seeded role that may read one of these must therefore read it org-wide. This
   // is a claim about the GRANT policy (domain/grants.ts), which is where such a change would be made.
   it("keeps every generic-list catalog readable org-wide, so binding the scope cannot empty it", () => {
-    // Wire names of the collections with no route-level `list` hook. The count is pinned below, so a 17th
+    // Wire names of the collections with no route-level `list` hook. The count is pinned below, so another
     // joining the generic path fails here rather than silently escaping the check. `expense-budgets` left this
     // lane for a filtered list (period/status scoping plus a whole-set aggregate), and binds the scope through
     // the same `applyScope(code)` call the generic list uses.
     const GENERIC_LIST = [
       "asset-categories", "benefit-plans", "compliance-rules", "expense-categories", "goal-templates", "holidays", "leave-types",
       "letter-templates", "letterheads", "pay-components", "pay-grades", "pay-periods", "projects", "reimbursement-categories",
-      "access-rules", "salary-structures", "shifts", "vendors",
+      "access-rules", "salary-structures", "shifts", "vendors", "card-transactions",
     ];
     const genericListFiles = entries.filter((e) => usesFactory(e.src) && !/^\s*list:/m.test(e.src)).map((e) => e.name);
     expect(genericListFiles.length, `these list through crud.ts: ${genericListFiles.join(", ")} - keep GENERIC_LIST in step`).toBe(GENERIC_LIST.length);

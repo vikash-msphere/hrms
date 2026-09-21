@@ -12,7 +12,7 @@ import { BLANK } from "@/lib/tableFilter";
 import { todayStr } from "@/lib/orgDay";
 import { thisYearStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
-import type { Employee, Reimbursement, ReimbursementCategory, Me } from "@/types";
+import type { Employee, Reimbursement, ReimbursementCategory, Loan, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { RequestsHistoryTabs, type RequestsHistorySearch } from "@/components/common/RequestsHistoryTabs";
@@ -50,11 +50,19 @@ const STALE_CLAIM_DAYS = 7;
 // `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
 // local parts, which is a different day for part of every day and a different day again from the one the
 // server validates against.
-const EMPTY = { category: "", amount: "", incurred_on: "", description: "" };
+const EMPTY = { category: "", amount: "", incurred_on: "", description: "", advance: "" };
 
 export default function Reimbursements({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<Reimbursement>("reimbursements");
   const { rows: categories } = useCollection<ReimbursementCategory>("reimbursement-categories");
+  // The claimant's own live advances. Scoped by the server to what they may list, so for an ordinary employee
+  // this is their own floats and nobody else's; a disbursed advance with nothing left to settle is filtered
+  // out here rather than offered and then refused by the service.
+  const { rows: loans } = useCollection<Loan>("loans");
+  const myAdvances = useMemo(
+    () => loans.filter((l) => l.kind === "advance" && (l.status ?? "").toUpperCase() === "DISBURSED" && (l.outstanding ?? 0) > 0.005),
+    [loans],
+  );
   // `all: true` on the directory read, here and on every page that resolves a NAME out of it. One page meant
   // a `new Map(employees.map(...))` lookup rendered the wire token (or "Employee") for everyone past the
   // hundredth - in the column that says who the money is for, and in `confirmDecision`'s prompt, which exists
@@ -149,6 +157,9 @@ export default function Reimbursements({ me }: { me: Me }) {
         // `format: date`, and "" is not a date - an empty one is left out.
         ...(form.incurred_on ? { incurred_on: form.incurred_on } : {}),
         description: form.description,
+        // Only sent when one was chosen: an ordinary claim has no advance, and the field is absent rather than
+        // null for the same reason nothing else on this wire is null.
+        ...(form.advance ? { advance: form.advance } : {}),
       });
       // THE CLAIM EXISTS FROM HERE ON, so the receipt is a follow-up, not part of the create. A throw here used
       // to leave the claim filed and the dialog open over everything the person typed, and a second press made
@@ -253,7 +264,23 @@ export default function Reimbursements({ me }: { me: Me }) {
     { id: "category", header: "Category", filter: "select", groupBy: true, accessor: (r) => catName(r.category) },
     // Totalled under the column and over any selection: "how much is this queue worth" is the question the
     // person approving it is about to be asked.
-    { id: "amount", header: "Amount", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => money(n), accessor: (r) => r.amount, cell: (r) => <span className="tabular-nums">{money(r.amount)}</span> },
+    {
+      id: "amount", header: "Amount", align: "right", filter: "number", aggregate: "sum", formatTotal: (n) => money(n), accessor: (r) => r.amount,
+      // A claim settled against an advance pays out less than it claims - sometimes nothing. Saying only the
+      // claimed amount would leave somebody waiting for money that was never going to arrive, because they had
+      // already been given it.
+      cell: (r) => (
+        <div className="tabular-nums">
+          {money(r.amount)}
+          {(r.advance_settled ?? 0) > 0 && (
+            <div data-sentry-mask className="text-xs font-normal text-muted-foreground">
+              {money(r.advance_settled!)} against your advance
+              {r.amount - r.advance_settled! > 0.005 ? `, ${money(r.amount - r.advance_settled!)} to pay` : ", nothing to pay"}
+            </div>
+          )}
+        </div>
+      ),
+    },
     { id: "incurred", header: "Incurred", filter: "date", dateHint: "past", accessor: (r) => r.incurred_on ?? "", cell: (r) => (r.incurred_on ? formatDate(r.incurred_on) : "-") },
     // PAID is the terminal happy state - show it green and say how/when the money went out (payroll run sets paid_run).
     { id: "state", header: "Status", filter: "select", groupBy: true, accessor: (r) => r.state, cell: (r) => upper(r.state) === "PAID" ? (
@@ -452,6 +479,34 @@ export default function Reimbursements({ me }: { me: Me }) {
           <Field label="Date incurred" error={form.incurred_on && form.incurred_on > todayStr() ? "That's in the future - expenses are claimed after they're incurred." : undefined}>
             <Input type="date" max={todayStr()} value={form.incurred_on} onChange={(e) => setForm({ ...form, incurred_on: e.target.value })} />
           </Field>
+          {/* Only where there is a float to spend. Choosing one means the claim DISCHARGES the advance instead
+              of paying out again - so the money is accounted for once, which is the whole point of taking an
+              advance rather than claiming afterwards. Hidden entirely when the person holds none, because an
+              empty picker is a question nobody can answer. */}
+          {myAdvances.length > 0 && (
+            <Field
+              label="Against an advance (optional)"
+              hint={form.advance
+                ? "This claim will be set against the advance rather than paid out. Anything over the remaining balance is still paid."
+                : "Choose one if you were given money up front for this."}
+            >
+              <Select value={form.advance || "none"} onValueChange={(v) => setForm({ ...form, advance: v === "none" ? "" : v })}>
+                <SelectTrigger><SelectValue placeholder="Not against an advance" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Not against an advance</SelectItem>
+                  {myAdvances.map((l) => (
+                    <SelectItem key={l.path} value={l.path}>
+                      {/* `loans` is MEMORY_ONLY and a SENSITIVE_PAGES route: what somebody has borrowed from
+                          the company, and what is still outstanding, is not ordinary business data about them.
+                          This form is not one of those routes, so the figure is masked here - the label stays
+                          readable, which is all a replay needs to show that a picker was used. */}
+                      {l.reason || "Advance"} - <span data-sentry-mask>{money(l.outstanding ?? 0)}</span> left
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
           <Field label="Description (optional)" hint="What it was for. An approver reading a bare amount usually asks anyway.">
             <Textarea rows={2} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
           </Field>

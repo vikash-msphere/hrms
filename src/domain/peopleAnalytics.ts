@@ -11,7 +11,7 @@
 /** How a measure rolls up to the team line under the table. */
 export type MetricAgg = "sum" | "avg";
 /** What the number IS, so one formatter serves every column. `time_of_day` is minutes since local midnight. */
-export type MetricUnit = "count" | "days" | "hours" | "minutes" | "percent" | "rating" | "time_of_day";
+export type MetricUnit = "count" | "days" | "hours" | "minutes" | "percent" | "rating" | "time_of_day" | "money";
 /** Which direction is good, for the column's tone. `none` = neither (a volume, not a verdict). */
 export type MetricDirection = "higher" | "lower" | "none";
 
@@ -31,7 +31,69 @@ export type MetricDef = {
   direction: MetricDirection;
   /** One line explaining exactly what was counted, shown on the column header. */
   hint: string;
+  /**
+   * A measure that may be reported for a GROUP but never attributed to a named person.
+   *
+   * WHY IT EXISTS. This report answers per person - `employeeId`, `employeeIds`, and a day-by-day series -
+   * and it writes NO audit row. Reading the same salary figure at `GET /v1/payslips/<id>` writes a
+   * `payslips.read.sensitive` one, because `AUDIT.sensitive_collections` names payslips for exactly that
+   * reason. So a pay-derived measure served per person would put somebody's salary on a surface with no
+   * accountability trail, reachable by anybody holding the list grant. The SCOPING would be correct; the
+   * trail would not.
+   *
+   * The closure is structural rather than procedural: a flagged measure is stripped from every person row
+   * before the answer is built, so there is no request shape - no filter, no narrowing, no series - that
+   * returns it for an individual. An audit row would have been the alternative, and it is the weaker one:
+   * it records that the disclosure happened instead of preventing it.
+   *
+   * It is also suppressed for a roster too small to hide anybody (`MIN_TEAM_FOR_TEAM_ONLY`), because a team
+   * total over two people is a per-person figure wearing a group's label.
+   */
+  teamOnly?: true;
 };
+
+/**
+ * The smallest roster a team-only measure will be reported over.
+ *
+ * A group aggregate stops protecting anybody once the group is small enough to invert: the total pay of a
+ * team of one IS that person's pay, and of a team of two it is one subtraction away for either member. Five
+ * is the usual floor for this kind of suppression and is deliberately a named constant rather than a literal,
+ * because it is the sort of number an org with a different obligation will want to raise.
+ *
+ * Suppression here means the measure is ABSENT, not zero: a zero would read as "they cost nothing".
+ */
+export const MIN_TEAM_FOR_TEAM_ONLY = 5;
+
+/** The keys of every team-only measure in `metrics`. */
+export const teamOnlyKeys = (metrics: readonly MetricDef[]): string[] => metrics.filter((m) => m.teamOnly).map((m) => m.key);
+
+/**
+ * Whether a roster of `size` may carry a team-only figure at all. See `MIN_TEAM_FOR_TEAM_ONLY`: a group
+ * small enough to invert is not a group.
+ */
+export const teamOnlyReportable = (size: number): boolean => size >= MIN_TEAM_FOR_TEAM_ONLY;
+
+/**
+ * A person row's values with every team-only measure removed.
+ *
+ * PURE AND EXPORTED so the closure is exercised by a test rather than only by whichever measures happen to
+ * carry the flag today - there are none at the time of writing, which would otherwise leave the one piece of
+ * code standing between a salary and an unaudited report with no coverage at all. The test drives it with
+ * synthetic measures for exactly that reason.
+ *
+ * Returns a new object rather than mutating: the caller holds these rows in a list it has already built, and
+ * a helper that quietly empties them is a worse thing to call from two places later.
+ */
+export function withoutTeamOnly(
+  values: Record<string, number | null>,
+  metrics: readonly MetricDef[],
+): Record<string, number | null> {
+  const drop = new Set(teamOnlyKeys(metrics));
+  if (!drop.size) return values;
+  const out: Record<string, number | null> = {};
+  for (const [k, v] of Object.entries(values)) if (!drop.has(k)) out[k] = v;
+  return out;
+}
 
 export const METRIC_GROUPS: { key: string; label: string }[] = [
   { key: "attendance", label: "Attendance & punctuality" },
@@ -40,6 +102,7 @@ export const METRIC_GROUPS: { key: string; label: string }[] = [
   { key: "work", label: "Tasks & goals" },
   { key: "performance", label: "Performance" },
   { key: "time", label: "Time & effort" },
+  { key: "money", label: "Money" },
 ];
 
 // Every measure. Order is the column order in the table.
@@ -55,6 +118,25 @@ export const METRICS: readonly MetricDef[] = [
   { key: "days_short", label: "Under-hours days", short: "Short", group: "attendance", collection: "attendance", unit: "days", agg: "sum", direction: "lower", hint: "Present days that did not reach the configured full day of worked minutes." },
   { key: "avg_worked_minutes", label: "Average day length", short: "Day length", group: "attendance", collection: "attendance", unit: "minutes", agg: "avg", direction: "none", hint: "Mean worked minutes across present days (open sessions excluded)." },
   { key: "corrections_filed", label: "Corrections filed", short: "Corrections", group: "attendance", collection: "attendance-regularizations", unit: "count", agg: "sum", direction: "none", hint: "Attendance regularizations filed for a day inside the window." },
+
+  // ---- Money ----
+  // Company spend this person put through, gated on `expenses` like any other measure. Safe per person: an
+  // expense claim is something they filed and can already see, not a fact about what they are worth.
+  { key: "expense_claimed", label: "Expenses claimed", short: "Expenses", group: "money", collection: "expenses", unit: "money", agg: "sum", direction: "none", hint: "Approved and paid company expenses they filed, by the date incurred. Claims still awaiting a decision are not counted - that is a queue, not spend." },
+  { key: "expense_claims", label: "Expense claims", short: "Claims", group: "money", collection: "expenses", unit: "count", agg: "sum", direction: "none", hint: "How many approved or paid expense claims they filed in the window." },
+  // NO PAY-DERIVED MEASURE YET, and `teamOnly` above is only half of what one needs.
+  //
+  // The disclosure problem is solved: a flagged measure cannot reach a person row. The remaining problem is
+  // SCOPING, and it is a different one. `SCOPE_COLUMNS` in services/peopleAnalytics.ts is an owner-scope
+  // PARITY map - both columns must belong to the collection whose list decision gates the measure - and pay
+  // has no such pair: `payroll-runs` carries the code, while the per-person figures live on
+  // `payroll_run_items`. Binding the run-item columns under the `payroll-runs` key would be exactly the
+  // mistake the `announcements` and `expenses` entries in that map already record having made, where a scope
+  // was bound to a column that was not the one the collection's own list scopes on.
+  //
+  // So a payroll measure needs a decision about WHICH list decision governs it and how it binds, not another
+  // row in this array. Left out rather than guessed, because the failure mode of guessing here is a manager's
+  // breadth quietly pulling in pay for people they may not read.
 
   // ---- Leave ----
   { key: "leave_days_taken", label: "Leave days taken", short: "Leave", group: "leave", collection: "leave-requests", unit: "days", agg: "sum", direction: "none", hint: "Days on approved leave requests that start inside the window." },

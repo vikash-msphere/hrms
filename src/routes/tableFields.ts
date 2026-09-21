@@ -7,6 +7,7 @@ import { suggestTableView, MAX_QUESTION } from "../services/tableAssist";
 import { basesFor, buildCatalogue } from "../services/tableCatalog";
 import { catalogueFieldGate } from "../http/tableFieldAccess";
 import { BASES } from "../domain/tableFields";
+import { fullHeader } from "../domain/tableHeaders";
 import { invalidArgument } from "../lib/errors";
 
 // Virtual capability (no table, no rows of its own): the table builder's field catalogue.
@@ -52,6 +53,10 @@ export const tableFields = new Hono<AppEnv>().get("/", async (c) => {
     fields: catalogue.fields.map((f) => ({
       key: f.key,
       label: f.label,
+      // The picker files a field under the node it came from, so inside the picker `label` is the whole
+      // story. The CHOSEN-columns list stands outside all of them, and there "Name" is three fields at once -
+      // so it carries the qualified name. The grid shortens the same name again, against its own columns.
+      ...(f.trail?.length ? { column_label: fullHeader({ key: f.key, label: f.label, trail: f.trail, nodeName: f.nodeName }) } : {}),
       group: f.group,
       kind: f.kind,
       collection: f.collection,

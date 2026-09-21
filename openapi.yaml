@@ -677,6 +677,25 @@ components:
               section: { type: string, readOnly: true }
               declared: { type: number, readOnly: true }
               allowed: { type: number, readOnly: true }
+              cap: { type: number, readOnly: true, description: "The regime's limit for this section. Absent where the section has no cap, or where this regime disallows it - in both cases there is no limit to state." }
+        deduction_headroom:
+          type: array
+          readOnly: true
+          description: >-
+            Capped sections this regime allows that still have room, biggest remaining first. Reported
+            SEPARATELY from `deductions` rather than as zero rows there, so an existing reader's list does not
+            change shape - and it is the case worth surfacing, since somebody who has declared nothing against
+            a section is exactly the person who does not know they could. Stated as arithmetic and never as
+            advice: "you have declared 60,000 of a 150,000 limit" is a calculation; "you should invest more"
+            is financial advice, and the line between them is the one this app stays on the near side of.
+          items:
+            type: object
+            required: [section, cap, declared, remaining]
+            properties:
+              section: { type: string, readOnly: true }
+              cap: { type: number, readOnly: true }
+              declared: { type: number, readOnly: true }
+              remaining: { type: number, readOnly: true }
         taxable_income: { type: number, readOnly: true }
         slabs: { type: array, readOnly: true, items: { $ref: '#/components/schemas/tax-slab' } }
         income_tax: { type: number, readOnly: true }
@@ -819,6 +838,32 @@ components:
         plural: payroll-debit-accounts
         patterns: ['payroll-debit-accounts/{bank}']
         type: hrms.example.com/payroll-debit-account
+    revision-side:
+      type: object
+      description: >-
+        One side of a compensation comparison: what a REGULAR month looks like at that CTC, with no
+        period-specific effects in it. Employee PF is priced on PF wages at the component's ceiling; ESI appears
+        only while the wage is within the ceiling (the run's mid-period stickiness is a fact about a period, not
+        a salary); professional tax is the monthly slab before any annual cap.
+      properties:
+        annual_ctc: { type: number }
+        monthly_gross: { type: number }
+        base_pay: { type: number }
+        special_allowance: { type: number, description: "The balancing plug that makes gross plus employer contributions land on the target CTC." }
+        pf_wages: { type: number }
+        employee_pf: { type: number }
+        employee_esi: { type: number }
+        professional_tax: { type: number }
+        employer_cost: { type: number, description: "Employer contributions counted INSIDE CTC." }
+        above_ctc_cost: { type: number, description: "Employer contributions the organisation pays over and above CTC." }
+        lines:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              monthly: { type: number }
+              above_ctc: { type: boolean }
     payroll-line:
       type: object
       description: One earning, deduction, employer-contribution or perquisite line on an employee's payroll.
@@ -829,6 +874,207 @@ components:
         amount: { type: number }
         taxable: { type: boolean, description: "Earnings only; false excludes the line from the taxable gross (e.g. reimbursements, the payout rounding adjustment)." }
         above_ctc: { type: boolean, description: "Employer contributions only; true when the contribution's pay component is set to sit over and above CTC (in_ctc false), so it is excluded from the CTC figure." }
+        parts:
+          type: array
+          description: >-
+            What this line is made of, where the single figure cannot be checked by the person receiving it.
+            Present on salary arrears, naming the already-published periods the arrear is owed for; absent
+            everywhere else, and absent on an arrear whose breakdown was not recorded or does not sum to the
+            line. Display only - `amount` is the whole of the money, and the parts never re-enter any
+            calculation, so a breakdown can only ever be wrong on screen and never wrong in pay.
+          items:
+            type: object
+            required: [label, amount]
+            properties:
+              label: { type: string, description: "The pay period this part is owed for." }
+              amount: { type: number }
+    payroll-run-reconciliation:
+      type: object
+      description: >-
+        The movement from the previous finalized run's gross to this one's, attributed. The decomposition is
+        exhaustive - every employee falls into joined, left or continuing, and every earning line of a
+        continuing employee into carried-over, added or dropped - so the movements sum to the difference and
+        both residuals read zero. Only earnings are reconciled; deductions and employer contributions are
+        separate questions and folding them in would reconcile to a figure nobody is reviewing.
+      required: [path, opening, closing, movements, residual, headcount_residual]
+      properties:
+        path: { type: string, readOnly: true }
+        compared_to:
+          type: string
+          readOnly: true
+          nullable: true
+          description: "Resource path of the run this was compared against, or null on the first run an organisation builds."
+        opening:
+          type: object
+          readOnly: true
+          description: The previous run's totals (zeroes when there is no previous run).
+          required: [employees, gross]
+          properties:
+            employees: { type: integer, readOnly: true }
+            gross: { type: number, readOnly: true }
+        closing:
+          type: object
+          readOnly: true
+          description: This run's totals.
+          required: [employees, gross]
+          properties:
+            employees: { type: integer, readOnly: true }
+            gross: { type: number, readOnly: true }
+        movements:
+          type: array
+          readOnly: true
+          description: "In statement order: who arrived, who left, what changed for those who stayed, then one-offs on and off."
+          items:
+            type: object
+            required: [key, employees, amount]
+            properties:
+              key: { type: string, readOnly: true, enum: [joiners, leavers, recurring, added, dropped] }
+              employees: { type: integer, readOnly: true, description: "How many people contributed, which separates one large movement from many small ones." }
+              amount: { type: number, readOnly: true, description: "Signed, so the rows read as a sum throughout." }
+        residual:
+          type: number
+          readOnly: true
+          description: "closing.gross - opening.gross - sum(movements). Zero unless the server's bucketing has a hole in it."
+        headcount_residual:
+          type: integer
+          readOnly: true
+          description: "opening.employees + joiners - leavers - closing.employees. Zero for the same reason."
+        summary:
+          type: string
+          readOnly: true
+          description: >-
+            The same decomposition said in one sentence: the direction and size of the gross movement, then
+            the two or three movements that account for most of it. DETERMINISTIC - built from the movements
+            above and nothing else, with no model involved, so it cannot name a driver the statement does not
+            show or a figure it did not compute. Money is rendered as a bare rounded number because the
+            server does not know the org's currency; the client formats it.
+        summary_compared:
+          type: boolean
+          readOnly: true
+          description: >-
+            False on the first run an organisation builds, where there is nothing to compare against and the
+            sentence states this run's totals instead of a movement. A client must not render the summary as
+            a change when this is false.
+      x-aep-resource:
+        singular: reconciliation
+        plural: reconciliation
+        singleton: true
+        patterns:
+          - 'payroll-runs/{payroll_run_id}/reconciliation'
+        type: hrms.example.com/reconciliation
+    payslip-explain:
+      type: object
+      description: "The component-by-component difference between a payslip and the one before it."
+      required: [path, compared_to, changes, reasons, net_before, net_now, net_delta]
+      properties:
+        path: { type: string, readOnly: true }
+        compared_to: { type: string, readOnly: true, nullable: true, description: "Resource path of the earlier payslip, or null when this is the first." }
+        changes:
+          type: array
+          readOnly: true
+          description: "Biggest effect on take-home first - a deduction that grew and an earning that shrank both reduce pay, so the order follows the direction the money moved rather than the raw delta."
+          items:
+            type: object
+            required: [code, name, kind, before, now, delta]
+            properties:
+              code: { type: string, readOnly: true }
+              name: { type: string, readOnly: true }
+              kind: { type: string, readOnly: true, enum: [earning, deduction] }
+              before: { type: number, readOnly: true, description: "0 for a component that was not on the earlier slip." }
+              now: { type: number, readOnly: true, description: "0 for one that has stopped." }
+              delta: { type: number, readOnly: true }
+        reasons: { type: array, readOnly: true, items: { type: string }, description: "One plain sentence per change, in the same vocabulary the run review uses, so an employee and a payroll officer read the same words about the same event." }
+        net_before: { type: number, readOnly: true }
+        net_now: { type: number, readOnly: true }
+        net_delta: { type: number, readOnly: true }
+      x-aep-resource:
+        singular: explain
+        plural: explain
+        singleton: true
+        patterns:
+          - 'payslips/{payslip_id}/explain'
+        type: hrms.example.com/explain
+    payroll-run-variance:
+      type: object
+      description: "Which rows of a run to look at, and everything that should be true before it is approved."
+      required: [path, flags, preflight, compared_against]
+      properties:
+        path: { type: string, readOnly: true }
+        compared_against: { type: integer, readOnly: true, description: "How many earlier finalized runs the history was taken from (up to three). Zero means nothing to compare against, and every row reads as first_run." }
+        flags:
+          type: array
+          readOnly: true
+          description: "Worst shape first, then biggest move - a reviewer works down the list and stops when satisfied, so the order is the prioritisation."
+          items:
+            type: object
+            required: [employee_id, kind, delta, fraction, reasons]
+            properties:
+              employee_id: { type: string, readOnly: true }
+              kind: { type: string, readOnly: true, enum: [net_moved_gross_flat, net_moved, gross_moved, component_added, component_removed, first_run], description: "net_moved_gross_flat is listed first deliberately: the same wage with a different take-home means a DEDUCTION changed, which is where a wrongly-started recovery or a tax swing hides and is exactly what an org-total comparison cannot show." }
+              delta: { type: number, readOnly: true, description: "Signed, against the median of that person's own recent runs. Zero for first_run." }
+              fraction: { type: number, readOnly: true }
+              reasons: { type: array, readOnly: true, items: { type: string }, description: "What changed in the line set, against LAST run rather than the median. Empty when nothing explains the move - which is the row to open first, not a gap in the check." }
+        preflight:
+          type: array
+          readOnly: true
+          items:
+            type: object
+            required: [employee_id, code, detail, blocking]
+            properties:
+              employee_id: { type: string, readOnly: true, nullable: true, description: "Null for an issue about the run rather than a person." }
+              code: { type: string, readOnly: true, enum: [negative_net, zero_net, net_above_gross, no_bank_account, tax_stopped, unpriced_component] }
+              detail: { type: string, readOnly: true }
+              blocking: { type: boolean, readOnly: true, description: "True only for the two arithmetically impossible states (negative net, net above gross), which refuse :approve outright - they cannot occur on a correct run, so there is nothing legitimate for them to block. Everything else is a judgement somebody may overrule and is reported, never refused." }
+      x-aep-resource:
+        singular: variance
+        plural: variance
+        singleton: true
+        patterns:
+          - 'payroll-runs/{payroll_run_id}/variance'
+        type: hrms.example.com/variance
+    payroll-run-journal:
+      type: object
+      description: >-
+        A payroll run posted as one line per account per cost centre. Summed rather than per employee: an
+        import with four hundred identical-account rows is a worse artefact than the same entry totalled, and
+        the per-person detail is what the run's item list is for.
+      required: [path, run, lines, total_debit, total_credit, residual, balanced, unmapped]
+      properties:
+        path: { type: string, readOnly: true }
+        run: { type: string, readOnly: true, description: "Resource path of the run this posts." }
+        period: { type: string, readOnly: true, nullable: true, description: "Resource path of the pay period." }
+        posted_from: { type: string, readOnly: true, description: "The run's own code, for the reference field of an import." }
+        lines:
+          type: array
+          readOnly: true
+          items:
+            type: object
+            required: [account, department, debit, credit, label]
+            properties:
+              account: { type: string, readOnly: true, description: "The general-ledger code, from the pay component or the payroll-gl settings blob." }
+              department: { type: string, readOnly: true, nullable: true, description: "Cost centre NAME, resolved from the department stamped on the run item at build time; null for org-wide lines such as net pay. A name rather than an id because this is imported into an accounting system or read in a spreadsheet, and an internal id is unusable in both." }
+              debit: { type: number, readOnly: true }
+              credit: { type: number, readOnly: true }
+              label: { type: string, readOnly: true, description: "What the line is, for a human reading the export before importing it." }
+        total_debit: { type: number, readOnly: true }
+        total_credit: { type: number, readOnly: true }
+        residual: { type: number, readOnly: true, description: "total_debit - total_credit. Zero whenever the pricing and the posting agree." }
+        balanced: { type: boolean, readOnly: true, description: "False when the residual is non-zero OR a priced component is unmapped. Do not post an entry that is not balanced." }
+        unmapped:
+          type: array
+          readOnly: true
+          items: { type: string }
+          description: >-
+            Line codes the run priced whose pay component carries no gl_code (or, for the payout rounding line,
+            no rounding account). The journal is refused rather than produced without them: dropping an
+            unmapped component leaves an entry that balances by omitting money.
+      x-aep-resource:
+        singular: journal
+        plural: journal
+        singleton: true
+        patterns:
+          - 'payroll-runs/{payroll_run_id}/journal'
+        type: hrms.example.com/journal
     payroll-run-item:
       type: object
       required: [employee, employee_name, code, gross, taxable_gross, total_deductions, tax, net, employer_cost, above_ctc_cost, lines]
@@ -3135,6 +3381,21 @@ components:
         incurred_on: { type: string, format: date }
         description: { type: string }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED/PAID. }
+        advance:
+          type: string
+          nullable: true
+          description: >-
+            Resource path of the advance this claim spends: loans/{loan_id}, of kind "advance". Set when the
+            employee was given the money up front (a travel float) and is now accounting for it. Must belong to
+            the same employee, be disbursed, and still owe something. Approving such a claim discharges the
+            advance by up to its outstanding balance instead of paying the claim out again.
+        advance_settled:
+          type: number
+          readOnly: true
+          description: >-
+            How much of this claim went to discharging the advance rather than being paid. The payout pays
+            `amount - advance_settled`, so a claim inside the advance pays nothing and one that overspends it
+            pays only the excess. Present only on a claim that names an advance.
         has_receipt: { type: boolean, readOnly: true }
         paid_run: { type: string, readOnly: true, description: "Resource path of the payroll run that paid this claim, if any." }
         paid_time: { type: string, format: date-time, readOnly: true }
@@ -3163,6 +3424,10 @@ components:
         display_name: { type: string }
         requires_receipt: { type: boolean, description: "When true an expense in this category must carry an invoice attachment." }
         gl_code: { type: string, nullable: true, description: "Accounting general-ledger code. Null when unset." }
+        rate_kind: { type: string, nullable: true, enum: [per_km, per_day], description: "Makes this a RATED category, paid at a published rate rather than against a receipt (mileage, per diem). Set together with `rate`; null clears both. A claim then states a quantity and the server computes the amount." }
+        rate: { type: number, nullable: true, description: "Amount per kilometre or per day. Changing it applies from that moment on: claims already filed keep their stored amount, so history is not rewritten, but a claim filed today for an earlier trip is priced at the CURRENT rate. Rates are deliberately not effective-dated." }
+        amount_cap: { type: number, nullable: true, description: "Most a single claim in this category may be. Checked when the claim is SUBMITTED rather than at approval, so a submitter is told before filing instead of being rejected days later. Null for no cap." }
+        max_age_days: { type: integer, nullable: true, description: "How late a claim may be filed, counted in whole days from the date incurred to the ORG's today. Null for no limit." }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
         locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
@@ -3192,7 +3457,7 @@ components:
         contact_email: { type: string }
         contact_phone: { type: string }
         tax_id: { type: string, description: "GSTIN / tax registration number." }
-        payment_terms: { type: string, description: "e.g. Net 30." }
+        payment_terms_days: { type: integer, nullable: true, description: "Days after the invoice date this vendor is paid (Net 30 = 30). Null means no agreed terms, which is different from 0 (due on the invoice date); an expense for a vendor with null terms carries no due date rather than one computed from a guess." }
         bank_details: { type: string }
         default_category: { type: string, description: "Resource path: expense-categories/{category_id}" }
         notes: { type: string }
@@ -3227,6 +3492,25 @@ components:
         amount: { type: number }
         tax_amount: { type: number, description: "GST / tax component included in amount." }
         incurred_on: { type: string, format: date }
+        quantity: { type: number, nullable: true, description: "Kilometres or days claimed against a rated category. The server multiplies it by the category's rate and OVERWRITES `amount`, so a client sending both is sending a preview rather than an instruction. Ignored on an unrated category." }
+        allocations:
+          type: array
+          description: >-
+            Splits one invoice across cost centres, so a bill that is 60% Engineering and 40% Sales is ONE
+            expense with the invoice attached to it rather than two rows, one of which had no evidence. The
+            lines must sum to `amount`; budget attribution charges the lines where they exist and the row where
+            they do not, which is the only place in the app that has to understand a split. Omitting the field
+            leaves an existing split alone, an empty array clears it, and a list replaces it whole - a split is
+            one statement about how an invoice divides, so a partial edit could only leave it summing wrong.
+            Changing `amount` without re-stating the split DROPS it, rather than leaving cost centres charged a
+            total the company never paid.
+          items:
+            type: object
+            required: [amount]
+            properties:
+              department: { type: string, nullable: true, description: "Resource path: departments/{department_id}" }
+              category: { type: string, nullable: true, description: "Resource path: expense-categories/{category_id}" }
+              amount: { type: number }
         description: { type: string }
         invoice_number: { type: string }
         payment_method: { type: string, description: "bank/card/cash/upi/cheque." }
@@ -3234,6 +3518,22 @@ components:
         state: { type: string, readOnly: true, description: State value DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED/PAID. }
         reimbursable: { type: boolean, description: "True when an employee fronted the cost; on approval a reimbursement is created and paid via payroll." }
         reimbursement: { type: string, readOnly: true, description: "Resource path of the linked reimbursement, when bridged to payroll." }
+        signals:
+          type: array
+          readOnly: true
+          description: >-
+            Why this claim is worth a second look, for an approver working a queue. Present only on a SUBMITTED
+            claim and only when something stood out, so absence means "nothing to say" rather than "not
+            checked". Computed server-side over the WHOLE collection rather than over the page: a duplicate
+            filed by somebody else, or a budget the client never loaded, cannot be seen from a page of rows.
+          items:
+            type: object
+            required: [kind, message]
+            properties:
+              kind: { type: string, enum: [duplicate, over_budget, missing_receipt, policy] }
+              message: { type: string, description: "Written for the approver and about the CLAIM, never about the person who filed it." }
+        first_approved_by: { type: string, readOnly: true, description: "Resource path of whoever gave the FIRST of two approvals, on a claim above the org's second-approval threshold. The row stays SUBMITTED until a DIFFERENT person gives the second, so it remains in the approval queue; absent on claims that need only one approval." }
+        first_approved_time: { type: string, format: date-time, readOnly: true }
         has_invoice: { type: boolean, readOnly: true }
         paid_time: { type: string, format: date-time, readOnly: true }
         decision_note: { type: string, readOnly: true, description: "The reviewer's reason, set when the expense is rejected." }
@@ -3243,6 +3543,33 @@ components:
         next_occurrence_on: { type: string, format: date, description: "Next date the template generates an expense." }
         last_generated_time: { type: string, format: date-time, readOnly: true, description: "When the template last generated an expense." }
         template: { type: string, readOnly: true, description: "Resource path of the recurring template this expense was generated from." }
+        due_on:
+          type: string
+          format: date
+          readOnly: true
+          description: >-
+            When this invoice is payable: `incurred_on` plus the vendor's `payment_terms_days`. Computed on
+            read, not stored, so renegotiated terms correct old invoices instead of leaving them answering with
+            the terms that applied the day somebody filed them. Terms run from the INVOICE date rather than
+            from approval, which is what Net 30 means and what stops a slow approval quietly extending the term
+            the vendor agreed to. Absent when there is no vendor, no agreed terms, or no invoice date.
+        series_drift:
+          type: object
+          readOnly: true
+          description: >-
+            Present only on an expense a recurring template generated whose amount has moved away from what
+            that series usually costs by more than the tolerance. Absent means there is nothing to say - the
+            expense is not from a series, the series has nothing to compare against, or the amount is in line -
+            so a client shows this when it is here and shows nothing when it is not. The baseline is the median
+            of up to six PRIOR occurrences (a first occurrence falls back to the template's own amount), which
+            keeps one double-billed month from moving the comparison the next month is judged against.
+          required: [baseline, delta, delta_fraction, direction, samples]
+          properties:
+            baseline: { type: number, description: "Median of the occurrences this amount was compared against." }
+            delta: { type: number, description: "amount - baseline; negative when the occurrence came in cheaper." }
+            delta_fraction: { type: number, description: "delta / baseline, as a fraction (0.12 = 12% dearer)." }
+            direction: { type: string, description: "up/down." }
+            samples: { type: integer, description: "How many occurrences the baseline was taken from." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -3252,6 +3579,74 @@ components:
         patterns:
           - 'expenses/{expense_id}'
         type: hrms.example.com/expense
+    narration:
+      type: object
+      description: >-
+        A sentence over a set of measures, plus the movements it was written from. `findings` is every figure
+        the text is allowed to contain - the server rejects a generated paragraph carrying any other number -
+        so a client can render the findings itself and get the same facts when `source` is `plain`.
+      required: [path, text, findings, source, cached, period_key]
+      properties:
+        path: { type: string, readOnly: true }
+        text: { type: string, readOnly: true }
+        source: { type: string, readOnly: true, enum: [model, plain], description: "`plain` means no model was used or its answer was rejected." }
+        cached: { type: boolean, readOnly: true }
+        period_key: { type: string, readOnly: true }
+        compared_to: { type: string, readOnly: true, nullable: true, description: "The period this was compared against, or null when there is no comparable earlier period." }
+        findings:
+          type: array
+          readOnly: true
+          items:
+            type: object
+            required: [key, label, unit, direction, previous, current, movement]
+            properties:
+              key: { type: string, readOnly: true }
+              label: { type: string, readOnly: true }
+              unit: { type: string, readOnly: true }
+              direction: { type: string, readOnly: true, enum: [higher, lower, none] }
+              previous: { type: number, readOnly: true }
+              current: { type: number, readOnly: true }
+              change_pct: { type: number, readOnly: true, nullable: true }
+              movement: { type: string, readOnly: true, enum: [up, down] }
+      x-aep-resource:
+        singular: narration
+        plural: narrations
+        singleton: true
+        patterns:
+          - 'expense-budgets/narration'
+        type: hrms.example.com/narration
+    card-transaction:
+      type: object
+      description: >-
+        One charge off a corporate card statement, and the expense claim it accounts for. Rows arrive through
+        `:import` rather than a POST - a charge is a fact the card issuer reported, not something to invent -
+        and re-importing the same statement is a no-op, because each row carries a content-derived key with a
+        unique index behind it. The only editable field is the match, because the matcher is a rule and a
+        person has to be able to overrule it.
+      required: [path, create_time, update_time, etag, amount, posted_on]
+      properties:
+        path: { type: string, readOnly: true, description: "The server-assigned path of the resource, unique within the service." }
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        employee: { type: string, readOnly: true, description: "Resource path of the CARDHOLDER, where the statement named a card this app could resolve to a person. A charge nobody owns is still a charge the company paid and is still listed." }
+        card_last4: { type: string, readOnly: true }
+        posted_on: { type: string, format: date, readOnly: true, description: "The date the ISSUER posted it, which is typically a few days after the purchase." }
+        amount: { type: number, readOnly: true }
+        merchant: { type: string, readOnly: true, description: "The card descriptor, which is rarely the merchant's actual name." }
+        reference: { type: string, readOnly: true, description: "The issuer's own row id, where the format carries one. Its presence is what makes two identical same-day charges distinguishable on re-import." }
+        expense: { type: string, description: "Resource path of the claim this charge accounts for. Writable: setting it records a MANUAL match, clearing it unlinks." }
+        match_confidence: { type: string, readOnly: true, enum: [exact, likely, manual], description: "How the pairing was decided. `exact` means the amount, a near date and a recognisable merchant all agreed; `likely` means the amount and the date window did; `manual` means a person said so." }
+        matched_time: { type: string, format: date-time, readOnly: true }
+        access:
+          readOnly: true
+          $ref: '#/components/schemas/access_hint'
+      x-aep-resource:
+        singular: card-transaction
+        plural: card-transactions
+        patterns:
+          - 'card-transactions/{card_transaction_id}'
+        type: hrms.example.com/card-transaction
     expense-budget:
       type: object
       description: A spend cap for a (department?, category?, period); spend is derived from approved/paid expenses.
@@ -3276,6 +3671,7 @@ components:
         remaining: { type: number, readOnly: true }
         utilization: { type: number, readOnly: true, description: "spent / amount (0..>1)." }
         alert_level: { type: integer, readOnly: true, description: "Highest budget-alert threshold already fired for this period (0 = none)." }
+        projection_alerted_time: { type: string, format: date-time, readOnly: true, description: "When the forecast warning (expense.budgetProjectedBreach) was sent for this period. Once per period; changing the cap or the period clears it, so a re-armed budget can warn again." }
         spend_history:
           type: array
           readOnly: true
@@ -3291,6 +3687,23 @@ components:
             properties:
               period: { type: string, description: "The calendar month, YYYY-MM." }
               spent: { type: number, description: "Approved + paid expenses charged to this budget in that month." }
+        projection:
+          type: object
+          readOnly: true
+          description: >-
+            Where this cap lands at period end if the rest of the period spends at the rate the elapsed part
+            did. Present ONLY for a currently-running period that has both spend and enough elapsed time
+            (15%) to extrapolate from; absent for a closed period (whose spend is already its total), a future
+            one, one with no spend, and one too early to call. Absence therefore means "no honest forecast",
+            not "on track", and a client must not render a zero in its place. This is the same arithmetic as
+            `alert_level` asked forwards: a cap on course to finish over says so weeks before it crosses a
+            threshold.
+          required: [elapsed, projected, projected_utilization, projected_over_by]
+          properties:
+            elapsed: { type: number, description: "Fraction of the period already gone (0..1); how much to trust the rest." }
+            projected: { type: number, description: "Spend at period end at the current rate." }
+            projected_utilization: { type: number, description: "projected / amount (0..>1)." }
+            projected_over_by: { type: number, description: "projected - amount; negative when the cap is forecast to hold." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -3608,6 +4021,25 @@ components:
         text: { type: string, readOnly: true, description: The drafted text. }
         kind: { type: string, readOnly: true }
         cached: { type: boolean, readOnly: true, description: "True when an identical request had already been drafted and the stored result was served, costing no inference." }
+    similar-goal:
+      description: "One goal the index found near another, with what a reader needs to judge it: whose it is, how far it has got, and how close the match was."
+      type: object
+      properties:
+        path: { type: string, description: "Resource path: goals/{goal_id}." }
+        title: { type: string }
+        status: { type: string }
+        progress: { type: integer }
+        score: { type: number, description: "Cosine similarity, 0-1. Shown so a person can weigh the match rather than trust it." }
+        owner: { type: string, description: "The goal owner's name, absent when the row has no employee behind it." }
+        department_goal: { type: boolean, description: "A goal a whole department owns, which is usually what a personal goal should align to." }
+    flow-stat:
+      description: "A percentile pair over comparable cards, with the corpus that produced it. `basis` is `size` when the board sizes its work and this card's size band had enough samples, `column` when it fell back to everything that has been through the column. `count` is how many cards the figures came from, which is what makes them weighable rather than trustworthy by assertion."
+      type: object
+      properties:
+        p50: { type: number }
+        p85: { type: number }
+        count: { type: integer }
+        basis: { type: string, enum: [size, column] }
     triage-vote:
       type: object
       nullable: true
@@ -3867,6 +4299,14 @@ components:
         regime: { type: string, description: "For method income_tax: the tax regime block to use (e.g. new)." }
         recurring: { type: boolean }
         in_ctc: { type: boolean, description: "employer_contribution only: true (default) counts this contribution INSIDE the CTC figure; false pays it OVER AND ABOVE CTC (\"CTC + PF\") - still a company cost, still costed by payroll, but excluded from the CTC number. Always true for earnings/deductions." }
+        gl_code:
+          type: string
+          description: >-
+            The general-ledger account this component posts to in a payroll journal, mirroring
+            expense-categories.gl_code. Which SIDE it posts to is not stored - it follows from `kind`, so the
+            two cannot disagree. Unset until an organisation maps its chart of accounts; a run refuses to
+            produce a journal while any component it priced is unmapped, because dropping one leaves an entry
+            that balances by omitting money.
         pf_wages: { type: boolean, description: "earning only: does this allowance count as PF wages when settings/ctc pf_wage_basis is basic_plus? Ignored under the default basic basis (PF wages = basic). Always false for deductions/employer contributions." }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
@@ -3958,6 +4398,16 @@ components:
         period_start: { type: string, format: date }
         period_end: { type: string, format: date }
         pay_date: { type: string, format: date }
+        input_cutoff_on:
+          type: string
+          format: date
+          nullable: true
+          description: >-
+            The day after which this period's inputs are meant to stop moving. Absent when the organisation has
+            not adopted a cutoff, which is the default. Must fall between period_start and pay_date inclusive -
+            outside that window it would read as a deadline while never being one. This is a published date,
+            not a lock: late writes into the period are still accepted, and the run's own staleness check is
+            what reports that the figures moved. Send null to clear it.
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
         locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
@@ -3970,6 +4420,67 @@ components:
         patterns:
           - 'pay-periods/{pay_period_id}'
         type: hrms.example.com/pay-period
+    payroll-budget:
+      type: object
+      description: >-
+        A salary cap for a (department?, period), with spend derived from what payroll actually paid. The same
+        idea as `expense-budget` and deliberately the same shape, minus the two fields salary has no analogue
+        for: there is no category, and no `pending` - an approved run is spend, with nothing sitting in
+        between. Kept as its own collection rather than a flag on `expense-budget` so that no forgotten filter
+        can ever count salary as expense spend.
+      # Only the server-assigned fields are `required`. A writable one listed here would make every partial
+      # merge-patch a 422 through Prism (which enforces `required` on request bodies), so the fields the
+      # serializer always emits but a client may omit are narrowed in src/http/wire.ts ALWAYS_PRESENT
+      # instead - the same split `expense-budget` uses.
+      required: [path, create_time, update_time, etag, spent, remaining, utilization]
+      properties:
+        path:
+          type: string
+          readOnly: true
+          description: The server-assigned path of the resource, unique within the service.
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        delete_time: { type: string, format: date-time, readOnly: true }
+        department: { type: string, description: "Resource path: departments/{department_id} (omit for org-wide)." }
+        period_type: { type: string, description: "monthly/quarterly/yearly." }
+        period_key: { type: string, description: "2026 | 2026-Q1 | 2026-07." }
+        amount: { type: number, description: "The budget cap." }
+        recurring: { type: boolean, description: "Re-open this cap for the next period automatically once this period closes (same scope, same amount)." }
+        spent:
+          type: number
+          readOnly: true
+          description: >-
+            Gross pay from APPROVED and PUBLISHED runs whose pay date falls in the period. Draft runs are
+            excluded: their figures change on every rebuild, and counting them would make a department's
+            budget move while a colleague works. Attribution uses the department stamped on each run item at
+            build time, NOT the employee's department today - so a transfer in March cannot rewrite what
+            February consumed.
+        remaining: { type: number, readOnly: true }
+        utilization: { type: number, readOnly: true, description: "spent / amount (0..>1)." }
+        projection:
+          type: object
+          readOnly: true
+          description: >-
+            Where this cap lands at period end if the rest of the period spends at the rate the elapsed part
+            did - the same arithmetic, and the same refusals, as `expense-budget.projection`. Absent for a
+            closed period, a future one, one with no spend, and one too early to call, so absence means "no
+            honest forecast" rather than "on track".
+          required: [elapsed, projected, projected_utilization, projected_over_by]
+          properties:
+            elapsed: { type: number, description: "Fraction of the period already gone (0..1); how much to trust the rest." }
+            projected: { type: number, description: "Spend at period end at the current rate." }
+            projected_utilization: { type: number, description: "projected / amount (0..>1)." }
+            projected_over_by: { type: number, description: "projected - amount; negative when the cap is forecast to hold." }
+        access:
+          readOnly: true
+          $ref: '#/components/schemas/access_hint'
+      x-aep-resource:
+        singular: payroll-budget
+        plural: payroll-budgets
+        patterns:
+          - 'payroll-budgets/{payroll_budget_id}'
+        type: hrms.example.com/payroll-budget
     payroll-run:
       type: object
       required: [path, create_time, update_time, etag, state]
@@ -3999,7 +4510,18 @@ components:
         bank_file_time: { type: string, format: date-time, readOnly: true, description: "When a bank payout file was first generated for this run; null if never. Once set the run can no longer be deleted, since deleting releases the one-off payables it paid and the money may already have left." }
         built_time: { type: string, format: date-time, readOnly: true, description: "When the run's line items were last (re)built from live inputs; null if never built. Detail GET only." }
         stale: { type: boolean, readOnly: true, description: "True when an income-affecting input (compensation, pay components, bonuses, leave encashments, reimbursements, overtime, loans, tax verifications, settings, joiners) changed after built_time, so the built numbers are out of date and the run should be rebuilt. Only ever true while editable (DRAFT/REVIEW). Detail GET only." }
-        changes: { type: array, readOnly: true, items: { type: string }, description: "Human-readable categories of inputs that changed since the build, when stale. Detail GET only." }
+        changes: { type: array, readOnly: true, items: { type: string }, description: "Human-readable categories of inputs that changed since the build - the reason for `stale` on an editable run, and for `diverged` on a committed one. Detail GET only." }
+        diverged:
+          type: boolean
+          readOnly: true
+          description: >-
+            True when an income-affecting input has moved since a COMMITTED (approved/published) run was
+            built. The same scan as `stale`, reported separately because the two mean opposite things: `stale`
+            is work to do (rebuild before approving), while this is a statement of fact with no remedy of that
+            kind - the payslips are the record of what was paid, the run cannot be rebuilt, and the live data
+            now says something different. A correction belongs in a later run (arrears for a back-dated
+            compensation revision, the payable queue for everything else), never in this one. Absent rather
+            than false when nothing has moved, and never set at the same time as `stale`. Detail GET only.
         split_drift:
           type: object
           readOnly: true
@@ -4012,6 +4534,33 @@ components:
           readOnly: true
           items: { type: string }
           description: "Names the last build walked but could not price, because no compensation revision is in force at the period end - so they are ABSENT from this run rather than wrong in it. Only people employed during the period are listed (a future joiner already on the roster is correctly unpriced). A warning, not a block: enter their compensation and rebuild, or accept it if they are genuinely owed nothing. Absent when everyone was priced. Detail GET only; reported in every state, unlike split_drift."
+        timeline:
+          type: array
+          readOnly: true
+          description: >-
+            Where this run has got to, in order: cutoff, created, built, submitted, approved, bank file,
+            published, pay date. `cutoff` is present only when the period carries one, and is the period's
+            deadline rather than anything the run did. Present on the detail read. Assembled from the audit trail (the run records who did each
+            thing, not when), so `actor` is the person's name as of the event rather than a live lookup. A
+            milestone with a null `at` has not happened yet - `pay_date` is the only planned entry, and it is
+            null only when the run's period is missing. Where a run was sent back and re-approved the EARLIEST
+            timestamp is reported, because the question is when the month reached that step; `built` is the
+            exception and reports the latest, since a rebuild is where the current figures came from.
+          items:
+            type: object
+            required: [key, at, actor]
+            properties:
+              key: { type: string, readOnly: true, enum: [cutoff, created, built, submitted, approved, bank_file, published, pay_date] }
+              at_time: { type: string, format: date-time, readOnly: true, nullable: true }
+              actor: { type: string, readOnly: true, nullable: true, description: "Who did it, as of the event. Null for the entries that are stamps rather than transitions (built, bank_file) and for pay_date." }
+        payslips_unopened:
+          type: integer
+          readOnly: true
+          description: >-
+            How many of this run's payslips the employees they belong to have not opened yet. Present on the
+            detail read of a PUBLISHED run only - before publication there are no slips, and a zero there would
+            read as "nobody has seen it" rather than "it has not been sent". Counts the owner's own first view;
+            a manager or HR reading somebody's slip does not mark it opened.
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -4038,6 +4587,15 @@ components:
         total_deductions: { type: number, readOnly: true }
         tax: { type: number, readOnly: true, description: TDS withheld. }
         net: { type: number, readOnly: true }
+        first_opened_time:
+          type: string
+          format: date-time
+          readOnly: true
+          description: >-
+            When the employee this slip belongs to first opened it themselves. Absent until they do. Written
+            once and never updated, and never written when somebody else reads the slip: it answers whether
+            the payslip was delivered, and deliberately cannot answer how often or how recently its owner has
+            looked at their own pay.
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -5546,6 +6104,7 @@ paths:
                       properties:
                         key: { type: string, description: "The catalogue key, as stored in a view's columns." }
                         label: { type: string }
+                        column_label: { type: string, description: "The field's name qualified by the whole link trail (`Requester: Job title`), for a list that stands outside the node it came from. Absent at the base, where `label` already says it. A grid shortens this again against its own columns - see the `label` of `:run`." }
                         group: { type: string }
                         kind: { type: string, enum: [text, number, money, date, datetime, bool, enum, ref] }
                         collection: { type: string, description: "The collection whose list decision gated it." }
@@ -5750,7 +6309,8 @@ paths:
                       required: [key, label, kind, collection]
                       properties:
                         key: { type: string }
-                        label: { type: string }
+                        label: { type: string, description: "The header, qualified by the links that reach it only as far as the other columns of THIS grid make it ambiguous (`Name`, `Department`, `Manager -> Department`)." }
+                        full_label: { type: string, description: "The whole trail spelled out; present only when the header is shorter than it, as a tooltip." }
                         kind: { type: string, enum: [text, number, money, date, datetime, bool, enum, ref] }
                         collection: { type: string }
                         masked: { type: boolean, description: "Served masked: the caller does not hold `unmask`." }
@@ -6621,6 +7181,60 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/goals/{goal_id}:suggestMeasure:
+    post:
+      description: "Custom method suggestMeasure: propose how this goal could be measured - a unit, a starting value and a target - from the goal's own title and description. One generation, on a press. The model is shown that text and nothing else: no progress, no owner, no review, and it is not asked whether the goal is good, ambitious or realistic. The answer is parsed into exactly those three nullable fields and refused otherwise, and lands in the form as a suggestion the owner accepts field by field - accepting is the ordinary goal update with the ordinary validation and audit row. Any value the goal does not support comes back null rather than invented. Fails with a readable precondition when the feature is off, no model is bound, or the allowance is spent."
+      operationId: ":SuggestGoalMeasure"
+      parameters: [ { in: path, name: goal_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unit: { nullable: true, type: string }
+                  baseline_value: { nullable: true, type: number }
+                  target_value: { nullable: true, type: number }
+                  cached: { type: boolean, description: "The answer came from the generation cache, so it cost no neurons." }
+                required: [cached]
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goals/{goal_id}:similar:
+    post:
+      description: "Custom method similar: goals that are the same work in different words, and the goal this one could roll up under. `overlaps` are near-identical goals owned by somebody ELSE - duplicated effort, or a contribution nobody recorded; `parent_candidates` are related objectives this one could align to, and are empty once it already has a parent or is a key result; `related` is everything above the floor, for a reader who wants the working. NO TEXT IS GENERATED: the index already holds each goal's title and description, and this is a nearest-neighbour lookup over them. Nothing is written - aligning a goal stays a deliberate edit. Every neighbour is re-checked against the caller's own goal list scope, so a goal they could not have listed is never named. Returns { similar: null } when the feature is off, the goal is not indexed yet, or nothing is close enough."
+      operationId: ":SimilarGoals"
+      parameters: [ { in: path, name: goal_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  similar:
+                    nullable: true
+                    type: object
+                    properties:
+                      overlaps: { type: array, items: { $ref: '#/components/schemas/similar-goal' } }
+                      parent_candidates: { type: array, items: { $ref: '#/components/schemas/similar-goal' } }
+                      related: { type: array, items: { $ref: '#/components/schemas/similar-goal' } }
+                required: [similar]
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/goals/{goal_id}:watch:
     post:
       description: >-
@@ -6926,9 +7540,79 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/board' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/boards/{board_id}:narrate:
+    post:
+      description: "Custom method narrate: how this board's flow changed over the last `days` against the equal period before them - tasks delivered, median cycle time, median lead time and work in flight. The DETECTION IS ARITHMETIC and is always returned as `findings`; the model is handed only those movements and writes them up, so it cannot notice anything the comparison did not, and a sentence containing a figure that was not in the findings is discarded in favour of the plain summary (`source` says which was used). Nothing personal is sent: four labels and two numbers each, no task title, assignee or department. Never fails for an unavailable model - the numbers answer the question with or without one."
+      operationId: ":NarrateBoard"
+      parameters:
+        - { in: path, name: board_id, required: true, schema: { type: string } }
+        - { in: query, name: days, schema: { type: integer }, description: "Window length in days, clamped to 7-90. Default 30." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  text: { type: string }
+                  source: { type: string, enum: [model, plain] }
+                  cached: { type: boolean }
+                  days: { type: integer }
+                  findings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        label: { type: string }
+                        unit: { type: string }
+                        direction: { type: string }
+                        previous: { type: number }
+                        current: { type: number }
+                        change_pct: { nullable: true, type: number }
+                        movement: { type: string, enum: [up, down] }
+                required: [text, source, cached, days, findings]
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/boards/{board_id}:duplicates:
+    post:
+      description: "Custom method duplicates: pairs of OPEN cards on this board that the nightly sweep found to be the same work filed twice. The sweep is a vector lookup over cards already in the index - no text is generated and nothing is written to any card - and its answers are stored as pending ai_suggestions rows, cleared when a card is delivered or deleted. Both halves of every pair are re-checked here against the caller's own card list scope, so a pair involving a card they could not list is dropped rather than half-shown, and each pair is reported once whichever way round the sweep recorded it. Empty when the feature is off, nothing has been swept yet, or nothing looks duplicated."
+      operationId: ":BoardDuplicates"
+      parameters: [ { in: path, name: board_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  duplicates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        card: { type: object, properties: { path: { type: string }, title: { type: string } } }
+                        duplicates:
+                          type: array
+                          items: { type: object, properties: { path: { type: string }, title: { type: string }, column: { type: string }, score: { type: number } } }
+                required: [duplicates]
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/boards/{board_id}:metrics:
     post:
-      description: "Custom method metrics: flow analytics (cumulative flow diagram, lead time, cycle time, throughput)."
+      description: "Custom method metrics: flow analytics (cumulative flow diagram, lead time, cycle time, throughput, and how long cards take to leave each column)."
       operationId: ":MetricsBoard"
       parameters:
         - { in: path, name: board_id, required: true, schema: { type: string } }
@@ -6945,7 +7629,7 @@ paths:
             application/json:
               schema:
                 type: object
-                description: "Flow analytics: columns, CFD series, lead/cycle-time percentiles (days), throughput."
+                description: "Flow analytics: columns, CFD series, lead/cycle-time percentiles (days), throughput, and `column_dwell` - the p50/p85 days cards have taken to leave each column, over completed stays only (a card sitting in a column now is not a sample). Columns nothing has left yet are absent rather than reported as zero."
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/boards/{board_id}:restore:
@@ -7926,6 +8610,80 @@ paths:
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '200': { description: "The review PDF, for inline display or saving.", content: { application/pdf: { schema: { type: string, format: binary } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/reviews/{review_id}:collaborators:
+    post:
+      description: "Custom method collaborators: who worked with this person during the cycle, ranked by how much shared work there is, each entry carrying the reasons it is there - tasks with both their names on, goals one credited the other a share of, kudos written either way, and (weakest) cards of their own on a board the subject was working on. Feeds the 360 nomination picker so it leads with people who saw the work instead of the whole directory. NO MODEL: joins and a count, because ranking colleagues by a model's opinion of who knows somebody is an opinion about people. The score orders the list and is not a judgement of anybody. Nothing is written - nominating is still a separate act through :nominate. Each signal is decided by the list verdict its own collection would give this caller, so a section they may not list contributes nothing. People who have left are left out."
+      operationId: ":ReviewCollaborators"
+      parameters: [ { in: path, name: review_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  collaborators:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        employee: { type: string, description: "Resource path: employees/{employee_id}." }
+                        name: { type: string }
+                        score: { type: integer, description: "Orders the list. Not a measure of anybody and not stored." }
+                        reasons:
+                          type: array
+                          items: { type: object, properties: { kind: { type: string, enum: [same_task, shared_goal, kudos, same_board] }, detail: { type: string }, count: { type: integer } } }
+                      required: [employee, name, score, reasons]
+                required: [collaborators]
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/reviews/{review_id}:evidence:
+    post:
+      description: "Custom method evidence: what this person actually did during the cycle, gathered from the records that already hold it - board cards delivered in the window, kudos colleagues wrote them, goals owned by somebody else that credited them a share, and the shared notes of their own 1:1s. NO MODEL IS CALLED and nothing is written: the pack is a list of links a human reads while writing, never a summary, a score or a ranking. A read, and a POST only because that is how this API spells a custom method. Each section is decided by the list verdict its own collection would give this caller, so a section the caller may not list comes back empty rather than refusing the request. `truncated` says a section hit its cap."
+      operationId: ":ReviewEvidence"
+      parameters: [ { in: path, name: review_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  evidence:
+                    type: object
+                    properties:
+                      window: { type: object, properties: { start: { type: string }, end: { type: string } } }
+                      cards:
+                        type: array
+                        items: { type: object, properties: { path: { type: string }, key: { type: string }, title: { type: string }, delivered: { type: string }, board: { type: string }, size: { type: integer }, goal: { type: object, properties: { path: { type: string }, title: { type: string } } } } }
+                      kudos:
+                        type: array
+                        items: { type: object, properties: { path: { type: string }, body: { type: string }, at: { type: string }, from: { type: string }, category: { type: string }, level: { type: string } } }
+                      contributions:
+                        type: array
+                        items: { type: object, properties: { path: { type: string }, title: { type: string }, share: { type: integer }, note: { type: string }, progress: { type: integer }, status: { type: string } } }
+                      check_ins:
+                        type: array
+                        items: { type: object, properties: { path: { type: string }, date: { type: string }, notes: { type: string } } }
+                      truncated: { type: boolean }
+                    required: [window, cards, kudos, contributions, check_ins, truncated]
+                required: [evidence]
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
@@ -13859,9 +14617,88 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ticket' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/cards/{card_id}:suggestSteps:
+    post:
+      description: "Custom method suggestSteps: the checklist items that comparable DELIVERED cards on this board actually carried, most common first. No text is generated - these are steps people wrote down on finished work, in the board's own vocabulary - and nothing is written to the card: the caller adds what they want through :addTodos. An item is offered only when at least two comparable cards carried it, counted per card so one repetitive checklist cannot out-vote several others, and only delivered neighbours count (a checklist on a card still in flight is a plan, not a record). Every neighbour is re-checked against the caller's own card list scope. Empty when the feature is off, the card is not indexed yet, or the board has too little comparable history - the `task-checklist` draft kind is the fallback for that case."
+      operationId: ":SuggestCardSteps"
+      parameters: [ { in: path, name: card_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  steps:
+                    type: array
+                    items: { type: object, properties: { text: { type: string }, seen: { type: integer, description: "How many comparable delivered cards carried this step." }, of: { type: integer, description: "How many comparable delivered cards were read." } }, required: [text, seen, of] }
+                required: [steps]
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/cards/{card_id}:suggestGoal:
+    post:
+      description: "Custom method suggestGoal: which goal this card is probably serving, from the card's own vector matched against the GOALS half of the index. The link exists so that delivering a card can roll its progress up into a goal, and it is filled in by hand today, which means it usually is not filled in at all. No text is generated - the card and the goals were embedded by the search drain. Nothing is written: the value lands in the dialog's Goal field and is saved with the rest of the card. Answers with goals only, re-checked against the caller's own GOAL list scope (a goal's title is frequently a statement of strategy), and only live goals. Empty when the card already names a goal, when the feature is off, or when nothing is close enough."
+      operationId: ":SuggestCardGoal"
+      parameters: [ { in: path, name: card_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  goals:
+                    type: array
+                    items: { type: object, properties: { path: { type: string }, title: { type: string }, score: { type: number }, owner: { type: string } }, required: [path, title, score] }
+                required: [goals]
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/cards/{card_id}:flow:
+    post:
+      description: "Custom method flow: how long work like this card has taken on this board, read off the board's own movement log. `dwell` is how long comparable cards took to LEAVE the column this one is in, `to_delivery` how long they took from entering it to being delivered, and `slower_than` is this card's own age as a percentile of that set. Comparable means the same column, narrowed to the same size when the board sizes its work and has enough of it - `basis` says which corpus answered and `count` how many cards it held. No model is called and nothing is stored: this is arithmetic over rows the board already writes. Every card in the corpus is re-checked against the caller's own card list scope, so a card they could not list cannot move a percentile. Returns { flow: null } when nothing comparable has been through the column yet."
+      operationId: ":CardFlow"
+      parameters: [ { in: path, name: card_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flow:
+                    nullable: true
+                    type: object
+                    properties:
+                      column: { type: string }
+                      days_here: { nullable: true, type: number }
+                      dwell: { $ref: '#/components/schemas/flow-stat' }
+                      to_delivery: { $ref: '#/components/schemas/flow-stat' }
+                      slower_than: { type: integer }
+                    required: [column, days_here]
+                required: [flow]
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/cards/{card_id}:triage:
     post:
-      description: "Custom method triage: what comparable DELIVERED cards say this one's department, priority and size should be, plus cards still in flight that look like duplicates of it. Evidence is delivered work only - an open card's filing is a guess the board has not tested - while duplicates are open only, because filing the same work twice is a problem exactly while both are live. A read, and a POST only because that is how this API spells a custom method. Every neighbour is re-checked against the caller's own card list scope, so it cites nothing they could not have listed. Nothing is written to the card. Returns { triage: null } when the card is not indexed yet, when no neighbour is visible, or when no field reaches the evidence floor."
+      description: "Custom method triage: what comparable DELIVERED cards say this one's department, priority and size should be, how long that work took and what blocked it, plus cards still in flight that look like duplicates of it. Evidence is delivered work only - an open card's filing is a guess the board has not tested - while duplicates are open only, because filing the same work twice is a problem exactly while both are live. A read, and a POST only because that is how this API spells a custom method. Every neighbour is re-checked against the caller's own card list scope, so it cites nothing they could not have listed. Nothing is written to the card. Returns { triage: null } when the card is not indexed yet, when no neighbour is visible, or when no field reaches the evidence floor."
       operationId: ":TriageCard"
       parameters: [ { in: path, name: card_id, required: true, schema: { type: string } } ]
       responses:
@@ -13890,6 +14727,8 @@ paths:
                       duplicates:
                         type: array
                         items: { type: object, properties: { path: { type: string }, title: { type: string }, score: { type: number }, column: { type: string } } }
+                      took: { type: object, description: "How long the comparable delivered cards took from starting work to delivery, in days. Absent when no neighbour carries both ends.", properties: { p50: { type: number }, p85: { type: number }, count: { type: integer } } }
+                      blocked: { type: object, description: "How many of the comparable cards were blocked at some point, out of how many were compared, and the commonest reasons. Read from the event log, because a card row keeps only its CURRENT block - the reason is cleared on unblock.", properties: { cards: { type: integer }, of: { type: integer }, reasons: { type: array, items: { type: string } } } }
                 required: [triage]
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
@@ -15138,6 +15977,113 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-budgets:
+    get:
+      description: List method for payroll-budget.
+      operationId: ListPayrollBudgets
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: show_deleted, schema: { type: boolean } }
+        - in: query
+          name: period
+          schema: { type: string, enum: [current, upcoming, past] }
+          description: "Where the period sits relative to today, resolved against each row's own period_type, so one read covers monthly, quarterly and yearly caps."
+        - { in: query, name: period_key, schema: { type: string }, description: "Exact period key (2026 | 2026-Q1 | 2026-07)." }
+        - { in: query, name: period_type, schema: { type: string, enum: [monthly, quarterly, yearly] } }
+        - { in: query, name: year, schema: { type: string }, description: "Every period inside a calendar year, whatever its granularity." }
+        - { in: query, name: department, schema: { type: string }, description: "departments/{department_id} (omit for every cost centre)." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/payroll-budget' } }
+                  next_page_token: { type: string }
+                  summary:
+                    type: object
+                    description: "Totals over the WHOLE filtered set, not the returned page (deleted caps excluded)."
+                    properties:
+                      count: { type: integer }
+                      amount: { type: number }
+                      spent: { type: number }
+                      over: { type: integer }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: Create method for payroll-budget.
+      operationId: CreatePayrollBudget
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-budget' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-budget' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-budgets/{payroll_budget_id}:
+    parameters: [ { in: path, name: payroll_budget_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for payroll-budget.
+      operationId: GetPayrollBudget
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-budget' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: Update method for payroll-budget.
+      operationId: UpdatePayrollBudget
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/payroll-budget' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-budget' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: Delete method for payroll-budget.
+      operationId: DeletePayrollBudget
+      parameters:
+        - { in: query, name: force, schema: { type: boolean } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-budgets/{payroll_budget_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestorePayrollBudget"
+      parameters: [ { in: path, name: payroll_budget_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-budget' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/payroll-runs:
     get:
       description: List method for payroll-run.
@@ -15212,6 +16158,32 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/payslips/{payslip_id}/explain:
+    parameters: [ { in: path, name: payslip_id, required: true, schema: { type: string } } ]
+    get:
+      description: >-
+        Why this payslip differs from the one before it, component by component. The most common payroll
+        question in any organisation, answered from figures the app already holds. Deterministic: the value is
+        the JOIN, not prose - somebody who can see their net fell by exactly the amount of a new loan line has
+        their answer. Compared against the employee's own PREVIOUS payslip by issue order, which is what "last
+        month" means to them, rather than the previous pay period, which may have no slip for a joiner or
+        leaver. `compared_to` is null on a first payslip and everything else is empty: a first slip has
+        nothing to be different from, and comparing against zero would say their pay went up by all of it.
+        Employer contributions and perquisites are excluded - neither is paid to the employee nor withheld
+        from them, so neither explains a change in what they received.
+      operationId: GetExplain
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/payslip-explain' }
+        '404': { $ref: '#/components/responses/Problem' }
   /v1/payroll-runs/{payroll_run_id}/items:
     get:
       description: List the per-employee breakdown (run items) for a payroll run - the review surface.
@@ -15235,6 +16207,78 @@ paths:
                 properties:
                   results: { type: array, items: { $ref: '#/components/schemas/payroll-run-item' } }
                   next_page_token: { type: string }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-runs/{payroll_run_id}/reconciliation:
+    parameters: [ { in: path, name: payroll_run_id, required: true, schema: { type: string } } ]
+    get:
+      description: >-
+        Why this run's gross differs from the previous finalized run's, decomposed into movements that sum
+        exactly to the difference. Derived on read from line arrays both runs already hold; nothing is stored.
+        `residual` and `headcount_residual` are zero whenever the server's arithmetic is right - they are a
+        check on the decomposition rather than on payroll, so a non-zero means the breakdown beside them is
+        not to be trusted. On an organisation's first run `compared_to` is null and everybody is a joiner.
+      operationId: GetReconciliation
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/payroll-run-reconciliation' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-runs/{payroll_run_id}/variance:
+    parameters: [ { in: path, name: payroll_run_id, required: true, schema: { type: string } } ]
+    get:
+      description: >-
+        The rows of this run worth a reviewer's attention, against each person's OWN recent history, plus the
+        pre-flight. The run's existing comparison is org-level, and payroll mistakes are not org-level: a
+        proration bug or an EMI that started early moves one person's net while the total moves by an amount
+        nobody looks at twice. Each flag carries the reasons its line set changed, so the pointer does not
+        send somebody to four other pages - and a flag with NO reasons is the most interesting row in the run
+        rather than a failure of the check. Derived on read; a rebuild changes the numbers. The threshold is
+        `settings/payroll-variance.net_fraction`. Pre-flight issues marked `blocking` also refuse `:approve`.
+      operationId: GetVariance
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/payroll-run-variance' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-runs/{payroll_run_id}/journal:
+    parameters: [ { in: path, name: payroll_run_id, required: true, schema: { type: string } } ]
+    get:
+      description: >-
+        This run as a double-entry journal, derived on read and stored nowhere (a rebuild changes the numbers,
+        and a stored journal would then describe a run that no longer exists). Payroll's output otherwise stops
+        at a bank file, so the month is re-keyed into the accounting system by hand. Which side each line posts
+        to follows from its pay component's kind and is never stored: an earning debits an expense, an employee
+        deduction credits a liability, an employer contribution does BOTH, net pay credits the payable the bank
+        file discharges, and a perquisite posts nothing because it moves the tax base rather than money.
+        `balanced` is false when the entry does not balance or when `unmapped` is non-empty, and a client must
+        not post an unbalanced entry - a residual means the pricing and the posting disagree, which is a check
+        on the whole engine rather than an accounting nicety.
+      operationId: GetJournal
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/payroll-run-journal' }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/payroll-runs/{payroll_run_id}:build:
     post:
@@ -15301,6 +16345,7 @@ paths:
       parameters:
         - { in: path, name: payroll_run_id, required: true, schema: { type: string } }
         - { in: query, name: bank, required: true, schema: { type: string } }
+        - { in: query, name: acknowledge, schema: { type: string }, description: "Set to 1 to confirm the payout findings the check refused on - a destination account shared by two people, or an account that changed since the last run that paid somebody. Both are legitimate often enough that refusing them outright would be a control people route around, and serious enough to want a named person saying yes on the record; the confirmation is audited." }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -15311,6 +16356,74 @@ paths:
           description: The filled bulk-payment workbook.
           content: { application/octet-stream: { schema: { type: string, format: binary } } }
         '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-runs/{payroll_run_id}:paymentResult:
+    post:
+      description: >-
+        Custom method paymentResult: record what the bank did with this run's payout file, per person. Closes
+        a loop the module did not have - `bank_file_time` records the moment the money left and nothing
+        recorded whether it arrived, so a wrong account number or a closed account was discovered when the
+        employee said they had not been paid. Refused for a run that has produced no payout file: a response
+        about money that never moved is the wrong file, not a reconciliation. The body is ALREADY-PARSED rows
+        rather than the bank's own file, because every bank returns a different format exactly as every bank
+        takes a different one - a new bank is a parser, not a change to how a payment is reconciled. Rows
+        naming somebody the run did not pay come back as `unmatched` rather than being dropped, since a
+        response that does not line up is the loudest sign the wrong file was uploaded. People the run paid
+        whom the response says nothing about are `unreported` - sent, nothing heard - which is deliberately
+        neither a success nor a failure. Super-only, following `bankFile`: whoever cannot generate the file
+        cannot assert what became of it. Recording a failure notifies the employee.
+      operationId: ":PaymentResult"
+      parameters: [ { in: path, name: payroll_run_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [results]
+              properties:
+                results:
+                  type: array
+                  items:
+                    type: object
+                    required: [employee, status]
+                    properties:
+                      employee: { type: string, description: "Resource path: employees/{employee_id}" }
+                      status: { type: string, enum: [paid, failed, returned] }
+                      reference: { type: string, nullable: true, description: "The bank's own reference, so a failure can be chased in their terms." }
+                      reason: { type: string, nullable: true, description: "Why it did not land, in the bank's words. Recorded for payroll; the employee's notification stays generic." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run: { type: string }
+                  matched:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        employeeId: { type: string }
+                        status: { type: string, enum: [paid, failed, returned] }
+                        reference: { type: string, nullable: true }
+                        reason: { type: string, nullable: true }
+                  unmatched: { type: array, items: { type: string }, description: "Rows naming somebody this run did not pay." }
+                  unreported: { type: array, items: { type: string }, description: "People the run paid whom the response did not mention." }
+                  counts:
+                    type: object
+                    properties:
+                      paid: { type: integer }
+                      failed: { type: integer }
+                      returned: { type: integer }
+                      unreported: { type: integer }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/payroll-runs/{payroll_run_id}:statutoryReport:
     post:
@@ -15985,6 +17098,141 @@ paths:
                   unchanged: { type: integer, description: Rows already consistent with the config. }
                   skipped: { type: integer, description: "Rows left untouched because their CTC no longer fits the config (basic + fixed components exceed it)." }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/compensation:preview:
+    post:
+      description: >-
+        Custom method preview: price a PROPOSED compensation revision and write nothing. Runs the same pricing
+        the save runs, so the split and the arrears figure shown here are the ones that would land. Answers the
+        REGULAR month at the new rate - it deliberately omits TDS (which depends on the employee's verified
+        declarations and what the year has already collected, so a figure here would not match the payslip) and
+        every period effect (loss of pay, one-offs, loan recovery, the annual PT cap), which are facts about a
+        month rather than about a salary. `crossings` names the statutory boundaries the revision crosses, in
+        sentences, because that is where a rise in CTC can lower take-home and somebody has to explain it.
+      operationId: ":PreviewCompensation"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [employee, annual_ctc, effective_from]
+              properties:
+                employee: { type: string, description: "Resource path: employees/{employee_id}" }
+                annual_ctc: { type: number }
+                effective_from: { type: string, format: date }
+                pay_grade: { type: string, nullable: true }
+                salary_structure: { type: string, nullable: true }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  current:
+                    nullable: true
+                    allOf: [{ $ref: '#/components/schemas/revision-side' }]
+                    description: "The employee's regular month as it stands, or null when they have no compensation row yet."
+                  proposed: { $ref: '#/components/schemas/revision-side' }
+                  arrears:
+                    type: object
+                    description: "What saving this revision would owe for already-published periods, and which periods."
+                    properties:
+                      amount: { type: number }
+                      periods:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            label: { type: string }
+                            months: { type: number, description: "Month-equivalents credited; a fraction where the period was part-worked or only partly inside the backdated window." }
+                  crossings:
+                    type: array
+                    items: { type: string }
+                    description: "Statutory boundaries this revision crosses, as sentences meant to be read aloud in the conversation."
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/compensation:increment:
+    post:
+      description: >-
+        Custom method increment: an increment ROUND. By default (and whenever `dry_run` is not false) this
+        PRICES the round and writes nothing - per-person figures through the same pricer a single revision
+        uses, plus what the round costs in total and every statutory boundary it crosses. `dry_run: false`
+        applies it. The default is the safe one deliberately: a body that forgets the flag prices rather than
+        commits, because a batch of salary revisions is not something to apply because a field was omitted.
+        Bounded per call, since each person costs several reads and an unbounded batch would work for a team
+        and fail for a department. APPLYING IS NOT ATOMIC ACROSS PEOPLE - each revision is its own guarded
+        write, there is no transaction spanning the round, and the response reports per person what applied
+        and what did not so the caller can re-run the failures.
+      operationId: ":IncrementCompensation"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [increments]
+              properties:
+                dry_run: { type: boolean, description: "Omitted or true prices the round and writes nothing. Only an explicit false applies it." }
+                increments:
+                  type: array
+                  items:
+                    type: object
+                    required: [employee, annual_ctc, effective_from]
+                    properties:
+                      employee: { type: string, description: "Resource path: employees/{employee_id}" }
+                      annual_ctc: { type: number }
+                      effective_from: { type: string, format: date }
+                      pay_grade: { type: string, nullable: true }
+                      salary_structure: { type: string, nullable: true }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                description: "A priced round (dry run) or the outcome of applying one."
+                properties:
+                  rows:
+                    type: array
+                    description: "Dry run only. One entry per person, in the order sent; `preview` is null where the row could not be priced and `error` says why, leaving the rest of the round unaffected."
+                    items:
+                      type: object
+                      properties:
+                        employee: { type: string }
+                        error: { type: string, nullable: true }
+                  totals:
+                    type: object
+                    description: "Dry run only. Summed over the rows that priced."
+                    properties:
+                      people: { type: integer }
+                      priced: { type: integer }
+                      annual_ctc_delta: { type: number }
+                      monthly_gross_delta: { type: number }
+                      arrears: { type: number }
+                      crossings: { type: integer }
+                  results:
+                    type: array
+                    description: "Apply only. What happened per person."
+                    items:
+                      type: object
+                      properties:
+                        employee: { type: string }
+                        applied: { type: boolean }
+                        error: { type: string, nullable: true }
+                  applied: { type: integer, description: "Apply only: how many revisions landed." }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/batch:run:
     post:
       description: "Custom method run: execute several GET reads in one request. Each sub-request is independently access-gated exactly as if called directly; mutations are rejected."
@@ -16300,7 +17548,7 @@ paths:
                       properties:
                         kind:
                           type: string
-                          enum: [goal_at_risk, goal_behind, goal_stale, review_waiting, card_aged]
+                          enum: [goal_at_risk, goal_behind, goal_stale, review_waiting, feedback_requested, card_aged]
                         path:
                           type: string
                           description: The record this is about, as <collection>/<id>.
@@ -16389,6 +17637,213 @@ paths:
                   patterns:
                     - 'approvals-summary'
                   type: hrms.example.com/approvals-summary
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/expense-budgets/narration:
+    get:
+      description: >-
+        How this period's budgets moved against the previous period's, in a sentence. The movements are found
+        by arithmetic over four org-level totals; a model, if one is configured and the `budgets.narrate`
+        feature is on, only phrases those findings, and any answer containing a figure that was not among them
+        is discarded in favour of the plain summary. `source` says which happened, so a client can present a
+        deterministic list as a list rather than as prose somebody wrote. Nothing per-budget and nothing about
+        a person reaches a prompt.
+      operationId: GetNarration
+      parameters:
+        - { in: query, name: period_type, schema: { type: string, enum: [monthly, quarterly, yearly] } }
+        - { in: query, name: period_key, schema: { type: string }, description: "Defaults to the period containing today." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/narration' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/card-transactions:
+    get:
+      description: "List corporate card charges, newest posting first. Rows arrive through :import; there is no create."
+      operationId: ListCardTransactions
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/card-transaction' } }
+                  next_page_token: { type: string }
+  /v1/card-transactions/{card_transaction_id}:
+    parameters: [ { in: path, name: card_transaction_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for card-transaction.
+      operationId: GetCardTransaction
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/card-transaction' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: "Update method for card-transaction. Only `expense` is writable: setting it records a MANUAL match, clearing it unlinks. Everything else is what the issuer reported."
+      operationId: UpdateCardTransaction
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: { $ref: '#/components/schemas/card-transaction' }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/card-transaction' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/card-transactions:import:
+    post:
+      description: "Custom method import: store statement rows already parsed out of the issuer's file. Idempotent - a row already held is counted as a duplicate and not written again, so re-uploading an overlapping statement period is safe."
+      operationId: ":ImportCardTransactions"
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [imported, duplicates]
+                properties:
+                  imported: { type: integer }
+                  duplicates: { type: integer, description: "Rows already held, so the answer distinguishes a working upload from one that changed nothing." }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/card-transactions:reconcile:
+    post:
+      description: "Custom method reconcile: match unmatched charges against the claims that could account for them. Separate from :import because importing is a fact and matching is a judgement - re-running it after the missing claims are filed should not need another upload."
+      operationId: ":ReconcileCardTransactions"
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [matched, unmatched_rows, unmatched_expenses]
+                properties:
+                  matched: { type: integer }
+                  unmatched_rows: { type: integer, description: "Charges with no claim behind them: the expenses nobody has filed." }
+                  unmatched_expenses: { type: integer, description: "Claims with no charge behind them: filed against a card but never charged to it." }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-forecast:
+    get:
+      description: >-
+        What payroll is already COMMITTED to over the next twelve months, by month and by cost centre. The
+        number asked for every time headcount is discussed, which the app previously answered by exporting to
+        a spreadsheet. Committed, not predicted: current compensation, future-dated revisions somebody has
+        entered, joiners with a start date and leavers with a notice end - and nothing about hiring or raises
+        nobody has approved, so a month here is a FLOOR rather than a plan. A month counts somebody employed
+        on its first day and prices them at the compensation in force then; a mid-month joiner therefore first
+        appears the following month, which understates by part of one month and never overstates. Costs are
+        full company cost (earnings plus the employer contributions inside CTC), in whole currency units,
+        because the inputs are a salary and a calendar rather than a priced run. Gated on the caller's own
+        `compensation` list verdict, so a manager sees their reports and finance the organisation; a caller
+        who may list nobody's compensation gets an empty forecast rather than a refusal.
+      operationId: "GetPayrollForecast"
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  horizon_months: { type: integer }
+                  total: { type: number, description: "Summed from the rounded months, so it matches its own column." }
+                  months:
+                    type: array
+                    items:
+                      type: object
+                      required: [month, cost, people]
+                      properties:
+                        month: { type: string, description: "YYYY-MM." }
+                        cost: { type: number }
+                        people: { type: integer }
+                        by_department:
+                          type: object
+                          additionalProperties: { type: number }
+                          description: "Cost by department id. The empty key holds people with no department - dropping them would stop the parts summing to the whole."
+                x-aep-resource:
+                  singular: payroll-forecast
+                  plural: payroll-forecasts
+                  singleton: true
+                  patterns:
+                    - 'payroll-forecast'
+                  type: hrms.example.com/payroll-forecast
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/expense-close:
+    get:
+      description: "What is unfinished about the month, as a checklist: expenses approved but unpaid, waiting on an approver, past the vendor's agreed payment terms, missing a receipt their category demands, recurring schedules that have not filed, and budgets over or forecast over their cap. Every count is bound by the caller's own list scope for `expenses` / `expense-budgets` - the same verdict a plain list of either would get - so a department manager sees their cost centre and finance sees the org, from one endpoint. A collection the caller may not list contributes nothing rather than refusing the request. Counts are computed server-side over the WHOLE scoped set, not over a page."
+      operationId: "GetExpenseClose"
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [checks]
+                properties:
+                  checks:
+                    type: array
+                    description: "Only checks with something outstanding are present, so an empty list means the month is clean. Order is the order to work through them."
+                    items:
+                      type: object
+                      required: [key, count]
+                      properties:
+                        key: { type: string, enum: [approved_unpaid, awaiting_approval, overdue, missing_receipt, recurring_not_generated, unclaimed_card_charges, budgets_over, budgets_trending_over] }
+                        count: { type: integer }
+                        amount: { type: number, description: "Total value, only where money is the point (unpaid, awaiting, overdue, missing receipt). Absent on the budget and schedule checks, where the count IS the finding." }
+                        filter: { type: string, description: "Query string that opens exactly this set on the expenses list, so a number never has to be reconstructed by hand." }
+                x-aep-resource:
+                  singular: expense-close
+                  plural: expense-closes
+                  singleton: true
+                  patterns:
+                    - 'expense-close'
+                  type: hrms.example.com/expense-close
         '500': { $ref: '#/components/responses/Problem' }
   /v1/employees:batchGetPhotos:
     post:

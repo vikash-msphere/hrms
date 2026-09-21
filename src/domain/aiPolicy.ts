@@ -236,7 +236,12 @@ export const CONSENTED_PATHS: Readonly<Record<string, { collection: string; basi
       "rendered on the page they are looking at - because the manual work here is hunting for what you did, " +
       "not writing it. It is seeded as EDITABLE TEXT the author reads, cuts and adds to before sending, not " +
       "collected behind them; the server still receives only an instruction. Ratings, manager comments and " +
-      "peer feedback are never seeded: those are other people's words, and this is somebody writing their own.",
+      "peer feedback are never seeded: those are other people's words, and this is somebody writing their own. " +
+      "THE SAME ARGUMENT COVERS THE PERSON'S OWN DELIVERED WORK - board tasks they owned or were assigned, " +
+      "and goals owned by somebody else that credited them a share - which is their record of what they did, " +
+      "on collections that are not on the denylist, rendered on the same page beside the box. Kudos are NOT " +
+      "seeded although the page shows them: a kudos is a colleague's sentence about this person, which is " +
+      "the same category as peer feedback however warmly it is written.",
   },
   "ats.resumeExtraction": {
     collection: "candidates",
@@ -391,7 +396,7 @@ export type AiConfig = {
 };
 
 /** The switchable features. A new one is added here, which is also what puts it in the settings panel. */
-export const AI_FEATURES = ["search.semantic", "tickets.triage", "cards.triage", "drafting", "ats.extraction", "tables.describe", "analytics.narrate", "moderation", "suggestions.similar", "attention.summary"] as const;
+export const AI_FEATURES = ["search.semantic", "tickets.triage", "cards.triage", "goals.similar", "goals.measure", "boards.narrate", "drafting", "ats.extraction", "tables.describe", "analytics.narrate", "budgets.narrate", "moderation", "suggestions.similar", "attention.summary"] as const;
 export type AiFeature = (typeof AI_FEATURES)[number];
 
 export const AI_CONFIG_DEFAULT: AiConfig = {
@@ -399,10 +404,14 @@ export const AI_CONFIG_DEFAULT: AiConfig = {
     "search.semantic": false,
     "tickets.triage": false,
     "cards.triage": false,
+    "goals.similar": false,
+    "goals.measure": false,
+    "boards.narrate": false,
     drafting: false,
     "ats.extraction": false,
     "tables.describe": false,
     "analytics.narrate": false,
+    "budgets.narrate": false,
     "suggestions.similar": false,
     moderation: false,
     "attention.summary": false,

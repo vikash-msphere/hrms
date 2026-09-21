@@ -217,6 +217,85 @@ describe("computeAccrual", () => {
     expect(second.newLastYm).toBe("2026-03~");
   });
 
+  // THE EMPLOYMENT WINDOW CAN MOVE UNDER THE MARKER, and the marker cannot see it. These three are the
+  // corrections that were silently never made: the walk starts at the marker and only ever adds, so anything
+  // that moves the window EARLIER left the balance permanently wrong with nothing to notice it by. The window
+  // the periods were priced against is now recorded beside the marker (db/schema.ts `accrual_priced_start`),
+  // which is what makes the difference computable.
+  describe("when the employment window is corrected", () => {
+    const base = {
+      accrualDaysPerYear: ANNUAL,
+      probationAccrualDaysPerYear: ANNUAL,
+      probationEndMs: null,
+      currentMs: ms("2026-05-10"),
+    };
+
+    it("credits the months before a start date corrected EARLIER", () => {
+      // Recorded as joining 1 April, credited April, then the date is fixed to 1 February. The walk resumes at
+      // May, so February and March were never credited by anything and never would have been.
+      const r = computeAccrual({
+        ...base,
+        startMs: ms("2026-02-01"),
+        endMs: null,
+        lastAccrualYm: "2026-04",
+        pricedStartMs: ms("2026-04-01"),
+        pricedEndMs: null,
+      });
+      // February, March (the two months nobody credited) plus May, which the ordinary walk credits.
+      expect(r.add).toBeCloseTo(3, 2);
+      expect(r.newLastYm).toBe("2026-05");
+      expect(r.pricedStartMs).toBe(ms("2026-02-01"));
+    });
+
+    it("takes back the months before a start date corrected LATER", () => {
+      // The mirror, and the direction that over-credits: recorded as joining 1 February, corrected to 1 April,
+      // so February and March were credited to somebody who was not there.
+      const r = computeAccrual({
+        ...base,
+        startMs: ms("2026-04-01"),
+        endMs: null,
+        lastAccrualYm: "2026-04",
+        pricedStartMs: ms("2026-02-01"),
+        pricedEndMs: null,
+      });
+      // -2 for the two months taken back, +1 for May.
+      expect(r.add).toBeCloseTo(-1, 2);
+      expect(r.newLastYm).toBe("2026-05");
+    });
+
+    it("restores the exit month when a departure is rescinded", () => {
+      // The claw-back priced March at the 3 days worked. The departure is then withdrawn - `setTransitionState`
+      // says plainly that completing an offboarding is not reversed on reopen, so HR clears the end date - and
+      // the month is a full month again. Without the recorded window the marker's final mark said "already
+      // settled" and the missing 28/31 of a month stayed missing for ever.
+      const r = computeAccrual({
+        ...base,
+        startMs: ms("2026-01-01"),
+        endMs: null,
+        lastAccrualYm: "2026-03~",
+        pricedStartMs: ms("2026-01-01"),
+        pricedEndMs: ms("2026-03-03"),
+      });
+      // The part of March the claw-back removed, plus April and May from the ordinary walk.
+      expect(r.add).toBeCloseTo(1 - 3 / 31 + 2, 2);
+      expect(r.newLastYm).toBe("2026-05");
+      expect(r.pricedEndMs).toBeNull();
+    });
+
+    it("does nothing at all while the window is unchanged", () => {
+      const r = computeAccrual({
+        ...base,
+        startMs: ms("2026-01-01"),
+        endMs: null,
+        lastAccrualYm: "2026-05",
+        pricedStartMs: ms("2026-01-01"),
+        pricedEndMs: null,
+      });
+      expect(r.add).toBe(0);
+      expect(r.newLastYm).toBe("2026-05");
+    });
+  });
+
   // A backdated exit: months credited ENTIRELY after the last working day come back in full, not just the
   // month the exit falls in.
   it("takes back whole months credited after a backdated last working day", () => {

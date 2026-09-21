@@ -84,7 +84,7 @@ export default function Moderation() {
   return (
     <div>
       <PageHeader
-        eyebrow="Admin"
+        eyebrow="Connect"
         accessCollection="moderation"
         title="Flagged posts"
         description="Public posts a safety model objected to. Nothing here has been hidden - each one is still on the wall until you decide."

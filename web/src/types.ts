@@ -27,6 +27,13 @@ export type ExpenseCategory = Wire<"expense-category">;
 
 export type ExpenseBudget = Wire<"expense-budget">;
 
+// A salary cap for a cost centre and a period. Same shape as an expense budget minus the two fields salary
+// has no analogue for: there is no category, and no pending queue between committed and paid.
+export type PayrollBudget = Wire<"payroll-budget">;
+
+// A charge off a corporate card statement. Read-only except the match, which a person may overrule.
+export type CardTransaction = Wire<"card-transaction">;
+
 export type Referral = Wire<"referral">;
 
 export type JobRequisition = Wire<"job-requisition">;
@@ -249,6 +256,8 @@ export type BoardMetrics = {
   lead_time: { p50: number; p85: number; avg: number; count: number };
   cycle_time: { p50: number; p85: number; avg: number; count: number };
   throughput: { delivered: number; per_week: number };
+  /** Days cards took to LEAVE each column, over stays that ended. Columns nothing has left yet are absent. */
+  column_dwell: { key: string; label: string; p50: number; p85: number; count: number }[];
 };
 
 export type ReviewCycleState = "DRAFT" | "ACTIVE" | "CLOSED";
@@ -331,6 +340,26 @@ export type PayrollLine = Wire<"payroll-line">;
 // at the aliased child (same reason as Transition.tasks).
 export type PayrollRunItem = Embed<Wire<"payroll-run-item">, "lines", PayrollLine>;
 
+// Why this run's gross differs from the previous finalized run's. Read-only, derived on demand from the two
+// runs' line arrays; `compared_to` is null on the first run an organisation builds.
+export type RunReconciliation = Wire<"payroll-run-reconciliation">;
+
+// What `compensation:preview` answers: a proposed revision priced but not written. `current` is null for an
+// employee with no compensation row yet. Assembled here rather than named as one schema because only the two
+// sides are a reusable shape; the envelope is this endpoint's alone.
+export type RunJournal = Wire<"payroll-run-journal">;
+
+// Which rows of a run to look at, and the pre-flight. Derived on read; a rebuild changes it.
+export type RunVariance = Wire<"payroll-run-variance">;
+
+export type RevisionSide = Wire<"revision-side">;
+export type RevisionPreview = {
+  current: RevisionSide | null;
+  proposed: RevisionSide;
+  arrears: { amount: number; periods: { label: string; months: number }[] };
+  crossings: string[];
+};
+
 export type Operation = Wire<"operation">;
 
 // A recorded cron tick (admin-only; from /v1/cron-runs).
@@ -391,6 +420,8 @@ export type TableFieldKind = "text" | "number" | "money" | "date" | "datetime" |
 export type TableField = {
   key: string;
   label: string;
+  /** The header it gets on a grid, qualified by the link trail ("Requester: Job title"); absent at the base. */
+  column_label?: string;
   group: string;
   kind: TableFieldKind;
   /** The collection whose list decision gated it - shown so an author knows what a column depends on. */
@@ -417,7 +448,11 @@ export type TableCatalogue = {
   links: TableLink[];
 };
 
-export type TableRunColumn = { key: string; label: string; kind: TableFieldKind; collection: string; masked?: boolean };
+/**
+ * `label` is the header the server shortened against this grid's OTHER columns - a lone "Name" stays "Name",
+ * and two of them grow a hop apiece. `full_label` is the whole trail, present only when it says more.
+ */
+export type TableRunColumn = { key: string; label: string; full_label?: string; kind: TableFieldKind; collection: string; masked?: boolean };
 export type TableRunRow = { path: string; cells: Record<string, unknown>; denied?: string[] };
 export type TableRunResult = {
   base: string;

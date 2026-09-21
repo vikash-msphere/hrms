@@ -9,7 +9,7 @@ import { useMedia } from "@/hooks/useMedia";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useRoute } from "@/router";
-import { formatDate, formatMoney, idOf, cn } from "@/lib/utils";
+import { formatDate, formatMoney, idOf, cn, round2 } from "@/lib/utils";
 import { addDaysYmd, orgDayOf, thisMonthStr, todayStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { bulkInvoke, bulkSummary } from "@/lib/bulk";
@@ -61,10 +61,48 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision, type Decision } from "@/lib/confirmDecision";
 import { getSetting } from "@/lib/settingsStore";
-import { advanceRecurrence, type RecurrenceRule } from "../../../src/domain/expenses";
+import { advanceRecurrence, categoryBreaches, type CloseCheck, type RecurrenceRule } from "../../../src/domain/expenses";
 
-const EMPTY = { employee: "", vendor: "", category: "", department: "", amount: "", tax_amount: "", incurred_on: "", invoice_number: "", description: "", reimbursable: false, recurring: false, recurrence_rule: "monthly", next_occurrence_on: "" };
+
+const EMPTY = { employee: "", vendor: "", category: "", department: "", amount: "", quantity: "", tax_amount: "", incurred_on: "", invoice_number: "", description: "", reimbursable: false, recurring: false, recurrence_rule: "monthly", next_occurrence_on: "" };
 const up = (s?: string) => (s ?? "").toUpperCase();
+
+// The close checks, named for a reader. Keys come from the server (services/expenses.ts#monthEndClose); an
+// unknown one falls back to its key rather than vanishing, so a check added server-side is visible before this
+// map catches up.
+// Triage reasons, summarised. Keys come from the server (services/expenses.ts#expenseTriageFor); an unknown
+// one falls back to its key so a signal added server-side is visible before this map catches up.
+const SIGNAL_LABEL: Record<string, string> = {
+  duplicate: "look like repeats",
+  over_budget: "would put a budget over",
+  missing_receipt: "missing a required receipt",
+  policy: "against a category rule",
+};
+
+const CLOSE_LABEL: Record<string, string> = {
+  approved_unpaid: "approved, not yet paid",
+  awaiting_approval: "waiting on an approver",
+  overdue: "past the vendor's terms",
+  missing_receipt: "missing a required receipt",
+  recurring_not_generated: "schedules that have not filed",
+  unclaimed_card_charges: "card charges nobody has claimed",
+  budgets_over: "budgets over their cap",
+  budgets_trending_over: "budgets forecast over",
+};
+
+/**
+ * How a recurring occurrence's drift from its series reads on one line.
+ *
+ * Both halves of the sentence are there on purpose. The PERCENTAGE is what makes it noticeable and the
+ * BASELINE is what makes it checkable: "18% above" alone invites the reader to trust the comparison, while
+ * "18% above the usual ₹12,000" tells them what it was compared against, so they can disagree with it. A
+ * series with one prior month is a weaker claim than one with six, and `samples` says which this is.
+ */
+function driftLabel(d: NonNullable<Expense["series_drift"]>, money: (n: number) => string): string {
+  const pct = Math.abs(Math.round(d.delta_fraction * 100));
+  const from = d.samples === 1 ? "the last" : `the usual`;
+  return `${pct}% ${d.direction === "up" ? "above" : "below"} ${from} ${money(d.baseline)}`;
+}
 // `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
 // local parts, which is a different day for part of every day and a different day again from the one the
 // server validates against.
@@ -184,6 +222,8 @@ export default function Expenses({ me }: { me: Me }) {
     setSubmitNow(true);
   }
   function openCreate(recurring = false) {
+    setSplit([]);
+    setSplitTouched(false);
     resetForm(recurring);
     setErr(null);
     setOpen(true);
@@ -191,12 +231,16 @@ export default function Expenses({ me }: { me: Me }) {
   function openEdit(r: Expense) {
     setErr(null);
     setEditing(r);
+    setSplit((r.allocations ?? []).map((a) => ({ department: a.department ?? "", category: a.category ?? "", amount: String(a.amount) })));
+    setSplitTouched(false);
     setForm({
       employee: r.employee ? `employees/${idOf(r.employee)}` : "",
       vendor: r.vendor ? `vendors/${idOf(r.vendor)}` : "",
       category: r.category ? `expense-categories/${idOf(r.category)}` : "",
       department: r.department ? `departments/${idOf(r.department)}` : "",
       amount: String(r.amount ?? ""),
+      quantity: r.quantity == null ? "" : String(r.quantity),
+
       tax_amount: r.tax_amount ? String(r.tax_amount) : "",
       incurred_on: r.incurred_on ?? "",
       invoice_number: r.invoice_number ?? "",
@@ -326,6 +370,19 @@ export default function Expenses({ me }: { me: Me }) {
   const paidThisMonth = useMemo(() => ledgerAll.filter(paidInThisMonth), [ledgerAll]);
   // An unpaid expense with no invoice on it is the one accounts will hand back, so it earns a metric.
   const noInvoice = useMemo(() => ledgerAll.filter((r) => !r.has_invoice && up(r.state) !== "PAID"), [ledgerAll]);
+
+  // WHAT IS UNFINISHED ABOUT THE MONTH, counted on the server over the whole scoped set rather than over the
+  // page this table happens to hold. Every check is bound by the caller's own list scope, so a department
+  // manager sees their cost centre and finance sees the org from the same request; a caller who may list
+  // neither expenses nor budgets gets an empty list and this band never renders.
+  const [close, setClose] = useState<CloseCheck[]>([]);
+  useEffect(() => {
+    let live = true;
+    get<{ checks: CloseCheck[] }>("expense-close")
+      .then((r) => { if (live) setClose(r.checks ?? []); })
+      .catch(() => { if (live) setClose([]); }); // a checklist that fails to load must never break the ledger
+    return () => { live = false; };
+  }, []);
   // Committed money only: an expense that is still submitted or was rejected has not been spent, and putting
   // it on a spend chart is how a month reads as 40% worse than it was. Dated by when the cost was INCURRED,
   // not when it was paid - that is the month it belongs to.
@@ -474,13 +531,61 @@ export default function Expenses({ me }: { me: Me }) {
     </p>
   );
   const pickedVendor = useMemo(() => (form.vendor ? vendors.find((v) => idOf(v.path) === idOf(form.vendor)) ?? null : null), [vendors, form.vendor]);
+  // The chosen category, when it is one the org pays at a rate. Drives the whole rated branch of this form:
+  // which field is asked for, what the running preview says, and whether a quantity is sent at all.
+  const ratedCategory = useMemo(() => {
+    if (!form.category) return null;
+    const c = categories.find((x) => idOf(x.path) === idOf(form.category));
+    return c && (c.rate_kind === "per_km" || c.rate_kind === "per_day") && c.rate ? c : null;
+  }, [categories, form.category]);
+  // A PREVIEW, and deliberately not what gets saved. The server multiplies by its own rate on write, so a tab
+  // left open across a rate change shows a stale total for a moment and then stores the right one.
+  const ratedPreview = useMemo(() => {
+    if (!ratedCategory || form.quantity === "") return null;
+    const q = Number(form.quantity);
+    return Number.isFinite(q) && q > 0 ? Math.round(q * (ratedCategory.rate ?? 0) * 100) / 100 : null;
+  }, [ratedCategory, form.quantity]);
+
+  // The split, as rows the form edits. Empty = no split, which is every ordinary expense; the field is only
+  // sent when the user has actually opened it, so an untouched edit leaves an existing split alone.
+  const [split, setSplit] = useState<{ department: string; category: string; amount: string }[]>([]);
+  const [splitTouched, setSplitTouched] = useState(false);
+  const splitTotal = useMemo(() => round2(split.reduce((t, l) => t + (Number(l.amount) || 0), 0)), [split]);
+  const splitAmount = ratedPreview ?? (Number(form.amount) || 0);
+  // The same tolerance the server applies, so the form cannot call a split balanced that the server refuses.
+  const splitOff = split.length > 0 && Math.abs(splitTotal - round2(splitAmount)) > 0.01 * split.length;
+
+  // THE SAME RULE THE SERVER WILL APPLY, run here before anybody presses anything. It is literally the same
+  // function (domain/expenses.ts#categoryBreaches), which is what stops the form letting through a claim the
+  // server then refuses - the round trip this item exists to remove. The server still checks: this is a
+  // courtesy, not the enforcement.
+  const policyBreaches = useMemo(() => {
+    if (!form.category) return [];
+    const c = categories.find((x) => idOf(x.path) === idOf(form.category));
+    if (!c) return [];
+    const amount = ratedPreview ?? Number(form.amount);
+    if (!Number.isFinite(amount) || amount <= 0) return [];
+    return categoryBreaches(
+      { amountCap: c.amount_cap, maxAgeDays: c.max_age_days, requiresReceipt: c.requires_receipt, rateKind: c.rate_kind },
+      { amount, incurredOn: form.incurred_on ? Date.parse(`${form.incurred_on}T00:00:00Z`) : null, hasReceipt: !!file || !!editing?.has_invoice },
+      Date.parse(`${todayStr()}T00:00:00Z`),
+      money,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categories, form.category, form.amount, form.incurred_on, ratedPreview, file, editing?.has_invoice]);
 
   // One definition of "this form can be saved", shared by the Save button, the form's Enter and Cmd+Enter.
   // Three copies had already drifted apart: Enter used to submit a future-dated or scheduleless expense that
   // the button refused.
   const formValid =
-    !!form.amount && Number(form.amount) > 0 &&
-    !(invoiceRequired && !file && !editing) &&
+    // A rated category is saved on its QUANTITY: the amount field is not on screen and the server computes the
+    // total, so requiring a typed amount here would make mileage unsaveable. An invoice is not required either
+    // - there is nothing to attach to a car journey, which is the point of a published rate.
+    (ratedCategory
+      ? !!form.quantity && Number(form.quantity) > 0
+      : !!form.amount && Number(form.amount) > 0 && !(invoiceRequired && !file && !editing)) &&
+    policyBreaches.length === 0 &&
+    !splitOff &&
     !(form.recurring && !form.next_occurrence_on) &&
     !(form.incurred_on && form.incurred_on > todayStr());
 
@@ -504,6 +609,14 @@ export default function Expenses({ me }: { me: Me }) {
         category: form.category,
         department: form.department,
         amount: Number(form.amount),
+        // On a rated category the server recomputes the amount from its own rate; sending the quantity is what
+        // makes that possible, and omitting it on an ordinary category keeps the hand-entered amount.
+        ...(ratedCategory && form.quantity !== "" ? { quantity: Number(form.quantity) } : {}),
+        // Only sent once somebody has opened the split editor: omitting it leaves any existing split alone,
+        // which is what an edit that never touched it should do.
+        ...(splitTouched
+          ? { allocations: split.filter((l) => Number(l.amount) > 0).map((l) => ({ department: l.department || null, category: l.category || null, amount: Number(l.amount) })) }
+          : {}),
         tax_amount: form.tax_amount ? Number(form.tax_amount) : 0,
         // Date fields are `format: date`, and "" is not a date - an empty one is left out.
         ...(form.incurred_on ? { incurred_on: form.incurred_on } : {}),
@@ -818,8 +931,25 @@ export default function Expenses({ me }: { me: Me }) {
       <div className="tabular-nums">
         {money(r.amount)}
         {r.tax_amount ? <div className="text-xs text-muted-foreground">incl. {money(r.tax_amount)} tax</div> : null}
+        {/* A generated occurrence that does not cost what its series usually costs. Rendered only when the
+            server sent one, which is the only time there is anything to say: a schedule whose amount has not
+            moved says nothing here, so a line in this column IS the finding. */}
+        {r.series_drift ? <div className="text-xs font-normal text-warning">{driftLabel(r.series_drift, money)}</div> : null}
       </div>
     ),
+  };
+  // When it is payable, and whether that has passed. Only meaningful while the money is still owed, so a paid
+  // or cancelled row shows nothing - an "overdue" flag on an invoice that was settled last month is noise that
+  // teaches people to ignore the column. Absent terms show a dash rather than a guess.
+  const dueColumn: Column<Expense> = {
+    id: "due", header: "Due", align: "right", filter: "none", sortable: true,
+    accessor: (r) => r.due_on ?? "",
+    cell: (r) => {
+      if (!r.due_on) return <span className="text-muted-foreground">-</span>;
+      const owed = !["PAID", "CANCELLED", "REJECTED", "DRAFT"].includes(up(r.state));
+      const overdue = owed && r.due_on < todayStr();
+      return <span className={cn("tabular-nums text-xs", overdue ? "font-medium text-warning" : "text-muted-foreground")}>{formatDate(r.due_on)}</span>;
+    },
   };
   const invoiceColumn: Column<Expense> = {
     // Filterable on whether the paperwork is there at all: "(Blank)" is every expense with no invoice
@@ -871,6 +1001,18 @@ export default function Expenses({ me }: { me: Me }) {
 
   const signalColumns: Column<Expense>[] = [
     {
+      // A large claim that already holds one of its two approvals. Shown rather than hidden by default, and in
+      // the QUEUE above all: an approver who cannot see that somebody has already signed is being asked to
+      // make the same decision blind. WHO signed is deliberately not resolved here - this page does no user
+      // lookup, and adding one for a caption is not worth a request per page; the server names them in its
+      // refusal if the first approver tries again.
+      id: "second_approval", header: "Approvals", filter: "select", sortable: false,
+      accessor: (r) => (r.first_approved_by ? "1 of 2" : ""),
+      cell: (r) => (r.first_approved_by
+        ? <span className="whitespace-nowrap text-xs text-warning">1 of 2 signed</span>
+        : <span className="text-muted-foreground">-</span>),
+    },
+    {
       id: "dupe", header: "Repeat", defaultHidden: true, filter: "select", sortable: false,
       accessor: (r) => (dupeIds.has(r.path) ? "Possible duplicate" : ""),
       cell: (r) => (dupeIds.has(r.path)
@@ -914,14 +1056,25 @@ export default function Expenses({ me }: { me: Me }) {
         ? <span className="text-xs">{r.payment_method ? up(r.payment_method) : ""}{r.payment_ref ? ` · ${r.payment_ref}` : ""}</span>
         : <span className="text-muted-foreground">-</span>),
     },
+    dueColumn,
     invoiceColumn,
     ...signalColumns,
     { id: "description", header: "Description", defaultHidden: true, accessor: (r) => r.description ?? "", cell: (r) => r.description || "-" },
   ];
   const ledgerColumns: Column<Expense>[] = [...baseLedgerColumns, ...metaColumns<Expense>(), actionsColumn];
+  // Why this one is worth reading. The server decides it over the whole collection - a duplicate filed by
+  // somebody else, a budget this page never loaded - which is the half a page-local check cannot answer.
+  const signalsColumn: Column<Expense> = {
+    id: "signals", header: "Worth a look", filter: "select", sortable: false,
+    accessor: (r) => (r.signals?.length ? r.signals.map((x) => x.kind).join(" ") : ""),
+    cell: (r) => (r.signals?.length
+      ? <span className="text-xs text-warning">{r.signals.map((x) => x.message).join(" · ")}</span>
+      : <span className="text-muted-foreground">-</span>),
+  };
   // The decision queues gain the waiting time and drop the status column (every row shares one state).
   const queueColumns: Column<Expense>[] = [
     ...baseLedgerColumns.filter((c) => c.id !== "state"),
+    signalsColumn,
     waitingColumn,
     ...metaColumns<Expense>(),
     actionsColumn,
@@ -1328,6 +1481,19 @@ export default function Expenses({ me }: { me: Me }) {
           />
         ) : (
           <Tabs value={tab} onValueChange={pickTab}>
+            {/* Rendered only when something is outstanding: an empty checklist IS the month being clean, and a
+                band that always said "0 outstanding" is one people stop reading. */}
+            {close.length > 0 && (
+              <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+                <span className="font-medium">To close the month</span>
+                {close.map((k) => (
+                  <span key={k.key} className="whitespace-nowrap text-muted-foreground">
+                    <span className="font-medium text-foreground">{k.count}</span> {CLOSE_LABEL[k.key] ?? k.key}
+                    {k.amount ? ` · ${money(k.amount)}` : ""}
+                  </span>
+                ))}
+              </div>
+            )}
             <TabsList>
               {showReview && (
                 <TabsTrigger value="review">
@@ -1352,6 +1518,23 @@ export default function Expenses({ me }: { me: Me }) {
 
             {showReview && (
               <TabsContent value="review">
+                {/* Not "you have 14 claims" but which of the 14 are not routine. A queue that only says how
+                    many is a queue people work through by clicking; this is the line that decides where to
+                    start, and it is silent when every claim is unremarkable. */}
+                {(() => {
+                  const flagged = toReview.filter((r) => r.signals?.length);
+                  if (!flagged.length) return null;
+                  const byKind = new Map<string, number>();
+                  for (const r of flagged) for (const sig of r.signals ?? []) byKind.set(sig.kind, (byKind.get(sig.kind) ?? 0) + 1);
+                  return (
+                    <p className="mb-3 rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-warning">
+                      <TriangleAlert className="mr-1 inline h-3.5 w-3.5" />
+                      <span className="font-medium">{flagged.length}</span> of {toReview.length} need a look
+                      {" · "}
+                      {[...byKind].map(([kind, n]) => `${n} ${SIGNAL_LABEL[kind] ?? kind}`).join(", ")}
+                    </p>
+                  );
+                })()}
                 {toReview.length === 0 && !searching
                   ? <EmptyState icon={ClipboardCheck} title="Nothing to approve" description="Submitted expenses waiting on your decision land here." />
                   : renderTable(toReview, queueColumns, "expenses-review", "No expenses match", "Adjust the filters to see the queue.", { bulk: "review", insights: queueInsights, more: { hasMore: reviewQ.hasMore, loadMore: reviewQ.loadMore } })}
@@ -1448,23 +1631,97 @@ export default function Expenses({ me }: { me: Me }) {
                   </SelectContent>
                 </Select>
               </Field>
-              <Field
-                label="Amount"
-                hint={autoApproves ? `At or below ${money(threshold)} this approves itself on submit.` : undefined}
-                error={form.amount !== "" && Number(form.amount) <= 0 ? "Enter an amount greater than 0." : undefined}
-              >
-                <MoneyInput value={form.amount} onChange={(v) => setForm({ ...form, amount: v })} min={0} autoFocus />
-              </Field>
+              {/* A rated category asks for the QUANTITY instead of the amount: the rate is the org's, so the
+                  total is arithmetic and not something anybody should be typing. The figure shown underneath is
+                  a preview - the server recomputes it from its own rate on save, so a stale rate in a long-open
+                  tab corrects itself rather than being trusted. */}
+              {ratedCategory ? (
+                <Field
+                  label={ratedCategory.rate_kind === "per_km" ? "Distance (km)" : "Days"}
+                  hint={`${money(ratedCategory.rate ?? 0)} per ${ratedCategory.rate_kind === "per_km" ? "km" : "day"}${ratedPreview != null ? ` · ${money(ratedPreview)}` : ""}`}
+                  error={form.quantity !== "" && Number(form.quantity) <= 0 ? "Enter a number greater than 0." : undefined}
+                >
+                  <Input type="number" min={0} step="0.01" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} autoFocus />
+                </Field>
+              ) : (
+                <Field
+                  label="Amount"
+                  hint={autoApproves ? `At or below ${money(threshold)} this approves itself on submit.` : undefined}
+                  error={form.amount !== "" && Number(form.amount) <= 0 ? "Enter an amount greater than 0." : undefined}
+                >
+                  <MoneyInput value={form.amount} onChange={(v) => setForm({ ...form, amount: v })} min={0} autoFocus />
+                </Field>
+              )}
             </FieldRow>
 
             {/* What this expense does to its budget, before it exists. */}
             {budgetImpact && budgetNotice(budgetImpact)}
             {/* The classic expense error: the same invoice filed twice. Say so; don't block it. */}
             {duplicate && duplicateNotice(duplicate)}
+            {/* ONE invoice, several cost centres. Without this a bill that is 60% Engineering and 40% Sales is
+                filed as two expenses and the invoice can only be attached to one of them, so the second row is
+                evidence-free by construction and neither row is what the company actually paid. The split does
+                not change the expense's amount - it says who that amount is charged to. */}
+            {!form.recurring && (
+              <div className="space-y-2 rounded-lg border p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-medium">Split across cost centres{split.length ? ` (${split.length})` : ""}</p>
+                  <Button
+                    type="button" size="sm" variant="ghost"
+                    onClick={() => {
+                      setSplitTouched(true);
+                      // The first line is seeded with the whole amount and the expense's own department, so the
+                      // common split is "halve this" rather than "type it all out".
+                      setSplit(split.length
+                        ? [...split, { department: "", category: "", amount: "" }]
+                        : [{ department: form.department, category: form.category, amount: String(splitAmount || "") }]);
+                    }}
+                  >
+                    <Plus className="mr-1 h-3.5 w-3.5" />{split.length ? "Add line" : "Split this"}
+                  </Button>
+                </div>
+                {split.map((line, i) => (
+                  <FieldRow key={i}>
+                    <Field label="Department">
+                      <Select value={line.department || "none"} onValueChange={(v) => { setSplitTouched(true); setSplit(split.map((l, j) => j === i ? { ...l, department: v === "none" ? "" : v } : l)); }}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">-</SelectItem>
+                          {departments.map((d) => <SelectItem key={d.path} value={`departments/${idOf(d.path)}`}>{d.display_name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    <Field label="Amount">
+                      <div className="flex items-center gap-1">
+                        <MoneyInput value={line.amount} onChange={(v) => { setSplitTouched(true); setSplit(split.map((l, j) => j === i ? { ...l, amount: v } : l)); }} min={0} />
+                        <Button type="button" size="icon" variant="ghost" className="h-8 w-8 shrink-0" aria-label="Remove line" onClick={() => { setSplitTouched(true); setSplit(split.filter((_, j) => j !== i)); }}>
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </Field>
+                  </FieldRow>
+                ))}
+                {split.length > 0 && (
+                  <p className={cn("text-xs", splitOff ? "text-destructive" : "text-muted-foreground")}>
+                    {money(splitTotal)} of {money(splitAmount)}
+                    {splitOff ? ` · ${money(round2(splitAmount - splitTotal))} unallocated - the split must add up before this can be saved.` : " · balanced"}
+                  </p>
+                )}
+              </div>
+            )}
+            {/* The category's own rules, said HERE rather than in a rejection three days later. These do block
+                the save, because the server will refuse the submit anyway - letting it through would only move
+                the same message to a worse moment. */}
+            {policyBreaches.length > 0 && (
+              <p className="rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                <TriangleAlert className="mr-1 inline h-3.5 w-3.5" />
+                {policyBreaches.map((b) => b.message).join(" ")}
+              </p>
+            )}
 
             <FieldRow>
               {vendors.length > 0 && (
-                <Field label="Vendor (optional)" hint={pickedVendor?.payment_terms ? `Terms: ${pickedVendor.payment_terms}` : undefined}>
+                <Field label="Vendor (optional)" hint={pickedVendor?.payment_terms_days != null ? `Terms: net ${pickedVendor.payment_terms_days} days` : undefined}>
                   <Combobox
                     value={form.vendor}
                     onValueChange={(v) => {

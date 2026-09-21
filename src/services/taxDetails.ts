@@ -83,7 +83,11 @@ function toView(p: TaxProjection, decl: TaxDeclarations): Omit<Wire<"tax">, "pat
     annual_gross: p.annualGross,
     standard_deduction: b.standardDeduction,
     chapter_via: b.chapterVIA,
-    deductions: p.deductions.map((d) => ({ section: d.section, declared: d.declared, allowed: d.allowed })),
+    deductions: p.deductions.map((d) => ({ section: d.section, declared: d.declared, allowed: d.allowed, cap: d.cap ?? undefined })),
+    // Capped sections with room left, biggest first. Stated as arithmetic and never as advice: "you have
+    // declared 60,000 of a 150,000 limit" is a calculation this app is entitled to make, and "you should
+    // invest more" is financial advice it is not.
+    deduction_headroom: p.deductionHeadroom.map((h) => ({ section: h.section, cap: h.cap, declared: h.declared, remaining: h.remaining })),
     taxable_income: b.taxableIncome,
     slabs: b.slabRows.map((r) => ({ from: r.from, to: r.to, rate: r.rate, amount: r.amount })),
     income_tax: b.incomeTax,

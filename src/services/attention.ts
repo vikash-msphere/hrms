@@ -15,7 +15,7 @@
 // on every visit, for everybody - a surface that scans the whole goals table to tell somebody about three of
 // them is a surface that gets switched off. The window is ordered so the rows most likely to be flagged are
 // the ones read.
-import { and, desc, eq, inArray, isNull, lt, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
@@ -41,9 +41,13 @@ const DAY = 86_400_000;
  * per request so a second read would be free, but passing it makes the dependency visible: a helper that
  * decides what "stale" means should say so in its signature rather than reach for it.
  */
-async function config(deps: Deps): Promise<AttentionConfig> {
+export async function attentionSettings(deps: Deps): Promise<AttentionConfig> {
   return attentionConfigOf(await getSettingValue<Partial<AttentionConfig>>(deps, "attention", {}));
 }
+
+/** The in-module name for the same read. Exported under a name that says whose thresholds these are, because
+ *  the 1:1 reminder (src/cron.ts) needs them to say what is worth raising in tomorrow's meeting. */
+const config = attentionSettings;
 
 export type Attention = { items: AttentionItem[]; summary?: string };
 
@@ -57,7 +61,8 @@ export async function attentionFor(
   const found: AttentionItem[] = [
     ...await goalItems(deps, scopes.get("goals"), now, cfg),
     ...await cardItems(deps, scopes.get("cards"), now, cfg),
-    ...await reviewItems(deps, user, scopes.get("reviews")),
+    ...await reviewItems(deps, user, scopes.get("reviews"), now),
+    ...await feedbackItems(deps, user, scopes.get("review-feedback"), now),
   ];
   const items = rankAttention(found).slice(0, cfg.limit);
   const summary = await summarise(deps, user, items);
@@ -88,11 +93,16 @@ async function summarise(deps: Deps, user: AppUser, items: AttentionItem[]): Pro
   if (items.length < 2) return undefined;
   if (!(await aiFeatureOn(deps, "attention.summary"))) return undefined;
 
+  // BOTH REVIEW SIGNALS REACH THE PROMPT AS A COUNT. `reviews` is denylisted, and a 360 request carries the
+  // name of the person being reviewed, which is the same category of fact by a different route - so neither
+  // is sent as text. "Two reviews are waiting" is worth exactly as much as one naming them.
   const reviews = items.filter((i) => i.kind === "review_waiting").length;
+  const feedback = items.filter((i) => i.kind === "feedback_requested").length;
   const lines = items
-    .filter((i) => i.kind !== "review_waiting")
+    .filter((i) => i.kind !== "review_waiting" && i.kind !== "feedback_requested")
     .map((i) => `- ${i.title}: ${i.detail}`);
   if (reviews > 0) lines.push(`- ${reviews} review${reviews === 1 ? "" : "s"} waiting on you`);
+  if (feedback > 0) lines.push("- a 360 feedback request waiting on you");
 
   const out = await aiGenerate(
     deps,
@@ -163,7 +173,9 @@ export async function weeklyAttentionDigest(deps: Deps): Promise<number> {
   for (const c of await deps.db
     .select({ uuid: schema.cards.uuid, title: schema.cards.title, columnKey: schema.cards.columnKey, columnSince: schema.cards.columnSince, employeeId: schema.cards.employeeId })
     .from(schema.cards)
-    .where(and(isNull(schema.cards.deleteTime), lt(schema.cards.columnSince, new Date(now - cfg.cardAgedDays * DAY))))
+    // Same two conditions as the dashboard, and for the same reason: a delivered card's `column_since` is the
+    // moment it was delivered, so without this the Monday roundup mails everybody their long-closed work.
+    .where(and(isNull(schema.cards.deleteTime), isNull(schema.cards.deliveredAt), lt(schema.cards.columnSince, new Date(now - cfg.cardAgedDays * DAY))))
     .limit(DIGEST_WINDOW)) {
     add(c.employeeId, cardItem(c, now, cfg));
   }
@@ -172,18 +184,51 @@ export async function weeklyAttentionDigest(deps: Deps): Promise<number> {
     .select({
       uuid: schema.reviews.uuid, state: schema.reviews.state, employeeId: schema.reviews.employeeId,
       reviewerId: schema.reviews.reviewerId, revieweeManagerId: schema.employees.managerId, cycleName: schema.reviewCycles.name,
+      selfDue: schema.reviewCycles.selfDueDate, managerDue: schema.reviewCycles.managerDueDate,
     })
     .from(schema.reviews)
     .leftJoin(schema.reviewCycles, eq(schema.reviewCycles.uuid, schema.reviews.cycleId))
     .leftJoin(schema.employees, eq(schema.employees.uuid, schema.reviews.employeeId))
     .where(inArray(schema.reviews.state, ["SELF", "MANAGER", "SHARED"]))
     .limit(DIGEST_WINDOW)) {
-    // The same three cases as the dashboard, and the same reviewer fallback - but here the OWNER of the item
-    // is whoever it waits on, because that is who receives it.
+    // The same three cases as the dashboard, the same reviewer fallback and the same deadline wording - but
+    // here the OWNER of the item is whoever it waits on, because that is who receives it.
     const writer = r.reviewerId ?? r.revieweeManagerId;
-    if (r.state === "MANAGER") add(writer, reviewItem(r, "your review of this person is due"));
-    else if (r.state === "SELF") add(r.employeeId, reviewItem(r, "your self-assessment is due"));
-    else add(r.employeeId, reviewItem(r, "shared with you, waiting on your acknowledgement"));
+    if (r.state === "MANAGER") {
+      const due = dueIn(r.managerDue, now);
+      add(writer, reviewItem(r, due ? `your review of this person is due, ${due.phrase}` : "your review of this person is due", due?.days));
+    } else if (r.state === "SELF") {
+      const due = dueIn(r.selfDue, now);
+      add(r.employeeId, reviewItem(r, due ? `your self-assessment is due, ${due.phrase}` : "your self-assessment is due", due?.days));
+    } else {
+      add(r.employeeId, reviewItem(r, "shared with you, waiting on your acknowledgement"));
+    }
+  }
+
+  const pendingFeedback = new Map<string, { revieweeName: string; waitedDays: number }[]>();
+  // The 360 requests nobody has answered. On the weekly list because they are the quietest thing in the app:
+  // a row on a page the nominee has no reason to open, holding up a review that is not theirs.
+  for (const f of await deps.db
+    .select({
+      authorId: schema.reviewFeedback.authorId, createdAt: schema.reviewFeedback.createdAt,
+      firstName: schema.employees.firstName, lastName: schema.employees.lastName,
+    })
+    .from(schema.reviewFeedback)
+    .leftJoin(schema.employees, eq(schema.employees.uuid, schema.reviewFeedback.revieweeId))
+    .where(eq(schema.reviewFeedback.state, "REQUESTED"))
+    .limit(DIGEST_WINDOW)) {
+    if (!f.authorId) continue;
+    const list = pendingFeedback.get(f.authorId) ?? [];
+    list.push({
+      revieweeName: f.firstName ? `${f.firstName} ${f.lastName}`.trim() : "a colleague",
+      waitedDays: Math.max(0, Math.floor((now - +new Date(f.createdAt)) / DAY)),
+    });
+    pendingFeedback.set(f.authorId, list);
+  }
+  // Grouped per person first, then folded into one item each, for the reason `feedbackItem` gives.
+  for (const [authorId, pending] of pendingFeedback) {
+    const item = feedbackItem(pending);
+    if (item) add(authorId, item);
   }
 
   let sent = 0;
@@ -241,7 +286,12 @@ async function goalItems(deps: Deps, scope: ListScope | undefined, now: number, 
     ))
     // Soonest due first: a goal without a due date can only be stale, and staleness is the lower-ranked
     // signal, so the rows most likely to produce a high-ranked item are the ones this window keeps.
-    .orderBy(schema.goals.dueDate)
+    //
+    // THE NULL KEY IS NOT DECORATION. SQLite sorts NULLs FIRST on an ascending order, so ordering by the date
+    // alone filled the window with exactly the goals that have no date - the ones `goalPace` declines to
+    // answer for and that can only ever produce the lowest-ranked signal. A manager with more than WINDOW
+    // goals in scope then never saw `goal_at_risk` at all.
+    .orderBy(sql`${schema.goals.dueDate} is null`, schema.goals.dueDate)
     .limit(WINDOW);
 
   return rows.flatMap((g) => goalTrouble(g, now, cfg));
@@ -258,8 +308,8 @@ async function goalItems(deps: Deps, scope: ListScope | undefined, now: number, 
  * Returns at most one item. A goal that is both behind AND silent is one problem with two symptoms, and
  * listing it twice would push something else off a list of eight.
  */
-type GoalRow = { uuid: string; title: string; status: string; progress: number | null; dueDate: Date | null; createdAt: Date; updatedAt: Date };
-function goalTrouble(g: GoalRow, now: number, cfg: AttentionConfig): AttentionItem[] {
+export type GoalRow = { uuid: string; title: string; status: string; progress: number | null; dueDate: Date | null; createdAt: Date; updatedAt: Date };
+export function goalTrouble(g: GoalRow, now: number, cfg: AttentionConfig): AttentionItem[] {
   const path = `goals/${g.uuid}`;
   const pace = goalPace({ createdAt: g.createdAt, dueDate: g.dueDate, progress: g.progress ?? 0, status: g.status }, now);
   if (pace && (pace.state === "at_risk" || pace.state === "behind")) {
@@ -287,8 +337,55 @@ function cardItem(c: CardRow, now: number, cfg: AttentionConfig): AttentionItem 
 }
 
 /** One waiting review as an item. The WORDING is the caller's, because who it waits on decides what it says. */
-function reviewItem(r: { uuid: string; cycleName: string | null }, detail: string): AttentionItem {
-  return { kind: "review_waiting", path: `reviews/${r.uuid}`, title: r.cycleName ?? "Review", detail };
+function reviewItem(r: { uuid: string; cycleName: string | null }, detail: string, days?: number): AttentionItem {
+  return { kind: "review_waiting", path: `reviews/${r.uuid}`, title: r.cycleName ?? "Review", detail, ...(days != null ? { days } : {}) };
+}
+
+/**
+ * The cycle's own deadline, said in days rather than as a date.
+ *
+ * A REVIEW WITHOUT ITS DEADLINE IS A CHORE WITH NO WHEN. "Your self-assessment is due" reads the same on the
+ * first day of the window as on the day after it closed, which is how a cycle reaches its deadline with a
+ * third of the self-assessments unwritten and nobody having been told anything different. The cycle already
+ * records `self_due_date` and `manager_due_date`; this is them, read at the moment the sentence is written.
+ *
+ * Returns the phrase and the urgency, where urgency is days PAST the deadline (negative before it), so
+ * `rankAttention` puts the overdue one above the one due next week without a second rule about it.
+ */
+function dueIn(due: Date | null, now: number): { phrase: string; days: number } | null {
+  if (!due) return null;
+  // The due date is a DAY, and it is not late until the end of that day. Floored to its own midnight first,
+  // so a date stored with a time on it (an import, a hand-written row) counts as the day it falls on rather
+  // than shifting the whole sentence by one.
+  const end = Math.floor(+new Date(due) / DAY) * DAY + DAY;
+  const left = Math.floor((end - now) / DAY);
+  if (left < 0) return { phrase: `${-left} day${left === -1 ? "" : "s"} overdue`, days: -left };
+  if (left === 0) return { phrase: "due today", days: 0 };
+  return { phrase: `due in ${left} day${left === 1 ? "" : "s"}`, days: -left };
+}
+
+/**
+ * Unanswered 360 requests as ONE item on the nominee's list.
+ *
+ * ONE, not one each, and that is about what the list is for. Eight slots have to hold everything off track
+ * for a person; three feedback requests are one errand - open the reviews page, write three paragraphs - and
+ * spending three of the eight on it pushes out the goal that is about to miss its date. The oldest one is
+ * named, because a name is what makes somebody do it.
+ *
+ * The path is the reviews PAGE rather than a feedback row: that is where the requests are answered, and it
+ * is where the notification for the same thing already sends people.
+ */
+function feedbackItem(pending: { revieweeName: string; waitedDays: number }[]): AttentionItem | null {
+  if (pending.length === 0) return null;
+  const oldest = [...pending].sort((a, b) => b.waitedDays - a.waitedDays)[0]!;
+  const rest = pending.length - 1;
+  return {
+    kind: "feedback_requested",
+    path: "reviews",
+    title: pending.length === 1 ? `360 feedback on ${oldest.revieweeName}` : `360 feedback on ${oldest.revieweeName} and ${rest} other${rest === 1 ? "" : "s"}`,
+    detail: `asked ${oldest.waitedDays} day${oldest.waitedDays === 1 ? "" : "s"} ago`,
+    days: oldest.waitedDays,
+  };
 }
 
 /** Cards that have sat in one column long enough that the board is no longer telling the truth about them. */
@@ -303,6 +400,11 @@ async function cardItems(deps: Deps, scope: ListScope | undefined, now: number, 
     .where(and(
       applyScope(scope, schema.cards.code, schema.cards.employeeId),
       isNull(schema.cards.deleteTime),
+      // DELIVERED WORK IS NOT AGEING WORK, and the column this filters on cannot tell them apart:
+      // `column_since` is restamped by every move INCLUDING the one into the done column
+      // (services/cards.ts), so a card delivered six months ago reads as "in done for 183 days" and, on any
+      // board older than the threshold, finished work fills all eight slots this surface has.
+      isNull(schema.cards.deliveredAt),
       // Filtered in SQL, unlike the goals above, because there is no domain predicate to respect here - the
       // question is just "has this column held it since before the cutoff", and asking the database is
       // cheaper than reading a window of cards that are fine.
@@ -322,7 +424,7 @@ async function cardItems(deps: Deps, scope: ListScope | undefined, now: number, 
  * theirs, and the reviewee owes an acknowledgement of what was shared. A review waiting on somebody else is
  * not this person's problem and is deliberately absent.
  */
-async function reviewItems(deps: Deps, user: AppUser, scope: ListScope | undefined): Promise<AttentionItem[]> {
+async function reviewItems(deps: Deps, user: AppUser, scope: ListScope | undefined, now: number): Promise<AttentionItem[]> {
   const me = user.employeeId;
   if (!me) return [];
   const rows = await deps.db
@@ -331,6 +433,8 @@ async function reviewItems(deps: Deps, user: AppUser, scope: ListScope | undefin
       employeeId: schema.reviews.employeeId, reviewerId: schema.reviews.reviewerId,
       revieweeManagerId: schema.employees.managerId,
       cycleName: schema.reviewCycles.name,
+      selfDue: schema.reviewCycles.selfDueDate,
+      managerDue: schema.reviewCycles.managerDueDate,
     })
     .from(schema.reviews)
     .leftJoin(schema.reviewCycles, eq(schema.reviewCycles.uuid, schema.reviews.cycleId))
@@ -363,7 +467,49 @@ async function reviewItems(deps: Deps, user: AppUser, scope: ListScope | undefin
           : (r.state === "SHARED" && r.employeeId === me) ? "shared with you, waiting on your acknowledgement"
             : null;
     if (!waiting) continue;
-    out.push(reviewItem(r, waiting));
+    // WITH THE CYCLE'S OWN DEADLINE, where it set one. Which deadline depends on which half of the cycle this
+    // is: the self stage answers to `self_due_date`, the write-up to `manager_due_date`, and an
+    // acknowledgement to neither - it is waiting on a person, not on a date.
+    const due = r.state === "SELF" ? dueIn(r.selfDue, now) : r.state === "MANAGER" ? dueIn(r.managerDue, now) : null;
+    out.push(reviewItem(r, due ? `${waiting}, ${due.phrase}` : waiting, due?.days));
   }
   return out;
+}
+
+/**
+ * 360 feedback somebody asked this person for and has not had.
+ *
+ * THE ONE THING ON THIS SURFACE THAT IS ABOUT SOMEBODY ELSE'S DEADLINE, which is exactly why it belongs: an
+ * unanswered request is invisible to the person who owes it (it is a row on a page they may never open) and
+ * it is the commonest reason a manager cannot finish a review. The nominee is the AUTHOR of the row, so this
+ * is their own work by the collection's own ownership, not their team's.
+ */
+async function feedbackItems(deps: Deps, user: AppUser, scope: ListScope | undefined, now: number): Promise<AttentionItem[]> {
+  const me = user.employeeId;
+  if (!me) return [];
+  const rows = await deps.db
+    // The reviewee's name is all the item needs: the cycle is not named, because one line about an errand
+    // does not need to say which review cycle the errand belongs to, and the joins to get there are two more
+    // reads on a dashboard load.
+    .select({
+      createdAt: schema.reviewFeedback.createdAt,
+      firstName: schema.employees.firstName,
+      lastName: schema.employees.lastName,
+    })
+    .from(schema.reviewFeedback)
+    .leftJoin(schema.employees, eq(schema.employees.uuid, schema.reviewFeedback.revieweeId))
+    .where(and(
+      applyScope(scope, schema.reviewFeedback.code, schema.reviewFeedback.authorId),
+      eq(schema.reviewFeedback.authorId, me),
+      // REQUESTED only. A suggestion asks nobody for anything, and a submitted or declined row is answered.
+      eq(schema.reviewFeedback.state, "REQUESTED"),
+    ))
+    .orderBy(schema.reviewFeedback.createdAt)
+    .limit(WINDOW);
+
+  const item = feedbackItem(rows.map((f) => ({
+    revieweeName: f.firstName ? `${f.firstName} ${f.lastName}`.trim() : "a colleague",
+    waitedDays: Math.max(0, Math.floor((now - +new Date(f.createdAt)) / DAY)),
+  })));
+  return item ? [item] : [];
 }

@@ -2,6 +2,8 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { objectivesWithKeyResults, setGoalContributors, contributorsFor, suggestedContributorsFor, watchGoal, goalWatchersFor, loggedHoursFor, listGoals, createGoal, updateGoal, updateGoalProgress, setGoalConfidence, proposeGoal, approveGoal, requestGoalChanges, getGoalWithComments, commentGoal, deleteGoal, restoreGoal, linkedTaskRollup, lastCommentAtFor, type GoalInput } from "../services/goals";
+import { similarGoals } from "../services/goalSimilar";
+import { proposeGoalMeasure } from "../services/goalMeasure";
 import { toGoalResource } from "../http/serialize";
 
 const statusEnum = z.enum(["not_started", "in_progress", "completed", "cancelled"]);
@@ -149,6 +151,19 @@ export const goals = collectionRoutes<GoalInput, typeof schema.goals>({
     // anything together.
     setContributors: { schema: contributorsSchema, run: (deps, user, id, body) => setGoalContributors(deps, user, id, body.contributors) },
     comment: { schema: commentSchema, run: (deps, user, id, body) => commentGoal(deps, user, id, body.body) },
+    // Goals that are the same work in different words, and the goal this one could roll up under. A read,
+    // and `raw` because the answer is other goals rather than this one.
+    //
+    // Registered in SCOPE_READING_VERBS (middleware/authz.ts): it answers with goals OTHER than the one
+    // named, so it binds the caller's own goal list scope and a goal an ACL deny hides can never be named.
+    // How this goal could be measured, proposed as three fields the owner accepts. One generation, on a
+    // press, on the one screen where it is worth a neuron: a goal being written or proposed.
+    suggestMeasure: {
+      raw: async (c, id) => c.json(await proposeGoalMeasure(c.get("deps"), c.get("user")!, id)),
+    },
+    similar: {
+      raw: async (c, id) => c.json({ similar: await similarGoals(c.get("deps"), c.get("scope"), id) }),
+    },
     // Follow somebody else's goal your own plans turn on. Idempotent both ways.
     watch: { run: (deps, user, id) => watchGoal(deps, user, id, true) },
     unwatch: { run: (deps, user, id) => watchGoal(deps, user, id, false) },

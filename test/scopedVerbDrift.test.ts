@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
-import { SCOPE_READING_VERBS } from "../src/middleware/authz";
+import { SCOPE_READING_VERBS, MULTI_SCOPE_VERBS } from "../src/middleware/authz";
 
 // A custom method usually acts on the record its path names, so the authz middleware does not pay for the
 // per-object exception read on one - that read is for lists, and `announcements:markRead` fires on dwell.
@@ -23,6 +23,28 @@ const indexTs = Object.values(
 const MOUNTED_AS = new Map<string, string>();
 for (const m of indexTs.matchAll(/app\.route\("\/v1\/([a-z0-9-]+)",\s*([A-Za-z0-9_]+)\)/g)) {
   if (!MOUNTED_AS.has(m[2]!)) MOUNTED_AS.set(m[2]!, m[1]!);
+}
+
+/** `<collection>:<verb>` for every item-level verb whose handler body reads one of the fan-out scope maps. */
+function multiScopeVerbs(): Map<string, string> {
+  const found = new Map<string, string>();
+  const keys = [...new Set([...MULTI_SCOPE_VERBS.values()].map((v) => v.key))];
+  for (const src of Object.values(routes)) {
+    const inline = src.match(/collection:\s*"([a-z0-9-]+)"/)?.[1] ?? src.match(/const COL = "([a-z0-9-]+)"/)?.[1];
+    const exported = [...src.matchAll(/^export const ([A-Za-z0-9_]+) = collectionRoutes/gm)].map((m) => m[1]!);
+    const collection = inline ?? exported.map((e) => MOUNTED_AS.get(e)).find(Boolean);
+    if (!collection) continue;
+    const vi = src.indexOf("\n  verbs: {");
+    if (vi < 0) continue;
+    const block = src.slice(vi, src.indexOf("\n  },", vi) + 1);
+    const verbKeys = [...block.matchAll(/^ {4}([A-Za-z0-9_]+):\s*\{/gm)];
+    for (let i = 0; i < verbKeys.length; i++) {
+      const verb = verbKeys[i]![1]!;
+      const body = block.slice(verbKeys[i]!.index!, i + 1 < verbKeys.length ? verbKeys[i + 1]!.index! : block.length);
+      for (const key of keys) if (body.includes(`c.get("${key}")`)) found.set(`${collection}:${verb}`, key);
+    }
+  }
+  return found;
 }
 
 /** `<collection>:<verb>` for every item-level verb whose handler body reads the list scope. */
@@ -63,6 +85,22 @@ describe("item verbs that list other records", () => {
     // A stale name is not free: it costs an indexed read on every call of a verb that does not need one.
     const stale = [...SCOPE_READING_VERBS.keys()].filter((k) => !scopeReadingVerbs().has(k));
     expect(stale).toEqual([]);
+  });
+
+  it("names every item verb that binds a whole map of list scopes", () => {
+    // Same class of bug one axis wider: a verb reading `evidenceScopes` without an entry in MULTI_SCOPE_VERBS
+    // gets an empty map, so every section of its answer is silently empty for everybody.
+    const missing = [...multiScopeVerbs().keys()].filter((k) => !MULTI_SCOPE_VERBS.has(k));
+    expect(missing).toEqual([]);
+    const stale = [...MULTI_SCOPE_VERBS.keys()].filter((k) => !multiScopeVerbs().has(k));
+    expect(stale).toEqual([]);
+  });
+
+  it("names the context key each multi-scope verb actually reads", () => {
+    for (const [key, spec] of MULTI_SCOPE_VERBS) {
+      expect(multiScopeVerbs().get(key), `${key} must read ${spec.key}`).toBe(spec.key);
+      expect(spec.collections.length).toBeGreaterThan(0);
+    }
   });
 
   it("binds a collection, not a verb name", () => {

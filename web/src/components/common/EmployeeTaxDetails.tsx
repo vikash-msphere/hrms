@@ -196,12 +196,30 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
               {/* Chapter VI-A from VERIFIED investment declarations. A section this regime disallows is shown at
                   zero rather than hidden, so the answer to "why didn't my 80C help?" is on the page. */}
               {(d.deductions ?? []).filter((x) => (x.allowed ?? 0) > 0).map((x) => (
-                <Row key={x.section} label={`Deduction u/s ${x.section}`} value={`− ${inr(x.allowed ?? 0)}`} muted />
+                <Row
+                  key={x.section}
+                  // The limit beside the figure, where there is one: "of the 150,000 limit" is what turns a
+                  // number somebody has to trust into one they can check, and it is the only form of this
+                  // that is useful while the window is still open.
+                  label={`Deduction u/s ${x.section}${x.cap ? ` (of ${inr(x.cap)} allowed)` : ""}`}
+                  value={`− ${inr(x.allowed ?? 0)}`}
+                  muted
+                />
               ))}
               <Row label="Taxable income" value={inr(d.taxable_income)} strong />
               {(d.deductions ?? []).some((x) => (x.allowed ?? 0) === 0) && (
                 <p className="text-xs text-muted-foreground">
                   Not allowed under this regime: {(d.deductions ?? []).filter((x) => (x.allowed ?? 0) === 0).map((x) => x.section).join(", ")}.
+                </p>
+              )}
+              {/* WHAT IS STILL AVAILABLE, and only while it still can be acted on. Arithmetic, never advice:
+                  the line between "you have declared 60,000 of a 150,000 limit" and "you should invest more"
+                  is the line between a calculation this app is entitled to make and financial advice it is
+                  not. Absent once every capped section is full, which is the right time to say nothing. */}
+              {(d.deduction_headroom ?? []).length > 0 && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Still available this year:{" "}
+                  {(d.deduction_headroom ?? []).slice(0, 3).map((h) => `${inr(h.remaining)} under ${h.section}`).join(", ")}.
                 </p>
               )}
               <div className="my-2 border-t" />

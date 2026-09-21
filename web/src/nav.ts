@@ -15,7 +15,6 @@ import {
   CheckCheck,
   UserPlus,
   ScrollText,
-  ShieldAlert,
   ReceiptText,
   Table2,
   type LucideIcon,
@@ -156,6 +155,13 @@ export const NAV: NavGroup[] = [
           { key: "announcements", label: "Feed", collection: "announcements" },
           { key: "suggestions", label: "Suggestions", perm: "suggestions.read", collection: "suggestions" },
           { key: "events", label: "Events", perm: "events.read", collection: "events" },
+          // The flagged-post queue sits beside the walls it is about - the posts it decides on are the Feed's
+          // and the Suggestion box's. Private by default (nothing seeds `moderation`), so the tab appears only
+          // for somebody an admin has deliberately made a moderator, which is the whole access decision:
+          // the queue quotes posts in full and is not narrowed per holder.
+          // No `collection`: `moderation` is a virtual capability with no table, so there are no rows for the
+          // tab bar's "new since you looked" count to measure. Its access key stays on the page heading.
+          { key: "moderation", label: "Flagged posts", perm: "moderation.read" },
         ],
       },
       {
@@ -227,6 +233,7 @@ export const NAV: NavGroup[] = [
           { key: "expenses", label: "Expenses", collection: "expenses" },
           { key: "vendors", label: "Vendors", perm: "vendors.read", collection: "vendors" },
           { key: "expense-budgets", label: "Budgets", perm: "expense-budgets.read", collection: "expense-budgets" },
+          { key: "card-transactions", label: "Card charges", perm: "card-transactions.read", collection: "card-transactions" },
         ],
       },
       { key: "compliance", label: "Compliance", icon: FileCheck, perm: "compliance-events.read" },
@@ -251,10 +258,6 @@ export const NAV: NavGroup[] = [
       { key: "tables", label: "Tables", icon: Table2, perm: "table-views.read" },
       { key: "workflows", label: "Workflows", icon: Workflow, perm: "automations.read" },
       { key: "activity", label: "Activity", icon: ScrollText, perm: "audit.read" },
-      // Flagged posts awaiting a decision. Private by default (nothing seeds `moderation`), so this appears
-      // only for somebody an admin has deliberately made a moderator - which is the whole access decision,
-      // because the queue quotes posts in full and is not narrowed per holder.
-      { key: "moderation", label: "Flagged posts", icon: ShieldAlert, perm: "moderation.read" },
       { key: "settings", label: "Settings", icon: Settings, perm: "settings.write" },
     ],
   },
@@ -325,7 +328,7 @@ export function itemPageKeys(item: NavItem): string[] {
 // renders within one page component rather than as a separate route). Maps tab key -> label for the breadcrumb;
 // the page itself owns which tabs actually render (permission-gated). First entry is the default tab.
 export const PAGE_TAB_LABELS: Record<string, Record<string, string>> = {
-  "payroll-runs": { runs: "Runs", periods: "Pay periods", bonuses: "Bonuses" },
+  "payroll-runs": { runs: "Runs", periods: "Pay periods", bonuses: "Bonuses", budgets: "Budgets" },
   // Settings panels come from the registry - one breadcrumb label per panel key (legacy keys resolve
   // before they reach the breadcrumb, so only canonical keys need entries).
   settings: Object.fromEntries(SETTINGS_REGISTRY.map((e) => [e.key, e.title])),

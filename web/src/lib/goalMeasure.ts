@@ -60,3 +60,35 @@ export const numOrNone = (s: string): number | undefined => (s.trim() === "" || 
  */
 export const measureLabel = (g: Pick<Goal, "target_value" | "current_value" | "unit">) =>
   g.target_value == null ? null : `${g.current_value ?? 0} of ${g.target_value}${g.unit ? ` ${g.unit}` : ""}`;
+
+/**
+ * What a goal cannot answer about itself, for the hint beside the measure fields.
+ *
+ * ONE RULE, TWO RUNTIMES. `src/domain/goalMeasure.ts` holds the same predicate for the server (the suggest
+ * verb asks it before spending a neuron), and `test/goalMeasure.test.ts` holds the two against each other -
+ * a page saying a goal is measurable while the server offers to fix it is the drift worth stopping.
+ *
+ * Re-exported wording rather than a second set of sentences for the same reason.
+ */
+export type MeasureGap = "no_measure" | "no_baseline" | "no_due_date";
+
+export function measureGaps(g: {
+  unit?: string | null;
+  baseline_value?: number | null;
+  target_value?: number | null;
+  due_date?: string | null;
+}): MeasureGap[] {
+  const gaps: MeasureGap[] = [];
+  const hasUnit = !!g.unit?.trim();
+  const hasTarget = g.target_value != null;
+  if (!hasUnit && !hasTarget) gaps.push("no_measure");
+  else if (g.baseline_value == null) gaps.push("no_baseline");
+  if (!g.due_date) gaps.push("no_due_date");
+  return gaps;
+}
+
+export const GAP_MESSAGE: Readonly<Record<MeasureGap, string>> = {
+  no_measure: "No measure: progress on this goal will be somebody's estimate. Give it a unit and a target and the app computes it.",
+  no_baseline: "No starting value. A goal moving churn from 8% to 4% reads as nearly done on day one without one.",
+  no_due_date: "No due date, so this goal can never be behind - only forgotten.",
+};

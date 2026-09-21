@@ -403,7 +403,9 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   if (typeof leaveDays !== "number") leaveDays = Math.max(0, sum2(encashableBalances.map((b) => b.balanceDays)));
   const noticeShortfallDays = Math.max(0, input.notice_shortfall_days ?? 0);
   const reimbClaims = await approvedUnpaidReimbursements(deps, employeeId);
-  const reimbursements = sum2(reimbClaims.map((r) => r.amount));
+  // Net of anything already set against an advance, for the same reason the payroll payout is (see
+  // services/payroll.ts) - a leaver's final settlement is the last place a double payout could still slip out.
+  const reimbursements = sum2(reimbClaims.map((r) => Math.max(0, round2(r.amount - (r.advanceSettled ?? 0)))));
 
   // Everything else still queued for this employee. A payroll run only pays ACTIVE employees, so once the exit
   // transition flips them to `terminated` these payables can never be paid by a run - the FnF is their last

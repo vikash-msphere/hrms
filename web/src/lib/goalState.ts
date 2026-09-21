@@ -181,3 +181,147 @@ export const statusForProgress = (progress: number, current: GoalStatus | string
   progress >= 100 && current !== "completed" ? "completed"
   : progress > 0 && current === "not_started" ? "in_progress"
   : undefined;
+
+/**
+ * Which goals are holding up the most other goals.
+ *
+ * `blocked_by` makes a set of goals a graph, and a list sorted by drift can never show what a graph knows:
+ * the goal whose movement would free four others. Everyone looking at a team's goals sees the four that are
+ * behind; nobody sees the one that is the reason.
+ *
+ * TRANSITIVE, because the chain is the point. If C waits on B and B waits on A, then A is holding up two
+ * goals, not one, and A is where the conversation belongs. Cycles are survivable - a pair of goals each
+ * recorded as waiting on the other is somebody's data-entry mistake, not a reason to hang the page - so the
+ * walk carries a seen-set and stops.
+ *
+ * ONLY OPEN GOALS COUNT, on both ends. A blocker that is finished is not blocking anything (its dependents
+ * may not have noticed, which is worth telling them separately), and a cancelled dependent is not waiting.
+ */
+export function blockingChains<T extends GoalLike & { path?: string | null; blocked_by?: string | null }>(
+  goals: T[],
+  idOfRef: (ref: string) => string,
+): { goal: T; blocking: T[] }[] {
+  const byId = new Map<string, T>();
+  for (const g of goals) if (g.path) byId.set(idOfRef(g.path), g);
+
+  // blocker id -> the goals directly waiting on it.
+  const dependents = new Map<string, T[]>();
+  for (const g of goals) {
+    if (!g.blocked_by || !isOpen(g)) continue;
+    const blockerId = idOfRef(g.blocked_by);
+    (dependents.get(blockerId) ?? dependents.set(blockerId, []).get(blockerId)!).push(g);
+  }
+  if (dependents.size === 0) return [];
+
+  const out: { goal: T; blocking: T[] }[] = [];
+  for (const [blockerId, direct] of dependents) {
+    const blocker = byId.get(blockerId);
+    // A blocker outside the rows on screen (another team's goal, or one this reader cannot see) is not
+    // something this panel can name, so it contributes nothing rather than an anonymous row.
+    if (!blocker || !isOpen(blocker)) continue;
+    const seen = new Set<string>([blockerId]);
+    const reached: T[] = [];
+    const queue = [...direct];
+    while (queue.length) {
+      const g = queue.shift()!;
+      const id = g.path ? idOfRef(g.path) : "";
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      reached.push(g);
+      for (const next of dependents.get(id) ?? []) queue.push(next);
+    }
+    if (reached.length > 0) out.push({ goal: blocker, blocking: reached });
+  }
+  // Most held up first; a tie goes to the goal in the worst shape itself, because that is the one least
+  // likely to free the others on its own.
+  out.sort((a, b) => b.blocking.length - a.blocking.length || troubleRank(b.goal) - troubleRank(a.goal));
+  return out;
+}
+
+/**
+ * The goal's own record, as the first draft of its closing note.
+ *
+ * `goals.retro` is written when a goal closes, and by then nobody remembers the shape of the quarter - so it
+ * is usually a sentence that says less than the percentage above it. Everything needed for a real first
+ * paragraph is already on the page: where the measure started and finished, how the progress actually moved,
+ * and which board tasks were delivered against it.
+ *
+ * NO MODEL AND NO REQUEST. Every line comes from props the drawer already holds, which is also what keeps
+ * this on the right side of the line: nothing is sent anywhere, and the text is the owner's to rewrite
+ * before they save it. (If it is then handed to the Draft button, the author has read it and chosen to -
+ * the same shape as the self-assessment seed, and the reason `reviews.draft` spells that distinction out.)
+ */
+export function retroSeed(
+  goal: GoalLike & { title?: string; progress?: number | null; unit?: string | null; baseline_value?: number | null; current_value?: number | null; target_value?: number | null },
+  linked: { title: string; deliver_time?: string | null }[] = [],
+  history: { at_time: string; progress: number }[] = [],
+): string {
+  const lines: string[] = [];
+
+  const measured = goal.target_value != null && goal.unit;
+  lines.push(measured
+    ? `Finished at ${goal.current_value ?? "?"} ${goal.unit} against a target of ${goal.target_value} (${goal.progress ?? 0}%).`
+    : `Finished at ${goal.progress ?? 0}%.`);
+
+  // The shape of the climb, not every point of it: when it first moved and when it last did says whether
+  // this was steady work or a fortnight at the end.
+  const moved = history.filter((h) => h.progress > 0);
+  if (moved.length >= 2) {
+    lines.push(`Progress first moved on ${moved[0]!.at_time.slice(0, 10)} and last on ${moved[moved.length - 1]!.at_time.slice(0, 10)}.`);
+  }
+
+  const delivered = linked.filter((t) => !!t.deliver_time);
+  if (delivered.length > 0) {
+    lines.push(`Delivered against it: ${delivered.map((t) => t.title).join(", ")}.`);
+  }
+  const open = linked.length - delivered.length;
+  if (open > 0) lines.push(`${open} linked task${open === 1 ? "" : "s"} still open.`);
+
+  // The prompt, left in the box: the record says what happened, and only the owner can say why.
+  lines.push("", "What I would do differently: ");
+  return lines.join("\n");
+}
+
+/**
+ * The templates that read like what somebody has started typing.
+ *
+ * WHY NOT THE INDEX. The obvious version of this is a vector lookup, which is how the app finds goals that
+ * are the same work in other words - but `goal-templates` is not in the semantic index (domain/searchIndex.ts
+ * lists what is), so a nearest-neighbour version means adding a collection to the index, the DDL and the
+ * migration to save somebody a scroll through a dropdown. The overlap below costs nothing, runs on rows the
+ * dialog has already loaded, and answers the question the dropdown could not: which of these thirty
+ * blueprints is about what I am writing.
+ *
+ * THE MATCH IS WORDS, honestly and visibly. Stop-words out, stems ignored, and a template has to share at
+ * least two meaningful words before it is offered - one shared "improve" is not a match, and offering it
+ * teaches people that the suggestions are noise.
+ */
+const STOP = new Set([
+  "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "by", "with", "our", "we", "i", "my",
+  "this", "that", "is", "are", "be", "at", "from", "as", "it", "its", "into", "per", "new", "all",
+]);
+
+const wordsOf = (text: string): Set<string> =>
+  new Set(
+    (text ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !STOP.has(w)),
+  );
+
+export function matchingTemplates<T extends { title?: string | null; description?: string | null; group_name?: string | null }>(
+  typed: string,
+  templates: T[],
+  limit = 3,
+): { template: T; shared: string[] }[] {
+  const want = wordsOf(typed);
+  if (want.size === 0) return [];
+  const out: { template: T; shared: string[] }[] = [];
+  for (const t of templates) {
+    const have = wordsOf(`${t.title ?? ""} ${t.description ?? ""} ${t.group_name ?? ""}`);
+    const shared = [...want].filter((w) => have.has(w));
+    if (shared.length >= 2) out.push({ template: t, shared });
+  }
+  return out.sort((a, b) => b.shared.length - a.shared.length).slice(0, limit);
+}

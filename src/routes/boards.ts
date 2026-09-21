@@ -3,6 +3,8 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listBoards, createBoard, updateBoard, configureBoard, boardMetrics, cardCountsFor, purgeBoard, type BoardInput } from "../services/boards";
+import { boardDuplicates } from "../services/cardDuplicateSweep";
+import { narrateBoard } from "../services/boardNarrate";
 import { toBoardResource } from "../http/serialize";
 
 const modeEnum = z.enum(["kanban", "scrum"]);
@@ -65,6 +67,18 @@ export const boards = collectionRoutes<BoardInput, typeof schema.boards>({
     configure: { schema: configureSchema, run: (deps, user, id, body) => configureBoard(deps, user, id, body) },
     metrics: {
       raw: async (c, id) => c.json(await boardMetrics(c.get("deps"), c.get("user"), id, Number(c.req.query("days")) || undefined) as object),
+    },
+    // What changed on this board, in a sentence. Arithmetic finds the movements; the model only writes them
+    // up, and a sentence carrying a number nobody computed is discarded in favour of the plain one.
+    narrate: {
+      raw: async (c, id) => c.json(await narrateBoard(c.get("deps"), c.get("user")!, id, Number(c.req.query("days")) || undefined)),
+    },
+    // What the nightly sweep found on this board: pairs of open cards that look like the same work.
+    //
+    // A read of OTHER cards, so it binds the caller's own card list scope (SCOPE_READING_VERBS) - both halves
+    // of every pair are re-checked, and a pair with a card they cannot list is dropped rather than half-shown.
+    duplicates: {
+      raw: async (c, id) => c.json({ duplicates: await boardDuplicates(c.get("deps"), c.get("scope"), id) }),
     },
   },
 });

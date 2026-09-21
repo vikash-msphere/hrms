@@ -14,6 +14,7 @@ import { DEFAULT_ATTENDANCE, type AttendanceConfig, type DayCredit, utcDay, week
 import { invalidArgument, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { softDeleteRow } from "./softDelete";
+import { restateLopForDay } from "./payroll";
 
 // Attendance day marks: HR decides what ONE day is worth, and payroll settles up on that instead of on the
 // minutes punched. See the table's own note in db/schema.ts for why this is a separate thing from a
@@ -172,6 +173,10 @@ export async function createDayMark(deps: Deps, actor: AppUser, input: DayMarkIn
     actorId: actor.employeeId ?? null,
   });
   await emitEvent(deps, actor, "dayMark.set", { subject: `attendance-day-marks/${row.uuid}`, employeeId, payload: { date: ymd, credit } });
+  // Re-valuing a day changes what its period should have docked. If that period's run has published, the
+  // difference is carried into the next run instead of leaving the payslip and the attendance record
+  // disagreeing. Best-effort - see `restateLopForDay`.
+  await restateLopForDay(deps, employeeId, +new Date(date));
   return row;
 }
 
@@ -192,6 +197,9 @@ export async function notifyDayMarkChanged(
   before: typeof schema.attendanceDayMarks.$inferSelect,
 ): Promise<void> {
   if (row.credit === before.credit) return;
+  // The credit moved, so the day is worth something different and a closed period may owe a correction.
+  // Guarded by the same equality check as the notification: a reworded reason changes no pay.
+  await restateLopForDay(deps, row.employeeId, +new Date(row.date));
   const ymd = utcDay(+new Date(row.date));
   await notify(deps, {
     recipient: row.employeeId,
@@ -216,6 +224,10 @@ export async function removeDayMark(deps: Deps, actor: AppUser, id: string, ifMa
   const before = (await deps.db.select().from(schema.attendanceDayMarks).where(eq(schema.attendanceDayMarks.uuid, id)).limit(1))[0];
   await softDeleteRow(deps, actor, schema.attendanceDayMarks, "attendance-day-mark", "attendance-day-marks", id, ifMatch);
   if (!before) return;
+  // Withdrawing a mark hands the day back to its punches, which is as much a change to what the period
+  // docked as setting one was. The path that REMOVES a decision needs the correction exactly as the two that
+  // make one do - it is the easiest of the three to forget, because nothing new was written.
+  await restateLopForDay(deps, before.employeeId, +new Date(before.date));
   const ymd = utcDay(+new Date(before.date));
   await notify(deps, {
     recipient: before.employeeId,

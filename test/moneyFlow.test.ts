@@ -539,6 +539,50 @@ describe("payroll: one committed run per pay period", () => {
     expect((await transition(deps, actor, run.uuid, "APPROVED")).state).toBe("APPROVED");
   });
 
+  it("reports a COMMITTED run whose inputs moved as diverged, not as stale", async () => {
+    // The same scan, the opposite meaning. An editable run that drifts is told to rebuild; a committed one
+    // CANNOT be rebuilt, so reporting it as stale would instruct the one action nobody should take here -
+    // and reporting nothing at all (what happened before) left the published payslip and the live data
+    // disagreeing with nothing saying which was true.
+    const emp = await seedEmployee({ code: short("04"), firstName: "Div", lastName: "Erged" });
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    const run = await createRun(deps, actor, `pay-periods/${await seedPeriod()}`);
+    await buildRunItems(deps, actor, run.uuid);
+    await transition(deps, actor, run.uuid, "REVIEW");
+    await transition(deps, actor, run.uuid, "APPROVED");
+
+    // Committed and nothing has moved: neither flag.
+    const fresh = await runStaleness(deps, await getRun(deps, run.uuid));
+    expect(fresh.stale).toBe(false);
+    expect(fresh.diverged).toBeUndefined();
+
+    // Rewind the build stamp, exactly as the staleness test above does and for the same reason.
+    const built = (await getRun(deps, run.uuid)).itemsBuiltAt!;
+    await deps.db
+      .update(schema.payrollRuns)
+      .set({ itemsBuiltAt: new Date(+built - 60_000) })
+      .where(eq(schema.payrollRuns.uuid, run.uuid));
+
+    const moved = await runStaleness(deps, await getRun(deps, run.uuid));
+    expect(moved.diverged).toBe(true);
+    expect(moved.changes.length).toBeGreaterThan(0);
+    // The load-bearing half: `stale` stays FALSE on a committed run however much has moved, because it is
+    // what gates the approve and what puts a "Rebuild now" button on screen.
+    expect(moved.stale).toBe(false);
+  });
+
+  it("never reports divergence for a run that was never built", async () => {
+    // There is no moment to measure "since" from - nothing was computed, so nothing can have diverged from
+    // it. Without this the null build stamp would have to be handled by whatever reads the flag.
+    const actor = await seedActor(await seedEmployee());
+    const run = await createRun(deps, actor, `pay-periods/${await seedPeriod()}`);
+    const s = await runStaleness(deps, await getRun(deps, run.uuid));
+    expect(s.built_time).toBeNull();
+    expect(s.diverged).toBeUndefined();
+    expect(s.stale).toBe(false);
+  });
+
   it("refuses to approve a run that was never built, or built empty (it would lock the period and pay nobody)", async () => {
     const actor = await seedActor(await seedEmployee());
     const period = await seedPeriod();

@@ -3,7 +3,8 @@ import { ArrowDown, ArrowUp, BarChart3, ChevronRight, Info, TriangleAlert, Users
 import { get } from "@/api";
 import { navigate } from "@/router";
 import { useRoute, setQueryParams } from "@/router";
-import { idOf, cn } from "@/lib/utils";
+import { idOf, cn, formatMoney } from "@/lib/utils";
+import { useOrg, currencyDecimals } from "@/lib/org";
 import { usePermission, useCanExport } from "@/lib/perm";
 import { useCollection } from "@/hooks/useCollection";
 import type { Department, Me } from "@/types";
@@ -45,6 +46,10 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 const DAY_MS = 86_400_000;
 
 export default function TeamAnalytics({ me }: { me: Me }) {
+  // A money measure needs the ORG's currency, which `formatMetric` has no way to know: without this a spend
+  // renders as a bare number beside a count of people and reads as a count of people.
+  const { org } = useOrg();
+  const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   const route = useRoute();
   // The report's rows ARE the employee roster (its header access icon points at `employees` for the same
   // reason), so that is the collection a narrowed export grant has to name.
@@ -240,7 +245,7 @@ export default function TeamAnalytics({ me }: { me: Me }) {
                   labels={chartPeople.map((p) => p.name)}
                   datasets={[{ name: chartMetric.short, values: chartPeople.map((p) => p.values[chartMetric.key] ?? 0) }]}
                   markers={data.team[chartMetric.key] != null ? [{ label: "Team", value: data.team[chartMetric.key]! }] : undefined}
-                  format={(v) => formatMetric(v, chartMetric.unit)}
+                  format={(v) => formatMetric(v, chartMetric.unit, money)}
                   ariaLabel={`${chartMetric.label} for each person, ${data.window.from} to ${data.window.to}`}
                   onSelect={(i) => { const p = chartPeople[i]; if (p) setOpen(p); }}
                   emptyText="Nobody has a number for this measure in this window."
@@ -261,7 +266,7 @@ export default function TeamAnalytics({ me }: { me: Me }) {
                   if (!m || data.team[key] == null) return [];
                   return [{
                     label: m.agg === "avg" ? `Avg ${m.label.toLowerCase()}` : m.label,
-                    value: formatMetric(data.team[key], m.unit),
+                    value: formatMetric(data.team[key], m.unit, money),
                     hint: m.agg === "avg" ? "team average" : "team total",
                     onClick: () => { setGroup(m.group); toggleSort(m.key); },
                   }];
@@ -335,7 +340,7 @@ export default function TeamAnalytics({ me }: { me: Me }) {
                         const tone = toneFor(p.values[c.key], data.team[c.key], c.direction);
                         return (
                           <td key={c.key} data-label={c.short} className={cn("py-2 pl-3 text-right tabular-nums", tone && TONE_CLASS[tone])}>
-                            {formatMetric(p.values[c.key], c.unit)}
+                            {formatMetric(p.values[c.key], c.unit, money)}
                           </td>
                         );
                       })}
@@ -346,7 +351,7 @@ export default function TeamAnalytics({ me }: { me: Me }) {
                       <td className="sticky left-0 z-10 bg-background py-2 pr-3">Team</td>
                       {columns.map((c) => (
                         <td key={c.key} data-label={`Team ${c.short}`} className="py-2 pl-3 text-right tabular-nums">
-                          {formatMetric(data.team[c.key], c.unit)}
+                          {formatMetric(data.team[c.key], c.unit, money)}
                         </td>
                       ))}
                     </tr>
@@ -383,6 +388,10 @@ function PersonReport({ person, data, deptName, me }: {
   deptName: (p?: string | null) => string | undefined;
   me: Me;
 }) {
+  // Its own, rather than threaded down as a prop: this component is rendered from two places and a money
+  // measure rendered without the org's currency reads as a count.
+  const { org } = useOrg();
+  const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   const id = idOf(person.employee);
   const mine = me.employee_id === id;
   const byGroup = data.groups
@@ -419,9 +428,9 @@ function PersonReport({ person, data, deptName, me }: {
                       <span className="block text-xs opacity-80">{m.hint}</span>
                     </dt>
                     <dd className="shrink-0 text-right">
-                      <span className={cn("tabular-nums", tone && TONE_CLASS[tone])}>{formatMetric(person.values[m.key], m.unit)}</span>
+                      <span className={cn("tabular-nums", tone && TONE_CLASS[tone])}>{formatMetric(person.values[m.key], m.unit, money)}</span>
                       <span className="ml-2 text-xs text-muted-foreground tabular-nums">
-                        team {formatMetric(data.team[m.key], m.unit)}
+                        team {formatMetric(data.team[m.key], m.unit, money)}
                       </span>
                     </dd>
                   </div>

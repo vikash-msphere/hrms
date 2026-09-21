@@ -13,6 +13,9 @@ import { loadObjectRulesForRequest, loadObjectExceptionCodes, loadObjectExceptio
 import { SEARCHABLE_COLLECTIONS } from "../domain/searchIndex";
 import { DASHBOARD_SUMMARY_COLLECTIONS } from "../domain/dashboardSummary";
 import { ATTENTION_COLLECTIONS } from "../domain/attention";
+import { CLOSE_COLLECTIONS } from "../domain/expenses";
+import { EVIDENCE_COLLECTIONS } from "../domain/reviewEvidence";
+import { COLLABORATOR_COLLECTIONS } from "../domain/reviewCollaborators";
 import { ANALYTICS_COLLECTIONS } from "../domain/peopleAnalytics";
 import { TABLE_SOURCE_COLLECTIONS } from "../domain/tableFields";
 import { APPROVAL_SUMMARY_COLLECTIONS, TAX_VERIFICATION_QUEUE } from "../domain/approvalsSummary";
@@ -242,9 +245,17 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
 // Aggregate ROUTES: transports that own no rows and grant nothing, answering over many collections at once.
 // The envelope is open to any authenticated caller and the real gating happens per collection inside (see
 // scopesForCollections / approvalScopesFor), which is why they are exempt from the collection-level decision
-// and from its per-object exception read. Listed once, because a transport added to only some of the three
-// places that consult this would be half-gated.
-const AGGREGATE_ROUTES = new Set(["search", "dashboard-summary", "people-analytics", "approvals-summary", "activity-counts", "changes", "attention"]);
+// and from its per-object exception read.
+//
+// THIS LIST IS COPIED, and a new entry has to reach the copies or the drift gates fail (which is how the
+// `expense-close` entry was caught missing from both):
+//   - test/collections.test.ts keeps its own copy and asserts it matches THIS source text, so that one cannot
+//     silently diverge - it is the gate, not a duplicate somebody forgot.
+//   - test/grantReach.test.ts holds a DIFFERENT and wider list (this set plus activity, operations,
+//     notifications, preferences, settings, batch): routes no seeded role needs to be able to list. It is not
+//     this list and must not be derived from it.
+// The three lines below are the ones to edit; the rest of this file consults only this constant.
+const AGGREGATE_ROUTES = new Set(["search", "dashboard-summary", "people-analytics", "approvals-summary", "activity-counts", "changes", "attention", "expense-close", "payroll-forecast"]);
 
 /**
  * ITEM-level custom methods whose handler LISTS OTHER RECORDS, mapped to the collection those records are in.
@@ -275,8 +286,37 @@ export const SCOPE_READING_VERBS = new Map<string, string>([
   ["suggestions:similar", "suggestions"], // other suggestions asking the same thing (services/suggestionSimilar.ts)
   ["tickets:triage", "tickets"], // the resolved neighbours a routing suggestion is voted from (services/ticketTriage.ts)
   ["cards:triage", "cards"], // the delivered neighbours a card's filing suggestion is voted from (services/cardTriage.ts)
+  ["boards:duplicates", "cards"], // the board's own cards, as the pairs a nightly sweep flagged (services/cardDuplicateSweep.ts)
+  ["cards:suggestGoal", "goals"], // the GOALS a card might belong to, named under the caller's goal scope (services/cardTriage.ts)
+  ["goals:similar", "goals"], // goals that look like the same work, and the one this could align to (services/goalSimilar.ts)
+  ["cards:suggestSteps", "cards"], // the checklists of comparable DELIVERED cards (services/cardTriage.ts)
+  ["cards:flow", "cards"], // the board's other cards, as the distribution one card is read against (services/cardFlow.ts)
   ["review-cycles:variablePay", "reviews"], // every review in the cycle, priced (services/variablePay.ts)
   ["review-cycles:award", "reviews"], // the same lines, then paid
+]);
+
+/**
+ * Item verbs that read MORE than one collection, and the set each one reads.
+ *
+ * `SCOPE_READING_VERBS` above answers "which collection's scope does this verb bind" with exactly one name,
+ * which is right for a neighbour lookup and cannot express an evidence pack: `reviews:evidence` answers with
+ * delivered cards, kudos, contributed goals and 1:1 notes, four collections none of which is the one in the
+ * path. The map is resolved the same way the aggregate routes are (`scopesForCollections`) and left on its
+ * own context key, so the service binds verdicts it was handed rather than resolving any of its own.
+ *
+ * A collection the caller may not list is ABSENT from the map, which the service reads as an empty section.
+ * That is the same fail-closed behaviour `/v1/attention` has, and it is what lets one endpoint serve an
+ * employee reading their own pack and an HR admin reading somebody else's.
+ *
+ * test/scopedVerbDrift.test.ts holds these keys against the route files the same way, by the context key the
+ * handler reads.
+ */
+export const MULTI_SCOPE_VERBS = new Map<string, { key: "evidenceScopes"; collections: readonly string[] }>([
+  ["reviews:evidence", { key: "evidenceScopes", collections: EVIDENCE_COLLECTIONS }],
+  // Who worked with the reviewee, read off the same kind of fan-out: shared cards, shared goals, kudos.
+  // Same context key, a different set - the key is a slot for "this verb's per-collection verdicts", not a
+  // name for one verb's list.
+  ["reviews:collaborators", { key: "evidenceScopes", collections: COLLABORATOR_COLLECTIONS }],
 ]);
 
 // Per-collection list verdicts for a fan-out envelope (`GET /v1/search`, `GET /v1/dashboard-summary`): for
@@ -801,6 +841,21 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // reason: each collection is decided by the exact list decision it would get on its own, so a caller who
     // cannot list reviews is simply never told about one.
     if (collection === "attention") c.set("attentionScopes", await scopesForCollections(c.get("deps"), user, [...ATTENTION_COLLECTIONS]));
+    // The month-end close checklist: the same shape again. Every check it answers is a COUNT over `expenses` or
+    // `expense-budgets`, bound to the exact list verdict each of those collections would give this caller on
+    // its own - so a manager sees their department's unfinished business and finance sees the org's, from one
+    // endpoint, and a caller who may list neither gets an empty checklist rather than a 403 on a page.
+    // The committed-cost forecast is gated on COMPENSATION, not on a collection of its own: it owns no rows
+    // and every figure in it is derived from compensation the caller may already list. Binding the scope of
+    // the collection the DATA comes from is what makes a manager's forecast their team's.
+    if (collection === "payroll-forecast") c.set("scope", scopeFor(user, "compensation", await selfContextFor(c.get("deps"), user)));
+    if (collection === "expense-close") c.set("closeScopes", await scopesForCollections(c.get("deps"), user, [...CLOSE_COLLECTIONS]));
+    // An item verb that answers with records from collections the path does not name gets the same fan-out
+    // map, for the same reason (MULTI_SCOPE_VERBS above). `reviews:evidence` is the one: it reads a person's
+    // delivered cards, their kudos, the goals they contributed to and their own 1:1 notes, and each of those
+    // is decided by the exact list verdict that collection would give this caller on its own.
+    const multi = itemVerb ? MULTI_SCOPE_VERBS.get(`${collection}:${itemVerb}`) : undefined;
+    if (multi) c.set(multi.key, await scopesForCollections(c.get("deps"), user, multi.collections));
     // The people report is the same fan-out one axis over: it answers per PERSON rather than per collection, so
     // the roster it lists (`employees`) and every measure's own collection are each decided here, by the exact
     // list decision they would get on their own. A collection missing from the map costs the report a column.

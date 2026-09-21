@@ -8,7 +8,7 @@ import { audit } from "../lib/audit";
 import { emitEvent } from "./eventBus";
 import { getSettingValue } from "./settings";
 import { round2 } from "../domain/money";
-import { periodBounds, periodKeyFor, budgetUtilization, type PeriodType } from "../domain/expenses";
+import { periodBounds, periodKeyFor, budgetUtilization, projectBudget, type BudgetProjection, type PeriodType } from "../domain/expenses";
 import { allocFlatCode } from "./codeAlloc";
 import { invalidArgument } from "../lib/errors";
 import { visibleByDelete } from "./softDelete";
@@ -78,8 +78,9 @@ export async function computeBudgetSpendMany(deps: Deps, budgets: (BudgetScope &
   // window is widened by the range where they disagree; attribution below is exact regardless.
   const from = new Date(Math.min(...spans.map((s) => s.start)));
   const to = new Date(Math.max(...spans.map((s) => s.end)));
-  const rows: ChargeRow[] = await deps.db
+  const charged: (ChargeRow & { uuid: string })[] = await deps.db
     .select({
+      uuid: schema.expenses.uuid,
       amount: schema.expenses.amount,
       state: schema.expenses.state,
       incurredOn: schema.expenses.incurredOn,
@@ -95,6 +96,47 @@ export async function computeBudgetSpendMany(deps: Deps, budgets: (BudgetScope &
         and(isNull(schema.expenses.incurredOn), gte(schema.expenses.createdAt, from), lt(schema.expenses.createdAt, to)),
       ),
     ));
+
+  // THE SPLIT IS APPLIED HERE AND NOWHERE ELSE. An invoice divided across cost centres charges its LINES, each
+  // with its own department and category; an ordinary expense charges the row. Expanding into the same
+  // `ChargeRow` shape means everything below - the month bucketing, the period edges, the per-cap filters - is
+  // unchanged and cannot tell the difference, which is what keeps a split from needing to be understood twice.
+  //
+  // One extra read, over the same window, for every split in it. The lines carry the expense's state and dates
+  // because those are facts about the invoice rather than about the share: half a cancelled invoice is not
+  // spend, and a share is charged to the period its invoice falls in.
+  type AllocRow = { expenseId: string; amount: number; departmentId: string | null; categoryId: string | null };
+  // Skipped entirely when the window charged nothing: `inArray` with an empty list builds SQL that matches
+  // nothing at best, and asking for it is a subrequest spent to learn what we already know.
+  const allocations: AllocRow[] = charged.length
+    ? await deps.db
+        .select({
+          expenseId: schema.expenseAllocations.expenseId,
+          amount: schema.expenseAllocations.amount,
+          departmentId: schema.expenseAllocations.departmentId,
+          categoryId: schema.expenseAllocations.categoryId,
+        })
+        .from(schema.expenseAllocations)
+        .where(inArray(schema.expenseAllocations.expenseId, charged.map((r) => r.uuid)))
+    : [];
+  const splitBy = new Map<string, AllocRow[]>();
+  for (const a of allocations) {
+    const held = splitBy.get(a.expenseId);
+    if (held) held.push(a);
+    else splitBy.set(a.expenseId, [a]);
+  }
+  const rows: ChargeRow[] = charged.flatMap((r): ChargeRow[] => {
+    const split = splitBy.get(r.uuid);
+    if (!split?.length) return [r];
+    return split.map((a): ChargeRow => ({
+      amount: a.amount,
+      state: r.state,
+      incurredOn: r.incurredOn,
+      createdAt: r.createdAt,
+      departmentId: a.departmentId,
+      categoryId: a.categoryId,
+    }));
+  });
 
   // month -> charges in that month. A cap then sums only the months its period covers.
   const byMonth = new Map<string, ChargeRow[]>();
@@ -156,18 +198,34 @@ export async function computeBudgetSpend(deps: Deps, budget: BudgetScope): Promi
   return many.get(scopeKeyOf(budget)) ?? many.values().next().value ?? { spent: 0, pending: 0, months: [] };
 }
 
+// Where this cap lands at period end at the rate it has been spending. Null for anything the arithmetic
+// cannot honestly extrapolate (a past or future period, too little elapsed, no spend) - see `projectBudget`,
+// which owns every one of those decisions. A malformed period key projects nothing rather than throwing, the
+// same way `budgetPhase` refuses to hide such a row: an unparseable key is a data problem to fix, not a reason
+// for the page to fail.
+export function budgetProjection(b: BudgetScope & { amount: number }, spent: number, now: number): BudgetProjection | null {
+  let range: { start: number; end: number };
+  try {
+    range = periodBounds(b.periodType as PeriodType, b.periodKey);
+  } catch {
+    return null;
+  }
+  return projectBudget(b.amount, spent, range, now);
+}
+
 // A budget row plus its derived spend/pending/remaining/utilization, ready for the serializer.
-export async function budgetWithSpend(deps: Deps, budget: BudgetRow) {
+export async function budgetWithSpend(deps: Deps, budget: BudgetRow, now: Date = new Date()) {
   const { spent, pending, months } = await computeBudgetSpend(deps, budget);
-  return { ...budget, ...budgetUtilization(budget.amount, spent, pending), spendHistory: months };
+  return { ...budget, ...budgetUtilization(budget.amount, spent, pending), spendHistory: months, projection: budgetProjection(budget, spent, now.getTime()) };
 }
 
 // The same, for a whole page of budgets: one expenses read for all of them.
-export async function budgetsWithSpend(deps: Deps, budgets: BudgetRow[]) {
+export async function budgetsWithSpend(deps: Deps, budgets: BudgetRow[], now: Date = new Date()) {
   const spends = await computeBudgetSpendMany(deps, budgets);
+  const at = now.getTime();
   return budgets.map((b) => {
     const { spent, pending, months } = spends.get(b.uuid) ?? { spent: 0, pending: 0, months: [] };
-    return { ...b, ...budgetUtilization(b.amount, spent, pending), spendHistory: months };
+    return { ...b, ...budgetUtilization(b.amount, spent, pending), spendHistory: months, projection: budgetProjection(b, spent, at) };
   });
 }
 
@@ -217,12 +275,14 @@ export const expenseBudgetSpec: CrudSpec<ExpenseBudgetInput, typeof schema.expen
       set.periodType = type;
       set.periodKey = key;
       set.alertLevel = 0; // changing the period resets the alert guard
+      set.projectionAlertedAt = null; // and the forecast guard, which is about the period it describes
     }
     if (has(patch, "amount")) {
       const amount = Number(patch.amount);
       if (!Number.isFinite(amount) || amount <= 0) throw invalidArgument("amount must be a positive number");
       set.amount = round2(amount);
       set.alertLevel = 0; // changing the cap re-arms alerts
+      set.projectionAlertedAt = null; // raising a cap can un-breach a forecast, so the warning must be re-earnable
     }
     if (has(patch, "recurring")) set.recurring = !!patch.recurring;
     return set;
@@ -403,15 +463,27 @@ export async function openRecurringBudgetPeriods(deps: Deps, now: Date = new Dat
 }
 
 // ---- Budget alerts (daily cron) -------------------------------------------------------------------------
-// For each active budget whose spend crosses a configured threshold higher than the highest already alerted
-// (`alertLevel`), emit `expense.budgetThreshold` (delivery is left to automation rules) and raise the guard so
-// the same level fires once. Thresholds default to 80% and 100%. Returns the count of alerts fired.
-export async function checkBudgetThresholds(deps: Deps): Promise<number> {
+// Two warnings off ONE expenses read, because they are the same arithmetic asked in opposite directions and
+// splitting them into two sweeps would double the read this module works hardest to keep singular.
+//
+//   BACKWARDS - `expense.budgetThreshold`. Spend has crossed a configured percentage of the cap higher than
+//     the highest already alerted (`alertLevel`). True, and late: at 100% the money is gone.
+//   FORWARDS - `expense.budgetProjectedBreach`. The rate the period has spent at so far lands it over the cap
+//     by period end (`projectBudget`, which returns null for everything it cannot honestly extrapolate).
+//     Guarded by `projectionAlertedAt` so it says so once per period rather than every night the forecast
+//     stays bad.
+//
+// The two are INDEPENDENT. A cap forecast over in week one has not crossed any threshold yet, and a cap that
+// crosses 80% in a quiet month may be forecast to land inside its cap; neither guard may suppress the other,
+// which is why each budget is offered both checks and `continue` appears in neither.
+//
+// Returns the total number of alerts fired, of either kind. `now` is injectable because a forecast is a
+// statement about a moment.
+export async function checkBudgetThresholds(deps: Deps, now: Date = new Date()): Promise<number> {
   const settings = await getSettingValue<{ budget_alert_thresholds?: number[] }>(deps, "expenses", {});
   const thresholds = (settings.budget_alert_thresholds && settings.budget_alert_thresholds.length ? settings.budget_alert_thresholds : [80, 100])
     .filter((t) => Number.isFinite(t) && t > 0)
     .sort((a, b) => a - b);
-  if (!thresholds.length) return 0;
   const budgets = visibleByDelete(await deps.db.select().from(schema.expenseBudgets), false);
   // One expenses read for every budget in the org, not one per budget: this sweep sees the whole collection,
   // so per-row derivation was the worst offender of the lot.
@@ -419,14 +491,26 @@ export async function checkBudgetThresholds(deps: Deps): Promise<number> {
   let fired = 0;
   for (const b of budgets) {
     const spent = spends.get(b.uuid)?.spent ?? 0;
+
+    // Backwards: a threshold already crossed.
     const pct = b.amount > 0 ? (spent / b.amount) * 100 : 0;
     const crossed = thresholds.filter((t) => pct >= t);
     const highest = crossed.length ? crossed[crossed.length - 1]! : 0;
-    if (highest <= b.alertLevel) continue;
-    await deps.db.update(schema.expenseBudgets).set({ alertLevel: highest, updatedAt: new Date() }).where(eq(schema.expenseBudgets.uuid, b.uuid));
-    await emitEvent(deps, null, "expense.budgetThreshold", { subject: `expense-budgets/${b.uuid}`, payload: { level: highest, periodKey: b.periodKey, spent: round2(spent), budget: b.amount } });
-    await audit(deps, "system", "expense_budget.alert", "expense-budgets", b.uuid, { level: highest, spent: round2(spent) });
-    fired++;
+    if (highest > b.alertLevel) {
+      await deps.db.update(schema.expenseBudgets).set({ alertLevel: highest, updatedAt: now }).where(eq(schema.expenseBudgets.uuid, b.uuid));
+      await emitEvent(deps, null, "expense.budgetThreshold", { subject: `expense-budgets/${b.uuid}`, payload: { level: highest, periodKey: b.periodKey, spent: round2(spent), budget: b.amount } });
+      await audit(deps, "system", "expense_budget.alert", "expense-budgets", b.uuid, { level: highest, spent: round2(spent) });
+      fired++;
+    }
+
+    // Forwards: a breach the rate makes inevitable but the spend has not reached.
+    const projection = budgetProjection(b, spent, now.getTime());
+    if (projection && projection.projectedOverBy > 0 && !b.projectionAlertedAt) {
+      await deps.db.update(schema.expenseBudgets).set({ projectionAlertedAt: now, updatedAt: now }).where(eq(schema.expenseBudgets.uuid, b.uuid));
+      await emitEvent(deps, null, "expense.budgetProjectedBreach", { subject: `expense-budgets/${b.uuid}`, payload: { periodKey: b.periodKey, spent: round2(spent), projected: projection.projected, budget: b.amount } });
+      await audit(deps, "system", "expense_budget.projected_breach", "expense-budgets", b.uuid, { spent: round2(spent), projected: projection.projected, elapsed: projection.elapsed });
+      fired++;
+    }
   }
   return fired;
 }

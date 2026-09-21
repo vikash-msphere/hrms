@@ -181,6 +181,25 @@ describe("the catalogue only offers what the caller may list", () => {
     const tooDeep = await buildCatalogue(deps, "employees", listable, ["manager_id", "manager_id", "manager_id", "manager_id", "manager_id"]);
     expect(tooDeep.fields).toEqual([]);
   });
+
+  it("carries the trail a field sits under, so a header can be qualified from it", async () => {
+    await seed();
+    const listable = new Set(TABLE_SOURCE_COLLECTIONS);
+    // The picker files a field under the node it came from, so at the base the plain name is the whole story.
+    const base = await buildCatalogue(deps, "employees", listable);
+    expect(base.fields.find((f) => f.key === "first_name")!.trail).toBeUndefined();
+    const dept = await buildCatalogue(deps, "employees", listable, ["department_id"]);
+    const deptName = dept.fields.find((f) => f.key === "department_id.name")!;
+    expect(deptName.trail).toEqual(["Department"]);
+    // A department IS its name, so a header may collapse to the link ("Department" over "Engineering").
+    expect(deptName.nodeName).toBe(true);
+    expect(dept.fields.find((f) => f.key === "department_id.disabled")!.nodeName).toBeUndefined();
+    const deep = await buildCatalogue(deps, "employees", listable, ["manager_id", "department_id"]);
+    expect(deep.fields.find((f) => f.key === "manager_id.department_id.name")!.trail).toEqual(["Manager", "Department"]);
+    // A per-employee source hanging off a linked node carries the same trail as that node's own columns.
+    const mgr = await buildCatalogue(deps, "employees", listable, ["manager_id"]);
+    expect(mgr.fields.find((f) => f.key === "manager_id.@personal.personal_email")!.trail).toEqual(["Manager"]);
+  });
 });
 
 describe("running a grid", () => {
@@ -195,6 +214,44 @@ describe("running a grid", () => {
     expect(ada.cells["@personal.personal_email"]).toBe("ada@personal.example");
     expect(ada.cells["@comp.ctc_annual"]).toBe(1200000);
     expect(ada.cells["department_id.name"]).toBe("Engineering");
+  });
+
+  it("names the headers against each other: short where it can be, qualified where it must be", async () => {
+    await seed();
+    const run = async (columns: { field: string; label?: string }[]) =>
+      (await runTableView(deps, SUPER(), allScopes(), { base: "employees", columns }, { maxPageSize: 50 })).columns;
+    const header = (cols: Awaited<ReturnType<typeof run>>, key: string) => cols.find((c) => c.key === key)!.label;
+
+    // One linked name and nothing to confuse it with: the link is the header, and the ": Name" that would
+    // have been on the end of it says nothing the reader did not already know.
+    const one = await run([{ field: "first_name" }, { field: "department_id.name" }]);
+    expect(header(one, "first_name")).toBe("First name");
+    expect(header(one, "department_id.name")).toBe("Department");
+    // ...and the name it did not need to spell out is still one hover away.
+    expect(one.find((c) => c.key === "department_id.name")!.full_label).toBe("Department: Name");
+    expect(one.find((c) => c.key === "first_name")!.full_label).toBeUndefined();
+
+    // Add the manager's department and the two grow - each by exactly one hop, and nothing else moves.
+    const two = await run([{ field: "first_name" }, { field: "department_id.name" }, { field: "manager_id.department_id.name" }]);
+    expect(two.map((c) => c.label)).toEqual(["First name", "Department", "Manager -> Department"]);
+
+    // Two "First name"s, one of them the base's own: the linked one qualifies, the base's stays plain.
+    const clash = await run([{ field: "first_name" }, { field: "manager_id.first_name" }]);
+    expect(clash.map((c) => c.label)).toEqual(["First name", "Manager: First name"]);
+
+    // The author's own header is never rewritten, and the rest are named around it.
+    const named = await run([{ field: "first_name" }, { field: "manager_id.first_name", label: "Reports to" }]);
+    expect(named.map((c) => c.label)).toEqual(["First name", "Reports to"]);
+  });
+
+  it("keeps the whole trail one hover away from a header it shortened", async () => {
+    await seed();
+    const spec = { base: "employees", columns: [{ field: "manager_id.department_id.name" }] };
+    const [col] = (await runTableView(deps, SUPER(), allScopes(), spec, { maxPageSize: 50 })).columns;
+    // Alone in the grid it is just "Department"; what that is the department OF is on the tooltip rather
+    // than in the header of every row.
+    expect(col!.label).toBe("Department");
+    expect(col!.full_label).toBe("Manager -> Department: Name");
   });
 
   it("does not publish a SOFT-DELETED row through a link", async () => {

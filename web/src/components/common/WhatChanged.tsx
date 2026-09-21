@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { ArrowDown, ArrowUp, Sparkles, TrendingUp } from "lucide-react";
 import { invoke } from "@/api";
-import { cn } from "@/lib/utils";
+import { cn, formatMoney } from "@/lib/utils";
+import { useOrg, currencyDecimals } from "@/lib/org";
 import { formatMetric } from "@/lib/analytics";
 import { Button } from "@/components/ui/button";
 import type { Finding } from "../../../../src/domain/narrate";
@@ -44,6 +45,9 @@ function toneOf(f: Finding): "good" | "bad" | null {
  * had to open in the first place.
  */
 export function WhatChanged({ from, to, department }: { from: string; to: string; department?: string }) {
+  // Same reason as TeamAnalytics: a money finding without the org's currency reads as a plain count.
+  const { org } = useOrg();
+  const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   const [state, setState] = useState<"shut" | "loading" | "ready" | "error">("shut");
   const [data, setData] = useState<Narration | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -111,12 +115,12 @@ export function WhatChanged({ from, to, department }: { from: string; to: string
                   <li key={f.key} className="flex items-baseline justify-between gap-3 text-sm">
                     <span className="min-w-0 truncate text-muted-foreground">{f.label}</span>
                     <span className="flex shrink-0 items-baseline gap-1.5 tabular-nums">
-                      <span className="text-muted-foreground">{formatMetric(f.previous, f.unit)}</span>
+                      <span className="text-muted-foreground">{formatMetric(f.previous, f.unit, money)}</span>
                       {f.movement === "up"
                         ? <ArrowUp className="h-3 w-3 self-center" />
                         : <ArrowDown className="h-3 w-3 self-center" />}
                       <span className={cn("font-medium", tone === "good" && "text-success", tone === "bad" && "text-destructive")}>
-                        {formatMetric(f.current, f.unit)}
+                        {formatMetric(f.current, f.unit, money)}
                       </span>
                       {f.changePct !== null && (
                         <span className="text-xs text-muted-foreground">

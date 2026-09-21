@@ -17,7 +17,13 @@ import { esiEmployerContribution } from "./statutory";
 // them back out of a display label or reverse-derive them from a rounded amount: `units` is the quantity the
 // amount was priced from (loss-of-pay day-units today), and `basis` the wage a statutory line was computed on
 // (PF wages for EPF/EDLI/administration, ESI wages for ESI). The statutory register and the PF ECR report both.
-export type Line = { code: string; name: string; kind: "earning" | "deduction" | "employer_contribution" | "perquisite"; amount: number; taxable?: boolean; aboveCtc?: boolean; units?: number; basis?: number };
+export type Line = { code: string; name: string; kind: "earning" | "deduction" | "employer_contribution" | "perquisite"; amount: number; taxable?: boolean; aboveCtc?: boolean; units?: number; basis?: number; parts?: LinePart[] };
+
+/** What a single line is made of, where the lump on its own cannot be checked by the person receiving it.
+ *  Used by salary arrears today: one figure covering four months tells an employee nothing they can verify,
+ *  and the months are known. `parts` NEVER re-enter the arithmetic - `computeRunItem` reads `amount` and
+ *  nothing else - so a breakdown that failed to sum could only ever be a display fault, never a pay fault. */
+export type LinePart = { label: string; amount: number };
 
 import { round2 } from "./money";
 
@@ -96,8 +102,26 @@ const liveComponent = (c: CtcComponent) => !c.disabled && !c.deleteTime && !!c.r
 // the PF ECR, the loss-of-pay normalisation, the payout rounding line), so a plain pay component must never be
 // able to mint one just by being named "PT" or "LOP".
 const RESERVED_LINE_CODES = new Set([
-  "BASIC", "SPECIAL", "LOP", "ENCASH", "BONUS", "OT", "ARREARS", "REIMB",
+  "BASIC", "SPECIAL", "LOP", "LOPADJ", "ENCASH", "BONUS", "OT", "ARREARS", "REIMB",
   "EPF", "ESI", "PT", "TDS", "PERQ_LOAN", "LOAN", "ROUND",
+]);
+
+/**
+ * Earning codes that are a ONE-OFF rather than part of the monthly wage.
+ *
+ * ONE LIST, EXPORTED, because the question it answers - "what was this person's regular monthly rate in that
+ * period" - is asked from more than one place and two answers would price two different figures for the same
+ * month. `services/compensation.ts` asks it to work out the wage a back-dated revision owes arrears on;
+ * `services/lopAdjustments.ts` asks it to reconstruct the daily rate a closed period docked at. It lived in
+ * the first of those as a private const and was copied into the second, where the copy immediately gained
+ * `LOPADJ` and the original did not - which would have let a month carrying a loss-of-pay correction report
+ * an inflated regular wage and price the next arrears off it.
+ *
+ * `LOP` is deliberately ABSENT: a loss-of-pay line is a negative earning that reduces the regular wage that
+ * period actually paid, so it belongs in the sum rather than excluded from it.
+ */
+export const ONE_OFF_EARNING_CODES: ReadonlySet<string> = new Set([
+  "BONUS", "ENCASH", "OT", "ARREARS", "REIMB", "ROUND", "LOPADJ",
 ]);
 
 // The line code for an ordinary (non-statutory) pay component. Derived from the component name so it is stable

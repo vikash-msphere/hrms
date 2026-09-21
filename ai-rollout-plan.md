@@ -35,6 +35,11 @@ works", and it is the cheapest way to learn whether the prompts and the estimate
 | 5 | Natural language to a grid spec | The catalogue is a closed set, so an invented field key matches nothing and is reported rather than rendered |
 | 6 | Narrated team analytics | Detection is arithmetic. The model is handed movements already found, and a sentence containing a number that was not in them is discarded |
 | 3 | Moderation queue for the public walls | The model can only add a queue item. Hiding a post is a separate act by a person, through a capability nobody holds by default, and it is reversible |
+| 2 | Board task triage, flow forecast and the nightly duplicate sweep | No generation. Delivered work votes; the movement log answers how long a column takes; the sweep writes a suggestion and never touches a card |
+| 2 | Goal overlap and alignment, and the goal a card serves | The index is asked which records read alike; the ROWS are re-read under the caller's own list scope, so a goal they could not list is never named |
+| 3 | A measure proposed for a goal that has none | The model sees the goal's own title and description, answers in exactly three nullable fields, and the owner accepts them one at a time |
+| 6 | Board flow narration | Detection is arithmetic over the board's own movement log; a sentence containing a figure that was not in the findings is discarded |
+| - | Review evidence pack, 360 nominees, cycle chase, draft check, calibration note | NO MODEL AT ALL. Queries, joins and a lexicon - which is what the allocation makes the right answer for the review surface, and what keeps it clear of Annex III |
 
 ### Where things live
 
@@ -47,6 +52,13 @@ works", and it is the cheapest way to learn whether the prompts and the estimate
 - `src/services/searchEmbed.ts` - the reconciling drain.
 - `src/services/globalSearch.ts` - hybrid retrieval and RRF fusion.
 - `src/services/ticketTriage.ts`, `src/services/aiDraft.ts`, `src/services/resumeExtract.ts` - the features.
+- `src/services/cardTriage.ts`, `src/services/cardFlow.ts`, `src/services/cardDuplicateSweep.ts` - the board.
+- `src/services/goalSimilar.ts`, `src/services/goalMeasure.ts` - the goals.
+- `src/services/boardNarrate.ts` - the board's own narration, next to `analyticsNarrate.ts`.
+- `src/services/reviewEvidence.ts`, `src/services/reviewCollaborators.ts` - the review surface, neither of
+  which calls a model: `reviews` stays on `NEVER_TO_MODEL` and these are queries under the caller's scope.
+- `web/src/lib/reviewDraftCheck.ts`, `web/src/lib/calibrationNote.ts` - the two review aids that run entirely
+  in the browser, so the text being checked never leaves the page.
 - `src/domain/moderation.ts` - what may be scanned, the hazard taxonomy, and the strict verdict parse.
 - `src/services/moderation.ts` - the scan drain, the queue, and the only code that hides anything.
 - `web/src/pages/Moderation.tsx` - the moderator's queue.

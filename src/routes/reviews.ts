@@ -1,11 +1,14 @@
 import { z } from "zod";
-import { inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { collectionRoutes } from "../http/collectionRoute";
 import { contentDisposition } from "../http/contentDisposition";
 import { listReviews, submitSelf, submitManager, acknowledgeReview, skipReviewStage, nudgeReview, renderReviewPdf, goalsForReviews, attainmentTrend, assignReviewer } from "../services/reviews";
 import { nominateFeedback, suggestFeedback, feedbackForReviews } from "../services/reviewFeedback";
+import { reviewEvidenceFor } from "../services/reviewEvidence";
+import { collaboratorsFor } from "../services/reviewCollaborators";
+import { notFound } from "../lib/errors";
 import { getSettingValue } from "../services/settings";
 import { DEFAULT_PERFORMANCE, competenciesForCycle, type PerformanceFramework } from "../domain/performance";
 import { toReviewResource } from "../http/serialize";
@@ -110,6 +113,39 @@ export const reviews = collectionRoutes({
     acknowledge: { schema: acknowledgeSchema, run: (deps, user, id, body) => acknowledgeReview(deps, user, id, body.comment) },
     skipStage: { run: (deps, user, id) => skipReviewStage(deps, user, id) },
     nudge: { run: (deps, user, id) => nudgeReview(deps, user, id) },
+    // What this person actually did in the cycle, gathered from the four places that already record it.
+    //
+    // `raw`, because there is no review row to serialize: the answer is a pack of OTHER records, each a link.
+    // No model is called and nothing is written, so there is no feature flag and no fallback - the only thing
+    // that can make a section empty is the caller not being allowed to list that collection, which is decided
+    // per collection by the middleware (MULTI_SCOPE_VERBS) and arrives here as `evidenceScopes`.
+    evidence: {
+      raw: async (c, id) => {
+        const deps = c.get("deps");
+        const row = (await deps.db
+          .select({ uuid: schema.reviews.uuid, employeeId: schema.reviews.employeeId, cycleId: schema.reviews.cycleId, createdAt: schema.reviews.createdAt })
+          .from(schema.reviews)
+          .where(eq(schema.reviews.uuid, id))
+          .limit(1))[0];
+        if (!row) throw notFound("review not found");
+        return c.json({ evidence: await reviewEvidenceFor(deps, c.get("evidenceScopes") ?? new Map(), row) });
+      },
+    },
+    // Who saw this person's work, from the record of who worked with them. Feeds the 360 picker, which was
+    // otherwise a blank list of the whole directory answered from memory. Nothing is written: nominating is
+    // still a separate act through `:nominate`.
+    collaborators: {
+      raw: async (c, id) => {
+        const deps = c.get("deps");
+        const row = (await deps.db
+          .select({ uuid: schema.reviews.uuid, employeeId: schema.reviews.employeeId, cycleId: schema.reviews.cycleId, createdAt: schema.reviews.createdAt })
+          .from(schema.reviews)
+          .where(eq(schema.reviews.uuid, id))
+          .limit(1))[0];
+        if (!row) throw notFound("review not found");
+        return c.json({ collaborators: await collaboratorsFor(deps, c.get("evidenceScopes") ?? new Map(), row) });
+      },
+    },
     pdf: {
       raw: async (c, id) => {
         // `?variant=print` renders it on the letterhead's print page; nothing is filed either way.

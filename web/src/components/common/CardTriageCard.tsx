@@ -38,7 +38,7 @@ export function CardTriageCard({ cardId, can, onUsePriority, onOpenCard }: {
   async function run() {
     setBusy(true);
     try {
-      const res = await invoke<{ triage: Triage | null }>("cards", "triage", cardId);
+      const res = await invoke<{ triage: Triage | null }>(`cards/${cardId}`, "triage");
       setTriage(res.triage);
     } catch {
       // Silent, deliberately. This is an enrichment on a dialog somebody opened to do something else; a red
@@ -106,6 +106,30 @@ export function CardTriageCard({ cardId, can, onUsePriority, onOpenCard }: {
         </div>
       )}
 
+      {/* What it TOOK, which is the question the estimate field pretends to answer. Measured from the
+          neighbours' own start-to-delivery, so it is this board's history rather than a guess. */}
+      {triage.took && (
+        <div className="flex flex-wrap items-baseline gap-2 text-sm">
+          <span className="text-muted-foreground">Took</span>
+          <span className="font-medium">{triage.took.p50}d</span>
+          <span className="text-xs text-muted-foreground">p85 {triage.took.p85}d · {triage.took.count} similar</span>
+        </div>
+      )}
+
+      {/* What stopped work like this last time. The reasons are the useful half: "waiting on vendor access"
+          is something somebody can go and sort out before starting. */}
+      {triage.blocked && triage.blocked.cards > 0 && (
+        <div className="space-y-0.5 text-sm">
+          <p>
+            <span className="text-warning">{triage.blocked.cards} of {triage.blocked.of}</span>{" "}
+            <span className="text-muted-foreground">comparable tasks were blocked at some point</span>
+          </p>
+          {triage.blocked.reasons.length > 0 && (
+            <p className="text-xs text-muted-foreground">{triage.blocked.reasons.join(" · ")}</p>
+          )}
+        </div>
+      )}
+
       {triage.basis.length > 0 && (
         <details className="text-xs">
           <summary className="cursor-pointer text-muted-foreground">Based on {triage.basis.length} finished task{triage.basis.length === 1 ? "" : "s"}</summary>
@@ -131,4 +155,6 @@ type Triage = {
   size: Vote | null;
   basis: { path: string; title: string; score: number }[];
   duplicates: { path: string; title: string; score: number; column: string }[];
+  took?: { p50: number; p85: number; count: number };
+  blocked?: { cards: number; of: number; reasons: string[] };
 };

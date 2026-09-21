@@ -62,10 +62,34 @@ export function employmentFraction(opts: {
   return total <= 0 ? 1 : Math.min(1, calDays(from, to) / total);
 }
 
+// Formatters, kept per timezone instead of built per call.
+//
+// CONSTRUCTING an Intl.DateTimeFormat resolves locale and timezone data and costs roughly thirty times what
+// formatting with an existing one does; `.format` itself is cheap. Both helpers below are called in loops -
+// the loss-of-pay walk prices every employee across every day of the period (services/payroll.ts), the
+// comp-off and regularization scans filter whole session lists, and `orgYear.covers` runs once per row - so a
+// 400-person run with LOP on was building the same formatter some twelve thousand times per build.
+//
+// An org has ONE timezone, so this map holds one or two entries in practice; it is keyed by tz rather than
+// capped because the key space is the set of zones an org has been configured with, not anything a caller can
+// grow. Identical output either way - a formatter is immutable once built, and the same (locale, tz, options)
+// triple always formats the same instant the same way.
+const DAY_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+const MINUTE_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+
+function dayFormatter(tz: string): Intl.DateTimeFormat {
+  let f = DAY_FORMATTERS.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+    DAY_FORMATTERS.set(tz, f);
+  }
+  return f;
+}
+
 // Calendar day "YYYY-MM-DD" of an INSTANT, read in the org timezone. For a moment that happened - a punch, an
 // audit stamp, `now`. NOT for a date-only column: see utcDay.
 export function localDay(ms: number, tz: string): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
+  return dayFormatter(tz).format(new Date(ms));
 }
 
 // Calendar day "YYYY-MM-DD" of a DATE-ONLY column.
@@ -138,7 +162,14 @@ export function workingDaysInRange(startYmd: string, endYmd: string, workDays: n
 // minutes on its first day (eventCreditByDay below), and the day reads as unworked. Naming the cycle removes
 // the dependency on which resolution the runtime's ICU happens to make.
 export function localMinutes(ms: number, tz: string): number {
-  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(ms));
+  let f = MINUTE_FORMATTERS.get(tz);
+  if (!f) {
+    // `hourCycle: "h23"` is load-bearing (see the note above) and is part of the memo key by construction:
+    // the map holds formatters built here and nowhere else.
+    f = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+    MINUTE_FORMATTERS.set(tz, f);
+  }
+  const parts = f.formatToParts(new Date(ms));
   const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
   const m = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
   return h * 60 + m;

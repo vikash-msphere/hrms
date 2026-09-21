@@ -13,6 +13,7 @@ import { getSettingValue } from "./settings";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig, localDay } from "../domain/attendance";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
+import { restateLopForDay } from "./payroll";
 
 // Attendance regularization requests: an employee asks to correct a whole day's clock times, submitting the
 // COMPLETE intended set of in/out pairs for the day. A manager (own dept) or HR approves; on approval the
@@ -150,6 +151,12 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
     await notify(deps, { recipient: row.employeeId, type: `regularization.${to.toLowerCase()}`, title: `Regularization ${to.toLowerCase()}`, body: `Your attendance regularization was ${to.toLowerCase()}.`, link: "attendance", subject: `attendance-regularizations/${id}`, actorId: actor.employeeId });
   }
   if (to === "APPROVED") await emitEvent(deps, actor, "attendanceRegularization.approved", { subject: `attendance-regularizations/${id}`, employeeId: row.employeeId, payload: { date: new Date(row.date).toISOString() } });
+  // A regularization fixes the punches for one day, which can change that day's loss of pay. If the day sits
+  // in a period whose run has already published, the correction is carried into the next run rather than
+  // silently disagreeing with a payslip nobody can rebuild. Best-effort: the attendance fact is already
+  // recorded and correct, and failing the decision because a correction could not be raised would refuse a
+  // true statement about somebody's attendance to protect a number.
+  await restateLopForDay(deps, row.employeeId, +new Date(row.date));
   return updated;
 }
 

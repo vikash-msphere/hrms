@@ -331,7 +331,9 @@ describe("copying one subject's rules onto another", () => {
   });
 
   it("refuses the role the caller is using, and a copy onto itself", async () => {
-    await expect(cloneAccessRules(deps, ana(), { from: employee(), to: { subject_kind: "role", subject: "hr_admin" } })).rejects.toThrow(/role you are using/);
+    // The refusal now NAMES the role, because it covers every role the caller holds rather than only the one
+    // on their profile - "the role you are using" was ambiguous the moment there could be more than one.
+    await expect(cloneAccessRules(deps, ana(), { from: employee(), to: { subject_kind: "role", subject: "hr_admin" } })).rejects.toThrow(/"hr_admin".*you hold that role/);
     await expect(cloneAccessRules(deps, ana(), { from: employee(), to: employee() })).rejects.toThrow(/different subjects/);
     await expect(cloneAccessRules(deps, ana(), { from: employee(), to: { subject_kind: "role", subject: "nope" } })).rejects.toThrow(/target role not found/);
   });
@@ -371,6 +373,55 @@ describe("a rule author cannot widen themselves", () => {
     const from = { subject_kind: "role", subject: "employee" };
     await expect(cloneAccessRules(deps, ana(), { from, to: { subject_kind: "user", subject: `users/${ids.ana}` } })).rejects.toThrow(/rules for your own user/);
     await expect(cloneAccessRules(deps, ana(), { from, to: { subject_kind: "role", subject: "everyone" } })).rejects.toThrow(/'everyone' role includes you/);
+  });
+
+  // THE FOURTH SUBJECT, and the one the block above did not know about. `loadAuthority` merges a grant for
+  // EVERY role the caller holds - the primary plus each secondary from `user_roles` - so a rule written for a
+  // role somebody holds as their SECOND one feeds their grant exactly as their primary's does. The guard
+  // compared against `actor.role`, which is only the first, so this was a one-request self-grant for any ACL
+  // admin who also held a second role: `payroll_admin` gets `compensation` at admin, and they are using it on
+  // the next request.
+  describe("including a role they hold as a SECOND role", () => {
+    // Ana administers access as `hr_admin` and also holds `payroll_admin`. Both are in her grant.
+    const anaTwoRoles = () => ({ ...ana(), roles: ["hr_admin", "payroll_admin"] }) as AppUser;
+    const payrollRule = (extra: Record<string, unknown> = {}) =>
+      ({ subject_kind: "role", subject: "payroll_admin", collection: "compensation", scope: "all", level: "admin", ...extra });
+
+    beforeEach(async () => {
+      await deps.db.insert(schema.roles).values({ name: "payroll_admin", label: "Payroll" }).onConflictDoNothing();
+    });
+
+    it("refuses a rule written for it", async () => {
+      await expect(createAccessRule(deps, anaTwoRoles(), payrollRule())).rejects.toThrow(/you hold that role/);
+      expect(await deps.db.select().from(schema.accessRules)).toHaveLength(0);
+    });
+
+    it("still allows a rule for a role they do NOT hold", async () => {
+      const rule = await createAccessRule(deps, anaTwoRoles(), { ...payrollRule(), subject: "employee" });
+      expect(rule.subject).toBe("employee");
+    });
+
+    it("refuses the clone that writes the same widening in bulk", async () => {
+      await expect(cloneAccessRules(deps, anaTwoRoles(), {
+        from: { subject_kind: "role", subject: "employee" },
+        to: { subject_kind: "role", subject: "payroll_admin" },
+      })).rejects.toThrow(/you hold that role/);
+    });
+
+    it("refuses DELETING one of its rules - removing a deny widens just as adding an allow does", async () => {
+      const deny = await createAccessRule(deps, bo(), { ...payrollRule(), effect: "deny", level: undefined });
+      await expect(deleteAccessRule(deps, anaTwoRoles(), deny.uuid)).rejects.toThrow(/you hold that role/);
+      expect(await deps.db.select().from(schema.accessRules)).toHaveLength(1);
+    });
+
+    it("refuses APPROVING one of its rules, however it got into the queue", async () => {
+      await setApproval(true);
+      // Written by somebody else, so the four-eyes rule about the requester is satisfied and this is the only
+      // thing standing between Ana and a grant to a role she is using.
+      const pending = await createAccessRule(deps, bo(), payrollRule());
+      expect(pending.status).toBe("pending");
+      await expect(decideAccessRule(deps, anaTwoRoles(), pending.uuid, "approve")).rejects.toThrow(/you hold that role/);
+    });
   });
 });
 

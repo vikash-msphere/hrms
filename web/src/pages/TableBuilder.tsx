@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { api, create, get, patch, remove } from "@/api";
 import { navigate, useRoute, setQueryParams } from "@/router";
-import { cn, formatDate, formatMonthYear, idOf } from "@/lib/utils";
+import { cn, formatDate, formatMonthYear, humanize, idOf } from "@/lib/utils";
 import { useMoney } from "@/lib/org";
 import { usePermission } from "@/lib/perm";
 import { useCollection } from "@/hooks/useCollection";
@@ -175,9 +175,21 @@ const VALUELESS: readonly FilterOp[] = ["empty", "not_empty"];
 
 const opLabel = (kind: TableFieldKind, op: FilterOp) => OPS_BY_KIND[kind].find((o) => o.op === op)?.label ?? op;
 
+/**
+ * A last-resort name for a column NOTHING has described: a field the reader does not get, on a table they
+ * are looking at anyway (the definition is shared; the columns it resolves to are not). Read out of the
+ * storage key itself - `manager_id.@personal.personal_email` is "Manager -> Personal: Personal email" -
+ * because a key is a name with the punctuation left in, and printing it raw asks the reader to parse it.
+ */
+function nameFromKey(key: string): string {
+  const parts = key.split(".").map((seg) => humanize(seg.replace(/^@/, "").replace(/_id$/, "")));
+  const leaf = parts[parts.length - 1]!;
+  return parts.length > 1 ? `${parts.slice(0, -1).join(" -> ")}: ${leaf}` : leaf;
+}
+
 /** What a field is CALLED, from the run's own columns - falling back to the key for a filter on a column the
- *  reader does not get (the definition is shared; the columns it resolves to are not). */
-const labelOfField = (field: string, cols: TableRunColumn[]) => cols.find((c) => c.key === field)?.label ?? field;
+ *  reader does not get. */
+const labelOfField = (field: string, cols: TableRunColumn[]) => cols.find((c) => c.key === field)?.label ?? nameFromKey(field);
 const kindOfField = (field: string, cols: TableRunColumn[]): TableFieldKind => cols.find((c) => c.key === field)?.kind ?? "text";
 
 /** One saved filter as a sentence: "Status is any of open, blocked", "Annual CTC is at least 1200000". */
@@ -706,6 +718,9 @@ function OneTable({ id }: { id: string }) {
     return result.columns.map((col) => ({
       id: col.key,
       header: col.label,
+      // The header is as short as this grid's own columns allow; the trail that got to the column is on hover
+      // for the reader who has to ask "whose?" once.
+      headerTitle: col.full_label,
       align: col.kind === "money" || col.kind === "number" ? ("right" as const) : undefined,
       // The accessor is the RAW value: it is what sorts, filters and exports, so a money column exports as a
       // number rather than as "₹12,00,000" that no spreadsheet can add up.
@@ -1144,6 +1159,7 @@ function OneTable({ id }: { id: string }) {
           base={view.base}
           catalogue={catalogue}
           selected={chosen}
+          headers={cols}
           onSave={saveColumns}
           canExport={canExport}
         />
@@ -1487,7 +1503,7 @@ function FilterValue({ kind, op, value, onChange }: {
 
 // ---- The field picker -----------------------------------------------------------------------------------
 
-function ColumnPicker({ open, onClose, base, catalogue, selected, onSave, canExport }: {
+function ColumnPicker({ open, onClose, base, catalogue, selected, headers, onSave, canExport }: {
   open: boolean;
   onClose: () => void;
   /**
@@ -1500,6 +1516,8 @@ function ColumnPicker({ open, onClose, base, catalogue, selected, onSave, canExp
   catalogue: TableCatalogue;
   /** The table's columns, IN ORDER, each with the header its author gave it. */
   selected: ChosenColumn[];
+  /** What the grid drew, so the chosen list can name a column the way the reader has just seen it named. */
+  headers: TableRunColumn[];
   onSave: (columns: ChosenColumn[]) => Promise<void>;
   canExport: boolean;
 }) {
@@ -1512,9 +1530,10 @@ function ColumnPicker({ open, onClose, base, catalogue, selected, onSave, canExp
   const [trail, setTrail] = useState<TableLink[]>([]);
   const [node, setNode] = useState<TableCatalogue>(catalogue);
   const [loadingNode, setLoadingNode] = useState(false);
-  // Labels for keys that came from a node this session is no longer standing on, so a chip keeps its name
-  // after the picker has walked somewhere else.
-  const [labels, setLabels] = useState<Record<string, string>>({});
+  // What each chosen column is CALLED, by key: `short` is the header it has on the grid, `full` the whole
+  // trail behind it. Held here rather than looked up, so a column keeps its name after the picker has walked
+  // somewhere else - and so a saved table's columns have names before it has walked anywhere at all.
+  const [names, setNames] = useState<Record<string, { short: string; full: string }>>({});
 
   // Start over when the picker OPENS, or when the table's base changes under it - and on nothing else. Keyed
   // on the identity of `selected` and `catalogue` instead, this fired on every parent render (the grid's rows
@@ -1553,11 +1572,29 @@ function ColumnPicker({ open, onClose, base, catalogue, selected, onSave, canExp
     if (!trail.length) setNode(catalogue);
   }, [catalogue, trail.length]);
 
-  // Remember every label this picker has seen, so a chip for a field two hops away still reads as a name.
+  // What the GRID calls each column, which is the first thing the chosen list should say. Browsing filled
+  // this in before, and only for the nodes somebody happened to walk: open a saved table with a column two
+  // hops out and the list showed `manager_id.department_id.name` - the storage key, in the one place whose
+  // job is to say what the table reads like. The running grid has already named every column it drew, so the
+  // list is told rather than left to find out, and the two agree word for word.
   useEffect(() => {
-    setLabels((l) => {
-      const next = { ...l };
-      for (const f of node.fields) next[f.key] = f.label;
+    setNames((n) => {
+      const next = { ...n };
+      for (const c of headers) next[c.key] = { short: c.label, full: c.full_label ?? c.label };
+      return next;
+    });
+  }, [headers]);
+
+  // ...and every label this picker itself has seen, for a column that was ticked a moment ago and has no
+  // header on the grid yet. The trail-QUALIFIED one both times: the list stands outside the node a field came
+  // from, where "Name" on its own says nothing about whose name it is.
+  useEffect(() => {
+    setNames((n) => {
+      const next = { ...n };
+      for (const f of node.fields) {
+        if (next[f.key]) continue; // the grid's own word for it wins - it is what the reader will see
+        next[f.key] = { short: f.column_label ?? f.label, full: f.column_label ?? f.label };
+      }
       return next;
     });
   }, [node]);
@@ -1687,27 +1724,40 @@ function ColumnPicker({ open, onClose, base, catalogue, selected, onSave, canExp
           {picked.length > 0 && (
             <div className="space-y-1">
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">On the table, in order</p>
-              {picked.map((col, i) => (
-                <div key={col.field} className="flex items-center gap-1 rounded-md border p-1.5">
-                  <GripVertical className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
-                  <Input
-                    value={col.label ?? ""}
-                    placeholder={labels[col.field] ?? col.field}
-                    aria-label={`Header for ${labels[col.field] ?? col.field}`}
-                    onChange={(e) => rename(i, e.target.value)}
-                    className="h-8 min-w-0 flex-1 border-0 bg-transparent px-1 shadow-none focus-visible:ring-1"
-                  />
-                  <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" disabled={i === 0} aria-label={`Move ${labels[col.field] ?? col.field} earlier`} onClick={() => move(i, -1)}>
-                    <ArrowUp className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" disabled={i === picked.length - 1} aria-label={`Move ${labels[col.field] ?? col.field} later`} onClick={() => move(i, 1)}>
-                    <ArrowDown className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" aria-label={`Remove ${labels[col.field] ?? col.field}`} onClick={() => toggle(col.field)}>
-                    <X className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-              ))}
+              {picked.map((col, i) => {
+                // Two names, and the row says both: the header the grid shows, in the box the author types
+                // over, and the trail that reaches the field underneath it. One of them is what the table
+                // reads like and the other is which field it IS, and a list that gave only one always gave
+                // the wrong one to somebody.
+                const named = names[col.field];
+                const short = named?.short ?? nameFromKey(col.field);
+                const full = named?.full ?? nameFromKey(col.field);
+                return (
+                  <div key={col.field} className="flex items-start gap-1 rounded-md border p-1.5">
+                    <GripVertical className="mt-1.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                    <div className="min-w-0 flex-1">
+                      <Input
+                        value={col.label ?? ""}
+                        placeholder={short}
+                        aria-label={`Header for ${full}`}
+                        onChange={(e) => rename(i, e.target.value)}
+                        className="h-8 w-full border-0 bg-transparent px-1 shadow-none focus-visible:ring-1"
+                      />
+                      {/* Only where it says something the header does not: a base column is its own trail. */}
+                      {full !== short && <p className="truncate px-1 text-xs text-muted-foreground" title={full}>{full}</p>}
+                    </div>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" disabled={i === 0} aria-label={`Move ${full} earlier`} onClick={() => move(i, -1)}>
+                      <ArrowUp className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" disabled={i === picked.length - 1} aria-label={`Move ${full} later`} onClick={() => move(i, 1)}>
+                      <ArrowDown className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" aria-label={`Remove ${full}`} onClick={() => toggle(col.field)}>
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                );
+              })}
             </div>
           )}
           {/* Where this record points. Following one is a join: its own fields, and its own links after that. */}

@@ -21,7 +21,7 @@
 
 /** The collections this surface reads. Handed to the middleware so each is scoped by the very decision its
  *  own list request would get - a collection the caller cannot list simply contributes nothing. */
-export const ATTENTION_COLLECTIONS = ["goals", "cards", "reviews"] as const;
+export const ATTENTION_COLLECTIONS = ["goals", "cards", "reviews", "review-feedback"] as const;
 
 /**
  * Why an item is on the list. The kind is what decides its rank and its wording, so it is a closed set rather
@@ -37,7 +37,9 @@ export type AttentionKind =
   /** A review is at a stage that is waiting on this person. */
   | "review_waiting"
   /** A card has sat in one column long enough that the board is lying about it being in flight. */
-  | "card_aged";
+  | "card_aged"
+  /** Somebody asked this person for 360 feedback and has not had an answer. */
+  | "feedback_requested";
 
 export type AttentionItem = {
   kind: AttentionKind;
@@ -60,8 +62,12 @@ export type AttentionItem = {
  * goal that is otherwise on track is worth a nudge, not the top of the list.
  */
 const SEVERITY: Record<AttentionKind, number> = {
-  goal_at_risk: 5,
-  review_waiting: 4,
+  goal_at_risk: 6,
+  review_waiting: 5,
+  // Below a review of one's own and above a goal merely behind: an unanswered feedback request is holding up
+  // somebody ELSE'S review, which is the property that decides this order, but it is minutes of work where a
+  // review is an afternoon's.
+  feedback_requested: 4,
   goal_behind: 3,
   card_aged: 2,
   goal_stale: 1,

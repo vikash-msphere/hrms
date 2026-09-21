@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "97b45e1d-2ddd-4329-9e92-7cedeb86352c",
+  "id": "89925bf2-2934-4b6a-be3c-84c12afb9cdf",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -4699,6 +4699,179 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "card_transactions": {
+      "name": "card_transactions",
+      "columns": {
+        "uuid": {
+          "name": "uuid",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "employee_id": {
+          "name": "employee_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "card_last4": {
+          "name": "card_last4",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "posted_on": {
+          "name": "posted_on",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "amount": {
+          "name": "amount",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "merchant": {
+          "name": "merchant",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "reference": {
+          "name": "reference",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "import_key": {
+          "name": "import_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expense_id": {
+          "name": "expense_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "match_confidence": {
+          "name": "match_confidence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "matched_at": {
+          "name": "matched_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "card_transactions_code_unique": {
+          "name": "card_transactions_code_unique",
+          "columns": [
+            "code"
+          ],
+          "isUnique": true
+        },
+        "card_transactions_page_idx": {
+          "name": "card_transactions_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
+        "card_txn_import_key_idx": {
+          "name": "card_txn_import_key_idx",
+          "columns": [
+            "import_key"
+          ],
+          "isUnique": true
+        },
+        "card_txn_emp_idx": {
+          "name": "card_txn_emp_idx",
+          "columns": [
+            "employee_id",
+            "posted_on"
+          ],
+          "isUnique": false
+        },
+        "card_txn_expense_idx": {
+          "name": "card_txn_expense_idx",
+          "columns": [
+            "expense_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "card_transactions_employee_id_employees_uuid_fk": {
+          "name": "card_transactions_employee_id_employees_uuid_fk",
+          "tableFrom": "card_transactions",
+          "tableTo": "employees",
+          "columnsFrom": [
+            "employee_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "card_transactions_expense_id_expenses_uuid_fk": {
+          "name": "card_transactions_expense_id_expenses_uuid_fk",
+          "tableFrom": "card_transactions",
+          "tableTo": "expenses",
+          "columnsFrom": [
+            "expense_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "card_watchers": {
       "name": "card_watchers",
       "columns": {
@@ -5646,6 +5819,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": 0
+        },
+        "arrears_periods_json": {
+          "name": "arrears_periods_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "arrears_paid_run_id": {
           "name": "arrears_paid_run_id",
@@ -7359,6 +7539,113 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "expense_allocations": {
+      "name": "expense_allocations",
+      "columns": {
+        "uuid": {
+          "name": "uuid",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expense_id": {
+          "name": "expense_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "department_id": {
+          "name": "department_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "category_id": {
+          "name": "category_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "amount": {
+          "name": "amount",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "exp_alloc_expense_idx": {
+          "name": "exp_alloc_expense_idx",
+          "columns": [
+            "expense_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "expense_allocations_expense_id_expenses_uuid_fk": {
+          "name": "expense_allocations_expense_id_expenses_uuid_fk",
+          "tableFrom": "expense_allocations",
+          "tableTo": "expenses",
+          "columnsFrom": [
+            "expense_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "expense_allocations_department_id_departments_uuid_fk": {
+          "name": "expense_allocations_department_id_departments_uuid_fk",
+          "tableFrom": "expense_allocations",
+          "tableTo": "departments",
+          "columnsFrom": [
+            "department_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "expense_allocations_category_id_expense_categories_uuid_fk": {
+          "name": "expense_allocations_category_id_expense_categories_uuid_fk",
+          "tableFrom": "expense_allocations",
+          "tableTo": "expense_categories",
+          "columnsFrom": [
+            "category_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "expense_budgets": {
       "name": "expense_budgets",
       "columns": {
@@ -7426,6 +7713,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": 0
+        },
+        "projection_alerted_at": {
+          "name": "projection_alerted_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "delete_time": {
           "name": "delete_time",
@@ -7541,6 +7835,34 @@
         "gl_code": {
           "name": "gl_code",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "rate_kind": {
+          "name": "rate_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "rate": {
+          "name": "rate",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "amount_cap": {
+          "name": "amount_cap",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "max_age_days": {
+          "name": "max_age_days",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -7664,6 +7986,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "quantity": {
+          "name": "quantity",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "tax_amount": {
           "name": "tax_amount",
           "type": "real",
@@ -7733,6 +8062,20 @@
         "decided_by": {
           "name": "decided_by",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "first_approved_by": {
+          "name": "first_approved_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "first_approved_at": {
+          "name": "first_approved_at",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -7950,6 +8293,19 @@
           "tableTo": "users",
           "columnsFrom": [
             "decided_by"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "expenses_first_approved_by_users_uuid_fk": {
+          "name": "expenses_first_approved_by_users_uuid_fk",
+          "tableFrom": "expenses",
+          "tableTo": "users",
+          "columnsFrom": [
+            "first_approved_by"
           ],
           "columnsTo": [
             "uuid"
@@ -9636,6 +9992,20 @@
           "notNull": false,
           "autoincrement": false
         },
+        "accrual_priced_start": {
+          "name": "accrual_priced_start",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "accrual_priced_end": {
+          "name": "accrual_priced_end",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "last_carry_forward_year": {
           "name": "last_carry_forward_year",
           "type": "text",
@@ -10515,6 +10885,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "reimbursement_id": {
+          "name": "reimbursement_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "amount": {
           "name": "amount",
           "type": "real",
@@ -10544,6 +10921,14 @@
             "run_id"
           ],
           "isUnique": false
+        },
+        "loan_repayment_claim_idx": {
+          "name": "loan_repayment_claim_idx",
+          "columns": [
+            "reimbursement_id"
+          ],
+          "isUnique": true,
+          "where": "\"loan_repayments\".\"reimbursement_id\" is not null"
         }
       },
       "foreignKeys": {
@@ -10566,6 +10951,19 @@
           "tableTo": "payroll_runs",
           "columnsFrom": [
             "run_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "loan_repayments_reimbursement_id_reimbursements_uuid_fk": {
+          "name": "loan_repayments_reimbursement_id_reimbursements_uuid_fk",
+          "tableFrom": "loan_repayments",
+          "tableTo": "reimbursements",
+          "columnsFrom": [
+            "reimbursement_id"
           ],
           "columnsTo": [
             "uuid"
@@ -10739,6 +11137,174 @@
           "tableTo": "users",
           "columnsFrom": [
             "decided_by"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "lop_adjustments": {
+      "name": "lop_adjustments",
+      "columns": {
+        "uuid": {
+          "name": "uuid",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "employee_id": {
+          "name": "employee_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "pay_period_id": {
+          "name": "pay_period_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "charged_units": {
+          "name": "charged_units",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "correct_units": {
+          "name": "correct_units",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "day_units": {
+          "name": "day_units",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "amount": {
+          "name": "amount",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "paid_run_id": {
+          "name": "paid_run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "paid_at": {
+          "name": "paid_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "lop_adjustments_code_unique": {
+          "name": "lop_adjustments_code_unique",
+          "columns": [
+            "code"
+          ],
+          "isUnique": true
+        },
+        "lop_adjustments_page_idx": {
+          "name": "lop_adjustments_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
+        "lopadj_emp_idx": {
+          "name": "lopadj_emp_idx",
+          "columns": [
+            "employee_id",
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
+        "lopadj_open_idx": {
+          "name": "lopadj_open_idx",
+          "columns": [
+            "employee_id",
+            "pay_period_id"
+          ],
+          "isUnique": true,
+          "where": "\"lop_adjustments\".\"paid_run_id\" is null"
+        }
+      },
+      "foreignKeys": {
+        "lop_adjustments_employee_id_employees_uuid_fk": {
+          "name": "lop_adjustments_employee_id_employees_uuid_fk",
+          "tableFrom": "lop_adjustments",
+          "tableTo": "employees",
+          "columnsFrom": [
+            "employee_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "lop_adjustments_pay_period_id_pay_periods_uuid_fk": {
+          "name": "lop_adjustments_pay_period_id_pay_periods_uuid_fk",
+          "tableFrom": "lop_adjustments",
+          "tableTo": "pay_periods",
+          "columnsFrom": [
+            "pay_period_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "lop_adjustments_paid_run_id_payroll_runs_uuid_fk": {
+          "name": "lop_adjustments_paid_run_id_payroll_runs_uuid_fk",
+          "tableFrom": "lop_adjustments",
+          "tableTo": "payroll_runs",
+          "columnsFrom": [
+            "paid_run_id"
           ],
           "columnsTo": [
             "uuid"
@@ -11916,6 +12482,13 @@
           "autoincrement": false,
           "default": true
         },
+        "gl_code": {
+          "name": "gl_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "delete_time": {
           "name": "delete_time",
           "type": "integer",
@@ -12140,6 +12713,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "input_cutoff_on": {
+          "name": "input_cutoff_on",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "delete_time": {
           "name": "delete_time",
           "type": "integer",
@@ -12203,6 +12783,125 @@
         }
       },
       "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "payroll_budgets": {
+      "name": "payroll_budgets",
+      "columns": {
+        "uuid": {
+          "name": "uuid",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "department_id": {
+          "name": "department_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "period_type": {
+          "name": "period_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "period_key": {
+          "name": "period_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "amount": {
+          "name": "amount",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "recurring": {
+          "name": "recurring",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "delete_time": {
+          "name": "delete_time",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "payroll_budgets_code_unique": {
+          "name": "payroll_budgets_code_unique",
+          "columns": [
+            "code"
+          ],
+          "isUnique": true
+        },
+        "payroll_budgets_page_idx": {
+          "name": "payroll_budgets_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
+        "payrollbudget_period_idx": {
+          "name": "payrollbudget_period_idx",
+          "columns": [
+            "period_type",
+            "period_key"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "payroll_budgets_department_id_departments_uuid_fk": {
+          "name": "payroll_budgets_department_id_departments_uuid_fk",
+          "tableFrom": "payroll_budgets",
+          "tableTo": "departments",
+          "columnsFrom": [
+            "department_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -12282,6 +12981,48 @@
           "notNull": true,
           "autoincrement": false
         },
+        "department_id": {
+          "name": "department_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "bank_account_hash": {
+          "name": "bank_account_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "payment_status": {
+          "name": "payment_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "payment_at": {
+          "name": "payment_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "payment_ref": {
+          "name": "payment_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "payment_reason": {
+          "name": "payment_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -12341,6 +13082,19 @@
           "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "payroll_run_items_department_id_departments_uuid_fk": {
+          "name": "payroll_run_items_department_id_departments_uuid_fk",
+          "tableFrom": "payroll_run_items",
+          "tableTo": "departments",
+          "columnsFrom": [
+            "department_id"
           ],
           "columnsTo": [
             "uuid"
@@ -12644,6 +13398,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": 0
+        },
+        "first_opened_at": {
+          "name": "first_opened_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "created_at": {
           "name": "created_at",
@@ -13838,6 +14599,21 @@
           "notNull": false,
           "autoincrement": false
         },
+        "advance_id": {
+          "name": "advance_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "advance_settled": {
+          "name": "advance_settled",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
         "paid_run_id": {
           "name": "paid_run_id",
           "type": "text",
@@ -13933,6 +14709,19 @@
           "tableTo": "users",
           "columnsFrom": [
             "decided_by"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "reimbursements_advance_id_loans_uuid_fk": {
+          "name": "reimbursements_advance_id_loans_uuid_fk",
+          "tableFrom": "reimbursements",
+          "tableTo": "loans",
+          "columnsFrom": [
+            "advance_id"
           ],
           "columnsTo": [
             "uuid"
@@ -17568,9 +18357,9 @@
           "notNull": false,
           "autoincrement": false
         },
-        "payment_terms": {
-          "name": "payment_terms",
-          "type": "text",
+        "payment_terms_days": {
+          "name": "payment_terms_days",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

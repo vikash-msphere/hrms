@@ -13,6 +13,8 @@ import { localDay } from "../domain/attendance";
 import {
   METRICS,
   METRIC_GROUPS,
+  teamOnlyReportable,
+  withoutTeamOnly,
   summarizeAttendance,
   expectedWorkingDays,
   hhmmToMin,
@@ -245,6 +247,12 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     // owner-scope parity - `author_employee_id` for announcements - which is the wrong column for it. Binding
     // it here was the whole of that bug; see the `kudos` aggregate below for what replaced it.
     tickets: [t.tickets.code, t.tickets.employeeId],
+    // The SUBMITTER, which is the column `expenses` own list scopes on (its code is owner-embedded on the
+    // person who filed the claim). `department_id` on the same row is cost-centre attribution and is
+    // deliberately NOT the scope key - binding to it here would let a manager's dept breadth pull in a claim
+    // somebody else filed against their cost centre, which is the mistake the announcements entry above
+    // records having made with a different column.
+    expenses: [t.expenses.code, t.expenses.employeeId],
   };
   const scoped = (collection: string, ...conds: (SQL | undefined)[]) => {
     const [code, owner] = SCOPE_COLUMNS[collection]!;
@@ -345,6 +353,27 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
         lte(t.overtimeRequests.date, toDate),
         inArray(t.overtimeRequests.employeeId, ids)))
       .groupBy(t.overtimeRequests.employeeId));
+  }
+
+  if (wants("expenses")) {
+    // What this person put through as company spend. SUBMITTED is excluded deliberately: a claim awaiting a
+    // decision is not spend, and counting it would make a measure move when somebody presses a button rather
+    // than when money is committed - the same line `computeBudgetSpendMany` draws between `spent` and
+    // `pending`.
+    add("expenses", db
+      .select({
+        employeeId: t.expenses.employeeId,
+        claimed: expr("claimed", sql<number>`coalesce(sum(${t.expenses.amount}), 0)`),
+        claims: expr("claims", sql<number>`count(*)`),
+      })
+      .from(t.expenses)
+      .where(scoped("expenses",
+        inArray(t.expenses.state, ["APPROVED", "PAID"]),
+        eq(t.expenses.isRecurring, false),
+        gte(t.expenses.incurredOn, fromDate),
+        lte(t.expenses.incurredOn, toDate),
+        inArray(t.expenses.employeeId, ids)))
+      .groupBy(t.expenses.employeeId));
   }
 
   if (wants("time-entries")) {
@@ -565,6 +594,7 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
   const remote = index("remote");
   const overtime = index("overtime");
   const time = index("time");
+  const expenses = index("expenses");
   const cards = index("cards");
   const goals = index("goals");
   const rating = index("rating");
@@ -618,6 +648,10 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     // planting a 0% against somebody the window does not cover.
     put("remote_share_pct", expected ? Math.min(100, Math.round((num(rw?.days) / expected) * 100)) : null);
 
+    const ex = expenses.get(p.uuid);
+    put("expense_claimed", num(ex?.claimed) || null);
+    put("expense_claims", num(ex?.claims) || null);
+
     const c = cards.get(p.uuid);
     put("tasks_delivered", num(c?.delivered));
     put("tasks_open", num(c?.open));
@@ -666,13 +700,27 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
 
   // The team line: a sum where the measure is a count and a mean where it is a rate, over the people who have
   // a number at all (averaging a null arrival time as zero would put the team's average start at midnight).
+  //
+  // Computed BEFORE the team-only measures are stripped from the person rows below, because the group total
+  // is the one form in which they may be reported. The order is load-bearing: strip first and the team line
+  // would have nothing to sum.
   const team: Record<string, number | null> = {};
+  const bigEnough = teamOnlyReportable(rows.length);
   for (const m of metrics) {
+    // A roster too small to hide anybody gets no team-only figure at all. Absent rather than null-because-
+    // empty: both read as "no number", and the distinction costs a reader nothing here.
+    if (m.teamOnly && !bigEnough) continue;
     const vals = rows.map((r) => r.values[m.key]).filter((v): v is number => v != null);
     if (!vals.length) { team[m.key] = null; continue; }
     const total = vals.reduce((a, b) => a + b, 0);
     team[m.key] = m.agg === "sum" ? round1(total) : Math.round((total / vals.length) * 10) / 10;
   }
+
+  // THE CLOSURE. A team-only measure leaves no per-person trace, whatever the request asked for - one named
+  // employee, an explicit id list, or the whole roster. Done here, on the way out, rather than at any of the
+  // places a person row is built: there is one exit and several constructions, so this is the spot where
+  // "no request shape returns it for an individual" is a property of the code rather than a claim about it.
+  for (const r of rows) r.values = withoutTeamOnly(r.values, metrics);
 
   const workingDays = expectedWorkingDays({ fromYmd: q.from, toYmd: q.to, workDays: sched.work_days, holidays, todayYmd });
 

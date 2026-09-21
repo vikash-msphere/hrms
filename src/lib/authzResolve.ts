@@ -75,6 +75,10 @@ export const TABLES: Record<string, any> = {
   "expense-categories": schema.expenseCategories,
   vendors: schema.vendors,
   "expense-budgets": schema.expenseBudgets,
+  // Salary caps. A sibling of `expense-budgets`, deliberately its own table so no forgotten filter can count
+  // salary as expense spend (see services/payrollBudgets.ts).
+  "payroll-budgets": schema.payrollBudgets,
+  "card-transactions": schema.cardTransactions,
   "ticket-checklists": schema.ticketChecklists,
   operations: schema.jobs, // the jobs table is surfaced as the `operations` collection (employee-owned)
   "cron-runs": schema.cronRuns, // recorded cron ticks; private-by-default (super-only via **)

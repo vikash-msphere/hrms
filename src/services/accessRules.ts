@@ -84,22 +84,44 @@ async function approvalRequired(deps: Deps): Promise<boolean> {
 }
 
 /**
+ * Every role a caller's authority is actually assembled from, not just the one they are labelled with.
+ *
+ * `role` is the PRIMARY role and the one the audit trail records; `roles` is the whole set, and
+ * middleware/auth.ts merges a grant for each of them (`loadAuthority`: the primary, plus every secondary from
+ * `user_roles`, plus the caller's own user rules). Anything deciding "does this feed my own grant" has to ask
+ * about the set - `role` alone answers a narrower question than the one being asked.
+ *
+ * Falls back to the primary for a principal assembled outside the auth middleware (the system actor, a test
+ * fixture), which is the same set by construction when there are no secondary roles.
+ */
+const rolesHeldBy = (actor: AppUser): readonly string[] => (actor.roles?.length ? actor.roles : [actor.role]);
+
+/**
  * NOBODY AUTHORS THEIR OWN AUTHORITY. Refused for every subject that feeds the author's own grant.
  *
- * middleware/auth.ts assembles a caller's authority from THREE subjects, not one - lib/policyLoad.ts merges
- * the caller's user rows over `mergeGrants(everyone rows, own-role rows)`. So "cannot edit rules of the role
- * you are using" was one third of the guard: an ACL admin could still author a broad rule against their OWN
- * user row, or against `everyone` (which is unioned into every non-super caller's grant), and hold whatever
- * it granted from the next request onward. One rule per collection is all it takes to reach `compensation`,
- * `payslips` or `audit` at admin - precisely the collections the seeded policy keeps a delegated admin out of.
+ * middleware/auth.ts assembles a caller's authority from FOUR kinds of subject, not one - lib/policyLoad.ts
+ * merges the caller's user rows over `mergeGrants(everyone rows, own-role rows)`, and `loadAuthority` merges a
+ * grant for EVERY role they hold, not only the primary one. So "cannot edit rules of the role you are using"
+ * was one quarter of the guard: an ACL admin could still author a broad rule against their OWN user row,
+ * against `everyone` (which is unioned into every non-super caller's grant), or against a SECONDARY role of
+ * theirs - and hold whatever it granted from the next request onward. One rule per collection is all it takes
+ * to reach `compensation`, `payslips` or `audit` at admin - precisely the collections the seeded policy keeps
+ * a delegated admin out of.
+ *
+ * THE SECONDARY-ROLE HOLE IS THE ONE THIS COMMENT USED TO DESCRIBE ITSELF AS CLOSING. Secondary roles arrived
+ * after the guard did, the check kept comparing against `actor.role`, and the paragraph above went on claiming
+ * every subject was covered. `AppUser.roles` says what the set is for in its own comment - "a rule written for
+ * somebody's second role silently stops applying to them" - which is the same sentence read the other way
+ * round: a rule written for your own second role silently starts applying to you.
  *
  * Latent while `access-rules` has no seeded grant (only super holds it, and super already has `**`), but
  * delegating access management is the feature: `useCanManageAccess()` and the four-eyes queue exist so that
- * more than one person administers permissions.
+ * more than one person administers permissions. The queue is also no backstop here - `access-approval` is
+ * opt-in and absent by default, so an unapproved rule lands `active` on the spot.
  *
  * Super is exempt only for `everyone`: a super author cannot widen themselves with it (they already hold
  * `**`), and org-wide rules are a normal super action - the seeded `everyone` grants are exactly that shape.
- * The self-subject guards apply to everyone, super included, because writing a rule for the role or the user
+ * The self-subject guards apply to everyone, super included, because writing a rule for a role or the user
  * you are signed in as is never the way to change your own access.
  */
 function assertNotSelfWidening(actor: AppUser, subjectKind: "role" | "user", subject: string): void {
@@ -107,7 +129,11 @@ function assertNotSelfWidening(actor: AppUser, subjectKind: "role" | "user", sub
     if (subject === actor.uuid) throw failedPrecondition("cannot write rules for your own user - ask another access admin");
     return;
   }
-  if (subject === actor.role) throw failedPrecondition("cannot edit rules of the role you are using");
+  if (rolesHeldBy(actor).includes(subject)) {
+    // Named, because "the role you are using" reads as the one on your profile and the refusal is now about
+    // any of them: somebody holding a second role has to be told which rule they cannot write.
+    throw failedPrecondition(`cannot edit rules of "${subject}" - you hold that role, so ask another access admin`);
+  }
   if (subject === EVERYONE_ROLE && !isSuperGrant(actor.grant)) {
     throw failedPrecondition("the 'everyone' role includes you, so its rules are super-admin only");
   }
@@ -523,7 +549,12 @@ async function notifyCloneQueued(deps: Deps, actor: AppUser, added: number, from
 export async function deleteAccessRule(deps: Deps, actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.accessRules).where(ruleById(id)).limit(1))[0];
   if (!row) throw notFound("access rule not found");
-  if (row.subjectKind === "role" && row.subject === actor.role) throw failedPrecondition("cannot edit rules of the role you are using");
+  // EVERY role the caller holds, for the reason `assertNotSelfWidening` gives: a grant merged from a secondary
+  // role is as much theirs as one merged from the primary. It matters on this path in both directions -
+  // deleting a DENY that sits on a role you hold widens you exactly as adding an allow would.
+  if (row.subjectKind === "role" && rolesHeldBy(actor).includes(row.subject)) {
+    throw failedPrecondition(`cannot change rules of "${row.subject}" - you hold that role, so ask another access admin`);
+  }
   // Under four-eyes, removing an ACTIVE rule is itself a change to be approved: the row is MARKED
   // `pending_delete` and keeps enforcing (policyLoad `live` still loads it) until a second admin approves.
   // Marking rather than deleting is what makes the removal reviewable, reversible, and non-surprising.
@@ -549,7 +580,12 @@ export async function decideAccessRule(deps: Deps, actor: AppUser, id: string, d
   if (!row) throw notFound("access rule not found");
   if (row.status === "active") throw failedPrecondition("this access rule is not awaiting a decision");
   if (row.requestedBy && row.requestedBy === actor.uuid) throw failedPrecondition("a permission change must be approved by someone other than the person who requested it");
-  if (row.subjectKind === "role" && row.subject === actor.role) throw failedPrecondition("cannot edit rules of the role you are using");
+  // EVERY role the caller holds, for the reason `assertNotSelfWidening` gives: a grant merged from a secondary
+  // role is as much theirs as one merged from the primary. It matters on this path in both directions -
+  // deleting a DENY that sits on a role you hold widens you exactly as adding an allow would.
+  if (row.subjectKind === "role" && rolesHeldBy(actor).includes(row.subject)) {
+    throw failedPrecondition(`cannot change rules of "${row.subject}" - you hold that role, so ask another access admin`);
+  }
 
   const applying = decision === "approve";
   const removing = row.status === "pending_delete";

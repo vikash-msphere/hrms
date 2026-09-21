@@ -30,6 +30,10 @@ export type BoardMetrics = {
   lead_time: { p50: number; p85: number; avg: number; count: number };
   cycle_time: { p50: number; p85: number; avg: number; count: number };
   throughput: { delivered: number; per_week: number };
+  // How long cards have taken to LEAVE each column, which is the question a cumulative flow diagram makes
+  // somebody squint at a chart to answer. Completed stays only: a card sitting in a column now has not told
+  // anybody how long it will be there, and counting it would make a board look faster as it slowed down.
+  column_dwell: { key: string; label: string; p50: number; p85: number; count: number }[];
 };
 
 export function computeBoardMetrics(
@@ -85,6 +89,17 @@ export function computeBoardMetrics(
     columns,
     cfd,
     lead_time: stats(lead),
+    column_dwell: columns.map((c) => {
+      const samples: number[] = [];
+      for (const arr of byCard.values()) {
+        for (let i = 0; i < arr.length; i++) {
+          if (arr[i]!.toColumn !== c.key) continue;
+          const left = arr[i + 1];
+          if (left) samples.push((left.at - arr[i]!.at) / DAY);
+        }
+      }
+      return { key: c.key, label: c.label, ...stats(samples) };
+    }).filter((c) => c.count > 0),
     cycle_time: stats(cycle),
     throughput: { delivered: deliveredInRange, per_week: round1(deliveredInRange / weeks) },
   };

@@ -137,6 +137,7 @@ export const SEARCH_INDEX: SearchEntry[] = [
     match: ["description", "invoiceNumber", "paymentRef", "state"], title: ["description", "invoiceNumber"], subtitle: ["state"] },
   { collection: "expense-categories", table: schema.expenseCategories, scoping: flat, match: ["name", "glCode"], title: ["name"], subtitle: ["glCode"] },
   { collection: "expense-budgets", table: schema.expenseBudgets, scoping: flat, match: ["periodKey", "periodType"], title: ["periodKey"], subtitle: ["periodType"] },
+  { collection: "payroll-budgets", table: schema.payrollBudgets, scoping: flat, match: ["periodKey", "periodType"], title: ["periodKey"], subtitle: ["periodType"] },
   { collection: "vendors", table: schema.vendors, scoping: flat,
     match: ["name", "contactEmail", "taxId", "notes"], title: ["name"], subtitle: ["contactEmail"] },
   { collection: "loans", table: schema.loans, scoping: scoped("employeeId"),

@@ -295,14 +295,16 @@ const EC = [
 emit("INSERT INTO expense_categories (uuid,code,name,requires_receipt,gl_code,created_at,updated_at) VALUES");
 emit(EC.map((c) => ` (${q(c.uuid)},${q(c.code)},${q(c.name)},${c.rr},${q(c.gl)},${T0},${T0})`).join(",\n") + ";");
 
+// `terms` is a NUMBER OF DAYS, not the words "Net 30": the column became `payment_terms_days` so an expense
+// can derive a due date from it, which free text could never answer.
 const VEN = [
-  { uuid: nid(), code: "0a", name: "Coworking Spaces Co", tax: "27AAACW1234A1Z5", terms: "Net 30", cat: 0 },
-  { uuid: nid(), code: "0b", name: "Cloud Hosting Co", tax: "29AAACA1234B1Z1", terms: "Net 15", cat: 2 },
-  { uuid: nid(), code: "0c", name: "Office Supplies Co", tax: null, terms: "Net 30", cat: 3 },
-  { uuid: nid(), code: "0d", name: "Advisory Partners LLP", tax: "07AAACD1234C1Z9", terms: "Net 45", cat: 5 },
+  { uuid: nid(), code: "0a", name: "Coworking Spaces Co", tax: "27AAACW1234A1Z5", terms: 30, cat: 0 },
+  { uuid: nid(), code: "0b", name: "Cloud Hosting Co", tax: "29AAACA1234B1Z1", terms: 15, cat: 2 },
+  { uuid: nid(), code: "0c", name: "Office Supplies Co", tax: null, terms: 30, cat: 3 },
+  { uuid: nid(), code: "0d", name: "Advisory Partners LLP", tax: "07AAACD1234C1Z9", terms: 45, cat: 5 },
 ];
-emit("INSERT INTO vendors (uuid,code,name,tax_id,payment_terms,default_category_id,created_at,updated_at) VALUES");
-emit(VEN.map((v) => ` (${q(v.uuid)},${q(v.code)},${q(v.name)},${q(v.tax)},${q(v.terms)},${q(EC[v.cat]!.uuid)},${T0},${T0})`).join(",\n") + ";");
+emit("INSERT INTO vendors (uuid,code,name,tax_id,payment_terms_days,default_category_id,created_at,updated_at) VALUES");
+emit(VEN.map((v) => ` (${q(v.uuid)},${q(v.code)},${q(v.name)},${q(v.tax)},${v.terms},${q(EC[v.cat]!.uuid)},${T0},${T0})`).join(",\n") + ";");
 
 const finDept = DEPTS.find((d) => d.code === "05")!.uuid; // Finance
 const itDept = DEPTS.find((d) => d.code === "0b")!.uuid;  // IT

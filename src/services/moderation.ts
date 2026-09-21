@@ -17,7 +17,7 @@ import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { invalidArgument, notFound } from "../lib/errors";
+import { forbidden, invalidArgument, notFound } from "../lib/errors";
 import { BUDGET, MODELS, UNTRUSTED_PREAMBLE, fence, scrubIdentifiers } from "../domain/aiPolicy";
 import {
   MODERATABLE,
@@ -319,6 +319,97 @@ async function recordFlag(deps: Deps, c: Candidate, hazards: string[]): Promise<
         updatedAt: now,
       },
     });
+}
+
+/**
+ * Is this post down because a MODERATOR put it down?
+ *
+ * The hide borrows the collection's own withdrawal column - `disabled` for an announcement, the soft-delete
+ * stamp for a suggestion - which is what makes it reversible by the people who can see the record, and what
+ * makes every visibility filter in the app honour it without knowing moderation exists. The cost of borrowing
+ * is that the inverse verbs cannot tell a moderator's hide from an author's own delete: both read as a row
+ * with the column set. This is the missing half of that state, kept where the decision already lives rather
+ * than as a fourth column on three tables - an `accepted` flag IS the record that a human took this post down.
+ *
+ * Read by the un-hide paths (`suggestions:restore`, `announcements:enable`) to refuse an author walking a
+ * moderation decision back. It decides nothing on its own: the middleware says whether the caller may lift a
+ * hold (`mayModerate`), and this says whether there is one.
+ */
+export async function moderationHoldOn(deps: Deps, collection: string, recordId: string): Promise<boolean> {
+  if (!isModeratable(collection)) return false;
+  const row = await deps.db
+    .select({ uuid: schema.aiSuggestions.uuid })
+    .from(schema.aiSuggestions)
+    .where(and(
+      eq(schema.aiSuggestions.hostCollection, collection),
+      eq(schema.aiSuggestions.hostRecordId, recordId),
+      eq(schema.aiSuggestions.feature, FEATURE),
+      eq(schema.aiSuggestions.state, "accepted"),
+    ))
+    .get();
+  return !!row;
+}
+
+/**
+ * Refuse an un-hide that would walk a moderation decision back, unless the caller may make that decision.
+ *
+ * `mayModerate` comes from the authz middleware (`moderation.decide`), never from here: deciding who may do a
+ * thing is the gate's job, and a service that asked the engine itself would be the second authority this app
+ * is built not to have. A moderator lifting their own hide is an ordinary restore - it re-queues the flag
+ * (`reopenOnUnhide`) so the post comes back with a decision outstanding rather than silently settled.
+ */
+export async function assertMayUnhide(deps: Deps, collection: string, recordId: string, mayModerate: boolean): Promise<void> {
+  if (mayModerate) return;
+  if (!(await moderationHoldOn(deps, collection, recordId))) return;
+  throw forbidden("this post was hidden by a moderator; it can only be put back by someone who can decide moderation flags");
+}
+
+/**
+ * A HIDDEN POST THAT COMES BACK PUTS ITS FLAG BACK ON THE QUEUE.
+ *
+ * `hide` is reversible on purpose - this file says so ("the decision is reversible by the people who can see
+ * the record") - but reversing it left the flag reading `accepted`, which records that the post came down. It
+ * is back up, so that is no longer true: the queue never shows it again, the coverage answer says a human
+ * settled it, and the one surface whose job is to notice objectionable content on the wall is quietly blind to
+ * this one for ever. Whoever un-hid it may well be right, and this does not argue with them - it asks for the
+ * decision to be made again now that the post is visible again.
+ *
+ * Distinct from `reopenFlag` below, which is the SCAN's business and touches only `superseded` rows. This is
+ * the un-hide's business and touches only `accepted` ones: a `rejected` flag belongs to a post that was never
+ * hidden, so nothing about restoring one can contradict it.
+ *
+ * Called from the two inverses of a hide, because the two walls are hidden differently: a suggestion by its
+ * soft-delete stamp (`:restore` is the inverse) and an announcement by `disabled` (`:enable` is). Best-effort -
+ * the post is already back, and failing to re-queue a flag must not fail the restore that prompted it.
+ */
+export async function reopenOnUnhide(deps: Deps, actor: AppUser, collection: string, recordId: string): Promise<void> {
+  if (!isModeratable(collection)) return;
+  try {
+    const row = await deps.db
+      .select({ uuid: schema.aiSuggestions.uuid })
+      .from(schema.aiSuggestions)
+      .where(and(
+        eq(schema.aiSuggestions.hostCollection, collection),
+        eq(schema.aiSuggestions.hostRecordId, recordId),
+        eq(schema.aiSuggestions.feature, FEATURE),
+        eq(schema.aiSuggestions.state, "accepted"),
+      ))
+      .get();
+    if (!row) return;
+    await deps.db
+      .update(schema.aiSuggestions)
+      .set({ state: "pending", decidedBy: null, decidedAt: null, updatedAt: deps.clock.now() })
+      .where(eq(schema.aiSuggestions.uuid, row.uuid));
+    // Anchored on the POST, like the decision it reverses (see decideModeration), so the record's own activity
+    // reads as one story: flagged, hidden, put back, awaiting a decision again.
+    const anchor = await auditAnchor(deps, collection, recordId);
+    await audit(deps, actor, `${MODERATABLE[collection]!.singular}.moderate.requeued`, anchor.entity, anchor.entityId, {
+      ...anchor.meta,
+      reason: "the hidden post was restored",
+    });
+  } catch (e) {
+    console.error(`moderation: re-queueing the flag for ${collection}/${recordId} failed`, e);
+  }
 }
 
 /**

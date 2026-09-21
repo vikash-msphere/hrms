@@ -81,6 +81,10 @@ export const stampSlug = (collection: string) => collection.replace(/-/g, "_");
 //
 // Keyed by table name so several can stamp the same collection, which is the usual shape here.
 const SIDE_TABLES: Record<string, { table: unknown; collection: string }> = {
+  // A split is a field of the expense that carries it (`allocations` on the serialized row), so editing one is
+  // a change to that expense exactly as editing its amount is. Without the stamp, re-splitting an invoice would
+  // leave every client's cached ledger showing the old division until something else touched the row.
+  expense_allocations: { table: schema.expenseAllocations, collection: "expenses" },
   event_responses: { table: schema.eventResponses, collection: "events" },
   announcement_reads: { table: schema.announcementReads, collection: "announcements" },
   announcement_reactions: { table: schema.announcementReactions, collection: "announcements" },
@@ -141,6 +145,12 @@ export const UNSTAMPED_TABLES: Record<string, string> = {
   code_sequences: "internal counter, not part of any resource",
   // The digest worker's queue. Its OUTPUT is a notification, and `notifications` is a stamped collection.
   notification_digest_queue: "internal queue; the notification it produces is stamped",
+  // Loss-of-pay corrections waiting for a run to pay them. Not its own wire collection, and - the reason it
+  // is here rather than a SIDE_TABLE - raising one makes nothing a client already holds stale. The closed
+  // run it corrects is history and does not change; the correction only becomes visible when the NEXT run is
+  // built, and that build stamps `payroll-runs` and `payslips` itself. Same shape as the digest queue: an
+  // internal queue whose output is stamped.
+  lop_adjustments: "internal payable queue; the run item it becomes is stamped when the next run is built",
   // The FTS index. Written by the search triggers whenever a stamped row is written, so it is stamped already -
   // one hop back - and `/v1/search` is a live query that caches nothing.
   search_docs: "derived from stamped tables; search results are never stored",

@@ -5,7 +5,7 @@ import { collectionRoutes } from "../http/collectionRoute";
 import { jsonBody } from "../http/jsonRequest";
 import {
   listExpenses, getExpense, createExpense, updateExpense,
-  submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense,
+  submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense, seriesDriftFor, paymentDueFor, allocationsFor, expenseTriageFor,
   type ExpenseInput,
 } from "../services/expenses";
 import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
@@ -27,6 +27,16 @@ const writeSchema = z
     // response. "No tax" is 0, not null.
     tax_amount: nonNegativeMoney().optional(),
     incurred_on: z.string().nullable().optional(),
+    // Kilometres or days on a rated category. The SERVER multiplies by the rate and overwrites `amount`, so a
+    // client sending both is sending a preview, not an instruction.
+    quantity: z.number().nullable().optional(),
+    // A split across cost centres. Omitted leaves any existing split alone; [] clears it; a list replaces it
+    // whole and must sum to the expense (the service checks against the STORED amount).
+    allocations: z.array(z.object({
+      department: z.string().nullable().optional(),
+      category: z.string().nullable().optional(),
+      amount: positiveMoney(),
+    }).strict()).optional(),
     description: z.string().nullable().optional(),
     invoice_number: z.string().nullable().optional(),
     payment_method: paymentMethod.nullable().optional(),
@@ -56,9 +66,27 @@ export const expenses = collectionRoutes<ExpenseInput, typeof schema.expenses>({
   // create, update, and the verbs) resolves it here - one lookup, in one place.
   // One query for the whole page (bounded to it), not one per row - and the factory applies it to the
   // list, the item read and every write response alike, so the flag has a single implementation.
+  // Drift rides along for the same reason: a generated occurrence that does not cost what its series usually
+  // costs is only useful where somebody is already looking at it, and deriving it per row would be a query an
+  // expense. Both lookups are bounded to the page.
   decorate: async (deps, _actor, rows) => {
-    const attached = await attachedObjectIds(deps, COL, INVOICE, rows.map((r) => r.uuid));
-    return rows.map((r) => ({ ...r, hasInvoice: attached.has(r.uuid) }));
+    const [attached, drift, due, split, triage] = await Promise.all([
+      attachedObjectIds(deps, COL, INVOICE, rows.map((r) => r.uuid)),
+      seriesDriftFor(deps, rows),
+      paymentDueFor(deps, rows),
+      allocationsFor(deps, rows.map((r) => r.uuid)),
+      // Only does any work when the page holds claims actually awaiting a decision; a ledger page of paid rows
+      // returns an empty map without a read.
+      expenseTriageFor(deps, rows),
+    ]);
+    return rows.map((r) => ({
+      ...r,
+      hasInvoice: attached.has(r.uuid),
+      seriesDrift: drift.get(r.uuid) ?? null,
+      dueOn: due.get(r.uuid) ?? null,
+      allocations: split.get(r.uuid) ?? null,
+      signals: triage.get(r.uuid) ?? null,
+    }));
   },
   overrides: {
     create: (deps, actor, input) => createExpense(deps, actor, input),

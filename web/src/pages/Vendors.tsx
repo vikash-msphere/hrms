@@ -32,7 +32,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
-const EMPTY = { name: "", contact_email: "", contact_phone: "", tax_id: "", payment_terms: "", bank_details: "", default_category: "", notes: "" };
+const EMPTY = { name: "", contact_email: "", contact_phone: "", tax_id: "", payment_terms_days: "", bank_details: "", default_category: "", notes: "" };
 
 export default function Vendors({ openId }: { me?: Me; openId?: string }) {
   const { rows, state, error, reload } = useCollection<Vendor>("vendors", { showDeleted: true });
@@ -106,7 +106,7 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
         filters: { tax: BLANK },
       });
     }
-    const noTerms = live.filter((v) => !v.payment_terms?.trim());
+    const noTerms = live.filter((v) => v.payment_terms_days == null);
     if (noTerms.length > 0) {
       out.push({
         id: "no-terms",
@@ -135,7 +135,7 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
     setErr(null);
     setForm({
       name: v.display_name, contact_email: v.contact_email ?? "", contact_phone: v.contact_phone ?? "",
-      tax_id: v.tax_id ?? "", payment_terms: v.payment_terms ?? "", bank_details: v.bank_details ?? "",
+      tax_id: v.tax_id ?? "", payment_terms_days: v.payment_terms_days == null ? "" : String(v.payment_terms_days), bank_details: v.bank_details ?? "",
       default_category: v.default_category ? `expense-categories/${idOf(v.default_category)}` : "", notes: v.notes ?? "",
     });
     setOpen(true);
@@ -147,7 +147,7 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
     try {
       const body = {
         display_name: form.name, contact_email: form.contact_email, contact_phone: form.contact_phone,
-        tax_id: form.tax_id, payment_terms: form.payment_terms, bank_details: form.bank_details,
+        tax_id: form.tax_id, payment_terms_days: form.payment_terms_days === "" ? null : Number(form.payment_terms_days), bank_details: form.bank_details,
         default_category: form.default_category, notes: form.notes,
       };
       if (editing) {
@@ -159,7 +159,7 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
       }
       // Vendors arrive as a list off an invoice pile; payment terms usually repeat across a batch.
       if (again && !editing) {
-        const next = { ...EMPTY, payment_terms: form.payment_terms, default_category: form.default_category };
+        const next = { ...EMPTY, payment_terms_days: form.payment_terms_days, default_category: form.default_category };
         setForm(next);
         guard.markSaved(next);
         // The just-cleared Name loses focus the instant its own Create button disables with it - see
@@ -196,7 +196,7 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
         return last ? formatDate(last) : <span className="text-muted-foreground">never</span>;
       } },
     { id: "tax", header: "Tax ID", accessor: (v) => v.tax_id ?? "", cell: (v) => v.tax_id || <span className="text-muted-foreground">-</span>, defaultHidden: true },
-    { id: "terms", header: "Terms", filter: "select", groupBy: true, accessor: (v) => v.payment_terms ?? "", cell: (v) => v.payment_terms || <span className="text-muted-foreground">-</span> },
+    { id: "terms", header: "Terms", filter: "select", groupBy: true, accessor: (v) => (v.payment_terms_days == null ? "" : `Net ${v.payment_terms_days}`), cell: (v) => (v.payment_terms_days == null ? <span className="text-muted-foreground">-</span> : `Net ${v.payment_terms_days}`) },
     { id: "email", header: "Contact", accessor: (v) => v.contact_email ?? "", cell: (v) => v.contact_email || <span className="text-muted-foreground">-</span> },
     stateColumn<Vendor>(),
     ...metaColumns<Vendor>(),
@@ -255,7 +255,9 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
             </FieldRow>
             <FieldRow>
               <Field label="Tax ID / GSTIN"><Input value={form.tax_id} onChange={(e) => setForm({ ...form, tax_id: e.target.value })} /></Field>
-              <Field label="Payment terms"><Input value={form.payment_terms} onChange={(e) => setForm({ ...form, payment_terms: e.target.value })} placeholder="e.g. Net 30" /></Field>
+              {/* A number of days, not free text: it is what the due date on every invoice from this vendor is
+                  computed from, so "Net 30" typed as prose would compute nothing. Blank means no agreed terms. */}
+              <Field label="Payment terms (days)" hint="Days after the invoice date. Blank for no agreed terms."><Input type="number" min={0} max={365} value={form.payment_terms_days} onChange={(e) => setForm({ ...form, payment_terms_days: e.target.value })} placeholder="e.g. 30" /></Field>
             </FieldRow>
             <Field label="Default expense category">
               <Select value={form.default_category} onValueChange={(v) => setForm({ ...form, default_category: v })}>

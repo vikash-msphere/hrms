@@ -146,7 +146,7 @@ describe("bank file: the payment lines match the run, for the right people, on t
     await setBankDetails(deps, actor, bob, { bank_name: BANK, account_name: "Bob Bose", account_number: "222222", ifsc_code: "HDFC0000001" });
 
     const runId = await seedRun([{ employeeId: alice, net: 50000 }, { employeeId: bob, net: 61234 }]);
-    const { bytes, fileName } = await buildBankFile(deps, runId, BANK);
+    const { bytes, fileName } = await buildBankFile(deps, null, runId, BANK);
     const rows = dataRows(bytes);
 
     expect(rows).toHaveLength(2);
@@ -175,7 +175,7 @@ describe("bank file: the payment lines match the run, for the right people, on t
     await setBankDetails(deps, actor, other, { bank_name: "Other Bank", account_number: "222222" });
 
     const runId = await seedRun([{ employeeId: same, net: 1000 }, { employeeId: other, net: 2000 }]);
-    const rows = dataRows((await buildBankFile(deps, runId, BANK)).bytes);
+    const rows = dataRows((await buildBankFile(deps, null, runId, BANK)).bytes);
 
     expect(rows[0]![3]).toBe("IFT"); // within-bank
     expect(rows[1]![3]).toBe("NEFT"); // another bank
@@ -192,7 +192,7 @@ describe("bank file: the payment lines match the run, for the right people, on t
     await setBankDetails(deps, actor, paid, { bank_name: BANK, account_number: "111111" });
 
     const runId = await seedRun([{ employeeId: paid, net: 1000 }, { employeeId: noAccount, net: 2000 }]);
-    await expect(buildBankFile(deps, runId, BANK)).rejects.toThrow(/Nita Nair/);
+    await expect(buildBankFile(deps, null, runId, BANK)).rejects.toThrow(/Nita Nair/);
   });
 
   it("omits a zero-net item entirely, and does not demand an account for one", async () => {
@@ -205,7 +205,7 @@ describe("bank file: the payment lines match the run, for the right people, on t
     await setBankDetails(deps, actor, paid, { bank_name: BANK, account_number: "111111" });
 
     const runId = await seedRun([{ employeeId: paid, net: 1000 }, { employeeId: zero, net: 0 }]);
-    const rows = dataRows((await buildBankFile(deps, runId, BANK)).bytes);
+    const rows = dataRows((await buildBankFile(deps, null, runId, BANK)).bytes);
     expect(rows).toHaveLength(1); // nothing to disburse, so nothing to route and nothing to demand
     expect(rows[0]![0]).toBe("111111");
   });
@@ -217,7 +217,7 @@ describe("bank file: the payment lines match the run, for the right people, on t
     const emp = await seedEmployee();
     await setBankDetails(deps, actor, emp, { bank_name: BANK, account_number: "111111" });
     const runId = await seedRun([{ employeeId: emp, net: 1000 }], "DRAFT");
-    await expect(buildBankFile(deps, runId, BANK)).rejects.toThrow(/approved/i);
+    await expect(buildBankFile(deps, null, runId, BANK)).rejects.toThrow(/approved/i);
   });
 
   it("stamps bankFileAt once, on the first generation only", async () => {
@@ -229,10 +229,10 @@ describe("bank file: the payment lines match the run, for the right people, on t
     await setBankDetails(deps, actor, emp, { bank_name: BANK, account_number: "111111" });
     const runId = await seedRun([{ employeeId: emp, net: 1000 }]);
 
-    await buildBankFile(deps, runId, BANK);
+    await buildBankFile(deps, null, runId, BANK);
     const first = (await deps.db.select().from(schema.payrollRuns))[0]!.bankFileAt;
     expect(first).toBeTruthy();
-    await buildBankFile(deps, runId, BANK);
+    await buildBankFile(deps, null, runId, BANK);
     const second = (await deps.db.select().from(schema.payrollRuns))[0]!.bankFileAt;
     expect(+new Date(second!)).toBe(+new Date(first!)); // unchanged: the FIRST hand-off is the one that counts
   });

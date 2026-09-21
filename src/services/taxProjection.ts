@@ -11,7 +11,7 @@ import { getSettingValue } from "./settings";
 import { applyStructure, type StructureLine } from "../domain/payroll";
 import { round2 } from "../domain/money";
 import { allStructureLines } from "./salaryStructures";
-import { DEFAULT_TAX_CONFIG, fyLabels, computeAnnualTax, monthlyTds, allowedDeductions, assertSupportedRegime, type TaxConfig, type RegimeConfig, type TaxBreakdown, type DeductionRow } from "../domain/incomeTax";
+import { DEFAULT_TAX_CONFIG, fyLabels, computeAnnualTax, monthlyTds, allowedDeductions, assertSupportedRegime, type TaxConfig, type RegimeConfig, type TaxBreakdown, type DeductionRow, type DeductionHeadroom } from "../domain/incomeTax";
 import { refPayComponents, refPayPeriods } from "../lib/refData";
 
 // The stored (encrypted) tax-details blob. Prior-employer income/TDS are employee-DECLARED; HR/payroll then
@@ -348,6 +348,8 @@ export type TaxProjection = {
   // Chapter VI-A from the employee's VERIFIED investment declarations, per section: what they declared and what
   // this regime actually allows (0 for a section the regime disallows), so the Tax page can show why.
   deductions: DeductionRow[];
+  /** Capped sections with room left. The half of item 9 that is useful BEFORE the window shuts. */
+  deductionHeadroom: DeductionHeadroom[];
 };
 
 // The pure assembler: combine the loaded numbers into the year's tax + the per-month TDS. `currentRunGross`
@@ -424,6 +426,7 @@ export function assembleProjection(args: {
     employedMonths: args.employedMonths,
     monthlyTds: monthly,
     deductions: deductions.rows,
+    deductionHeadroom: deductions.headroom,
   };
 }
 

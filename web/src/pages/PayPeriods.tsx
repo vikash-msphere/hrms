@@ -31,8 +31,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
-type Form = { name: string; start: string; end: string; pay: string };
-const EMPTY: Form = { name: "", start: "", end: "", pay: "" };
+type Form = { name: string; start: string; end: string; pay: string; cutoff: string };
+const EMPTY: Form = { name: "", start: "", end: "", pay: "", cutoff: "" };
 
 export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: boolean; openId?: string }) {
   const { rows, state, error, reload } = useCollection<PayPeriod>("pay-periods", { showDeleted: true });
@@ -62,7 +62,7 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
   }
   function openEdit(pp: PayPeriod) {
     setEditing(pp);
-    setForm({ name: pp.display_name, start: pp.period_start, end: pp.period_end, pay: pp.pay_date });
+    setForm({ name: pp.display_name, start: pp.period_start, end: pp.period_end, pay: pp.pay_date, cutoff: pp.input_cutoff_on ?? "" });
     setErr(null);
     setOpen(true);
   }
@@ -83,7 +83,9 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
     setBusy(true);
     setErr(null);
     try {
-      const body = { display_name: form.name, period_start: form.start, period_end: form.end, pay_date: form.pay };
+      // null, not omitted, when the box is empty: clearing an adopted cutoff is a real edit, and leaving the
+      // field out would be read as "unchanged" and silently keep the old date.
+      const body = { display_name: form.name, period_start: form.start, period_end: form.end, pay_date: form.pay, input_cutoff_on: form.cutoff || null };
       if (editing) {
         await patch("pay-periods/" + idOf(editing.path), body, editing.etag);
         toast({ title: "Pay period updated", variant: "success" });
@@ -247,7 +249,10 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
                   // for anyone east of UTC, and a pay period is not a thing to be a day out by.
                   const endYmd = new Date(Date.UTC(Number(start.slice(0, 4)), Number(start.slice(5, 7)), 0)).toISOString().slice(0, 10);
                   const monthName = new Date(`${start.slice(0, 8)}01T00:00:00Z`).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
-                  setForm({ name: monthName, start, end: endYmd, pay: endYmd });
+                  // The cutoff is NOT prefilled. End and pay date are arithmetic on the start; a cutoff is a
+                  // policy the org either has or has not adopted, and guessing one would put a deadline on the
+                  // calendar that nobody chose.
+                  setForm({ name: monthName, start, end: endYmd, pay: endYmd, cutoff: "" });
                 } else {
                   setForm({ ...form, start });
                 }
@@ -266,6 +271,17 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
             hint={form.pay && form.end && form.pay < form.end ? "Falls inside the period - the last days are paid before they're worked." : "The day the money reaches employees."}
           >
             <Input type="date" value={form.pay} onChange={(e) => setForm({ ...form, pay: e.target.value })} />
+          </Field>
+          {/* Optional, and the hint says what it does rather than what it enforces - nothing is refused after
+              this date. It is the day the org tells everyone upstream of payroll to have their claims,
+              overtime and corrections in by, so the run is built against figures that have stopped moving. */}
+          <Field
+            label="Inputs close (optional)"
+            error={form.cutoff && form.start && form.cutoff < form.start ? "Before the period starts - nothing to freeze yet."
+              : form.cutoff && form.pay && form.cutoff > form.pay ? "After the pay date - the inputs are already paid by then." : undefined}
+            hint="The day claims and corrections should be in by. Shown on the run's timeline; late writes are still accepted and flag the run stale."
+          >
+            <Input type="date" value={form.cutoff} min={form.start || undefined} max={form.pay || undefined} onChange={(e) => setForm({ ...form, cutoff: e.target.value })} />
           </Field>
           {clash && (
             <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">

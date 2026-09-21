@@ -95,6 +95,57 @@ test.describe("with the AI features switched off", () => {
     await expect(page.locator("div.shadow-card").filter({ hasText: title }).first()).toBeVisible({ timeout: 30_000 });
   });
 
+  test("a goal drawer offers no similarity panel, and the goal still reads normally", async ({ as }) => {
+    test.setTimeout(180_000);
+    const page = await as("manager");
+    const admin = await as("super"); // the hard purge is an admin's to make
+    const title = `E2E no-ai goal ${Date.now() % 1_000_000}`;
+    const goalPath = await makeGoal(page, title);
+
+    try {
+      await gotoRoute(page, `goals/${goalPath.split("/")[1]}`);
+      const detail = page.getByRole("dialog");
+      await expect(detail.getByText(title).first()).toBeVisible({ timeout: 30_000 });
+
+      // Absent, not disabled: a control that only ever explains that it is switched off is a promise about a
+      // product this org does not run.
+      await expect(detail.getByRole("button", { name: "Find goals like this one" })).toHaveCount(0);
+
+      // And the drawer is otherwise untouched. The measure hint beside it is ARITHMETIC - it has no switch,
+      // it costs nothing, and it must keep appearing on a deployment with no model anywhere near it.
+      await expect(detail.getByText(/No measure: progress on this goal will be somebody's estimate/)).toBeVisible({ timeout: 30_000 });
+    } finally {
+      await purge(admin, goalPath);
+    }
+  });
+
+  test("the goal editor offers no measure suggestion, and the fields still take one by hand", async ({ as }) => {
+    test.setTimeout(180_000);
+    const page = await as("manager");
+    const admin = await as("super");
+    const title = `E2E no-ai measure ${Date.now() % 1_000_000}`;
+    const goalPath = await makeGoal(page, title);
+
+    try {
+      await gotoRoute(page, "goals", "Goals");
+      await openEdit(page, title);
+      const form = page.getByRole("dialog");
+      await expect(form.getByRole("heading", { name: "Edit goal" })).toBeVisible({ timeout: 30_000 });
+      await expect(form.getByRole("button", { name: "Suggest a measure" })).toHaveCount(0);
+
+      // The three fields the suggestion would have filled still take one typed by hand, which is what makes
+      // the absence above a narrowing rather than a removal.
+      await form.getByLabel("Baseline").fill("14");
+      await form.getByLabel("Target").fill("3");
+      await form.getByLabel("Unit").fill("days");
+      // "Save changes" is the edit dialog's own submit label (Goals.tsx `submitLabel`), not a bare "Save".
+      await form.getByRole("button", { name: "Save changes" }).click();
+      await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+    } finally {
+      await purge(admin, goalPath);
+    }
+  });
+
   test("the team report's period comparison shows its figures and credits no model", async ({ as }) => {
     test.setTimeout(120_000);
     const page = await as("manager");
@@ -196,6 +247,45 @@ test.describe("an AI feature switched on", () => {
       await expect(kudos.getByRole("button", { name: /Draft|Improve/ })).toHaveCount(0);
     } finally {
       await patchSettings(page, "ai", off("drafting"));
+    }
+  });
+
+  test("puts the similarity panel on a goal, and the measure suggestion in its editor", async ({ as }) => {
+    test.setTimeout(240_000);
+    const page = await as("manager");
+    // The switches are an ADMIN's to throw - `settings/ai` answers a manager 403 - while the goal below is
+    // the manager's own record. Two roles, two jobs.
+    const admin = await as("super");
+    const title = `E2E ai-on goal ${Date.now() % 1_000_000}`;
+    const goalPath = await makeGoal(page, title);
+
+    // Two switches, because they sit on two surfaces of the same record and each is its own decision: one
+    // reads other goals, the other spends a generation.
+    await patchSettings(admin, "ai", on("goals.similar"));
+    await patchSettings(admin, "ai", on("goals.measure"));
+    try {
+      await gotoRoute(page, `goals/${goalPath.split("/")[1]}`);
+      const detail = page.getByRole("dialog");
+      await expect(detail.getByText(title).first()).toBeVisible({ timeout: 30_000 });
+      // NOT PRESSED. Pressing asks the index, which on this lane is the real Vectorize binding - and this
+      // describe has to pass on a machine with nothing local running. That the button is there is the whole
+      // claim; `test/goalSimilar.test.ts` owns what it answers.
+      await expect(detail.getByRole("button", { name: "Find goals like this one" })).toBeVisible({ timeout: 30_000 });
+      await page.keyboard.press("Escape");
+
+      await gotoRoute(page, "goals", "Goals");
+      await openEdit(page, title);
+      const form = page.getByRole("dialog");
+      await expect(form.getByRole("heading", { name: "Edit goal" })).toBeVisible({ timeout: 30_000 });
+      // Offered only where there is a gap to fill: this goal was created without a measure. Not pressed, for
+      // the same reason - it is a generation.
+      await expect(form.getByRole("button", { name: "Suggest a measure" })).toBeVisible({ timeout: 30_000 });
+      await form.getByRole("button", { name: "Cancel" }).click();
+      await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+    } finally {
+      await patchSettings(admin, "ai", off("goals.similar"));
+      await patchSettings(admin, "ai", off("goals.measure"));
+      await purge(admin, goalPath);
     }
   });
 
@@ -494,4 +584,27 @@ async function cvPdf(): Promise<Buffer> {
   ];
   lines.forEach((line, i) => page.drawText(line, { x: 60, y: 760 - i * 24, size: 12, font }));
   return Buffer.from(await doc.save());
+}
+
+
+// ---------------------------------------------------------------------------------------------------------
+
+/** A goal with NO measure, which is the state both goal affordances above are about: the similarity panel
+ *  sits on any goal, and the measure suggestion is offered only where the unit and target are empty. */
+async function makeGoal(page: import("@playwright/test").Page, title: string): Promise<string> {
+  const res = await page.request.post("/v1/goals", {
+    headers: SPA_HEADERS,
+    data: { title, description: "Raised by the AI features spec." },
+  });
+  expect(res.status(), await res.text()).toBe(200);
+  return ((await res.json()) as { path: string }).path;
+}
+
+/** Open the edit dialog of the goal card carrying `title`. Same shape `goalAlignment.spec.ts` uses: the card
+ *  is whichever row carries the title, and Edit appears on hover. */
+async function openEdit(page: import("@playwright/test").Page, title: string) {
+  const card = page.locator("div.shadow-card, tbody tr, li").filter({ hasText: title }).last();
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await card.hover();
+  await card.getByRole("button", { name: "Edit", exact: true }).click();
 }

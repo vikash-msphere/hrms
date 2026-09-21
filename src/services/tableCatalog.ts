@@ -30,6 +30,14 @@ export type ResolvedField = {
   /** The catalogue key, as stored in a saved view. */
   key: string;
   label: string;
+  /**
+   * The link names walked to reach this field's node ("Manager", "Department"), absent at the base. A grid
+   * draws several nodes' columns side by side, where "Name" on its own says nothing about whose name it is;
+   * this is what a header is qualified WITH, as far as it has to be - see domain/tableHeaders.
+   */
+  trail?: readonly string[];
+  /** This field is its node's own name, so the trail alone can stand as a header ("Department"). */
+  nodeName?: boolean;
   /** Which group the picker files it under. */
   group: string;
   kind: FieldKind;
@@ -111,6 +119,10 @@ function columnFields(collection: string, path: string[], group: string, prefix:
     out.push({
       key: prefix + c.name,
       label: humanize(jsKey),
+      // The column a record is KNOWN by. Only these two, because a header that collapses to the link name
+      // ("Department", holding "Engineering") has to be the thing the reader would have written by hand -
+      // which `code`, `subject` or any other candidate is not.
+      nodeName: jsKey === "name" || jsKey === "title" || undefined,
       group,
       kind: kindOf(collection, jsKey, c.dataType, c.enumValues),
       collection,
@@ -315,6 +327,12 @@ export async function buildCatalogue(
   // ("Requester (People)", "Requester -> Department (Departments)").
   const trail = hops.map((h) => h.label).join(" -> ");
   const nodeLabel = hops.length ? `${trail} (${BASES[collection]!.label})` : def.label;
+  // ...and the same trail as the LIST a header is qualified from. The picker files a field under the node it
+  // came from, so standing in that node the plain name is enough and nothing here changes it; a grid puts
+  // several nodes' columns in one row of headers, and domain/tableHeaders spends as much of this as that grid
+  // turns out to need. The base's own fields carry none of it.
+  const hopLabels = hops.map((h) => h.label);
+  const qualify = (f: ResolvedField): ResolvedField => (hopLabels.length ? { ...f, trail: hopLabels } : f);
 
   const fields: ResolvedField[] = [];
   const groups: { key: string; label: string }[] = [];
@@ -332,7 +350,7 @@ export async function buildCatalogue(
   const ownColumns = columnFields(collection, jsPath, nodeLabel, prefix).filter(allowed);
   // The group is added only if something lands in it - an empty heading is a promise of fields that are not there.
   if (ownColumns.length) addGroup(nodeLabel, nodeLabel);
-  fields.push(...ownColumns);
+  fields.push(...ownColumns.map(qualify));
 
   // 2. The per-employee sources, when this node IS an employee. A ticket's requester and its assignee are two
   //    different nodes, so each carries its own set and there is never a question of which one a column means.
@@ -346,7 +364,7 @@ export async function buildCatalogue(
         if ((fld.needs ?? []).some((n) => !listable.has(n))) continue;
         if (!allowed(fld)) continue; // field-level read (a PII sub-resource, or one key within it)
         addGroup(fld.group, fld.group);
-        fields.push(fld);
+        fields.push(qualify(fld));
       }
     }
   }

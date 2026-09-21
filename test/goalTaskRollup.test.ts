@@ -8,7 +8,9 @@ import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
+import { eq } from "drizzle-orm";
 import { createGoal, linkedTaskRollup } from "../src/services/goals";
+import { recomputeGoalProgress } from "../src/services/cards";
 import { toGoalResource } from "../src/http/serialize";
 
 // The linked-task rollup a goal card renders ("3/5 tasks · 8/13 pts"). It has to equal what the linked cards
@@ -100,5 +102,51 @@ describe("goal linked-task rollup", () => {
   it("asks nothing of the database for an empty page of goals", async () => {
     const roll = await linkedTaskRollup(deps, []);
     expect(roll.size).toBe(0);
+  });
+});
+
+// The roll-up that WRITES, as opposed to the one above that reads. `updateGoalProgress` files an audit entry
+// and emits `goal.progress` on every call, and this function is reached from the commonest write on the board,
+// so it has to decide for itself whether anything actually moved - the objective roll-up next door
+// (services/goals.ts) has always had that guard and this one did not.
+describe("writing a goal's progress back from its linked tasks", () => {
+  const progressAudits = async (goalId: string) =>
+    (await deps.db.select().from(schema.auditLog)).filter((r) => r.action === "goal.updateProgress" && r.entityId === goalId);
+
+  it("writes once, and not again while nothing has moved", async () => {
+    const actor = await seedActor();
+    const board = await seedBoard();
+    const goal = await createGoal(deps, actor, { title: "Ship it" });
+    await seedCard(board, actor.employeeId!, 1, { goalId: goal.uuid, size: 1, delivered: true });
+    await seedCard(board, actor.employeeId!, 2, { goalId: goal.uuid, size: 1 });
+
+    await recomputeGoalProgress(deps, actor, goal.uuid);
+    expect((await progressAudits(goal.uuid)).length).toBe(1);
+    expect((await deps.db.select().from(schema.goals).where(eq(schema.goals.uuid, goal.uuid)))[0]?.progress).toBe(50);
+
+    // A card moved between two undelivered columns re-runs this with the same answer. Before the guard, every
+    // such move filed an audit entry recording a change from 50 to 50 and emitted a domain event the
+    // automation engine then dispatched.
+    await recomputeGoalProgress(deps, actor, goal.uuid);
+    await recomputeGoalProgress(deps, actor, goal.uuid);
+    expect((await progressAudits(goal.uuid)).length).toBe(1);
+  });
+
+  it("still writes when the percentage is unchanged but the status is not what it should be", async () => {
+    // The guard compares the STATUS too. A goal sitting at 100% whose status was put back by hand needs the
+    // write, and guarding on the number alone would skip it for ever.
+    const actor = await seedActor();
+    const board = await seedBoard();
+    const goal = await createGoal(deps, actor, { title: "Done, allegedly" });
+    await seedCard(board, actor.employeeId!, 1, { goalId: goal.uuid, size: 1, delivered: true });
+
+    await recomputeGoalProgress(deps, actor, goal.uuid);
+    expect((await progressAudits(goal.uuid)).length).toBe(1);
+
+    await deps.db.update(schema.goals).set({ status: "in_progress" }).where(eq(schema.goals.uuid, goal.uuid));
+    await recomputeGoalProgress(deps, actor, goal.uuid);
+    const after = (await deps.db.select().from(schema.goals).where(eq(schema.goals.uuid, goal.uuid)))[0];
+    expect(after?.status).toBe("completed");
+    expect((await progressAudits(goal.uuid)).length).toBe(2);
   });
 });

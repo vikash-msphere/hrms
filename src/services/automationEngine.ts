@@ -26,6 +26,7 @@ import { computeEmployeeMetrics, NEVER_TAKEN_LEAVE, type EmployeeMetrics } from 
 import { orgToday, dayStartMs } from "./orgDay";
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
 import { buildBankFile } from "./bankFile";
+import { payrollScheduleMetrics } from "./payroll";
 import { renderEmail, loadEmailBrand, escapeHtml } from "../lib/emailLayout";
 import { fanOutEmail } from "./emailFanOut";
 import { ENCODABLE } from "../middleware/encodeWireIds";
@@ -278,7 +279,10 @@ async function resolveAttachments(deps: Deps, ctx: EvalContext, specs: EmailAtta
         const run = String(template(spec.bankFile.run, ctx));
         const runId = run.includes("/") ? run.slice(run.indexOf("/") + 1) : run; // accept "payroll-runs/<id>" or a bare uuid
         const bank = String(template(spec.bankFile.bank, ctx));
-        const { bytes, fileName } = await buildBankFile(deps, runId, bank);
+        // No actor: a rule fired, not a person. The payout four-eyes rule is about which PERSON may both
+        // approve and pay, so it has nobody to be about here (services/payroll.ts#assertMayGenerateBankFile
+        // says so, and names the gap that leaves).
+        const { bytes, fileName } = await buildBankFile(deps, null, runId, bank);
         out.push({ filename: spec.filename || fileName, content: bytes, contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
         continue;
       }
@@ -785,6 +789,9 @@ export async function runScheduledAutomations(deps: Deps): Promise<number> {
   const today = new Date(dayStartMs(todayStr));
   const scheduled = (await loadEnabled(deps)).filter((r) => r.triggerType === SCHEDULE_TRIGGER && r.scheduleJson);
   let fired = 0;
+  // The org-level payroll calendar, shared across every `once` rule due tonight and computed lazily for the
+  // same reason the roster is: most ticks have no scheduled rule at all.
+  let payrollMetrics: Record<string, unknown> | null = null;
   // Metrics + roster are shared across perEmployee rules and computed lazily (only if one is actually due).
   let roster: { uuid: string; managerId: string | null }[] | null = null;
   let metrics: Awaited<ReturnType<typeof computeEmployeeMetrics>> | null = null;
@@ -811,7 +818,21 @@ export async function runScheduledAutomations(deps: Deps): Promise<number> {
     const base = { weekday: today.getUTCDay(), dayOfMonth: today.getUTCDate() };
 
     if ((schedule.scope ?? "once") === "once") {
-      fired += await runScheduledFiring(deps, row, automation, { type: SCHEDULE_TRIGGER, subject: null, actorId: null, employeeId: null, payload: base, occurredAt: now });
+      // The payroll calendar rides the ORG-level firing, and only this one. These are facts about the company's
+      // month - how far off the pay date is, whether the run is built - so fanning them out per employee would
+      // tell the whole roster that payroll has not been started. Computed once for the tick and shared across
+      // however many `once` rules are due, because a nightly tick with three payroll reminders in it should
+      // read the calendar once. Best-effort: a reminder that cannot compute its numbers must not take down the
+      // automation tick that also runs everything else.
+      if (!payrollMetrics) {
+        try {
+          payrollMetrics = await payrollScheduleMetrics(deps, today);
+        } catch (e) {
+          console.error("[automationEngine] payroll schedule metrics failed (scheduled rules see none)", e);
+          payrollMetrics = {};
+        }
+      }
+      fired += await runScheduledFiring(deps, row, automation, { type: SCHEDULE_TRIGGER, subject: null, actorId: null, employeeId: null, payload: { ...base, ...payrollMetrics }, occurredAt: now });
       continue;
     }
 

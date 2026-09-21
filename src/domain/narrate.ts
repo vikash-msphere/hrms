@@ -36,6 +36,11 @@ export const MIN_CHANGE_PCT = 15;
  */
 export const MIN_ABSOLUTE: Record<MetricUnit, number> = {
   count: 3,
+  // Money has no single sensible floor - a currency where the unit is worth a hundredth of another's would
+  // need a different one, and this app is single-currency by design (see the org's default_currency). So the
+  // floor is deliberately low and the PROPORTIONAL test does the work: a spend that moved 15% is worth a
+  // sentence whatever the absolute figure, and one that moved 14% is not, whatever it was.
+  money: 1,
   days: 2,
   hours: 4,
   minutes: 60,

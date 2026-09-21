@@ -8,6 +8,9 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
 import { getSetting, saveSetting } from "@/lib/settingsStore";
+// The switch list and the code that reads a switch share ONE list of keys: this panel had its own copy, so
+// adding a feature compiled here and quietly did nothing where it was read.
+import type { AiFeatureKey } from "@/lib/aiFeatures";
 
 // The org's AI switches (settings/ai). Two things are decided here and they are different decisions:
 // WHICH features may use a model at all, and HOW MUCH of the shared daily allowance they may spend.
@@ -18,7 +21,6 @@ import { getSetting, saveSetting } from "@/lib/settingsStore";
 // employee data. Each feature also states what it does WITHOUT AI, because every one of them has a working
 // non-AI path and switching it off is not a loss of function.
 
-type AiFeatureKey = "search.semantic" | "tickets.triage" | "cards.triage" | "drafting" | "ats.extraction" | "tables.describe" | "analytics.narrate" | "moderation" | "suggestions.similar" | "attention.summary";
 type AiConfig = { features?: Partial<Record<AiFeatureKey, boolean>>; dailyNeurons?: number; perUserHourlyGenerations?: number; resume_fields?: string[] };
 
 // Which fields a CV may be read into, and which of those are the model doing more than copying. Mirrors
@@ -56,6 +58,24 @@ const FEATURES: { key: AiFeatureKey; title: string; on: string; off: string }[] 
     title: "Board task filing suggestions",
     on: "On a task, show what comparable DELIVERED tasks say its department, priority and size should be, with the tasks that voted - and flag tasks still in flight that look like the same work. Evidence is finished work only: an open task's filing is a guess the board has not tested yet. No text is generated and nothing is applied automatically.",
     off: "Tasks are filed and sized by hand, and duplicated work is noticed by somebody recognising it, as today.",
+  },
+  {
+    key: "goals.similar",
+    title: "Goals aiming at the same thing",
+    on: "On a goal, show goals that read like the same work in different words - usually another team planning a quarter around it - and offer the goal this one could roll up under. Nothing is generated and nothing is linked: the index already holds each goal's title and description, and a person decides what to do about the match.",
+    off: "Overlapping goals are found by somebody reading the whole list side by side, and alignment is filled in by hand, as today.",
+  },
+  {
+    key: "goals.measure",
+    title: "Suggest how a goal could be measured",
+    on: "On a goal with no measure, someone can ask for a unit, a starting value and a target to be proposed from what the goal says. The three numbers land in the form for them to change or discard, one at a time, and nothing is saved on their behalf. The model is shown the goal's own title and description and nothing else - no progress, no owner, no review - and it is not asked whether the goal is any good.",
+    off: "Goals are given their unit, baseline and target by hand, and a goal without them keeps progress as an estimate, as today.",
+  },
+  {
+    key: "boards.narrate",
+    title: "Write up what changed on a board",
+    on: "On a board's analytics, a short paragraph saying how delivery, cycle time, lead time and work in flight moved against the period before. The comparison is arithmetic and always shown; the model only puts those movements into sentences, and a sentence containing a figure nobody computed is discarded. No task title, assignee or department is sent - four labels and two numbers each.",
+    off: "The movements are listed as figures, exactly as they are today. Nothing is sent to a model.",
   },
   {
     key: "drafting",

@@ -32,6 +32,7 @@ import { TABLES, listOwnerColumn } from "../lib/authzResolve";
 import { audit } from "../lib/audit";
 import { invalidArgument, forbidden } from "../lib/errors";
 import { MAX_COLUMNS, type ViewFilter, type ViewSpec } from "../domain/tableFields";
+import { fullHeader, headerLabels } from "../domain/tableHeaders";
 import { resolveFields, type ResolvedField } from "./tableCatalog";
 import { getFieldDefs, maskIdentityValue } from "./identityDetails";
 import { maskAccount } from "./bankDetails";
@@ -46,7 +47,10 @@ import { round2 } from "../domain/money";
 
 export type RunColumn = {
   key: string;
+  /** The header, shortened to whatever THIS grid's other columns leave unambiguous (domain/tableHeaders). */
   label: string;
+  /** The whole trail spelled out, when the header is shorter than it. What the grid shows on hover. */
+  full_label?: string;
   kind: ResolvedField["kind"];
   collection: string;
   /** True when the value is masked because the caller lacks the `unmask` capability. */
@@ -157,13 +161,31 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
     if (v === undefined) unmaskMemo.set(field.key, (v = askUnmask(field)));
     return v;
   };
-  const columns: RunColumn[] = selected.map(({ col, field }) => ({
+  // The headers are named as a SET, not one at a time: a column is qualified by the links that reach it only
+  // as far as the columns beside it make it ambiguous, so a grid with one "Name" keeps "Name" and a grid with
+  // three grows all three by a hop. An author's own header is fixed, and the rest are named around it.
+  const headerOf = selected.map(({ col, field }) => ({
     key: field.key,
-    label: col.label || field.label,
-    kind: field.kind,
-    collection: field.collection,
-    masked: field.masked && !unmaskable(field) ? true : undefined,
+    label: field.label,
+    trail: field.trail,
+    nodeName: field.nodeName,
+    fixed: col.label || undefined,
   }));
+  const shortened = headerLabels(headerOf);
+  const columns: RunColumn[] = selected.map(({ field }, i) => {
+    const label = shortened[i]!;
+    const full = fullHeader(headerOf[i]!);
+    return {
+      key: field.key,
+      label,
+      // Only when it says more than the header does: shortening costs the reader nothing if the whole trail
+      // is one hover away, and a tooltip repeating the header is a tooltip nobody needs.
+      full_label: full === label ? undefined : full,
+      kind: field.kind,
+      collection: field.collection,
+      masked: field.masked && !unmaskable(field) ? true : undefined,
+    };
+  });
 
   // ---- The base page -------------------------------------------------------------------------------------
   const cols = getTableColumns(table) as Record<string, any>;

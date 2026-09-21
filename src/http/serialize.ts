@@ -1536,6 +1536,10 @@ export function toReimbursementResource(r: any): Wire<"reimbursement"> {
     description: r.description ?? undefined,
     state: r.state,
     has_receipt: !!r.hasReceipt, // set by the route when an attachment exists for this claim
+    advance: ref("loans", r.advanceId),
+    // How much of the claim went against that advance rather than being paid out. Emitted only when there was
+    // an advance at all, so a zero here means "settled nothing against it" rather than "was never linked".
+    advance_settled: r.advanceId ? (r.advanceSettled ?? 0) : undefined,
     paid_run: ref("payroll-runs", r.paidRunId),
     paid_time: r.paidAt ? iso(r.paidAt) : undefined,
   };
@@ -1547,6 +1551,14 @@ export function toExpenseCategoryResource(r: any): Wire<"expense-category"> {
     display_name: r.name,
     requires_receipt: !!r.requiresReceipt,
     gl_code: r.glCode ?? undefined,
+    // Both or neither: a rated category is the pair, and the service refuses a half-set one.
+    rate_kind: r.rateKind ?? undefined,
+    rate: r.rate ?? undefined,
+    // The limits a claim is checked against at submit. The SPA runs the same rule from these fields before
+    // anybody presses anything (domain/expenses.ts#categoryBreaches), so the warning and the refusal cannot
+    // drift apart.
+    amount_cap: r.amountCap ?? undefined,
+    max_age_days: r.maxAgeDays ?? undefined,
   };
 }
 
@@ -1557,7 +1569,7 @@ export function toVendorResource(r: any): Wire<"vendor"> {
     contact_email: r.contactEmail ?? undefined,
     contact_phone: r.contactPhone ?? undefined,
     tax_id: r.taxId ?? undefined,
-    payment_terms: r.paymentTerms ?? undefined,
+    payment_terms_days: r.paymentTermsDays ?? undefined,
     bank_details: r.bankDetails ?? undefined,
     default_category: ref("expense-categories", r.defaultCategoryId),
     notes: r.notes ?? undefined,
@@ -1575,12 +1587,34 @@ export function toExpenseResource(r: any): Wire<"expense"> {
     tax_amount: r.taxAmount,
     incurred_on: r.incurredOn ? iso(r.incurredOn).slice(0, 10) : undefined,
     description: r.description ?? undefined,
+    // What the claim was computed FROM on a rated category, so an approver reads "412 km" rather than only
+    // the total it produced. Absent on every ordinary expense.
+    quantity: r.quantity ?? undefined,
+    // How this invoice divides across cost centres. Absent on an ordinary expense, which is what tells a
+    // reader the row's own department and category are the whole answer.
+    allocations: r.allocations?.length
+      ? r.allocations.map((a: { department: string | null; category: string | null; amount: number }) => ({
+          department: ref("departments", a.department),
+          category: ref("expense-categories", a.category),
+          amount: a.amount,
+        }))
+      : undefined,
     invoice_number: r.invoiceNumber ?? undefined,
     payment_method: r.paymentMethod ?? undefined,
     payment_ref: r.paymentRef ?? undefined,
     state: r.state,
     reimbursable: !!r.reimbursable,
     reimbursement: ref("reimbursements", r.reimbursementId),
+    // Who gave the FIRST of two approvals on a large claim, so the queue can say the row is half-approved and
+    // by whom. Absent on everything that needs only one.
+    // Why this claim is worth a second look, for the approver deciding it. Present only on a claim awaiting a
+    // decision and only when there IS something to say, so its absence means "nothing stood out" rather than
+    // "not checked".
+    signals: r.signals?.length
+      ? r.signals.map((x: { kind: string; message: string }) => ({ kind: x.kind, message: x.message }))
+      : undefined,
+    first_approved_by: ref("users", r.firstApprovedBy),
+    first_approved_time: r.firstApprovedAt ? iso(r.firstApprovedAt) : undefined,
     has_invoice: !!r.hasInvoice, // set by the route when an attachment exists
     paid_time: r.paidAt ? iso(r.paidAt) : undefined,
     decision_note: r.decisionNote ?? undefined,
@@ -1590,6 +1624,39 @@ export function toExpenseResource(r: any): Wire<"expense"> {
     next_occurrence_on: r.nextOccurrenceOn ? iso(r.nextOccurrenceOn).slice(0, 10) : undefined,
     last_generated_time: r.lastGeneratedOn ? iso(r.lastGeneratedOn) : undefined,
     template: ref("expenses", r.templateId),
+    // Present only on a generated occurrence whose amount has moved away from what its series usually costs,
+    // so its absence means "nothing to say" rather than "not checked" (see `seriesDriftFor`).
+    // When this invoice is payable, from the vendor's agreed terms and the invoice date. Absent when there is
+    // no vendor, no agreed terms or no invoice date - a payables list shows those without a due date rather
+    // than inventing one, because a wrong due date is the number somebody chases against.
+    due_on: r.dueOn ? iso(r.dueOn).slice(0, 10) : undefined,
+    series_drift: r.seriesDrift ? {
+      baseline: r.seriesDrift.baseline,
+      delta: r.seriesDrift.delta,
+      delta_fraction: r.seriesDrift.deltaFraction,
+      direction: r.seriesDrift.direction,
+      samples: r.seriesDrift.samples,
+    } : undefined,
+  };
+}
+
+export function toCardTransactionResource(r: any): Wire<"card-transaction"> {
+  return {
+    ...baseResource(r, "card-transactions"),
+    employee: ref("employees", r.employeeId),
+    card_last4: r.cardLast4 ?? undefined,
+    // NOT optional: the column is NOT NULL and the spec lists it required, so a row without one is a bug
+    // rather than a shape to tolerate. Emitting undefined here would have satisfied tsc and produced a
+    // response that fails its own contract.
+    posted_on: iso(r.postedOn).slice(0, 10),
+    amount: r.amount,
+    merchant: r.merchant ?? undefined,
+    reference: r.reference ?? undefined,
+    expense: ref("expenses", r.expenseId),
+    // HOW the pairing was decided, not just that it was: "the amount and the week agreed" and "a person said
+    // so" are different warrants and an approver should be able to tell them apart.
+    match_confidence: r.matchConfidence ?? undefined,
+    matched_time: r.matchedAt ? iso(r.matchedAt) : undefined,
   };
 }
 
@@ -1609,9 +1676,45 @@ export function toExpenseBudgetResource(r: any): Wire<"expense-budget"> {
     // The highest alert threshold the daily cron has already fired for this period, so the page can say the
     // notification went out (and why editing the cap re-arms it) instead of leaving it invisible.
     alert_level: r.alertLevel ?? 0,
+    // The forecast warning's guard, surfaced for the same reason `alert_level` is: the page can say the
+    // notification already went out, and why editing the cap re-arms it, instead of the guard being a silent
+    // reason that nothing fires tonight.
+    projection_alerted_time: r.projectionAlertedAt ? iso(r.projectionAlertedAt) : undefined,
     // `spent` broken out by the months the period covers, in order. Free: computeBudgetSpendMany already
     // buckets every charge by month to sum them, so this is the shape it was throwing away.
     spend_history: r.spendHistory ?? [],
+    // Where this cap lands at period end at the rate it has spent so far. Absent whenever the arithmetic
+    // cannot support a forecast - a closed or future period, too little elapsed, nothing spent - so the page
+    // shows a projection or shows nothing, and never a number the data does not carry (`projectBudget`).
+    projection: r.projection ? {
+      elapsed: r.projection.elapsed,
+      projected: r.projection.projected,
+      projected_utilization: r.projection.projectedUtilization,
+      projected_over_by: r.projection.projectedOverBy,
+    } : undefined,
+  };
+}
+
+// Deliberately the same shape as an expense budget minus the fields salary has no analogue for (no category,
+// no `pending` queue - an approved run is spend, there is nothing sitting in between). A finance reader looking
+// at both pages should not have to learn two vocabularies for one idea.
+export function toPayrollBudgetResource(r: any): Wire<"payroll-budget"> {
+  return {
+    ...baseResource(r, "payroll-budgets"),
+    department: ref("departments", r.departmentId),
+    period_type: r.periodType,
+    period_key: r.periodKey,
+    amount: r.amount,
+    recurring: !!r.recurring,
+    spent: r.spent ?? 0, // derived from finalized run items, never stored
+    remaining: r.remaining ?? r.amount,
+    utilization: r.utilization ?? 0,
+    projection: r.projection ? {
+      elapsed: r.projection.elapsed,
+      projected: r.projection.projected,
+      projected_utilization: r.projection.projectedUtilization,
+      projected_over_by: r.projection.projectedOverBy,
+    } : undefined,
   };
 }
 
@@ -1898,6 +2001,7 @@ export function toPayComponentResource(r: any): Wire<"pay-component"> {
     recurring: r.recurring,
     in_ctc: r.inCtc,
     pf_wages: r.pfWages,
+    gl_code: r.glCode ?? undefined,
   };
 }
 
@@ -1908,6 +2012,7 @@ export function toPayPeriodResource(r: any): Wire<"pay-period"> {
     period_start: iso(r.periodStart).slice(0, 10),
     period_end: iso(r.periodEnd).slice(0, 10),
     pay_date: iso(r.payDate).slice(0, 10),
+    input_cutoff_on: r.inputCutoffOn ? iso(r.inputCutoffOn).slice(0, 10) : undefined,
   };
 }
 
@@ -1943,6 +2048,9 @@ export function toPayslipResource(r: any): Wire<"payslip"> {
     // column and the year's withholding tile on #/payslips summed zero over slips that had withheld tax.
     tax: r.tax,
     net: r.net,
+    // When the employee themselves first opened it. A delivery fact, not a reading history - see the column's
+    // own note in db/schema.ts for why it is one stamp and never a log.
+    first_opened_time: r.firstOpenedAt ? iso(r.firstOpenedAt) : undefined,
   };
 }
 

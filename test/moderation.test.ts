@@ -12,7 +12,9 @@ import { genId } from "../src/lib/idCodec";
 import type { TextModel } from "../src/ports";
 import { BUDGET, ESTIMATED_NEURONS, MODELS } from "../src/domain/aiPolicy";
 import { excerptOf, parseVerdict } from "../src/domain/moderation";
-import { drainModeration, listModerationQueue, decideModeration, QUEUE_PAGE } from "../src/services/moderation";
+import { drainModeration, listModerationQueue, decideModeration, reopenOnUnhide, assertMayUnhide, QUEUE_PAGE } from "../src/services/moderation";
+import { restoreSuggestion } from "../src/services/suggestions";
+import { setDisabled } from "../src/services/lifecycle";
 import { repliesFor } from "../src/services/announcements";
 
 // Moderation: what the model is allowed to say, and what a person does with it.
@@ -504,6 +506,106 @@ describe("deciding", () => {
     await decideModeration(deps, mod, `suggestions/${id}`, "hide");
     const row = await deps.db.select().from(schema.suggestions).where(eq(schema.suggestions.uuid, id)).get();
     expect(row?.deleteTime).not.toBeNull();
+  });
+
+  // A HIDE IS REVERSIBLE, AND REVERSING IT IS NOT A DECISION. The two walls are hidden differently - a
+  // suggestion by its soft-delete stamp, an announcement by `disabled` - and each of those has a public
+  // inverse (`:restore`, `:enable`). Run either one and the post is back on the wall carrying a flag that
+  // says it came down: the queue never shows it again, so the one surface whose job is to notice this content
+  // is blind to it for ever. Whoever put it back may be right; the flag just has to be decided again.
+  it("refuses to let the author walk a moderator's hide back", async () => {
+    // The hide borrows the collection's own withdrawal column, so `:restore` is the inverse of a moderator's
+    // decision as much as of an author's own delete - and from the row the two are identical. Without the hold
+    // the person whose post came down could simply put it back, which is the whole of the moderation queue
+    // undone by the one caller with the most reason to.
+    const author = await seedPerson("Ana");
+    const mod = await seedPerson("Mo");
+    const id = await seedSuggestion(author);
+    deps.ai = scriptedModel(() => "unsafe\nS5");
+    await drainModeration(deps);
+    await decideModeration(deps, mod, `suggestions/${id}`, "hide");
+
+    await expect(restoreSuggestion(deps, author, id, false)).rejects.toThrow(/hidden by a moderator/);
+    const row = await deps.db.select().from(schema.suggestions).where(eq(schema.suggestions.uuid, id)).get();
+    expect(row?.deleteTime).not.toBeNull(); // still down
+    expect((await flagFor("suggestions", id))?.state).toBe("accepted"); // and still decided
+  });
+
+  it("still lets the AUTHOR restore a suggestion they withdrew themselves", async () => {
+    // The hold is about a moderation decision, not about the column: an ordinary delete carries no flag, so
+    // nothing here changes for the author who simply changed their mind.
+    const author = await seedPerson("Ana");
+    const id = await seedSuggestion(author);
+    await deps.db.update(schema.suggestions).set({ deleteTime: new Date() }).where(eq(schema.suggestions.uuid, id));
+
+    await restoreSuggestion(deps, author, id, false);
+    const row = await deps.db.select().from(schema.suggestions).where(eq(schema.suggestions.uuid, id)).get();
+    expect(row?.deleteTime).toBeNull();
+  });
+
+  it("lets a MODERATOR lift the hide, and puts the flag back on the queue with it", async () => {
+    const author = await seedPerson("Ana");
+    const mod = await seedPerson("Mo");
+    const id = await seedSuggestion(author);
+    deps.ai = scriptedModel(() => "unsafe\nS5");
+    await drainModeration(deps);
+    await decideModeration(deps, mod, `suggestions/${id}`, "hide");
+    expect((await flagFor("suggestions", id))?.state).toBe("accepted");
+
+    await restoreSuggestion(deps, mod, id, true);
+
+    const back = await flagFor("suggestions", id);
+    expect(back?.state).toBe("pending");
+    expect(back?.decidedBy).toBeNull();
+    expect((await listModerationQueue(deps)).results.map((r) => r.host)).toContain(`suggestions/${id}`);
+  });
+
+  it("holds a hidden announcement down against a caller who may not moderate", async () => {
+    const author = await seedPerson("Ana");
+    const mod = await seedPerson("Mo");
+    const id = await seedAnnouncement(author);
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    await drainModeration(deps);
+    await decideModeration(deps, mod, `announcements/${id}`, "hide");
+
+    await expect(assertMayUnhide(deps, "announcements", id, false)).rejects.toThrow(/hidden by a moderator/);
+    // ...and nothing about an ordinary disabled post is held: no flag, no hold.
+    const plain = await seedAnnouncement(author, { disabled: true });
+    await expect(assertMayUnhide(deps, "announcements", plain, false)).resolves.toBeUndefined();
+  });
+
+  it("puts the flag back when a hidden announcement is re-enabled", async () => {
+    const author = await seedPerson("Ana");
+    const mod = await seedPerson("Mo");
+    const id = await seedAnnouncement(author);
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    await drainModeration(deps);
+    await decideModeration(deps, mod, `announcements/${id}`, "hide");
+    expect((await flagFor("announcements", id))?.state).toBe("accepted");
+
+    // What `announcements:enable` does, which is the shared column write plus this.
+    await setDisabled(deps, author, schema.announcements, "announcement", "announcements", id, false);
+    await reopenOnUnhide(deps, author, "announcements", id);
+
+    expect((await flagFor("announcements", id))?.state).toBe("pending");
+  });
+
+  it("leaves a DISMISSED flag alone when the post is restored - nothing about it was hidden", async () => {
+    // `rejected` belongs to a post that was never taken down, so a restore cannot contradict it. Re-queueing it
+    // would put a moderator's "this is fine" back in front of them every time anything touched the row.
+    const author = await seedPerson("Ana");
+    const mod = await seedPerson("Mo");
+    const id = await seedSuggestion(author);
+    deps.ai = scriptedModel(() => "unsafe\nS5");
+    await drainModeration(deps);
+    await decideModeration(deps, mod, `suggestions/${id}`, "dismiss");
+
+    // The author deletes and restores their own suggestion, which has nothing to do with the moderation call -
+    // and is not held, because a DISMISSED flag never took the post down.
+    await deps.db.update(schema.suggestions).set({ deleteTime: new Date() }).where(eq(schema.suggestions.uuid, id));
+    await restoreSuggestion(deps, author, id, false);
+
+    expect((await flagFor("suggestions", id))?.state).toBe("rejected");
   });
 
   it("dismissing closes the flag and leaves the post exactly where it was", async () => {

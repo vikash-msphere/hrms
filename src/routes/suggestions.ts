@@ -2,7 +2,7 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { jsonBody } from "../http/jsonRequest";
-import { listSuggestions, createSuggestion, updateSuggestion, respondSuggestion, voteSuggestion, mergeSuggestion, purgeSuggestion, decorate, type SuggestionInput } from "../services/suggestions";
+import { listSuggestions, createSuggestion, updateSuggestion, respondSuggestion, voteSuggestion, mergeSuggestion, purgeSuggestion, restoreSuggestion, decorate, type SuggestionInput } from "../services/suggestions";
 import { similarSuggestions } from "../services/suggestionSimilar";
 import { toSuggestionResource } from "../http/serialize";
 import { invalidArgument } from "../lib/errors";
@@ -68,6 +68,17 @@ export const suggestions = collectionRoutes<SuggestionInput, typeof schema.sugge
     // surface a suggestion their own list would not have returned. No submitter is carried, signed or not.
     similar: {
       raw: async (c, id) => c.json({ results: await similarSuggestions(c.get("deps"), c.get("scope"), id) }),
+    },
+    // `:restore` MEANS SOMETHING SPECIFIC HERE, which is why the collection claims it from the shared lane
+    // (http/collectionRoute.ts answers a collection's own verb first).
+    //
+    // The soft-delete stamp is BOTH an author withdrawing their own suggestion and how moderation takes one off
+    // the wall (services/moderation.ts hideHost), and from the row they are the same thing. So restoring is the
+    // inverse of a moderator's decision as often as it is of a delete: an author may not walk one back, and a
+    // moderator who lifts one puts the flag back on the queue with it. Whether THIS caller may is the
+    // middleware's answer (`mayModerate`), never the service's.
+    restore: {
+      run: (deps, user, id, _body, c) => restoreSuggestion(deps, user, id, c.get("mayModerate") === true),
     },
   },
 });
