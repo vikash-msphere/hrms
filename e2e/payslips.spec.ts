@@ -88,6 +88,14 @@ test("a published run reaches the employee as a payslip they can read and downlo
   expect(fullName, "the seeded employee has a name to render").toBeTruthy();
   await gotoRoute(admin, "payslips", "Payslips");
   await expect(admin.getByRole("columnheader", { name: "Employee" })).toBeVisible({ timeout: 60_000 });
+  // NARROWED TO THIS PERSON FIRST. The org-wide list pages at 25 and this lane publishes runs for the whole
+  // seeded company (75 slips when this was written), so "their row is on screen" is only true if they happen
+  // to land on the first page - which is not what is being proven here and moves with whatever else the run
+  // published. The column's own filter is the reader's way to that row, and it is the same "is it a NAME"
+  // question: the filter lists people by name too.
+  await admin.getByRole("button", { name: "Filter by employee" }).first().click();
+  await admin.getByRole("button", { name: new RegExp(`^${fullName}\\b`) }).first().click();
+  await admin.keyboard.press("Escape");
   // Not `exact`: the cell carries the person's avatar as well as their name, and the avatar's fallback
   // initials are text too - so the cell's accessible name is the initials followed by the name.
   await expect(admin.getByRole("cell", { name: fullName }).first()).toBeVisible({ timeout: 60_000 });

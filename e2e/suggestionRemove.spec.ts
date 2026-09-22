@@ -23,7 +23,12 @@ test("a suggestion is permanently removed from its own card", async ({ as }) => 
   await card.getByRole("button", { name: "Remove" }).click();
   const confirm = page.getByRole("dialog");
   await expect(confirm.getByText("Remove this suggestion?")).toBeVisible();
-  await expect(confirm.getByText(/permanently removed/)).toBeVisible();
+  // The dialog now comes from the shared decision vocabulary, like Hide beside it, and its copy says what
+  // separates the two buttons: removing takes the votes with it, hiding keeps them and can be undone. The
+  // old wording ("permanently removed") described only this button, which was fine when it was the only
+  // one on the card.
+  await expect(confirm.getByText(/votes come off the box/)).toBeVisible();
+  await expect(confirm.getByText(/Hiding it instead keeps the votes/)).toBeVisible();
   await confirm.getByRole("button", { name: "Remove", exact: true }).click();
   await expect(toast(page, "Suggestion removed")).toBeVisible({ timeout: 30_000 });
   await expect(card).toHaveCount(0, { timeout: 30_000 });

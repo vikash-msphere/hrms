@@ -242,6 +242,26 @@ export async function purgeRow(
   if (attached.length) {
     stmts.push(deps.db.delete(schema.attachments).where(and(eq(schema.attachments.collection, collection), eq(schema.attachments.objectId, id))));
   }
+  // THE SAME BUG, TWO TABLES FURTHER ON. `ai_suggestions` is keyed `(host_collection, host_record_id)` and
+  // `moderation_scans` `(collection, record_id)`, both halves bare `text().notNull()` with no `.references()`
+  // - so SQLite never refuses a purge over one, and `test/purgeCascadeDrift` enumerates `cfg.foreignKeys`
+  // and cannot see the pointer either. Exactly the shape the attachments note above describes.
+  //
+  // WHAT SURVIVED `DELETE /v1/<collection>/<id>?force`, in `payload_json`: a candidate's name, email, phone,
+  // current employer, job title, years of experience and summary transcribed from their CV; a 400-character
+  // excerpt of a moderated post with its hazard codes and anonymity flag; a receipt's vendor, invoice number,
+  // amounts and date; the subjects and titles of neighbouring tickets and cards. `candidates` is the
+  // collection behind `CONSENTED_PATHS["ats.resumeExtraction"]`, whose stated lawful basis is that the
+  // candidate submitted the document FOR THIS PURPOSE - a basis that does not survive the record being
+  // erased while the extraction stays.
+  //
+  // `ai_usage` goes with them: its `subject` is the same `<collection>/<uuid>` string, and the row pairs it
+  // with the user who caused the call. `moderation_scans` holds only a hash and matters least; it is in the
+  // same sweep for the same reason. All three are generic here, like the attachments one above, so there is
+  // no per-collection declaration for the next collection to forget.
+  stmts.push(deps.db.delete(schema.aiSuggestions).where(and(eq(schema.aiSuggestions.hostCollection, collection), eq(schema.aiSuggestions.hostRecordId, id))));
+  stmts.push(deps.db.delete(schema.moderationScans).where(and(eq(schema.moderationScans.collection, collection), eq(schema.moderationScans.recordId, id))));
+  stmts.push(deps.db.delete(schema.aiUsage).where(eq(schema.aiUsage.subject, `${collection}/${id}`)));
   stmts.push({ stmt: deps.db.delete(table).where(atVersion(table, row)).returning({ uuid: table.uuid }), expect: 1, label: "purge" });
   let short: string[];
   try {

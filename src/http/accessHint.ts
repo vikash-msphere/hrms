@@ -105,7 +105,15 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   // private by default and granted deliberately, so the one action on it should be grantable just as
   // deliberately rather than only through a wildcard. `moderation` has no table, so there is no per-row hint
   // to compute - this is here for the authoring UI.
-  moderation: ["decide"],
+  // `unhide` is deliberately a SEPARATE verb from `decide`, not part of it. Deciding is the day-to-day
+  // work of the queue; putting a post somebody already took down back into play is a reversal of a
+  // colleague's judgement, and an org may well want the first widely held and the second not. Both are
+  // grantable by name in the ACL modal for the same reason the capability is private by default.
+  // `hide` is the manual half: taking a post down because a PERSON objected, with no flag involved. It is
+  // separate from `decide` because the flagged queue and the board are different jobs - somebody trusted to
+  // work through what a model raised is not automatically somebody who may reach onto the wall and remove
+  // anything they like - and separate from `unhide` for the reason given there.
+  moderation: ["decide", "hide", "unhide"],
 };
 const DEFAULT_VERBS = ["update", "delete"];
 
@@ -123,6 +131,8 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "reply", // append a reply to a board post (announcements)
   "vote", // cast the caller's vote on a board poll (announcements)
   "pin", "unpin", // pin a board post to the top of the feed / take it down (announcements, moderation)
+  "hide", // take a public post down because a person objected, no flag needed (moderation)
+  "unhide", // put a post a moderator hid back as a draft, and reopen its flag (moderation)
   "updateProgress", // move a goal's progress without full edit rights (goals)
   "setContributors", // credit a share of a goal to the people who delivered it (goals)
   "configure", "metrics", // kanban board config (columns/WIP/policies/lanes) + flow analytics (boards)

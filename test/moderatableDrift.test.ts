@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
 import { MODERATABLE } from "../src/domain/moderation";
+import * as schema from "../src/db/schema";
 
 // Does the moderation scan still cover every public wall?
 //
@@ -64,5 +65,23 @@ describe("the moderation scan covers every public wall", () => {
   it("classifies every author-written text column exactly once", () => {
     const both = Object.keys(SCANNED).filter((k) => k in NOT_PUBLIC);
     expect(both, `listed as both scanned and not-public: ${both.join(", ")}`).toEqual([]);
+  });
+
+  it("claims anonymity only for a wall whose table actually has it", () => {
+    // `anonymity` is what puts "anonymous posts only" in front of an admin for that wall, and what the
+    // settings validator refuses it on elsewhere. Claimed for a wall with no such column, the option would
+    // store a value the scan then reads as "no post qualifies" - a wall silently switched off through a
+    // control that says it narrows. Denied for a wall that HAS one, the cheapest useful configuration of the
+    // whole feature is simply not offered. Both directions are derivable, so neither is left to a comment.
+    for (const [collection, spec] of Object.entries(MODERATABLE)) {
+      const table = (schema as unknown as Record<string, Record<string, unknown>>)[
+        collection.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())
+      ];
+      expect(table, `no schema table for the moderated wall ${collection}`).toBeTruthy();
+      expect(
+        Object.prototype.hasOwnProperty.call(table!, "anonymous"),
+        `MODERATABLE.${collection}.anonymity says ${spec.anonymity}, the table says otherwise`,
+      ).toBe(spec.anonymity);
+    }
   });
 });

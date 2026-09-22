@@ -25,7 +25,8 @@ test("a ticket's copied link opens that exact ticket", async ({ as }) => {
 
   try {
     await gotoRoute(page, "tickets", "Support");
-    await page.getByRole("tab", { name: /^All/ }).click();
+    // "All" is a scope CHIP over the desk's one table, not a tab over four (see `tickets.spec.ts`).
+    await page.getByRole("button", { name: /^All/ }).click();
     await page.getByRole("button", { name: subject, exact: true }).click();
 
     const detail = page.getByRole("dialog").filter({ hasText: subject });

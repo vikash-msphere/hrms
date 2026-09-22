@@ -329,4 +329,34 @@ describe("a run pays a loss-of-pay correction", () => {
     const lines = (await listRunItems(deps, run.uuid))[0]!.lines;
     expect(lines.find((l) => l.code === LOP_ADJUST_CODE)).toBeUndefined();
   });
+
+  it("prices a company with more employees than one statement can bind", async () => {
+    // THE CORRECTION QUEUE IS READ FOR EVERY EMPLOYEE THE RUN MAY PRICE, so its id list is the company's
+    // headcount - and D1 binds at most 100 parameters per statement. Unchunked, the whole build answered 500
+    // (`D1_ERROR: too many SQL variables`) for any org past about a hundred people: not a wrong payslip, no
+    // payroll at all, and only above a size no other test in this file reaches. Every other case here runs one
+    // employee, which is exactly why it shipped.
+    await lopOn();
+    const staff: string[] = [];
+    for (let i = 0; i < 120; i++) staff.push(await employee());
+    const actor = await actorFor(staff[0]!);
+
+    // One of them is also owed a correction, so the read this is about has something to find as well as a long
+    // list to find it in - a chunked read that returned nothing would pass a bare "it did not throw".
+    const march = await period("March 2026", 2026, 3);
+    await workedDays(staff[0]!, 2026, 3, [2]);
+    await publishedMarchRun(march, staff[0]!, 1);
+    await approvedLeave(staff[0]!, MON);
+    await restateLopForDay(deps, staff[0]!, MON);
+
+    const april = await period("April 2026", 2026, 4);
+    const run = await createRun(deps, actor, `pay-periods/${april}`);
+    await buildRunItems(deps, actor, run.uuid);
+
+    const items = await listRunItems(deps, run.uuid);
+    expect(items.length).toBe(120);
+    const corrected = items.find((i) => i.lines.some((l) => l.code === LOP_ADJUST_CODE))!;
+    expect(corrected).toBeDefined();
+    expect(corrected.lines.find((l) => l.code === LOP_ADJUST_CODE)!.amount).toBe(1_000);
+  });
 });

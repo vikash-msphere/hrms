@@ -90,9 +90,14 @@ function persist(toServer: boolean) {
 
 // Mark a tab viewed as of now - clears its badge and advances the reference the next visit measures "new" from.
 export function markTabSeen(tabKey: string) {
-  if (!tabKey || seen[tabKey] === undefined || Date.now() - seen[tabKey]! > 1000) {
-    // Read the badge BEFORE advancing the reference, which is what clears it.
-    const clearing = (shown.get(tabKey) ?? 0) > 0;
+  if (!tabKey) return;
+  // Read the badge BEFORE advancing the reference, which is what clears it.
+  const clearing = (shown.get(tabKey) ?? 0) > 0;
+  // The one-second guard is there to keep a page that marks on mount and again on its first render from writing
+  // twice for one arrival. It must not swallow a mark that is CLEARING something: a page can mark on mount and
+  // then have the reader press the badged tab a moment later, and skipping that press leaves the badge up over
+  // rows the reader is looking at.
+  if (clearing || seen[tabKey] === undefined || Date.now() - seen[tabKey]! > 1000) {
     seen = { ...seen, [tabKey]: Date.now() };
     persist(clearing);
     notifySeen();

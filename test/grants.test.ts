@@ -287,6 +287,15 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
     // app makes for them - the same posture as `tax-verifications` and the access system itself. It is
     // OFFERED in ACCESS_VERBS precisely so it can be granted by name there.
     "moderation:decide",
+    // Taking a post down by hand, from the board rather than the queue. Reaching onto a public wall and
+    // removing anything you disagree with is the broadest of the three and the least appropriate to hand
+    // out by default, so - like the other two - it is offered in the ACL and seeded to nobody.
+    "moderation:hide",
+    // Putting a hidden post back, which is a reversal of a moderator's decision about somebody else's
+    // words. Withheld for the same reason as `decide` and then some: an org that grants reviewing widely
+    // may well want undoing held narrowly, and that is a choice it makes in the ACL rather than one
+    // inherited from a seed.
+    "moderation:unhide",
   ];
   const NON_SUPER = ["employee", "manager", "hr_admin", "payroll_admin"] as const;
   // Three object codes: own, a dept member's, and a flat-coded row - so a `me` / `my-dept` / `*` rule all get

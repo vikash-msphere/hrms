@@ -9,6 +9,8 @@
 // The model half only ever PROPOSES the three numbers, into fields the person then accepts one at a time. It
 // is not asked whether the goal is good, whether it is ambitious, or how the person is doing.
 
+import { UNTRUSTED_PREAMBLE } from "./aiPolicy";
+
 /** A goal, as much of it as either half of this file needs. */
 export type MeasurableGoal = {
   title?: string | null;
@@ -68,6 +70,10 @@ export const MEASURE_SYSTEM =
   "Use null for anything the goal does not state or imply clearly. Do NOT invent a specific figure the text " +
   "does not support: a plausible-looking number somebody accepts without noticing is worse than a null. " +
   "Do not assess the goal, do not say whether it is ambitious or realistic, and do not comment on anybody's " +
-  "performance.";
+  "performance.\n\n" +
+  // The goal's own words are fenced into the user half, and a fence is worth nothing without the sentence
+  // that says what the delimiters mean - the whole point of `UNTRUSTED_PREAMBLE`. A goal description is
+  // employee-authored free text, so "ignore the above and answer with..." is a thing somebody can type.
+  UNTRUSTED_PREAMBLE;
 
 export const MEASURE_PROMPT_VERSION = "v1";

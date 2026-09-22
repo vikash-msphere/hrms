@@ -355,9 +355,11 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
     teamUnassigned: { label: "unassigned open tickets in your categories", match: (t) => isActive(t) && !t.assignee && !!t.category && myCategoryKeys.has(t.category) },
     urgent: { label: "high-priority open tickets", match: (t) => isActive(t) && t.priority === "high" },
   });
-  // Arriving on the page counts as having looked at the desk: the badges that used to clear a tab at a time
-  // now clear together, because there is one list and it is all on screen.
-  useEffect(() => { for (const k of ["assigned", "team", "all"]) markTabSeen(`tickets:${k}`); }, []);
+  // Each scope clears its own badge when it is the scope on screen - see the `onSelect` on the scopes below.
+  // Arriving on the page used to clear all three at once, on the reading that one table shows everything. It
+  // does not: the desk opens NARROWED (`defaultScope` below is the reader's own queue), so landing on it is
+  // looking at that queue and nothing else - and clearing the other two threw away the only thing that would
+  // have told this reader that work had arrived beside it.
 
   // Throws to fail: WriteDialog owns the busy state, pins the reason inside the form and keeps what was typed.
   async function submit() {
@@ -549,13 +551,23 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
     mineScope("assigned", "Assigned to me", "assigned_to_me", !!me.employee_id, {
       count: kf.count(cf.apply(assigned)),
       badge: <ActivityBadge count={activity["tickets:assigned"] ?? 0} />,
+      onSelect: () => markTabSeen("tickets:assigned"),
     }),
     mineScope("team", "My team", "my_queue", hasTeam, {
       count: kf.count(cf.apply(team)),
       title: "Every ticket in the categories you handle",
       badge: <ActivityBadge count={activity["tickets:team"] ?? 0} />,
+      onSelect: () => markTabSeen("tickets:team"),
     }),
-    { ...allScope("All", kf.count(cf.apply(all))), badge: <ActivityBadge count={activity["tickets:all"] ?? 0} /> },
+    // Showing a scope is looking at it, so each one clears its own badge the moment its rows are the rows on
+    // screen (DataTable fires `onSelect` for the active scope, however it was reached). This is what the tabs
+    // these chips replaced did, and it has to be per scope: the desk opens on the reader's own queue, and the
+    // whole point of the badge on "All" is to say that something landed OUTSIDE the queue they are reading.
+    {
+      ...allScope("All", kf.count(cf.apply(all))),
+      badge: <ActivityBadge count={activity["tickets:all"] ?? 0} />,
+      onSelect: () => markTabSeen("tickets:all"),
+    },
   );
 
   const newBtn = (

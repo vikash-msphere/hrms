@@ -32,17 +32,35 @@ const LABELS: Record<string, string> = {
   summary: "Summary",
 };
 
-/** Which candidate column each extracted field maps to. `summary` and `years_experience` have no column of
- *  their own - they are shown for the recruiter to read and copy into notes if they want them, never written
- *  automatically, because inventing a destination for them would be this component deciding something the
- *  data model did not. */
+/**
+ * Which candidate column each extracted field maps to, ONE FIELD PER COLUMN.
+ *
+ * `summary`, `years_experience`, `current_employer` and `current_title` have no column of their own - they
+ * are shown for the recruiter to read and copy if they want them, never written automatically, because
+ * inventing a destination for them would be this component deciding something the data model did not.
+ *
+ * THE LAST TWO USED TO POINT AT `notes`, both of them, and `candidates.notes` is a single text column rather
+ * than a list. `accept` is a plain overwrite, so a recruiter who had typed "Referred by Priya, available from
+ * March" into notes and then accepted Current employer lost the note; accepting Current job title after it
+ * lost the employer. Both steps rendered "Saved" in green - two clicks, on the feature whose entire safety
+ * argument is that a person checks each value, with the second silently undoing the first.
+ *
+ * `skills -> tags` is not the same shape: `candidates.tags` is documented as comma-separated text and
+ * `render` joins the array, so one field owns one column.
+ */
 const PATCHABLE: Record<string, string> = {
   name: "name",
   email: "email",
   phone: "phone",
-  current_employer: "notes",
-  current_title: "notes",
   skills: "tags",
+};
+
+/** What a savable field will overwrite, named on the row so the recruiter is not guessing. */
+const DESTINATION: Record<string, string> = {
+  name: "Name",
+  email: "Email",
+  phone: "Phone",
+  skills: "Tags",
 };
 
 const render = (v: unknown): string => (Array.isArray(v) ? v.join(", ") : String(v ?? ""));
@@ -141,6 +159,8 @@ export function ResumeExtractPanel({ candidateId, candidatePath, can, hasResume,
                     <p className="text-xs text-muted-foreground">{LABELS[key] ?? key}</p>
                     <p className="whitespace-pre-wrap text-sm" data-sentry-mask>{render(value)}</p>
                     {!savable && <p className="text-xs text-muted-foreground">No field on the record holds this - copy it if you want it.</p>}
+                    {/* Accept is an overwrite, so the row says which field it overwrites. */}
+                    {savable && <p className="text-xs text-muted-foreground">Accepting replaces {DESTINATION[key] ?? PATCHABLE[key]}.</p>}
                   </div>
                   {!state && savable && (
                     <span className="flex gap-1.5">

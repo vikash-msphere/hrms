@@ -138,7 +138,12 @@ export async function extractResume(deps: Deps, user: AppUser, candidateId: stri
 
   const out = await aiGenerate(
     deps,
-    { feature: "ats.resumeExtract", userId: user.uuid, subject: `candidates/${candidateId}` },
+    // `reads: "none"` because the general gate is not the one that governs this path. `candidates` is on
+    // NEVER_TO_MODEL, and what makes this call lawful is the declared exception asserted above
+    // (`assertConsentedPath("ats.resumeExtraction")`) - the candidate submitted this document for exactly
+    // this purpose. Naming the collection here would ask the blanket rule a question the exception exists to
+    // answer, and it would throw.
+    { feature: "ats.resumeExtract", userId: user.uuid, subject: `candidates/${candidateId}`, reads: "none" },
     {
       system: systemFor(allowed),
       // Statutory ids go; phone numbers stay, because a phone number is a field this is trying to fill.
@@ -197,25 +202,36 @@ export function parseExtraction(raw: string, allowed: readonly ExtractField[]): 
   return out;
 }
 
-/** Park the suggestion on the candidate, in the same table ticket triage uses. Accepting is the recruiter
- *  PATCHing the candidate through the ordinary route, so nothing here writes to the record. */
+/**
+ * Record THAT an extraction happened, on the candidate, in the same table ticket triage uses. Accepting is
+ * the recruiter PATCHing the candidate through the ordinary route, so nothing here writes to the record.
+ *
+ * THE FIELD NAMES, NOT THE VALUES. Nothing in the app reads an extraction payload back - no route, no
+ * serializer, no decide verb - so storing the candidate's name, email, phone, employer, job title, years of
+ * experience and a paraphrased summary bought no provenance anybody could consult and no accept rate anybody
+ * could measure. It was a second copy of the CV's contents with its own lifetime, on the collection whose
+ * whole lawful basis (`CONSENTED_PATHS["ats.resumeExtraction"]`) is that the document was submitted for one
+ * purpose. What is left answers what the table is actually asked: which feature ran, on which record, with
+ * which model, and how many fields it produced.
+ */
 async function recordSuggestion(deps: Deps, candidateId: string, fields: ExtractedResume): Promise<void> {
   try {
     const now = deps.clock.now();
+    const names = Object.keys(fields);
     const values = {
       hostCollection: "candidates",
       hostRecordId: candidateId,
       feature: "ats.resumeExtract",
-      payloadJson: JSON.stringify(fields),
+      payloadJson: JSON.stringify({ fields: names }),
       model: MODELS.generate,
-      basis: 1,
+      basis: names.length,
     };
     await deps.db
       .insert(schema.aiSuggestions)
       .values(values)
       .onConflictDoUpdate({
         target: [schema.aiSuggestions.hostCollection, schema.aiSuggestions.hostRecordId, schema.aiSuggestions.feature],
-        set: { payloadJson: values.payloadJson, model: values.model, state: "pending", decidedBy: null, decidedAt: null, updatedAt: now },
+        set: { payloadJson: values.payloadJson, basis: values.basis, model: values.model, state: "pending", decidedBy: null, decidedAt: null, updatedAt: now },
       });
   } catch (e) {
     console.error("resume extraction suggestion record failed", e);

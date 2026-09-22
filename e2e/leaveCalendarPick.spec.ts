@@ -97,10 +97,19 @@ test("a range picked on the grid fills the dates and prices itself", async ({ as
 });
 
 /** The next Mon-Fri strictly after `day`, as the grid names its cells. */
-/** Any request this person holds that starts on `day` - there should be none. */
+/**
+ * A request THIS PERSON filed starting on `day` - there should be none.
+ *
+ * Scoped to their own employee, because the reader here is a manager and the list they get back is their whole
+ * team's: anybody else's leave starting on the day this spec happened to pick reads as "the picker filed a
+ * request by itself", and at sixteen workers somebody else's leave lands on most days.
+ */
 async function filedOn(page: import("@playwright/test").Page, day: string): Promise<string | undefined> {
+  const me = await page.request.get("/v1/users/me");
+  if (!me.ok()) return undefined;
+  const { employee } = (await me.json()) as { employee?: string };
   const res = await page.request.get("/v1/leave-requests?page_size=100");
   if (!res.ok()) return undefined;
-  const { results = [] } = (await res.json()) as { results?: { path: string; start_date?: string }[] };
-  return results.find((r) => r.start_date === day)?.path;
+  const { results = [] } = (await res.json()) as { results?: { path: string; start_date?: string; employee?: string }[] };
+  return results.find((r) => r.start_date === day && r.employee === employee)?.path;
 }

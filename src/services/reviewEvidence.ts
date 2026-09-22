@@ -25,6 +25,7 @@ import {
   type EvidenceKudos,
   type ReviewEvidence,
 } from "../domain/reviewEvidence";
+import { notHeld } from "./withheld";
 
 const day = (v: Date | number) => new Date(v).toISOString().slice(0, 10);
 
@@ -165,6 +166,8 @@ async function kudosReceived(
       isNull(schema.announcements.deleteTime),
       // A hidden kudos is one a moderator took off the wall. It does not come back as evidence.
       eq(schema.announcements.disabled, false),
+      // A held kudos has never been seen by anybody, including the person it names. It is not evidence yet.
+      notHeld(schema.announcements),
       gte(schema.announcements.createdAt, new Date(from)),
       lt(schema.announcements.createdAt, new Date(to)),
       applyScope(scope, schema.announcements.code, schema.announcements.authorEmployeeId),

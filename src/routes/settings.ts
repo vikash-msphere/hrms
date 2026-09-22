@@ -11,7 +11,8 @@ import { parsePayslipTemplate } from "../domain/payslipTemplate";
 import { DOCUMENT_KINDS } from "../services/letterheads";
 import { validateStateMachine, type StateMachine } from "../domain/stateMachines";
 import { validateRestrictions } from "../domain/leaveRestrictions";
-import { AI_FEATURES } from "../domain/aiPolicy";
+import { AI_FEATURES, CARD_DUPLICATE_SENSITIVITIES, MODERATION_FALLBACKS } from "../domain/aiPolicy";
+import { MODERATABLE, MODERATION_WALL_SCOPES, isModeratable } from "../domain/moderation";
 import { EXTRACTABLE_FIELDS } from "../domain/resumeFields";
 import { RECEIPT_FIELDS } from "../domain/receiptFields";
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
@@ -614,9 +615,13 @@ function validatePerformance(value: unknown) {
  */
 function validateAi(value: unknown) {
   if (!isObj(value)) throw invalidArgument("ai must be an object");
+  // MINIMUM ONE, NOT ZERO, on both. Zero passes every numeric test and turns the feature off by arithmetic:
+  // `dailyNeurons: 0` refuses every call, and `perUserHourlyGenerations: 0` makes `used >= 0` true before
+  // anybody has done anything. Saving a number that silently means "off" on a screen whose off switches are
+  // elsewhere is exactly what `validateAttention` below refuses for the same reason.
   numericLeaves("ai", value, [
-    { name: "dailyNeurons", min: 0 },
-    { name: "perUserHourlyGenerations", min: 0 },
+    { name: "dailyNeurons", min: 1 },
+    { name: "perUserHourlyGenerations", min: 1 },
   ]);
   if (value.features !== undefined) {
     if (!isObj(value.features)) throw invalidArgument("ai.features must be an object");
@@ -645,6 +650,48 @@ function validateAi(value: unknown) {
     for (const f of value.receipt_fields) {
       if (typeof f !== "string" || !(RECEIPT_FIELDS as readonly string[]).includes(f)) {
         throw invalidArgument(`ai.receipt_fields contains "${String(f)}", which is not an extractable receipt field (${RECEIPT_FIELDS.join(", ")})`);
+      }
+    }
+  }
+  // HOW ALIKE TWO TASKS MUST LOOK before one is called a duplicate. The last leaf that was not checked, and
+  // it fails the same way as the two above: `cardDuplicateScore` falls back to `balanced` for anything it
+  // does not recognise, so a misspelled position was stored, shown as saved, and quietly ignored.
+  if (value.cardDuplicateSensitivity !== undefined) {
+    const v = value.cardDuplicateSensitivity;
+    if (typeof v !== "string" || !(CARD_DUPLICATE_SENSITIVITIES as readonly string[]).includes(v)) {
+      throw invalidArgument(`ai.cardDuplicateSensitivity must be one of ${CARD_DUPLICATE_SENSITIVITIES.join(", ")}`);
+    }
+  }
+  // WHAT THE MODERATION GATE DOES WHEN THE MODEL COULD NOT ANSWER. Checked by name like the leaves above,
+  // and it matters most on this one: `aiConfig` coerces anything unrecognised back to `hold`, so a typo that
+  // was accepted here would leave an org believing they had chosen to keep posting through an outage while
+  // the gate went on holding every post. The coercion is deliberately toward the safe position, which is
+  // exactly why the write side has to refuse rather than rely on it.
+  if (value.moderationFallback !== undefined) {
+    const v = value.moderationFallback;
+    if (typeof v !== "string" || !(MODERATION_FALLBACKS as readonly string[]).includes(v)) {
+      throw invalidArgument(`ai.moderationFallback must be one of ${MODERATION_FALLBACKS.join(", ")}`);
+    }
+  }
+  // WHICH POSTS THE MODEL READS, per wall. Three ways to get this wrong and all three are refused here,
+  // because each of them would leave the screen saying something the gate does not do:
+  //
+  //   a wall name nothing scans      - read as "every wall on its default", so the org believes they have
+  //                                    narrowed scanning and every post is still read
+  //   a position nothing recognises  - `moderationCovers` falls back to `all`, same mistake, opposite way
+  //   "anonymous" on a signed wall   - means "no post qualifies", which is `off` spelled as though it were
+  //                                    a narrowing; an org choosing it has almost certainly misread it
+  if (value.moderationScope !== undefined) {
+    if (!isObj(value.moderationScope)) throw invalidArgument("ai.moderationScope must be an object");
+    for (const [wall, position] of Object.entries(value.moderationScope)) {
+      if (!isModeratable(wall)) {
+        throw invalidArgument(`ai.moderationScope.${wall} is not a moderated wall (${Object.keys(MODERATABLE).join(", ")})`);
+      }
+      if (typeof position !== "string" || !(MODERATION_WALL_SCOPES as readonly string[]).includes(position)) {
+        throw invalidArgument(`ai.moderationScope.${wall} must be one of ${MODERATION_WALL_SCOPES.join(", ")}`);
+      }
+      if (position === "anonymous" && !MODERATABLE[wall]!.anonymity) {
+        throw invalidArgument(`ai.moderationScope.${wall} cannot be "anonymous": every post on that wall carries its author, so it would mean nothing is checked. Use "off" if that is what you want.`);
       }
     }
   }

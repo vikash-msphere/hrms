@@ -309,6 +309,14 @@ test.describe("an AI feature switched on", () => {
       // do. Blank exercises the branch that matters anyway - the field being offered must not change what
       // happens when nobody uses it.
       await dialog.getByLabel("Name").fill(name);
+      // With the feature on, the base opens on "work it out from the description" - so a blank description
+      // leaves the create with no base and the button says so. That is the whole of the new contract that can
+      // be checked without spending a generation.
+      await expect(dialog.getByRole("button", { name: /Create|Save/ }).first()).toBeDisabled();
+
+      // Pick the base by hand, and the description goes back to being optional - the create it always was.
+      await dialog.getByLabel("One row is").click();
+      await page.getByRole("option", { name: "Tickets", exact: true }).click();
       await dialog.getByRole("button", { name: /Create|Save/ }).first().click();
       await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
       await expect(page.getByRole("main")).toContainText(name, { timeout: 30_000 });
@@ -456,6 +464,63 @@ test.describe("an AI feature with a model behind it", () => {
       await purge(page, path);
     }
   });
+
+  test("with the gate on, a post reaches the wall - itself, or after somebody releases it", async ({ as }) => {
+    // THE GATE IN A BROWSER, which nothing covered before this. `moderation` on means a post is written
+    // invisible, read by a model, and only then published, so the whole posting flow runs through a model on
+    // the request path - and the failure it can produce is a post that is on no wall and on no queue. The
+    // unit suite holds each function against the state it was written to produce; only this can settle that
+    // the surfaces agree about where the post went.
+    //
+    // WHAT IS NOT CLAIMED, and it is the rule the rest of this file works under: nothing here asserts the
+    // model's VERDICT. A local Gemma is not Llama Guard and may clear or flag anything. Both answers are the
+    // gate working. What must never happen is the third one - the post nowhere, which is the whole finding
+    // this test was written for - so the assertion is that it ends up on the wall by one of the two routes.
+    test.setTimeout(300_000);
+    const page = await as("hr");
+    test.skip(!(await aiLocalUp(page)), "no local model on this machine (see docs/04-testing.md)");
+    const moderator = await as("super"); // `moderation.read`/`.decide` seed to nobody else
+
+    const title = `E2E gated post ${Date.now()}`;
+    await patchSettings(page, "ai", on("moderation"));
+    try {
+      await gotoRoute(page, "announcements", "Feed");
+      await page.getByRole("button", { name: "Choose what to post" }).click();
+      await page.getByRole("menuitem", { name: "Announcement" }).click();
+      const composer = page.getByRole("dialog");
+      await composer.getByPlaceholder("Say it in a line").fill(title);
+      await composer.getByPlaceholder("What's on your mind?").fill("The office moves to the second floor from Monday.");
+      await composer.getByRole("button", { name: "Publish", exact: true }).click();
+      // The write itself always succeeds: an author's words are kept whatever the check says about them.
+      await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 60_000 });
+
+      // The model runs on this request, and a cold local model is tens of gigabytes, so the wait is for the
+      // load rather than for the verdict.
+      const card = page.locator("div.shadow-card").filter({ hasText: title }).first();
+      await card.waitFor({ state: "visible", timeout: 180_000 }).catch(() => { /* held, which is the other half */ });
+
+      if (!(await card.isVisible())) {
+        // HELD. It is on nobody's wall - including its author's, which is what `held_at` means - so the only
+        // thing that can put it up is a moderator, and the queue is where it has to be for that to be true.
+        await gotoRoute(moderator, "moderation");
+        // The queue's own `li`, not any ancestor that happens to contain the title: a broad selector matches
+        // the page as well as the row, and `Release it` would then be whichever row's button came first.
+        const row = moderator.locator("ul > li").filter({ hasText: title }).first();
+        await expect(row).toBeVisible({ timeout: 30_000 });
+
+        // "Release it", not "Leave it up": the wording flips with `held` because the act does. Releasing
+        // must not re-enter the gate - a second refusal here used to leave the history saying "Released"
+        // over a post nobody could see.
+        await row.getByRole("button", { name: "Release it" }).click();
+        await moderator.getByRole("button", { name: "Release post" }).click();
+
+        await gotoRoute(page, "announcements", "Feed");
+        await expect(card).toBeVisible({ timeout: 60_000 });
+      }
+    } finally {
+      await patchSettings(page, "ai", off("moderation"));
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------------------------------------
@@ -466,12 +531,15 @@ test.describe("an AI feature with a model behind it", () => {
 // triggers and nothing can tell the app a row changed. So none of these could be covered in a browser at all
 // until `runCron` existed; `scripts/e2eStack.sh` passes `--test-scheduled` for it.
 //
-// NOT COVERED HERE, DELIBERATELY: a flagged post rendering on the moderation queue. Producing one means
-// getting a model to judge content unacceptable, and the local model is not Llama Guard - the rule this file
-// works under is that a local pass says nothing about how the production classifier judges. A spec that
-// posted deliberately objectionable text and asserted on a stand-in's verdict would be claiming exactly what
-// describe 3 refuses to claim. `e2e/moderationQueue.spec.ts` covers what a browser CAN settle about that
-// feature: it is private by default, and the nav item and the endpoint agree about who may see it.
+// NOT COVERED HERE, DELIBERATELY: a flagged post rendering on the moderation queue as a flag. Producing one
+// on demand means getting a model to judge content unacceptable, and the local model is not Llama Guard - the
+// rule this file works under is that a local pass says nothing about how the production classifier judges. A
+// spec that posted deliberately objectionable text and asserted on a stand-in's verdict would be claiming
+// exactly what describe 3 refuses to claim. What describe 3's last test DOES settle is the property that does
+// not depend on the verdict: with the gate on, a post ends up on the wall - by itself, or after a moderator
+// releases it from the queue - and never in the third place, which is nowhere. `e2e/moderationQueue.spec.ts`
+// covers the rest of what a browser can settle: the queue is private by default, and the nav item and the
+// endpoint agree about who may see it.
 test.describe("the AI features fed by the cron tick", () => {
   test("semantic search finds a ticket by what it means, not by its words", async ({ as }) => {
     test.setTimeout(300_000);

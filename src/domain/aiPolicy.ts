@@ -31,6 +31,9 @@
 // that covers working text too, the lever is Data Localization Suite, and the honest interim answer is to
 // turn the feature flags off.
 import { AUDIT } from "./manifests";
+// Type only, and deliberately one-way: `domain/moderation.ts` owns what a wall is and what an org may say
+// about it; this file owns the `ai` settings blob those choices are stored in.
+import type { ModerationScope } from "./moderation";
 
 /**
  * The models this app may call, and nothing else.
@@ -303,8 +306,11 @@ export function fence(label: string, untrusted: string): string {
   return `${FENCE_OPEN} ${label}\n${clean}\n${FENCE_CLOSE}`;
 }
 
-const FENCE_OPEN = "<<<UNTRUSTED_CONTENT";
-const FENCE_CLOSE = "UNTRUSTED_CONTENT>>>";
+// Exported because two other places have to recognise the delimiters rather than only write them: the usage
+// ledger strips anything from one onwards out of a provider error (services/ai.ts safeError), and
+// `test/promptFencing.test.ts` scans call sites for a fenced prompt that carries no preamble.
+export const FENCE_OPEN = "<<<UNTRUSTED_CONTENT";
+export const FENCE_CLOSE = "UNTRUSTED_CONTENT>>>";
 
 /** The sentence every system prompt carries. Kept here so all of them carry the same one. */
 export const UNTRUSTED_PREAMBLE =
@@ -363,16 +369,42 @@ export const BUDGET = {
   dailyNeurons: 7000,
   /** Generation calls one person may make per hour. Stops one enthusiast spending the org's day by lunch. */
   perUserHourlyGenerations: 20,
-  /** Embed calls per cron drain, so a bulk re-index cannot consume the day in one tick. */
-  embedsPerDrain: 200,
+  /**
+   * The share of the day UNATTENDED work may spend, leaving the rest reserved for whoever is at a keyboard.
+   *
+   * WHY A RESERVATION AND NOT JUST SMALLER DRAINS. The budget was first-come-first-served, and the unattended
+   * work always arrives first: the cron runs on its own schedule, the person pressing Publish arrives later.
+   * So turning on `search.semantic` over a corpus bigger than a day's allocation spent the whole ceiling by
+   * mid-morning every morning - and from then until UTC midnight `moderationGate` got `budget`, which it fails
+   * closed on, so EVERY post on every wall was held. Two switches an org is told to turn on, and the
+   * noticeboard stops working.
+   *
+   * The gate runs in the request path and carries its author, so it counts as interactive and lives inside the
+   * reserved share. A backfill cannot reach that share however long it runs.
+   */
+  unattendedShare: 0.6,
+  /**
+   * Embed calls per cron drain, so a bulk re-index cannot consume the day in one tick.
+   *
+   * SIZED AGAINST THE DAY, not against the drain. At 288 five-minute ticks, 200 embeds a tick was 57,600
+   * neurons of capacity against a 7,000 ceiling - eight times the whole allocation - so the number bounded
+   * nothing and the sentence above it was not true. `floor(dailyNeurons * unattendedShare / 288)` is 14, at
+   * one neuron an embed, so a backfill now genuinely spreads across the day instead of spending it by
+   * mid-morning and doing the same again tomorrow.
+   */
+  embedsPerDrain: 14,
   /**
    * Posts scanned for moderation per cron drain.
    *
-   * Two orders of magnitude below the embed ceiling, and the gap is the point: moderation is a GENERATION
-   * call, worth roughly a thousand embeds each, and it runs unattended rather than because somebody pressed
-   * something. Eight per five-minute tick is about two thousand posts a day, far more than any real wall
-   * produces, while a runaway - a bulk import of every historic announcement - costs a bounded slice of the
-   * allocation per tick instead of the whole day before anyone notices.
+   * Below the embed ceiling, and the gap is the point: moderation is a GENERATION call, worth roughly a
+   * hundred embeds each, and it runs unattended rather than because somebody pressed something.
+   *
+   * WHAT THIS ACTUALLY BOUNDS, stated honestly because the previous version of this comment overstated it.
+   * Eight posts a tick is 2,304 posts a day of CAPACITY, which at 60-180 neurons a post is far more than the
+   * allocation - so this is a per-tick slice, not a daily bound, and it is `unattendedShare` of the daily
+   * budget that decides how much of the wall gets read: roughly 70 posts a day on the hazard pass alone, 23
+   * with the conduct pass on. What the per-tick number buys is that one tick cannot take the lot, so the
+   * interactive share and the next tick both still have something.
    *
    * WITH `moderation.conduct` ON A POST CAN COST TWO CALLS, not one: the guard model first, then the conduct
    * model on whatever the guard model passed as safe - which is nearly everything, so assume the worst case.
@@ -382,6 +414,20 @@ export const BUDGET = {
    */
   moderationsPerDrain: 8,
 } as const;
+
+/**
+ * How long a row stays in `ai_usage`.
+ *
+ * The table's stated job is to answer "what was sent to a model, by whom, about what" a year later, and each
+ * row pairs a `user_id` with a `subject` - so left unswept it is a permanent per-person record of which
+ * employee had a model consulted about which record. Thirteen months is the promise plus a month of slack,
+ * so the answer is still there for somebody asking about this time last year.
+ *
+ * A CONSTANT RATHER THAN A SETTING, unlike the ceilings above it: those are about spend, which an org may
+ * reasonably tune, and this is about how long a record of people is kept, which is the one number an org
+ * should not be able to set to "for ever" from a settings screen.
+ */
+export const USAGE_RETENTION_DAYS = 400;
 
 /**
  * The org's own switches, stored in the `ai` settings blob.
@@ -399,6 +445,11 @@ export type AiConfig = {
   perUserHourlyGenerations: number;
   /** How alike two cards must look before `cards.triage` calls one a possible duplicate. See below. */
   cardDuplicateSensitivity?: string;
+  /** What the moderation gate does with a post the model could not answer about. See MODERATION_FALLBACKS. */
+  moderationFallback: ModerationFallback;
+  /** Which posts the org wants read, per wall. Absent means every wall, every post - see ModerationScope in
+   *  domain/moderation.ts, which is where the three positions are argued. */
+  moderationScope?: ModerationScope;
 };
 
 /** The switchable features. A new one is added here, which is also what puts it in the settings panel. */
@@ -429,7 +480,36 @@ export const AI_CONFIG_DEFAULT: AiConfig = {
   dailyNeurons: 7000,
   perUserHourlyGenerations: 20,
   cardDuplicateSensitivity: "balanced",
+  // Fail CLOSED unless an org says otherwise, for the same reason every feature above defaults to off: the
+  // other direction's failure mode is content reaching a public wall that nobody and nothing has read.
+  moderationFallback: "hold",
 };
+
+/**
+ * WHAT THE GATE DOES WHEN THE MODEL NEVER SPOKE.
+ *
+ * `hold` is the default and the original behaviour: a post that could not be checked waits for a person. It
+ * is the honest posture for a gate - one that opens whenever the guard is asleep is not a gate - and its cost
+ * is that posting stops working for a while. The trigger is not exotic: the daily neuron allowance runs out,
+ * or Workers AI has an outage, and from then until UTC midnight every post on every wall is held and the way
+ * out is somebody draining the queue.
+ *
+ * `publish` is the other posture, and an org may reasonably want it: a noticeboard that stops accepting posts
+ * on a Tuesday afternoon can be worse for them than a post going up unread, especially where the walls are
+ * low-risk and the moderation queue is watched anyway.
+ *
+ * THIS IS ONLY ABOUT SILENCE, NOT ABOUT VERDICTS, and that boundary is the whole design. `publish` applies
+ * when there was no answer - no budget, no binding, an error, or a reply that was not a verdict. A model that
+ * READ the post and OBJECTED still holds it under either setting, because that is the model doing its job
+ * rather than failing, and a switch that let an org publish flagged content would not be a failure mode
+ * setting, it would be turning the feature off with extra steps.
+ *
+ * Either way A FLAG IS WRITTEN, so the post is on the moderation queue. Under `publish` it sits there live
+ * and marked `Not checked`, which is what makes the posture auditable after the fact: a moderator can see
+ * exactly which posts went up unread while the allowance was spent, and take any of them down.
+ */
+export const MODERATION_FALLBACKS = ["hold", "publish"] as const;
+export type ModerationFallback = (typeof MODERATION_FALLBACKS)[number];
 
 /**
  * How alike two cards must look before one is offered as "you may already have this".
@@ -442,6 +522,10 @@ export const AI_CONFIG_DEFAULT: AiConfig = {
  */
 export const CARD_DUPLICATE_SCORES = { loose: 0.75, balanced: 0.82, strict: 0.9 } as const;
 export type CardDuplicateSensitivity = keyof typeof CARD_DUPLICATE_SCORES;
+
+/** The three positions by name, for the settings validator and the settings panel. Derived from the scores
+ *  above so a fourth position cannot be added in one place and missed in the other. */
+export const CARD_DUPLICATE_SENSITIVITIES = Object.keys(CARD_DUPLICATE_SCORES) as readonly CardDuplicateSensitivity[];
 
 export const cardDuplicateScore = (s: unknown): number =>
   CARD_DUPLICATE_SCORES[(s as CardDuplicateSensitivity)] ?? CARD_DUPLICATE_SCORES.balanced;

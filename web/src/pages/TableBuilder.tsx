@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown, ArrowUp, BarChart3, ChevronRight, Columns3, Copy, ExternalLink, Filter, GripVertical, Link2,
-  Lock, Plus, RefreshCw, Rows3, Sigma, Table2, Trash2, Pencil, Search, X,
+  Lock, Plus, RefreshCw, Rows3, Sigma, Sparkles, Table2, Trash2, Pencil, Search, X,
 } from "lucide-react";
 import { api, create, get, patch, remove } from "@/api";
 import { navigate, useRoute, setQueryParams } from "@/router";
@@ -267,6 +267,15 @@ export default function TableBuilder({ openId }: { me: Me; openId?: string }) {
 
 // ---- The saved tables -----------------------------------------------------------------------------------
 
+/**
+ * The base picker's "let AI choose" option.
+ *
+ * A sentinel rather than an empty value because a Select item cannot hold one, and because it says something
+ * an empty picker does not: the base is not unanswered, it is being answered from the sentence above it.
+ * It never leaves this dialog - the request simply omits `base`, and the answer names the one that was chosen.
+ */
+const AI_CHOOSES_BASE = "__ai_chooses_base__";
+
 function TableList() {
   const { rows, state, error, reload } = useCollection<TableView>("table-views");
   const { toast } = useToast();
@@ -279,11 +288,19 @@ function TableList() {
   // and it is not sent to the create.
   const [describe, setDescribe] = useState("");
   const canDescribe = useAiFeature("tables.describe");
+  // Opened on AI_CHOOSES_BASE when the feature is on, so the easy way in is the default one: "one row is" is
+  // the builder's hardest question and the last one somebody who can describe their grid in a sentence wants
+  // to answer. Without the feature it opens on the first base, as it always did - the alphabetically first
+  // collection is an arbitrary answer, but it is a valid one and the picker is right there.
+  // Whether the picker carries an ANSWER (somebody chose one) rather than the dialog's opening default. Only
+  // the default is re-decided below; a chosen base is never moved out from under the person who chose it.
+  const baseAnswered = useRef(false);
   const openCreate = useCallback(() => {
-    setForm({ display_name: "", description: "", base: bases[0]?.collection ?? "" });
+    baseAnswered.current = false;
+    setForm({ display_name: "", description: "", base: canDescribe ? AI_CHOOSES_BASE : bases[0]?.collection ?? "" });
     setDescribe("");
     setCreating(true);
-  }, [bases]);
+  }, [bases, canDescribe]);
   // "Build a table" from ⌘K or the "+" menu lands here and opens the dialog straight away.
   useIntent("new-table", openCreate);
 
@@ -297,6 +314,21 @@ function TableList() {
       .catch(() => { if (live) { setBases([]); setCatalogueDenied(true); } });
     return () => { live = false; };
   }, []);
+
+  // THE OPENING DEFAULT, RE-DECIDED WHILE IT IS STILL THE DEFAULT. Both of the things `openCreate` reads
+  // arrive AFTER the page does - the catalogue is its own request, and whether AI may pick the base is read
+  // from the settings snapshot (`useAiFeature` answers false until it lands) - while the New button
+  // deliberately waits for neither (see `newButton`). `openCreate` runs once, so a dialog opened inside that
+  // window kept whatever was known then: with no catalogue yet, a picker left empty for good and a Create that
+  // stayed disabled on a form that looked filled in; with the AI answer still pending, the first collection in
+  // the list instead of "let AI choose", which quietly turns off the one thing the sentence above it is for.
+  // This settles the default as each answer lands, and stops the moment somebody answers the picker themselves.
+  useEffect(() => {
+    if (!creating || baseAnswered.current) return;
+    const want = canDescribe ? AI_CHOOSES_BASE : bases[0]?.collection ?? "";
+    if (!want) return;
+    setForm((f) => (f.base === want ? f : { ...f, base: want }));
+  }, [creating, bases, canDescribe]);
 
   const baseLabel = useMemo(() => new Map(bases.map((b) => [b.collection, b.label])), [bases]);
 
@@ -317,20 +349,30 @@ function TableList() {
     // AI feature in this app.
     type Suggested = { columns: { field: string }[]; filters?: unknown[]; sort?: unknown[] };
     let suggested: Suggested | null = null;
+    // The base the sentence has to supply, because the person left it to AI. `base` is then omitted from the
+    // request and the answer says which collection it settled on.
+    const aiPicksBase = form.base === AI_CHOOSES_BASE;
+    let base = aiPicksBase ? "" : form.base;
     const wanted = describe.trim();
     if (wanted) {
       try {
-        const res = await api<{ spec: Suggested; unmatched: string[] }>("/table-fields:describe", {
+        const res = await api<{ base: string; spec: Suggested; unmatched: string[] }>("/table-fields:describe", {
           method: "POST",
-          body: JSON.stringify({ base: form.base, question: wanted }),
+          body: JSON.stringify({ question: wanted, ...(aiPicksBase ? {} : { base: form.base }) }),
         });
         suggested = res.spec;
+        base = res.base;
         if (res.unmatched.length) {
           // Named, not swallowed: a grid quietly narrower than what somebody described reads as the feature
           // misunderstanding them rather than as a field that does not exist.
           toast({ title: "Some of that had no matching field", description: res.unmatched.join(", "), variant: "destructive" });
         }
       } catch (e) {
+        // RETHROWN when the base came from here, because there is no table to create without one: the dialog
+        // stays open with the message and the picker underneath it. With a base already chosen it stays a
+        // soft failure - the empty table is created and the columns are picked by hand, which is the fallback
+        // for every AI feature in this app.
+        if (aiPicksBase) throw new Error(`${(e as Error).message} - or pick what one row is yourself.`);
         toast({ title: "Couldn't lay it out", description: `${(e as Error).message} - creating the table empty.`, variant: "destructive" });
       }
     }
@@ -338,14 +380,19 @@ function TableList() {
     const created = await create<TableView>("table-views", {
       display_name: form.display_name.trim(),
       description: form.description.trim() || null,
-      base: form.base,
+      base,
       columns: suggested?.columns ?? [],
       ...(suggested?.filters?.length ? { filters: suggested.filters } : {}),
       ...(suggested?.sort?.length ? { sort: suggested.sort } : {}),
     });
     toast({
       title: "Table created",
-      description: suggested?.columns.length ? "Check the columns it picked." : "Pick its columns to fill it in.",
+      // The chosen base is NAMED when nobody chose it. It is the one decision here that was made for them,
+      // and a grid built on the wrong collection is otherwise something they work out from its columns.
+      description: [
+        aiPicksBase ? `Rows are ${baseLabel.get(base) ?? base}.` : "",
+        suggested?.columns.length ? "Check the columns it picked." : "Pick its columns to fill it in.",
+      ].filter(Boolean).join(" "),
       variant: "success",
     });
     reload();
@@ -512,12 +559,18 @@ function TableList() {
         open={creating}
         onClose={closeCreate}
         title="New table"
-        description="Pick what one row of the table is. You choose its columns next, and only ever from fields you can already read."
+        description={canDescribe
+          ? "Say what the table should show and AI lays it out, or build it by hand. Either way its columns are only ever fields you can already read."
+          : "Pick what one row of the table is. You choose its columns next, and only ever from fields you can already read."}
         collection="table-views"
         form={form}
         submitLabel="Create"
-        canSubmit={!!form.display_name.trim() && !!form.base}
-        whyNot={!form.display_name.trim() ? "Give the table a name." : "Pick what one row is."}
+        canSubmit={!!form.display_name.trim() && !!form.base && (form.base !== AI_CHOOSES_BASE || !!describe.trim())}
+        whyNot={[
+          !form.display_name.trim() && "Give the table a name.",
+          !form.base && "Pick what one row is.",
+          form.base === AI_CHOOSES_BASE && !describe.trim() && "Say what the table should show, or pick what one row is.",
+        ]}
         onSubmit={submit}
       >
         <Field label="Name">
@@ -526,21 +579,21 @@ function TableList() {
         <Field label="Description (optional)">
           <Input value={form.description} placeholder="What this table is for" onChange={(e) => setForm({ ...form, description: e.target.value })} />
         </Field>
-        <Field label="One row is" hint="The collection the table is built on. Everything else joins onto it.">
-          <Select value={form.base} onValueChange={(v) => setForm({ ...form, base: v })}>
-            <SelectTrigger><SelectValue placeholder="Pick a base" /></SelectTrigger>
-            <SelectContent>
-              {bases.map((b) => <SelectItem key={b.collection} value={b.collection}>{b.label}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </Field>
-        {/* Optional, and only when the org has the feature on - an input that cannot do anything is worse
-            than no input. Left blank this is the create it always was, and the table opens empty for the
-            person to pick columns by hand. It comes AFTER the base because the suggestion is made against
-            that base's catalogue, and asking for it first would invite describing a table the base cannot
-            answer. */}
+        {/* Only when the org has the feature on - an input that cannot do anything is worse than no input.
+            Optional against a base the person picked: left blank, that is the create it always was and the
+            table opens empty for them to fill in by hand. Required when the base is left to it, since there
+            is then nothing else to build the table from.
+            ABOVE the picker, because the picker's first option defers to it: an option that points at a field
+            further down the form asks somebody to answer a question before reading the answer. */}
         {canDescribe && (
-          <Field label="What should it show? (optional)" hint="Describe it and the columns, filters and sorting are laid out for you. You can change all of it afterwards.">
+          <Field
+            label={form.base === AI_CHOOSES_BASE ? "What should it show?" : "What should it show? (optional)"}
+            // Marked as AI at the field it belongs to, not only in the dialog's subtitle: this is the one
+            // input here that goes to a model, and somebody typing a sentence into a form deserves to know
+            // which of its boxes is read by one.
+            action={<span className="flex items-center gap-1 text-xs text-muted-foreground"><Sparkles className="h-3.5 w-3.5" /> AI</span>}
+            hint="AI turns your sentence into columns, filters and sorting. You can change all of it afterwards."
+          >
             <Input
               value={describe}
               placeholder="e.g. open tickets by department, newest first"
@@ -548,6 +601,29 @@ function TableList() {
             />
           </Field>
         )}
+        <Field
+          label="One row is"
+          hint={form.base === AI_CHOOSES_BASE
+            ? "AI picks it from your sentence above. You can change it afterwards."
+            : "The collection the table is built on. Everything else joins onto it."}
+        >
+          <Select value={form.base} onValueChange={(v) => { baseAnswered.current = true; setForm({ ...form, base: v }); }}>
+            <SelectTrigger><SelectValue placeholder="Pick a base" /></SelectTrigger>
+            <SelectContent>
+              {/* First, and the default, because it is the answer for somebody who knows the grid they want
+                  and not which of eighty collections counts it. Named for WHO decides rather than for what is
+                  read: the form already has a Description box - the table's own blurb, nothing to do with this
+                  - so wording it "from the description" pointed at the wrong field, and it said nothing about
+                  a model being involved in a choice being made for somebody. */}
+              {canDescribe && (
+                <SelectItem value={AI_CHOOSES_BASE}>
+                  <span className="flex items-center gap-1.5"><Sparkles className="h-3.5 w-3.5" /> Let AI choose</span>
+                </SelectItem>
+              )}
+              {bases.map((b) => <SelectItem key={b.collection} value={b.collection}>{b.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </Field>
       </WriteDialog>
     </div>
   );

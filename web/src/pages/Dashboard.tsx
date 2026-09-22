@@ -27,6 +27,7 @@ import {
   ListTodo,
   BellRing,
   ChevronDown,
+  Sparkles,
 } from "lucide-react";
 import { useCollection } from "@/hooks/useCollection";
 import { useEmployee } from "@/hooks/useEmployee";
@@ -63,6 +64,7 @@ import { AccessTarget } from "@/components/access/AccessTarget";
 import type { AccessTargetRef } from "@/components/access/AccessModeProvider";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { useAiFeature } from "@/lib/aiFeatures";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -319,15 +321,30 @@ export default function Dashboard({ me }: { me: Me }) {
   // and the contract it depends on is openapi.yaml's `/v1/attention`, not a TypeScript type in src/.
   const [attention, setAttention] = useState<{ kind: string; path: string; title: string; detail: string }[]>([]);
   const [attentionSummary, setAttentionSummary] = useState<string | null>(null);
+  // ASKED FOR, NOT LOADED. The summary is one generation call (~120 neurons against a daily ceiling of 7000),
+  // so running it on every dashboard load spent the org's whole allocation at 58 people - and the moderation
+  // gate, which holds a post when it cannot spend, draws on the same ceiling. So the list arrives with the
+  // page and the sentence arrives when somebody presses for it, the same shape the board narration and the
+  // team report already have.
+  const [attentionSummaryState, setAttentionSummaryState] = useState<"idle" | "loading" | "done">("idle");
+  const attentionSummaryOn = useAiFeature("attention.summary");
   useEffect(() => {
     if (!showSection("needsyou")) return;
     let live = true;
-    get<{ items?: { kind: string; path: string; title: string; detail: string }[]; summary?: string }>("attention")
-      .then((r) => { if (live) { setAttention(r.items ?? []); setAttentionSummary(r.summary ?? null); } })
-      .catch(() => { if (live) { setAttention([]); setAttentionSummary(null); } });
+    get<{ items?: { kind: string; path: string; title: string; detail: string }[] }>("attention")
+      .then((r) => { if (live) setAttention(r.items ?? []); })
+      .catch(() => { if (live) setAttention([]); });
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfgReady, dashCfg, me.employee_id]);
+  // The list is already on screen, so a refusal here costs a sentence: the button settles to "done" either
+  // way and says nothing rather than reporting that an optional extra was unavailable.
+  const askAttentionSummary = () => {
+    setAttentionSummaryState("loading");
+    get<{ summary?: string }>("attention?summary=1")
+      .then((r) => { setAttentionSummary(r.summary ?? null); setAttentionSummaryState("done"); })
+      .catch(() => { setAttentionSummary(null); setAttentionSummaryState("done"); });
+  };
   useEffect(() => {
     if (!cfgReady) return;
     // Counts, but not before they are wanted: every key below belongs to the KPI wall, bar the one my-day tile
@@ -1102,14 +1119,27 @@ export default function Dashboard({ me }: { me: Me }) {
             <AlertTriangle className="h-4 w-4 text-warning" /> Needs you
             <span className="text-xs font-normal text-muted-foreground">{attention.length}</span>
           </h2>
-          {/* Absent unless a model answered, which is most deployments: the section is the list, and the
-              sentence is an addition to it. Credited, like every other written line in this app, so nobody
-              mistakes it for something the app worked out. */}
-          {attentionSummary && (
+          {/* The sentence is an addition to the list and it is ASKED FOR: one press, one generation. Credited,
+              like every other written line in this app, so nobody mistakes it for something the app worked
+              out. A press that produced nothing (switched off mid-session, out of budget, a model error)
+              leaves the list exactly as it was and says nothing - the list was never the part at risk. */}
+          {attentionSummaryOn && attentionSummary && (
             <p className="mb-2 text-sm text-muted-foreground">
               {attentionSummary}
               <span className="ml-1.5 text-xs">Written by AI from the list below.</span>
             </p>
+          )}
+          {attentionSummaryOn && !attentionSummary && attention.length > 1 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mb-2 -ml-2 h-7 gap-1.5 text-xs text-muted-foreground"
+              disabled={attentionSummaryState === "loading"}
+              onClick={askAttentionSummary}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              {attentionSummaryState === "loading" ? "Reading the list..." : attentionSummaryState === "done" ? "Nothing to add" : "What should I look at first?"}
+            </Button>
           )}
           <div className="divide-y rounded-lg border">
             {attention.map((a) => (

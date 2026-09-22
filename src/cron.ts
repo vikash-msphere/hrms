@@ -23,9 +23,9 @@ import { nudgeMissingScorecards } from "./services/ats";
 import { reconcilePendingEsign } from "./services/esign/callback";
 import { publishDueAnnouncements } from "./services/announcements";
 import { drainSearchEmbeddings } from "./services/searchEmbed";
-import { drainModeration } from "./services/moderation";
+import { drainModeration, reconcileHolds } from "./services/moderation";
 import { sweepCardDuplicates, pruneDuplicateSuggestions } from "./services/cardDuplicateSweep";
-import { sweepAiCache } from "./services/ai";
+import { sweepAiCache, sweepAiUsage } from "./services/ai";
 import { nextOccurrence } from "./services/events";
 import { purgeExpiredAccessRules, reviewStandingAccess } from "./services/accessRules";
 import { purgeIdentityFieldsSlice, IDENTITY_PURGE_JOB, type IdentityPurgeCursor } from "./services/identityDetails";
@@ -228,6 +228,10 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // the enforcement - but the table holds generated text about real records, and without this it grows for
     // the life of the deployment.
     const aiCacheSwept = await run("sweepAiCache", () => sweepAiCache(deps));
+    // And the ledger's own retention. `ai_usage` is the larger of the two tables and each row pairs a person
+    // with a record they had a model consulted about, so without a window it is a permanent per-person log
+    // going back to deployment - the half of "answer this a year later" that had no code behind it.
+    const aiUsageSwept = await run("sweepAiUsage", () => sweepAiUsage(deps));
     // Periodic recertification of STANDING privilege (opt-in per org via the `access-review` setting). The
     // expiry sweep above only handles access somebody knew was temporary; this is the rest - the grant made
     // for one project or one person's leave cover that nobody's job it is to remove. No-ops on every tick
@@ -241,8 +245,13 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // And the hygiene half: answers about cards that have since been delivered or deleted are cleared, so a
     // groomer is never sent to check a pair that stopped existing.
     const duplicatesPruned = await run("pruneDuplicateSuggestions", () => pruneDuplicateSuggestions(deps));
+    // Posts the gate is still holding with nothing outstanding that could release them. `held_at` hides a row
+    // from every read in the app and only a PENDING flag puts it in front of a moderator, so a hold whose flag
+    // was retired, decided or never written is a post nobody can see and nobody can let out. This is the
+    // mirror of `retireOrphans`: that closes a flag with no host, this re-queues a host with no flag.
+    const holdsRequeued = await run("reconcileHolds", async () => (await reconcileHolds(deps)).requeued);
     return {
-      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, attentionDigests, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, payrollBudgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, accessReviewed, duplicatesFlagged, duplicatesPruned },
+      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, attentionDigests, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, payrollBudgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, aiUsageSwept, accessReviewed, duplicatesFlagged, duplicatesPruned, holdsRequeued },
       failures,
     };
   }

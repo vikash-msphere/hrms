@@ -123,9 +123,9 @@ export async function narrateBoard(deps: Deps, user: AppUser, boardId: string, d
 
   const out = await aiGenerate(
     deps,
-    // No `collection` is declared: nothing from `cards` is in this prompt. The four labels are this file's
-    // own words and the numbers are aggregates.
-    { feature: "boards.narrate", userId: user.uuid, subject: `boards/${boardId}` },
+    // `reads: "none"`, declared rather than omitted: nothing from `cards` is in this prompt. The four labels
+    // are this file's own words and the numbers are aggregates.
+    { feature: "boards.narrate", userId: user.uuid, subject: `boards/${boardId}`, reads: "none" },
     { system: SYSTEM, user: promptFor(findings, window), promptVersion: PROMPT_VERSION, maxTokens: 220 },
   );
 

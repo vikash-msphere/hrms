@@ -3972,8 +3972,12 @@ components:
     table-suggestion:
       type: object
       description: "A suggested grid specification, for the builder to render and the person to edit. Not a saved view and not a resource; saving it is a separate ordinary write."
-      required: [spec, unmatched]
+      required: [base, spec, unmatched]
       properties:
+        base:
+          type: string
+          readOnly: true
+          description: "The collection one row of the suggested grid is: the one the request named, or the one chosen from its description when it named none."
         spec:
           type: object
           readOnly: true
@@ -4574,7 +4578,7 @@ components:
             exception and reports the latest, since a rebuild is where the current figures came from.
           items:
             type: object
-            required: [key, at, actor]
+            required: [key, at_time, actor]
             properties:
               key: { type: string, readOnly: true, enum: [cutoff, created, built, submitted, approved, bank_file, published, pay_date] }
               at_time: { type: string, format: date-time, readOnly: true, nullable: true }
@@ -6039,7 +6043,7 @@ paths:
         '500': { $ref: '#/components/responses/Problem' }
   /v1/table-fields:describe:
     post:
-      description: "Custom method describe: turn a description of a grid into a specification the builder renders. The base is chosen by the caller, not by the model - they are already in the builder with one selected. The model is given ONLY the catalogue keys this caller may use (the same fields the picker offers them) and answers with those keys; anything it names that the catalogue does not have is reported in `unmatched` rather than dropped in silence. Nothing is saved: the spec comes back for the person to edit and save through the ordinary table-views write, which validates it again."
+      description: "Custom method describe: turn a description of a grid into a specification the builder renders. The model is given ONLY the catalogue keys this caller may use (the same fields the picker offers them) and answers with those keys; anything it names that the catalogue does not have is reported in `unmatched` rather than dropped in silence. `base` is optional: leave it out and the collection one row is is chosen from the same description, out of the bases this caller may build on, and named in the answer. Nothing is saved: the spec comes back for the person to edit and save through the ordinary table-views write, which validates it again."
       operationId: ":DescribeTableFields"
       requestBody:
         required: true
@@ -6048,8 +6052,9 @@ paths:
             schema:
               type: object
               properties:
-                base: { type: string, description: The collection one row of the grid is. Must be a base this caller can build on. }
+                base: { type: string, description: "The collection one row of the grid is. Must be a base this caller can build on. Optional: left out, it is chosen from `question`." }
                 question: { type: string, maxLength: 500, description: What the table should show. }
+              required: [question]
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -8172,9 +8177,10 @@ paths:
                   next_page_token: { type: string, description: "Absent - the queue is returned in full." }
   /v1/moderation:
     get:
-      description: "Public posts a guard model objected to and which nobody has decided on yet, newest first, capped at 100 with `has_more` when there are others. Gated by the `moderation` capability (super-only by default; widen through the ACL). The queue quotes posts in full and is not narrowed to what the holder could otherwise read - moderating is an org-wide job - so the capability is the whole of the access decision. An anonymous suggestion arrives with no author: the wall's promise is to the reader as well as the submitter. A flag whose post has since gone is closed as superseded rather than listed."
+      description: "Public posts a guard model objected to and which nobody has decided on yet, newest first, capped at 100 with `has_more` when there are others. Gated by the `moderation` capability (super-only by default; widen through the ACL). The queue quotes posts in full and is not narrowed to what the holder could otherwise read - moderating is an org-wide job - so the capability is the whole of the access decision. An anonymous suggestion arrives with no author: the wall's promise is to the reader as well as the submitter. A flag whose post has since gone is closed as superseded rather than listed. With `state=decided` this answers the HISTORY instead: flags a person has already upheld or overruled, newest decision first, with `decision`, `decided_time` and `decided_by` set. That view is the only place a hidden reply can be seen at all, and it never retires a flag."
       operationId: ListModerationQueue
       parameters:
+        - { in: query, name: state, schema: { type: string, enum: [pending, decided], default: pending }, description: "`pending` (default) is the queue of flags waiting on a person; `decided` is what has already been answered." }
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
       responses:
@@ -8204,8 +8210,74 @@ paths:
                         edited_since_flag: { type: boolean, description: "The post changed after it was flagged, so the excerpt is no longer what is on the wall" }
                         author: { type: string, nullable: true, description: "Resource path employees/{id}, or null when the post is anonymous" }
                         flagged_time: { type: string, format: date-time }
+                        held: { type: boolean, description: "The gate withheld this one - it was never public and nobody was notified. Dismissing it RELEASES it rather than merely closing the flag." }
+                        visible: { type: boolean, description: "Whether the post is on the wall as things stand" }
+                        decision: { type: string, nullable: true, enum: [hidden, released], description: "History only: what a person decided. Null on the pending queue." }
+                        decided_time: { type: string, format: date-time, nullable: true }
+                        decided_by: { type: string, nullable: true, description: "Resource path users/{id}, or null when an automation decided it" }
                   has_more: { type: boolean, description: "More flags are pending than this response carries. Decide some and read again." }
+                  counts:
+                    type: object
+                    description: "How big each half is, whichever half was asked for - the two view chips show these. Counted off the flags rather than off the page, which is capped at 100."
+                    properties:
+                      pending: { type: integer, description: "Flags waiting on a person" }
+                      decided: { type: integer, description: "Flags already upheld or overruled" }
                   next_page_token: { type: string, description: "Absent - the queue is not paged. It returns the newest 100 and sets `has_more` when there are others." }
+  /v1/moderation:hide:
+    post:
+      description: "Take a public post, reply or suggestion down because a PERSON objected - no model flag required. The item is withdrawn through its own table's write (an announcement is disabled; a reply and a suggestion are soft-deleted), its author is told, and a record is written so it appears under Flagged posts as hidden and can be put back with `:unhide`. An outstanding flag on the same item is answered by this rather than left waiting. Gated by `moderation.hide`, a SEPARATE grant from `moderation.decide`: working through what a model raised is not the same permission as reaching onto the wall and removing anything."
+      operationId: ":Hide"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host]
+              properties:
+                host: { type: string, description: "Resource path of the item: announcements/{id} - announcement-replies/{id} - or suggestions/{id}" }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  host: { type: string, description: "The item that was taken down" }
+  /v1/moderation:unhide:
+    post:
+      description: "Put a post a moderator hid back into play. With `mode=draft` (the default) it returns to its author as a DRAFT and its flag reopens, so it is waiting on a decision again; getting it live is then the ordinary publish, which sends the text through the safety check afresh. With `mode=publish` it goes straight back on the wall and its flag records the takedown as overruled - for the moderator who has read the post and disagrees, and whose author may be on leave or gone. A reply and a suggestion have no draft state, so for them the row simply comes back either way. Its author is told. This also takes a post the gate is HOLDING whose flag is still pending: an announcement is handed back to its author as a draft and its flag closes, since nobody judged the text. Refused for a post that was never taken down, and for a held reply or suggestion, which has no draft to go back to. Gated by `moderation.unhide`, which is a SEPARATE grant from `moderation.decide` - reversing a colleague's decision is not the same permission as making one."
+      operationId: ":Unhide"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host]
+              properties:
+                host: { type: string, description: "Resource path of the hidden item: announcements/{id} - announcement-replies/{id} - or suggestions/{id}" }
+                mode: { type: string, enum: [draft, publish], default: draft, description: "Where it lands: back to its author as a draft, or straight onto the wall. Not a second grant - both are the same reversal." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  host: { type: string, description: "The item that was put back" }
   /v1/moderation:decide:
     post:
       description: "Uphold a moderation flag or dismiss it. `hide` withdraws the item through its own table's write (an announcement is disabled; a suggestion and a reply are soft-deleted) and notifies whoever wrote it; `dismiss` closes the flag and leaves the item exactly where it is. A reply is hidden on its own, never by taking down the post it sits under - the author did not write it. Neither action is a hard delete and both are recorded against the deciding user. Gated by the `moderation` capability."
@@ -17530,7 +17602,7 @@ paths:
                           type: array
                           description: "Further collections a derived measure required."
                           items: { type: string }
-                        unit: { type: string, enum: [count, days, hours, minutes, percent, rating, time_of_day] }
+                        unit: { type: string, enum: [count, days, hours, minutes, percent, rating, time_of_day, money] }
                         agg: { type: string, enum: [sum, avg], description: "How the measure rolls up to the team line." }
                         direction: { type: string, enum: [higher, lower, none], description: "Which way is good." }
                         hint: { type: string, description: "Exactly what was counted." }
@@ -17578,6 +17650,12 @@ paths:
     get:
       description: "What needs this caller, across their goals, board cards and reviews. Every item is derived at read time from a signal the app already computes - a goal behind the line from its start to its due date, a goal nobody has touched in three weeks, a card that has sat in one column for three weeks, a review at a stage waiting on this person - so nothing is stored and there is nothing to keep up to date. Each backing collection is bound by the caller's own list scope, so a collection they may not list contributes nothing rather than refusing the request. Ranked worst first and capped."
       operationId: "AttentionForCaller"
+      parameters:
+        - name: summary
+          in: query
+          required: false
+          schema: { type: string, enum: ["1", "true"] }
+          description: "Ask for the one-line written summary as well as the list. Omitted, no model is called. It is a separate request rather than part of the load because it costs one generation (~120 neurons against a daily ceiling of 7,000, so 58 of them spend the org's day), and the moderation gate - which withholds a post when it cannot spend - draws on the same ceiling."
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -17619,7 +17697,7 @@ paths:
                       required: [kind, path, title, detail]
                   summary:
                     type: string
-                    description: "One sentence saying what to look at first. Present only when the `attention.summary` feature is on, a model answered, and there is more than one item; the list is arithmetic and never depends on it. Reviews reach the model as a count only - `reviews` is on the denylist - while goal and card titles, which are not, are named."
+                    description: "One sentence saying what to look at first. Present only when `summary` was asked for, the `attention.summary` feature is on, a model answered, and there is more than one item; the list is arithmetic and never depends on it. Reviews reach the model as a count only - `reviews` is on the denylist - while goal and card titles, which are not, are named."
                 required: [items]
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }

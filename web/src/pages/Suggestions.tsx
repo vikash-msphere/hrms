@@ -19,6 +19,7 @@ import { useInfiniteScroll } from "@/hooks/useInfiniteScroll";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
+import { confirmDecision } from "@/lib/confirmDecision";
 import { AccessItem } from "@/components/access/AccessItem";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -206,8 +207,24 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
       setVoting(null);
     }
   }
+  // Take a suggestion off the box as a moderator: `moderation.hide`, not this collection's delete. It is
+  // recoverable and recorded, which is the difference from Remove.
+  async function hideByHand(s: Suggestion) {
+    if (!(await confirmDecision(confirm, "hide", `"${s.title}"`))) return;
+    try {
+      await invoke("moderation", "hide", undefined, { host: s.path });
+      toast({ title: "Suggestion hidden", description: "Its author has been told. You can put it back from Flagged posts.", variant: "success" });
+      if (solo) navigate("suggestions"); else reload();
+    } catch (e) {
+      toast({ title: "Couldn't hide it", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
   async function del(s: Suggestion) {
-    if (!(await confirm({ title: "Remove this suggestion?", description: `"${s.title}" and its votes will be permanently removed.`, confirmLabel: "Remove", destructive: true }))) return;
+    // Through the shared decision dialog, like Hide beside it: two adjacent buttons that both take a
+    // suggestion off the box should ask in the same voice, and the difference between them belongs in the
+    // copy rather than in one of them having a hand-rolled prompt and the other the house one.
+    if (!(await confirmDecision(confirm, "removeSuggestion", `"${s.title}"`))) return;
     // Removing the suggestion a solo page IS leaves nothing to render, so that page goes back to the board.
     try { await remove(s.path, s.etag); toast({ title: "Suggestion removed", variant: "success" }); if (solo) navigate("suggestions"); else reload(); }
     catch (e) { toast({ title: "Couldn't remove", description: (e as Error).message, variant: "destructive" }); }
@@ -331,6 +348,13 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
                     <div className="mt-2 flex items-center gap-2">
                       {can.includes("respond") && <AccessAction verb="respond" can={can} label="Respond to suggestion"><Button size="sm" variant="outline" onClick={() => openRespond(s)}><MessageSquare className="h-3.5 w-3.5" /> Respond</Button></AccessAction>}
                       {can.includes("delete") && <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive" onClick={() => del(s)}><Trash2 className="h-3.5 w-3.5" /> Remove</Button>}
+                      {/* MODERATION, and distinct from Remove beside it. Remove is the owner's (or an
+                          admin's) delete; this is somebody with `moderation.hide` taking a suggestion off
+                          the box on their own judgement - the author is told, it is recorded under Flagged
+                          posts, and it can be put back. Two different acts, two different grants. */}
+                      <AccessAction collection="moderation" verb="hide" label="Take this suggestion off the box">
+                        <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => void hideByHand(s)}><EyeOff className="h-3.5 w-3.5" /> Hide</Button>
+                      </AccessAction>
                       {/* Pop this one out onto a page of its own: the suggestion, its votes and the response,
                           with no board behind it. Same tab - the back button returns to the board. Not
                           offered on that page - it IS that page. */}

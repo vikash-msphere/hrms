@@ -271,4 +271,24 @@ describe.skipIf(!LIVE)("generations come back in a shape the parsers accept", ()
     // this the safest place in the app to put a model, and it holds whatever the model invented.
     for (const c of spec.columns) expect(["title", "status", "created_at"]).toContain(c.field);
   }, SLOW);
+
+  it("names one of the offered collections when asked what a row of the table is", async () => {
+    // The other half of the table assist, and the one a person leans on hardest: the base. Asserted on the
+    // FORMAT and the vocabulary, not on the judgement - what has to hold is that a real model answers with a
+    // collection name from the list rather than a sentence about it, because `coerceBase` refuses everything
+    // else and the builder then asks the person to pick one by hand.
+    const { coerceBase, systemForBases } = await import("../src/services/tableAssist");
+    const bases = [
+      { collection: "employees", label: "People" },
+      { collection: "tickets", label: "Tickets" },
+      { collection: "leave-requests", label: "Leave requests" },
+    ];
+
+    const raw = await deps.ai!.generate({
+      system: systemForBases(bases),
+      user: "every open ticket with who raised it",
+      maxTokens: 40,
+    });
+    expect(coerceBase(raw, bases), `no offered collection in: ${raw}`).not.toBeNull();
+  }, SLOW);
 });

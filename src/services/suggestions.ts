@@ -16,7 +16,7 @@ import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { deleteStateFilter, purgeRow, restoreRow, type PurgeCascade } from "./softDelete";
-import { assertMayUnhide, moderationGate, moderationGateOn, reopenOnUnhide, scanSoon } from "./moderation";
+import { assertMayUnhide, moderationGate, moderationGateOn, reopenOnUnhide } from "./moderation";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 import { notHeld } from "./withheld";
 
@@ -130,7 +130,13 @@ export async function createSuggestion(deps: Deps, actor: AppUser, input: Sugges
   if (!submitterId) throw invalidArgument("only an employee can submit a suggestion");
   // Allocated inside the retry, so two people submitting at once both get a suggestion (codeAlloc.ts).
   // Written held when the gate is on: the box shows nothing until a model has read it.
-  const gated = await moderationGateOn(deps);
+  //
+  // THE ANONYMITY IS PART OF THE QUESTION on this wall, and it is known here before the row exists. An org
+  // scanning only unattributed posts gates an anonymous submission and lets a signed one through untouched -
+  // never written held, never read by a model, no queue item. That is the cheapest useful configuration of
+  // the feature, and it is the one the box's own design argues for: anonymity is what removes the deterrent
+  // a name provides, so it is where a check earns its keep.
+  const gated = await moderationGateOn(deps, "suggestions", { anonymous: !!input.anonymous });
   const row = (await withFreshCode(async () => deps.db
     .insert(schema.suggestions)
     .values({ code: await allocOwnedCode(deps, schema.suggestions, schema.suggestions.submitterId, submitterId), submitterId, anonymous: !!input.anonymous, category: input.category?.trim() || null, title, body, heldAt: gated ? deps.clock.now() : null })
@@ -145,7 +151,7 @@ export async function createSuggestion(deps: Deps, actor: AppUser, input: Sugges
   // Held: no event, and no nudge to the reviewers. Both would announce a suggestion that is not in the box,
   // and the event in particular is what an automation rule acts on - a rule that emails HR about every new
   // suggestion would otherwise leak the text of one that was withheld.
-  if (gated && !(await moderationGate(deps, "suggestions", row.uuid))) return row;
+  if (gated && !(await moderationGate(deps, "suggestions", row.uuid, actor.uuid))) return row;
   // ...and out of the event, for the same reason one layer over: `event_log` carries `employee_id`, and an
   // HR-authored automation on `suggestion.submitted` can template `{{employeeId}}` straight out of it.
   await emitEvent(deps, row.anonymous ? null : actor, "suggestion.submitted", {
@@ -163,9 +169,6 @@ export async function createSuggestion(deps: Deps, actor: AppUser, input: Sugges
     subject: `suggestions/${row.uuid}`,
     actorId: input.anonymous ? undefined : submitterId,
   });
-  // Gate off: read after the fact instead, which cannot withhold anything. Anonymity is preserved either
-  // way by the flag itself (the payload carries it), so an anonymous suggestion is scanned like any other.
-  if (!gated) await scanSoon(deps, "suggestions", row.uuid);
   return row;
 }
 
@@ -182,17 +185,20 @@ export async function updateSuggestion(deps: Deps, actor: AppUser, id: string, p
   // The gate meets an edit too, and the hold rides in the same write as the new text - otherwise a cleared
   // suggestion can be edited into anything and the check only finds out afterwards. A suggestion is always
   // public, so unlike an announcement there is no draft case to skip.
-  const gated = await moderationGateOn(deps);
+  //
+  // THE ANONYMITY IS READ AFTER THE PATCH, not before it: signing a previously anonymous suggestion, and
+  // un-signing a signed one, both change whether an org scanning only unattributed posts wants this one
+  // read. Taking it off `row` would decide on what the suggestion used to be.
+  const gated = await moderationGateOn(deps, "suggestions", {
+    anonymous: has("anonymous") ? !!patch.anonymous : row.anonymous,
+  });
   if (gated) set.heldAt = deps.clock.now();
 
   const updated = await updateAtVersion(deps, schema.suggestions, "suggestion", row, set);
   // Same rule as the create: the submitter editing their own anonymous suggestion must not be named by the
   // trail either - an edit entry beside the create would give away exactly what the create no longer does.
   await audit(deps, anonymousActor(actor, updated), "suggestion.update", "suggestions", id, diffMeta(row, updated, set, "suggestions"), updated);
-  if (gated && !(await moderationGate(deps, "suggestions", id))) return { ...updated, heldAt: set.heldAt as Date };
-  // Gate off: the same question asked after the fact. The hash check makes an edit that changed neither
-  // title nor body (a category change, say) cost nothing.
-  if (!gated) await scanSoon(deps, "suggestions", id);
+  if (gated && !(await moderationGate(deps, "suggestions", id, actor.uuid))) return { ...updated, heldAt: set.heldAt as Date };
   return updated;
 }
 

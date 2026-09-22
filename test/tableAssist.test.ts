@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
-import { coerceSpec, rankFields, systemFor } from "../src/services/tableAssist";
+import { coerceBase, coerceSpec, rankFields, systemFor, systemForBases } from "../src/services/tableAssist";
 import { FILTER_OPS, MAX_COLUMNS, MAX_FILTERS } from "../src/domain/tableFields";
 import type { ResolvedField } from "../src/services/tableCatalog";
 
@@ -133,6 +133,39 @@ describe("the prompt", () => {
     for (const op of FILTER_OPS) expect(system).toContain(op);
     // The model must answer with keys, and the prompt has to say so: a label is ambiguous across groups.
     expect(system).toMatch(/do not use a label in place of a key/i);
+  });
+});
+
+// The base is the other thing the model may choose, and it is chosen out of the caller's own base picker.
+// Same closed output space, same enforcement point: an answer that is not one of the offered collections is
+// no answer, and the caller is asked to point at one rather than being given the nearest match.
+describe("only an offered base survives", () => {
+  const BASES = [{ collection: "tickets" }, { collection: "employees" }, { collection: "leave-requests" }];
+
+  it("keeps a collection that was offered", () => {
+    expect(coerceBase(JSON.stringify({ base: "tickets" }), BASES)).toBe("tickets");
+  });
+
+  it("refuses one that was not, a label in place of a name, and a non-string", () => {
+    for (const raw of [{ base: "payslips" }, { base: "Tickets" }, { base: 7 }, { base: "" }, {}]) {
+      expect(coerceBase(JSON.stringify(raw), BASES)).toBeNull();
+    }
+  });
+
+  it("never throws on prose, empty input or broken JSON", () => {
+    for (const raw of ["I would use tickets", "", "{", "{oops}"]) expect(coerceBase(raw, BASES)).toBeNull();
+  });
+
+  it("tolerates JSON wrapped in prose or a code fence", () => {
+    expect(coerceBase('Sure:\n```json\n{"base":"employees"}\n```', BASES)).toBe("employees");
+  });
+
+  it("offers every base by name and says to answer with the name", () => {
+    const system = systemForBases([{ collection: "leave-requests", label: "Leave requests" }, { collection: "employees", label: "People" }]);
+    expect(system).toContain("leave-requests (Leave requests)");
+    expect(system).toContain("employees (People)");
+    // The distinction that decides whether the grid has one row per person or one per request.
+    expect(system).toMatch(/what the description counts/i);
   });
 });
 

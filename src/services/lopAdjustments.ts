@@ -18,6 +18,7 @@ import type { Deps } from "../deps";
 import { audit } from "../lib/audit";
 import { round2 } from "../domain/money";
 import { lopAdjustment, type LopRestatement } from "../domain/lopAdjust";
+import { byIdChunks } from "../lib/dbBatch";
 import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { ONE_OFF_EARNING_CODES, type Line } from "../domain/payroll";
 
@@ -178,13 +179,17 @@ export async function closedPeriodFor(deps: Deps, dayMs: number): Promise<string
   return committed ? period.uuid : null;
 }
 
-/** Unpaid adjustments for a set of employees, for the run build to pick up. */
+/** Unpaid adjustments for a set of employees, for the run build to pick up.
+ *
+ *  CHUNKED: the caller is the payroll build, and its id list is EVERY employee the run may price - so the list
+ *  is the company's headcount, which passes D1's 100-bound-parameter cap on any real org (it took ~120 people
+ *  to turn `:build` into a 500: `D1_ERROR: too many SQL variables`). */
 export async function openAdjustmentsFor(deps: Deps, employeeIds: string[]) {
-  if (!employeeIds.length) return [];
-  return deps.db
-    .select()
-    .from(schema.lopAdjustments)
-    .where(and(inArray(schema.lopAdjustments.employeeId, employeeIds), isNull(schema.lopAdjustments.paidRunId)));
+  return byIdChunks(employeeIds, (group) =>
+    deps.db
+      .select()
+      .from(schema.lopAdjustments)
+      .where(and(inArray(schema.lopAdjustments.employeeId, group), isNull(schema.lopAdjustments.paidRunId))));
 }
 
 /** Mark adjustments settled by a run. Shaped as a statement so the build can put it in its own atomic batch

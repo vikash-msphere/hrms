@@ -70,6 +70,10 @@ export const tableFields = new Hono<AppEnv>().get("/", async (c) => {
 // Collection-level custom method `table-fields:describe` - say what the grid should show in words, get a
 // spec back for the builder to render.
 //
+// `base` is OPTIONAL. Left out, the collection one row is gets chosen from the same description, out of the
+// bases this caller may build on, and comes back in the answer - so the client always learns which base the
+// spec is for rather than assuming the one it asked about.
+//
 // Mounted on THIS capability rather than on `table-views`, because the thing it needs is the catalogue, and
 // `table-fields.read` is already the gate that decides who may see one. Gating it anywhere else would be a
 // second answer to a question this endpoint has already answered - and the middleware sets `tableScopes` for
@@ -79,19 +83,19 @@ export const tableFields = new Hono<AppEnv>().get("/", async (c) => {
 // the ordinary table-views write, which validates the spec again on its own account.
 export const tableDescribe = new Hono<AppEnv>().post("/", async (c) => {
   const parsed = describeSchema.safeParse(await jsonBody(c));
-  if (!parsed.success) throw invalidArgument("body must be { base, question }");
+  if (!parsed.success) throw invalidArgument("body must be { question, base? }");
   const scopes = c.get("tableScopes") ?? new Map<string, ListScope>();
   const out = await suggestTableView(
     c.get("deps"),
     c.get("user")!,
     scopes,
     c.get("self"),
-    parsed.data.base,
+    parsed.data.base ?? null,
     parsed.data.question,
   );
-  return c.json({ spec: out.spec, unmatched: out.unmatched, cached: out.cached });
+  return c.json({ base: out.base, spec: out.spec, unmatched: out.unmatched, cached: out.cached });
 });
 
 const describeSchema = z
-  .object({ base: z.string().min(1).max(64), question: z.string().min(1).max(MAX_QUESTION) })
+  .object({ base: z.string().min(1).max(64).optional(), question: z.string().min(1).max(MAX_QUESTION) })
   .strict();

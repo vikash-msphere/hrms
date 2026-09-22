@@ -174,6 +174,36 @@ const BUDGETS: Budget[] = [
     rate: keyedCounter(120),
   },
   {
+    // WRITES THAT COST AN INFERENCE. With `moderation` on, a post to either public wall runs the gate in the
+    // request path - one generation call, or two with the conduct pass - against a daily allocation of 7,000
+    // neurons. That is 38 posts a day with conduct on, 116 without, and under the catch-all's 3,000 a minute
+    // an employee reaches either in about three seconds with nothing but new text, which misses the
+    // generation cache for free.
+    //
+    // WHAT HAPPENS THEN IS WHY THIS IS HERE AND NOT IN THE AI LAYER. The gate fails closed, so once the
+    // budget is spent every subsequent post on every wall is HELD, drafting and the extractions refuse, and
+    // the queue that would release the held posts is drained by an action that needs the same budget. No
+    // access-control failure is involved - it is one employee using the noticeboard, or a client loop, which
+    // is precisely the threat this file's header names.
+    //
+    // AND WHY IT IS AN HTTP BUDGET RATHER THAN THE PER-CALLER AI CEILING: `withinUserRate` answering `rate`
+    // makes the scan return "stopped", which the gate turns into a HOLD. A rate limit that silently withholds
+    // somebody's writing is worse than no rate limit. Refused here, the author gets a 429 they can read and
+    // no row is created at all.
+    //
+    // 30 a minute is far past composing a post and far short of spending the day: the gate's own share of the
+    // allocation runs out first, honestly, at the budget rather than at a counter.
+    name: "moderated-write",
+    limit: 30,
+    // Every write that can reach `moderationGate`: the two creates, a reply, a publish, and the two edits -
+    // an edit re-gates, because the point of the gate is that the text on the wall is text a model has read.
+    matches: (m, p) =>
+      (m === "POST" && (p === "/v1/announcements" || p === "/v1/suggestions")) ||
+      (m === "POST" && (itemVerbIs(p, "announcements", "reply") || itemVerbIs(p, "announcements", "publish"))) ||
+      (m === "PATCH" && (/^\/v1\/announcements\/[^/:]+$/.test(p) || /^\/v1\/suggestions\/[^/:]+$/.test(p))),
+    rate: keyedCounter(30),
+  },
+  {
     // Everything else on /v1. DELIBERATELY VERY LOOSE: this is a runaway detector, not a pace. 50 requests a
     // second, sustained, from one credential against one isolate is not a person and is not a healthy client.
     //

@@ -15,6 +15,7 @@ import { applyScope } from "./listScope";
 import { byIdChunks } from "../lib/dbBatch";
 import { evidenceWindow } from "../domain/reviewEvidence";
 import { rankCollaborators, type Collaborator, type CollaboratorReason } from "../domain/reviewCollaborators";
+import { notHeld } from "./withheld";
 
 /** Cards read per side of the join. A cycle's worth of one person's work, bounded so a heavy board cannot
  *  turn a picker into a table scan. */
@@ -199,6 +200,8 @@ async function kudosSignals(
       eq(schema.announcements.kind, "kudos"),
       isNull(schema.announcements.deleteTime),
       eq(schema.announcements.disabled, false),
+      // A held kudos is withheld from everyone until the gate releases it, so it counts for nobody.
+      notHeld(schema.announcements),
       gte(schema.announcements.createdAt, new Date(from)),
       lt(schema.announcements.createdAt, new Date(to)),
       or(eq(schema.announcements.recipientEmployeeId, subject), eq(schema.announcements.authorEmployeeId, subject)),

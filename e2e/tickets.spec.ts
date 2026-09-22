@@ -65,7 +65,19 @@ test("a ticket is raised, warns about a duplicate, and is moved through its stat
 test("a scope chip narrows the desk, travels in the URL, and clears again", async ({ as }) => {
   test.setTimeout(120_000);
   const page = await as("hr");
+  const subject = `E2E scope ${Date.now()}`;
+
+  // OWN THE ROW. An empty desk draws its empty state instead of the table, and a table nobody has raised a
+  // ticket on has no chips to press - so this spec raises its own rather than relying on another one's
+  // leftovers, which is the difference between passing on a warm database and passing anywhere.
   await gotoRoute(page, "tickets", "Support");
+  await page.getByRole("button", { name: "New ticket" }).first().click();
+  const form = page.getByRole("dialog");
+  await form.getByLabel("Subject").fill(subject);
+  await form.getByLabel("Category").click();
+  await page.getByRole("option").first().click();
+  await form.getByRole("button", { name: "Raise ticket" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 
   const all = page.getByRole("button", { name: /^All/ });
   const mine = page.getByRole("button", { name: /^My tickets/ });
@@ -92,6 +104,8 @@ test("a scope chip narrows the desk, travels in the URL, and clears again", asyn
   await page.getByRole("button", { name: /^My tickets/ }).click();
   await expect(page.getByRole("button", { name: /^My tickets/ })).toHaveAttribute("aria-pressed", "false");
   await expect(page.getByRole("button", { name: /^All/ })).toHaveAttribute("aria-pressed", "true");
+
+  await purge(page, await ticketPath(page, subject));
 });
 
 /** The wire path of the ticket this spec raised. */

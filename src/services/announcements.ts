@@ -5,7 +5,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
 import { audit, createdMeta, diffMeta, noteMeta } from "../lib/audit";
-import { invalidArgument, notFound, aborted } from "../lib/errors";
+import { invalidArgument, notFound, aborted, isMissingParentRow } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { applyScope } from "./listScope";
 import { deleteStateFilter } from "./softDelete";
@@ -18,7 +18,7 @@ import { notify, notifyAudience, audienceEmployeeIds, type Audience } from "./no
 import { renderEmail, loadEmailBrand, textParagraphs } from "../lib/emailLayout";
 import { fanOutEmail } from "./emailFanOut";
 import { emitEvent } from "./eventBus";
-import { scanSoon } from "./moderation";
+import { BUDGET } from "../domain/aiPolicy";
 import { DEFAULT_KUDOS_CONFIG, pointsForLevel } from "../domain/kudos";
 import { normalizeIllustration, normalizeIllustrationLayout, normalizeRecipientLayout, type RecipientLayout, type IllustrationLayout } from "../domain/illustration";
 import { richExcerpt, richToPlain } from "../domain/richText";
@@ -146,7 +146,12 @@ export async function listAnnouncements(
   const repliedTo = repliedById
     ? inArray(
         schema.announcements.uuid,
-        deps.db.select({ id: schema.announcementReplies.announcementId }).from(schema.announcementReplies).where(eq(schema.announcementReplies.authorId, repliedById)),
+        // `notHeld` on the reply as well as on the post: a held reply is on nobody's thread, so it does not
+        // pull the post it was written under into a "replied to" view either.
+        deps.db
+          .select({ id: schema.announcementReplies.announcementId })
+          .from(schema.announcementReplies)
+          .where(and(eq(schema.announcementReplies.authorId, repliedById), notHeld(schema.announcementReplies))),
       )
     : undefined;
   // `?kind=kudos` narrows the board to one kind. The board itself is a FEED - a window by design - but the
@@ -232,7 +237,9 @@ export async function createAnnouncement(deps: Deps, actor: AppUser, input: Anno
   // ...and only for a post that is GOING PUBLIC. A draft is nobody's to read yet, so gating it would spend
   // a model call on text that may never be posted and would hold a row its author is still writing. The
   // draft meets the gate when it is published, which is the moment it becomes a post.
-  const gated = published && (await moderationGateOn(deps));
+  // ...and only on a wall the org has asked to have read. `announcements` carries no anonymity, so it is the
+  // wall's own position that decides here and there is nothing per-post to weigh.
+  const gated = published && (await moderationGateOn(deps, "announcements", { anonymous: false }));
   const heldAt = gated ? deps.clock.now() : null;
   // AND IT GOES IN UNPUBLISHED, not merely held. Two reasons, and the second is the important one: a held
   // row that is already `published` would go live the instant the hold cleared, with nobody told; leaving
@@ -256,7 +263,7 @@ export async function createAnnouncement(deps: Deps, actor: AppUser, input: Anno
   // Read it before anybody hears about it. Held means the post stays invisible and NOTHING below runs: no
   // bell, no email, no mention. A notification about a post nobody can open is the one thing worse than the
   // delay - and if the post is later released, the release sends the broadcast then.
-  if (gated && !(await moderationGate(deps, "announcements", row.uuid))) return { ...row, heldAt };
+  if (gated && !(await moderationGate(deps, "announcements", row.uuid, actor.uuid))) return { ...row, heldAt };
   // Cleared. A post the author wanted live now goes live through the publish verb, which is the same road a
   // release takes - so the broadcast below stays the responsibility of exactly one path.
   if (gated && published) {
@@ -278,9 +285,6 @@ export async function createAnnouncement(deps: Deps, actor: AppUser, input: Anno
   // Anyone the body names hears about it directly, on top of whatever broadcast this kind does - being named
   // is addressed at you, which a company-wide "new post" is not. A draft stays silent until it is published.
   if (published) await notifyMentions(deps, actor, { ...announcementMention(row.uuid), body: row.body, title: row.title });
-  // With the gate OFF, the same read still happens - just after the fact and without the power to withhold
-  // anything, which is what the feature was before an org asked for a gate. Deferred past the response.
-  if (!gated) await scanSoon(deps, "announcements", row.uuid);
   return row;
 }
 
@@ -347,15 +351,36 @@ export async function emailAnnouncement(deps: Deps, row: typeof schema.announcem
 // feed sorts by, and rewriting it to "whenever the tick happened to fire" would move a 9:00 announcement to 9:03.
 export async function publishDueAnnouncements(deps: Deps): Promise<number> {
   const now = deps.clock.now();
-  const due = await deps.db
+  // Asked once for the whole batch rather than per post: it is one settings read, the answer cannot change
+  // inside a tick, and every row here is on the same wall.
+  const gated = await moderationGateOn(deps, "announcements", { anonymous: false });
+  // BOUNDED WHEN THE GATE IS ON, because each post then costs one generation call, or two with the conduct
+  // pass. Unbounded, N posts due in the same minute - a comms batch, a seed, an import that back-dates
+  // `publish_time` - made up to 2N calls in one invocation, walking straight past the ceiling the moderation
+  // drain has on the same five-minute tick for exactly this reason. Once the budget refused, the gate failed
+  // closed and every remaining scheduled post was silently held. The overflow rolls to the next tick, which
+  // is the behaviour the rest of the AI layer already has.
+  //
+  // The UNGATED path stays unbounded: it costs a guarded update apiece and nothing else.
+  const limit = gated ? BUDGET.moderationsPerDrain : undefined;
+  let q = deps.db
     .select()
     .from(schema.announcements)
-    .where(and(eq(schema.announcements.published, false), isNull(schema.announcements.deleteTime), lte(schema.announcements.publishTime, now)));
+    // A post the gate is already holding is not due: it is unpublished for a different reason, it is on the
+    // moderation queue, and picking it up again every tick would re-hold it - and re-tell its author - for as
+    // long as it waits. Releasing it is a decision, and `releasePost` is where that decision publishes.
+    .where(and(
+      eq(schema.announcements.published, false),
+      isNull(schema.announcements.deleteTime),
+      notHeld(schema.announcements),
+      lte(schema.announcements.publishTime, now),
+    ))
+    .$dynamic();
+  // Oldest first, so a post that missed one tick is not overtaken by a fresher one on every tick after it.
+  if (limit !== undefined) q = q.orderBy(schema.announcements.publishTime).limit(limit);
+  const due = await q;
   let published = 0;
   let failed = 0;
-  // Asked once for the whole batch rather than per post: it is one settings read and the answer cannot
-  // change inside a tick.
-  const gated = await moderationGateOn(deps);
   for (const row of due) {
     if (row.disabled) continue;
     // A SCHEDULED POST MEETS THE GATE AT THE MOMENT IT GOES LIVE, exactly like one published by hand. This
@@ -397,10 +422,6 @@ export async function publishDueAnnouncements(deps: Deps): Promise<number> {
       // A scheduled post's mentions land when it does. The "actor" is the post's own author, not the tick: it
       // is their words that named someone, and naming yourself still notifies nobody.
       await notifyMentions(deps, { employeeId: row.authorEmployeeId } as AppUser, { ...announcementMention(row.uuid), body: row.body, title: row.title });
-      // Gate off: it is on the wall as of now, so it is due a read as of now rather than on whichever later
-      // tick the sweep reaches it. Awaited rather than deferred - this IS the tick, and it has the time.
-      // With the gate on it was already read, above, before it was allowed to go live at all.
-      if (!gated) await scanSoon(deps, "announcements", row.uuid);
     } catch (err) {
       failed++;
       console.error(`[announcements] published ${row.uuid} but could not broadcast it`, err);
@@ -494,13 +515,20 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
   // door beside it: post something harmless, wait for it to clear, then edit it into whatever you liked.
   // The hold goes on in the SAME update as the new text, so there is no instant where the edited post is
   // both public and unread. A draft is not gated (nobody can see it); publishing is where it meets this.
-  const gated = row.published && (await moderationGateOn(deps));
+  //
+  // PUBLIC **OR HELD**, and the second half was the whole of a bug. A held announcement is by construction
+  // unpublished - `createAnnouncement` writes `published && !gated` - so written as `row.published` alone
+  // this was false for exactly the posts that are waiting. The author did the one thing the design preserves
+  // for them, rewrote the sentence that got their post held, and nothing looked at it: no re-gate, no
+  // re-scan, the moderator's queue still quoting the old text with `edited_since_flag` lit. The only thing
+  // that would re-examine it was `:publish`.
+  const gated = (row.published || !!row.heldAt) && (await moderationGateOn(deps, "announcements", { anonymous: false }));
   if (gated) set.heldAt = deps.clock.now();
 
   const updated = await updateAtVersion(deps, schema.announcements, "announcement", row, set);
   await audit(deps, actor, "announcement.update", "announcements", id, diffMeta(row, updated, set, "announcements"), updated);
 
-  if (gated && !(await moderationGate(deps, "announcements", id))) {
+  if (gated && !(await moderationGate(deps, "announcements", id, actor.uuid))) {
     // Held: the post is off the wall as of this edit, and the people its new text names are NOT told - a
     // mention pointing at a post nobody can open is worse than silence. The release sends them.
     return { ...updated, heldAt: set.heldAt as Date };
@@ -509,9 +537,6 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
   // An edit notifies the people it NEWLY names (the old body is the baseline, so nobody hears about the same
   // mention twice). A draft stays silent - publishing is what tells anyone anything about it.
   if (updated.published) await notifyMentions(deps, actor, { ...announcementMention(id), body: updated.body, previousBody: row.body, title: updated.title });
-  // Gate off: the same read, after the fact and unable to withhold anything. The scan's own hash check makes
-  // a no-op edit free either way.
-  if (!gated) await scanSoon(deps, "announcements", id);
   return updated;
 }
 
@@ -545,7 +570,19 @@ export async function markAnnouncementRead(deps: Deps, actor: AppUser, id: strin
     // `onConflictDoNothing` against `ar_ann_emp_uniq`: the pre-read above is the cheap path, and the index is
     // what makes the answer true when two of these run at once. A lost race is the receipt already existing,
     // which is the outcome this wanted anyway - so it is a no-op, never a 500.
-    if (!existing) await deps.db.insert(schema.announcementReads).values({ announcementId: id, employeeId: actor.employeeId }).onConflictDoNothing();
+    //
+    // The OTHER race the index cannot answer is the post being erased between the read above and this insert -
+    // a hard purge while somebody has the board open - which the foreign key refuses. Nothing is wrong with
+    // the request; the thing it is about has gone, and that is a 404. It reached the reader as a red "the
+    // server had a problem" over a post that was simply deleted underneath them.
+    if (!existing) {
+      try {
+        await deps.db.insert(schema.announcementReads).values({ announcementId: id, employeeId: actor.employeeId }).onConflictDoNothing();
+      } catch (e) {
+        if (isMissingParentRow(e)) throw notFound("announcement not found");
+        throw e;
+      }
+    }
   }
   return row;
 }
@@ -574,7 +611,16 @@ export async function markAllAnnouncementsRead(deps: Deps, actor: AppUser, scope
   if (!missing.length) return { marked: 0 };
   // Split under D1's bound-parameter cap, measured rather than guessed (see insertBatches).
   const reads = missing.map((a) => ({ announcementId: a.uuid, employeeId: me }));
-  await runBatch(deps.db, insertBatches(reads, (rows) => deps.db.insert(schema.announcementReads).values(rows).onConflictDoNothing()));
+  try {
+    await runBatch(deps.db, insertBatches(reads, (rows) => deps.db.insert(schema.announcementReads).values(rows).onConflictDoNothing()));
+  } catch (e) {
+    // One of the posts listed a moment ago was erased before the batch landed, and the foreign key took the
+    // whole atomic batch down with it. Nothing here is wrong and nothing has to be told to the reader: the
+    // posts that are left are still unread, and pressing again marks them. Reported as marking nothing rather
+    // than as a server fault - the next press is the retry, and it is one press.
+    if (!isMissingParentRow(e)) throw e;
+    return { marked: 0 };
+  }
   // No audit line, for the same reason markAnnouncementRead writes none: a read receipt is the caller's own
   // state, not an accountability event (see NO_AUDIT_VERBS).
   return { marked: missing.length };
@@ -654,8 +700,10 @@ export async function addReply(deps: Deps, actor: AppUser, id: string, body?: st
   const row = await getAnnouncement(deps, id);
   assertNotLocked(row);
   // Written held when the gate is on, for the reason the create path gives: a reply that appears on the
-  // thread and is withdrawn a second later has already been read by whoever was looking at it.
-  const gated = await moderationGateOn(deps);
+  // thread and is withdrawn a second later has already been read by whoever was looking at it. Replies are
+  // their own wall in the scanning scope - an org can have its noticeboard read and leave the thread under
+  // it alone, or the other way round, which is the same split that makes a reply its own flag host.
+  const gated = await moderationGateOn(deps, "announcement-replies", { anonymous: false });
   const reply = (await deps.db
     .insert(schema.announcementReplies)
     .values({ announcementId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text, heldAt: gated ? deps.clock.now() : null })
@@ -665,15 +713,12 @@ export async function addReply(deps: Deps, actor: AppUser, id: string, body?: st
   await audit(deps, actor, "announcement.reply", "announcements", id, noteMeta("announcements", text), row);
   // Held: the reply is off the thread and the post's author is told nothing about it. Whoever wrote it hears
   // that it is waiting (holdPost), and the queue decides.
-  if (gated && !(await moderationGate(deps, "announcement-replies", reply.uuid))) return row;
+  if (gated && !(await moderationGate(deps, "announcement-replies", reply.uuid, actor.uuid))) return row;
   // Notify the post's author that someone replied (skip replying to your own post).
   if (row.authorEmployeeId && row.authorEmployeeId !== actor.employeeId)
     await notify(deps, { recipient: row.authorEmployeeId, type: "announcement.reply", title: "New reply to your post", body: richExcerpt(text, 120), link: boardPostLink(id), subject: `announcements/${id}`, actorId: actor.employeeId });
   // Someone named in the reply hears about it too - that is how a thread pulls in the person who can answer.
   await notifyMentions(deps, actor, { ...announcementMention(id), body: text, title: row.title });
-  // A reply is the surface most worth reading promptly: it is the one public text written by somebody other
-  // than the post's author, and it is where a thread turns. (Gate off: read after the fact, as before.)
-  if (!gated) await scanSoon(deps, "announcement-replies", reply.uuid);
   return row;
 }
 

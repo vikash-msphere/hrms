@@ -18,7 +18,7 @@ import { assertNotLocked } from "./lockGuard";
 import { boardPostLink, postedTitle } from "../domain/board";
 import { notifyMentions } from "./mentions";
 import { isModeratable } from "../domain/moderation";
-import { moderationGate, moderationGateOn, scanSoon } from "./moderation";
+import { moderationGate, moderationGateOn } from "./moderation";
 
 type Table = any;
 type Row = {
@@ -73,6 +73,14 @@ export async function setLocked(deps: Deps, actor: AppUser, table: Table, singul
   return out;
 }
 
+/**
+ * `skipGate` is for the ONE caller that has already had the question answered by a person: `releasePost`,
+ * when a moderator dismisses a flag on a held post. Re-reading the text there is the machine re-litigating a
+ * decision it lost, and it is worse than pointless - the gate fails closed, so a release during a model
+ * outage or a spent budget re-holds the post while the queue records it as released.
+ */
+export type PublishOptions = { skipGate?: boolean };
+
 export async function setPublished(
   deps: Deps,
   actor: AppUser,
@@ -82,6 +90,7 @@ export async function setPublished(
   id: string,
   published: boolean,
   withPublishTime = false,
+  opts: PublishOptions = {},
 ) {
   const row = await fetchRow(deps, table, id);
   if (!row) throw notFound(`${singular} not found`);
@@ -93,10 +102,16 @@ export async function setPublished(
   // the Flagged posts queue for somebody to release. `moderationGate` clears the hold when it passes, and
   // the scan bookkeeping makes a second look at unchanged text free, so releasing from the queue does not
   // pay for the check twice.
-  if (published && isModeratable(collection) && (await moderationGateOn(deps))) {
+  // The wall is named, so an org that scans its suggestion box and not its noticeboard publishes here
+  // without a model being asked. The row's own anonymity is not passed: the only collection this path
+  // publishes is `announcements`, where every post is signed, and `moderationGate` re-decides with the row
+  // in hand for anything that is not.
+  if (published && !opts.skipGate && isModeratable(collection) && (await moderationGateOn(deps, collection, { anonymous: false }))) {
     const { setHeld } = await import("./moderation");
     await setHeld(deps, collection, id);
-    if (!(await moderationGate(deps, collection, id))) return row;
+    // The actor rides along so the usage ledger can say whose post this was and so the call counts as
+    // interactive against the daily reservation (see `scanContext` in services/moderation.ts).
+    if (!(await moderationGate(deps, collection, id, actor.uuid))) return row;
   }
 
   const fields: Record<string, unknown> = { published, updatedAt: new Date() };
@@ -135,11 +150,5 @@ export async function setPublished(
     // `emailed_at`, so a Publish racing the scheduler's tick still sends one copy.
     await emailAnnouncement(deps, out as typeof schema.announcements.$inferSelect);
   }
-  // Going live is the moment the text first reaches a wall, whichever direction the flip went - so it is
-  // also the moment it becomes worth reading. Unpublishing needs no scan: the post is off the wall, and
-  // `retireOrphans` closes any flag standing over it.
-  // Gate OFF only. With it on, the post was read above - before the flip - and a second call here would be
-  // two mechanisms answering one question, which is how the two of them drift.
-  if (isModeratable(collection) && published && !(await moderationGateOn(deps))) await scanSoon(deps, collection, id);
   return out;
 }

@@ -4,11 +4,21 @@
 // owns the workplace-conduct pass that catches what a safety taxonomy has no category for. Both write the
 // same flag with the same `hazards` array, so a moderator reads one queue.
 //
-// THE MODEL FLAGS; IT NEVER HIDES. Llama Guard returns a verdict on text, and that verdict becomes a row in
+// THE MODEL FLAGS; IT DOES NOT HIDE. Llama Guard returns a verdict on text, and that verdict becomes a row in
 // `ai_suggestions` with `feature: "moderation"` - the same advisory record triage and extraction use, with
-// the same one-live-suggestion-per-record index. Hiding a post is a separate act, performed by a person.
-// There is no path from a model's output to content disappearing, which is the property that makes it safe to
-// run this unattended on a five-minute tick.
+// the same one-live-suggestion-per-record index. Hiding a post is a separate act, performed by a person, and
+// that is the property which makes it safe to run this unattended on a five-minute tick.
+//
+// PRECISELY: nothing hides a post unless a super admin wires a rule that does, and `pass` exists so they can.
+// `recordFlag` emits `moderation.flagged`, the automation engine's `apiCall` action can POST any endpoint,
+// and `/v1/moderation:decide` with `action: "hide"` is an endpoint - `domain/events.ts` is explicit that the
+// `pass` field is carried because it is what a rule that HIDES must condition on. The guard is real:
+// `apiCall` is in `PRIVILEGED_ACTION_KINDS` beside `webhook` and `email`, `assertMayAuthorActions` refuses a
+// non-super author, `collectActionKinds` recurses into `wait`/`waitFor` arms so it cannot hide inside a
+// continuation, and `assertMayActOnStored` applies the same gate to enable/disable/delete. So the claim is
+// bounded by a configuration default rather than absolute, and stating it absolutely would not survive
+// somebody finding the `apiCall` action. Out of the box, and for every author below super admin, no model
+// output can make content disappear.
 //
 // That separate act writes the host row DIRECTLY (`services/moderation.ts` hideHost) rather than through a
 // service of its own, because neither collection has one to route through: `announcements.disabled` is read
@@ -37,12 +47,18 @@ import { CONDUCT_HAZARDS } from "./conduct";
  * the query decides what it reads. An earlier version carried the column names here as well and nothing ever
  * read them, which made this look like the source of truth for something it did not control.
  */
-export const MODERATABLE: Record<string, { singular: string }> = {
+export const MODERATABLE: Record<string, { singular: string; anonymity: boolean }> = {
   // `singular` is what the audit action is named with (`announcement.moderate.hide`), matching the
   // `auditName` each collection's own route already uses - so a moderation entry reads like every other entry
   // about that record rather than like a different system's.
-  announcements: { singular: "announcement" },
-  suggestions: { singular: "suggestion" },
+  //
+  // `anonymity` is whether a post on this wall can be UNATTRIBUTED, and it is here rather than in a list of
+  // its own so the two cannot drift: the org's scanning scope offers "anonymous posts only" exactly on the
+  // walls where that describes something, and the settings validator refuses it on the walls where it would
+  // silently mean "nothing". A wall that later grows an anonymity flag turns the option on by declaring it
+  // here, beside the flag's own name.
+  announcements: { singular: "announcement", anonymity: false },
+  suggestions: { singular: "suggestion", anonymity: true },
   // A REPLY IS FLAGGED ON ITS OWN, not as part of the post it sits under, and that is the whole reason it is
   // a host rather than more text folded into the announcement's scan. It is the one public surface written
   // by somebody other than the post's author: hiding the thread because a commenter was abusive would take
@@ -51,11 +67,62 @@ export const MODERATABLE: Record<string, { singular: string }> = {
   //
   // Not a wire collection - replies are reached through the announcement's routes - but the queue addresses
   // one directly, so it is registered in `ENCODABLE` to keep its id off the wire in the clear.
-  "announcement-replies": { singular: "reply" },
+  "announcement-replies": { singular: "reply", anonymity: false },
 };
 
 export const isModeratable = (collection: string): boolean =>
   Object.prototype.hasOwnProperty.call(MODERATABLE, collection);
+
+/**
+ * WHICH POSTS THIS ORGANISATION WANTS READ, which is a different question from which posts CAN be read.
+ *
+ * `MODERATABLE` above is structural: it is the set of walls the feature knows how to scan, and it does not
+ * change with configuration. This is the org's policy over that set, per wall:
+ *
+ *   `all`        every post on this wall (the default, and what the feature did before this existed)
+ *   `anonymous`  only posts nobody's name is attached to
+ *   `off`        this wall is not scanned at all
+ *
+ * WHY `anonymous` IS WORTH ITS OWN POSITION rather than being left to "all or nothing". An unattributed post
+ * is the one place the ordinary deterrent is missing: on a noticeboard a person's name is beside what they
+ * wrote, and that alone does most of the work a moderation queue would otherwise do. The suggestion box
+ * deliberately removes it, so the same wall that makes people willing to raise something uncomfortable is
+ * also the one where abuse costs nothing. An org can reasonably decide that is the only place worth spending
+ * a model on - and it is the cheapest possible configuration of this feature, since anonymous posts are a
+ * small share of the traffic.
+ *
+ * SCANNING IS NOT THE ONLY THING MODERATION DOES. A wall set to `off` still has a moderation queue, and a
+ * moderator can still hide a post on it by hand (`hideManually`) and put it back. What `off` stops is the
+ * MODEL reading it, and therefore the gate holding it - which is the thing being consented to here.
+ */
+export const MODERATION_WALL_SCOPES = ["all", "anonymous", "off"] as const;
+export type ModerationWallScope = (typeof MODERATION_WALL_SCOPES)[number];
+export type ModerationScope = Record<string, ModerationWallScope>;
+
+/** The walls where `anonymous` describes something, derived from the registry rather than kept beside it. */
+export const ANONYMITY_WALLS: readonly string[] =
+  Object.entries(MODERATABLE).filter(([, m]) => m.anonymity).map(([collection]) => collection);
+
+/**
+ * Is this post one the org has asked to have read?
+ *
+ * `post` is the row itself where the caller has it. Where it does not - a write path deciding whether to
+ * hold a row it has not built yet - an absent or unknown `anonymous` reads as IN SCOPE, which is the
+ * conservative direction: the row is held for the length of one call and the gate, which does have the row,
+ * releases it immediately if it turns out not to be covered. The opposite default would let an in-scope post
+ * reach a wall unread while the caller worked out what it was.
+ */
+export function moderationCovers(
+  scope: ModerationScope | undefined,
+  collection: string,
+  post?: { anonymous?: boolean | null },
+): boolean {
+  if (!isModeratable(collection)) return false;
+  const chosen = scope?.[collection] ?? "all";
+  if (chosen === "off") return false;
+  if (chosen === "all") return true;
+  return post?.anonymous !== false;
+}
 
 /**
  * Llama Guard's hazard taxonomy, and what each one is called on screen.
@@ -99,7 +166,17 @@ export const hazardLabel = (code: string): string => HAZARDS[code] ?? CONDUCT_HA
  */
 export const UNCHECKED = "UNCHECKED";
 
-const OUTCOME_LABELS: Record<string, string> = { [UNCHECKED]: "Not checked" };
+/**
+ * The reason on a post a PERSON took down, with no model involved.
+ *
+ * A manual hide still writes a flag row, and it has to: the queue's decided view is the only place a
+ * withdrawn post can be seen, so a takedown that recorded nothing would put the post beyond reach of every
+ * surface in the app - the same hole an upheld hold used to fall into. The "hazard" is therefore not one:
+ * it says a person decided, which is the honest reason and the one a reader of the history needs.
+ */
+export const MANUAL = "MANUAL";
+
+const OUTCOME_LABELS: Record<string, string> = { [UNCHECKED]: "Not checked", [MANUAL]: "Hidden by a person" };
 
 /** Hazard labels, lower-cased, back to their codes. Built once: the object dialect below sometimes names a
  *  category rather than coding it. */
@@ -224,6 +301,23 @@ export type ModerationAction = "hide" | "dismiss";
 export const MODERATION_ACTIONS: readonly ModerationAction[] = ["hide", "dismiss"];
 export const isModerationAction = (v: unknown): v is ModerationAction =>
   typeof v === "string" && (MODERATION_ACTIONS as readonly string[]).includes(v);
+
+/**
+ * WHERE A POST LANDS WHEN IT IS PUT BACK, which is a second question with the same answer to the first one.
+ *
+ * `draft` returns it to its author's hands: off the wall, editable, nobody notified, and the way back out is
+ * the ordinary publish, which sends the text through the check afresh. It is the cautious default and the
+ * only thing `:unhide` used to do.
+ *
+ * `publish` puts it straight back in front of readers. A moderator who has looked at the post and disagrees
+ * with the takedown should not have to ask its author to press Publish before anybody can see it again -
+ * which, for a colleague on leave or an author who has left, meant the post never came back at all. The two
+ * are the same power (reversing a takedown) and so the same verb; which one ran is recorded on the flag.
+ */
+export type UnhideMode = "draft" | "publish";
+export const UNHIDE_MODES: readonly UnhideMode[] = ["draft", "publish"];
+export const isUnhideMode = (v: unknown): v is UnhideMode =>
+  typeof v === "string" && (UNHIDE_MODES as readonly string[]).includes(v);
 
 /** The payload stored on the flag row. Small and self-describing, because it is read back by a queue that
  *  must not have to re-run the scan to render a row. */

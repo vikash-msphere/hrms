@@ -8,6 +8,11 @@ const writeSchema = z.object({
   period_start: z.string().optional(),
   period_end: z.string().optional(),
   pay_date: z.string().optional(),
+  // Nullable, because clearing an adopted cutoff is an edit: the form sends `null` for an empty box rather
+  // than leaving the key out, which would read as "unchanged" (web/src/pages/PayPeriods.tsx). Missing from
+  // this schema, the field was refused by `.strict()` before the service ever saw it - and since the form
+  // sends the key on EVERY save, that 400 was every create and every edit made from the page.
+  input_cutoff_on: z.string().nullable().optional(),
 }).strict();
 
 export const payPeriods = collectionRoutes({

@@ -120,6 +120,17 @@ export function isCodeCollision(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\.code\b/i.test(errorChainText(err));
 }
 
+/** A write whose PARENT ROW went while it was in flight: the row it points at was deleted between the read
+ *  that found it and the insert that references it.
+ *
+ *  Not a validation failure and not a bug in the caller - both halves were true when they were read. It is the
+ *  same shape of race as a code collision, one table up, and it is reachable by anything that records
+ *  something ABOUT another row (a read receipt, a reaction, a sighting) while somebody else is deleting that
+ *  row. The honest answer is that the thing is gone, which is a 404, not a 500. */
+export function isMissingParentRow(err: unknown): boolean {
+  return /FOREIGN KEY constraint failed/i.test(errorChainText(err));
+}
+
 /** The same lost race on a card's per-board number: allocated max+1, kept unique by card_board_seq_idx. */
 export function isCardSeqCollision(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\bcards\.(board_id|seq)\b/i.test(errorChainText(err));

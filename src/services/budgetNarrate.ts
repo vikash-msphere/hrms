@@ -115,7 +115,8 @@ export async function narrateBudgets(
     return { text: plainSummary(findings), findings, source: "plain", cached: false, ...shell };
   }
 
-  const out = await aiGenerate(deps, { feature: "budgets.narrate", userId: user.uuid }, {
+  // `reads: "none"`: the findings are sums this file computed, and no budget or expense row reaches the model.
+  const out = await aiGenerate(deps, { feature: "budgets.narrate", userId: user.uuid, reads: "none" }, {
     system: SYSTEM,
     user: promptFor(findings),
     promptVersion: PROMPT_VERSION,

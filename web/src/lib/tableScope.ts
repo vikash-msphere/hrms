@@ -41,7 +41,7 @@ export const allScope = (label = "All", count?: number): TableScope => ({ id: "a
  * Rows a `mineColumn` flagged as the reader's. `null` when the caller has nobody to be (an account with no
  * employee record), so the chip is absent rather than matching everybody or nobody.
  */
-export function mineScope(id: string, label: string, flagColumnId: string, enabled: boolean, opts?: { count?: number; badge?: ReactNode; title?: string }): TableScope | null {
+export function mineScope(id: string, label: string, flagColumnId: string, enabled: boolean, opts?: { count?: number; badge?: ReactNode; title?: string; onSelect?: () => void }): TableScope | null {
   if (!enabled) return null;
   return { id, label, filters: { [flagColumnId]: MINE }, ...opts };
 }

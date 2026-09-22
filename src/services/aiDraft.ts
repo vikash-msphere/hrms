@@ -54,17 +54,17 @@ export async function draftText(deps: Deps, user: AppUser, req: DraftRequest): P
       // learned, and "drafting cost 900 neurons today" does not say which of them to keep.
       feature: `draft.${kind.id}`,
       userId: user.uuid,
-      // `collection` DECLARES "content from this collection is going into the prompt", and `aiGenerate`
-      // answers it with the absolute `assertMayReachModel`. For an ordinary kind that is exactly right - a
-      // second gate behind the one above. For a consented kind it would be a false statement AND an
-      // immediate throw: `draftText` reads no record, so the only text sent is the instruction the author
-      // typed and whatever is already in their field. The declared exception is asserted above, by path and
-      // collection together; claiming the collection here as well would ask the general gate a question the
-      // exception exists to answer.
+      // `reads` DECLARES "content from this collection is going into the prompt", and `aiGenerate` answers it
+      // with the absolute `assertMayReachModel`. For an ordinary kind that is exactly right - a second gate
+      // behind the one above. For a consented kind it would be a false statement AND an immediate throw:
+      // `draftText` reads no record, so the only text sent is the instruction the author typed and whatever
+      // is already in their field. The declared exception is asserted above, by path and collection together;
+      // claiming the collection here as well would ask the general gate a question the exception exists to
+      // answer.
       //
       // Tied to `consentedPath` rather than to a kind id, so a future kind that genuinely does read rows
-      // cannot inherit the omission by accident - it would have to claim an exception of its own first.
-      ...(kind.consentedPath ? {} : { collection: kind.collection }),
+      // cannot inherit the `"none"` by accident - it would have to claim an exception of its own first.
+      reads: kind.consentedPath ? "none" : { collection: kind.collection },
     },
     {
       system: draftSystem(kind),

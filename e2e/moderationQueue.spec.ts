@@ -3,10 +3,12 @@ import { apiPost, capabilitiesOf, gotoRoute, test, expect } from "./fixtures";
 // The flagged-post queue: who can reach it, and what it says when there is nothing in it.
 //
 // WHAT THIS CANNOT COVER, stated up front so nobody reads more into a green run than is there. A flag is
-// written by the moderation drain, which needs a guard model, and this stack has no `AI` binding - so the
-// queue is empty in every run and no amount of driving the browser will put a row in it. Rendering a flag,
-// the hazard chips, the anonymity rule and Hide taking a post off the wall are covered against real D1 in
-// `test/moderation.test.ts` (23 cases) and are deliberately not attempted here.
+// written by a guard model's verdict, and the only model this lane can reach is whatever is running locally
+// (`AI_LOCAL_URL` in e2e/e2e.vars) - which is not Llama Guard, so no text can be relied on to produce a flag
+// on demand. `moderation` is also off in every run but the one test that turns it on, and that test lives in
+// `e2e/aiFeatures.spec.ts` because the switch is one org-wide settings row and two files writing it race.
+// Rendering a flag, the hazard chips, the anonymity rule and Hide taking a post off the wall are covered
+// against real D1 in `test/moderation.test.ts` and are deliberately not attempted here.
 //
 // What IS only checkable here is the half that unit tests structurally cannot reach: that the capability is
 // private by default in a running app. `moderation` seeds nothing for any role, so the posture is that a
@@ -50,6 +52,16 @@ test.describe("the moderation queue", () => {
     // different answer from "that flag is not there".
     const res = await apiPost(employee, "moderation:decide", { host: "announcements/whatever", action: "hide" });
     expect(res.status()).toBe(403);
+  });
+
+  test("rejects a way of putting a post back that does not exist", async ({ as }) => {
+    // `:unhide` grew a `mode` - back to its author as a draft, or straight onto the wall - and the route is
+    // the only thing standing between a typo and a service that would read it as the default. A bad value is
+    // refused BEFORE the flag is looked up, which is why this answers 422 (the codebase's invalid-argument)
+    // rather than the 404 the same post gets below.
+    const page = await as("super");
+    const res = await apiPost(page, "moderation:unhide", { host: "announcements/not-a-real-id", mode: "wall" });
+    expect(res.status()).toBe(422);
   });
 
   test("even a super gets a 404 for a post that was never flagged", async ({ as }) => {

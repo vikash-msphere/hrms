@@ -14,8 +14,8 @@ import type { ListScope } from "../src/domain/access";
 import { BUDGET, ESTIMATED_NEURONS, MODELS } from "../src/domain/aiPolicy";
 import { excerptOf, hazardLabel, parseVerdict } from "../src/domain/moderation";
 import { CONDUCT_RULES, parseConduct } from "../src/domain/conduct";
-import { drainModeration, listModerationQueue, decideModeration, reopenOnUnhide, assertMayUnhide, QUEUE_PAGE } from "../src/services/moderation";
-import { createSuggestion, listSuggestions, restoreSuggestion } from "../src/services/suggestions";
+import { drainModeration, listModerationQueue, decideModeration, hideManually, unhideModeration, reconcileHolds, reopenOnUnhide, assertMayUnhide, QUEUE_PAGE } from "../src/services/moderation";
+import { createSuggestion, listSuggestions, restoreSuggestion, updateSuggestion } from "../src/services/suggestions";
 import { setDisabled, setPublished } from "../src/services/lifecycle";
 import { addReply, createAnnouncement, listAnnouncements, publishDueAnnouncements, repliesFor, updateAnnouncement } from "../src/services/announcements";
 
@@ -375,6 +375,20 @@ describe("the scan", () => {
 /** The org's AI switches, replaced wholesale. `moderation` on and nothing else is what `beforeEach` sets. */
 const setFeatures = (features: Record<string, boolean>) =>
   deps.db.update(schema.settings).set({ value: JSON.stringify({ features }) }).where(eq(schema.settings.key, "ai"));
+
+/** Which walls (and which posts on them) the org wants read, with `moderation` left on. */
+const setScope = (moderationScope: Record<string, string>) =>
+  deps.db
+    .update(schema.settings)
+    .set({ value: JSON.stringify({ features: { moderation: true }, moderationScope }) })
+    .where(eq(schema.settings.key, "ai"));
+
+/** The gate's posture when the model cannot answer, with `moderation` left on. */
+const setFallback = (moderationFallback: string) =>
+  deps.db
+    .update(schema.settings)
+    .set({ value: JSON.stringify({ features: { moderation: true }, moderationFallback }) })
+    .where(eq(schema.settings.key, "ai"));
 
 /** A model that answers the guard pass and the conduct pass separately, by role. */
 const twoPassModel = (guard: string, conduct: string) =>
@@ -837,7 +851,7 @@ describe("releasing a held post", () => {
     expect((await flagFor("announcements", row.uuid))?.state).toBe("rejected");
   });
 
-  it("leaves it hidden when the moderator agrees with the model", async () => {
+  it("turns an upheld hold into an ordinary hidden post, not a hole", async () => {
     const author = await seedPerson("Ana");
     deps.ai = scriptedModel(() => "unsafe\nS10");
     const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
@@ -848,6 +862,242 @@ describe("releasing a held post", () => {
     const post = await postRow(row.uuid);
     expect(post?.published).toBe(false);
     expect((await flagFor("announcements", row.uuid))?.state).toBe("accepted");
+
+    // THE BUG THIS PINS, reported from the app: "once I click keep it hidden, it disappears". `held_at`
+    // hides a row from every read including the restricted views, and the queue lists PENDING flags only -
+    // so upholding a hold satisfied both exclusions at once and the post existed nowhere a person could
+    // reach it. Not on the wall, not in a drafts list, not on the queue, not restorable. Upholding must
+    // therefore CLEAR the hold and take the post down the ordinary way.
+    expect(post?.heldAt).toBeNull();
+    expect(post?.disabled).toBe(true);
+    // ...which is exactly the state an editor can still see, and restore from.
+    const editorScope: ListScope = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true };
+    const { items } = await listAnnouncements(deps, editorScope, 50);
+    expect(items.map((i) => i.uuid)).toContain(row.uuid);
+  });
+
+  it("is findable afterwards on the decided view, with who decided and what", async () => {
+    const author = await seedPerson("Ana");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+    const moderator = await seedPerson("Mo");
+    await decideModeration(deps, moderator, `announcements/${row.uuid}`, "hide");
+
+    // Deciding takes it off the QUEUE - that is what a queue is - and the history is the answer to "where
+    // did it go". Without it, a hidden reply in particular is visible nowhere in the product at all.
+    expect((await listModerationQueue(deps)).results).toHaveLength(0);
+
+    const [decided] = (await listModerationQueue(deps, "decided")).results;
+    expect(decided?.host).toBe(`announcements/${row.uuid}`);
+    expect(decided?.decision).toBe("hidden");
+    expect(decided?.decided_by).toBe(`users/${moderator.uuid}`);
+    expect(decided?.excerpt).toContain("Something hateful");
+  });
+
+  it("does not let reading the history rewrite it", async () => {
+    const author = await seedPerson("Ana");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+    const moderator = await seedPerson("Mo");
+    await decideModeration(deps, moderator, `announcements/${row.uuid}`, "hide");
+    // The post is then deleted outright, so its host is gone.
+    await deps.db.update(schema.announcements).set({ deleteTime: new Date() }).where(eq(schema.announcements.uuid, row.uuid));
+
+    await listModerationQueue(deps, "decided");
+
+    // `retireOrphans` rewrites a flag whose host has gone to `superseded`, which is right for something
+    // still waiting and destructive here: reading the record would overwrite "a person hid this" with "the
+    // post went away", losing the decision BECAUSE somebody looked at it.
+    expect((await flagFor("announcements", row.uuid))?.state).toBe("accepted");
+  });
+
+  it("lets a person take a post down with no model flag at all", async () => {
+    const author = await seedPerson("Ana");
+    const moderator = await seedPerson("Mo");
+    const id = await seedAnnouncement(author, { title: "Off topic" });
+
+    await hideManually(deps, moderator, `announcements/${id}`);
+
+    expect((await postRow(id))?.disabled).toBe(true);
+    // IT STILL WRITES A RECORD, and that is the part not to skip: the decided view is the only place a
+    // withdrawn post can be seen, so a takedown that recorded nothing would put it beyond every surface in
+    // the app - the hole an upheld hold used to fall into. The reason says a person decided rather than
+    // naming a hazard no model found.
+    const flag = await flagFor("announcements", id);
+    expect(flag?.state).toBe("accepted");
+    expect(flag?.decidedBy).toBe(moderator.uuid);
+    expect(JSON.parse(flag!.payloadJson).hazards).toEqual(["MANUAL"]);
+    expect(hazardLabel("MANUAL")).toBe("Hidden by a person");
+
+    const [decided] = (await listModerationQueue(deps, "decided")).results;
+    expect(decided?.host).toBe(`announcements/${id}`);
+    expect(decided?.decision).toBe("hidden");
+    // ...and the ordinary way back works on it, exactly as it does for a model's flag.
+    await unhideModeration(deps, moderator, `announcements/${id}`);
+    expect((await postRow(id))?.disabled).toBe(false);
+  });
+
+  it("answers an outstanding flag rather than leaving it pending", async () => {
+    const author = await seedPerson("Ana");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+    deps.ai = undefined;
+    const moderator = await seedPerson("Mo");
+
+    await hideManually(deps, moderator, `announcements/${row.uuid}`);
+
+    // The post is down, so a queue item asking whether it should come down is about a decision already
+    // taken. One row, not two: the person's decision answers the model's question.
+    const flags = await deps.db.select().from(schema.aiSuggestions);
+    expect(flags).toHaveLength(1);
+    expect(flags[0]?.state).toBe("accepted");
+    // The model's hazards survive - WHY it was flagged is still true and still worth reading.
+    expect(JSON.parse(flags[0]!.payloadJson).hazards).toEqual(["S10"]);
+    expect((await listModerationQueue(deps)).results).toHaveLength(0);
+  });
+
+  it("refuses a collection that is not moderated", async () => {
+    const moderator = await seedPerson("Mo");
+    await expect(hideManually(deps, moderator, `employees/${moderator.employeeId}`)).rejects.toThrow(/not a moderated collection/);
+  });
+
+  it("puts a hidden post back as a draft, and reopens its flag", async () => {
+    const author = await seedPerson("Ana");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+    const moderator = await seedPerson("Mo");
+    await decideModeration(deps, moderator, `announcements/${row.uuid}`, "hide");
+
+    await unhideModeration(deps, moderator, `announcements/${row.uuid}`);
+
+    // A DRAFT, NOT BACK ON THE WALL. Undoing a takedown is not the same act as publishing, and the person
+    // undoing it is usually not the author: the post returns to its author's hands, and the way back onto
+    // the wall is the ordinary publish, which sends it through the check again.
+    const post = await postRow(row.uuid);
+    expect(post?.disabled).toBe(false);
+    expect(post?.published).toBe(false);
+    expect(post?.heldAt).toBeNull();
+    // THE FLAG CLOSES, and this is the case the first version got wrong. A draft is on no wall, so there is
+    // nothing outstanding to decide: left pending it sat on the queue as a row about a post nobody can see,
+    // and the next read retired it as an orphan - the right end state reached by side effect. Publishing it
+    // is what asks the question again, through the gate, which re-reads the text.
+    expect((await flagFor("announcements", row.uuid))?.state).toBe("superseded");
+    expect((await listModerationQueue(deps)).results.map((r) => r.host)).not.toContain(`announcements/${row.uuid}`);
+    // And its author hears about it - silence would read as the post still being gone.
+    const told = await deps.db.select().from(schema.notifications).where(eq(schema.notifications.type, "moderation.unhidden"));
+    expect(told).toHaveLength(1);
+  });
+
+  it("refuses to put back something that was never hidden", async () => {
+    const author = await seedPerson("Ana");
+    const moderator = await seedPerson("Mo");
+    // FLAGGED WHILE IT WAS UP, not held: the post is on the wall where its author put it, so there is no
+    // decision to reverse. Saying so beats doing nothing and reporting success. (Seeded published and then
+    // scanned, because a post written THROUGH the gate is held, which is the other case entirely.)
+    const post = await seedAnnouncement(author);
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    await drainModeration(deps);
+    expect((await flagFor("announcements", post))?.state).toBe("pending");
+    await expect(unhideModeration(deps, moderator, `announcements/${post}`)).rejects.toThrow(/not hidden/);
+
+    await decideModeration(deps, moderator, `announcements/${post}`, "dismiss");
+    // Released rather than hidden: the post was never taken down, so there is nothing to put back either.
+    await expect(unhideModeration(deps, moderator, `announcements/${post}`)).rejects.toThrow(/not hidden/);
+  });
+
+  it("hands a held post back to its author as a draft, deciding nothing", async () => {
+    const author = await seedPerson("Ana");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+    const moderator = await seedPerson("Mo");
+
+    // THE THIRD ANSWER TO A HELD POST, beside releasing it and keeping it buried: give it back. The
+    // moderator declines to be the person who judges the text, and its author can rewrite it or drop it.
+    await unhideModeration(deps, moderator, `announcements/${row.uuid}`);
+
+    const post = await postRow(row.uuid);
+    expect(post?.heldAt).toBeNull();
+    expect(post?.published).toBe(false);
+    expect(post?.disabled).toBe(false);
+    // SUPERSEDED, NOT DECIDED: nobody read it and nobody judged it, so the history must not credit anybody
+    // with a verdict. Left pending it would sit on the queue as a row about a draft nobody can act on.
+    expect((await flagFor("announcements", row.uuid))?.state).toBe("superseded");
+    const queue = await listModerationQueue(deps);
+    expect(queue.results.map((r) => r.host)).not.toContain(`announcements/${row.uuid}`);
+    expect((await listModerationQueue(deps, "decided")).results.map((r) => r.host)).not.toContain(`announcements/${row.uuid}`);
+    // And its author hears, or the post has simply vanished from where they are sitting.
+    const told = await deps.db.select().from(schema.notifications).where(eq(schema.notifications.type, "moderation.unhidden"));
+    expect(told).toHaveLength(1);
+  });
+
+  it("refuses to hand back a held reply or suggestion, which has no draft to go to", async () => {
+    const submitter = await seedPerson("Ana");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    const s = await createSuggestion(deps, submitter, { title: "About Bob", body: "Something hateful." });
+    const moderator = await seedPerson("Mo");
+    // Clearing the hold on one of these IS publishing it, and publishing it in silence is what `:decide`
+    // with `dismiss` exists to avoid - it sends the notifications the hold withheld.
+    await expect(unhideModeration(deps, moderator, `suggestions/${s.uuid}`)).rejects.toThrow(/draft to go back to/);
+  });
+
+  it("puts a hidden post straight back on the wall when asked to", async () => {
+    const author = await seedPerson("Ana");
+    const post = await seedAnnouncement(author);
+    const moderator = await seedPerson("Mo");
+    await hideManually(deps, moderator, `announcements/${post}`);
+    expect((await postRow(post))?.disabled).toBe(true);
+
+    // THE POINT OF THE SECOND MODE. `draft` costs the author a publish they may never perform - somebody on
+    // leave, or gone - so the post a moderator meant to restore stays gone.
+    await unhideModeration(deps, moderator, `announcements/${post}`, "publish");
+
+    const row = await postRow(post);
+    expect(row?.disabled).toBe(false);
+    expect(row?.published).toBe(true);
+    // RECORDED AS A DECISION, not a re-queue: the moderator has read it and overruled the takedown, so the
+    // history says who did that rather than handing the flag back to the person who just answered it.
+    const flag = await flagFor("announcements", post);
+    expect(flag?.state).toBe("rejected");
+    expect(flag?.decidedBy).toBe(moderator.uuid);
+    const decided = (await listModerationQueue(deps, "decided")).results.find((r) => r.host === `announcements/${post}`);
+    expect(decided?.decision).toBe("released");
+    expect((await listModerationQueue(deps)).results.map((r) => r.host)).not.toContain(`announcements/${post}`);
+  });
+
+  it("announces a post that was never published when it goes back up", async () => {
+    const author = await seedPerson("Ana");
+    await seedPerson("Bea"); // an audience, so the broadcast has somebody to reach
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+    const moderator = await seedPerson("Mo");
+    // Held, then upheld: the post has never been seen by anybody and carries no publish.
+    await decideModeration(deps, moderator, `announcements/${row.uuid}`, "hide");
+    expect((await postRow(row.uuid))?.published).toBe(false);
+
+    await unhideModeration(deps, moderator, `announcements/${row.uuid}`, "publish");
+
+    expect((await postRow(row.uuid))?.published).toBe(true);
+    // The broadcast is the half that is easy to forget: a post appearing silently on a wall nobody is
+    // looking at is, from its author's side, the same as the gate having eaten it.
+    const bell = await deps.db.select().from(schema.notifications).where(eq(schema.notifications.type, "announcement.published"));
+    expect(bell.length).toBeGreaterThan(0);
+  });
+
+  it("counts both halves of the queue, whichever half was asked for", async () => {
+    const author = await seedPerson("Ana");
+    const moderator = await seedPerson("Mo");
+    const up = await seedAnnouncement(author);
+    const down = await seedAnnouncement(author);
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    await drainModeration(deps);
+    await decideModeration(deps, moderator, `announcements/${down}`, "hide");
+
+    // THE CHIP ON THE HALF YOU ARE NOT LOOKING AT is the point: an empty queue said nothing about whether
+    // there was a history worth opening, so the only way to find out was to go and look.
+    const pending = await listModerationQueue(deps);
+    expect(pending.counts).toEqual({ pending: 1, decided: 1 });
+    expect(pending.results.map((r) => r.host)).toEqual([`announcements/${up}`]);
+    expect((await listModerationQueue(deps, "decided")).counts).toEqual({ pending: 1, decided: 1 });
   });
 
   it("keeps a held post ON the queue, where an ordinary hidden one drops off", async () => {
@@ -1058,9 +1308,35 @@ describe("the queue", () => {
   it("says when there are more flags than one read returns", async () => {
     const author = await seedPerson("Ana");
     deps.ai = scriptedModel(() => "unsafe\nS10");
-    // The scan is bounded per tick, so the backlog is built by running it until the wall is covered.
-    for (let i = 0; i < QUEUE_PAGE + 2; i += 1) await seedAnnouncement(author, { title: `Post ${i}` });
-    for (let i = 0; i < Math.ceil((QUEUE_PAGE + 2) / BUDGET.moderationsPerDrain); i += 1) await drainModeration(deps);
+    const posts: string[] = [];
+    for (let i = 0; i < QUEUE_PAGE + 2; i += 1) posts.push(await seedAnnouncement(author, { title: `Post ${i}` }));
+
+    // SCANNED FOR THE FIRST TICK, WRITTEN FOR THE REST. Draining until the wall is covered cannot get there
+    // and the arithmetic says so: the unattended share of the daily budget (domain/aiPolicy.ts) pays for
+    // roughly seventy moderation calls a UTC day, so a backlog of a hundred and two is more than a day of
+    // scanning however many ticks it is given - the drain correctly stops at the budget, which used to read
+    // here as the queue being short. What is under test is the QUEUE READ: that it caps a page and says there
+    // is more behind it. So one tick's worth is flagged by the scanner (the rows the queue lists are the rows
+    // the scanner writes, and that stays proven) and the remainder is written as the same flag row directly.
+    await drainModeration(deps);
+    const flagged = new Set(
+      (await deps.db.select().from(schema.aiSuggestions).where(eq(schema.aiSuggestions.feature, "moderation"))).map((f) => f.hostRecordId),
+    );
+    expect(flagged.size, "the first drain should flag its tick's worth").toBe(BUDGET.moderationsPerDrain);
+    // Which posts those were is the SCANNER's rotation to decide (`dueForScan`), not this test's - so the rest
+    // are whatever it did not reach, rather than a slice of the seed order.
+    for (const recordId of posts.filter((p) => !flagged.has(p))) {
+      await deps.db.insert(schema.aiSuggestions).values({
+        hostCollection: "announcements",
+        hostRecordId: recordId,
+        feature: "moderation",
+        // The payload the scanner writes, and the shape the queue insists on (`readPayload` drops a flag whose
+        // payload has no `excerpt`, which is how a fixture that guesses at it reads as a queue that is short).
+        payloadJson: JSON.stringify({ hazards: ["S10"], excerpt: "Great quarter everyone.", anonymous: false }),
+        model: "test",
+        basis: 1,
+      });
+    }
 
     const queue = await listModerationQueue(deps);
     expect(queue.results).toHaveLength(QUEUE_PAGE);
@@ -1394,5 +1670,310 @@ describe("a post that comes back brings its flag back", () => {
     await drainModeration(deps);
     expect((await flagFor("announcements", id))?.state).toBe("rejected");
     expect((await listModerationQueue(deps)).results).toEqual([]);
+  });
+});
+
+describe("which posts the org has asked to have read", () => {
+  // `moderation` decides WHETHER a model reads the walls; `moderationScope` decides WHICH. The default is
+  // every wall, so an org that never opens this section sees the behaviour every other test in this file
+  // describes. What is worth pinning is that a narrowed scope is honoured on BOTH paths - the gate in the
+  // request, and the cron drain - because a scope the sweep ignored would read as the setting not working
+  // five minutes after somebody set it.
+
+  const suggestionRow = (uuid: string) =>
+    deps.db.select().from(schema.suggestions).where(eq(schema.suggestions.uuid, uuid)).get();
+
+  it("checks an anonymous suggestion and leaves a signed one alone", async () => {
+    await setScope({ announcements: "off", "announcement-replies": "off", suggestions: "anonymous" });
+    const submitter = await seedPerson("Ana");
+    const model = scriptedModel(() => "unsafe\nS10");
+    deps.ai = model;
+
+    const signed = await createSuggestion(deps, submitter, { title: "Idea", body: "Something hateful." });
+    // Never held, never flagged, and NEVER SENT: the saving is the point of this configuration, so a test
+    // that only checked the row would pass on an implementation that asked anyway and threw the answer away.
+    expect(model.calls).toBe(0);
+    expect((await suggestionRow(signed.uuid))?.heldAt).toBeNull();
+    expect(await flagFor("suggestions", signed.uuid)).toBeUndefined();
+
+    const anon = await createSuggestion(deps, submitter, { title: "Idea", body: "Something hateful.", anonymous: true });
+    expect(model.calls).toBe(1);
+    expect((await suggestionRow(anon.uuid))?.heldAt).not.toBeNull();
+    expect((await flagFor("suggestions", anon.uuid))?.state).toBe("pending");
+  });
+
+  it("does not hold a post on a wall the org switched off", async () => {
+    await setScope({ announcements: "off", "announcement-replies": "all", suggestions: "all" });
+    const author = await seedPerson("Ana");
+    const model = scriptedModel(() => "unsafe\nS10");
+    deps.ai = model;
+
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+
+    // Up, unread, and unflagged - which is what "we do not check the noticeboard" has to mean. A wall that
+    // is off is not a wall whose posts are checked and then let through.
+    const post = await postRow(row.uuid);
+    expect(post?.published).toBe(true);
+    expect(post?.heldAt).toBeNull();
+    expect(model.calls).toBe(0);
+    expect(await flagFor("announcements", row.uuid)).toBeUndefined();
+  });
+
+  it("keeps the cron sweep inside the same scope", async () => {
+    // The sweep is the half that would otherwise flag, hours later, exactly what the gate was told to skip.
+    await setScope({ announcements: "off", "announcement-replies": "off", suggestions: "anonymous" });
+    const author = await seedPerson("Ana");
+    const submitter = await seedPerson("Ben");
+    const post = await seedAnnouncement(author, { title: "About Bob" });
+    const signed = await seedSuggestion(submitter);
+    const anon = await seedSuggestion(submitter, { title: "Quietly", body: "Something hateful.", anonymous: true });
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+
+    await drainModeration(deps);
+
+    expect(await flagFor("announcements", post)).toBeUndefined();
+    expect(await flagFor("suggestions", signed)).toBeUndefined();
+    expect((await flagFor("suggestions", anon))?.state).toBe("pending");
+  });
+
+  it("re-decides on the anonymity the edit leaves behind, not the one it started with", async () => {
+    // Signing a suggestion takes it out of scope; making one anonymous brings it in. Reading `row` instead
+    // of the patch would decide on what the suggestion used to be, which is the wrong post.
+    await setScope({ announcements: "off", "announcement-replies": "off", suggestions: "anonymous" });
+    const submitter = await seedPerson("Ana");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+
+    const signed = await createSuggestion(deps, submitter, { title: "Idea", body: "A thought." });
+    expect((await suggestionRow(signed.uuid))?.heldAt).toBeNull();
+
+    await updateSuggestion(deps, submitter, signed.uuid, { anonymous: true, body: "Something hateful." });
+
+    expect((await suggestionRow(signed.uuid))?.heldAt).not.toBeNull();
+    expect((await flagFor("suggestions", signed.uuid))?.state).toBe("pending");
+  });
+
+  it("reads every wall when the org has said nothing", async () => {
+    // The default, and the thing a narrowing must not quietly become: `beforeEach` writes no scope at all.
+    const author = await seedPerson("Ana");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+    expect((await postRow(row.uuid))?.heldAt).not.toBeNull();
+  });
+});
+
+describe("what the gate does when the model cannot answer", () => {
+  // THE ORG'S CHOICE, and the boundary it is drawn on. `moderationFallback` decides what happens to a post
+  // the model never spoke about - no allowance left, an outage, a reply that was not a verdict. It decides
+  // NOTHING about a post a model read and objected to; that one is held under both postures, or the setting
+  // would be a way to turn moderation off while the screen still said it was on.
+
+  const downModel = () => ({
+    embed: async () => [],
+    rerank: async () => [],
+    generate: async () => { throw new Error("model is down"); },
+  } as unknown as TextModel);
+
+  const suggestionRow = (uuid: string) =>
+    deps.db.select().from(schema.suggestions).where(eq(schema.suggestions.uuid, uuid)).get();
+
+  it("holds by default, without the setting being written at all", async () => {
+    // `beforeEach` writes `{ features: { moderation: true } }` and nothing else, which is the shape of a blob
+    // saved before this setting existed. The safe position has to be what that reads as.
+    const author = await seedPerson("Ana");
+    deps.ai = downModel();
+
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+
+    const post = await postRow(row.uuid);
+    expect(post?.heldAt).not.toBeNull();
+    expect(post?.published).toBe(false);
+  });
+
+  it("lets the post up, flagged as unchecked, when the org has chosen that", async () => {
+    await setFallback("publish");
+    const author = await seedPerson("Ana");
+    await seedPerson("Ben"); // an audience, which a published post tells
+    deps.ai = downModel();
+
+    const row = await createAnnouncement(deps, author, { title: "Well done team", body: "Great quarter." });
+
+    // Up, and up in the ordinary way: published, not held, and the broadcast the gate would have withheld.
+    const post = await postRow(row.uuid);
+    expect(post?.heldAt).toBeNull();
+    expect(post?.published).toBe(true);
+    // ASKED BY SUBJECT, not by type. A post that goes up under this posture goes up the RELEASE road - the
+    // gate wrote it unpublished and the publish verb flips it (services/announcements.ts), which is the same
+    // road a moderator's release takes and broadcasts `announcement.published`, while a post that never met
+    // the gate broadcasts `announcement.posted` from the create path. Both are "there is a new post" in the
+    // bell, and which of them carried it is not what this test is about: the claim is that the audience heard
+    // about a post that is now public, which naming one type quietly narrowed to "heard about it the other way".
+    const told = await deps.db.select().from(schema.notifications).where(eq(schema.notifications.subject, `announcements/${row.uuid}`));
+    expect(told.length).toBeGreaterThan(0);
+
+    // AND STILL FLAGGED. The posture trades a hold for a record; without the queue item nobody could say
+    // afterwards which posts went up unread.
+    const flag = await flagFor("announcements", row.uuid);
+    expect(flag?.state).toBe("pending");
+    expect(JSON.parse(flag!.payloadJson).hazards).toEqual(["UNCHECKED"]);
+    expect(JSON.parse(flag!.payloadJson).held).toBe(false);
+    expect((await listModerationQueue(deps)).results.map((r) => r.host)).toContain(`announcements/${row.uuid}`);
+
+    // The author is not told: their post went up, so there is nothing about it for them to act on.
+    expect(await deps.db.select().from(schema.notifications).where(eq(schema.notifications.type, "moderation.held"))).toHaveLength(0);
+  });
+
+  it("still holds a post the model READ and objected to", async () => {
+    // The line the setting must not cross. A verdict is the feature working; only silence is the failure the
+    // org chose to post through.
+    await setFallback("publish");
+    const author = await seedPerson("Ana");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+
+    const post = await postRow(row.uuid);
+    expect(post?.heldAt).not.toBeNull();
+    expect(post?.published).toBe(false);
+    expect(JSON.parse((await flagFor("announcements", row.uuid))!.payloadJson).hazards).toEqual(["S10"]);
+  });
+
+  it("holds anyway on a value nothing recognises", async () => {
+    // `aiConfig` coerces an unknown stored value back to `hold`. The route refuses one on write, so reaching
+    // this means a blob written by hand or by an older client - and the coercion has to land on the position
+    // that cannot publish something unread.
+    await setFallback("fail-open-please");
+    const author = await seedPerson("Ana");
+    deps.ai = downModel();
+
+    const row = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful." });
+    expect((await postRow(row.uuid))?.heldAt).not.toBeNull();
+  });
+
+  it("carries the choice to the suggestion box as well as the noticeboard", async () => {
+    await setFallback("publish");
+    const submitter = await seedPerson("Ana");
+    deps.ai = downModel();
+
+    const suggestion = await createSuggestion(deps, submitter, { title: "Idea", body: "Better coffee." });
+
+    // A suggestion has no publish flag - clearing the hold IS publishing it - so this is the whole of it.
+    expect((await suggestionRow(suggestion.uuid))?.heldAt).toBeNull();
+    const scope: ListScope = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: false };
+    expect((await listSuggestions(deps, scope, 50)).items.map((i) => i.uuid)).toContain(suggestion.uuid);
+    expect((await flagFor("suggestions", suggestion.uuid))?.state).toBe("pending");
+  });
+});
+
+describe("state one function writes and another reads", () => {
+  // EVERY TEST IN THIS BLOCK IS CROSS-FUNCTION, and that is the point of it. The rest of the file holds each
+  // function against the state it was written to produce - the gate holds, the drain flags, a decision
+  // decides - and each of those passed while a post could still be lost between two of them. The shape
+  // repeats: one function writes `held_at` and a different one is supposed to clear it, and the tests that
+  // would notice are the ones that call both.
+  //
+  // The invariant underneath all four: A HELD ROW ALWAYS HAS SOMETHING THAT CAN RELEASE IT. `held_at` hides a
+  // row from every read in the app including its author's, and the only things that clear it are the gate
+  // (once) and a moderator acting on a `pending` flag - so held with no pending flag is a post nobody can
+  // see and nobody can release.
+
+  const suggestionRow = (uuid: string) =>
+    deps.db.select().from(schema.suggestions).where(eq(schema.suggestions.uuid, uuid)).get();
+
+  /** A model that is down, which is what the gate's hardest cases are all about. */
+  const downModel = () => ({
+    embed: async () => [],
+    rerank: async () => [],
+    generate: async () => { throw new Error("model is down"); },
+  } as unknown as TextModel);
+
+  it("does not let a second Publish walk a held post onto the wall", async () => {
+    // THE CHEAPEST BYPASS THERE WAS: publish, get held, press Publish again. The second call re-enters the
+    // gate, the text has not changed and neither has the model set, so the scan takes its unchanged-hash
+    // short-circuit - and an "unchanged" outcome used to be treated exactly like a clean one. "Unchanged"
+    // means the text matches the last scan, and the last scan was an objection.
+    const author = await seedPerson("Ana");
+    await seedPerson("Ben"); // an audience, so a broadcast would be visible
+    const model = scriptedModel(() => "unsafe\nS10");
+    deps.ai = model;
+
+    const draft = await createAnnouncement(deps, author, { title: "About Bob", body: "Something hateful.", published: false });
+    await setPublished(deps, author, schema.announcements, "announcement", "announcements", draft.uuid, true, true);
+    expect((await postRow(draft.uuid))?.heldAt).not.toBeNull();
+
+    await setPublished(deps, author, schema.announcements, "announcement", "announcements", draft.uuid, true, true);
+
+    const post = await postRow(draft.uuid);
+    expect(post?.published).toBe(false);
+    expect(post?.heldAt).not.toBeNull();
+    // The flag is still the moderator's to answer, and nobody was told about a post that is not up.
+    expect((await flagFor("announcements", draft.uuid))?.state).toBe("pending");
+    const told = await deps.db.select().from(schema.notifications).where(eq(schema.notifications.type, "announcement.published"));
+    expect(told).toHaveLength(0);
+  });
+
+  it("does not strand a held suggestion when the drain later reads it clean", async () => {
+    // The likeliest route to a lost post, and none of it is anybody doing anything wrong: submit while the
+    // model is down (held, flagged UNCHECKED, no scan row), the model comes back, the cron picks the row up
+    // because nothing filtered `held_at`, reads it for real, finds it fine, and retires the flag as
+    // `superseded` - a state neither half of the queue shows - while `held_at` stays set.
+    const submitter = await seedPerson("Ana");
+    deps.ai = downModel();
+    const held = await createSuggestion(deps, submitter, { title: "Idea", body: "Better coffee." });
+    expect((await suggestionRow(held.uuid))?.heldAt).not.toBeNull();
+
+    deps.ai = scriptedModel(() => "safe");
+    await drainModeration(deps);
+
+    const row = await suggestionRow(held.uuid);
+    const flag = await flagFor("suggestions", held.uuid);
+    // Either answer is acceptable; the pair "still held" and "nothing pending" is not.
+    if (row?.heldAt) expect(flag?.state).toBe("pending");
+    if (flag?.state !== "pending") expect(row?.heldAt ?? null).toBeNull();
+  });
+
+  it("re-queues a held post that lost its flag, so nothing is held with nothing outstanding", async () => {
+    // `holdPost` is two statements with no transaction - the stamp, then the flag - and the gate's catch
+    // returns false having written whichever of them landed. This is the net under that, and under anything
+    // else that retires a flag over a row still holding its stamp.
+    const author = await seedPerson("Ana");
+    const id = await seedAnnouncement(author, { published: false, heldAt: new Date(), title: "About Bob" });
+    expect(await flagFor("announcements", id)).toBeUndefined();
+
+    const { requeued } = await reconcileHolds(deps);
+
+    expect(requeued).toBe(1);
+    // RE-QUEUED, NOT RELEASED. Nothing read this post, so the honest answer to "was it checked" is no, and a
+    // sweeper that published it would be the gate quietly opening itself.
+    expect((await flagFor("announcements", id))?.state).toBe("pending");
+    expect((await postRow(id))?.published).toBe(false);
+    expect((await listModerationQueue(deps)).results.map((r) => r.host)).toContain(`announcements/${id}`);
+  });
+
+  it("releases a held post while the model is down, rather than recording a release that did not happen", async () => {
+    // A moderator dismissing a flag has already overruled the model, so the release must not ask it again.
+    // It used to: `releasePost` went through `setPublished`, which opens with the gate - so during an outage
+    // the post was re-held, the return value was discarded, and the decision was then stamped `rejected`.
+    // Final state: held, unpublished, and badged "Released. On the wall." on the history. It was not.
+    //
+    // The outage is not an unlucky coincidence either. The gate fails closed, so an outage is exactly when
+    // the queue is full and somebody is working through it.
+    const author = await seedPerson("Ana");
+    await seedPerson("Ben");
+    deps.ai = scriptedModel(() => "unsafe\nS10");
+    const row = await createAnnouncement(deps, author, { title: "Well done team", body: "Great quarter." });
+    expect((await postRow(row.uuid))?.heldAt).not.toBeNull();
+
+    deps.ai = downModel();
+    const moderator = await seedPerson("Mo");
+    await decideModeration(deps, moderator, `announcements/${row.uuid}`, "dismiss");
+
+    const post = await postRow(row.uuid);
+    expect(post?.heldAt).toBeNull();
+    expect(post?.published).toBe(true);
+    // And the history's claim is true: the audience was told, by the same publish path an ordinary post takes.
+    const told = await deps.db.select().from(schema.notifications).where(eq(schema.notifications.type, "announcement.published"));
+    expect(told.length).toBeGreaterThan(0);
+    expect((await flagFor("announcements", row.uuid))?.state).toBe("rejected");
   });
 });

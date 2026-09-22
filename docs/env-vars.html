@@ -390,6 +390,34 @@
     word-break: break-word;
   }
 
+  /* One copy button per variable, built by the script at the foot of the page. A name that carries two
+     variables is split on the comma so each gets its own, because copying "A, B" pastes something no
+     config file accepts. */
+  .name-tok { display: inline-flex; align-items: center; gap: 4px; }
+  .name-tok + .name-tok { margin-left: 4px; }
+
+  .copy {
+    font-family: var(--f-body);
+    font-size: 10.5px;
+    line-height: 1;
+    padding: 3px 6px;
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    background: var(--surface-2);
+    color: var(--ink-3);
+    cursor: pointer;
+    vertical-align: middle;
+    /* The row is a <label>, so a bare button click would toggle the tick. The handler calls
+       preventDefault; this only stops the browser's own label-activation highlight. */
+    user-select: none;
+  }
+
+  .copy:hover { border-color: var(--accent); color: var(--accent-ink); }
+  .copy[data-state="done"] { border-color: var(--accent); background: var(--accent-wash); color: var(--accent-ink); }
+  .copy[data-state="fail"] { border-color: var(--danger); background: var(--danger-wash); color: var(--danger); }
+
+  .row.is-done .copy { opacity: .55; }
+
   .row .body { grid-column: 2; }
 
   .row p {
@@ -541,14 +569,14 @@
 
 <main class="page">
   <nav class="toc" aria-label="Sections">
-    <a href="#bindings">Bindings <b>3</b></a>
+    <a href="#bindings">Bindings <b>5</b></a>
     <a href="#secrets">Secrets <b>6</b></a>
     <a href="#optional-secrets">Optional secrets <b>6</b></a>
-    <a href="#vars">Worker vars <b>8</b></a>
-    <a href="#spa">SPA build <b>6</b></a>
-    <a href="#build">Build machine <b>4</b></a>
+    <a href="#vars">Worker vars <b>11</b></a>
+    <a href="#spa">SPA build <b>7</b></a>
+    <a href="#build">CI variables <b>6</b></a>
     <a href="#github">GitHub secrets <b>4</b></a>
-    <a href="#never">Never in prod <b>3</b></a>
+    <a href="#never">Never in prod <b>6</b></a>
     <a href="#pairs">Must match</a>
   </nav>
 
@@ -559,22 +587,28 @@
         <div class="lane">
           <h3>Runtime, committed</h3>
           <code>wrangler.toml [vars]</code>
-          <p>Bindings, cron triggers and non-secret vars. In git. Changing one needs a redeploy.</p>
+          <p>Bindings, cron triggers and non-secret vars. In git, edited in your editor. Changing one needs a
+            redeploy. The Cloudflare dashboard will let you edit these, and the next deploy overwrites it.</p>
         </div>
         <div class="lane">
           <h3>Runtime, secret</h3>
           <code>wrangler secret put</code>
-          <p>Stored on the Worker, never in git, never in CI. Persists across deploys on its own.</p>
+          <p>Stored on the Worker, never in git, never in CI. Cloudflare &rarr; Workers &amp; Pages &rarr;
+            <code>hrms</code> &rarr; Settings &rarr; Variables and Secrets does the same thing in a browser.
+            Persists across deploys on its own.</p>
         </div>
         <div class="lane">
           <h3>Baked into the bundle</h3>
           <code>web/.env &rarr; VITE_*</code>
-          <p>Read by Vite at build time and compiled into the JavaScript. Public. A missing one needs a new build, not a secret.</p>
+          <p>Read by Vite at build time and compiled into the JavaScript. Public, and committed here on
+            purpose. A missing one needs a new build, not a secret.</p>
         </div>
         <div class="lane">
           <h3>CI only</h3>
-          <code>GitHub &rarr; production env</code>
-          <p>Credentials the deploy and backup workflows use. They never reach the Worker.</p>
+          <code>GitHub &rarr; Settings &rarr; Environments &rarr; production</code>
+          <p>Credentials and acknowledgements the deploy and backup workflows use. Secrets on the
+            <em>Environment secrets</em> list, non-secret ones on <em>Environment variables</em>. They never
+            reach the Worker.</p>
         </div>
       </div>
     </section>
@@ -583,8 +617,12 @@
       <header>
         <h2>Bindings</h2>
         <span class="where">wrangler.toml &middot; committed</span>
-        <p>Declared once and left alone. Provision the resources first (<code>wrangler d1 create hrms</code>,
-          <code>wrangler r2 bucket create hrms</code>), then paste the ids.</p>
+        <p><b>Set where:</b> provision the resource first (<code>wrangler d1 create hrms</code>,
+          <code>wrangler r2 bucket create hrms</code>, <code>wrangler vectorize create hrms-search</code>),
+          then paste the id into <code>wrangler.toml</code> in the repo and commit it. Cloudflare &rarr;
+          Workers &amp; Pages &rarr; <code>hrms</code> &rarr; Settings &rarr; Bindings shows what is deployed;
+          it is not where you edit them, because the next <code>wrangler deploy</code> replaces the whole
+          list with this file.</p>
       </header>
       <div class="rows">
 
@@ -622,6 +660,38 @@
           </div>
         </label>
 
+        <label class="row" data-kind="">
+          <input type="checkbox" data-id="AI">
+          <div class="body">
+            <div class="row-head"><span class="name">AI</span><span class="tag opt">optional</span><span class="tag">binding</span></div>
+            <p>Workers AI, declared as <code>[ai]</code>. Drives the drafting, summarising, receipt/resume
+              extraction, moderation and narration features. Unbind it and every one of them falls back to
+              what the app did before it existed: FTS search, a manual pick, no draft button.</p>
+            <p class="risk"><b>Binding it settles nothing about what may be called.</b> The binding will proxy
+              <em>external</em> providers given a provider-prefixed model id, and sending employee data to one
+              is the single thing this layer must never do. The allowlist is
+              <code>src/domain/aiPolicy.ts</code>, and <code>src/lib/ai.ts</code> is the only file that calls
+              <code>AI.run</code>. Free allocation is 10,000 neurons/day for the whole <em>account</em>, which
+              staging shares &mdash; see <code>docs/deploy-ai.md</code>.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="">
+          <input type="checkbox" data-id="VEC">
+          <div class="body">
+            <div class="row-head"><span class="name">VEC</span><span class="tag opt">optional</span><span class="tag">binding</span></div>
+            <p>The Vectorize semantic-search index, independent of <code>AI</code>: with no index bound,
+              global search is the FTS5 path it has always been. Create it with the dimensions and metric the
+              embedding model produces, plus the metadata index the collection pre-filter needs.</p>
+            <div class="cmd">wrangler vectorize create hrms-search --dimensions=384 --metric=cosine
+wrangler vectorize create-metadata-index hrms-search --property-name=collection --type=string</div>
+            <p class="risk"><b>Staging needs its own index, never production's.</b> Staging runs on a copy of
+              the database with different record ids, so one shared index means staging's upserts overwriting
+              production's entries. Changing the dimensions or the model later means rebuilding: vectors from
+              two models are not comparable.</p>
+          </div>
+        </label>
+
       </div>
     </section>
 
@@ -629,7 +699,12 @@
       <header>
         <h2>Required secrets</h2>
         <span class="where">wrangler secret put &middot; never committed</span>
-        <p>Generate fresh values for production. Never reuse anything from <code>.dev.vars</code>.</p>
+        <p><b>Set where:</b> <code>npx wrangler secret put NAME</code> from the repo root (add
+          <code>--env staging</code> for the <code>hrms-staging</code> worker), or Cloudflare dashboard &rarr;
+          Workers &amp; Pages &rarr; <code>hrms</code> &rarr; Settings &rarr; Variables and Secrets &rarr; Add
+          &rarr; type <em>Secret</em>. Either way they live on the Worker and survive redeploys, so they are
+          set once and never put in GitHub. Generate fresh values for production &mdash; never reuse anything
+          from <code>.dev.vars</code>.</p>
       </header>
       <div class="rows">
 
@@ -707,7 +782,9 @@
       <header>
         <h2>Optional secrets</h2>
         <span class="where">wrangler secret put &middot; feature switches</span>
-        <p>Absent by default. Each one turns a feature on; leaving it unset degrades gracefully rather than
+        <p><b>Set where:</b> same place as the required ones &mdash; <code>npx wrangler secret put NAME</code>,
+          or Workers &amp; Pages &rarr; <code>hrms</code> &rarr; Settings &rarr; Variables and Secrets. Absent
+          by default. Each one turns a feature on; leaving it unset degrades gracefully rather than
           erroring.</p>
       </header>
       <div class="rows">
@@ -785,8 +862,13 @@
       <header>
         <h2>Worker vars</h2>
         <span class="where">wrangler.toml [vars] &middot; committed, not secret</span>
-        <p>Redeclare each of these under <code>[env.staging.vars]</code> too &mdash; wrangler does not inherit
-          top-level vars into a named environment.</p>
+        <p><b>Set where:</b> the <code>[vars]</code> block of <code>wrangler.toml</code> in the repo, then
+          commit and deploy. <b>Not</b> in the Cloudflare dashboard: Workers &amp; Pages &rarr;
+          <code>hrms</code> &rarr; Settings &rarr; Variables and Secrets will accept a plaintext edit there,
+          and the next <code>wrangler deploy</code> replaces the whole set with this file, so a dashboard-only
+          value disappears at the next release with nothing to show for it. Redeclare each of these under
+          <code>[env.staging.vars]</code> too &mdash; wrangler does not inherit top-level vars into a named
+          environment.</p>
       </header>
       <div class="rows">
 
@@ -796,9 +878,11 @@
             <div class="row-head"><span class="name">ALLOWED_EMAIL_DOMAINS</span><span class="tag req">required</span><span class="tag">var</span></div>
             <p>Comma-separated org domains permitted to sign in and auto-provision on first login, e.g.
               <code>acme.com</code>. Under Google sign-in this is the org perimeter.</p>
-            <p class="risk"><b>Empty is refused at startup, not treated as &ldquo;no restriction&rdquo;.</b>
-              <code>makeDeps</code> throws and the OAuth callback returns 500 &mdash; deliberately, because the
-              permissive reading would let any Google account in as an employee.</p>
+            <p class="risk"><b>Empty is refused at startup in Google mode, not treated as &ldquo;no
+              restriction&rdquo;.</b> <code>makeDeps</code> throws and the OAuth callback returns 500 &mdash;
+              deliberately, because the permissive reading would let any Google account on the internet finish
+              <code>/auth/callback</code> and be auto-provisioned as an employee. Under Cloudflare Access it is
+              optional: Access is the perimeter and this is a second net.</p>
           </div>
         </label>
 
@@ -818,7 +902,11 @@
             <div class="row-head"><span class="name">EMAIL_PROVIDER</span><span class="tag opt">optional</span><span class="tag">var</span></div>
             <p>One of <code>resend</code> (default), <code>brevo</code>, <code>sendgrid</code>,
               <code>postmark</code>, <code>mailgun</code>. Selects which vendor <code>EMAIL_API_KEY</code>
-              belongs to.</p>
+              belongs to. Production here is <code>brevo</code>; staging is <code>resend</code>.</p>
+            <p class="risk"><b><code>console</code> is the sixth value and never a production one.</b> It logs
+              &ldquo;would send to &hellip;&rdquo; and posts nothing, which is right for a preview stack and
+              the browser suite and a silent disaster live: every offer letter and payslip notice is accepted,
+              recorded as sent, and thrown away. Preflight refuses it for the environment being deployed.</p>
           </div>
         </label>
 
@@ -828,6 +916,54 @@
             <div class="row-head"><span class="name">EMAIL_REGION</span><span class="tag opt">optional</span><span class="tag">var</span></div>
             <p>Provider-specific: the Mailgun sending domain. Ignored by every other provider &mdash; omit it
               unless <code>EMAIL_PROVIDER=mailgun</code>.</p>
+          </div>
+        </label>
+
+        <label class="row never" data-kind="">
+          <input type="checkbox" data-id="EMAIL_REDIRECT_TO">
+          <div class="body">
+            <div class="row-head"><span class="name">EMAIL_REDIRECT_TO</span><span class="tag opt">staging only</span><span class="tag">var</span></div>
+            <p>Diverts every outbound message to this one address, keeping the intended recipient in the
+              subject (<code>src/lib/email.ts</code>). Set it under <code>[env.staging.vars]</code>: a
+              rehearsal runs the nightly cron against a copy of the database, with a real vendor and a real
+              company sender, so without it staging mails real employees about a rehearsal.</p>
+            <p class="risk"><b>Preflight fails the deploy if the environment being deployed sets it.</b> In
+              production it is the same class of silent failure as <code>console</code> &mdash; the vendor
+              accepts, the trail says &ldquo;sent&rdquo;, and the employee never hears. The inverse is a
+              warning: a named preview environment on a real provider with no redirect is flagged too.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="">
+          <input type="checkbox" data-id="D1_SESSIONS">
+          <div class="body">
+            <div class="row-head"><span class="name">D1_SESSIONS</span><span class="tag opt">deploy-time</span><span class="tag">var</span></div>
+            <p><code>"true"</code> reads through a D1 session, which is what puts reads on the replicas. It is
+              <code>"false"</code> in <code>wrangler.toml</code> deliberately, because the same file is read by
+              <code>wrangler dev</code>, where a session opened against a local database makes every request
+              die at its first query with <code>internal error; reference = &hellip;</code>.</p>
+            <p class="risk"><b>Turned on by the deploy script, not by this file.</b>
+              <code>npm run deploy</code> passes <code>--var D1_SESSIONS:true</code>, which merges with
+              <code>[vars]</code>. A hand-run <code>npx wrangler deploy</code> therefore ships without
+              replicas: correct, just slower. Use the npm script.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="">
+          <input type="checkbox" data-id="AI_GATEWAY_ID">
+          <div class="body">
+            <div class="row-head"><span class="name">AI_GATEWAY_ID</span><span class="tag opt">optional</span><span class="tag">var</span></div>
+            <p>Routes Workers AI inference through an AI Gateway for per-model analytics and a shared cache.
+              Unset = call the <code>AI</code> binding directly. Payload logging is suppressed on every call
+              either way (<code>src/lib/ai.ts</code>): the gateway records that a call happened, not what was
+              in it.</p>
+            <p class="risk"><b>Deliberately unset, and the support exists so the choice can be revisited.</b>
+              The analytics duplicate <code>ai_usage</code>, the cache sits behind <code>ai_cache</code> and
+              sees only its misses, and the gateway becomes a second hop in front of the moderation gate: a
+              wrong id reads as "the model was silent", which under the default <code>hold</code> posture
+              stops every public wall accepting posts. The per-model numbers come from
+              <code>aiInferenceAdaptiveGroups</code> on the GraphQL Analytics API instead, which needs no
+              gateway. Reasoning in <code>ai-observability-plan.md</code>.</p>
           </div>
         </label>
 
@@ -874,9 +1010,14 @@
           <input type="checkbox" data-id="SENTRY_RELEASE">
           <div class="body">
             <div class="row-head"><span class="name">SENTRY_RELEASE</span><span class="tag opt">optional</span><span class="tag">var</span></div>
-            <p>Which build the Worker's own errors belong to. Set it in CI to the same string the SPA is
-              built with so both halves of a distributed trace land on one release. Unset tags every server
-              issue &ldquo;unknown release&rdquo;.</p>
+            <p>Which build the Worker's own errors belong to. <b>Deliberately absent from
+              <code>wrangler.toml</code>:</b> a literal there is the same string for every deploy, which is how
+              eight months of releases all ended up tagged <code>0.1.0</code> with every uploaded source map
+              unmatched. <code>deploy.yml</code> resolves one release per run
+              (<code>git rev-parse --short HEAD</code>) and passes it as
+              <code>wrangler deploy --var SENTRY_RELEASE:"$RELEASE"</code>, which merges with
+              <code>[vars]</code>. Deploying by hand, pass it yourself. Preflight warns when it is unset or
+              disagrees with the SPA's.</p>
           </div>
         </label>
 
@@ -887,8 +1028,13 @@
       <header>
         <h2>SPA build values</h2>
         <span class="where">web/.env &middot; compiled into the bundle by Vite</span>
-        <p>Public by construction &mdash; never put a secret here. A value missing at build time cannot be
-          supplied later by a Worker secret; it needs another build.</p>
+        <p><b>Set where:</b> <code>web/.env</code> in the repo, which is <em>committed on purpose</em> &mdash;
+          nothing in it is a secret, and a committed copy is what makes a CI build reproducible from a clean
+          checkout. Edit that file, not <code>web/.env.example</code> (which documents the keys), and not
+          Cloudflare or GitHub: these never reach the Worker at all. Public by construction &mdash; never put
+          a secret here. A value missing at build time cannot be supplied later by a Worker secret; it needs
+          another build. A fork deploying its own instance must replace the DSN and the VAPID public key with
+          its own, or its reports and push subscriptions land on this organisation's.</p>
       </header>
       <div class="rows">
 
@@ -925,6 +1071,17 @@
         </label>
 
         <label class="row" data-kind="build">
+          <input type="checkbox" data-id="VITE_SENTRY_IN_DEV">
+          <div class="body">
+            <div class="row-head"><span class="name">VITE_SENTRY_IN_DEV</span><span class="tag opt">dev only</span><span class="tag">build</span></div>
+            <p><code>1</code> opts a <em>dev server</em> back into Sentry. The DSN applies to builds only, so
+              that the errors you cause on purpose while working &mdash; and every page the browser suite
+              walks &mdash; stay out of the project you read when production breaks. Nothing to set for a
+              deploy.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="build">
           <input type="checkbox" data-id="VITE_SENTRY_ORG">
           <div class="body">
             <div class="row-head"><span class="name">VITE_SENTRY_ORG</span><span class="tag opt">optional</span><span class="tag">build</span></div>
@@ -938,11 +1095,17 @@
           <input type="checkbox" data-id="VITE_APP_VERSION">
           <div class="body">
             <div class="row-head"><span class="name">VITE_APP_VERSION</span><span class="tag opt">optional</span><span class="tag">build</span></div>
-            <p>The release string every SPA event is tagged with. Set it in CI:</p>
+            <p>The release string every SPA event is tagged with. <code>deploy.yml</code> already sets it, for
+              the build step and for preflight, from the one release it resolves per run; setting it by hand
+              is for a local release build. Left unset, <code>resolveAppVersion</code> in
+              <code>web/vite.config.ts</code> falls back to the short commit, with a <code>-dirty</code>
+              suffix when the tree is not clean:</p>
             <div class="cmd">VITE_APP_VERSION=$(git rev-parse --short HEAD)</div>
-            <p class="risk"><b>It cannot be backfilled.</b> Without it issues arrive as &ldquo;unknown
-              release&rdquo;, regression detection and &ldquo;resolved in next release&rdquo; have nothing to key
-              on, and the uploaded source maps match no event &mdash; the same as not uploading them.</p>
+            <p class="risk"><b>It cannot be backfilled.</b> With no value and no git to fall back on, issues
+              arrive as &ldquo;unknown release&rdquo;, regression detection and &ldquo;resolved in next
+              release&rdquo; have nothing to key on, and the uploaded source maps match no event &mdash; the
+              same as not uploading them. A <code>-dirty</code> release means the build is reproducible from
+              no commit; preflight warns on both.</p>
           </div>
         </label>
 
@@ -962,10 +1125,16 @@
 
     <section id="build">
       <header>
-        <h2>Build machine environment</h2>
-        <span class="where">process env at build / preflight time</span>
-        <p>Read by <code>web/vite.config.ts</code> and <code>scripts/preflight.ts</code>. Not
-          <code>VITE_</code>-prefixed, so none of these reach the bundle.</p>
+        <h2>CI / build-machine variables</h2>
+        <span class="where">GitHub &rarr; Settings &rarr; Secrets and variables &rarr; Actions &rarr; Variables</span>
+        <p><b>Set where:</b> GitHub repository &rarr; Settings &rarr; Secrets and variables &rarr; Actions
+          &rarr; the <em>Variables</em> tab (or Settings &rarr; Environments &rarr; production &rarr;
+          Environment variables, which the deploy job resolves the same way). <code>deploy.yml</code> reads
+          them as <code>${{ vars.NAME }}</code> and passes them to <code>npm run preflight</code> and
+          <code>npm run build:web</code> as process environment. Deploying by hand, export them in your shell
+          instead. Read by <code>web/vite.config.ts</code> and <code>scripts/preflight.ts</code>; not
+          <code>VITE_</code>-prefixed, so none of these reach the bundle, and none of them reach the Worker
+          either.</p>
       </header>
       <div class="rows">
 
@@ -989,7 +1158,9 @@
           <div class="body">
             <div class="row-head"><span class="name">SENTRY_AUTH_TOKEN</span><span class="tag opt">optional</span><span class="tag secret">ci secret</span></div>
             <p>Enables the Sentry Vite plugin and source-map upload. Its presence is also what sets
-              <code>build.sourcemap = "hidden"</code>.</p>
+              <code>build.sourcemap = "hidden"</code>. The one entry in this section that is a <em>secret</em>,
+              so it goes on the Secrets list (Settings &rarr; Environments &rarr; production &rarr; Environment
+              secrets), not the Variables tab its three neighbours use.</p>
             <p class="risk"><b>Absent means no source maps at all</b> &mdash; deliberately, so maps are never left
               in <code>web/dist</code> to be served as public assets. The cost is that your first production
               issue arrives as <code>index-a1b2c3.js:1:48213</code>.</p>
@@ -1013,15 +1184,48 @@
           </div>
         </label>
 
+        <label class="row" data-kind="required ci">
+          <input type="checkbox" data-id="WAF_RATE_LIMIT_CONFIRMED">
+          <div class="body">
+            <div class="row-head"><span class="name">WAF_RATE_LIMIT_CONFIRMED</span><span class="tag req">required</span><span class="tag">ci var</span></div>
+            <p>The ISO date (<code>2026-09-10</code>) on which you last verified the Cloudflare WAF
+              rate-limiting rules in <code>docs/deploy-security.md</code> &sect;1. It is an acknowledgement,
+              not a switch: preflight has no binding for the zone and no token to ask with, so this is the
+              only way a dashboard control can gate a deploy.</p>
+            <p class="risk"><b>Blocking for production, a warning for a named preview environment.</b> The
+              unauthenticated lanes (<code>/diag</code>, <code>/auth/*</code>, the e-sign callback) carry only
+              an isolate-local floor, which is not a limit across a fleet of isolates &mdash; the edge rule is
+              still required. A value that is not an ISO date, or one dated in the future, is an error; past a
+              year it warns, because stale reads as answered.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="required ci">
+          <input type="checkbox" data-id="HSTS_CONFIRMED">
+          <div class="body">
+            <div class="row-head"><span class="name">HSTS_CONFIRMED</span><span class="tag req">required</span><span class="tag">ci var</span></div>
+            <p>The ISO date you last verified zone-level HSTS in Cloudflare &rarr; SSL/TLS &rarr; Edge
+              Certificates &rarr; HSTS. Same dated-acknowledgement shape as the rule above.</p>
+            <p class="risk"><b>The app deliberately sends no <code>Strict-Transport-Security</code> header of
+              its own.</b> <code>web/public/_headers</code> cannot condition a header on the request being
+              HTTPS, and RFC 6797 &sect;7.2 forbids sending one over plain HTTP. So until this is on at the
+              zone there is no transport pinning anywhere, and nothing in the repo can tell.</p>
+          </div>
+        </label>
+
       </div>
     </section>
 
     <section id="github">
       <header>
         <h2>GitHub repository secrets</h2>
-        <span class="where">Settings &rarr; Environments &rarr; production</span>
-        <p>Used by <code>deploy.yml</code>, <code>d1-backup.yml</code> and <code>r2-backup.yml</code>. No
-          application secret belongs here &mdash; those live on the Worker and persist across deploys.</p>
+        <span class="where">Settings &rarr; Environments &rarr; production &rarr; Environment secrets</span>
+        <p><b>Set where:</b> GitHub repository &rarr; Settings &rarr; Environments &rarr;
+          <code>production</code> &rarr; Environment secrets (all three workflows declare
+          <code>environment: production</code>, so that is the scope they resolve in; repository-level Actions
+          secrets work too). Used by <code>deploy.yml</code>, <code>d1-backup.yml</code> and
+          <code>r2-backup.yml</code>. No application secret belongs here &mdash; those live on the Worker and
+          persist across deploys.</p>
       </header>
       <div class="rows">
 
@@ -1074,7 +1278,11 @@
       <header>
         <h2>Confirm these are absent</h2>
         <span class="where">verify on the Worker before go-live</span>
-        <p>Not things to set &mdash; things to check are not set. Tick each once you have confirmed it.</p>
+        <p><b>Check where:</b> <code>wrangler.toml</code> (preflight reads it and will fail the deploy for
+          most of these), <em>and</em> Cloudflare &rarr; Workers &amp; Pages &rarr; <code>hrms</code> &rarr;
+          Settings &rarr; Variables and Secrets, which preflight cannot see &mdash; a value added by hand in
+          the dashboard, or a stray <code>wrangler deploy --var</code>, is exactly what the file-level checks
+          miss. Not things to set: things to check are not set. Tick each once you have confirmed it.</p>
       </header>
       <div class="rows">
 
@@ -1083,8 +1291,11 @@
           <div class="body">
             <div class="row-head"><span class="name">ALLOW_DEV_AUTH</span><span class="tag no">never in prod</span><span class="tag">var</span></div>
             <p>Local-only gate (<code>"true"</code>) that must accompany <code>DEV_FAKE_EMAIL</code>.</p>
-            <p class="risk"><b>Together these bypass authentication entirely.</b> See
-              <code>docs/deploy-security.md</code> &sect;3.</p>
+            <p class="risk"><b>Together these bypass authentication entirely</b> &mdash; every request resolves
+              to that one identity with no token check of any kind, and <code>assertConfigured</code> accepts
+              the pair as a valid auth mode, so nothing else in the app objects. Preflight treats either name
+              in <code>wrangler.toml</code> as fatal for <em>every</em> environment in the file, not just the
+              one being deployed. See <code>docs/deploy-security.md</code> &sect;3.</p>
           </div>
         </label>
 
@@ -1104,6 +1315,46 @@
             <p>The Cloudflare Access auth mode, used only when <code>GOOGLE_CLIENT_ID</code> is unset
               (<code>src/middleware/auth.ts</code>). Google sign-in is the documented path &mdash; it carries no
               per-seat cost. Leave these unset unless you are deliberately fronting the app with Access.</p>
+          </div>
+        </label>
+
+        <label class="row never" data-kind="required">
+          <input type="checkbox" data-id="AI_LOCAL_URL">
+          <div class="body">
+            <div class="row-head"><span class="name">AI_LOCAL_URL</span><span class="tag no">never deployed</span><span class="tag">var</span></div>
+            <p>Points the whole AI layer at a model on the developer's own machine
+              (<code>src/lib/aiLocal.ts</code>), replacing <em>both</em> the <code>AI</code> binding and the
+              Vectorize index. Belongs in <code>.dev.vars</code> and <code>e2e/e2e.vars</code>, neither of
+              which is deployed.</p>
+            <p class="risk"><b>Preflight fails on it in any environment, not just production.</b> It is
+              already harmless in the sense that matters &mdash; <code>assertLoopback</code> refuses any host
+              but this machine, so it can never become an egress channel &mdash; which is exactly why a
+              deployed one is an outage rather than a breach: nothing answers on the Worker's loopback, every
+              AI feature falls back silently, and somebody notices weeks later that the draft button never
+              appears.</p>
+          </div>
+        </label>
+
+        <label class="row never" data-kind="">
+          <input type="checkbox" data-id="AI_LOCAL_MODELS">
+          <div class="body">
+            <div class="row-head"><span class="name">AI_LOCAL_CHAT_MODEL, AI_LOCAL_EMBED_MODEL</span><span class="tag no">never deployed</span><span class="tag">var</span></div>
+            <p>The local model names, as <code>ollama list</code> prints them, tag included. Required whenever
+              <code>AI_LOCAL_URL</code> is set and meaningless without it &mdash; so if the line above is
+              absent, these should be too.</p>
+          </div>
+        </label>
+
+        <label class="row never" data-kind="required">
+          <input type="checkbox" data-id="EMAIL_SINKS">
+          <div class="body">
+            <div class="row-head"><span class="name">EMAIL_PROVIDER="console", EMAIL_REDIRECT_TO</span><span class="tag no">never in prod</span><span class="tag">var</span></div>
+            <p>The two email sinks, listed here as well because they are the pair most easily carried over
+              from a rehearsal. Both are right for staging and silent in production: the send resolves, the
+              audit trail says &ldquo;sent&rdquo;, and nobody receives anything.</p>
+            <p class="risk"><b>Preflight blocks both for the environment being deployed</b> &mdash; and flags
+              the inverse for a preview target, which on a real provider with no sink mails whatever real
+              addresses are in its copy of the database.</p>
           </div>
         </label>
 
@@ -1138,8 +1389,16 @@
         </div>
         <div class="pair">
           <code>EMAIL_FROM</code><span class="eq">verified at</span><code>EMAIL_PROVIDER</code>
-          <span class="why">The sending domain has to be verified with the vendor before anything sends.
-            <code>npm run test:email</code> against a real inbox is the cheapest proof.</span>
+          <span class="why">The sending domain has to be verified with the vendor before anything sends. One
+            message to a real inbox is the cheapest proof:
+            <code>node --import ./scripts/tsResolve.mjs scripts/testEmail.ts you@example.com</code>.</span>
+        </div>
+        <div class="pair">
+          <code>hrms-search --dimensions</code><span class="eq">must equal</span><code>domain/aiPolicy.ts embedding model</code>
+          <span class="why">The index is created once with a width and a metric, and vectors from two models
+            are not comparable &mdash; change either and the index has to be rebuilt. Staging must point at
+            <code>hrms-search-staging</code>, never production's: it runs on a copy of the database with
+            different record ids, so a shared index means staging's upserts overwriting production's rows.</span>
         </div>
       </div>
     </div>
@@ -1149,9 +1408,12 @@
 
 <footer class="doc">
   <p>Sources of truth: <code>src/env.ts</code> (<code>Bindings</code>), <code>wrangler.toml</code>,
-    <code>web/.env.example</code>, <code>scripts/preflight.ts</code>, and the three workflows in
-    <code>.github/workflows/</code>. Narrative setup steps live in <code>docs/deploy.md</code>; hardening in
-    <code>docs/deploy-security.md</code>.</p>
+    <code>web/.env</code> and <code>web/.env.example</code>, <code>scripts/preflight.ts</code>, and the
+    workflows in <code>.github/workflows/</code>. Narrative setup steps live in <code>docs/deploy.md</code>;
+    hardening in <code>docs/deploy-security.md</code>; the AI layer's bindings, budgets and fallbacks in
+    <code>docs/deploy-ai.md</code>. Local development reads <code>.dev.vars</code> (gitignored, documented by
+    <code>.dev.vars.example</code>) and the browser suite reads <code>e2e/e2e.vars</code> &mdash; neither is
+    ever deployed, and nothing in either is listed above.</p>
 </footer>
 
 <script>
@@ -1225,6 +1487,84 @@
           var anyVisible = Array.prototype.some.call(rows, function (r) { return !r.hidden; });
           sec.hidden = !anyVisible;
         });
+      });
+    });
+  })();
+
+  // ---------- copy buttons ----------
+  // Built here rather than written into each row: there are 51 of them, three rows name two variables at
+  // once, and a button in the markup would be one more thing to keep in step with the prose.
+  (function () {
+    var names = Array.prototype.slice.call(document.querySelectorAll(".row-head .name"));
+
+    // What lands on the clipboard is the variable NAME, not the illustrative value beside it: the row for
+    // the email sinks reads EMAIL_PROVIDER="console", and pasting that into a secret prompt sets the
+    // provider to a literal quoted string.
+    function keyOf(token) {
+      return token.split("=")[0].trim();
+    }
+
+    function write(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+      }
+      // Opened from disk, or an older browser: the async API is unavailable outside a secure context, and
+      // this page is meant to be usable as a local file.
+      return new Promise(function (resolve, reject) {
+        var pad = document.createElement("textarea");
+        pad.value = text;
+        pad.setAttribute("readonly", "");
+        pad.style.position = "fixed";
+        pad.style.opacity = "0";
+        document.body.appendChild(pad);
+        pad.select();
+        var ok = false;
+        try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+        document.body.removeChild(pad);
+        ok ? resolve() : reject(new Error("copy refused"));
+      });
+    }
+
+    function flash(btn, state) {
+      btn.dataset.state = state;
+      btn.textContent = state === "done" ? "copied" : "press ⌘C";
+      window.setTimeout(function () {
+        delete btn.dataset.state;
+        btn.textContent = "copy";
+      }, 1400);
+    }
+
+    names.forEach(function (nameEl) {
+      var tokens = nameEl.textContent.split(",").map(function (t) { return t.trim(); }).filter(Boolean);
+      if (!tokens.length) return;
+      nameEl.textContent = "";
+
+      tokens.forEach(function (token, i) {
+        var key = keyOf(token);
+        var wrap = document.createElement("span");
+        wrap.className = "name-tok";
+
+        var label = document.createElement("span");
+        // The comma belongs to the text, not to the button, so a two-variable row still reads as a list.
+        label.textContent = i < tokens.length - 1 ? token + "," : token;
+        wrap.appendChild(label);
+
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "copy";
+        btn.textContent = "copy";
+        btn.title = "Copy " + key;
+        btn.setAttribute("aria-label", "Copy " + key);
+
+        btn.addEventListener("click", function (e) {
+          // The whole row is a <label>, so without this the click also toggles that variable's tick.
+          e.preventDefault();
+          e.stopPropagation();
+          write(key).then(function () { flash(btn, "done"); }, function () { flash(btn, "fail"); });
+        });
+
+        wrap.appendChild(btn);
+        nameEl.appendChild(wrap);
       });
     });
   })();

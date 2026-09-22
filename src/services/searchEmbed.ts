@@ -32,14 +32,28 @@ export type EmbedDrainResult = { embedded: number; removed: number; pending: num
  *  not take the tick down, and a search index that is a few minutes behind is not an incident. */
 export async function drainSearchEmbeddings(deps: Deps): Promise<EmbedDrainResult> {
   if (!deps.ai || !deps.vectors) return { embedded: 0, removed: 0, pending: 0, skipped: "no ai or vector binding" };
+  const collections = [...INDEXABLE];
+
+  // DELETION IS NOT A FEATURE; IT IS THE UNDO FOR ONE, so it runs whatever the switch says. Gating it behind
+  // `search.semantic` made the off switch stop the cleanup as well as the writing, and two guarantees stated
+  // elsewhere quietly stopped holding the moment anybody used it: `removeOrphans`'s own header ("taking a
+  // collection OUT of INDEXABLE is a privacy decision, and it has to actually remove what is already in the
+  // index") and `aiPolicy.ts`'s stated privacy lever ("the honest interim answer is to turn the feature flags
+  // off"). Doing that stranded every existing vector in Vectorize with nothing that would ever collect it -
+  // and an embedding is, as that same file says, a lossy but partially invertible projection of the source
+  // text, held outside the main tables. A purge, a soft delete or a de-indexing performed after the switch
+  // went off left its vector in place for good.
+  //
+  // The binding check above is still the right guard for both halves: with no index there is nothing to
+  // remove from.
+  const removed = await removeOrphans(deps, collections);
+
   // The org's switch gates the INDEXING, not just the searching. Embedding every row of the directory for a
   // feature nobody turned on would be the opt-in in name only: the text would already have been through a
   // model and be sitting in a vector store before anyone decided it could be.
-  if (!(await aiFeatureOn(deps, "search.semantic"))) return { embedded: 0, removed: 0, pending: 0, skipped: "search.semantic is off" };
-  const collections = [...INDEXABLE];
-  if (collections.length === 0) return { embedded: 0, removed: 0, pending: 0 };
+  if (!(await aiFeatureOn(deps, "search.semantic"))) return { embedded: 0, removed, pending: 0, skipped: "search.semantic is off" };
+  if (collections.length === 0) return { embedded: 0, removed, pending: 0 };
 
-  const removed = await removeOrphans(deps, collections);
   const { embedded, pending } = await embedPending(deps, collections);
   return { embedded, removed, pending };
 }
@@ -131,7 +145,11 @@ async function embedPending(deps: Deps, collections: string[]): Promise<{ embedd
 
   // ONE batched embed call for the whole tick's work. The daily ceiling is checked inside aiEmbed against the
   // batch size, so an over-large backfill refuses here rather than half-completing.
-  const out = await aiEmbed(deps, { feature: "search.embed" }, stale.map((s) => s.text));
+  // EVERY COLLECTION IN THE BATCH IS DECLARED, so the denylist is asked about each one rather than about
+  // nothing. `INDEXABLE` is a curated opt-in and the two lists are meant to be disjoint; declaring the batch
+  // is what makes a future entry that is also on `NEVER_TO_MODEL` fail here instead of being embedded.
+  const reads = [...new Set(stale.map((s) => s.collection))].map((collection) => ({ collection }));
+  const out = await aiEmbed(deps, { feature: "search.embed", reads }, stale.map((s) => s.text));
   if (!out.ok) {
     // Out of budget, no binding, or the model failed. All three are states to sit out and retry next tick:
     // the rows stay stale, the comparison finds them again, and the index catches up when it can.

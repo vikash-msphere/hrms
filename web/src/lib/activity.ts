@@ -53,6 +53,10 @@ const VERB: Record<string, string> = {
   // them a decision to take somebody's post down reads as the bare token "hide".
   hide: "took down",
   dismiss: "cleared the flag on",
+  // The two ways a takedown or a hold is reversed, which read as different events to whoever is following
+  // the post: one put it back in front of readers, the other handed it to its author to rewrite.
+  restored: "put back on the wall",
+  returned: "sent back to its author",
 };
 
 export function actionLabel(action: string): string {
@@ -77,6 +81,9 @@ const TONE: Record<string, ActionTone> = {
   // removal nor a positive act - the moderator agreed with the author, and the feed should not colour that
   // as though something happened to the content.
   hide: "remove", dismiss: "other",
+  // Putting a post back is the restore it is; handing it to its author changes nothing about the content, so
+  // it colours as neither a removal nor a completion.
+  restored: "positive", returned: "other",
 };
 export function actionTone(action: string): ActionTone {
   const verb = action.includes(".") ? action.slice(action.lastIndexOf(".") + 1) : action;

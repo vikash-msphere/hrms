@@ -25,6 +25,7 @@ import { applyScope } from "./listScope";
 import { byIdChunks } from "../lib/dbBatch";
 import { parseVectorId, vectorIdOf } from "../lib/vector";
 import { aiFeatureOn } from "./ai";
+import { notHeld } from "./withheld";
 
 /** Neighbours asked of the index before the SQL re-check throws most of them away for a narrow caller. */
 const TOP_K = 20;
@@ -105,7 +106,9 @@ export async function similarSuggestions(
 
   // THE ACCESS RE-CHECK. `applyScope` over the suggestion's own code and submitter, which is what
   // `listSuggestions` binds - so these are rows the caller's own list would have returned. Soft-deleted rows
-  // are excluded: a merged-away or withdrawn suggestion is not something to merge into.
+  // are excluded: a merged-away or withdrawn suggestion is not something to merge into. `notHeld` is stated
+  // for the same reason `listSuggestions` states it: a held suggestion is withheld from everyone, and
+  // rendering its title as somebody else's neighbour is the gate not holding.
   const rows = await byIdChunks([...scoreOf.keys()], (ids) =>
     deps.db
       .select({
@@ -117,6 +120,7 @@ export async function similarSuggestions(
       .where(and(
         inArray(schema.suggestions.uuid, ids),
         isNull(schema.suggestions.deleteTime),
+        notHeld(schema.suggestions),
         applyScope(scope, schema.suggestions.code, schema.suggestions.submitterId),
       )),
   );

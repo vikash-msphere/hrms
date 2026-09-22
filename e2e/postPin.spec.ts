@@ -33,6 +33,12 @@ test("a pinned post leads the board, and unpinning gives it back", async ({ as }
     // The per-post tools are drawn while the pointer is on the card, so this is a hover and then a press.
     await card.hover();
     await card.getByRole("button", { name: "Pin", exact: true }).click();
+    // Pinning asks first: it puts a post above everything else for the whole company. Which dialog appears
+    // depends on whether the seeded board already has a pinned post - "Pin this post?" when nothing is up
+    // there, "Replace the pinned post?" when something is - so the press is on whichever confirm button the
+    // dialog carries rather than on a fixed label.
+    const pinDialog = page.getByRole("dialog");
+    await pinDialog.getByRole("button", { name: /^(Pin it|Unpin that, pin this)$/ }).click();
 
     // The card says what it now is...
     await expect(pinBadge(card)).toBeVisible({ timeout: 30_000 });

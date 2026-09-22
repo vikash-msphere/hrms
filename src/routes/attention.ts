@@ -11,7 +11,13 @@ import { attentionFor } from "../services/attention";
 // collection the caller may not list contributes nothing to the answer rather than refusing it, which is what
 // lets one surface serve an employee, a manager and an admin without any of them being told what they cannot
 // see.
+//
+// `?summary=1` asks for the one-line written summary on top of the list. It is a separate request rather than
+// part of the load because it costs a generation: at ~120 neurons against a daily ceiling of 7,000, running
+// it on every dashboard load is 58 people a day before the org's whole allocation is gone - and the
+// moderation gate, which fails closed, spends the same ceiling. See `summarise` in services/attention.ts.
 export const attentionRoute = new Hono<AppEnv>().get("/", async (c) => {
-  const out = await attentionFor(c.get("deps"), c.get("user")!, c.get("attentionScopes") ?? new Map());
+  const summary = c.req.query("summary") === "1" || c.req.query("summary") === "true";
+  const out = await attentionFor(c.get("deps"), c.get("user")!, c.get("attentionScopes") ?? new Map(), { summary });
   return c.json(out);
 });

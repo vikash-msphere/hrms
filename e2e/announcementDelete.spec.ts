@@ -19,6 +19,11 @@ test("a post is deleted from the board", async ({ as }) => {
   const card = page.locator("div").filter({ hasText: title }).filter({ has: page.getByRole("button", { name: "Delete" }) }).last();
   await expect(card).toBeVisible({ timeout: 30_000 });
   await card.getByRole("button", { name: "Delete", exact: true }).click();
+  // Deleting a post asks first. It is a soft delete and `useSoftDelete` does not confirm on its own, but on
+  // THIS card the bin sits beside a moderator's Hide, which does ask - and two adjacent buttons where the
+  // quieter one is the more destructive is how somebody deletes a post they meant to hide. The dialog's own
+  // button carries the same word, so it is addressed through the dialog rather than by name alone.
+  await page.getByRole("dialog").getByRole("button", { name: "Delete", exact: true }).click();
   await expect(toast(page, "Post deleted")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("div").filter({ hasText: title })).toHaveCount(0, { timeout: 30_000 });
 

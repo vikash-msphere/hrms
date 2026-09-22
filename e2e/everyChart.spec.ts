@@ -84,6 +84,26 @@ test.describe("every chart", () => {
     expect(drawing.filter((f) => !covered.has(f)), "these pages draw charts that no browser test opens").toEqual([]);
     expect(PAGES.map((p) => p.file).filter((f) => !drawing.includes(f)), "these pages are listed here but draw no charts").toEqual([]);
     expect(Object.keys(ELSEWHERE).filter((f) => !drawing.includes(f)), "these pages are excused here but draw no charts").toEqual([]);
+
+    // An excusal is a PROMISE that another spec judges that chart, and the promise was taken on trust: the
+    // name is prose, so a spec renamed away, deleted, or quietly stripped of its chart assertions left the
+    // page excused here and judged nowhere - a chart with no test and a list saying it has one. So the name
+    // is resolved to a real file, and that file is required to make the same two assertions this one does: a
+    // figure to draw in, and the caption that ties the picture to the numbers under it.
+    const specDir = new URL("./", import.meta.url);
+    const broken: string[] = [];
+    for (const [page, promise] of Object.entries(ELSEWHERE)) {
+      const spec = promise.split(" ")[0]!;
+      let src = "";
+      try {
+        src = readFileSync(new URL(spec, specDir), "utf8");
+      } catch {
+        broken.push(`${page}: ${spec} does not exist`);
+        continue;
+      }
+      if (!/figure/.test(src) || !/figcaption/.test(src)) broken.push(`${page}: ${spec} asserts no chart`);
+    }
+    expect(broken, "these pages are excused to a spec that cannot be keeping the promise").toEqual([]);
   });
 
   test("every chart draws a picture and carries its numbers in a table", async ({ as }) => {

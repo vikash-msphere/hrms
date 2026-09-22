@@ -161,11 +161,13 @@ Budgets live in settings so they are tunable without a deploy: a daily neuron ce
 Generation is keyed by `(feature, prompt version, sha256 of inputs)` and cached in D1. A summary of a review
 cycle that nobody edited costs one inference forever.
 
-AI Gateway can sit in front of the binding for a second cache layer and per-model analytics, but **not on its
-defaults**: it stores request and response bodies by default, which would put salary and review text into a
-third retained surface with its own lifetime and its own deletion story. If it is used at all, every call
-carries `cf-aig-collect-log-payload: false`, set once in `lib/ai.ts` rather than per call site. Metadata-only
-logging still gives the usage picture, and `ai_usage` gives a better one because it is ours.
+AI Gateway can sit in front of the binding for a second cache layer and per-model analytics, and **is
+deliberately not used**. It stores request and response bodies by default, which would put salary and review
+text into a third retained surface with its own lifetime and its own deletion story, so every call carries
+`cf-aig-collect-log-payload: false`, set once in `lib/ai.ts` rather than per call site. That header is what
+makes the support safe to keep; the reasons not to switch it on are that `ai_usage` is the better usage
+picture because it is ours, that a gateway cache sits behind `ai_cache` and sees only its misses, and that the
+hop it adds fails a closed moderation gate. `ai-observability-plan.md` has the argument and the measurements.
 
 ### The async path
 

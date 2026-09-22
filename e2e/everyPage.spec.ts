@@ -64,6 +64,7 @@ const PAGES: PageCase[] = [
   { route: "expenses", heading: "Expenses" },
   { route: "vendors", heading: "Vendors" },
   { route: "expense-budgets", heading: "Budgets" },
+  { route: "card-transactions", heading: "Card charges" },
   { route: "referrals", heading: "Referrals" },
   { route: "pipeline", heading: "Pipeline" },
   { route: "job-requisitions", heading: "Jobs" },

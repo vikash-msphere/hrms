@@ -232,11 +232,16 @@ export async function boardDuplicates(deps: Deps, scope: ListScope | undefined, 
 
   // The other half of every pair, under the same scope. A card an ACL deny hides from this reader must not
   // arrive as the thing their card supposedly duplicates.
-  const visible = new Set<string>();
+  //
+  // ITS TITLE AND COLUMN COME BACK WITH IT, live. The payload carries what the sweep saw last night, and a
+  // card renamed or moved since then was rendered under last night's title in last night's column - while the
+  // HOST card's title was read live off the join above, so one half of every pair was current and the other
+  // was not. The read is already happening; taking two more columns off it costs nothing.
+  const visible = new Map<string, { title: string; column: string }>();
   if (wanted.size) {
     const others = await byIdChunks([...wanted], (ids) =>
       deps.db
-        .select({ uuid: schema.cards.uuid })
+        .select({ uuid: schema.cards.uuid, title: schema.cards.title, columnKey: schema.cards.columnKey })
         .from(schema.cards)
         .where(and(
           inArray(schema.cards.uuid, ids),
@@ -245,21 +250,25 @@ export async function boardDuplicates(deps: Deps, scope: ListScope | undefined, 
           applyScope(scope, schema.cards.code, schema.cards.employeeId),
         )),
     );
-    for (const o of others) visible.add(o.uuid);
+    for (const o of others) visible.set(o.uuid, { title: o.title, column: o.columnKey });
   }
 
   const seenPair = new Set<string>();
   const out: BoardDuplicatePair[] = [];
   for (const row of parsed) {
-    const kept = row.duplicates.filter((d) => {
+    const kept: BoardDuplicatePair["duplicates"] = [];
+    for (const d of row.duplicates) {
       const otherId = d.path.split("/").pop()!;
-      if (!visible.has(otherId)) return false;
+      const live = visible.get(otherId);
+      if (!live) continue;
       // One line per problem: the pair is keyed by both ids, whichever way round the sweep wrote it.
       const key = [row.id, otherId].sort().join("\u0000");
-      if (seenPair.has(key)) return false;
+      if (seenPair.has(key)) continue;
       seenPair.add(key);
-      return true;
-    });
+      // The SCORE is the sweep's - it is a statement about the text as it was compared - but the title and
+      // the column are what the card says now.
+      kept.push({ path: d.path, score: d.score, title: live.title, column: live.column });
+    }
     if (kept.length) out.push({ card: { path: `cards/${row.id}`, title: row.title }, duplicates: kept });
   }
   return out;

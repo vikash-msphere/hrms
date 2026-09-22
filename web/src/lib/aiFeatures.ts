@@ -27,12 +27,23 @@ export type AiFeatureKey =
   | "expenses.receiptExtraction"
   | "tables.describe"
   | "analytics.narrate"
+  | "budgets.narrate"
   | "moderation"
   | "moderation.conduct"
   | "suggestions.similar"
   | "attention.summary";
 
 type AiSetting = { features?: Partial<Record<AiFeatureKey, boolean>> };
+
+/**
+ * The longest instruction, or existing draft, a drafting call accepts.
+ *
+ * Mirrors `MAX_DRAFT_INPUT` in `src/domain/aiDraft.ts`, which is where the cap is enforced - the route
+ * answers 400 past it. Held here so the composer can stop somebody at the box instead of after a round trip:
+ * the case the server rejects is improving a long announcement, which is the exact thing the "Improve" label
+ * invites. `test/draftInputCap.test.ts` holds the two numbers together.
+ */
+export const MAX_DRAFT_INPUT = 4000;
 
 /**
  * True when `key` is on. Starts false and flips when the setting arrives, which is the right way round: an

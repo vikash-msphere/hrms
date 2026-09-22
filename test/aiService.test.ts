@@ -74,7 +74,7 @@ beforeEach(async () => {
 });
 
 const lastUsage = () => deps.db.select().from(schema.aiUsage).orderBy(desc(schema.aiUsage.createdAt)).limit(1).then((r) => r[0]!);
-const ctx = { feature: "test.embed", collection: "tickets" };
+const ctx = { feature: "test.embed", reads: { collection: "tickets" } } as const;
 
 describe("no model bound", () => {
   it("refuses rather than throwing, so the caller can fall back", async () => {
@@ -86,8 +86,8 @@ describe("no model bound", () => {
 
   it("refuses generate and rerank the same way", async () => {
     const without: Deps = { ...deps, ai: undefined };
-    expect((await aiGenerate(without, { feature: "x" }, { system: "s", user: "u", promptVersion: "v1" })).ok).toBe(false);
-    expect((await aiRerank(without, { feature: "x" }, "q", ["a"])).ok).toBe(false);
+    expect((await aiGenerate(without, { feature: "x", reads: "none" }, { system: "s", user: "u", promptVersion: "v1" })).ok).toBe(false);
+    expect((await aiRerank(without, { feature: "x", reads: "none" }, "q", ["a"])).ok).toBe(false);
   });
 });
 
@@ -95,16 +95,23 @@ describe("the denylist throws instead of degrading", () => {
   it("refuses a forbidden collection loudly", async () => {
     // Not a refusal object: a call site asking to embed payroll is a bug, and returning a soft refusal would
     // let it ship and look like a model outage.
-    await expect(aiEmbed(deps, { feature: "bad", collection: "compensation" }, ["x"])).rejects.toThrow(/may not be sent to a model/);
-    await expect(aiGenerate(deps, { feature: "bad", collection: "leave-requests" }, { system: "s", user: "u", promptVersion: "v1" })).rejects.toThrow(/may not be sent to a model/);
+    await expect(aiEmbed(deps, { feature: "bad", reads: { collection: "compensation" } }, ["x"])).rejects.toThrow(/may not be sent to a model/);
+    await expect(aiGenerate(deps, { feature: "bad", reads: { collection: "leave-requests" } }, { system: "s", user: "u", promptVersion: "v1" })).rejects.toThrow(/may not be sent to a model/);
   });
 
   it("refuses a forbidden sub-resource of an allowed collection", async () => {
-    await expect(aiEmbed(deps, { feature: "bad", collection: "employees", subresource: "bank-account" }, ["x"])).rejects.toThrow(/may not be sent to a model/);
+    await expect(aiEmbed(deps, { feature: "bad", reads: { collection: "employees", subresource: "bank-account" } }, ["x"])).rejects.toThrow(/may not be sent to a model/);
+  });
+
+  it("refuses a BATCH in which one collection is forbidden", async () => {
+    // A declaration can name several collections - the search drain embeds a window spanning the whole
+    // index - and the check has to be asked about each of them, not about the first.
+    await expect(aiEmbed(deps, { feature: "bad", reads: [{ collection: "tickets" }, { collection: "compensation" }] }, ["x"]))
+      .rejects.toThrow(/may not be sent to a model/);
   });
 
   it("nothing was recorded, because nothing was sent", async () => {
-    await expect(aiEmbed(deps, { feature: "bad", collection: "compensation" }, ["x"])).rejects.toThrow();
+    await expect(aiEmbed(deps, { feature: "bad", reads: { collection: "compensation" } }, ["x"])).rejects.toThrow();
     expect(await deps.db.select().from(schema.aiUsage)).toEqual([]);
   });
 });
@@ -112,7 +119,7 @@ describe("the denylist throws instead of degrading", () => {
 describe("the trail", () => {
   it("records a hash, never the text", async () => {
     const secretish = "Priya asked about her appraisal on the 14th";
-    const out = await aiEmbed(deps, { feature: "search.embed", collection: "tickets", subject: "tickets/abc" }, [secretish]);
+    const out = await aiEmbed(deps, { feature: "search.embed", reads: { collection: "tickets" }, subject: "tickets/abc" }, [secretish]);
     expect(out.ok).toBe(true);
 
     const row = await lastUsage();
@@ -143,7 +150,7 @@ describe("budget", () => {
       feature: "earlier.today", model: "@cf/baai/bge-small-en-v1.5", role: "embed",
       inputHash: "0".repeat(64), estimatedNeurons: BUDGET.dailyNeurons,
     });
-    const out = await aiGenerate(deps, { feature: "draft" }, { system: "s", user: "u", promptVersion: "v1" });
+    const out = await aiGenerate(deps, { feature: "draft", reads: "none" }, { system: "s", user: "u", promptVersion: "v1" });
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.reason).toBe("budget");
     expect((deps.ai as ReturnType<typeof fakeModel>).calls.generate).toBe(0);
@@ -164,7 +171,7 @@ describe("budget", () => {
   });
 
   it("a lowered ceiling passed by the caller wins", async () => {
-    const out = await aiGenerate(deps, { feature: "draft", limits: { dailyNeurons: 1 } }, { system: "s", user: "u", promptVersion: "v1" });
+    const out = await aiGenerate(deps, { feature: "draft", reads: "none", limits: { dailyNeurons: 1 } }, { system: "s", user: "u", promptVersion: "v1" });
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.reason).toBe("budget");
   });
@@ -173,7 +180,7 @@ describe("budget", () => {
 describe("per-user rate limit", () => {
   it("stops one person spending the org's day", async () => {
     const userId = null; // a system call is not rate limited
-    expect((await aiGenerate(deps, { feature: "draft", userId }, { system: "s", user: "sys", promptVersion: "v1" })).ok).toBe(true);
+    expect((await aiGenerate(deps, { feature: "draft", reads: "none", userId }, { system: "s", user: "sys", promptVersion: "v1" })).ok).toBe(true);
   });
 
   it("refuses the caller past their hourly generations", async () => {
@@ -186,7 +193,7 @@ describe("per-user rate limit", () => {
         userId: uid, inputHash: `${i}`.padStart(64, "0"), estimatedNeurons: 0,
       });
     }
-    const out = await aiGenerate(deps, { feature: "draft", userId: uid }, { system: "s", user: "u", promptVersion: "v1" });
+    const out = await aiGenerate(deps, { feature: "draft", reads: "none", userId: uid }, { system: "s", user: "u", promptVersion: "v1" });
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.reason).toBe("rate");
   });
@@ -195,11 +202,11 @@ describe("per-user rate limit", () => {
 describe("cache", () => {
   it("serves the second identical generation without calling the model", async () => {
     const req = { system: "sys", user: "summarise this", promptVersion: "v1" };
-    const first = await aiGenerate(deps, { feature: "draft" }, req);
+    const first = await aiGenerate(deps, { feature: "draft", reads: "none" }, req);
     expect(first.ok).toBe(true);
     if (first.ok) expect(first.cached).toBe(false);
 
-    const second = await aiGenerate(deps, { feature: "draft" }, req);
+    const second = await aiGenerate(deps, { feature: "draft", reads: "none" }, req);
     expect(second.ok).toBe(true);
     if (second.ok) {
       expect(second.cached).toBe(true);
@@ -209,15 +216,15 @@ describe("cache", () => {
   });
 
   it("a changed prompt version misses, so editing a prompt is not masked by the cache", async () => {
-    await aiGenerate(deps, { feature: "draft" }, { system: "sys", user: "u", promptVersion: "v1" });
-    await aiGenerate(deps, { feature: "draft" }, { system: "sys-EDITED", user: "u", promptVersion: "v2" });
+    await aiGenerate(deps, { feature: "draft", reads: "none" }, { system: "sys", user: "u", promptVersion: "v1" });
+    await aiGenerate(deps, { feature: "draft", reads: "none" }, { system: "sys-EDITED", user: "u", promptVersion: "v2" });
     expect((deps.ai as ReturnType<typeof fakeModel>).calls.generate).toBe(2);
   });
 
   it("records the cache hit as usage, so the picture is not flatter than reality", async () => {
     const req = { system: "sys", user: "u", promptVersion: "v1" };
-    await aiGenerate(deps, { feature: "draft" }, req);
-    await aiGenerate(deps, { feature: "draft" }, req);
+    await aiGenerate(deps, { feature: "draft", reads: "none" }, req);
+    await aiGenerate(deps, { feature: "draft", reads: "none" }, req);
     const rows = await deps.db.select().from(schema.aiUsage);
     expect(rows.length).toBe(2);
     expect(rows.filter((r) => r.cacheHit).length).toBe(1);

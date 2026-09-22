@@ -180,7 +180,9 @@ async function semanticHits(
   // nothing, not merely produce nothing.
   if (!(await aiFeatureOn(deps, "search.semantic"))) return [];
 
-  const embedded = await aiEmbed(deps, { feature: "search.query" }, [query]);
+  // `reads: "none"`: what is embedded is the caller's own search box, not a record. The rows the index
+  // answers with are re-read under the caller's own scope below, which is where that question is settled.
+  const embedded = await aiEmbed(deps, { feature: "search.query", reads: "none" }, [query]);
   if (!embedded.ok) return [];
 
   let matches: { id: string; score: number }[];

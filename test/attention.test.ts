@@ -330,6 +330,14 @@ describe("the one-line summary", () => {
     await deps.db.insert(schema.settings).values({ key: "ai", value: JSON.stringify({ features: { "attention.summary": true } }) });
   }
 
+  /**
+   * The summary is ASKED FOR, never part of the load - `GET /v1/attention?summary=1` (services/attention.ts).
+   * Every test below drives the asked-for path, because the other one is the subject of exactly one assertion
+   * ("does not bother summarising a single item" reaches it through the same option) and a test that reads
+   * `summary` off a plain load is asserting about a request nobody made.
+   */
+  const ASK = { summary: true } as const;
+
   it("never sends a review to the model, only how many there are", async () => {
     // `reviews` is on NEVER_TO_MODEL. A cycle name is not an assessment, but the honest way to keep it that
     // way is to not send review rows at all - so they arrive as a count. This is the assertion that stops a
@@ -344,7 +352,7 @@ describe("the one-line summary", () => {
 
     const s = spy();
     deps.ai = s.model as unknown as Deps["ai"];
-    const { items, summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    const { items, summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"), ASK);
 
     expect(items).toHaveLength(2);
     expect(summary).toBeTruthy();
@@ -362,8 +370,9 @@ describe("the one-line summary", () => {
     await goal({ title: "B", createdAt: new Date(Date.now() - 90 * DAY), dueDate: new Date(Date.now() + 10 * DAY), progress: 6 });
     const s = spy();
     deps.ai = s.model as unknown as Deps["ai"];
-    const { items, summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
-    // Off must cost NOTHING, not merely produce nothing: the switch is checked before the model is asked.
+    const { items, summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"), ASK);
+    // Off must cost NOTHING, not merely produce nothing: the switch is checked before the model is asked - and
+    // it is asked here, so "nothing happened" is the feature switch answering rather than nobody asking.
     expect(items).toHaveLength(2);
     expect(summary).toBeUndefined();
     expect(s.seen).toEqual([]);
@@ -377,7 +386,7 @@ describe("the one-line summary", () => {
     // The whole ordering argument: the list is arithmetic and the sentence is an addition, so a model that
     // throws costs a sentence and nothing else.
     deps.ai = { async embed() { return []; }, async generate() { throw new Error("model down"); }, async rerank() { return []; } } as unknown as Deps["ai"];
-    const { items, summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    const { items, summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"), ASK);
     expect(items).toHaveLength(2);
     expect(summary).toBeUndefined();
   });
@@ -394,7 +403,7 @@ describe("the one-line summary", () => {
     await deps.db.insert(schema.reviewFeedback).values({ uuid: fb, code: `f-${fb.slice(0, 6)}`, reviewId: review, revieweeId: OTHER.uuid, authorId: ME.uuid, state: "REQUESTED" });
     const s = spy();
     deps.ai = s.model as unknown as Deps["ai"];
-    await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews", "review-feedback"));
+    await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews", "review-feedback"), ASK);
     const prompt = s.seen.join("\n");
     // `reviews` is on NEVER_TO_MODEL, and the name of somebody being reviewed is the same category of fact
     // arriving by a different route.
@@ -408,7 +417,7 @@ describe("the one-line summary", () => {
     await goal({ title: "Only one", createdAt: new Date(Date.now() - 90 * DAY), dueDate: new Date(Date.now() + 10 * DAY), progress: 5 });
     const s = spy();
     deps.ai = s.model as unknown as Deps["ai"];
-    const { summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"));
+    const { summary } = await attentionFor(deps, user(ME.uuid), scopes("goals", "cards", "reviews"), ASK);
     // The row already says it, in more detail than a sentence would, and a neuron spent here buys nothing.
     expect(summary).toBeUndefined();
     expect(s.seen).toEqual([]);

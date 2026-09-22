@@ -126,3 +126,57 @@ describe("settings/ats pipeline", () => {
     expect(orphanedStages(DEFAULT_ATS_CONFIG.stages.filter((s) => s.key !== "screening"), ["applied", "screening", "screening"])).toEqual(["screening"]);
   });
 });
+
+// ---- settings/ai moderationFallback --------------------------------------------------------------------
+//
+// One of the two positions on this leaf lets a post reach a public wall with no check having run, so the
+// screen saying it saved has to mean the gate is honouring it. `aiConfig` coerces anything it does not
+// recognise back to `hold`, which is the right direction and is exactly why a misspelling must be refused
+// here: accepted silently, it would leave an org believing they had chosen to keep posting through an outage
+// while every post went on being held. Same failure as the feature map and `cardDuplicateSensitivity` - a
+// value stored, shown as saved, and quietly not used.
+describe("settings/ai moderation fallback", () => {
+  it("accepts the two positions", () => {
+    expect(settings("ai", { moderationFallback: "hold" })).not.toThrow();
+    expect(settings("ai", { moderationFallback: "publish" })).not.toThrow();
+  });
+
+  it("refuses anything else, including the words somebody would try", () => {
+    expect(settings("ai", { moderationFallback: "fail-open" })).toThrow(/must be one of hold, publish/);
+    expect(settings("ai", { moderationFallback: "Publish" })).toThrow(/must be one of/);
+    expect(settings("ai", { moderationFallback: true })).toThrow(/must be one of/);
+  });
+
+  it("says nothing about it when the write does not touch it", () => {
+    expect(settings("ai", { features: { moderation: true } })).not.toThrow();
+  });
+});
+
+// ---- settings/ai moderationScope -----------------------------------------------------------------------
+//
+// Which walls the model reads, and which posts on them. Every refusal below is a value that would otherwise
+// be stored, shown as saved, and then read as something else: `moderationCovers` falls back to `all` for
+// anything it does not recognise, so a misspelled wall or position means "everything is still checked" on a
+// screen that says scanning was narrowed. The `anonymous`-on-a-signed-wall case is the subtler one - it is
+// well-formed, it is not a typo, and it silently means "nothing", which is a different setting with a
+// different name.
+describe("settings/ai moderation scope", () => {
+  it("accepts a wall narrowed to anonymous posts, and a wall switched off", () => {
+    expect(settings("ai", { moderationScope: { suggestions: "anonymous" } })).not.toThrow();
+    expect(settings("ai", { moderationScope: { announcements: "off", "announcement-replies": "all" } })).not.toThrow();
+  });
+
+  it("refuses a wall nothing moderates", () => {
+    expect(settings("ai", { moderationScope: { tickets: "all" } })).toThrow(/not a moderated wall/);
+  });
+
+  it("refuses a position nothing recognises", () => {
+    expect(settings("ai", { moderationScope: { suggestions: "sometimes" } })).toThrow(/must be one of all, anonymous, off/);
+  });
+
+  it("refuses \"anonymous only\" on a wall where every post carries its author", () => {
+    // It would mean no post qualifies, which is `off` under a name that reads like a narrowing.
+    expect(settings("ai", { moderationScope: { announcements: "anonymous" } })).toThrow(/cannot be "anonymous"/);
+    expect(settings("ai", { moderationScope: { "announcement-replies": "anonymous" } })).toThrow(/cannot be "anonymous"/);
+  });
+});

@@ -142,6 +142,15 @@ export type TableScope = {
   /** Anything that rides the chip - a "new since you looked" badge, most often. */
   badge?: React.ReactNode;
   title?: string;
+  /**
+   * Run when this scope becomes the one on screen - by being pressed, by being the scope the table opens on,
+   * or by a deep link landing on its filters.
+   *
+   * For what showing the scope MEANS beyond the filters, which is the half a filter set cannot carry: a scope
+   * wearing a "new since you looked" badge has been looked at once its rows are the rows on screen, and
+   * something has to say so. Not a substitute for `filters` - the narrowing is still what the chip does.
+   */
+  onSelect?: () => void;
 };
 
 type SortState = { id: string; dir: "asc" | "desc" } | null;
@@ -1907,14 +1916,29 @@ export function DataTable<T>({
   // land everybody on the fallback and then leave them there - the answer arrives a moment later and the
   // reader has already been put somewhere.
   const scopeApplied = React.useRef(false);
+  // Whether the table has landed where it is going to land. Until then no scope is really on screen: with no
+  // filters set yet, "All" matches by default (its filter set is empty, so everything matches it), and reading
+  // that as "the reader is looking at everything" is wrong on any page that opens narrowed.
+  const [scopeSettled, setScopeSettled] = React.useState(!defaultScope);
   React.useEffect(() => {
     if (scopeApplied.current || !defaultScope || scopeList.length === 0 || rows.length === 0) return;
     scopeApplied.current = true;
+    setScopeSettled(true);
     if (urlInitial.current?.f) return;
     const opening = scopeList.find((s) => s.id === defaultScope);
     if (opening && Object.keys(opening.filters).length > 0) applyPreset(opening, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultScope, scopeList.length, rows.length]);
+
+  // The scope on screen has been LOOKED AT, which is what `onSelect` reports. Driven off which scope is active
+  // rather than off the press, because a scope is reached three ways - pressed, opened on, or deep-linked - and
+  // all three put its rows in front of the reader. A page hangs "new since you looked" badges off this, and a
+  // badge that only a press could clear would sit on the scope the reader is already reading.
+  React.useEffect(() => {
+    if (!scopeSettled || !scopeActive) return;
+    scopeList.find((s) => s.id === scopeActive)?.onSelect?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeActive, scopeSettled]);
 
   return (
     <div className="space-y-3">

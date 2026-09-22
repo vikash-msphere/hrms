@@ -13,28 +13,39 @@
 // `decideModeration` is the only thing that touches a post, it takes a human's verdict as an argument, and it
 // is reached through a capability somebody had to be granted. A model that decides every kudos post is hate
 // speech produces a long queue and no missing content.
+//
+// The one qualification, stated here because this header is what a reviewer reads first: a SUPER ADMIN can
+// wire an automation rule whose `apiCall` action posts `/v1/moderation:decide` on the `moderation.flagged`
+// event, and that is intended - `pass` is carried on the event precisely so such a rule can condition on it.
+// `apiCall` is a privileged action kind and only a super admin may author or arm one. So the property is
+// "nothing hides a post unless a super admin wires a rule that does", not an absolute. See
+// `domain/moderation.ts`.
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { forbidden, invalidArgument, notFound } from "../lib/errors";
+import { failedPrecondition, forbidden, invalidArgument, notFound } from "../lib/errors";
 import { BUDGET, MODELS, UNTRUSTED_PREAMBLE, fence, scrubIdentifiers } from "../domain/aiPolicy";
 import {
   MODERATABLE,
   excerptOf,
   hazardLabel,
   isModeratable,
+  moderationCovers,
   parseVerdict,
   scanText,
+  MANUAL,
   UNCHECKED,
   type ModerationAction,
   type ModerationPayload,
+  type UnhideMode,
 } from "../domain/moderation";
 import { conductRubric, parseConduct } from "../domain/conduct";
 import { audit } from "../lib/audit";
 import { byIdChunks, chunk, ID_CHUNK } from "../lib/dbBatch";
-import { aiFeatureOn, aiGenerate } from "./ai";
+import { aiConfig, aiFeatureOn, aiGenerate } from "./ai";
+import { HELDABLE, notHeld } from "./withheld";
 import { emitEvent } from "./eventBus";
 import { notify } from "./notifications";
 
@@ -99,65 +110,49 @@ export async function drainModeration(deps: Deps): Promise<ModerationDrainResult
 }
 
 /**
- * Scan ONE post, now, because it was just written.
+ * THERE IS NO SCAN-ON-WRITE PATH, and its absence is the decision.
  *
- * WHY THIS EXISTS BESIDE THE DRAIN. The cron pass is a reconciliation - it asks "what has changed since we
- * last looked" and it is bounded, so a new post waits behind whatever else is due. That is the right shape
- * for a backstop and the wrong one for the moment that matters: a flag is worth most while the post is still
- * the thing people are reading, and on a wall with any history at all the rotation put a fresh post minutes
- * or hours away. Called from the write paths, the queue item appears about as fast as the post does.
+ * There used to be one - `scanSoon`/`scanOnWrite`, called from every write path as `if (!gated) await
+ * scanSoon(...)`. It could not run. `gated` is `moderationGateOn`, which is `deps.ai && moderation is on`,
+ * and `scanOnWrite` opened by returning on exactly that condition - so `!gated` guaranteed the call did
+ * nothing, at all six call sites. Ninety lines of load-bearing-looking documentation described a path with no
+ * execution, and four tests in `test/moderation.test.ts` appeared to cover it while running with the switch
+ * ON, so the gate satisfied every assertion.
  *
- * NEVER THROWS, and never blocks the write. The caller hands this to `deps.defer` (which is
- * `ctx.waitUntil`), so the post is already committed and the response already sent by the time the model is
- * asked. A model that is down, slow or out of budget therefore cannot fail a post - it just leaves the row
- * for the cron pass, which is exactly what the cron pass is for. `services/moderation.ts` still cannot hide
- * anything, so there is no path from "the scan ran late" to "the post was wrongly visible": it was visible
- * either way, and it stays visible after a flag too.
+ * What actually covers the two cases: with the switch ON, `moderationGate` reads the post before anybody can
+ * see it, which is strictly better than reading it afterwards. With it OFF, nothing is scanned and nothing
+ * should be - sending posts through a model for a feature nobody enabled is the opt-in in name only.
+ *
+ * If "check the posts" and "check them before anyone sees them" are ever split into two switches, this is
+ * where the immediate path comes back, and it comes back with the `!gated` predicate written against the NEW
+ * switch rather than against the one that gates the scan itself.
  */
-export async function scanOnWrite(deps: Deps, collection: string, recordId: string): Promise<void> {
-  try {
-    if (!deps.ai || !isModeratable(collection)) return;
-    if (!(await aiFeatureOn(deps, "moderation"))) return;
-    const conductOn = await aiFeatureOn(deps, "moderation.conduct");
-    const [candidate] = await candidatesFor(deps, collection, [recordId]);
-    // Not on a wall (a draft, a disabled post, a reply under a hidden one) or nothing to read. The drain
-    // applies the same filter; it is stated once, in `candidatesFor`.
-    if (!candidate) return;
-    await scanCandidate(deps, candidate, conductOn, scanIdentity(conductOn));
-  } catch (e) {
-    // Detached work: an exception here has nowhere to go but the log, and must not become an unhandled
-    // rejection in the request's waitUntil.
-    console.error(`moderation: scan-on-write failed for ${collection}/${recordId}`, e);
-  }
-}
 
 /**
- * Ask for a post to be read now, from the write path that just produced it.
+ * Is the org running moderation as a GATE over THIS post - nothing reaches the wall until a model has read it?
  *
- * Deferred when the runtime gives us somewhere to defer to (`Deps#defer` = `ctx.waitUntil`), so no caller's
- * response waits on a model; awaited otherwise, which is what happens on the cron's own publish path and in
- * tests - both places where waiting is correct. Either way `scanOnWrite` swallows its own failures: a post
- * is never refused, delayed or lost because a scan could not run.
+ * The same switch that turns scanning on. There is no second setting for gating, because "check the posts"
+ * and "check them before anyone sees them" are not two features an org would want to choose between: an org
+ * that has decided a model should read its noticeboard has decided it should read it BEFORE the noticeboard
+ * does. With the switch off this is false and every write path behaves exactly as it did.
  *
- * Call it after the row is committed, unconditionally. A draft, a disabled post or a reply under a hidden
- * one is filtered out by the candidate query, so no call site has to restate the visibility rule.
+ * WHICH POSTS is the org's to configure, and that is why this takes a collection rather than answering for
+ * the whole app. `moderationScope` can put a wall out of scope entirely, or narrow it to the posts nobody's
+ * name is attached to (domain/moderation.ts argues the three positions). A caller that has the row in hand
+ * passes it: on a wall narrowed to `anonymous`, a signed post is not gated and is never written held.
+ *
+ * The collection is a REQUIRED argument rather than an optional narrowing, so a new write path cannot
+ * inherit "every wall" by forgetting to say which one it is on.
  */
-export function scanSoon(deps: Deps, collection: string, recordId: string): Promise<void> | void {
-  const work = scanOnWrite(deps, collection, recordId);
-  if (!deps.defer) return work;
-  deps.defer(work);
-}
-
-/**
- * Is the org running moderation as a GATE - nothing reaches a wall until a model has read it?
- *
- * The same switch that turns scanning on. There is no second setting, because "check the posts" and "check
- * them before anyone sees them" are not two features an org would want to choose between: an org that has
- * decided a model should read its noticeboard has decided it should read it BEFORE the noticeboard does.
- * With the switch off this is false and every write path behaves exactly as it did.
- */
-export const moderationGateOn = (deps: Deps): Promise<boolean> =>
-  deps.ai ? aiFeatureOn(deps, "moderation") : Promise.resolve(false);
+export const moderationGateOn = async (
+  deps: Deps,
+  collection: string,
+  post?: { anonymous?: boolean | null },
+): Promise<boolean> => {
+  if (!deps.ai) return false;
+  if (!(await aiFeatureOn(deps, "moderation"))) return false;
+  return moderationCovers((await aiConfig(deps)).moderationScope, collection, post);
+};
 
 /**
  * The gate: read a post that has just been written, and decide whether it may be seen.
@@ -180,7 +175,7 @@ export const moderationGateOn = (deps: Deps): Promise<boolean> =>
  * opposite failure should turn the feature off, which is an honest switch, rather than have a gate that
  * silently is not one.
  */
-export async function moderationGate(deps: Deps, collection: string, recordId: string): Promise<boolean> {
+export async function moderationGate(deps: Deps, collection: string, recordId: string, actorUserId?: string | null): Promise<boolean> {
   try {
     if (!isModeratable(collection)) return true;
     const conductOn = await aiFeatureOn(deps, "moderation.conduct");
@@ -192,7 +187,31 @@ export async function moderationGate(deps: Deps, collection: string, recordId: s
       await setHeldAt(deps, collection, recordId, null);
       return true;
     }
-    const outcome = await scanCandidate(deps, candidate, conductOn, scanIdentity(conductOn));
+    // OUT OF THE ORG'S SCANNING SCOPE, decided with the row in hand rather than from the caller's guess. A
+    // write path that could not know whether the post was anonymous holds first and asks here (see
+    // `moderationCovers`), so this is the release for a signed post on a wall narrowed to anonymous ones -
+    // and for anything else the org has said it does not want read. No model is asked, no flag is written:
+    // an unscanned post is not a queue item, it is a post this organisation moderates the way it did before.
+    if (!moderationCovers((await aiConfig(deps)).moderationScope, collection, candidate)) {
+      await setHeldAt(deps, collection, recordId, null);
+      return true;
+    }
+    const outcome = await scanCandidate(deps, candidate, conductOn, scanIdentity(conductOn), true, actorUserId ?? null);
+    // AN UNCHANGED TEXT IS NOT A PASS WHEN THE LAST LOOK WAS AN OBJECTION.
+    //
+    // `"unchanged"` means "the hash and the scan identity match what we last recorded", which is a statement
+    // about cost, not about the verdict - and the recorded verdict may have been a flag. Treated as a pass it
+    // gave anybody a two-click bypass of the whole gate: publish, get held, press Publish again, and the
+    // second call short-circuits on its own hash and clears the hold. Same for a PATCH to a held suggestion
+    // that changes only a field the scan does not read.
+    //
+    // The DRAIN still wants the cheap `"unchanged"` - it is the common case and asking again would spend a
+    // generation on text nobody edited - so the refusal is here, on the gate side, where the question is "may
+    // this be seen" rather than "has this been read".
+    if (outcome === "unchanged" && candidate.flagged) {
+      await holdPost(deps, candidate, "flagged");
+      return false;
+    }
     if (outcome === "clean" || outcome === "unchanged") {
       // Cleared: the hold the write path put on at insert comes off here, and the row is then exactly what
       // it would have been with the gate switched off.
@@ -200,14 +219,47 @@ export async function moderationGate(deps: Deps, collection: string, recordId: s
       return true;
     }
     // "flagged" is the model objecting; "stopped" is no answer at all; "unknown" is an answer that was not
-    // one. All three hold the post, and the flag records which - a moderator releasing it should know
-    // whether a model found something or never spoke.
+    // one. The flag records which - a moderator releasing it should know whether a model found something or
+    // never spoke - and what happens to the post depends on WHICH of those two things happened.
+    //
+    // AN OBJECTION ALWAYS HOLDS, under either posture. `moderationFallback` is about the model failing, not
+    // about the model disagreeing; letting an org publish flagged content would be turning the feature off
+    // with extra steps, and it has an off switch already.
+    if (outcome === "flagged") {
+      await holdPost(deps, candidate, outcome);
+      return false;
+    }
+    // NO VERDICT, so the org's posture decides. `publish` lets the post out and still queues the flag, so
+    // the moderator can see exactly what went up unread while the model was silent and take any of it down.
+    if ((await aiConfig(deps)).moderationFallback === "publish") {
+      await passUnread(deps, candidate);
+      return true;
+    }
     await holdPost(deps, candidate, outcome);
     return false;
   } catch (e) {
     // A gate that throws must not fail the write, and must not let the post out either. The row stays
-    // invisible, and the sweep will offer it again.
+    // invisible - and it needs a queue item saying so, because nothing else will produce one. The sweep
+    // skips held rows (they are the gate's), so "the sweep will offer it again" was never true: without
+    // this the post was held with no flag, which is off both halves of the queue and visible to nobody.
+    //
+    // THIS HOLDS EVEN UNDER `moderationFallback: "publish"`, and the distinction is deliberate. That setting
+    // is about the MODEL being silent - no allowance left, no binding, an error from the provider - which is
+    // a condition an org can reasonably decide to post through. Reaching here means OUR code threw, so
+    // nothing is known about this post, including whether the check ran at all. Publishing on the strength
+    // of a bug is not a posture anybody chose.
     console.error(`moderation: gate failed for ${collection}/${recordId}`, e);
+    try {
+      const [candidate] = await candidatesFor(deps, collection, [recordId], { includeHidden: true });
+      await holdPost(
+        deps,
+        candidate ?? { collection, recordId, text: "", authorId: null, anonymous: true, knownHash: null, knownModel: null, flagged: false },
+        "unknown",
+      );
+    } catch (inner) {
+      // Nothing left to try. `reconcileHolds` on the nightly tick is the net under this one.
+      console.error(`moderation: could not queue the failed gate's hold for ${collection}/${recordId}`, inner);
+    }
     return false;
   }
 }
@@ -222,7 +274,34 @@ export async function moderationGate(deps: Deps, collection: string, recordId: s
  */
 type ScanOutcome = "flagged" | "clean" | "unknown" | "unchanged" | "stopped";
 
-async function scanCandidate(deps: Deps, c: Candidate, conductOn: boolean, scanModel: string): Promise<ScanOutcome> {
+/**
+ * What the usage ledger records about one scan.
+ *
+ * `subject` WAS MISSING, and this is the app's highest-volume generative caller. `schema.ts` says the row
+ * exists to answer "what was sent to a model, by whom, about what" a year later; for moderation it recorded
+ * the feature and nothing else, so "which posts were read by a model, and whose were they" had no answer.
+ *
+ * `userId` is the author, on the GATE's calls only - the drain is a cron and genuinely has no caller. It is
+ * there for two reasons, and the second is the load-bearing one: it makes "who spent the budget today"
+ * answerable, and it puts the gate on the INTERACTIVE side of the daily reservation
+ * (`BUDGET.unattendedShare`), so a semantic-search backfill cannot spend the share the noticeboard needs.
+ *
+ * AND IT EXEMPTS ITSELF FROM THE PER-CALLER HOURLY CEILING, which looks wrong and is the careful part.
+ * `withinUserRate` answers `rate`, `scanCandidate` turns that into `"stopped"`, and the gate fails closed -
+ * so a caller over their hourly limit would not be refused, their post would be HELD indefinitely pending a
+ * moderator. A rate limit that silently withholds somebody's writing is worse than no rate limit, so the
+ * limiting for this surface belongs at the HTTP layer (`middleware/rateLimit.ts`, the `moderated-write`
+ * budget), where the author gets a 429 and no row is created at all.
+ */
+const scanContext = (c: Candidate, actorUserId: string | null) => ({
+  feature: FEATURE,
+  reads: { collection: c.collection },
+  subject: `${c.collection}/${c.recordId}`,
+  userId: actorUserId,
+  ...(actorUserId ? { limits: { perUserHourlyGenerations: Number.POSITIVE_INFINITY } } : {}),
+});
+
+async function scanCandidate(deps: Deps, c: Candidate, conductOn: boolean, scanModel: string, viaGate = false, actorUserId: string | null = null): Promise<ScanOutcome> {
   {
     const hash = await sha256Hex(c.text);
     // Unchanged since the last look: stamp it so the rotation moves past it, and spend nothing. This is the
@@ -244,7 +323,7 @@ async function scanCandidate(deps: Deps, c: Candidate, conductOn: boolean, scanM
 
     const out = await aiGenerate(
       deps,
-      { feature: FEATURE, collection: c.collection },
+      scanContext(c, actorUserId),
       // `role: "moderate"` is load-bearing, not decoration: without it this prompt goes to the general
       // instruct model, which does not answer in Llama Guard's two-line format, so `parseVerdict` rejects
       // every reply and the feature flags nothing while looking healthy.
@@ -301,7 +380,7 @@ async function scanCandidate(deps: Deps, c: Candidate, conductOn: boolean, scanM
     // of an opinion, not a clean bill.
     let flaggedBy: string = MODELS.moderate;
     if (conductOn && objected === null) {
-      const conduct = await scanConduct(deps, c);
+      const conduct = await scanConduct(deps, c, actorUserId);
       if (!conduct.ok) return "stopped";
       if (conduct.codes === null) {
         console.error(`moderation: unparseable conduct answer for ${c.collection}/${c.recordId}`);
@@ -315,7 +394,7 @@ async function scanCandidate(deps: Deps, c: Candidate, conductOn: boolean, scanM
 
     if (objected !== null) {
       await stampScan(deps, c.collection, c.recordId, hash, true, scanModel);
-      await recordFlag(deps, c, objected, flaggedBy);
+      await recordFlag(deps, c, objected, flaggedBy, c.knownHash !== hash);
       return "flagged";
     }
     await stampScan(deps, c.collection, c.recordId, hash, false, scanModel);
@@ -323,7 +402,7 @@ async function scanCandidate(deps: Deps, c: Candidate, conductOn: boolean, scanM
     // about text that no longer exists, which is the moderator's time spent on the model's behalf. Only on a
     // pass that actually answered: retiring a flag because the model replied in prose would clear the queue
     // on the strength of a broken model.
-    if (cleared) await supersedeFlag(deps, c.collection, c.recordId);
+    if (cleared) await supersedeFlag(deps, c.collection, c.recordId, viaGate);
     return cleared ? "clean" : "unknown";
   }
 }
@@ -338,10 +417,10 @@ async function scanCandidate(deps: Deps, c: Candidate, conductOn: boolean, scanM
  * a post reaches both models as the same text, and the one thing a reader of the queue can rely on (the
  * excerpt is what was judged) stays true whichever pass objected.
  */
-async function scanConduct(deps: Deps, c: Candidate): Promise<{ ok: true; codes: string[] | null } | { ok: false }> {
+async function scanConduct(deps: Deps, c: Candidate, actorUserId: string | null): Promise<{ ok: true; codes: string[] | null } | { ok: false }> {
   const out = await aiGenerate(
     deps,
-    { feature: FEATURE, collection: c.collection },
+    scanContext(c, actorUserId),
     {
       system: CONDUCT_SYSTEM,
       user: `${UNTRUSTED_PREAMBLE}\n\n${fence("the post", scrubIdentifiers(c.text))}`,
@@ -385,10 +464,24 @@ type Candidate = {
  * the queue for a post that is already invisible.
  */
 async function dueForScan(deps: Deps, limit: number): Promise<Candidate[]> {
+  // THE ORG'S SCOPE IS APPLIED IN THE QUERY, not after it. A wall that is `off` is not read at all, and a
+  // wall narrowed to `anonymous` narrows its own SQL - so the tick's budget is spent on posts somebody
+  // actually asked to have read, rather than on rows this would then throw away. Filtering afterwards would
+  // also make the per-tick ceiling meaningless for an org that scans one wall: the window would fill with
+  // rows from the two it does not.
+  const scope = (await aiConfig(deps)).moderationScope;
+  // Every post on these two walls is signed, so `{ anonymous: false }` is the whole wall: `all` reads it,
+  // and both `off` and `anonymous` skip it. The second of those is a configuration the settings validator
+  // refuses - "anonymous only" on a wall with no anonymous posts means "none" - so this is what a blob
+  // written by hand gets, and it agrees with the words rather than quietly scanning everything.
   const rows = [
-    ...(await announcementCandidates(deps, { limit })),
-    ...(await replyCandidates(deps, { limit })),
-    ...(await suggestionCandidates(deps, { limit })),
+    ...(moderationCovers(scope, "announcements", { anonymous: false }) ? await announcementCandidates(deps, { limit }) : []),
+    ...(moderationCovers(scope, "announcement-replies", { anonymous: false }) ? await replyCandidates(deps, { limit }) : []),
+    // The suggestion box is the wall where `anonymous` narrows rather than empties, so the narrowing goes
+    // into its query.
+    ...(scope?.suggestions === "off"
+      ? []
+      : await suggestionCandidates(deps, { limit }, { anonymousOnly: scope?.suggestions === "anonymous" })),
   ];
 
   // All three surfaces are merged and re-ordered on the same rule, so one busy one cannot starve the others:
@@ -457,7 +550,9 @@ async function announcementCandidates(deps: Deps, w: Window): Promise<SweepRow[]
     .where(and(
       isNull(a.deleteTime),
       // The gate reads a post that is deliberately still a draft - that is what it is deciding about.
-      ...(includeHidden ? [] : [eq(a.published, true), eq(a.disabled, false)]),
+      // `notHeld` is stated alongside `published` rather than left implied by it: a held announcement is
+      // unpublished today, but the sweep must not depend on that to stay off the gate's rows.
+      ...(includeHidden ? [] : [eq(a.published, true), eq(a.disabled, false), notHeld(a)!]),
       ...(ids ? [inArray(a.uuid, ids)] : []),
     ))
     .$dynamic();
@@ -504,10 +599,13 @@ async function replyCandidates(deps: Deps, w: Window): Promise<SweepRow[]> {
     .innerJoin(a, eq(a.uuid, rep.announcementId))
     .leftJoin(scans, and(eq(scans.collection, "announcement-replies"), eq(scans.recordId, rep.uuid)))
     .where(and(
-      // A held reply carries its own soft-delete stamp, which is how it is kept off the thread until it is
-      // released. Its POST still has to be on the wall either way: a reply under a hidden post is not a
-      // thing the gate has any business releasing.
-      ...(includeHidden ? [] : [isNull(rep.deleteTime)]),
+      // A held reply is the GATE's row, not the sweep's, and it carries `held_at` and nothing else -
+      // `addReply` sets that column alone, so filtering `delete_time` does not exclude it. Left in, the
+      // drain re-scanned held replies, and a clean verdict called `supersedeFlag` on the flag that was the
+      // only thing holding them on a queue: held row, retired flag, visible to nobody and releasable by
+      // nobody. Its POST still has to be on the wall either way: a reply under a hidden post is not a thing
+      // the gate has any business releasing.
+      ...(includeHidden ? [] : [isNull(rep.deleteTime), notHeld(rep)!]),
       isNull(a.deleteTime),
       eq(a.published, true),
       eq(a.disabled, false),
@@ -533,7 +631,12 @@ async function replyCandidates(deps: Deps, w: Window): Promise<SweepRow[]> {
     .filter((r) => r.text.length > 0);
 }
 
-async function suggestionCandidates(deps: Deps, w: Window): Promise<SweepRow[]> {
+/**
+ * `anonymousOnly` is the org's scanning scope, and it is passed ONLY by the cron's due-window. A by-id read
+ * never narrows: the gate, the queue and `reconcileHolds` ask about one row they already have a reason to
+ * care about, and a held suggestion that has since been signed still has to be findable and releasable.
+ */
+async function suggestionCandidates(deps: Deps, w: Window, opts: { anonymousOnly?: boolean } = {}): Promise<SweepRow[]> {
   const scans = schema.moderationScans;
   const s = schema.suggestions;
   const { ids, limit, includeHidden } = byWindow(w);
@@ -552,7 +655,14 @@ async function suggestionCandidates(deps: Deps, w: Window): Promise<SweepRow[]> 
     })
     .from(s)
     .leftJoin(scans, and(eq(scans.collection, "suggestions"), eq(scans.recordId, s.uuid)))
-    .where(and(...(includeHidden ? [] : [isNull(s.deleteTime)]), ...(ids ? [inArray(s.uuid, ids)] : [])))
+    // Same as the reply lane above: a held suggestion carries `held_at` alone (`createSuggestion` writes no
+    // soft-delete stamp), so `delete_time` does not exclude it and the drain would re-scan a row the gate
+    // owns. The gate owns held rows; the sweep does not touch them.
+    .where(and(
+      ...(includeHidden ? [] : [isNull(s.deleteTime), notHeld(s)!]),
+      ...(ids ? [inArray(s.uuid, ids)] : []),
+      ...(opts.anonymousOnly ? [eq(s.anonymous, true)] : []),
+    ))
     .$dynamic();
   if (limit !== undefined) q = q.orderBy(...dueOrder(scans, s.createdAt)).limit(limit);
   return (await q)
@@ -621,15 +731,54 @@ async function stampScan(deps: Deps, collection: string, recordId: string, hash:
     });
 }
 
-/** The flag itself: one advisory row, upserted, so a re-scan replaces its predecessor rather than stacking a
- *  second opinion about the same post next to the first.
+/**
+ * The flag itself: one advisory row, upserted, so a re-scan replaces its predecessor rather than stacking a
+ * second opinion about the same post next to the first.
  *
- *  `model` is the one that actually objected - the guard model or the conduct one - not the scan identity.
- *  This column answers "who said so" about a specific flag, and a composite string would make every flag
- *  look like both passes had agreed. */
-async function recordFlag(deps: Deps, c: Candidate, hazards: string[], model: string): Promise<void> {
+ * `model` is the one that actually objected - the guard model or the conduct one - not the scan identity.
+ * This column answers "who said so" about a specific flag, and a composite string would make every flag look
+ * like both passes had agreed.
+ *
+ * WHEN A DECISION IS CLEARED, and it is not on every re-scan. Two different things bring a post back round:
+ *
+ *   THE TEXT CHANGED. A moderator's "this is fine" was about something else, and carrying it forward would
+ *   let an edit inherit a verdict. Full reset.
+ *   THE SCAN IDENTITY CHANGED - somebody turned the conduct pass on, or a model id moved. The text is the
+ *   same text a person already looked at, so their decision still stands. Reset unconditionally, switching
+ *   the conduct pass on re-opened EVERY post a moderator had ever dismissed, with the same excerpt and the
+ *   same hazards, to be dismissed again - a queue full of finished work at the exact moment somebody is
+ *   forming a first impression of whether the new pass is worth trusting.
+ *
+ * The exception inside the second case is a genuinely NEW reason: the conduct pass objecting to a post whose
+ * HAZARD flag was dismissed is a different objection by a different model, and that is worth raising. So the
+ * decision survives only when the same pass says the same thing about the same text.
+ */
+async function recordFlag(deps: Deps, c: Candidate, hazards: string[], model: string, textChanged: boolean): Promise<void> {
   const now = deps.clock.now();
   const payload: ModerationPayload = { hazards, excerpt: excerptOf(c.text), anonymous: c.anonymous };
+  const existing = await deps.db
+    .select({ uuid: schema.aiSuggestions.uuid, state: schema.aiSuggestions.state, model: schema.aiSuggestions.model })
+    .from(schema.aiSuggestions)
+    .where(and(
+      eq(schema.aiSuggestions.hostCollection, c.collection),
+      eq(schema.aiSuggestions.hostRecordId, c.recordId),
+      eq(schema.aiSuggestions.feature, FEATURE),
+    ))
+    .get();
+  const decided = existing?.state === "accepted" || existing?.state === "rejected";
+  const keepDecision = decided && !textChanged && existing!.model === model;
+
+  if (existing && keepDecision) {
+    // Same pass, same text, already answered. The payload is refreshed so the row is not stale, and the
+    // decision, the person who made it and when are left exactly where they are - including `updated_at`,
+    // which is what the decided history sorts by.
+    await deps.db
+      .update(schema.aiSuggestions)
+      .set({ payloadJson: JSON.stringify(payload), basis: hazards.length })
+      .where(eq(schema.aiSuggestions.uuid, existing.uuid));
+    return;
+  }
+
   await deps.db
     .insert(schema.aiSuggestions)
     .values({
@@ -642,8 +791,6 @@ async function recordFlag(deps: Deps, c: Candidate, hazards: string[], model: st
     })
     .onConflictDoUpdate({
       target: [schema.aiSuggestions.hostCollection, schema.aiSuggestions.hostRecordId, schema.aiSuggestions.feature],
-      // A re-scan clears the previous decision with the previous flag. The text changed, so a moderator's
-      // "this is fine" was about something else, and carrying it forward would let an edit inherit a verdict.
       set: {
         payloadJson: JSON.stringify(payload),
         basis: hazards.length,
@@ -706,19 +853,36 @@ async function isHeldPost(deps: Deps, collection: string, recordId: string): Pro
  * For an announcement that is `setPublished`, which owns the whole broadcast (audience bell, email,
  * mentions) and is what the ordinary publish path calls. A reply or a suggestion has no publish verb: the
  * hold is simply cleared, and its own create-time notifications are sent here.
+ *
+ * THE PUBLISH SKIPS THE GATE, and that is the difference between a release working and a release lying. The
+ * ordinary publish path reads the post before it flips, which is right for an author pressing Publish and
+ * wrong here: a moderator dismissing a flag has already overruled the model, and the gate fails closed - so
+ * during a model outage or a spent daily budget the re-read held the post again, `setPublished` returned
+ * without publishing, nothing looked at that return, and the flag was then stamped `rejected`. The post was
+ * invisible, off the pending queue, and the history said "Released - on the wall".
+ *
+ * Returns whether the post is now public, so the caller is not told a release worked when it did not. False
+ * only for the guarded flip claiming nothing (somebody else published it in between) or a host that is
+ * already gone.
  */
-async function releasePost(deps: Deps, collection: string, recordId: string, user: AppUser): Promise<void> {
-  await setHeldAt(deps, collection, recordId, null);
-
+async function releasePost(deps: Deps, collection: string, recordId: string, user: AppUser): Promise<boolean> {
   if (collection === "announcements") {
     // A held announcement is ALSO left unpublished (see `createAnnouncement`), precisely so that releasing
     // it is the ordinary publish - one path that audits the publish, tells the audience, sends the email and
     // fires the mentions. Imported here rather than at the top because `lifecycle` imports this module; the
     // cycle is real and this is the call that would close it.
+    //
+    // THE HOLD COMES OFF AFTER THE FLIP, not before. A publish that claims nothing must leave the post
+    // exactly where it was - held, with its flag still pending - rather than as an unheld draft with a
+    // pending flag, which the next queue read would retire as an orphan.
     const { setPublished } = await import("./lifecycle");
-    await setPublished(deps, user, schema.announcements, "announcement", "announcements", recordId, true, true);
-    return;
+    const out = await setPublished(deps, user, schema.announcements, "announcement", "announcements", recordId, true, true, { skipGate: true });
+    if ((out as { published?: boolean } | undefined)?.published !== true) return false;
+    await setHeldAt(deps, collection, recordId, null);
+    return true;
   }
+
+  await setHeldAt(deps, collection, recordId, null);
 
   // A reply and a suggestion have no publish verb - clearing the hold IS publishing them - so the
   // notifications their create path skipped are sent from here.
@@ -728,7 +892,7 @@ async function releasePost(deps: Deps, collection: string, recordId: string, use
       .from(schema.announcementReplies)
       .where(eq(schema.announcementReplies.uuid, recordId))
       .get();
-    if (!reply) return;
+    if (!reply) return false;
     const post = await deps.db
       .select({ author: schema.announcements.authorEmployeeId, title: schema.announcements.title })
       .from(schema.announcements)
@@ -745,6 +909,8 @@ async function releasePost(deps: Deps, collection: string, recordId: string, use
       });
     }
   }
+  // A reply and a suggestion have no publish flag: clearing the hold above IS the release.
+  return true;
 }
 
 /**
@@ -774,43 +940,21 @@ async function setHeldAt(deps: Deps, collection: string, recordId: string, at: D
  * which is what keeps the post on the queue (see `liveHosts`) and what makes `dismiss` release it rather
  * than merely close it.
  *
- * `outcome` decides the reason. A model that objected has already written its flag with real hazard codes,
- * and this only marks it; a model that could not answer has written nothing, so the flag is created here
- * with `UNCHECKED` - a reason that is honest about there being no verdict, and actionable, since the
- * decision in front of the moderator is the same either way: let it out, or do not.
+ * `outcome` decides what the AUTHOR is told - "waiting for review" reads wrong for a check that never ran,
+ * and "could not be checked" reads wrong for one that objected. The flag itself is written by `queueFlag`,
+ * which `passUnread` shares: the two postures leave the same queue item and differ only in whether the post
+ * is visible under it.
  */
 async function holdPost(deps: Deps, c: Candidate, outcome: ScanOutcome): Promise<void> {
   const now = deps.clock.now();
+  // THE FLAG IS WRITTEN BEFORE THE HOLD IS STAMPED, and the order is the recovery. These are two statements
+  // with no transaction between them, so one of them can land alone - and the two orders fail in opposite
+  // directions. Hold-then-flag leaves an invisible post with nothing on any queue, which nothing in the
+  // product can reach. Flag-then-hold leaves a pending flag over a post that is still where it was, which a
+  // moderator sees and can act on. (The row is already held on both of today's paths - the write path
+  // created it that way, or `setHeld` stamped it - so this restamp is belt and braces either way.)
+  await queueFlag(deps, c, true);
   await setHeldAt(deps, c.collection, c.recordId, now);
-  const existing = await deps.db
-    .select({ uuid: schema.aiSuggestions.uuid, payloadJson: schema.aiSuggestions.payloadJson })
-    .from(schema.aiSuggestions)
-    .where(and(
-      eq(schema.aiSuggestions.hostCollection, c.collection),
-      eq(schema.aiSuggestions.hostRecordId, c.recordId),
-      eq(schema.aiSuggestions.feature, FEATURE),
-    ))
-    .get();
-
-  if (existing) {
-    const payload = { ...(readPayload(existing.payloadJson) ?? { hazards: [UNCHECKED], excerpt: excerptOf(c.text), anonymous: c.anonymous }), held: true };
-    await deps.db
-      .update(schema.aiSuggestions)
-      .set({ payloadJson: JSON.stringify(payload), state: "pending", updatedAt: now })
-      .where(eq(schema.aiSuggestions.uuid, existing.uuid));
-  } else {
-    const payload: ModerationPayload = { hazards: [UNCHECKED], excerpt: excerptOf(c.text), anonymous: c.anonymous, held: true };
-    await deps.db.insert(schema.aiSuggestions).values({
-      hostCollection: c.collection,
-      hostRecordId: c.recordId,
-      feature: FEATURE,
-      payloadJson: JSON.stringify(payload),
-      // The model that was ASKED, even though it did not answer - "which model was this about" stays
-      // answerable, and `basis: 0` already says no hazard was found.
-      model: MODELS.moderate,
-      basis: 0,
-    });
-  }
 
   // The author hears that it is waiting, not that it was taken down: nobody has decided anything yet, and
   // from where they are sitting the post simply has not appeared. Silence here is what turns a gate into
@@ -826,6 +970,146 @@ async function holdPost(deps: Deps, c: Candidate, outcome: ScanOutcome): Promise
       subject: `${c.collection}/${c.recordId}`,
     });
   }
+}
+
+/**
+ * LET A POST OUT UNREAD, on an org that has chosen `moderationFallback: "publish"`.
+ *
+ * The mirror of `holdPost` for the case where the model never spoke: the hold comes off, the caller publishes
+ * as it would for a clean post, and a `pending` flag is left standing over a post that is now LIVE.
+ *
+ * THE FLAG IS THE POINT, not bookkeeping. Under this posture the org has accepted that some posts reach a
+ * wall unchecked; what they have not accepted is not knowing which. A queue item marked `Not checked` over a
+ * visible post is what makes the window auditable afterwards - the moderator can read exactly what went up
+ * while the allowance was spent, and `hide` still takes any of it down, tells the author and is reversible.
+ *
+ * THE AUTHOR IS NOT NOTIFIED, and that is not an omission. Their post went up; from where they are sitting
+ * nothing happened, and a bell saying "this was not checked" would be telling them about an operational
+ * condition they cannot act on. The people who can act on it are on the queue.
+ */
+async function passUnread(deps: Deps, c: Candidate): Promise<void> {
+  // FLAG FIRST, HOLD OFF SECOND, for the same reason `holdPost` writes in that order: these are two
+  // statements with no transaction, and the half that can land alone should be the harmless one. A flag with
+  // the post still held is a queue item a moderator can release; a released post with no flag would be the
+  // unread post nobody can find afterwards, which is the whole thing this function is meant to leave behind.
+  await queueFlag(deps, c, false);
+  await setHeldAt(deps, c.collection, c.recordId, null);
+}
+
+/**
+ * Write (or refresh) the `pending` moderation flag over a post the gate has just decided about.
+ *
+ * `held` says which decision it was, and it is the field `liveHosts` reads to keep a held post on the queue
+ * and `decideModeration` reads to make `dismiss` mean RELEASE rather than merely close.
+ *
+ * A model that objected has already written its flag with real hazard codes, and this only marks it; a model
+ * that could not answer has written nothing, so the flag is created here with `UNCHECKED` - a reason that is
+ * honest about there being no verdict, and actionable, since the decision in front of the moderator is the
+ * same either way: let it stand, or take it down.
+ */
+async function queueFlag(deps: Deps, c: Candidate, held: boolean): Promise<void> {
+  const now = deps.clock.now();
+  const existing = await deps.db
+    .select({ uuid: schema.aiSuggestions.uuid, payloadJson: schema.aiSuggestions.payloadJson })
+    .from(schema.aiSuggestions)
+    .where(and(
+      eq(schema.aiSuggestions.hostCollection, c.collection),
+      eq(schema.aiSuggestions.hostRecordId, c.recordId),
+      eq(schema.aiSuggestions.feature, FEATURE),
+    ))
+    .get();
+
+  if (existing) {
+    const payload = { ...(readPayload(existing.payloadJson) ?? { hazards: [UNCHECKED], excerpt: excerptOf(c.text), anonymous: c.anonymous }), held };
+    await deps.db
+      .update(schema.aiSuggestions)
+      .set({ payloadJson: JSON.stringify(payload), state: "pending", updatedAt: now })
+      .where(eq(schema.aiSuggestions.uuid, existing.uuid));
+  } else {
+    const payload: ModerationPayload = { hazards: [UNCHECKED], excerpt: excerptOf(c.text), anonymous: c.anonymous, held };
+    await deps.db.insert(schema.aiSuggestions).values({
+      hostCollection: c.collection,
+      hostRecordId: c.recordId,
+      feature: FEATURE,
+      payloadJson: JSON.stringify(payload),
+      // The model that was ASKED, even though it did not answer - "which model was this about" stays
+      // answerable, and `basis: 0` already says no hazard was found.
+      model: MODELS.moderate,
+      basis: 0,
+    });
+  }
+}
+
+/**
+ * RECONCILE THE HOLDS: a held post with nothing outstanding goes back on the queue.
+ *
+ * WHY THIS EXISTS. `held_at` hides a row from every read in the app, and the only things that clear it are
+ * the gate (once) and a moderator acting on a PENDING flag. So a held row whose flag is `superseded`, or
+ * decided, or was never written is held for ever: off every wall, off both halves of the queue, invisible to
+ * its own author. Every other piece of moderation state in this file is reconciled - `moderation_scans`
+ * against the text hash, `retireOrphans` for a flag whose host is gone - and this is the mirror of that last
+ * one: it closes a HOST with no flag, where `retireOrphans` closes a flag with no host.
+ *
+ * IT RE-QUEUES RATHER THAN RELEASING, which is the conservative half of "the model flags, it never hides". A
+ * post reaches this state because something went wrong while it was being checked, and the honest answer to
+ * "was this ever read" is no. Putting it in front of a person costs one queue item; releasing it unread would
+ * be the gate quietly opening itself.
+ *
+ * Nightly rather than per-tick: the three routes here are all failures, not ordinary operation, and each of
+ * them is separately fixed upstream. This is the net under those fixes, not the mechanism.
+ */
+export async function reconcileHolds(deps: Deps): Promise<{ requeued: number }> {
+  let requeued = 0;
+  for (const collection of HELDABLE) {
+    let ids: string[];
+    try {
+      ids = await heldWithNoPendingFlag(deps, collection);
+    } catch (e) {
+      console.error(`moderation: reading stranded holds for ${collection} failed`, e);
+      continue;
+    }
+    for (const recordId of ids) {
+      try {
+        const [candidate] = await candidatesFor(deps, collection, [recordId], { includeHidden: true });
+        // No candidate means no text to quote - a row the candidate query cannot build, or one whose body is
+        // empty. The flag is still written, because the hold is real and somebody has to be able to lift it.
+        await holdPost(
+          deps,
+          candidate ?? { collection, recordId, text: "", authorId: null, anonymous: true, knownHash: null, knownModel: null, flagged: false },
+          "unknown",
+        );
+        requeued += 1;
+      } catch (e) {
+        console.error(`moderation: re-queueing the stranded hold on ${collection}/${recordId} failed`, e);
+      }
+    }
+  }
+  return { requeued };
+}
+
+/** How many stranded holds one nightly pass will pick up. A bound rather than a ceiling that matters: the
+ *  state is a failure, so a run that finds hundreds is an incident, and the rest come back tomorrow. */
+const RECONCILE_LIMIT = 200;
+
+/** Held rows of one wall with no `pending` moderation flag standing over them. */
+async function heldWithNoPendingFlag(deps: Deps, collection: (typeof HELDABLE)[number]): Promise<string[]> {
+  const f = schema.aiSuggestions;
+  const table =
+    collection === "announcements" ? schema.announcements
+    : collection === "announcement-replies" ? schema.announcementReplies
+    : schema.suggestions;
+  const rows = await deps.db
+    .select({ uuid: table.uuid })
+    .from(table)
+    .leftJoin(f, and(
+      eq(f.hostCollection, collection),
+      eq(f.hostRecordId, table.uuid),
+      eq(f.feature, FEATURE),
+      eq(f.state, "pending"),
+    ))
+    .where(and(sql`${table.heldAt} is not null`, isNull(f.uuid)))
+    .limit(RECONCILE_LIMIT);
+  return rows.map((r) => r.uuid);
 }
 
 /** The post's title for the event, or its opening words when the row has no title of its own (a reply). Not
@@ -957,8 +1241,23 @@ async function reopenFlag(deps: Deps, collection: string, recordId: string): Pro
     .where(eq(schema.aiSuggestions.uuid, row.uuid));
 }
 
-/** Retire a flag whose post no longer reads the way it did, without pretending a person decided anything. */
-async function supersedeFlag(deps: Deps, collection: string, recordId: string): Promise<void> {
+/**
+ * Retire a flag whose post no longer reads the way it did, without pretending a person decided anything.
+ *
+ * NEVER WHILE THE POST IS HELD BY SOMEBODY ELSE'S HOLD. A held row is invisible to every read and the pending
+ * flag is the only thing that puts it on a queue somebody can release it from, so retiring one leaves a post
+ * nothing in the product can see, list or let out. The hold comes off instead: the scan answered the question
+ * the hold was waiting on, and a clean answer is a release.
+ *
+ * `viaGate` is the exception, and it is the normal case. The gate holds the row itself before it asks, and
+ * clears the hold on its own line once this returns - so during a gate scan "held" says nothing about whether
+ * the post is stranded, and the flag genuinely is spent.
+ */
+async function supersedeFlag(deps: Deps, collection: string, recordId: string, viaGate = false): Promise<void> {
+  if (!viaGate && (await isHeldPost(deps, collection, recordId))) {
+    await setHeldAt(deps, collection, recordId, null);
+    return;
+  }
   await deps.db
     .update(schema.aiSuggestions)
     .set({ state: "superseded", updatedAt: deps.clock.now() })
@@ -991,7 +1290,21 @@ export type QueueItem = {
   /** Whether the post is on the wall as things stand. False for everything held, and for a post somebody
    *  hid while its flag sat here. */
   visible: boolean;
+  /** What a person decided, on the history view: `hidden` upheld the flag, `released` overruled it. Null on
+   *  the pending queue, where nobody has decided yet. */
+  decision: "hidden" | "released" | null;
+  decided_time: string | null;
+  decided_by: string | null; // users/{id}, or null when an automation decided it
 };
+
+/** Which half of the queue to read: what is waiting, or what has been answered. */
+export type QueueState = "pending" | "decided";
+
+/** A page of one half, and HOW BIG BOTH HALVES ARE. The counts are what the two view chips show: a moderator
+ *  looking at an empty queue can see whether there is a history to open without opening it, and one looking
+ *  at the history can see how much is still waiting on them. */
+export type ModerationQueuePage = { results: QueueItem[]; has_more: boolean; counts: ModerationCounts };
+export type ModerationCounts = { pending: number; decided: number };
 
 /**
  * The pending queue, newest first.
@@ -1002,8 +1315,9 @@ export type QueueItem = {
  * So an anonymous suggestion comes through with a null author, and the only way back to a person is the same
  * one everybody else has: there is not one.
  */
-export async function listModerationQueue(deps: Deps): Promise<{ results: QueueItem[]; has_more: boolean }> {
+export async function listModerationQueue(deps: Deps, state: QueueState = "pending"): Promise<ModerationQueuePage> {
   const f = schema.aiSuggestions;
+  const decided = state === "decided";
   const flags = await deps.db
     .select({
       uuid: f.uuid,
@@ -1012,18 +1326,28 @@ export async function listModerationQueue(deps: Deps): Promise<{ results: QueueI
       payloadJson: f.payloadJson,
       createdAt: f.createdAt,
       updatedAt: f.updatedAt,
+      state: f.state,
+      decidedAt: f.decidedAt,
+      decidedBy: f.decidedBy,
     })
     .from(f)
-    .where(and(eq(f.feature, FEATURE), eq(f.state, "pending")))
-    .orderBy(desc(f.updatedAt))
+    // DECIDED IS A HISTORY, NOT A QUEUE, and it exists because without it a decision was the last anybody
+    // saw of a post. A hidden REPLY is soft-deleted and appears in no list in the product; a hidden
+    // announcement turns up on the board's Drafts strip labelled as though its author had not finished it.
+    // "What did we take down, and who decided that" had no answer anywhere.
+    .where(and(eq(f.feature, FEATURE), decided ? inArray(f.state, ["accepted", "rejected"]) : eq(f.state, "pending")))
+    .orderBy(desc(decided ? f.decidedAt : f.updatedAt))
     // One more than the cap, so the answer to "is there more than this" is a fact rather than a guess. A
     // moderator shown 100 of 150 with nothing saying so would clear the page and believe they were finished.
     .limit(QUEUE_PAGE + 1);
-  if (flags.length === 0) return { results: [], has_more: false };
+  if (flags.length === 0) return { results: [], has_more: false, counts: await queueCounts(deps) };
 
   const page = flags.slice(0, QUEUE_PAGE);
   const refs = page.map((r) => ({ collection: r.hostCollection, recordId: r.hostRecordId }));
-  const live = await liveHosts(deps, refs);
+  // A DECIDED flag is about a post that is usually hidden - that was the decision - so the history reads
+  // hosts whatever their visibility. The pending queue keeps the stricter rule, where a host nobody can see
+  // means a flag with nothing left to decide.
+  const live = await liveHosts(deps, refs, decided);
   // What the text hashed to when it was last scanned, which is what "edited since" is actually a question
   // about. The comparison used to be between EXCERPTS, and an excerpt is the first 400 characters: an edit
   // past that point changed nothing the queue could see, so a post could be flagged short and then rewritten
@@ -1058,6 +1382,10 @@ export async function listModerationQueue(deps: Deps): Promise<{ results: QueueI
       // one answer to "is this post visible" and every read path is filtering by the same column.
       held: !host.visible,
       visible: host.visible,
+      // Only on the history. `null` on the pending queue, where by definition nobody has decided yet.
+      decision: flag.state === "accepted" ? "hidden" : flag.state === "rejected" ? "released" : null,
+      decided_time: flag.decidedAt ? flag.decidedAt.toISOString() : null,
+      decided_by: flag.decidedBy ? `users/${flag.decidedBy}` : null,
       // No scan row (it was swept, or the flag predates one) leaves the excerpt comparison as the fallback: it
       // catches an edit to the opening, which is better than saying nothing.
       edited_since_flag: knownHash ? (await sha256Hex(liveText)) !== knownHash : excerptOf(liveText) !== payload.excerpt,
@@ -1065,8 +1393,38 @@ export async function listModerationQueue(deps: Deps): Promise<{ results: QueueI
       flagged_time: (flag.updatedAt ?? flag.createdAt ?? new Date(0)).toISOString(),
     });
   }
-  await retireOrphans(deps, orphaned);
-  return { results: out, has_more: flags.length > QUEUE_PAGE };
+  // NEVER ON THE HISTORY. `retireOrphans` rewrites a flag to `superseded`, which is the right answer for a
+  // pending flag whose post has gone and a destructive one for a decided flag: reading the history would
+  // quietly overwrite "a person hid this" with "the post went away", and the record of the decision would
+  // be gone because somebody looked at it. Only an outstanding flag is ever retired.
+  if (!decided) await retireOrphans(deps, orphaned);
+  return { results: out, has_more: flags.length > QUEUE_PAGE, counts: await queueCounts(deps) };
+}
+
+/**
+ * How many flags are waiting and how many have been answered - one grouped count for the two view chips.
+ *
+ * COUNTED OFF THE FLAGS RATHER THAN OFF THE PAGE, because the page is capped at 100 and the number a
+ * moderator wants beside "Already decided" is the size of the thing they would be opening, not the size of
+ * the page they are not looking at. It is read AFTER `retireOrphans`, so a pending count taken on a pending
+ * read has already shed the flags that read found nothing behind: the number agrees with the list in front
+ * of the person, which is the one they can check.
+ */
+async function queueCounts(deps: Deps): Promise<ModerationCounts> {
+  const f = schema.aiSuggestions;
+  const rows = await deps.db
+    .select({ state: f.state, n: sql<number>`count(*)` })
+    .from(f)
+    .where(and(eq(f.feature, FEATURE), inArray(f.state, ["pending", "accepted", "rejected"])))
+    .groupBy(f.state);
+  const counts: ModerationCounts = { pending: 0, decided: 0 };
+  // `accepted` and `rejected` are both decisions - upheld and overruled - and the history shows them
+  // together, so they add up here rather than being reported apart.
+  for (const r of rows) {
+    if (r.state === "pending") counts.pending += Number(r.n);
+    else counts.decided += Number(r.n);
+  }
+  return counts;
 }
 
 /** How many flags one read of the queue returns. */
@@ -1129,12 +1487,14 @@ type LiveHost = { title: string; body: string; author: string | null; scanned: s
 async function liveHosts(
   deps: Deps,
   refs: { collection: string; recordId: string }[],
+  anyVisibility = false,
 ): Promise<Map<string, LiveHost>> {
   const out = new Map<string, LiveHost>();
   const byCollection = new Map<string, string[]>();
   /** Keep a row the visibility filter would have cut, but only when the GATE is the reason it is hidden -
-   *  `held_at`, the same column every read path filters by. A post somebody else withdrew is not kept. */
-  const keep = (visible: boolean, heldAt: Date | null) => visible || heldAt !== null;
+   *  `held_at`, the same column every read path filters by. A post somebody else withdrew is not kept.
+   *  `anyVisibility` is the decided history, which is mostly ABOUT posts that were taken down. */
+  const keep = (visible: boolean, heldAt: Date | null) => anyVisibility || visible || heldAt !== null;
   for (const r of refs) byCollection.set(r.collection, [...(byCollection.get(r.collection) ?? []), r.recordId]);
 
   // CHUNKED, because a full queue page is 100 ids and D1 caps a statement's bound parameters near that -
@@ -1167,8 +1527,9 @@ async function liveHosts(
   if (suggestionIds.length) {
     const s = schema.suggestions;
     // A suggestion is hidden by its soft-delete stamp, so "deleted" and "not visible" are the same column
-    // here. A held one is therefore read WITH the stamp set - the gate is what set it - and is told apart
-    // from an author's own withdrawal only by the flag that is holding it.
+    // here - for a hide. A HELD one is a different state written in a different column: `createSuggestion`
+    // sets `held_at` and nothing else, so the row reads as live-but-withheld, and only `held_at` tells it
+    // apart from an author's own withdrawal.
     const rows = await byIdChunks(suggestionIds, (ids) =>
       deps.db
         .select({ uuid: s.uuid, title: s.title, body: s.body, author: s.submitterId, anonymous: s.anonymous, deleteTime: s.deleteTime, heldAt: s.heldAt })
@@ -1209,7 +1570,16 @@ async function liveHosts(
       // because releasing it would put it back under a thread nobody can reach.
       const parentVisible = r.parentPublished && !r.parentDisabled;
       const visible = !r.hidden && !r.heldAt && parentVisible;
-      if (!parentVisible || !keep(visible, r.heldAt)) continue;
+      // `keep` IS TESTED FIRST, and the order is the whole of it. `!parentVisible` short-circuiting ahead of
+      // it dropped a HELD reply under a post somebody had since disabled, so the queue read pushed it to
+      // `orphaned`, `retireOrphans` wrote `superseded`, and the reply was held for ever with nothing on any
+      // queue that could release it - and restoring the parent did not bring it back. A held reply is the
+      // gate's row whatever its thread is doing; only one that is NOT held is dropped with its parent.
+      if (!keep(visible, r.heldAt)) continue;
+      // `anyVisibility` is the DECIDED HISTORY, and it is the one view that exists so a takedown stays
+      // findable - so a reply whose parent has since been disabled belongs on it. Dropping it here was the
+      // history losing exactly the row it was added for.
+      if (!parentVisible && !r.heldAt && !anyVisibility) continue;
       out.set(key, {
         title: `Re: ${r.parent}`, body: r.body, author: r.author, visible,
         // The body alone: the "Re:" title is a label this function composes for the queue, and was never
@@ -1267,6 +1637,309 @@ function readPayload(raw: string): ModerationPayload | null {
  * on workplace kudos will object to things that are fine, and a queue nobody is allowed to disagree with is a
  * block list with extra steps.
  */
+/**
+ * Take a public post down because a PERSON objected. No flag, no model, no queue involved.
+ *
+ * The board and the suggestion box needed this because moderation is not only what a model notices: most of
+ * what actually has to come off a wall is noticed by somebody reading it. Before this, the only way to
+ * remove a post was to wait for a model to flag it, which is a strange thing to have to do about a post you
+ * are looking at.
+ *
+ * IT STILL WRITES A FLAG ROW, and that is the part worth not skipping. The decided view is the only place a
+ * withdrawn post can be seen at all, so a takedown that recorded nothing would put the post beyond the
+ * reach of every surface in the app - exactly the hole an upheld hold used to fall into. The row is stamped
+ * `accepted` with the reason `MANUAL` and the person who decided, so the history reads the same whether a
+ * model or a colleague started it, and `unhideModeration` can put it back by the same route.
+ *
+ * An OUTSTANDING flag on the same post is answered by this rather than left pending: the post is down, and
+ * a queue item asking whether it should come down is then about a decision already taken.
+ */
+export async function hideManually(deps: Deps, user: AppUser, host: string): Promise<{ host: string }> {
+  // `splitHost` already refuses a collection that is not moderatable, with the same message and the list of
+  // the ones that are. A second check here read as though one of the two were load-bearing.
+  const [collection, recordId] = splitHost(host);
+
+  // Read the text BEFORE hiding it: the flag quotes what was taken down, and after the write the candidate
+  // query no longer returns the row on its ordinary terms.
+  const [candidate] = await candidatesFor(deps, collection, [recordId], { includeHidden: true });
+  await hideHost(deps, collection, recordId, user);
+  // AND THE HOLD COMES OFF, the same way `decideModeration` clears it before upholding a flag, and for the
+  // same reason spelled out there: `held_at` hides a row from EVERY read including the restricted views that
+  // show editors a disabled post, so a held post that was then hidden satisfied both exclusions at once. This
+  // reached that end state by a different door and did not clear it. Recoverable today only because the flag
+  // below is `accepted`, which puts it on the decided history where `unhideModeration` can reach it - which
+  // is one regression away from being the hole the note in `decideModeration` describes.
+  await setHeldAt(deps, collection, recordId, null);
+
+  const now = deps.clock.now();
+  const payload: ModerationPayload = {
+    hazards: [MANUAL],
+    excerpt: candidate ? excerptOf(candidate.text) : "",
+    anonymous: candidate?.anonymous ?? false,
+  };
+  await deps.db
+    .insert(schema.aiSuggestions)
+    .values({
+      hostCollection: collection,
+      hostRecordId: recordId,
+      feature: FEATURE,
+      payloadJson: JSON.stringify(payload),
+      // No model was asked. Recording one would put a name in the history that never saw the post.
+      model: "",
+      basis: 0,
+      state: "accepted",
+      decidedBy: user.uuid === "system" ? null : user.uuid,
+      decidedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [schema.aiSuggestions.hostCollection, schema.aiSuggestions.hostRecordId, schema.aiSuggestions.feature],
+      // A post that was already flagged and is now being taken down by hand: the person's decision answers
+      // the model's question, so the row becomes theirs rather than gaining a second one. The model's
+      // hazards are kept - why it was flagged is still true and still worth reading.
+      set: { state: "accepted", decidedBy: user.uuid === "system" ? null : user.uuid, decidedAt: now, updatedAt: now },
+    });
+
+  return { host: `${collection}/${recordId}` };
+}
+
+/**
+ * Put a post a moderator already hid back into play, or hand a held one back to its author.
+ *
+ * TWO WAYS BACK, AND `mode` CHOOSES. `draft` returns the post to its author's hands - off the wall,
+ * editable, nobody notified - so the decision about whether it goes out sits with the people whose decision
+ * it is, and the way back onto the wall runs through `:publish`, which is gated and which sends the text
+ * through the safety check again. `publish` puts it straight in front of readers, for the moderator who has
+ * read the post and thinks the takedown was wrong: making them ask the author to press Publish first means a
+ * post whose author is on leave, or has left, never comes back at all. Which one ran is recorded on the flag.
+ *
+ * A reply and a suggestion have NO DRAFT STATE, so there is only one place to put them back and `mode` says
+ * nothing about them: the row comes back on the wall either way, and its flag reopens for somebody to decide
+ * about it now that it is visible again.
+ *
+ * ALSO THE OTHER HALF OF THE QUEUE. A flag still PENDING over a HELD post has no takedown to reverse -
+ * nobody hid it, the gate held it - and the same button is still the right answer for it: a moderator who
+ * will neither release the post nor keep it buried hands it back for its author to rewrite. Only an
+ * announcement can take that, because only an announcement has a draft to go back to.
+ *
+ * ITS OWN VERB, not part of `decide`. `moderation.decide` is the queue's daily work; this reverses a
+ * colleague's judgement about somebody else's post, and an org can hand out the first without the second.
+ * The gate is the ACL's, decided by the middleware before this runs - there is no role test in here.
+ *
+ * On the `draft` path the flag reopens (`reopenOnUnhide`), so the post returns to the queue awaiting a
+ * decision rather than quietly leaving the record.
+ */
+export async function unhideModeration(deps: Deps, user: AppUser, host: string, mode: UnhideMode = "draft"): Promise<{ host: string }> {
+  const [collection, recordId] = splitHost(host);
+  const flag = await deps.db
+    .select({ state: schema.aiSuggestions.state })
+    .from(schema.aiSuggestions)
+    .where(and(
+      eq(schema.aiSuggestions.hostCollection, collection),
+      eq(schema.aiSuggestions.hostRecordId, recordId),
+      eq(schema.aiSuggestions.feature, FEATURE),
+    ))
+    .get();
+  if (!flag) throw notFound("no moderation flag for that record");
+
+  // A PENDING FLAG IS THE HAND-BACK, and only over a post the gate is holding. Everything else pending is a
+  // post still sitting where its author put it, with nothing to undo.
+  if (flag.state === "pending") {
+    if (!(await isHeldPost(deps, collection, recordId))) throw invalidArgument("that post was not hidden by a moderation decision");
+    if (collection !== "announcements") throw invalidArgument("only an announcement has a draft to go back to; release this one or keep it hidden");
+    // Releasing a held post is `:decide` with `dismiss`, which sends the broadcast that was held back with
+    // it. Routing it through here would put it on the wall in silence.
+    if (mode === "publish") throw invalidArgument("a held post goes on the wall by being released from the queue, not by being put back");
+    return handBackAsDraft(deps, user, recordId);
+  }
+  // A dismissed flag left the post where it was, so there is nothing to put back there either.
+  if (flag.state !== "accepted") throw invalidArgument("that post was not hidden by a moderation decision");
+  if (collection === "announcements" && mode === "publish") return publishBack(deps, user, recordId);
+
+  const now = deps.clock.now();
+  if (collection === "announcements") {
+    // `published: false` as well as clearing `disabled`: back as a draft, whichever it was before. A post
+    // that was live when it was hidden does not go live again on this click.
+    await deps.db
+      .update(schema.announcements)
+      .set({ disabled: false, published: false, heldAt: null, updatedAt: now })
+      .where(eq(schema.announcements.uuid, recordId));
+  } else if (collection === "announcement-replies") {
+    await deps.db.update(schema.announcementReplies).set({ deleteTime: null, heldAt: null }).where(eq(schema.announcementReplies.uuid, recordId));
+  } else if (collection === "suggestions") {
+    await deps.db.update(schema.suggestions).set({ deleteTime: null, heldAt: null, updatedAt: now }).where(eq(schema.suggestions.uuid, recordId));
+  } else {
+    throw invalidArgument(`${collection} is not a moderated collection`);
+  }
+
+  // A REPLY OR A SUGGESTION PUT BACK WITH `publish` HAS BEEN DECIDED, not re-queued. There is one place for
+  // it to go - these two have no draft state, so it is on the wall the moment this runs - and the moderator
+  // who asked for that has read it and overruled the takedown. Reopening the flag would put the post back
+  // on the queue of the person who just answered it. `draft` on the same two still reopens, below: that is
+  // the caller who restored the post without judging it.
+  if (mode === "publish") {
+    await settleAsReleased(deps, user, collection, recordId);
+    await tellAuthor(deps, user, collection, recordId, collection === "announcement-replies" ? "Your reply is back" : "Your post is back", "It is visible again.");
+    return { host: `${collection}/${recordId}` };
+  }
+
+  // Reopens the flag and writes the audit entry against the POST, the same way the decision it reverses
+  // did - so the record's own activity reads as one story: flagged, hidden, put back.
+  await reopenOnUnhide(deps, user, collection, recordId);
+
+  // ...and for an ANNOUNCEMENT the flag then closes, because it came back as a draft. A draft is on no
+  // wall, so there is nothing outstanding for a moderator to decide about it; left pending it would sit on
+  // the queue as an item nobody can act on, and the next queue read would retire it anyway as a flag whose
+  // host cannot be seen - a state arrived at by side effect rather than on purpose. Publishing it is what
+  // asks the question again, and that goes through the gate, which re-reads the text.
+  //
+  // A reply and a suggestion have no draft state: they are back on the wall as of now, so their flag
+  // genuinely is outstanding again and stays pending.
+  if (collection === "announcements") await supersedeFlag(deps, collection, recordId);
+
+  // The author was told when it was hidden; they are told when it comes back, or the silence reads as the
+  // post still being gone.
+  await tellAuthor(
+    deps,
+    user,
+    collection,
+    recordId,
+    collection === "announcement-replies" ? "Your reply is back" : "Your post is back",
+    collection === "announcements" ? "It was put back as a draft - open it to publish it again." : "It is visible again.",
+  );
+  return { host: `${collection}/${recordId}` };
+}
+
+/**
+ * Hand a HELD announcement back to whoever wrote it, as a draft, without deciding anything about it.
+ *
+ * The third answer a held post can get, and the one the queue had no button for: release it, keep it
+ * buried, or give it back. The first two are `:decide`; this is the one where the moderator does not want to
+ * be the person who judges the text - the post is off, the author has it, and they can rewrite it or drop it.
+ */
+async function handBackAsDraft(deps: Deps, user: AppUser, recordId: string): Promise<{ host: string }> {
+  const now = deps.clock.now();
+  // The hold comes off and the post stays unpublished, which is exactly the draft its author has been
+  // waiting to hear about. `disabled` is cleared with it so the post cannot come back invisible for a
+  // reason the author has no way to see.
+  await deps.db
+    .update(schema.announcements)
+    .set({ disabled: false, published: false, heldAt: null, updatedAt: now })
+    .where(eq(schema.announcements.uuid, recordId));
+  // SUPERSEDED, NOT DECIDED. Nobody judged this text - the moderator declined to and passed it back - so
+  // stamping `accepted` or `rejected` would put a verdict in the history that nobody reached. Left pending
+  // it would sit on the queue as a row about a draft, which is a question nobody can answer. Publishing it
+  // is what asks again, through the gate, which re-reads the text.
+  await supersedeFlag(deps, "announcements", recordId);
+  await audit(deps, user, "announcement.moderate.returned", "announcements", recordId, {
+    reason: "the held post was handed back to its author as a draft",
+  });
+  await tellAuthor(deps, user, "announcements", recordId, "Your post was sent back to you", "It was held for review and returned to you as a draft - edit it and publish it again.");
+  return { host: `announcements/${recordId}` };
+}
+
+/**
+ * Put a hidden announcement straight back on the wall, rather than into its author's drafts.
+ *
+ * The moderator has read the post and thinks the takedown was wrong. `draft` makes that verdict cost the
+ * author a second publish they may never perform - a post by somebody on leave, or somebody who has left,
+ * simply stays gone - so this is the same reversal carried all the way through.
+ */
+async function publishBack(deps: Deps, user: AppUser, recordId: string): Promise<{ host: string }> {
+  const a = schema.announcements;
+  const row = await deps.db.select({ published: a.published }).from(a).where(eq(a.uuid, recordId)).get();
+  if (!row) throw notFound("that post is already gone");
+  const now = deps.clock.now();
+  // `disabled` is how an announcement is taken down, so clearing it is most of the restore. The hold goes
+  // with it: a post hidden straight out of a hold carries both stamps, and `held_at` hides a row from every
+  // read there is - including the ones that show an editor a disabled post.
+  await deps.db.update(a).set({ disabled: false, heldAt: null, updatedAt: now }).where(eq(a.uuid, recordId));
+  // AND ONLY THEN THE PUBLISH, and only for a post that never had one: one the gate held, a moderator
+  // upheld, and this call is overruling. `setPublished` owns the whole broadcast - audience bell, email,
+  // mentions - which is what a post going in front of readers for the first time owes them. A post that was
+  // live when it was hidden needs none of it: its audience heard about it when it went up, and saying so
+  // again would announce a post they have already read.
+  //
+  // THE GATE IS SKIPPED, the same as `releasePost` and for the same reason spelled out there: the person
+  // publishing this has already overruled the check, and the gate fails closed - during a model outage the
+  // re-read would hold the post again while this call recorded it as back on the wall.
+  if (!row.published) {
+    const { setPublished } = await import("./lifecycle");
+    const out = await setPublished(deps, user, a, "announcement", "announcements", recordId, true, true, { skipGate: true });
+    if ((out as { published?: boolean } | undefined)?.published !== true) {
+      throw failedPrecondition("that post could not be put back on the wall; it is still a draft");
+    }
+  }
+  await settleAsReleased(deps, user, "announcements", recordId);
+  await tellAuthor(deps, user, "announcements", recordId, "Your post is back", "It is on the wall again.");
+  return { host: `announcements/${recordId}` };
+}
+
+/**
+ * Close the flag on a post that has just gone back on the wall, as the decision it is.
+ *
+ * NOT `reopenOnUnhide`. That is right for the draft path, where the post comes back for somebody to judge
+ * again; here it has been judged - by the person who put it up. The post is visible as of now, nothing about
+ * it is outstanding, and re-queueing it would hand the flag back to the moderator who just answered it.
+ *
+ * `rejected` is the same word `decide`'s `dismiss` writes, so the history reads the same whichever route the
+ * post took: overruled, by this person, at this time.
+ */
+async function settleAsReleased(deps: Deps, user: AppUser, collection: string, recordId: string): Promise<void> {
+  const now = deps.clock.now();
+  await deps.db
+    .update(schema.aiSuggestions)
+    // `decided_by` is a foreign key into `users` and the system principal is not a row in it - null is the
+    // honest value there, and the same one `decideModeration` writes for it.
+    .set({ state: "rejected", decidedBy: user.uuid === "system" ? null : user.uuid, decidedAt: now, updatedAt: now })
+    .where(and(
+      eq(schema.aiSuggestions.hostCollection, collection),
+      eq(schema.aiSuggestions.hostRecordId, recordId),
+      eq(schema.aiSuggestions.feature, FEATURE),
+    ));
+  // Anchored on the POST like every other moderation entry, so the record's own activity reads as one story:
+  // flagged, hidden, put back on the wall. A reply anchors on its thread - see `auditAnchor`.
+  const anchor = await auditAnchor(deps, collection, recordId);
+  await audit(deps, user, `${MODERATABLE[collection]!.singular}.moderate.restored`, anchor.entity, anchor.entityId, {
+    ...anchor.meta,
+    reason: "the hidden post was put back on the wall",
+  });
+}
+
+/** Tell whoever wrote the post that it came back. Silence reads as the post still being gone, which is the
+ *  one thing an author cannot check for themselves - a hidden post is hidden from them too. */
+async function tellAuthor(deps: Deps, user: AppUser, collection: string, recordId: string, title: string, body: string): Promise<void> {
+  const author = await authorOf(deps, collection, recordId);
+  if (!author) return;
+  await notify(deps, {
+    recipient: author,
+    type: "moderation.unhidden",
+    title,
+    body,
+    subject: `${collection}/${recordId}`,
+    actorId: user.employeeId ?? null,
+  });
+}
+
+/** The employee who wrote this post, or null when the wall withholds it (an anonymous suggestion). */
+async function authorOf(deps: Deps, collection: string, recordId: string): Promise<string | null> {
+  if (collection === "announcements") {
+    const r = await deps.db.select({ a: schema.announcements.authorEmployeeId }).from(schema.announcements).where(eq(schema.announcements.uuid, recordId)).get();
+    return r?.a ?? null;
+  }
+  if (collection === "announcement-replies") {
+    const r = await deps.db.select({ a: schema.announcementReplies.authorId }).from(schema.announcementReplies).where(eq(schema.announcementReplies.uuid, recordId)).get();
+    return r?.a ?? null;
+  }
+  const r = await deps.db
+    .select({ a: schema.suggestions.submitterId, anonymous: schema.suggestions.anonymous })
+    .from(schema.suggestions)
+    .where(eq(schema.suggestions.uuid, recordId))
+    .get();
+  // An anonymous submitter is still told: the notification goes to them and names nothing about them to
+  // anybody else. Anonymity is a promise to READERS of the box, not a reason to leave the author guessing.
+  return r?.a ?? null;
+}
+
 export async function decideModeration(
   deps: Deps,
   user: AppUser,
@@ -1275,7 +1948,7 @@ export async function decideModeration(
 ): Promise<{ host: string; action: ModerationAction }> {
   const [collection, recordId] = splitHost(host);
   const flag = await deps.db
-    .select({ uuid: schema.aiSuggestions.uuid, state: schema.aiSuggestions.state, payloadJson: schema.aiSuggestions.payloadJson })
+    .select({ uuid: schema.aiSuggestions.uuid, state: schema.aiSuggestions.state, payloadJson: schema.aiSuggestions.payloadJson, model: schema.aiSuggestions.model })
     .from(schema.aiSuggestions)
     .where(and(
       eq(schema.aiSuggestions.hostCollection, collection),
@@ -1295,8 +1968,31 @@ export async function decideModeration(
   //    broadcast that was held back with it. Dismissing a held post and having nothing happen would leave
   //    it invisible with its flag closed, which is the one state nothing could get it out of.
   const held = await isHeldPost(deps, collection, recordId);
-  if (action === "hide" && !held) await hideHost(deps, collection, recordId, user);
-  if (action === "dismiss" && held) await releasePost(deps, collection, recordId, user);
+  if (action === "hide") {
+    // UPHOLDING A HOLD CONVERTS IT INTO AN ORDINARY HIDDEN POST, and that is not bookkeeping - without it
+    // the post becomes unreachable from anywhere in the app.
+    //
+    // `held_at` hides a row from EVERY read (services/withheld.ts), including the restricted views that
+    // show editors a disabled post, and the queue lists `pending` flags only. So a held post whose flag was
+    // just upheld satisfied both exclusions at once: off the wall, and off the queue that was the only
+    // place it still appeared. Nothing in the product could see it, list it or restore it - the author's
+    // writing was simply gone, which is the one outcome moderation must never produce.
+    //
+    // Clearing the hold first and then taking it down the normal way lands it in the state the rest of the
+    // app already understands: `disabled` for an announcement, soft-deleted for a reply or a suggestion.
+    // An editor can see it, `assertMayUnhide` governs putting it back, and the author is told - the same as
+    // for a post that was hidden while it was up.
+    if (held) await setHeldAt(deps, collection, recordId, null);
+    await hideHost(deps, collection, recordId, user);
+  }
+  // A RELEASE THAT DID NOT LAND MUST NOT BE RECORDED AS ONE. `releasePost` answers whether the post is
+  // actually public now, and the flag is only closed on a true: stamped `rejected` regardless, a failed
+  // release left the post invisible, off the pending queue and badged "Released - on the wall" in the
+  // history, with nothing in the product able to reach it. Left pending, it stays on the queue for the
+  // moderator to try again.
+  if (action === "dismiss" && held && !(await releasePost(deps, collection, recordId, user))) {
+    throw failedPrecondition("that post could not be released; it is still waiting on the queue");
+  }
 
   await deps.db
     .update(schema.aiSuggestions)
@@ -1328,7 +2024,10 @@ export async function decideModeration(
   const anchor = await auditAnchor(deps, collection, recordId);
   await audit(deps, user, `${MODERATABLE[collection]!.singular}.moderate.${action}`, anchor.entity, anchor.entityId, {
     hazards: payload?.hazards ?? [],
-    flagged_by: MODELS.moderate,
+    // THE MODEL THAT ACTUALLY OBJECTED, read off the flag. Hard-coded to the guard model, every conduct flag
+    // and every manual takedown was recorded in the trail as having come from Llama Guard - `recordFlag`
+    // already writes the right one on the row (`model`), and the event already gets `pass` right.
+    flagged_by: flag.model || null,
     ...anchor.meta,
   });
 

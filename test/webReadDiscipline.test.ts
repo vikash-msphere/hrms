@@ -68,6 +68,7 @@ const COLLECTION_ALLOW: Record<string, string> = {
   "dashboard-summary": "aggregate KPI counts, not a collection",
   "people-analytics": "the per-person report: one aggregate over a window the page chooses, not a collection - this read EXISTS to stop the page fetching eight collections to compute it",
   "activity-counts": "tab-bar \"new since last seen\" counts, not a collection - this read EXISTS to stop the badges fetching collections",
+  attention: "\"what needs you\": one ranked list the server derives from goals, cards, reviews and 360 requests under the caller's own list scope, so this read EXISTS to stop the dashboard fetching those four collections to compute it. The `?summary=1` sibling is the same transport asked a second question, and it is asked only when somebody presses for it",
   "table-fields": "the custom-grid field catalogue for ONE base, assembled per caller from the schema + org config; it owns no rows and is read only while a table is being built",
 };
 

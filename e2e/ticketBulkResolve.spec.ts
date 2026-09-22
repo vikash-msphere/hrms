@@ -23,7 +23,8 @@ test("two tickets are resolved together from a bulk selection", async ({ as }) =
 
   try {
     await gotoRoute(page, "tickets", "Support");
-    await page.getByRole("tab", { name: /^All/ }).click();
+    // "All" is a scope CHIP over the desk's one table, not a tab over four (see `tickets.spec.ts`).
+    await page.getByRole("button", { name: /^All/ }).click();
 
     for (const subject of subjects) {
       const row = page.locator("tbody tr").filter({ hasText: subject });

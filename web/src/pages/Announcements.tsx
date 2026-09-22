@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, useEffect } from "react";
-import { Megaphone, Plus, Pencil, Trash2, MessageCircle, SmilePlus, Eye, ChevronDown, Trophy, Award, BarChart3, MessageSquare, Send, CalendarClock, Pin, PinOff, Link2, Maximize2, X, CheckCheck, Users, Mail, BellOff, Search, ArrowUp, ArrowLeft, ChevronUp, FilterX, Loader2 } from "lucide-react";
+import { Megaphone, Plus, Pencil, Trash2, MessageCircle, SmilePlus, Eye, EyeOff, ChevronDown, Trophy, Award, BarChart3, MessageSquare, Send, CalendarClock, Pin, PinOff, Link2, Maximize2, X, CheckCheck, Users, Mail, BellOff, Search, ArrowUp, ArrowLeft, ChevronUp, FilterX, Loader2 } from "lucide-react";
 import { patch, invoke, get, ApiError } from "@/api";
 import { navigate, recordUrl, pagePath } from "@/router";
 import { useCollection, type LoadState } from "@/hooks/useCollection";
@@ -38,6 +38,8 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
+import { useConfirm } from "@/components/common/confirm";
+import { confirmDecision } from "@/lib/confirmDecision";
 import { AccessItem } from "@/components/access/AccessItem";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -110,7 +112,17 @@ const READ_DWELL_MS = 2500;
 
 // Written but not sent: a draft, or a post scheduled for later. Only people who can post ever receive one from
 // the server, so this is a presentation split, not an access decision.
-const isDraft = (a: Announcement) => a.published === false;
+//
+// A WITHDRAWN POST IS NOT A DRAFT, whoever withdrew it. `disabled` is the column both the `:unpublish`/hide
+// path and a moderator's decision write, and a post carrying it has been taken DOWN - which is a different
+// thing from one its author has not finished. Read as a draft it turned up on the Drafts strip looking like
+// unfinished work, so a post that moderation had deliberately hidden sat in the same list as tomorrow's
+// announcement, inviting somebody to publish it back. Withdrawn posts belong to the surface that withdrew
+// them: the moderation queue's "Already decided" view, where the decision and the way back are.
+const isDraft = (a: Announcement) => a.published === false && a.disabled !== true;
+
+/** Taken down rather than unfinished: off the board entirely, in either list. */
+const isWithdrawn = (a: Announcement) => a.disabled === true;
 
 // What each kind is called and what it looks like, wherever the page offers to start one (the header button,
 // its menu, the starter row). The composer names them the same way.
@@ -175,6 +187,8 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   // `solo` is one post on a page of its own (`/announcements/<id>/view`). The board list is not read at all
   // there - the single row is fetched by id below - so a popped-out post costs one read, not a hundred.
   const { rows, setRows, state, error, reload, hasMore, loadMore } = useCollection<Announcement>("announcements", { enabled: !solo, max: FEED_PAGE_SIZE });
+  // For the moderator's own takedown below: hiding somebody else's post is a decision, so it asks first.
+  const confirm = useConfirm();
   // Free-text search. Not persisted (a search is a question you are asking now, not a view you curated). A list
   // page caps at 100 rows, so filtering the loaded rows would search a window rather than the board: from two
   // characters up the query goes to the server, which matches the FTS index over the whole collection and hands
@@ -363,10 +377,91 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   // Pin the post to the top of the board / take it down (moderation - the :pin/:unpin verb grants). The
   // response is the reserialized row; folding it in re-sorts the feed locally.
   async function togglePin(a: Announcement) {
+    const unpinning = !!a.pin_time;
+    // UNPINNING IS NOT ASKED ABOUT. It takes a post out of the pinned group and leaves it on the board,
+    // which is both reversible and small; a dialog in front of it is the noise that trains people through
+    // the dialogs that matter. Pinning is the loud one - it puts a post above everything else for the whole
+    // company - so that is the half that asks.
+    if (!unpinning) {
+      // Whatever is pinned NOW, from the board list rather than the filtered view: a search or a kind chip
+      // can hide the pinned post from `source`, and "nothing else is pinned" read off a narrowed list is
+      // how somebody ends up with two posts at the top having been told there would be one.
+      const pinned = rows.find((r) => r.pin_time && r.path !== a.path);
+      const name = (x: Announcement) => (x.title?.trim() ? `"${x.title}"` : "this post");
+      const ok = pinned
+        ? await confirmDecision(confirm, "pinReplacing", name(a), name(pinned))
+        : await confirmDecision(confirm, "pin", name(a));
+      if (!ok) return;
+      // Unpin the incumbent FIRST, and let a failure stop the whole thing. The other order can leave two
+      // posts pinned - which is exactly what the person was told would not happen - and doing it in either
+      // order without this guard means a half-applied answer to a question they said yes to once.
+      if (pinned) {
+        try {
+          fold(await invoke<Announcement>("announcements/" + idOf(pinned.path), "unpin"));
+        } catch (e) {
+          // A GONE incumbent is not a failure to stop for: somebody deleted that post between this page
+          // reading the board and the press, so "only one post leads the board" is already true and the
+          // pin should go ahead. Anything else - a refused unpin, a conflict - leaves two posts pinned if
+          // we carry on, which is not what the dialog said would happen, so that aborts.
+          if ((e as ApiError).status !== 404) {
+            toast({ title: "Couldn't unpin the current post", description: `${(e as Error).message} - nothing was changed.`, variant: "destructive" });
+            return;
+          }
+        }
+      }
+    }
     try {
-      fold(await invoke<Announcement>("announcements/" + idOf(a.path), a.pin_time ? "unpin" : "pin"));
+      fold(await invoke<Announcement>("announcements/" + idOf(a.path), unpinning ? "unpin" : "pin"));
     } catch (e) {
       toast({ title: "Couldn't pin", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
+  // Take a post off the wall by hand - the moderator's own judgement, no model flag involved.
+  //
+  // Addressed to `moderation`, not to the post's own collection, because that is where the permission
+  // lives: one grant covers the noticeboard, its replies and the suggestion box, and whoever holds it is
+  // the same person on all three. The post's path travels as the body's `host`, which the inbound edge
+  // decodes like any other ref.
+  async function hideByHand(a: Announcement) {
+    const subject = a.title?.trim() ? `"${a.title}"` : "this post";
+    if (!(await confirmDecision(confirm, "hide", subject))) return;
+    try {
+      await invoke("moderation", "hide", undefined, { host: a.path });
+      toast({ title: "Post hidden", description: "Its author has been told. You can put it back from Flagged posts.", variant: "success" });
+      // The row is gone from every board read now, so the page has to re-ask rather than patch a row in.
+      reload();
+    } catch (e) {
+      toast({ title: "Couldn't hide it", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
+  // Deleting a post asks first, which `useSoftDelete` deliberately does not do on its own.
+  //
+  // THE HOOK'S RULE IS RIGHT AND THIS IS A LOCAL EXCEPTION, so it is here rather than in the hook: a soft
+  // delete is reversible and carries an Undo on its toast, and a dialog in front of every reversible delete
+  // in the app is the noise that teaches people to click through the dialogs that matter. What is different
+  // on this card is the NEIGHBOUR. The bin now sits inches from a moderator's Hide, and hiding asks; one of
+  // two adjacent buttons asking and the other firing on the click reads as the silent one being the safer -
+  // and it is the opposite, because a hide tells the author and comes back from the queue while this takes
+  // the post off the board for everybody.
+  async function deletePost(a: Announcement) {
+    const subject = a.title?.trim() ? `"${a.title}"` : "this post";
+    if (!(await confirmDecision(confirm, "deletePost", subject))) return;
+    await sd.softDelete(a);
+  }
+
+  // The same act on a reply. Its id is the reply's own, under the `announcement-replies` collection - the
+  // one the moderation queue addresses it by, and the reason a reply can be taken down without touching the
+  // post it sits under.
+  async function hideReply(replyId: string) {
+    if (!(await confirmDecision(confirm, "hide", "this reply"))) return;
+    try {
+      await invoke("moderation", "hide", undefined, { host: `announcement-replies/${replyId}` });
+      toast({ title: "Reply hidden", description: "Its author has been told. You can put it back from Flagged posts.", variant: "success" });
+      reload();
+    } catch (e) {
+      toast({ title: "Couldn't hide it", description: (e as Error).message, variant: "destructive" });
     }
   }
 
@@ -431,7 +526,10 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   // in land where the server already placed them: pinned posts lead, the rest run newest-first by when they
   // went live. Sorting here as well as there is what lets a `:pin` or a just-written post reorder the board
   // without a refetch.
-  const feed = useMemo(() => source.filter((a) => !isDraft(a)).sort(byBoardOrder), [source]);
+  // `isWithdrawn` as well as `isDraft`: the server sends a disabled post to anyone who may see restricted
+  // rows, and without this it landed in the live feed between two posts everybody can see - an editor
+  // reading the board could not tell which of the three had been taken down.
+  const feed = useMemo(() => source.filter((a) => !isDraft(a) && !isWithdrawn(a)).sort(byBoardOrder), [source]);
   // Not-yet-published posts, soonest-scheduled first and undated ones last: a staging list reads by when things
   // are due to go out, not by when they were written.
   const drafts = useMemo(() => {
@@ -1168,8 +1266,17 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
                             <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(a)} aria-label="Edit"><Pencil className="h-3.5 w-3.5" /></Button>
                           </AccessAction>
                         )}
+                        {/* MODERATION, not editing: the grant is `moderation.hide`, so this appears for a
+                            moderator who has no rights over the post itself and stays absent for an author
+                            who can edit their own. `AccessAction` reads that from the caller's own
+                            capabilities - the page tests nothing. */}
+                        <AccessAction collection="moderation" verb="hide" label="Take this post off the wall">
+                          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void hideByHand(a)} aria-label="Take off the wall" title="Take this post off the wall (moderation)">
+                            <EyeOff className="h-3.5 w-3.5" />
+                          </Button>
+                        </AccessAction>
                         {can.includes("delete") && (
-                          <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => sd.softDelete(a)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>
+                          <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => void deletePost(a)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>
                         )}
                       </div>
                       {/* The whole card is clickable for a mouse, but a click target is not an affordance a
@@ -1339,7 +1446,20 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
                                       <RelativeTime iso={rep.create_time} className="text-xs text-muted-foreground" />
                                     </div>
                                     <RichText source={rep.body} className="mt-0.5 text-sm text-foreground/90" />
-                                    <ReactionBar className="mt-1.5" reactions={rep.reactions} canReact={can.includes("react") && !!rep.id} onToggle={(emoji) => toggleReact(a, emoji, rep.id)} nameOf={empName} />
+                                    <div className="mt-1.5 flex items-center gap-2">
+                                      <ReactionBar reactions={rep.reactions} canReact={can.includes("react") && !!rep.id} onToggle={(emoji) => toggleReact(a, emoji, rep.id)} nameOf={empName} />
+                                      {/* A reply is the surface that most often needs taking down and the one
+                                          hiding the post cannot fix: the thread belongs to its author, and a
+                                          commenter's words are not theirs to answer for. Same grant as the
+                                          post's own control. */}
+                                      {rep.id && (
+                                        <AccessAction collection="moderation" verb="hide" label="Take this reply off the thread">
+                                          <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => void hideReply(rep.id!)} aria-label="Take off the thread" title="Take this reply off the thread (moderation)">
+                                            <EyeOff className="h-3 w-3" />
+                                          </Button>
+                                        </AccessAction>
+                                      )}
+                                    </div>
                                   </div>
                                 </div>
                               );

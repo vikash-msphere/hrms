@@ -53,7 +53,13 @@ test.describe("table state in the URL", () => {
     await sortBy(author, "Name");
     await sortBy(author, "Name"); // and again, for descending
     await expect(header(author, "Name")).toHaveAttribute("aria-sort", "descending", { timeout: 30_000 });
-    await expect.poll(() => author.url(), { timeout: 30_000 }).toContain("t.departments");
+    // Waited for the LINK to say descending, not merely for the param to exist. The URL is mirrored on a
+    // debounce, and this table has already written an ASCENDING link one press earlier - so "t.departments is
+    // in the address" was true before the second press was mirrored, and the link copied in that window shares
+    // the sort the sender had a moment ago rather than the one they are looking at.
+    await expect
+      .poll(() => decodeURIComponent(author.url()), { timeout: 30_000 })
+      .toContain('"s":"name.desc"');
     const shared = author.url();
 
     // A colleague opening the pasted link sees the same table, not the default one: the sender's order, on

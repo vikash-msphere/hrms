@@ -17,7 +17,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { failedPrecondition, invalidArgument, notFound, resourceExhausted } from "../lib/errors";
-import { fence } from "../domain/aiPolicy";
+import { fence, scrubIdentifiers } from "../domain/aiPolicy";
 import { MEASURE_PROMPT_VERSION, MEASURE_SYSTEM } from "../domain/goalMeasure";
 import { aiFeatureOn, aiGenerate } from "./ai";
 
@@ -56,10 +56,12 @@ export async function proposeGoalMeasure(deps: Deps, user: AppUser, goalId: stri
 
   const out = await aiGenerate(
     deps,
-    { feature: "goals.measure", userId: user.uuid, subject: `goals/${goalId}`, collection: "goals" },
+    { feature: "goals.measure", userId: user.uuid, subject: `goals/${goalId}`, reads: { collection: "goals" } },
     {
       system: MEASURE_SYSTEM,
-      user: fence("the goal", text),
+      // Scrubbed as well as fenced: a goal description is free text somebody typed, and the net under the
+      // denylist exists for the PAN or Aadhaar that somebody pasted into a field nobody expected it in.
+      user: fence("the goal", scrubIdentifiers(text)),
       promptVersion: MEASURE_PROMPT_VERSION,
       maxTokens: 200,
     },

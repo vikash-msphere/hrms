@@ -22,6 +22,12 @@ test("the alignment picker will not offer a goal its own descendant", async ({ a
   // starts once a parent and a child exist.
   const parent = await makeGoal(page, { title: parentTitle });
   const child = await makeGoal(page, { title: childTitle, parent });
+  // A THIRD GOAL THIS PAIR IS NOT RELATED TO, so the picker exists at all. The field is drawn only when there
+  // is something in it to pick (web/src/pages/Goals.tsx), and editing the parent excludes the parent and
+  // everything under it - so on a page holding only this spec's two goals there is nothing left to offer and
+  // no "Aligns to" to press. It passed anyway whenever another spec's goals happened to be visible to this
+  // manager at the same moment, which is a spec that is only as sound as its neighbours are busy.
+  const spare = await makeGoal(page, { title: `E2E spare goal ${stamp}` });
 
   try {
     await gotoRoute(page, "goals", "Goals");
@@ -61,6 +67,7 @@ test("the alignment picker will not offer a goal its own descendant", async ({ a
   } finally {
     await purge(admin, child);
     await purge(admin, parent);
+    await purge(admin, spare);
   }
 });
 

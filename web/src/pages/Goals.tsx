@@ -982,7 +982,15 @@ export default function Goals({ me, openId, scope: forcedScope }: {
       // A CLEARED reference goes out as "", never null: the contract types the field as a string (see api.ts,
       // "No nulls on the wire"), so unlinking with a null is refused by the proxy with a 422 the worker never
       // sees - the same trap the task editor's department picker fell into.
-      await patch(`cards/${idOf(card.path)}`, { goal: unlink ? "" : g.path }, card.etag);
+      // WRITTEN AGAINST A VERSION READ NOW, not against the one the drawer's list is holding. Those rows come
+      // from the cards collection with its own freshness window, so the version beside them can be seconds old
+      // by the time somebody presses the button - and anything that touched the card in between (a drag across
+      // the board, an automation, this reader's own delivery a moment ago) turns the press into a lost-update
+      // refusal that has nothing to do with what they asked for. There is nothing to merge here either way: the
+      // whole edit is one reference, which the button names in full, so a stale version protects nobody. One
+      // indexed row read is the price of the button meaning what it says.
+      const fresh = await get<KanbanCard>(`cards/${idOf(card.path)}`);
+      await patch(`cards/${idOf(card.path)}`, { goal: unlink ? "" : g.path }, fresh.etag);
       toast({ title: unlink ? "Task unlinked" : "Task linked", description: card.title, variant: "success" });
       reloadCards();
       reload(); // the goal's derived progress may have shifted
@@ -1947,7 +1955,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
           {/* A key result cannot be saved without an objective, and the picker for one was hidden whenever
               there were no objectives to pick - so choosing "Key result" in an empty org left the form
               refusing to save, explaining why, and offering no control that could put it right. */}
-          {alignables.length === 0 && form.kind === "key_result" && (
+          {alignables.length === 0 && form.kind === "key_result" && state === "ready" && (
             <p className="text-xs text-warning">
               There are no objectives to put this under yet. Create the objective first, then add its key results.
             </p>

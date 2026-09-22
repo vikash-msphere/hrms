@@ -78,16 +78,20 @@ test.describe("new-activity badges", () => {
     const requester = await as("employee");
     const subject = `E2E badge ticket ${Date.now()}`;
 
-    // Baseline, then away: the "All" tab is a scope of the tickets the page already reads, so its badge is
-    // counted in the browser rather than asked for.
+    // Baseline, then away: "All" is a scope of the tickets the page already reads (a chip over one table, not
+    // a tab over four - see `tickets.spec.ts`), so its badge is counted in the browser rather than asked for.
     await gotoRoute(desk, "tickets", "Support");
-    const all = desk.getByRole("tab", { name: /^All/ });
+    const all = desk.getByRole("button", { name: /^All/ });
     await expect(all).toBeVisible({ timeout: 30_000 });
     // The baseline is READ, not assumed to be zero: several specs share this desk and raise their own tickets
-    // (the same reason the assertion below counts rather than expecting "1"), so this tab can already be
+    // (the same reason the assertion below counts rather than expecting "1"), so this chip can already be
     // advertising somebody else's arrival before this test has done anything. What is being pinned is that
     // THIS arrival moves the number, which is true whatever it started at.
-    const badge = async () => Number(((await all.textContent()) ?? "").replace(/^All/, "").trim() || "0");
+    //
+    // Read off the badge's own attribute, not out of the chip's text: the chip also wears the scope's row
+    // count, so its text holds two numbers and the badge's is capped at "99+" once it gets big.
+    const activity = all.locator("[data-activity-count]");
+    const badge = async () => ((await activity.count()) ? Number(await activity.getAttribute("data-activity-count")) : 0);
     const before = await badge();
     await gotoRoute(desk, "dashboard");
 
@@ -103,11 +107,11 @@ test.describe("new-activity badges", () => {
     // asserted is that the arrival was counted at all.
     await expect.poll(badge, { timeout: 30_000 }).toBeGreaterThan(before);
 
-    // Visiting is what clears it - the tab this desk is now looking at cannot also be advertising that
+    // Visiting is what clears it - the scope this desk is now looking at cannot also be advertising that
     // something new landed on it. (What the table itself lists is `tickets.spec.ts`'s business.)
     await all.click();
-    await expect(all).toHaveAttribute("aria-selected", "true");
-    await expect(all).toHaveText("All", { timeout: 30_000 });
+    await expect(all).toHaveAttribute("aria-pressed", "true");
+    await expect(activity).toHaveCount(0, { timeout: 30_000 });
 
     await purge(desk, ticket.path);
   });

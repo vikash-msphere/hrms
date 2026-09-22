@@ -911,6 +911,13 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   // rows of its own. test/verbInvalidationDrift.test.ts cannot see this one: it scans the `verbs:` blocks of
   // collection-factory routes, and the moderation queue is a hand-rolled mount (src/routes/moderation.ts).
   "moderation:decide": ["announcements", "suggestions", "notifications"],
+  // A manual takedown from the board or the suggestion box, which writes the same walls as a decision does
+  // - the post is the thing that changed, not the queue.
+  "moderation:hide": ["announcements", "suggestions", "notifications"],
+  // Putting a hidden post back writes the same two walls in the other direction - an announcement returns
+  // as a draft, a suggestion and a reply come back - so both lists are stale in exactly the way this map
+  // exists to fix, and the author's bell gets the notice about it.
+  "moderation:unhide": ["announcements", "suggestions", "notifications"],
   // A narration READS. It runs the team report twice and writes nothing, so it is a POST for transport reasons
   // only - the same shape `batch:run` has. Left unmapped it took the default and spent two list reads (its own
   // collection and the bell) on every press of "What changed", on a page that had just paid for the report.

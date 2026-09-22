@@ -136,7 +136,9 @@ export async function extractReceipt(deps: Deps, user: AppUser, expenseId: strin
 
   const out = await aiGenerate(
     deps,
-    { feature: "expenses.receiptExtract", userId: user.uuid, subject: `expenses/${expenseId}` },
+    // Declared rather than assumed: `expenses` is not denied, and the assert above says why this call names
+    // it by hand as well - the day somebody moves `expenses` onto NEVER_TO_MODEL, both must stop.
+    { feature: "expenses.receiptExtract", userId: user.uuid, subject: `expenses/${expenseId}`, reads: { collection: "expenses" } },
     {
       system: systemFor(allowed),
       // `scrubStatutoryIds`, NOT the general identifier scrub: that one deletes long digit runs, and an
@@ -194,18 +196,41 @@ export function parseReceipt(raw: string, allowed: readonly ReceiptField[]): Ext
   return out;
 }
 
-/** Park the suggestion beside the expense. Accepting it is the submitter PATCHing the expense through the
- *  ordinary route, so nothing here writes to the claim. */
+/**
+ * Record THAT an extraction happened, beside the expense. Accepting it is the submitter PATCHing the expense
+ * through the ordinary route, so nothing here writes to the claim.
+ *
+ * THE FIELD NAMES, NOT THE VALUES, and that is the whole of what this row is for. Nothing in the app ever
+ * reads an extraction payload back: the panel already has the fields in the HTTP response, no route or
+ * serializer fetches the row, and no decide verb ever sets its `state`. So storing vendor, invoice number,
+ * amounts and date bought no provenance anybody could consult and no measurement anybody could take - it was
+ * only a second copy of the receipt's contents with its own lifetime. What is left answers the questions the
+ * table is actually asked: which feature ran, on which record, with which model, and how many fields it
+ * produced.
+ *
+ * UPSERTED, because `ai_suggestions_host_idx` is unique on `(host_collection, host_record_id, feature)` and
+ * the panel has a "Read again" button. A bare insert made the second read a UNIQUE violation swallowed by the
+ * catch below, so the row stayed at whatever the first read said for ever.
+ */
 async function recordSuggestion(deps: Deps, expenseId: string, fields: ExtractedReceipt): Promise<void> {
   try {
-    await deps.db.insert(schema.aiSuggestions).values({
+    const now = deps.clock.now();
+    const names = Object.keys(fields);
+    const values = {
       hostCollection: "expenses",
       hostRecordId: expenseId,
       feature: "expenses.receiptExtract",
-      payloadJson: JSON.stringify(fields),
+      payloadJson: JSON.stringify({ fields: names }),
       model: MODELS.generate,
-      basis: 1,
-    });
+      basis: names.length,
+    };
+    await deps.db
+      .insert(schema.aiSuggestions)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [schema.aiSuggestions.hostCollection, schema.aiSuggestions.hostRecordId, schema.aiSuggestions.feature],
+        set: { payloadJson: values.payloadJson, basis: values.basis, model: values.model, state: "pending", decidedBy: null, decidedAt: null, updatedAt: now },
+      });
   } catch (err) {
     // A suggestion that cannot be recorded is not a reason to withhold it from the person waiting: the
     // fields are already computed and the record is for the audit trail, not for the answer.

@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
 
 // The board's social machinery: a poll, a reaction, and a pin.
 //
@@ -55,7 +55,18 @@ test.describe("the board", () => {
 
     // A pin lifts the post out of the timeline and under the "Pinned" divider - moderation that has to be
     // visible to mean anything.
+    // PINNING NOW DISPLACES whatever is already pinned, which makes this spec share state with every other
+    // spec that pins. The board is org-wide, the incumbent may belong to a test running beside this one,
+    // and that test purges its post when it finishes - so the unpin this press issues can land on a post
+    // that has just been deleted. The app treats a gone incumbent as already unpinned and carries on (see
+    // `togglePin`), but the browser still logs the 404 it got, and this harness fails a test for any
+    // console error. Excused by URL rather than by status, so it tolerates exactly that race and nothing
+    // else.
+    allowConsoleErrors(reader, /:unpin$/);
     await card.getByRole("button", { name: "Pin" }).click();
+    // ...behind a confirmation, because pinning puts one post above everything for the whole company. The
+    // dialog names the post it displaces when there is one, so its confirm button carries either label.
+    await reader.getByRole("dialog").getByRole("button", { name: /^(Pin it|Unpin that, pin this)$/ }).click();
     await expect(reader.getByText("Pinned").first()).toBeVisible();
     await expect(reader.locator("div.shadow-card").filter({ hasText: title }).first()).toContainText(/Pinned/);
 

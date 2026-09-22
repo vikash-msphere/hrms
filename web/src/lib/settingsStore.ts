@@ -28,6 +28,10 @@ type Row = { key: string; value?: unknown; etag?: string };
 let loaded: Promise<Map<string, unknown>> | null = null;
 // Per-key etag of the version the snapshot holds, in step with `loaded`/`stored` at all times.
 let etags = new Map<string, string>();
+// Per-key etag of the version a READER was last given (see `getSetting`). Unlike `etags` this does not move
+// when the snapshot is refreshed behind an open form, which is the whole point: it is the version whatever is
+// on somebody's screen was built from, and therefore the one their save has to be guarded on.
+const handedOut = new Map<string, string>();
 // Bumped on every invalidation, so a read that is WAITING for the reconciliation can tell whether the copy it
 // was about to serve was dropped while it waited.
 let generation = 0;
@@ -254,7 +258,11 @@ export async function getSetting<T>(key: string): Promise<{ value?: T; version?:
   // THE VERSION THE VALUE WAS READ AT, handed back with it. A panel that rebuilds a whole blob from a snapshot
   // it took at mount must write against the version THAT value came from; looking one up at write time is a
   // different claim, and in one specific case a false one - see `saveSetting`.
-  return { value, version: etags.get(key) };
+  const version = etags.get(key);
+  // Remembered as well as returned, because most panels take the value and drop the version, and `saveSetting`
+  // then had nothing to guard with but the LIVE one - which is the same as not guarding at all (see there).
+  if (version) handedOut.set(key, version);
+  return { value, version };
 }
 
 /**
@@ -283,13 +291,28 @@ export async function saveSetting(key: string, body: { value: unknown }, version
     // server accepted, and a panel holding a pre-write copy of the blob wrote the sibling's fields back to
     // their old values - with a green toast and no 409 anywhere. Holding the version with the value turns
     // that back into the conflict the guard is for.
-    await patch(`settings/${key}`, body, version ?? etags.get(key));
+    //
+    // ONE panel passes it. The rest read through `getSetting`, keep the value and drop the version - so the
+    // fallback was the live snapshot etag, which is a validator for a version nobody on screen has seen and
+    // matches whatever the last write left, including somebody else's. Every one of those saves was an
+    // unguarded blob overwrite wearing an If-Match. `handedOut` is what the reader was actually given, and it
+    // does not move when the snapshot refreshes underneath an open form; the explicit argument still wins for
+    // a caller that tracks its own.
+    const saved = await patch<{ etag?: string }>(`settings/${key}`, body, version ?? handedOut.get(key) ?? etags.get(key));
+    // The version this write CREATED, taken from its own answer. Without it the panel that just saved is
+    // holding the version it saved OVER: press Save twice (flip a switch, put it back - which is what a form
+    // with a toggle is) and the second press is refused as a conflict with the reader's own first press.
+    if (saved?.etag) handedOut.set(key, saved.etag);
+    else handedOut.delete(key);
   } catch (e) {
     // A refused save means the version this session holds is no longer the current one, so the SNAPSHOT is
     // what has to go. Without this the etag that just lost stayed in the map and every later attempt sent it
     // again: the first conflict turned into a panel whose Save could never succeed, for the rest of the
     // page's life, however many times somebody pressed it. Dropping it makes the next attempt carry a live
-    // version - and, because the values are re-read too, an attempt built on what actually won.
+    // version - and, because the values are re-read too, an attempt built on what actually won. The version
+    // handed to the reader goes with it, for the same reason and to the same end: the next `getSetting` is
+    // what re-arms the guard, against the value the panel is then showing.
+    handedOut.delete(key);
     invalidateSettings();
     throw e;
   }

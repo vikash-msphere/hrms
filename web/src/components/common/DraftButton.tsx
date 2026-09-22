@@ -7,7 +7,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
-import { useAiFeature } from "@/lib/aiFeatures";
+import { MAX_DRAFT_INPUT, useAiFeature } from "@/lib/aiFeatures";
 
 // The "Draft" affordance for a long-form field, shared by every page that has one.
 //
@@ -76,6 +76,14 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
   // Context is not a draft in progress, so it never turns this into an "Improve".
   const improving = !existingIsContext && !!(existing && existing.trim());
 
+  // WHAT THE SERVER WILL REFUSE, SAID BEFORE THE ROUND TRIP. Both halves are capped at `MAX_DRAFT_INPUT` and
+  // the route answers 400 past it, so improving a long announcement - the case the "Improve" label invites -
+  // used to fail with a message about character counts after the wait. The instruction is bounded by the box
+  // itself; the existing text is not something this dialog can shorten, and sending a truncated copy would
+  // quietly improve a different post to the one on screen, so the answer is to say so and not send it.
+  const existingTooLong = (existing?.length ?? 0) > MAX_DRAFT_INPUT;
+  const overLong = existingTooLong ? `That text is ${existing!.length.toLocaleString()} characters; drafting reads up to ${MAX_DRAFT_INPUT.toLocaleString()}.` : null;
+
   function close() {
     setOpen(false);
     // Cleared on the way out, not on the way in: a dialog that reopens showing the previous answer invites
@@ -87,6 +95,10 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
   async function run() {
     const text = instruction.trim();
     if (!text) return;
+    if (overLong) {
+      toast({ title: "Too long to read", description: overLong, variant: "destructive" });
+      return;
+    }
     setBusy(true);
     try {
       // `api` rather than `invoke`: `invoke` invalidates the collection it addresses, and a draft writes
@@ -133,9 +145,11 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
             </DialogDescription>
           </DialogHeader>
 
+          {/* The cap the server enforces, applied where somebody can still do something about it. */}
           <Textarea
             autoFocus
             rows={3}
+            maxLength={MAX_DRAFT_INPUT}
             value={instruction}
             placeholder={improving
               ? "e.g. make it shorter and drop the last paragraph"
@@ -143,6 +157,14 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
             onChange={(e) => setInstruction(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void run(); }}
           />
+
+          {overLong && (
+            // Said in the dialog as well as on the press, because the button beside it is disabled and a
+            // disabled control with no reason is the thing this codebase hides rather than shows.
+            <p className="text-xs text-warning">
+              {overLong} {improving ? "Shorten it first, or draft a section at a time." : "Shorten what is on this item first."}
+            </p>
+          )}
 
           {result !== null && (
             <div className="space-y-1">
@@ -164,14 +186,14 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
           <DialogFooter>
             <Button variant="ghost" onClick={close} disabled={busy}>Cancel</Button>
             {result === null ? (
-              <Button onClick={run} disabled={busy || !instruction.trim()}>
+              <Button onClick={run} disabled={busy || !instruction.trim() || !!overLong}>
                 {busy ? "Writing…" : improving ? "Improve" : existingIsContext ? label : "Draft"}
               </Button>
             ) : (
               <>
                 {/* "Try again" keeps the instruction, because the common case after a poor answer is a small
                     edit to the wording rather than starting over. */}
-                <Button variant="outline" onClick={run} disabled={busy || !instruction.trim()}>
+                <Button variant="outline" onClick={run} disabled={busy || !instruction.trim() || !!overLong}>
                   {busy ? "Writing…" : "Try again"}
                 </Button>
                 <Button onClick={() => { onDraft(result); close(); }} disabled={busy}>Use this</Button>

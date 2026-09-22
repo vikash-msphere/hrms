@@ -77,7 +77,9 @@ export async function narrateAnalytics(
 
   const out = await aiGenerate(
     deps,
-    { feature: "analytics.narrate", userId: user.uuid },
+    // `reads: "none"` and it is true: the arithmetic found the movements and the model is only writing them
+    // up, so the prompt holds this file's own labels and numbers, never a row.
+    { feature: "analytics.narrate", userId: user.uuid, reads: "none" },
     {
       system: SYSTEM,
       user: promptFor(findings, q, prior),
