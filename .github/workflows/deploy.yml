@@ -39,7 +39,10 @@ jobs:
       # Config gate FIRST: preflight catches a REPLACE_WITH_* placeholder, a [limits]/CF_PLAN mismatch and a
       # malformed VAPID key - mistakes no build or test can see, and which otherwise only surface in
       # production. `npm run deploy` chains it locally; this is the same gate for the CI path.
-      # CF_PLAN must match the Cloudflare plan this account is actually on ("paid" = Workers Standard).
+      # CF_PLAN must match the Cloudflare plan this account is actually on. It defaults to "free", which is the
+      # plan in use (wrangler.toml has `[limits]` commented out to match). On moving to Workers Standard, set the
+      # `production` environment variable CF_PLAN=paid AND uncomment `[limits]` in both wrangler configs -
+      # preflight fails the deploy if the two disagree.
       #
       # The two _CONFIRMED values are dated acknowledgements of edge controls configured in the Cloudflare
       # DASHBOARD, which a preflight cannot read for itself (no binding for the zone, no token to ask with) -
@@ -49,11 +52,16 @@ jobs:
       # docs/deploy-security.md §1 and zone HSTS are actually in place, to the ISO date you verified them.
       - run: npm run preflight
         env:
-          CF_PLAN: ${{ vars.CF_PLAN || 'paid' }}
+          CF_PLAN: ${{ vars.CF_PLAN || 'free' }}
           WAF_RATE_LIMIT_CONFIRMED: ${{ vars.WAF_RATE_LIMIT_CONFIRMED }}
           HSTS_CONFIRMED: ${{ vars.HSTS_CONFIRMED }}
           SENTRY_RELEASE: ${{ env.RELEASE }}
           VITE_APP_VERSION: ${{ env.RELEASE }}
+          # Preflight only checks that the token is SET (it warns when source maps would not upload); the
+          # upload itself is the build:web step's. A secret reaches a step only through its own `env:` - being
+          # in the `production` environment is not enough - so without this line preflight warned "not set"
+          # on every deploy, even with the secret configured.
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       # Gate the deploy on `npm run verify` (spectral + eslint + tsc + the vitest gate). verify.yml is manual
       # only, so this is the one place it runs without somebody asking.
       - run: npm run verify
