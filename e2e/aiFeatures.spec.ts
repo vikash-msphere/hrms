@@ -336,8 +336,8 @@ test.describe("an AI feature switched on", () => {
 // docs/04-testing.md has the setup and the full account of what a local pass proves.
 //
 // WHAT A PASS IS EVIDENCE OF: the round trip - affordance, request, service, model, parser, result on screen.
-// It is NOT evidence about the production models. A local Gemma is not
-// `@cf/meta/llama-3.1-8b-instruct-fast`, and how well either writes is not a thing a browser test can assert.
+// It is NOT evidence about the production models. A local Gemma 3 is not the hosted
+// `@cf/google/gemma-4-26b-a4b-it`, and how well either writes is not a thing a browser test can assert.
 test.describe("an AI feature with a model behind it", () => {
   test("Draft writes text into the announcement composer", async ({ as }) => {
     // 360s because this is usually the FIRST model call of the run, so it pays to load the weights - tens of

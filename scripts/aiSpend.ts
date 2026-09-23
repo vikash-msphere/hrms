@@ -273,11 +273,23 @@ function ourSpend(w: ReturnType<typeof window>): Map<string, { calls: number; ne
     `select model, count(*) calls, sum(estimated_neurons) neurons, ` +
     `sum(case when outcome='error' then 1 else 0 end) errors ` +
     `from ai_usage where created_at >= ${w.fromMs} and cache_hit = 0 group by model`;
-  const raw = execFileSync("npx", ["wrangler", "d1", "execute", "hrms", "--remote", "--json", "--command", sql], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 32 * 1024 * 1024,
-  });
+  let raw: string;
+  try {
+    raw = execFileSync("npx", ["wrangler", "d1", "execute", "hrms", "--remote", "--json", "--command", sql], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 32 * 1024 * 1024,
+    });
+  } catch (e) {
+    // execFileSync's own message is the command line, which says nothing about why it failed. Wrangler puts
+    // the reason in the output as `"text": "..."` notes, so those are what get reported.
+    const out = `${(e as { stdout?: string }).stdout ?? ""}\n${(e as { stderr?: string }).stderr ?? ""}`;
+    if (/no such table: ai_usage/.test(out)) {
+      throw new Error("the remote database has no `ai_usage` table: the AI migration has not been applied (docs/deploy-ai.md step 4)");
+    }
+    const notes = [...out.matchAll(/"text":\s*"([^"]+)"/g)].map((m) => m[1]).join("; ");
+    throw new Error(`wrangler d1 execute failed: ${notes || out.trim().slice(0, 400)}`);
+  }
   // `--json` prints one array of result sets, each with its own `results` - but which wrangler versions put a
   // banner above it varies, and slicing from the first `[` in the output would take a bracket out of that
   // banner. Parse the whole thing first, and only fall back to finding where the array starts.
@@ -333,24 +345,46 @@ async function main() {
   console.log(`\nWindow: ${w.fromIso} .. ${w.toIso}  (${args.days} day${args.days === 1 ? "" : "s"}, UTC)`);
   console.log(`Metric: sum.${metric}  dimension: ${modelDim}${extras.length ? `  also: ${extras.join(", ")}` : ""}\n`);
 
-  const [spend, ours] = [await cloudflareSpend(metric, modelDim, [...extras], [...auditDims], w), ourSpend(w)];
+  const spend = await cloudflareSpend(metric, modelDim, [...extras], [...auditDims], w);
   const theirs = spend.byModel;
-
-  console.log(`${pad("role", 10)}${pad("model", 38)}${pad("calls o/t", 14)}${pad("our est", 10)}${pad("actual", 10)}ratio`);
-  console.log("-".repeat(92));
+  // OUR SIDE MAY BE UNREADABLE WHILE CLOUDFLARE'S IS NOT - before the AI migration there is no `ai_usage` at
+  // all - and Cloudflare's figures are the half nothing else can give. So a failure here is reported and the
+  // run carries on with our columns empty, rather than throwing away what was already fetched.
+  let ours = new Map<string, { calls: number; neurons: number; errors: number }>();
+  let oursUnreadable: string | null = null;
+  try {
+    ours = ourSpend(w);
+  } catch (e) {
+    oursUnreadable = e instanceof Error ? e.message : String(e);
+  }
 
   const models = new Set([...theirs.keys(), ...ours.keys()]);
+  // Sized to the longest id in the window, plus a gap: a fixed width ran `@cf/meta/llama-3.3-70b-instruct-fp8-fast`
+  // straight into its call count.
+  const mw = Math.max(38, ...[...models].map((m) => m.length + 2));
+  const rule = "-".repeat(mw + 54);
+
+  console.log(`${pad("role", 10)}${pad("model", mw)}${pad("calls o/t", 14)}${pad("our est", 10)}${pad("actual", 10)}ratio`);
+  console.log(rule);
+
   for (const model of [...models].sort()) {
     const role = ROLE_OF_MODEL.get(model);
     const t = theirs.get(model);
     const o = ours.get(model);
     const ratio = t && o && o.neurons > 0 ? (t.neurons / o.neurons).toFixed(2) : "-";
     console.log(
-      pad(role ?? "(other)", 10) + pad(model, 38) +
+      pad(role ?? "(other)", 10) + pad(model, mw) +
         pad(`${o?.calls ?? 0}/${t?.calls ?? 0}`, 14) +
         pad(o?.neurons ?? 0, 10) + pad(t?.neurons?.toFixed(0) ?? "-", 10) + ratio,
     );
   }
+
+  // The account-wide figure is what the free allowance is measured against (10,000 a UTC day), whichever
+  // models spent it and whether or not this app was the caller.
+  const total = [...theirs.values()].reduce((n, t) => n + t.neurons, 0);
+  const totalCalls = [...theirs.values()].reduce((n, t) => n + t.calls, 0);
+  console.log(rule);
+  console.log(`${pad("total", mw + 10)}${pad(`-/${totalCalls}`, 14)}${pad("", 10)}${total.toFixed(0)}`);
 
   console.log(`\nESTIMATED_NEURONS today: ${JSON.stringify(ESTIMATED_NEURONS)}`);
   console.log("Multiply each role's constant by its ratio and record the date beside it in aiPolicy.ts.");
@@ -363,24 +397,29 @@ async function main() {
   // decision in ai-observability-plan.md needs the round trip, which only `ai_usage.duration_ms` has: the
   // difference between the two is the network, and the network is the term that decides it.
   if (extras.length) {
-    console.log(`\n${pad("role", 10)}${pad("model", 38)}${extras.map((e) => pad(e.replace(/^total/, ""), 18)).join("")}per call`);
-    console.log("-".repeat(92));
+    console.log(`\n${pad("role", 10)}${pad("model", mw)}${extras.map((e) => pad(e.replace(/^total/, ""), 18)).join("")}per call`);
+    console.log(rule);
     for (const model of [...models].sort()) {
       const t = theirs.get(model);
       if (!t) continue;
       const perCall = t.calls > 0 && t.extras.totalInferenceTimeMs !== undefined ? `${(t.extras.totalInferenceTimeMs / t.calls).toFixed(1)}ms inference` : "";
       console.log(
-        pad(ROLE_OF_MODEL.get(model) ?? "(other)", 10) + pad(model, 38) +
+        pad(ROLE_OF_MODEL.get(model) ?? "(other)", 10) + pad(model, mw) +
           extras.map((e) => pad(Math.round(t.extras[e] ?? 0), 18)).join("") + perCall,
       );
     }
   }
   console.log("");
 
+  if (oursUnreadable) {
+    console.warn(`ai_usage could not be read, so the "our est" and "ratio" columns are empty: ${oursUnreadable}\n`);
+  }
+
   // A model Cloudflare billed for and we have no row for is the one result worth stopping on: either
   // something is calling Workers AI outside services/ai.ts, or the trail is not recording every call.
+  // Skipped when our side could not be read at all, where every model would trip it and none would mean it.
   for (const model of models) {
-    if (!ours.has(model) && theirs.has(model)) {
+    if (!oursUnreadable && !ours.has(model) && theirs.has(model)) {
       console.warn(`WARNING: ${model} was billed but has no ai_usage rows. Something is calling Workers AI off the trail.`);
     }
   }
@@ -399,8 +438,10 @@ async function main() {
   const theirErrs = [...spend.byError].filter(([code]) => code !== "0" && code !== "null").reduce((n, [, c]) => n + c, 0);
   if (theirErrs > 0 || ourErrs > 0) {
     const codes = [...spend.byError].filter(([c]) => c !== "0" && c !== "null").map(([c, n]) => `${c}=${n}`).join("  ");
-    console.log(`Errors: ai_usage ${ourErrs}, Cloudflare ${theirErrs}${codes ? `  (${codes})` : ""}`);
-    if (theirErrs > ourErrs) {
+    console.log(`Errors: ai_usage ${oursUnreadable ? "unreadable" : ourErrs}, Cloudflare ${theirErrs}${codes ? `  (${codes})` : ""}`);
+    // Only a comparison when there is something to compare against: with `ai_usage` unreadable our count is
+    // an empty map's zero, and every Cloudflare failure would be reported as a lossy trail.
+    if (!oursUnreadable && theirErrs > ourErrs) {
       console.warn(`${theirErrs - ourErrs} failed call(s) never reached ai_usage. The trail is missing calls that were made.`);
     }
   }

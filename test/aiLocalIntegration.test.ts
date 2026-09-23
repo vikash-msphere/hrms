@@ -30,7 +30,7 @@ import { parseConduct } from "../src/domain/conduct";
 //     a trailing sentence - are exactly what they have to survive.
 //
 // WHAT IT IS STILL NOT EVIDENCE OF. This runs against Ollama on the developer's machine, not Workers AI. It
-// says nothing about whether `@cf/meta/llama-3.1-8b-instruct-fast` drafts usefully or whether
+// says nothing about whether `@cf/google/gemma-4-26b-a4b-it` drafts usefully or whether
 // `@cf/meta/llama-guard-3-8b` judges content correctly - the moderation case below deliberately asserts on
 // the FORMAT of a verdict and never on the verdict itself. docs/04-testing.md has the full split of what a
 // local run proves and what only the real service can answer.

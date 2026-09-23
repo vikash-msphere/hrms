@@ -180,6 +180,30 @@ describe("the two text transports", () => {
     expect(JSON.parse(answer)).toEqual({ safe: false, categories: ["S10"] });
   });
 
+  it("read the chat-completions reply the instruct model sends instead of `response`", async () => {
+    // Gemma 4 on Workers AI answers `{ choices: [{ message: { content } }] }` and sends no `response` field.
+    // Reading `response` alone turned every generation into "" - drafts, extractions and the conduct pass
+    // all "succeeding" with nothing in them.
+    const { binding } = fakeBinding(() => ({ choices: [{ message: { content: "the draft" } }] }));
+
+    expect(await makeTextModel(binding).generate({ system: "s", user: "u" })).toBe("the draft");
+  });
+
+  it("switch the instruct model's thinking off, and send the guard model no such key", async () => {
+    // Measured: with thinking on, Gemma 4 spent a 200-token ceiling reasoning and returned empty content.
+    // Llama Guard's input schema has no `chat_template_kwargs`, so it must not travel there.
+    const { binding, calls } = fakeBinding(() => ({ response: "ok" }));
+    const hosted = makeTextModel(binding);
+
+    await hosted.generate({ system: "s", user: "u" });
+    expect(calls.at(-1)!.model).toBe(MODELS.generate);
+    expect(calls.at(-1)!.input.chat_template_kwargs).toEqual({ enable_thinking: false });
+
+    await hosted.generate({ system: "", user: "u", role: "moderate" });
+    expect(calls.at(-1)!.model).toBe(MODELS.moderate);
+    expect(calls.at(-1)!.input).not.toHaveProperty("chat_template_kwargs");
+  });
+
   it("both return indices into the candidate list, best first", async () => {
     // `rerank` hands back positions, not strings, and a transport that returns its own ordering without the
     // indices would have the caller score the wrong rows. Production reads them off the response; the local

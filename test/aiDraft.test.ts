@@ -12,7 +12,7 @@ import { genId } from "../src/lib/idCodec";
 import type { TextModel } from "../src/ports";
 import { draftText } from "../src/services/aiDraft";
 import { DRAFT_KINDS, DRAFT_COLLECTIONS, draftKind, draftPrompt, MAX_DRAFT_INPUT } from "../src/domain/aiDraft";
-import { NEVER_TO_MODEL, BUDGET, CONSENTED_PATHS, assertConsentedPath } from "../src/domain/aiPolicy";
+import { NEVER_TO_MODEL, BUDGET, CONSENTED_PATHS, MODELS, assertConsentedPath } from "../src/domain/aiPolicy";
 import { COLLECTIONS } from "../src/domain/collections";
 
 // Drafting. The claim the whole feature rests on is that a draft is built from the caller's own typed text
@@ -124,7 +124,7 @@ describe("refusals reach the caller as answers", () => {
 
   it("names the budget and says when it resets", async () => {
     await deps.db.insert(schema.aiUsage).values({
-      feature: "earlier", model: "@cf/meta/llama-3.1-8b-instruct-fast", role: "generate",
+      feature: "earlier", model: MODELS.generate, role: "generate",
       inputHash: "0".repeat(64), estimatedNeurons: BUDGET.dailyNeurons,
     });
     await expect(draftText(deps, user, { kind: "announcement", instruction: "anything" })).rejects.toThrow(/midnight UTC/);
@@ -133,7 +133,7 @@ describe("refusals reach the caller as answers", () => {
   it("distinguishes the caller's own hourly limit from the org budget", async () => {
     for (let i = 0; i < BUDGET.perUserHourlyGenerations; i++) {
       await deps.db.insert(schema.aiUsage).values({
-        feature: "draft.announcement", model: "@cf/meta/llama-3.1-8b-instruct-fast", role: "generate",
+        feature: "draft.announcement", model: MODELS.generate, role: "generate",
         userId: user.uuid, inputHash: `${i}`.padStart(64, "0"), estimatedNeurons: 0,
       });
     }

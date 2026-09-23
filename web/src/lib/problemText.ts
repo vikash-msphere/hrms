@@ -50,6 +50,10 @@ export function problemText(status: number, problem: ProblemShape, statusText = 
     const next = "If you're working remotely, request remote work for these dates; otherwise file an attendance correction.";
     return said ? `${said} ${next}` : `Clocking in and out is limited to approved networks. ${next}`;
   }
+  // A build or settlement that lost a payable to another writer mid-way. Not a stale record: nobody changed THIS
+  // one, and the server's detail already says nothing was paid and to run it again. The payroll page retries
+  // its builds on this type by itself, so a reader only sees it once those retries have run out.
+  if (type.endsWith("/payables-raced")) return said || "Another payroll action took some of the same payouts at the same moment. Nothing was paid - run it again.";
   if (type.endsWith("/permission-denied") || status === 403) {
     return said || "You don't have permission to do this. Ask an admin to grant it, or to make the change for you.";
   }

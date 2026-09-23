@@ -191,7 +191,7 @@ describe("budgetFor: which surface a request is charged to", () => {
   });
 
   // With `moderation` on, each of these runs the gate in the request path: a generation call, or two with the
-  // conduct pass, against a daily allocation that allows 38 posts. Under the catch-all's 3000 a minute an
+  // conduct pass, against a daily allocation that allows 93 posts. Under the catch-all's 3000 a minute an
   // employee spends the org's whole day in about three seconds - and because the gate fails closed, every
   // post on every wall is then HELD until UTC midnight. The ceiling has to be on the surface, not in the AI
   // layer: `withinUserRate` refusing turns into a hold rather than a 429, which withholds somebody's writing.

@@ -176,7 +176,7 @@ const BUDGETS: Budget[] = [
   {
     // WRITES THAT COST AN INFERENCE. With `moderation` on, a post to either public wall runs the gate in the
     // request path - one generation call, or two with the conduct pass - against a daily allocation of 7,000
-    // neurons. That is 38 posts a day with conduct on, 116 without, and under the catch-all's 3,000 a minute
+    // neurons. That is 93 posts a day with conduct on, 116 without, and under the catch-all's 3,000 a minute
     // an employee reaches either in about three seconds with nothing but new text, which misses the
     // generation cache for free.
     //

@@ -83,6 +83,12 @@ export const notFound = (d?: string) => new AppError(404, "/errors/not-found", "
 export const alreadyExists = (d?: string) => new AppError(409, "/errors/already-exists", "Already Exists", d);
 export const failedPrecondition = (d?: string) => new AppError(409, "/errors/failed-precondition", "Failed Precondition", d);
 export const aborted = (d?: string) => new AppError(409, "/errors/aborted", "Aborted", d);
+// A payroll build or a settlement that lost a payable to another writer between reading the payout queues and
+// committing: its guarded paid-markers matched fewer rows than it priced, so the whole write was undone and
+// nothing was paid. Its own TYPE because the client does more than print it. The answer is to run the same
+// action again, which re-reads the queues without whatever the other writer took, and the payroll page does
+// that itself. An etag `aborted` is different: it means a PERSON moved the record, and the reader has to look.
+export const payablesRaced = (d?: string) => new AppError(409, "/errors/payables-raced", "Aborted", d);
 // Too many requests. The caller is who they say they are and may do what they asked - there is just a budget
 // on how often, and the honest answer names it (middleware/rateLimit.ts). 429 rather than 403 because a
 // client should RETRY this one, and the `Retry-After` the middleware attaches tells it when.

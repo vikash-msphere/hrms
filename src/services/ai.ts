@@ -179,7 +179,11 @@ export async function aiGenerate(
   const role = req.role ?? "generate";
   // The role is IN THE CACHE KEY. Two models asked the same question give different answers, and without it
   // a moderation verdict and a draft built from identical text would share one cached reply.
-  const key = await sha256Hex(`${ctx.feature}|${role}|${req.promptVersion}|${req.system}|${req.user}`);
+  //
+  // So is the MODEL ID behind the role, for the same reason across time: replacing `MODELS.generate` would
+  // otherwise keep serving the old model's answers for up to a week, and an upgrade would look like it did
+  // nothing until the cache ran out.
+  const key = await sha256Hex(`${ctx.feature}|${role}|${MODELS[role]}|${req.promptVersion}|${req.system}|${req.user}`);
   const hit = await cacheGet(deps, key);
   if (hit !== null) {
     // A HIT IS CHEAP, NOT FREE, so it has a ceiling of its own rather than none at all. The generation limit

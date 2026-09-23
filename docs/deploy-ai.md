@@ -371,11 +371,33 @@ Rough per-call estimates the app currently assumes, and what a day's 7000 neuron
 |---|---|---|
 | embed (search index, one row) | 1 | ~7,000 rows |
 | moderation scan, guard pass | 60 | ~116 posts |
-| moderation scan, conduct pass | 120 | ~58 posts |
-| generation (draft, extraction, table, narration) | 120 | ~58 calls |
+| moderation scan, conduct pass | 15 | ~466 posts |
+| generation (draft, extraction, table, narration) | 15 | ~466 calls |
 
-A post scanned by both passes costs 180, so ~38 posts a day on the budget alone. That is the number to watch
+A post scanned by both passes costs 75, so ~93 posts a day on the budget alone. That is the number to watch
 after switching the conduct pass on, and the reason it is a separate switch.
+
+What calls actually cost, from Cloudflare's billing (`npm run ai:spend`) on 2026-09-23 with the app's own
+prompts: 47 generation calls cost 231 neurons, 4.9 a call - a short structured answer (a conduct verdict, a
+receipt, a goal measure) 3-5, a full announcement draft about 16 - and a guard verdict on a short post 9.
+The generation estimate is three times the billed average; one very long prompt can still cost more than 15,
+and the gap between the app's 7,000 and the account's 10,000 absorbs that. The guard estimate is still a
+guess: that model is priced mostly on INPUT, so a long announcement costs it several times what a one-line
+kudos does, and one billed call does not say what the long ones cost.
+
+### The models
+
+`MODELS` in `src/domain/aiPolicy.ts` is the list, and its comment records how each was chosen:
+
+| Role | Model | Notes |
+|---|---|---|
+| embed | `@cf/baai/bge-small-en-v1.5` | 384 dimensions. Changing it means a new index AND new duplicate thresholds. |
+| generate | `@cf/google/gemma-4-26b-a4b-it` | Reasoning is switched off per call in `src/lib/ai.ts`; with it on, short answers come back empty. |
+| moderate | `@cf/meta/llama-guard-3-8b` | The only safety classifier in the catalogue. |
+| rerank | `@cf/baai/bge-reranker-base` | The only reranker in the catalogue. |
+
+All four are available on the Workers Free plan. Some newer catalogue models are not (they refuse with error
+5035), so check the plan before trying one.
 
 They share one budget, so a busy drafting day leaves less for moderation. When it runs out every feature
 falls back to its non-AI behaviour until midnight UTC - nothing breaks, things just stop being clever.

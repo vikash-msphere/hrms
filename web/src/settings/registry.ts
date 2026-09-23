@@ -131,7 +131,7 @@ export const SETTINGS_LEGACY: Record<string, string> = {
 export const settingsEntry = (key: string): SettingsEntry | undefined => SETTINGS_REGISTRY.find((e) => e.key === key);
 
 // Which settings surface inline (as a gear on the host feature page) and where. Data, not scattered JSX:
-// PageHeader renders <PageSettings host="…"/> which reads this map and emits one gear per key. A new setting
+// PageHeader renders <PageSettings host="…"/> which reads this map into one settings menu, a row per key. A new setting
 // self-wires by adding a row here; "which pages carry inline config" stays inspectable. The host key is the
 // page's route name (router.ts Route.page). Access & security, org identity/defaults etc. stay Settings-only.
 export const HOST_SETTINGS: Record<string, string[]> = {

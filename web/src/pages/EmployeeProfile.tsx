@@ -63,7 +63,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Combobox } from "@/components/ui/combobox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AccessTab } from "@/components/common/AccessTab";
-import { SettingsButton } from "@/components/common/SettingsButton";
+import { SettingsMenu } from "@/components/common/SettingsButton";
 import { useToast } from "@/components/ui/use-toast";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 
@@ -404,7 +404,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
     if (enrolmentChanged) await promptReapply();
   };
 
-  // Right-aligned gear row for a tab's inline settings; nothing renders when the caller can't configure.
+  // Right-aligned settings gear (one menu) for a tab's inline settings; nothing renders when the caller can't configure.
   // `ml-auto` rather than a `justify-between` on the parent: below `sm` the parent's row wraps and the strip
   // takes the whole first line, where `justify-between` would have nothing to push against (see the tab band).
   const tabGears = (tab: string) => {
@@ -412,7 +412,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
     if (!canSettings || !keys?.length) return null;
     return (
       <div className="order-1 ml-auto flex shrink-0 items-center gap-2 sm:order-2">
-        {keys.map((k) => <SettingsButton key={k} me={me} settingKey={k} />)}
+        <SettingsMenu me={me} items={keys.map((key) => ({ key }))} />
       </div>
     );
   };

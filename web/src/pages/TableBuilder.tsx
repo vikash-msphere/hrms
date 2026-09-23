@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown, ArrowUp, BarChart3, ChevronRight, Columns3, Copy, ExternalLink, Filter, GripVertical, Link2,
   Lock, Plus, RefreshCw, Rows3, Sigma, Sparkles, Table2, Trash2, Pencil, Search, X,
@@ -1691,10 +1691,15 @@ function ColumnPicker({ open, onClose, base, catalogue, selected, headers, onSav
   // go from empty to the real one a moment later. Read as a change, that wiped the search box under somebody
   // already typing into it: the faster they were, the more reliably they lost the text. Only a move between two
   // KNOWN bases starts over.
+  //
+  // A LAYOUT effect, so the start-over lands before the new base's fields are ever painted. As a passive effect
+  // it ran after the paint, in a task a busy machine can hold back: the search box for the new base was on
+  // screen and could be typed into, and React flushes a pending passive effect before rendering the keystroke.
+  // That queued this `setQuery("")` BEHIND the typed text, so the text was wiped the moment it landed.
   const latest = useRef({ selected, catalogue });
   latest.current = { selected, catalogue };
   const shownBase = useRef<string | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) {
       shownBase.current = null; // so the next open starts over, whatever it opens on
       return;
@@ -1713,8 +1718,10 @@ function ColumnPicker({ open, onClose, base, catalogue, selected, headers, onSav
 
   // The base's own fields can arrive (or be re-fetched) after the picker is already open. While standing AT
   // the base that is what the picker shows - and it touches nothing the reader has done: not the query, not
-  // the trail, not what they have ticked.
-  useEffect(() => {
+  // the trail, not what they have ticked. A layout effect for the same reason as the one above: painted first,
+  // the new base's breadcrumb stood over the old base's fields for a frame, and anything ticked in it was a
+  // field of the wrong record.
+  useLayoutEffect(() => {
     if (!trail.length) setNode(catalogue);
   }, [catalogue, trail.length]);
 

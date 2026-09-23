@@ -3,7 +3,8 @@ import { gotoRoute, test, expect } from "./fixtures";
 // Settings, opened where the setting is USED.
 //
 // The gear on a feature page opens that page's own panel in a right-docked Sheet - the same panel the central
-// Settings hub renders, without navigating away. Three things about that are browser-only:
+// Settings hub renders, without navigating away. A page with one setting gets a gear that opens it directly; a
+// page with several gets one gear whose menu lists them by name. Three things about that are browser-only:
 //
 //   - the panel bodies live in a lazily imported chunk (`SettingsPanelContent`), so "the sheet opens" and "the
 //     chunk actually loaded and rendered" are different claims, and only the second one is worth anything;
@@ -49,6 +50,37 @@ test.describe("inline settings", () => {
     await sheet.getByRole("button", { name: "Open full settings" }).click();
     await expect.poll(() => page.url()).toMatch(/\/settings\/attendance\b/);
     await expect(page.getByText("Shift start")).toBeVisible();
+  });
+
+  test("a page with several settings offers one gear with a labelled menu", async ({ as }) => {
+    const page = await as("super");
+    await gotoRoute(page, "payroll-runs", "Payroll");
+
+    // One trigger for the whole page, not a row of look-alike icons - no per-panel button survives outside it.
+    const gear = page.getByRole("main").getByRole("button", { name: "Settings", exact: true });
+    await expect(gear).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Payslip design" })).toHaveCount(0);
+
+    await gear.click();
+    const menu = page.getByRole("menu");
+    // Each row reads as its panel's title, so it can be picked without hovering a row of icons.
+    await expect(menu.getByRole("menuitem", { name: "Pay components" })).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: "All settings" })).toBeVisible();
+
+    // The one-line description is a hover tooltip on the row, not text under it.
+    const row = menu.getByRole("menuitem", { name: "Payslip design" });
+    await row.hover();
+    await expect(page.getByRole("tooltip")).toContainText("The blocks a generated payslip is laid out from");
+
+    await row.click();
+    const sheet = page.getByRole("dialog", { name: "Payslip design" });
+    await expect(sheet).toBeVisible();
+    await expect.poll(() => page.url()).toContain("setting=payslip-design");
+
+    // Back closes it, the same as a single gear's sheet: the open state is the URL either way.
+    await page.goBack();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect.poll(() => page.url()).not.toContain("setting=");
   });
 
   test("a caller who may not configure the page is not offered the gear", async ({ as }) => {

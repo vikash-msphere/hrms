@@ -18,8 +18,9 @@ of the plan:
   error against the daily allocation. Anything that can be expressed as "find the semantically near thing"
   - search, duplicate detection, candidate-to-requisition matching, ticket routing - should be, and none of
   it needs a generative model at request time.
-- **Generation is the expensive primitive and belongs off the request path.** An 8B instruct model
-  answering with a few hundred tokens is worth roughly a thousand embeds. So generation is: user-initiated
+- **Generation is the expensive primitive and belongs off the request path.** A generation answering with
+  a few hundred tokens costs tens of embeds (measured: about 16 neurons for a draft, under one for an embed
+  of a search row). So generation is: user-initiated
   and rate-limited per person (a "Draft this" button), or batched in the nightly cron, never fired
   automatically on every write.
 - **The allocation is shared by the whole org.** One enthusiastic user must not be able to spend the day's

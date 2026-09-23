@@ -77,10 +77,10 @@ export async function attentionFor(
  * One line saying what to look at first. Absent unless a model answers.
  *
  * ONLY WHEN SOMEBODY ASKS FOR IT (`GET /v1/attention?summary=1`), and the arithmetic for that is the same
- * arithmetic sixty lines below that refuses the weekly digest: a generation is about 120 neurons against a
- * daily ceiling of 7,000, so 58 summaries spend the org's whole day. Run on every dashboard load this was a
+ * arithmetic sixty lines below that refuses the weekly digest: a generation is budgeted at 15 neurons against
+ * a daily ceiling of 7,000, so 466 summaries spend the org's whole day. Run on every dashboard load this was a
  * generation per person per visit on the app's busiest page - per person AND more frequent than the digest
- * that was refused for being per person. Past 58 the failures were silent and unequal: whoever loaded their
+ * that was refused for being per person. Past 466 the failures were silent and unequal: whoever loaded their
  * dashboard first got a sentence and everybody after got nothing, with nobody told why.
  *
  * And it is the third switch that could stop the noticeboard working, through the same chain as the embed
@@ -150,9 +150,10 @@ async function summarise(deps: Deps, user: AppUser, items: AttentionItem[]): Pro
  * The Monday roundup: one notification per person who has something off track.
  *
  * NO MODEL, AND THAT IS ARITHMETIC RATHER THAN CAUTION. The dashboard's one-line summary costs a generation,
- * which `ESTIMATED_NEURONS` puts at about 120. A hundred people is 12,000 against a daily ceiling of 7,000 -
- * so a per-person written digest cannot fit in the free allocation at any company worth sending one to, and
- * the version that fits is the one that does not ask. The wording here is assembled from the same details the
+ * which `ESTIMATED_NEURONS` puts at 15. A digest is unattended work, which may spend 60% of the daily ceiling
+ * of 7,000 (`BUDGET.unattendedShare`), so a per-person written digest spends everything the cron may spend at
+ * about 280 people, and on the Monday it runs it takes that share from the embed backfill and the moderation
+ * drain at any size - and the version that fits is the one that does not ask. The wording here is assembled from the same details the
  * list already carries.
  *
  * ONE QUERY PER SOURCE, NOT PER PERSON. `attentionFor` runs three queries for one caller, which is right on a

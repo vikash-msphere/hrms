@@ -1,8 +1,8 @@
 // Propose how a goal could be measured, as three fields somebody accepts.
 //
-// ONE GENERATION, ON A BUTTON. About 120 neurons, paid by the person who pressed it, on the one screen where
-// the answer is worth that: a goal being written or proposed. Nothing runs on a list, on a save, or on a
-// cron.
+// ONE GENERATION, ON A BUTTON. Budgeted at 15 neurons and billed at a few, paid by the person who pressed
+// it, on the one screen where the answer is worth that: a goal being written or proposed. Nothing runs on a
+// list, on a save, or on a cron.
 //
 // WHAT THE MODEL IS SHOWN is the goal's own title and description - text the caller is looking at, on a
 // collection that is not on the denylist - and nothing else. No progress, no owner, no review, no history.

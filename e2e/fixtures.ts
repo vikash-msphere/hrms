@@ -190,6 +190,13 @@ export const test = base.extend<Fixtures>({
     // dropped connection with a plain-text 500 that Prism passes through. Those urls are collected here and the
     // console entries naming them are dropped at the end; every 500 the app wrote still fails the spec.
     const proxyFailed = new Set<string>();
+    // A payroll build that lost a payable to ANOTHER spec's build. Every draft run claims the org's whole queue
+    // of unpaid bonuses and claims, and sixteen workers build runs at once, so the second committer is refused
+    // with `/errors/payables-raced` and the payroll page builds again by itself (PayrollRuns.tsx `buildRun`).
+    // The browser still logs the refused attempt. Tolerated by the body's TYPE, never by the status, so any
+    // other 409 on the same path still fails the spec, and a race that outlasted the retries fails on the
+    // outcome the spec waits for.
+    const racedPayables = new Set<string>();
     const bodiesRead: Promise<void>[] = [];
 
     await use(async (who) => {
@@ -215,6 +222,10 @@ export const test = base.extend<Fixtures>({
       };
       // Read before the console entry is judged - the body settles first, and the check happens after the run.
       page.on("response", (res) => {
+        if (res.status() === 409) {
+          bodiesRead.push(res.text().then((b) => void (/"type"\s*:\s*"\/errors\/payables-raced"/.test(b) && racedPayables.add(res.url())), () => undefined));
+          return;
+        }
         if (res.status() !== 500) return;
         bodiesRead.push(notTheApps500(res).then((infra) => void (infra && proxyFailed.add(res.url()))));
       });
@@ -238,7 +249,7 @@ export const test = base.extend<Fixtures>({
     await Promise.all(bodiesRead); // whose 500 each one was, before the pages go away
     for (const context of contexts) await context.close();
     // Asserted after the test body so a genuine assertion failure is reported first and this never masks it.
-    const real = failures.filter((line) => ![...proxyFailed].some((url) => line.endsWith(` @ ${url}`)));
+    const real = failures.filter((line) => ![...proxyFailed, ...racedPayables].some((url) => line.endsWith(` @ ${url}`)));
     expect(real, "the app logged errors in the browser console").toEqual([]);
   },
 });

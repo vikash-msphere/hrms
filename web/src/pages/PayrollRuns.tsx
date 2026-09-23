@@ -243,20 +243,46 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     }
   }
 
-  // Rebuild in place from the review dialog: recompute lines from current inputs, then refresh the breakdown +
+  /**
+   * Build a run, running it again when it lost a payable to another build.
+   *
+   * Every draft run's build claims the org's whole queue of unpaid bonuses, claims, encashments and overtime,
+   * so two runs built in the same moment (two periods in draft, two payroll admins) can both price the same
+   * bonus. The one that commits second finds its guarded paid-marker matched nothing, undoes itself and answers
+   * `payables-raced`: nothing was paid, and the server says "build the run again". That is always the right
+   * next step and never needs the reader's judgement, so the page takes it. The retry is a new request, with
+   * a fresh subrequest budget, and it re-reads the queues without whatever the other build took. The undo
+   * moved the run's etag, so the run is re-read first. Twice at most: a third loss in a row is a real
+   * contention problem, and the reader should see it.
+   */
+  async function buildRun(id: string, etag: string | undefined) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await invoke("payroll-runs/" + id, "build", etag);
+      } catch (e) {
+        if (attempt >= 2 || !(e instanceof ApiError) || !e.problem?.type?.endsWith("/payables-raced")) throw e;
+        etag = (await get<PayrollRun>("payroll-runs/" + id)).etag;
+      }
+    }
+  }
+
   /**
    * Report a refused verb - and RE-READ the run when the refusal was a lost update.
    *
-   * Every verb on this page carries the etag the list was read with, and 409 means exactly one thing: the run
-   * moved in between - another payroll admin built or submitted it, or this page's own other tab did. The
-   * page then still holds the etag it was refused for, so pressing again sends the same stale header and is
-   * refused identically, for as long as the page stays open: the button is dead and the toast says only
-   * "etag mismatch". Re-reading is what makes the second press a different request, and the message says
-   * that is what happened rather than naming the header.
+   * Every verb on this page carries the etag the list was read with, and a 409 means the run moved in
+   * between - another payroll admin built or submitted it, or this page's own other tab did. The page then
+   * still holds the etag it was refused for, so pressing again sends the same stale header and is refused
+   * identically, for as long as the page stays open: the button is dead and the toast says only "etag
+   * mismatch". Re-reading is what makes the second press a different request, and the message says that is
+   * what happened rather than naming the header.
+   *
+   * A build that lost its payables past `buildRun`'s retries is re-read too (the undo moved the run), but it is
+   * not "somebody else changed this run", so it keeps the server's own sentence.
    */
   function staleToast(e: unknown, fallback: string) {
-    const stale = e instanceof ApiError && e.status === 409;
-    if (stale) reload();
+    const conflict = e instanceof ApiError && e.status === 409;
+    const stale = conflict && !e.problem?.type?.endsWith("/payables-raced");
+    if (conflict) reload();
     toast({
       title: stale ? "Somebody else changed this run" : fallback,
       description: stale ? "It has been re-read - look at where it is now, then try again." : (e as Error).message,
@@ -264,6 +290,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     });
   }
 
+  // Rebuild in place from the review dialog: recompute lines from current inputs, then refresh the breakdown +
   // staleness. NOTE: like any build, one-off inputs (LOP, ad-hoc lines) are re-entered per build, not preserved.
   async function rebuildReview() {
     if (!reviewRun) return;
@@ -271,7 +298,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     if (acting === id) return;
     setActing(id);
     try {
-      await invoke("payroll-runs/" + id, "build", reviewRun.etag);
+      await buildRun(id, reviewRun.etag);
       toast({ title: DONE_TOAST.build, variant: "success" });
       reload();
       await openReview(reviewRun);
@@ -525,7 +552,8 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
           reload();
         }
       } else {
-        await invoke("payroll-runs/" + id, verb, run.etag);
+        if (verb === "build") await buildRun(id, run.etag);
+        else await invoke("payroll-runs/" + id, verb, run.etag);
         toast({ title: DONE_TOAST[verb], variant: "success" });
         reload();
       }

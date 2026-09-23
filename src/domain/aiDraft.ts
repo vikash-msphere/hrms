@@ -43,9 +43,14 @@ export type DraftKind = {
   system: string;
 };
 
+// "USE EVERY FACT THE REQUEST GIVES" is there because the request arrives fenced as untrusted content, and a
+// careful model reads the fence plus "do not invent dates" as "the dates in there do not count": asked to
+// announce a closure "on 2 October", Gemma 4 wrote "closed on [date]" in two of three tries. With the sentence
+// it kept the given dates every time and still left placeholders for what was genuinely missing.
 const HOUSE_STYLE =
   "Write in plain British English. Be specific and brief. Do not use em dashes. Do not open with a greeting " +
-  "or close with a sign-off unless asked. Do not invent facts, names, dates, figures or policies: if a detail " +
+  "or close with a sign-off unless asked. Use every fact the request gives, exactly as it gives it. " +
+  "Do not invent facts, names, dates, figures or policies it does not give: if a detail " +
   "is needed and was not given, leave an obvious placeholder in square brackets such as [date]. " +
   "Return only the text itself, with no preamble, no explanation and no markdown code fences.";
 
@@ -54,7 +59,7 @@ export const DRAFT_KINDS: DraftKind[] = [
     id: "announcement",
     collection: "announcements",
     label: "Announcement",
-    promptVersion: "v1",
+    promptVersion: "v2",
     maxTokens: 500,
     system:
       `You help an HR team write an internal announcement for staff. ${HOUSE_STYLE} ` +
@@ -71,7 +76,7 @@ export const DRAFT_KINDS: DraftKind[] = [
     id: "post",
     collection: "announcements",
     label: "Post",
-    promptVersion: "v1",
+    promptVersion: "v2",
     maxTokens: 400,
     system:
       `You help somebody write a short post for their company's internal board. ${HOUSE_STYLE} ` +
@@ -88,7 +93,7 @@ export const DRAFT_KINDS: DraftKind[] = [
     id: "poll",
     collection: "announcements",
     label: "Poll description",
-    promptVersion: "v1",
+    promptVersion: "v2",
     maxTokens: 300,
     system:
       `You help somebody write the short description under a poll on a company's internal board. ${HOUSE_STYLE} ` +
@@ -106,7 +111,7 @@ export const DRAFT_KINDS: DraftKind[] = [
     id: "task",
     collection: "cards",
     label: "Task",
-    promptVersion: "v1",
+    promptVersion: "v2",
     maxTokens: 400,
     system:
       `You help somebody write the description of a task on a team's board. ${HOUSE_STYLE} ` +
@@ -128,7 +133,7 @@ export const DRAFT_KINDS: DraftKind[] = [
     collection: "reviews",
     consentedPath: "reviews.draft",
     label: "Self-assessment",
-    promptVersion: "v1",
+    promptVersion: "v2",
     maxTokens: 500,
     system:
       `You help somebody write their own self-assessment for a performance review. ${HOUSE_STYLE} ` +
@@ -143,7 +148,7 @@ export const DRAFT_KINDS: DraftKind[] = [
     collection: "reviews",
     consentedPath: "reviews.draft",
     label: "Review comments",
-    promptVersion: "v1",
+    promptVersion: "v2",
     maxTokens: 500,
     system:
       `You help a manager put their own review comments into sentences. ${HOUSE_STYLE} ` +
@@ -164,7 +169,7 @@ export const DRAFT_KINDS: DraftKind[] = [
     id: "task-checklist",
     collection: "cards",
     label: "Suggest steps",
-    promptVersion: "v1",
+    promptVersion: "v2",
     maxTokens: 300,
     system:
       `You break a task down into the steps needed to finish it. ${HOUSE_STYLE} ` +
@@ -178,7 +183,7 @@ export const DRAFT_KINDS: DraftKind[] = [
     id: "job-description",
     collection: "job-requisitions",
     label: "Job description",
-    promptVersion: "v1",
+    promptVersion: "v2",
     maxTokens: 700,
     system:
       `You help a hiring team write a job description. ${HOUSE_STYLE} ` +
@@ -190,7 +195,7 @@ export const DRAFT_KINDS: DraftKind[] = [
     id: "goal",
     collection: "goals",
     label: "Goal",
-    promptVersion: "v1",
+    promptVersion: "v2",
     maxTokens: 300,
     system:
       `You help someone write a work goal. ${HOUSE_STYLE} ` +
@@ -201,7 +206,7 @@ export const DRAFT_KINDS: DraftKind[] = [
     id: "suggestion-response",
     collection: "suggestions",
     label: "Response to a suggestion",
-    promptVersion: "v1",
+    promptVersion: "v2",
     maxTokens: 400,
     system:
       `You help an HR team reply to a suggestion an employee submitted. ${HOUSE_STYLE} ` +

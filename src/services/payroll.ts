@@ -8,7 +8,7 @@ import type { AppUser } from "../env";
 import { audit, createdMeta, removedMeta, stateMeta } from "../lib/audit";
 import { notifyMany } from "./notifications";
 import { emitEvent } from "./eventBus";
-import { notFound, failedPrecondition, aborted, invalidArgument } from "../lib/errors";
+import { notFound, failedPrecondition, aborted, invalidArgument, payablesRaced } from "../lib/errors";
 import { computeRunItem, canTransition, isEditable, applyStructure, overtimePay, employerCostLines, componentLineCode, pfWagesOf, DEFAULT_OVERTIME_CONFIG, DEFAULT_CTC_CONFIG, type Line, type RunState, type OvertimeConfig, type CtcConfig } from "../domain/payroll";
 import { round2 } from "../domain/money";
 import { reconcileRuns, type Reconciliation, type RunItemSnapshot } from "../domain/payrollReconcile";
@@ -1520,7 +1520,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       ...(await releasePaidByRun(deps, runId)),
       deps.db.update(schema.payrollRuns).set(RUN_UNBUILT).where(eq(schema.payrollRuns.uuid, runId)),
     ]);
-    throw failedPrecondition(`payables changed while the run was building (${[...new Set(drifted)].join(", ")}) - nothing was paid; build the run again`);
+    throw payablesRaced(`payables changed while the run was building (${[...new Set(drifted)].join(", ")}) - nothing was paid; build the run again`);
   }
 
   // Loan events only announce what the committed batch actually did. Best-effort: the money is already

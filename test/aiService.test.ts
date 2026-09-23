@@ -10,7 +10,7 @@ import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import type { TextModel } from "../src/ports";
 import { aiEmbed, aiGenerate, aiRerank } from "../src/services/ai";
-import { BUDGET, ESTIMATED_NEURONS } from "../src/domain/aiPolicy";
+import { BUDGET, ESTIMATED_NEURONS, MODELS } from "../src/domain/aiPolicy";
 
 // The properties services/ai.ts exists to have, against real D1. Three of them are the ones that decide
 // whether an AI layer over HR data is safe to turn on at all:
@@ -189,7 +189,7 @@ describe("per-user rate limit", () => {
     const uid = RATE_LIMITED_USER;
     for (let i = 0; i < BUDGET.perUserHourlyGenerations; i++) {
       await deps.db.insert(schema.aiUsage).values({
-        feature: "draft", model: "@cf/meta/llama-3.1-8b-instruct-fast", role: "generate",
+        feature: "draft", model: MODELS.generate, role: "generate",
         userId: uid, inputHash: `${i}`.padStart(64, "0"), estimatedNeurons: 0,
       });
     }

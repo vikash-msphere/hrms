@@ -29,3 +29,20 @@ describe("problemText: the attendance clock's network fence", () => {
     expect(problemText(403, { type: "/errors/permission-denied", status: 403 })).toContain("Ask an admin");
   });
 });
+
+// A build that lost a payable to another build is a 409, like a stale etag, and it must not read like one:
+// nobody changed the record, and "reload, then reapply your change" sends the reader looking for an edit that
+// never happened. The server's sentence already says nothing was paid and to run it again.
+describe("problemText: a build that lost its payables", () => {
+  const RACED = { type: "/errors/payables-raced", status: 409 };
+
+  it("keeps the server's sentence instead of the stale-record hint", () => {
+    const t = problemText(409, { ...RACED, detail: "payables changed while the run was building (bonuses) - nothing was paid; build the run again" });
+    expect(t).toContain("nothing was paid; build the run again");
+    expect(t).not.toContain("Someone else changed this");
+  });
+
+  it("still says what to do when the server sent no detail", () => {
+    expect(problemText(409, RACED)).toContain("run it again");
+  });
+});

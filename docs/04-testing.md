@@ -570,7 +570,7 @@ they ran, and the skip count is the thing to read:
 
 | Provable locally | Only the real service can answer |
 |---|---|
-| Feature switches gate what they claim to | Whether `llama-3.1-8b-instruct-fast` drafts usefully |
+| Feature switches gate what they claim to | Whether `gemma-4-26b-a4b-it` drafts usefully |
 | Budget accounting and the `ai_usage` ledger | Whether `llama-guard-3-8b` judges content correctly |
 | `ai_cache` hits (the model *not* being called) | Real neuron cost per call, which `BUDGET` is guessed from |
 | Prompt construction, fencing, identifier scrubbing | Vectorize `topK` semantics and `$in` metadata filtering |

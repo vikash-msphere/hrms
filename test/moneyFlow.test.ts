@@ -1421,7 +1421,7 @@ describe("FnF: a payable a payroll run took mid-compute is never paid twice", ()
     try {
       await expect(
         computeAndStoreSettlement(deps, actor, { employee: `employees/${emp}`, settlement_date: "2026-01-31" }),
-      ).rejects.toThrow(/payables changed/i);
+      ).rejects.toMatchObject({ httpStatus: 409, type: "/errors/payables-raced", message: expect.stringMatching(/payables changed/i) });
     } finally {
       asAny.batch = realBatch as unknown as BatchFn;
     }

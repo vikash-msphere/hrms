@@ -9,15 +9,18 @@ failures**.
 
 ## The one thing to know first
 
-**No real model call has ever been made.** Every test drives a deterministic fake. The layer is complete,
-internally consistent and covered, and it has never spoken to Workers AI. Three things are therefore unknown
-rather than verified:
+**The app itself has never called Workers AI.** Every test drives a deterministic fake. The layer is complete,
+internally consistent and covered. What is known about the real service comes from a benchmark run on
+2026-09-23 outside the app, which sent the app's own prompts to Workers AI and scored the answers with the
+app's own parsers; that run is how the models in `MODELS` were chosen. Three things are still open:
 
-- **Prompt quality.** Nobody has seen what `@cf/meta/llama-3.1-8b-instruct-fast` actually returns for these
-  prompts. The extraction parser is strict, so a model that formats differently is rejected cleanly rather
-  than corrupting a record, but it could reject often enough to make the feature useless.
-- **Real neuron costs.** `BUDGET` in `src/domain/aiPolicy.ts` still holds deliberately pessimistic guesses.
-  The `ai_usage` table exists precisely to replace them with measurements and has no rows yet.
+- **Prompt quality, for part of the layer.** The conduct pass, receipt and CV extraction, goal measures and
+  announcement and job-description drafts were measured and parse cleanly on `@cf/google/gemma-4-26b-a4b-it`.
+  The table assist and the narrations have not been sent to a real model yet. The parsers are
+  strict, so a model that formats differently is rejected cleanly rather than corrupting a record.
+- **Real neuron costs on real traffic.** `ESTIMATED_NEURONS` in `src/domain/aiPolicy.ts` is now sized from
+  measured calls and kept pessimistic. The `ai_usage` table has no rows yet, and `npm run ai:spend` is how the
+  estimates get checked once it does.
 - **Vectorize.** The index is configured in `wrangler.toml` and does not exist in the account.
 
 The next step that changes the most is a single real end-to-end smoke. That converts "tests pass" into "it

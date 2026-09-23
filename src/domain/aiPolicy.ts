@@ -43,16 +43,34 @@ import type { ModerationScope } from "./moderation";
  * party, and `assertModelAllowed` refuses it by shape as well as by membership - so a new entry cannot open
  * that door by being added carelessly, only by editing the check itself.
  */
+//
+// Each one was chosen by running the app's own prompts and parsers against the Workers AI catalogue on the
+// free plan (2026-09-23), not from a leaderboard:
+//
+//   - embed stays `bge-small`. It tied the best on retrieval (23 of 24 queries ranked first) and separated
+//     duplicates from merely related work better than `qwen3-embedding-0.6b`, `embeddinggemma-300m` and
+//     `bge-m3`, and its 384 dimensions fit about 13,000 rows in the free Vectorize allowance where a
+//     1024-wide model fits about 4,900. The duplicate thresholds in cardTriage, ticketTriage, goalSimilar and
+//     suggestionSimilar are cosine scores in THIS model's range and would all move with it.
+//   - generate is Gemma 4. On the conduct rubric it answered 21 of 22 posts correctly and was the only
+//     model at its price that ignored a post telling it what to answer; the 8B Llama it replaced answered 17
+//     of 22 and obeyed the injection both times. It matched on receipt and goal extraction, and stopped
+//     inventing details in drafts. It costs about 5 neurons a call against the 8B's 3, and answers in 2-6
+//     seconds against about 1. Llama 3.3 70B scored the same at four times the neurons.
+//   - moderate and rerank are the only models of their kind in the catalogue.
 export const MODELS = {
   // Sentence embeddings for semantic search, duplicate detection and matching. Small and cheap: this is the
   // primitive the daily neuron allocation is spent on, and it is the only model in the request path.
   embed: "@cf/baai/bge-small-en-v1.5",
   // Re-rank a shortlist the cheap retrieval already produced. Optional, budget permitting.
   rerank: "@cf/baai/bge-reranker-base",
-  // Short-form generation: drafting, summarising, constrained JSON extraction. An 8B instruct model costs
-  // roughly a thousand embeds per call, which is why generation is user-initiated or nightly, never automatic.
-  generate: "@cf/meta/llama-3.1-8b-instruct-fast",
-  // Moderation for content that posts publicly (kudos, announcements, the suggestion wall). Flags, never blocks.
+  // Short-form generation: drafting, summarising, constrained JSON extraction, and the conduct pass of
+  // moderation. A mixture-of-experts model (26B total, 4B active per token), so it reads like a large model
+  // and bills like a small one. lib/ai.ts turns its reasoning off - see there for why that is not optional.
+  // Generation is still user-initiated or nightly, never automatic on a write.
+  generate: "@cf/google/gemma-4-26b-a4b-it",
+  // The safety pass on content that posts publicly (kudos, announcements, the suggestion wall). With the
+  // `moderation` feature on it is a GATE: a post stays hidden until this model has read it.
   moderate: "@cf/meta/llama-guard-3-8b",
 } as const;
 
@@ -400,9 +418,9 @@ export const BUDGET = {
    * hundred embeds each, and it runs unattended rather than because somebody pressed something.
    *
    * WHAT THIS ACTUALLY BOUNDS, stated honestly because the previous version of this comment overstated it.
-   * Eight posts a tick is 2,304 posts a day of CAPACITY, which at 60-180 neurons a post is far more than the
+   * Eight posts a tick is 2,304 posts a day of CAPACITY, which at 60-75 neurons a post is far more than the
    * allocation - so this is a per-tick slice, not a daily bound, and it is `unattendedShare` of the daily
-   * budget that decides how much of the wall gets read: roughly 70 posts a day on the hazard pass alone, 23
+   * budget that decides how much of the wall gets read: roughly 70 posts a day on the hazard pass alone, 56
    * with the conduct pass on. What the per-tick number buys is that one tick cannot take the lot, so the
    * interactive share and the next tick both still have something.
    *
@@ -530,11 +548,23 @@ export const CARD_DUPLICATE_SENSITIVITIES = Object.keys(CARD_DUPLICATE_SCORES) a
 export const cardDuplicateScore = (s: unknown): number =>
   CARD_DUPLICATE_SCORES[(s as CardDuplicateSensitivity)] ?? CARD_DUPLICATE_SCORES.balanced;
 
-/** Rough neuron cost per call, for the pre-flight budget check. Replaced by measured values from `ai_usage`;
- *  until then they are deliberately pessimistic, so the app under-spends rather than over-spends. */
+/**
+ * Rough neuron cost per call, for the pre-flight budget check. Deliberately pessimistic, so the app
+ * under-spends rather than over-spends; `npm run ai:spend` compares them with what calls actually cost.
+ *
+ * `generate` is set from Cloudflare's BILLED figures (`ai:spend`, 2026-09-23): 47 Gemma 4 calls cost 231
+ * neurons, 4.9 a call, across short structured answers (3-5) and full announcement drafts (about 16). 15 is
+ * three times that average. It is a budget figure, not a ceiling on one call - a large prompt with the
+ * default 512-token answer prices at about 40 - and the gap between this app's 7,000 and the account's
+ * 10,000 is what absorbs a day heavy with long ones.
+ *
+ * `moderate` is still a guess. The guard model's INPUT is the expensive side (about 44 neurons per thousand
+ * tokens), so a long announcement costs several times a one-line kudos, and one billed call (9 neurons, a
+ * short post) says nothing about the long ones.
+ */
 export const ESTIMATED_NEURONS: Readonly<Record<ModelRole, number>> = {
   embed: 1,
   rerank: 3,
-  generate: 120,
+  generate: 15,
   moderate: 60,
 };

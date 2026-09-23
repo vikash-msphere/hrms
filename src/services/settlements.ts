@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
-import { failedPrecondition, invalidArgument, notFound } from "../lib/errors";
+import { payablesRaced, invalidArgument, notFound } from "../lib/errors";
 import {
   currentComp, compAsOf, monthlyRecurringGross, tdsComponent, loadTaxConfig, fyWindow, finalizedTotals,
   assembleProjection, readDeclarations, verifiedDeductions, employedMonthsInFy, EMPTY_FINALIZED_TOTALS,
@@ -722,7 +722,7 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
       ...releaseSettlementStmts(deps, refs, new Date()),
       deps.db.delete(schema.settlements).where(eq(schema.settlements.uuid, settlementId)),
     ]);
-    throw failedPrecondition(`payables changed while the settlement was being computed (${[...new Set(drifted)].join(", ")}) - nothing was settled; compute it again`);
+    throw payablesRaced(`payables changed while the settlement was being computed (${[...new Set(drifted)].join(", ")}) - nothing was settled; compute it again`);
   }
   const row = (await deps.db.select().from(schema.settlements).where(eq(schema.settlements.uuid, settlementId)).limit(1))[0]!;
 

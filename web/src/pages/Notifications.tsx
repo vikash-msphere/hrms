@@ -5,7 +5,7 @@ import { metaForType, categoryOf, CATEGORY_META } from "@/lib/notificationMeta";
 import { cn, formatDate } from "@/lib/utils";
 import { navigate } from "@/router";
 import { PageHeader } from "@/components/common/PageHeader";
-import { PageSettings, SettingsButton } from "@/components/common/SettingsButton";
+import { PageSettings } from "@/components/common/SettingsButton";
 import { EmptyState } from "@/components/common/EmptyState";
 import { CardsSkeleton } from "@/components/common/Skeletons";
 import { DataState } from "@/components/common/DataState";
@@ -182,8 +182,7 @@ export default function Notifications({ me }: { me: Me }) {
         description={unread > 0 ? `${unread} unread. Everything that's happened on your requests, recognition, and approvals.` : "Everything that's happened on your requests, recognition, and approvals."}
         actions={
           <div className="flex items-center gap-2">
-            <PageSettings me={me} host="notifications" />
-            {me.employee_id && <SettingsButton me={me} settingKey="notification-prefs" />}
+            <PageSettings me={me} host="notifications" extra={me.employee_id ? [{ key: "notification-prefs" }] : []} />
             {unread > 0 && (
               <AccessAction collection="notifications" verb="markAllRead" label="Mark all read">
                 <Button size="sm" variant="outline" onClick={() => void markAllRead()}>

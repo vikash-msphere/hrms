@@ -57,7 +57,7 @@ export function makeTextModel(binding: Ai, gatewayId?: string): TextModel {
       //
       // The cast at `run` is what let this compile: the binding's per-model input types never reach it.
       const guard = role === "moderate";
-      const out = await run<{ response?: unknown }>(MODELS[role ?? "generate"], {
+      const out = await run<{ response?: unknown; choices?: { message?: { content?: unknown } }[] }>(MODELS[role ?? "generate"], {
         messages: guard
           ? [{ role: "user", content: user }]
           : [
@@ -74,14 +74,24 @@ export function makeTextModel(binding: Ai, gatewayId?: string): TextModel {
         // moderator's queue - and `aiGenerate` then caches whichever way it fell for seven days, so the coin
         // toss is settled once and kept. This model was added to the method later than the number was chosen.
         temperature: guard ? 0 : 0.3,
+        // THINKING OFF for the instruct model. Gemma 4 reasons before it answers unless told not to, and the
+        // reasoning is billed as output and counted against `max_tokens`: measured on the goal-measure prompt
+        // with a 200-token ceiling, it spent all 200 thinking and returned EMPTY content. Every caller here
+        // wants a short answer in a fixed shape, not a worked argument. The guard model's schema has no such
+        // key, so it is not sent there.
+        ...(guard ? {} : { chat_template_kwargs: { enable_thinking: false } }),
       });
-      // `response` IS NOT ALWAYS A STRING. The guard model's post-processed output is
-      // `{ safe?: boolean; categories?: string[] }` (same types file), and the instruct models answer with
-      // text. Typed as `string`, the object flowed out of here untouched and the first thing that touched it
-      // called `.trim()` on it - a TypeError inside the call, recorded as a failed inference, indistinguishable
-      // from the model being down. Serialised here so the port keeps its one return type and the dialect stays
-      // a parsing question for whoever asked; `domain/moderation.ts parseVerdict` reads both.
-      const res = out?.response;
+      // TWO REPLY SHAPES. The guard model answers `{ response }`; Gemma 4 answers in the chat-completions shape
+      // and sends no `response` at all, so reading `response` alone returned "" for every generation - a
+      // switched-on feature that suggests nothing, with no error anywhere.
+      //
+      // `response` IS NOT ALWAYS A STRING either. The guard model's post-processed output is
+      // `{ safe?: boolean; categories?: string[] }` (same types file), and Workers AI parses a reply that is
+      // JSON into an object. Typed as `string`, the object flowed out of here untouched and the first thing
+      // that touched it called `.trim()` on it - a TypeError inside the call, recorded as a failed inference,
+      // indistinguishable from the model being down. Serialised here so the port keeps its one return type and
+      // the dialect stays a parsing question for whoever asked; `domain/moderation.ts parseVerdict` reads both.
+      const res = out?.response ?? out?.choices?.[0]?.message?.content;
       if (res == null) return "";
       return typeof res === "string" ? res : JSON.stringify(res);
     },
