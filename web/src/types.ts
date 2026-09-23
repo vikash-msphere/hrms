@@ -1,0 +1,471 @@
+import type { Wire, Embed, Item } from "@/wire";
+
+// Upcoming birthday or work anniversary for the dashboard feed. Birthdays carry day + month only (no year).
+export type Celebration = Wire<"celebration">;
+
+export type Employee = Wire<"employee">;
+
+export type Department = Wire<"department">;
+
+export type LeaveRequest = Wire<"leave-request">;
+
+export type OvertimeRequest = Wire<"overtime-request">;
+
+export type Suggestion = Wire<"suggestion">;
+
+export type NoticePeriod = Wire<"notice-period">;
+
+export type RemoteWorkRequest = Wire<"remote-work-request">;
+
+export type Reimbursement = Wire<"reimbursement">;
+
+export type Expense = Wire<"expense">;
+
+export type Vendor = Wire<"vendor">;
+
+export type ExpenseCategory = Wire<"expense-category">;
+
+export type ExpenseBudget = Wire<"expense-budget">;
+
+// A salary cap for a cost centre and a period. Same shape as an expense budget minus the two fields salary
+// has no analogue for: there is no category, and no pending queue between committed and paid.
+export type PayrollBudget = Wire<"payroll-budget">;
+
+// A charge off a corporate card statement. Read-only except the match, which a person may overrule.
+export type CardTransaction = Wire<"card-transaction">;
+
+export type Referral = Wire<"referral">;
+
+export type JobRequisition = Wire<"job-requisition">;
+
+export type Candidate = Wire<"candidate">;
+
+export type Application = Wire<"application">;
+
+export type AtsStage = { key: string; label: string; kind: "active" | "hired" | "rejected" };
+export type ScorecardCriterion = { key: string; label: string };
+// Mirrors src/domain/ats.ts. The offer defaults are what the pipeline's "draft the offer" rule fills in, so
+// they are org policy rather than constants inside a rule body.
+export type OfferBandPoint = "mid" | "min" | "max" | "none";
+export type AtsConfig = {
+  stages: AtsStage[];
+  sources: string[];
+  rejection_reasons: string[];
+  scorecard_criteria: ScorecardCriterion[];
+  blind_scorecards: boolean;
+  offer_validity_days: number;
+  join_notice_days: number;
+  offer_band_point: OfferBandPoint;
+};
+export const DEFAULT_ATS_CONFIG: AtsConfig = {
+  stages: [
+    { key: "applied", label: "Applied", kind: "active" },
+    { key: "screening", label: "Screening", kind: "active" },
+    { key: "interview", label: "Interview", kind: "active" },
+    { key: "offer", label: "Offer", kind: "active" },
+    { key: "hired", label: "Hired", kind: "hired" },
+  ],
+  sources: ["referral", "job_board", "agency", "direct", "linkedin", "career_site"],
+  rejection_reasons: ["Not qualified", "Failed interview", "Position filled", "Compensation mismatch", "Candidate withdrew", "Other"],
+  scorecard_criteria: [
+    { key: "technical", label: "Technical skills" },
+    { key: "communication", label: "Communication" },
+    { key: "culture", label: "Culture fit" },
+    { key: "problem_solving", label: "Problem solving" },
+  ],
+  blind_scorecards: false,
+  offer_validity_days: 7,
+  join_notice_days: 30,
+  offer_band_point: "mid",
+};
+
+export type Interview = Wire<"interview">;
+
+export type InterviewFeedback = Wire<"interview-feedback">;
+
+export type Offer = Wire<"offer">;
+
+export type ReimbursementCategory = Wire<"reimbursement-category">;
+
+// In-app notification (one row per recipient, emitted server-side). `read` mirrors read_time presence.
+export type Notification = Wire<"notification">;
+
+// Per-user in-app notification preferences (self-service), stored on the caller's own employee row.
+export type NotificationPrefs = Wire<"notification-prefs">;
+
+export type ApprovalDelegation = Wire<"approval-delegation">;
+
+export type TicketComment = Item<Ticket["comments"]>;
+
+export type TicketTodo = Item<Ticket["todos"]>;
+
+export type Ticket = Wire<"ticket">;
+
+// A row in the `ticket-categories` settings blob: a category, its default auto-assignee, and `members` -
+// extra employees who can see every ticket in the category (the basis of category-based visibility).
+export type TicketCategory = { key: string; name: string; assignee?: string | null; members?: string[]; department?: string | null };
+
+// A predefined ticket checklist - a first-class, access-controlled collection. Visibility (who sees it in the
+// "add from checklist" pickers) is governed by its own read grant via the ACL.
+export type TicketChecklist = Wire<"ticket-checklist">;
+
+// A bank's bulk-payment Excel column mapping (config side; the publish-time export fills the template).
+export type BankFormatColumn = Wire<"bank-format-column">;
+
+export type BankFormat = Wire<"bank-format">;
+
+// One letterhead in the org's catalogue (one per legal entity/brand), picked per document kind, per letter
+// template and per generation. `design` is the whole page - margins, typeface, palette, header band, footer
+// band, watermark. The artwork lives in object storage, not in the row, and is fetched per row (`:image`).
+export type Letterhead = Wire<"letterhead">;
+
+// The employer's debit account + currency for one bank (super_admin only). The account number is stored
+// encrypted and returned masked; writes send the full number.
+export type PayrollDebitAccount = Wire<"payroll-debit-account">;
+
+// A clock-in -> clock-out session. `open` (clock_out absent) = currently clocked in. Breaks = multiple/day.
+export type AttendanceSession = Wire<"attendance">;
+
+export type AttendanceRegularization = Wire<"attendance-regularization">;
+
+// HR's decision about what one working day is worth, replacing what the punches say. A regularization fixes
+// the punches and is the employee's to file; this is the other way round - the punches stand and the day is
+// re-valued - so it is an HR action with no approval step. Loss of pay settles on the credit.
+export type AttendanceDayMark = Wire<"attendance-day-mark">;
+export type DayCredit = NonNullable<AttendanceDayMark["credit"]>;
+
+// Effective-dated base pay; POST creates a revision (increment). `current` = the active salary.
+export type Compensation = Wire<"compensation">;
+
+// A rung on the org salary-grade ladder + its salary band (min/mid/max base pay). HR-managed catalog.
+export type PayGrade = Wire<"pay-grade">;
+
+// A named salary structure: an ordered set of earning components (with optional per-structure rate overrides)
+// that defines which allowances apply to an assigned employee. HR-managed catalog.
+export type SalaryStructureLine = Item<SalaryStructure["lines"]>; // component = pay-components/{id}
+export type SalaryStructure = Wire<"salary-structure">;
+
+export type Position = Wire<"position">;
+
+export type Bonus = Wire<"bonus">;
+
+export type Asset = Wire<"asset">;
+
+export type AssetCategory = Wire<"asset-category">;
+
+export type AssetRequest = Wire<"asset-request">;
+
+// One inventory walk-through. Its sightings are stamps on the ASSETS (last_verified_*), not rows here - see
+// src/domain/stocktake.ts.
+export type Stocktake = Wire<"stocktake">;
+export type StocktakeFound = Item<NonNullable<Stocktake["found"]>>;
+export type StocktakeMissing = Item<NonNullable<NonNullable<Stocktake["result"]>["missing"]>>;
+export type StocktakeSighted = Item<NonNullable<NonNullable<Stocktake["result"]>["sighted"]>>;
+
+export type SettlementLine = Item<Settlement["lines"]>;
+export type Settlement = Wire<"settlement">;
+
+export type LeaveType = Wire<"leave-type">;
+
+export type LeaveEncashment = Wire<"leave-encashment">;
+
+export type LeaveBalance = Wire<"leave-balance">;
+
+// Where a board card's sticker sits, once the author has moved/resized/faded it. Everything is a fraction of the
+// card's own width, so the placement holds at any card size - see components/common/CardSticker.tsx.
+// How the card's words behave around a placed element, in word-processor terms. See CardSticker.tsx for what
+// each one does to a card.
+export type WrapMode = "inline" | "square" | "tight" | "through" | "top-bottom" | "behind" | "front";
+export type StickerLayout = { x: number; y: number; size: number; opacity: number; wrap?: WrapMode };
+// A kudos card's recipient block is moved and resized like the art, but never faded - a half-transparent photo of
+// the person being recognized is not a look anyone needs.
+export type RecipientLayout = { x: number; y: number; size: number; wrap?: WrapMode };
+
+export type Announcement = Wire<"announcement">;
+
+export type GoalStatus = "not_started" | "in_progress" | "completed" | "cancelled";
+export type Goal = Wire<"goal">;
+
+/**
+ * The numbers that ride beside a goals list when it is read with `counts=true`.
+ *
+ * Every chip, tile and chart above a goals list used to be counted in the browser from the rows it held - one
+ * server page - so on any org past a hundred goals the page stated a window's numbers as the org's. These are
+ * counted by the server over the whole filtered set, under the caller's own scope (see `goalCounts` in
+ * src/services/goals.ts). Hand-written rather than generated because the list's `extra` is an inline shape in
+ * the spec, not a named resource schema.
+ */
+export type GoalCounts = {
+  /** Goals matching each health state, keyed as `?state=` takes them, plus `all` for the filtered set. */
+  states: Partial<Record<string, number>> & { all?: number };
+  /** Per owner, over their OPEN goals in that set. `progress` is the shared weighting rule, not a plain mean. */
+  owners: { employee: string; active: number; overdue: number; weight: number; progress: number }[];
+};
+export type GoalConfidence = "on_track" | "at_risk" | "off_track";
+export type GoalStage = "DRAFT" | "PROPOSED" | "AGREED";
+export type GoalKind = "objective" | "key_result";
+// A reusable goal blueprint (Settings -> Goal templates); `:apply` stamps it out as real goals.
+export type GoalTemplate = Wire<"goal-template">;
+export type GoalPace = "ahead" | "on_track" | "behind" | "at_risk";
+/** One week of a review cycle's attainment curve, from `GET /v1/goals?cycle=…&burnup=true`. */
+export type BurnupPoint = { at: string; attained: number; expected: number };
+
+// ---- Agile kanban ----
+// One audit-trail entry from the on-demand activity feed (GET /v1/activity).
+export type ActivityDiff = Record<string, { from: unknown; to: unknown }>;
+export type Activity = {
+  path: string;
+  action: string;
+  entity?: string; // touched collection (org-wide feed)
+  entity_ref?: string; // touched record as a wire ref `<collection>/<token>` (org-wide feed), when it has an id
+  entity_name?: string; // resolved display name of the touched record (server-enriched)
+  actor?: string;
+  actor_email: string;
+  actor_name?: string; // resolved actor employee name (server-enriched; falls back to email)
+  actor_role?: string; // the role the act was performed under, as of the event
+  correlation_id?: string; // the ACT this entry was part of; pass back as ?correlation for the rest of it
+  session_id?: string; // the SITTING (one login) this entry was written in; pass back as ?session
+  create_time: string;
+  ip?: string;
+  user_agent?: string;
+  meta?: { diff?: ActivityDiff; fields?: string[]; [k: string]: unknown };
+};
+export type ActivityPage = { results: Activity[]; next_page_token?: string };
+
+// One cross-collection hit from global search (GET /v1/search?q=). `name` is the wire ref `<collection>/<token>`
+// of the matched record; `collection` names its type so the palette can label and colour it.
+export type SearchHit = { name: string; collection: string; title: string | null; subtitle: string | null };
+export type SearchPage = { results: SearchHit[] };
+
+export type WipScope = "column" | "assignee";
+export type BoardColumn = Item<Board["columns"]>;
+export type SwimlaneMode = "none" | "assignee" | "goal" | "priority" | "department" | "custom";
+export type Swimlane = Item<Board["swimlanes"]>;
+export type Label = Item<Board["labels"]>;
+export type BoardMode = "kanban" | "scrum";
+export type Board = Wire<"board">;
+export type CardPriority = "low" | "medium" | "high" | "urgent";
+export type Card = Wire<"card">;
+export type CardComment = Item<Card["comments"]>;
+export type CardTodo = Item<Card["todos"]>;
+export type SprintState = "planning" | "active" | "completed";
+export type Sprint = Wire<"sprint">;
+export type BoardMetrics = {
+  columns: { key: string; label: string }[];
+  cfd: { date: string; counts: Record<string, number> }[];
+  lead_time: { p50: number; p85: number; avg: number; count: number };
+  cycle_time: { p50: number; p85: number; avg: number; count: number };
+  throughput: { delivered: number; per_week: number };
+  /** Days cards took to LEAVE each column, over stays that ended. Columns nothing has left yet are absent. */
+  column_dwell: { key: string; label: string; p50: number; p85: number; count: number }[];
+};
+
+export type ReviewCycleState = "DRAFT" | "ACTIVE" | "CLOSED";
+export type ReviewCycle = Wire<"review-cycle">;
+
+export type ReviewState = "SELF" | "MANAGER" | "SHARED" | "ACKNOWLEDGED";
+export type Review = Wire<"review">;
+
+export type ReviewFeedbackState = "REQUESTED" | "SUBMITTED" | "DECLINED";
+export type ReviewFeedback = Wire<"review-feedback">;
+
+export type TransitionKind = "onboarding" | "offboarding";
+export type TransitionState = "ACTIVE" | "COMPLETED" | "CANCELLED";
+export type TransitionTask = Wire<"transition-task">;
+// `tasks` is a $ref to transition-task in the spec, so it arrives with the schema's own (all-optional)
+// shape - Wire's required-key list applies to the resource it names, not through an embedded ref. Re-point
+// the embedded items at the aliased child so an embedded task reads the same as a fetched one.
+export type Transition = Embed<Wire<"transition">, "tasks", TransitionTask>;
+
+export type CheckInActionItem = { text: string; done?: boolean };
+export type CheckIn = Wire<"check-in">;
+
+export type BenefitCategory = "health" | "dental" | "vision" | "life" | "disability" | "retirement" | "other";
+export type BenefitPlan = Wire<"benefit-plan">;
+export type DependentRelationship = "spouse" | "child" | "parent" | "domestic_partner" | "other";
+export type Dependent = Wire<"dependent">;
+export type BenefitEnrollment = Wire<"benefit-enrollment">;
+
+export type Shift = Wire<"shift">;
+export type ShiftAssignment = Wire<"shift-assignment">;
+
+export type Project = Wire<"project">;
+export type TimeEntryStatus = "DRAFT" | "SUBMITTED" | "APPROVED" | "REJECTED";
+export type TimeEntry = Wire<"time-entry">;
+
+export type LoanStatus = "PENDING" | "APPROVED" | "DISBURSED" | "CLOSED" | "REJECTED";
+export type Loan = Wire<"loan">;
+
+export type TaxDeclarationStatus = "DECLARED" | "VERIFIED" | "REJECTED";
+export type TaxDeclaration = Wire<"tax-declaration">;
+
+export type Event = Wire<"event">;
+
+export type Holiday = Wire<"holiday">;
+
+export type ComplianceEvent = Wire<"compliance-event">;
+
+export type BackgroundCheck = Wire<"background-check">;
+
+export type ComplianceRule = Wire<"compliance-rule">;
+
+// The Documents page renders org-documents and personal-documents in one list, so it needs a shape that spans
+// both collections: everything is optional except what both endpoints always send. Which collection a row came
+// from is recovered from its path (see docCollection), not from the type.
+export type DocumentResource = Wire<"personal-document"> &
+  Partial<Wire<"org-document">>;
+
+// A signature box on a rendered PDF: PDF points, bottom-left origin, 1-based page. (x1,y1) top-left,
+// (x2,y2) bottom-right. Shared by the placement UI and the stored anchor.
+export type SignBox = NonNullable<Wire<"org-document">["sign_anchor"]>;
+
+// An employee's acknowledgement (e-signature) of an org-document version.
+export type DocumentAcknowledgement = Wire<"document-acknowledgement">;
+
+export type Payslip = Wire<"payslip">;
+
+export type PayComponent = Wire<"pay-component">;
+
+export type TaxSlabRow = Wire<"tax-slab">;
+export type TaxDetails = Wire<"tax">;
+
+export type PayPeriod = Wire<"pay-period">;
+
+export type PayrollRun = Wire<"payroll-run">;
+
+export type PayrollLine = Wire<"payroll-line">;
+
+// One employee's computed payroll for a run (the review breakdown).
+// `lines` $refs payroll-line, so the embedded items arrive with the child schema's raw shape; re-point them
+// at the aliased child (same reason as Transition.tasks).
+export type PayrollRunItem = Embed<Wire<"payroll-run-item">, "lines", PayrollLine>;
+
+// Why this run's gross differs from the previous finalized run's. Read-only, derived on demand from the two
+// runs' line arrays; `compared_to` is null on the first run an organisation builds.
+export type RunReconciliation = Wire<"payroll-run-reconciliation">;
+
+// What `compensation:preview` answers: a proposed revision priced but not written. `current` is null for an
+// employee with no compensation row yet. Assembled here rather than named as one schema because only the two
+// sides are a reusable shape; the envelope is this endpoint's alone.
+export type RunJournal = Wire<"payroll-run-journal">;
+
+// Which rows of a run to look at, and the pre-flight. Derived on read; a rebuild changes it.
+export type RunVariance = Wire<"payroll-run-variance">;
+
+export type RevisionSide = Wire<"revision-side">;
+export type RevisionPreview = {
+  current: RevisionSide | null;
+  proposed: RevisionSide;
+  arrears: { amount: number; periods: { label: string; months: number }[] };
+  crossings: string[];
+};
+
+export type Operation = Wire<"operation">;
+
+// A recorded cron tick (admin-only; from /v1/cron-runs).
+export type CronRun = Wire<"cron_run">;
+
+export type User = Wire<"user">;
+
+// A machine credential. It acts as its `owner`, narrowed by `scope` - never wider than that user's own
+// access. `secret` is present ONLY on the create response: it is stored one-way and can never be read back.
+export type ApiKey = Wire<"api-key">;
+
+/** Breadth past the caller's own rows. Absent from a scope map = "own or nothing", which reads as no. */
+export type OtherScope = "dept" | "all";
+/** What the caller's grant reaches beyond their own rows, per collection (and per `employees.<sub>`). */
+export type CallerScopes = { read: Record<string, OtherScope>; write: Record<string, OtherScope> };
+
+// `capabilities` is the server-computed, scope-stripped capability set (e.g. "holidays.write",
+// "leave-requests.approve"); UI gating reads it via <Can>/usePermission. The server still enforces.
+export type Me = {
+  email: string;
+  role: string;
+  employee_id: string | null;
+  capabilities: string[];
+  // Per-collection READ and WRITE breadth beyond the caller's own rows ("dept" / "all"); a collection the
+  // caller only self-serves is ABSENT. The capability set above cannot answer this - it is scope-stripped, so
+  // the self-service grant every employee holds on attendance, goals, reviews, payslips and their own
+  // bank/identity/tax looks exactly like an org-wide one. Read it through useCanReadFor / useCanWriteFor
+  // (lib/perm.ts), never directly.
+  scopes: CallerScopes;
+  // Token for the subscribable holiday calendar feed; null unless the org enabled it (see routes/holidayFeed.ts).
+  holiday_feed_token: string | null;
+  // Opaque id for this sitting, stable while the session lives and different after a new sign-in. The on-disk
+  // caches are namespaced to it (see App.tsx `cacheUser`) so cached records cannot outlive their session.
+  // Null on the lanes that carry no session (API key, Access JWT, dev bypass).
+  session_id: string | null;
+};
+
+export type IdentityField = Wire<"identity-field">;
+// `fields` $refs identity-field, so re-point the embedded items at the aliased child (see Transition.tasks).
+export type IdentityDetails = Embed<Wire<"identity">, "fields", IdentityField>;
+export type EmployeeFieldDef = { key: string; label: string; mandatory: boolean; sensitive: boolean; document?: "none" | "allowed" | "required" };
+
+export type PersonalDetails = Wire<"personal-info">;
+
+/** Derived reachability (services/presence.ts), read lazily by the profile header. Never on the record. */
+export type Presence = Wire<"presence">;
+
+export type BankDetails = Wire<"bank-account">;
+
+// ---- Custom tables (the grid builder) ----
+// The saved DEFINITION of a grid. Its rows are a separate call (`:run`), because they are re-read under each
+// reader's own access - which is what makes handing somebody a view safe.
+export type TableView = Wire<"table-view">;
+
+export type TableFieldKind = "text" | "number" | "money" | "date" | "datetime" | "bool" | "enum" | "ref";
+
+/** One offerable column, as GET /v1/table-fields describes it. */
+export type TableField = {
+  key: string;
+  label: string;
+  /** The header it gets on a grid, qualified by the link trail ("Requester: Job title"); absent at the base. */
+  column_label?: string;
+  group: string;
+  kind: TableFieldKind;
+  /** The collection whose list decision gated it - shown so an author knows what a column depends on. */
+  collection: string;
+  /** PII the profile masks; the real value needs the `unmask` capability. */
+  masked?: boolean;
+  enum_values?: string[];
+};
+
+/** A link out of a catalogue node: somewhere the builder can GO, not a field. */
+export type TableLink = { path: string; label: string; collection: string; collection_label: string };
+
+/** ONE node of the catalogue: this collection's fields, and the links leading out of it. */
+export type TableCatalogue = {
+  bases: { collection: string; label: string }[];
+  base?: string;
+  label?: string;
+  /** The dotted link path this node sits at; empty at the base. */
+  path?: string;
+  node_label?: string;
+  collection?: string;
+  groups: { key: string; label: string }[];
+  fields: TableField[];
+  links: TableLink[];
+};
+
+/**
+ * `label` is the header the server shortened against this grid's OTHER columns - a lone "Name" stays "Name",
+ * and two of them grow a hop apiece. `full_label` is the whole trail, present only when it says more.
+ */
+export type TableRunColumn = { key: string; label: string; full_label?: string; kind: TableFieldKind; collection: string; masked?: boolean };
+export type TableRunRow = { path: string; cells: Record<string, unknown>; denied?: string[] };
+export type TableRunResult = {
+  base: string;
+  columns: TableRunColumn[];
+  rows: TableRunRow[];
+  next_page_token?: string;
+  /** Columns the view asks for that this reader does not get, each with the reason. */
+  dropped: { field: string; reason: string }[];
+};
+
+// ---- Workflow & automation engine ----
+export type Automation = Wire<"automation">;
+
+export type AutomationRun = Wire<"automation_run">;
+
+export type EventLogEntry = Wire<"event_log_entry">;

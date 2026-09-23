@@ -1,0 +1,170 @@
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
+import { and, eq, gte, inArray, isNull, lt } from "drizzle-orm";
+import { chunk, ID_CHUNK, runBatch } from "../lib/dbBatch";
+import { applyScope } from "./listScope";
+import type { ListScope } from "../domain/access";
+import * as schema from "../db/schema";
+import type { Deps } from "../deps";
+import type { AppUser } from "../env";
+import { audit } from "../lib/audit";
+import { notify, notifyManager } from "./notifications";
+import { emitEvent } from "./eventBus";
+import { getSettingValue } from "./settings";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, localDay } from "../domain/attendance";
+import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
+import { keysetPage } from "./keysetPage";
+import { restateLopForDay } from "./payroll";
+import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+
+// Attendance regularization requests: an employee asks to correct a whole day's clock times, submitting the
+// COMPLETE intended set of in/out pairs for the day. A manager (own dept) or HR approves; on approval the
+// day's existing punches are superseded and the requested pairs are written as `correction` sessions, so the
+// derived day recomputes exactly - no double-counting, no manual reconciliation.
+export type SessionInput = { clock_in: string; clock_out: string }; // ISO datetimes
+export type RegularizationInput = {
+  employee?: string | null;
+  date?: string; // YYYY-MM-DD
+  sessions?: SessionInput[]; // the full intended day; [] = remove all punches
+  reason?: string | null;
+};
+const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
+const dayMs = (s?: string) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
+
+// Validate + normalise the requested pairs: each in<out, sorted by start, no overlaps. Returns ISO pairs.
+function normalizeSessions(sessions: SessionInput[]): { clock_in: string; clock_out: string }[] {
+  const pairs = sessions.map((s) => {
+    const cin = Date.parse(s.clock_in);
+    const cout = Date.parse(s.clock_out);
+    if (Number.isNaN(cin) || Number.isNaN(cout)) throw invalidArgument("each session needs a valid clock_in and clock_out");
+    if (cout <= cin) throw invalidArgument("clock_out must be after clock_in");
+    return { cin, cout };
+  });
+  pairs.sort((a, b) => a.cin - b.cin);
+  for (let i = 1; i < pairs.length; i++) if (pairs[i]!.cin < pairs[i - 1]!.cout) throw invalidArgument("sessions must not overlap");
+  return pairs.map((p) => ({ clock_in: new Date(p.cin).toISOString(), clock_out: new Date(p.cout).toISOString() }));
+}
+
+// `employeeId` narrows to ONE person's requests, the same `?employee=` every profile panel already has
+// (leaveBalances, bonuses, compensation, positions, assets). It narrows what the scope already allows and
+// never widens it: an approver asking for their own rows is asking for a subset of what they may read, and a
+// caller scoped to themselves passing somebody else's id still gets nothing.
+export async function listRegularizations(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, employeeId?: string) {
+  const conds = [applyScope(scope, schema.attendanceRegularizations.code, schema.attendanceRegularizations.employeeId)];
+  if (stateFilter) conds.push(eq(schema.attendanceRegularizations.state, stateFilter as typeof schema.attendanceRegularizations.$inferSelect.state));
+  if (employeeId) conds.push(eq(schema.attendanceRegularizations.employeeId, employeeId));
+  return keysetPage<typeof schema.attendanceRegularizations.$inferSelect>(deps, schema.attendanceRegularizations, "attendance-regularizations", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken });
+}
+
+// The read side of the collection is the factory's generic get (same select, same 404); this stays internal
+// because every decision needs the stored row (and its requested pairs) first.
+async function getRegularization(deps: Deps, _actor: AppUser, id: string) {
+  const row = (await deps.db.select().from(schema.attendanceRegularizations).where(eq(schema.attendanceRegularizations.uuid, id)).limit(1))[0];
+  if (!row) throw notFound("regularization request not found");
+  return row;
+}
+
+export async function createRegularization(deps: Deps, actor: AppUser, input: RegularizationInput) {
+  const date = dayMs(input.date);
+  if (Number.isNaN(date)) throw invalidArgument("date is required");
+  if (!Array.isArray(input.sessions)) throw invalidArgument("sessions is required (an empty array clears the day)");
+  const sessions = normalizeSessions(input.sessions);
+  // Default the employee to the caller's own record unless an admin files on someone's behalf.
+  const employeeId = idFromPath(input.employee) ?? actor.employeeId;
+  if (!employeeId) throw invalidArgument("employee is required");
+  // Allocated inside the retry (codeAlloc.ts): a forgotten punch is noticed by half a team at once.
+  const row = (await withFreshCode(async () => deps.db
+    .insert(schema.attendanceRegularizations)
+    .values({ code: await allocOwnedCode(deps, schema.attendanceRegularizations, schema.attendanceRegularizations.employeeId, employeeId), employeeId, date: new Date(date), sessions, reason: input.reason?.trim() || null, state: "PENDING" })
+    .returning()))[0]!;
+  await audit(deps, actor, "attendance-regularization.create", "attendance-regularizations", row.uuid, { employee: `employees/${employeeId}`, date: new Date(date).toISOString().slice(0, 10), sessions, ...(input.reason ? { reason: input.reason } : {}) }, row);
+  await notifyManager(deps, employeeId, { type: "regularization.requested", noun: "attendance regularization" });
+  await emitEvent(deps, actor, "attendanceRegularization.requested", { subject: `attendance-regularizations/${row.uuid}`, employeeId, payload: { date: new Date(date).toISOString() } });
+  return row;
+}
+
+async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", ifMatch?: string) {
+  const row = await getRegularization(deps, actor, id);
+  // Who may approve/reject/cancel is gated by the verb's grant (middleware). Here: state, the version the
+  // decider read, and - to approve - that it is not their own, since approval rewrites the day's punches and
+  // with them the day's loss of pay.
+  if (row.state !== "PENDING") throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
+  assertReviewedVersion(row, ifMatch);
+  if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "regularization");
+  // Guard the flip on PENDING so approval is EXACTLY-ONCE: without it a double-clicked approve would
+  // supersede the day's punches + insert the correction sessions twice (0 rows = already decided).
+  const [updated] = await deps.db
+    .update(schema.attendanceRegularizations)
+    .set({ state: to, decidedBy: actor.uuid, updatedAt: new Date() })
+    .where(and(eq(schema.attendanceRegularizations.uuid, id), eq(schema.attendanceRegularizations.state, "PENDING")))
+    .returning();
+  if (!updated) throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
+  // On approval the regularization becomes the day's source of truth: supersede every existing (non-superseded)
+  // punch that falls on the org-local day, then write the requested pairs as `correction` sessions. The derived
+  // day recomputes from these alone - no double-count, nothing to reconcile by hand.
+  if (to === "APPROVED") {
+    const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
+    const tz = att.timezone || "Asia/Kolkata";
+    // `date` is a DATE-ONLY column, anchored at UTC midnight like every other one in the schema, so the day it
+    // names is read in UTC. It was read with `localDay(..., tz)` instead, which asks a different question: west
+    // of UTC, midnight-Z on the requested day is the PREVIOUS evening locally, so an approval superseded the
+    // wrong day's punches while writing the (correct, absolute) corrected instants - leaving two days wrong at
+    // once. Invisible in the default configuration, because Asia/Kolkata is +05:30 and midnight-Z is 05:30 the
+    // same morning. The audit line below already read it this way; the two now agree. See services/orgDay.ts
+    // `dayStartMs` for the same rule stated once.
+    const targetYmd = new Date(row.date).toISOString().slice(0, 10);
+    // WIDEN IN SQL, DECIDE IN JS - the pattern services/orgDay.ts describes. This used to read EVERY
+    // non-superseded punch the employee had ever made and keep the one day of them, so an ordinary approval
+    // grew a whole tenure's worth of row reads. No timezone is more than 14 hours from UTC, so one UTC day of
+    // slack on each side cannot exclude an instant whose org-local day is `targetYmd`; the exact call stays
+    // with `localDay`, which is the one definition of a local day in the app.
+    const dayStart = Date.parse(`${targetYmd}T00:00:00Z`);
+    const existing = (await deps.db
+      .select({ uuid: schema.attendanceSessions.uuid, clockIn: schema.attendanceSessions.clockIn })
+      .from(schema.attendanceSessions)
+      .where(and(
+        eq(schema.attendanceSessions.employeeId, row.employeeId),
+        isNull(schema.attendanceSessions.supersededBy),
+        gte(schema.attendanceSessions.clockIn, new Date(dayStart - 86_400_000)),
+        lt(schema.attendanceSessions.clockIn, new Date(dayStart + 2 * 86_400_000)),
+      )))
+      .filter((s) => localDay(+new Date(s.clockIn), tz) === targetYmd);
+    // ONE atomic batch, not one UPDATE per punch. Sequentially they were N subrequests against the
+    // per-invocation budget AND non-atomic: a failure partway left the day's punches superseded with no
+    // correction rows written to replace them, which reads as a day nobody worked.
+    if (existing.length) {
+      await runBatch(deps.db, chunk(existing.map((s) => s.uuid), ID_CHUNK).map((ids) =>
+        deps.db.update(schema.attendanceSessions).set({ supersededBy: id, updatedAt: new Date() }).where(inArray(schema.attendanceSessions.uuid, ids))));
+    }
+    for (const p of row.sessions) {
+      // Each corrected session allocates its own code, so each is retried on its own: an approval that
+      // writes three sessions must not fail on the third because somebody else clocked in mid-write.
+      await withFreshCode(async () =>
+        deps.db.insert(schema.attendanceSessions).values({
+          code: await allocOwnedCode(deps, schema.attendanceSessions, schema.attendanceSessions.employeeId, row.employeeId),
+          employeeId: row.employeeId,
+          clockIn: new Date(p.clock_in),
+          clockOut: new Date(p.clock_out),
+          source: "correction",
+          note: row.reason ?? null,
+        }),
+      );
+    }
+  }
+  const verb = to === "APPROVED" ? "approve" : to === "REJECTED" ? "reject" : "cancel";
+  await audit(deps, actor, `attendance-regularization.${verb}`, "attendance-regularizations", id, { employee: `employees/${row.employeeId}`, date: new Date(row.date).toISOString().slice(0, 10) });
+  if (to === "APPROVED" || to === "REJECTED") {
+    await notify(deps, { recipient: row.employeeId, type: `regularization.${to.toLowerCase()}`, title: `Regularization ${to.toLowerCase()}`, body: `Your attendance regularization was ${to.toLowerCase()}.`, link: "attendance", subject: `attendance-regularizations/${id}`, actorId: actor.employeeId });
+  }
+  if (to === "APPROVED") await emitEvent(deps, actor, "attendanceRegularization.approved", { subject: `attendance-regularizations/${id}`, employeeId: row.employeeId, payload: { date: new Date(row.date).toISOString() } });
+  // A regularization fixes the punches for one day, which can change that day's loss of pay. If the day sits
+  // in a period whose run has already published, the correction is carried into the next run rather than
+  // silently disagreeing with a payslip nobody can rebuild. Best-effort: the attendance fact is already
+  // recorded and correct, and failing the decision because a correction could not be raised would refuse a
+  // true statement about somebody's attendance to protect a number.
+  await restateLopForDay(deps, row.employeeId, +new Date(row.date));
+  return updated;
+}
+
+export const approveRegularization = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "APPROVED", ifMatch);
+export const rejectRegularization = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", ifMatch);
+export const cancelRegularization = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");

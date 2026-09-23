@@ -1,0 +1,43 @@
+name: d1-backup
+# Nightly logical export of the production D1 to R2 (retention beyond D1 Time Travel's 30-day window) plus a
+# 30-day GitHub artifact for an off-platform copy. The Workers runtime has no D1 export API, so this must run
+# from CI, not the Worker. See docs/deploy.md "Backups & disaster recovery".
+on:
+  schedule:
+    - cron: "30 3 * * *" # 03:30 UTC, after the 02:00 nightly accrual/reminders cron has settled
+  workflow_dispatch: {}
+
+concurrency:
+  group: d1-backup-production
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24" # same major as verify.yml, which says why
+      - run: npm ci
+      # wrangler validates `[assets].directory` on every subcommand, so the d1/r2 calls below need
+      # web/dist to exist. This job uploads no assets, so an empty directory is enough - no SPA build.
+      - run: mkdir -p web/dist
+      - name: Export production D1
+        run: |
+          STAMP="$(date -u +%F)"
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+          npx wrangler d1 export hrms --remote --output="hrms-$STAMP.sql"
+      # Long-term / off-platform copy in R2 (retained in the existing DOCS bucket under a backups/ prefix).
+      - name: Upload export to R2
+        run: npx wrangler r2 object put "hrms/backups/db/hrms-${STAMP}.sql" --file="hrms-${STAMP}.sql" --remote
+      # Second copy as a GitHub artifact (kept 30 days) so a lost R2 object still leaves a recoverable dump.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: d1-export-${{ env.STAMP }}
+          path: hrms-${{ env.STAMP }}.sql
+          retention-days: 30

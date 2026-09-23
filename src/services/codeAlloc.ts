@@ -1,0 +1,362 @@
+// Code allocation at the persistence boundary: fetch the sibling codes in scope, then compose the next
+// code via the pure domain core (domain/codes.ts). Tables are loosely typed (`any`) to avoid Drizzle's
+// generic gymnastics; every resource table has a `.code` column (schema.ts). The internal `code` is the
+// matching/scoping key (docs/archive/plan.txt section 0); it is never on the wire.
+//
+// CONCURRENCY: a leaf comes from the scope's counter (schema `code_sequences`), taken with one atomic
+// statement, so two creates at the same moment take different values rather than composing the same one. The
+// UNIQUE index on `code` remains the backstop - it is what makes a stale counter fail safe instead of minting
+// a duplicate - and `withFreshCode` below turns that into a record anyway: the loser takes the counter again,
+// which has moved on. A collision that survives every attempt surfaces as the retryable 409 in
+// middleware/errorHandler.ts.
+import { eq, inArray, isNull, sql } from "drizzle-orm";
+import { getTableConfig } from "drizzle-orm/sqlite-core";
+import * as schema from "../db/schema";
+import type { Deps } from "../deps";
+import { childCodeAt, maxChildSeg } from "../domain/codes";
+import { chunk } from "../lib/dbBatch";
+import { isCodeCollision } from "../lib/errors";
+
+export const CODE_WIDTH = { dept: 2, employee: 3, owned: 3, flat: 2 } as const;
+
+/**
+ * Reserve `count` consecutive sequence values for a scope, as ONE indexed statement.
+ *
+ * This is what stops allocation costing a read of every sibling. `SELECT code FROM <table>` is fine on a
+ * bounded table and ruinous on an append-only one: `event_log` is written by essentially every action and is
+ * never pruned, so composing one code came to mean reading every event ever recorded - per action, on a
+ * platform that bills rows read.
+ *
+ * `seed` is only called on a scope's FIRST touch, and is the old whole-scope read: it establishes the
+ * high-water mark of whatever is already stored (a seeded database, or this counter being introduced over a
+ * live one). After that the scope is pure arithmetic. See the note on schema `codeSequences`.
+ *
+ * Returns the FIRST value of the reserved run; the run is `[value, value + count - 1]`.
+ *
+ * `resync` re-establishes the counter against what is actually STORED before taking a number, instead of
+ * trusting it - the same escape hatch `allocOwnedCodeRuns` below has carried since it was written, and the one
+ * this function was missing.
+ *
+ * A counter can only be BEHIND if something once wrote codes without it: a table populated by a seed script
+ * (bootstrap.sql inserts rows with literal codes), a restored dump, or a path that composed its own. A counter
+ * that is behind hands out numbers already on disk, the UNIQUE index on `code` refuses every one of them, and
+ * the retry in `withFreshCode` only walks it forward ONE place per attempt - so with four attempts a scope
+ * more than four codes behind can never catch up, and every create in it fails as a 409 "please retry" that
+ * retrying will not fix. That is a stuck collection, not a lost race. Paid for only on a RETRY (the attempt
+ * number is what sets this), so the first try stays one indexed statement and a collision buys the read that
+ * makes the scope correct from then on.
+ */
+async function reserve(deps: Deps, scope: string, count: number, seed: () => Promise<number>, resync = false): Promise<number> {
+  if (!resync) {
+    // The steady state: the counter exists, so one indexed update hands back the end of the reserved run.
+    const [bumped] = await deps.db
+      .update(schema.codeSequences)
+      .set({ next: sql`${schema.codeSequences.next} + ${count}` })
+      .where(eq(schema.codeSequences.scope, scope))
+      .returning();
+    if (bumped) return bumped.next - count + 1;
+  }
+  // First touch of this scope, or a resync. `onConflictDoUpdate` rather than a plain insert because two creates
+  // can reach here at the same moment: the loser takes the run after the winner's instead of colliding with it.
+  //
+  // `max(stored, mark) + count` covers both reasons the row may already exist, exactly as the owned lane does:
+  // a concurrent first touch (the winner's counter is at or past the mark, so `max` picks it and the loser's
+  // run simply follows) and a counter that had fallen behind (it jumps to the mark instead of handing out a
+  // number that is already on disk again).
+  const mark = await seed();
+  const [created] = await deps.db
+    .insert(schema.codeSequences)
+    .values({ scope, next: mark + count })
+    .onConflictDoUpdate({ target: schema.codeSequences.scope, set: { next: sql`max(${schema.codeSequences.next}, ${mark}) + ${count}` } })
+    .returning();
+  return created!.next - count + 1;
+}
+
+/** The scope key for a table's flat namespace, and for one owner's namespace within a table. */
+const tableName = (table: any) => getTableConfig(table).name;
+const ownedScope = (table: any, ownerUuid: string) => `${tableName(table)}:${ownerUuid}`;
+
+// Flat resources (holidays, leave-types, pay-periods, announcements, payroll-runs, users): one namespace.
+// `resync` re-establishes the counter from what is stored before taking a number - see `reserve`. Pass
+// `attempt > 1` from inside `withFreshCode`, so a collision heals the scope instead of walking it one place.
+export async function allocFlatCode(deps: Deps, table: any, minWidth: number = CODE_WIDTH.flat, resync = false): Promise<string> {
+  return (await allocFlatCodes(deps, table, 1, minWidth, resync))[0]!;
+}
+
+// `count` flat codes from ONE statement, for a create that makes many rows in a single act (a box of twenty
+// adapters, a pasted list of serials). Allocating in a loop would take the counter n times, which the
+// subrequest budget cannot afford (see lib/dbBatch.ts).
+export async function allocFlatCodes(deps: Deps, table: any, count: number, minWidth: number = CODE_WIDTH.flat, resync = false): Promise<string[]> {
+  const from = await reserve(deps, tableName(table), count, async () => {
+    const rows = await deps.db.select({ code: table.code }).from(table);
+    return maxChildSeg(rows.map((r: { code: string | null }) => r.code), null);
+  }, resync);
+  return Array.from({ length: count }, (_, i) => childCodeAt(null, from + i, minWidth));
+}
+
+/**
+ * The counter for the child namespace under one department (null = the root level).
+ *
+ * NOT spelled `<table>:<uuid>` like `ownedScope`, for two reasons. This namespace spans TWO tables - a
+ * department's children are its sub-departments AND its employees, sharing one child-segment sequence so the
+ * two can never compose the same code (docs/archive/plan.txt section 0 design note) - so no single table name
+ * describes it. And it is keyed by the PARENT rather than by an owner, which includes a root level that has no
+ * uuid at all. A spelling no table is named makes both explicit and cannot collide with an owned scope.
+ */
+const deptChildScope = (parentUuid: string | null) => `dept-children:${parentUuid ?? "root"}`;
+
+/**
+ * FIRST TOUCH ONLY: the highest child segment already stored under this parent, across both tables.
+ *
+ * This is the whole-scope read every allocation here used to do - kept as the seed, exactly as the flat
+ * allocator keeps its own, so a database populated before this counter existed (a seed script, a live tree)
+ * establishes its high-water mark once and is pure arithmetic after that.
+ */
+async function deptChildHighWaterMark(deps: Deps, parentUuid: string | null, parentCode: string | null): Promise<number> {
+  const subDepts = await deps.db
+    .select({ code: schema.departments.code })
+    .from(schema.departments)
+    .where(parentUuid ? eq(schema.departments.parentId, parentUuid) : isNull(schema.departments.parentId));
+  const emps = await deps.db
+    .select({ code: schema.employees.code })
+    .from(schema.employees)
+    .where(parentUuid ? eq(schema.employees.departmentId, parentUuid) : isNull(schema.employees.departmentId));
+  return maxChildSeg([...subDepts, ...emps].map((r) => r.code), parentCode);
+}
+
+/**
+ * Children of a department: BOTH sub-departments (parentId) AND employees (departmentId) share the same
+ * child-segment namespace under a dept, so they never collide.
+ *
+ * COUNTER-BACKED like every other allocator in this file, which it was the last one not to be. It composed
+ * `max(surviving siblings) + 1`, and that is not the same rule: it hands a number BACK the moment its holder
+ * stops surviving.
+ *
+ * That mattered because `code` is the authz scope key, and the two collections allocated here are the two the
+ * hierarchy is made of. A department is hard-purgeable (`DELETE ?force=true` - it carries `delete_time`, so the
+ * factory puts it in `forcePurgeable`), nothing sweeps the `access_rules` rows whose `scope_code` names the
+ * purged code, and the next department created under the same parent used to be handed that code again. Every
+ * surviving subtree grant written for the old department - `departments.04-*`, `employees.04-*`, whoever held
+ * `my-dept` under it - then applied to the new one and everyone placed under it, with nobody re-granting
+ * anything. The coupling was already known here: services/codeCascade.ts rewrites those same rule codes when a
+ * re-parent moves a subtree. Purge was the unguarded door, and a monotonic counter closes it at the source
+ * rather than by remembering to sweep.
+ *
+ * Employees have the identical shape and were protected only by accident (`provisionAccount` always leaves a
+ * `users.employee_id` row, `users` carries no `delete_time` so it cannot be purged either, and the foreign key
+ * makes every employee purge a 409). An accident of another feature is not a rail.
+ *
+ * It also drops the read this used to pay on the two hottest hierarchy writes in the app: every employee
+ * create, department create and re-parent read every sibling department PLUS every employee of the target
+ * department - and at the root level, every department-less employee in the org - on a platform that bills
+ * rows read.
+ */
+export async function allocUnderDept(deps: Deps, parentUuid: string | null, minWidth: number, resync = false): Promise<string> {
+  let parentCode: string | null = null;
+  if (parentUuid) {
+    const d = (await deps.db.select({ code: schema.departments.code }).from(schema.departments).where(eq(schema.departments.uuid, parentUuid)).limit(1))[0];
+    parentCode = d?.code ?? null;
+  }
+  const value = await reserve(deps, deptChildScope(parentUuid), 1, () => deptChildHighWaterMark(deps, parentUuid, parentCode), resync);
+  return childCodeAt(parentCode, value, minWidth);
+}
+
+// Employee-owned resources (leave-requests, documents, payslips, leave-balances, holiday-selections):
+// code = owner employee's code + own seg, scoped within (this table, this owner).
+// The counter is keyed on (table, owner) and holds the LEAF number, not the composed code - so it survives the
+// owner moving department. A move rewrites the prefix on their existing rows; the leaf sequence carries on from
+// where it was, which is what keeps the new codes clear of the old ones either way.
+export async function allocOwnedCode(
+  deps: Deps,
+  table: any,
+  ownerCol: any,
+  ownerUuid: string,
+  minWidth: number = CODE_WIDTH.owned,
+  resync = false,
+): Promise<string> {
+  return (await allocOwnedCodesFor(deps, table, ownerCol, [ownerUuid], minWidth, undefined, resync)).get(ownerUuid)!;
+}
+
+/**
+ * ONE owned code for EACH of many owners - the fan-out form of `allocOwnedCode`, and the reason a broadcast
+ * does not have to compose codes some other way.
+ *
+ * A fan-out that reads each owner's existing codes and takes max+1 looks equivalent and is not: it leaves the
+ * scope's COUNTER untouched, so every row it writes is a leaf the counter has never heard of. The next single
+ * `notify()` for that person then takes a counter value that is already on disk, the unique index refuses it,
+ * and four retries only walk the counter forward four places - which is how notifications for a busy person
+ * were quietly lost ("[notify] insert failed (non-fatal)"). Both paths have to take numbers from the same
+ * place, and this is that place, taken for many owners at once.
+ *
+ * Cost is what made the divergence tempting, so it is kept: the steady state is ONE batch of indexed counter
+ * bumps (one subrequest), and the whole-scope read only happens for owners whose counter does not exist yet.
+ */
+export async function allocOwnedCodesFor(
+  deps: Deps,
+  table: any,
+  ownerCol: any,
+  ownerUuids: string[],
+  minWidth: number = CODE_WIDTH.owned,
+  /** The owners' employee codes, when the caller has already read them - a fan-out usually has. */
+  ownerCodes?: Map<string, string | null>,
+  resync = false,
+): Promise<Map<string, string>> {
+  const runs = await allocOwnedCodeRuns(deps, table, ownerCol, new Map(ownerUuids.map((uuid) => [uuid, 1])), minWidth, ownerCodes, resync);
+  return new Map([...runs].map(([uuid, codes]) => [uuid, codes[0]!]));
+}
+
+/**
+ * SEVERAL owned codes for each of many owners, in one pass - `allocOwnedCodesFor` generalised from one-per-owner
+ * to `counts.get(owner)`-per-owner, and the function it is now implemented in terms of.
+ *
+ * The shape exists because the one-per-owner form is the wrong one for a fan-out that writes several rows under
+ * the SAME owner: the nightly leave accrual creates a balance row per (employee x accruing leave type), so a
+ * five-type org needs five codes in one owner's namespace. Called one at a time that is a counter round-trip per
+ * pair - headcount x types of them - inside the single invocation the nightly tick gets, which is how a
+ * first-ever accrual night runs out of subrequests part-way through the roster and leaves half the org without
+ * balances. Reserving a RUN per owner makes the whole night one batch of indexed counter bumps.
+ *
+ * Codes in a run are consecutive, so `counts` must be the real number of rows about to be written: a reserved
+ * number that goes unused is a gap in the sequence, which is harmless, but a run that is too short is a missing
+ * code the caller cannot recover from.
+ */
+export async function allocOwnedCodeRuns(
+  deps: Deps,
+  table: any,
+  ownerCol: any,
+  /** How many codes each owner needs. Owners mapped to 0 (or absent) get none. */
+  counts: Map<string, number>,
+  minWidth: number = CODE_WIDTH.owned,
+  /** The owners' employee codes, when the caller has already read them - a fan-out usually has. */
+  ownerCodes?: Map<string, string | null>,
+  /**
+   * Re-establish each counter against what is actually STORED before taking a number, instead of trusting it.
+   *
+   * The counter can only be behind if something once wrote codes without it - a table populated by a seed
+   * script, or a fan-out that composed its own (which is what this function replaced). A counter that is behind
+   * hands out numbers that are already on disk, and the unique index refuses every one of them, so retrying
+   * with the same fast path only walks it forward one place per attempt and never catches up. Set on a RETRY
+   * (see `withFreshCode`, which passes the attempt number): the first try stays cheap, and a collision pays for
+   * the read that makes the scope correct from then on.
+   */
+  resync = false,
+): Promise<Map<string, string[]>> {
+  // An owner asking for nothing is not an owner: dropping them here keeps them out of every statement below,
+  // so a caller may pass its whole roster and let the counts decide who is actually touched.
+  const owners = [...new Set([...counts].filter(([uuid, n]) => uuid && n > 0).map(([uuid]) => uuid))];
+  const need = (uuid: string) => Math.max(1, Math.trunc(counts.get(uuid) ?? 1));
+  const out = new Map<string, string[]>();
+  if (!owners.length) return out;
+
+  // The prefix half of the code: the owner's own employee code. One read for the whole fan-out, skipped when
+  // the caller already holds them.
+  const parentCode = new Map<string, string | null>(ownerCodes ?? []);
+  const unknown = owners.filter((uuid) => !parentCode.has(uuid));
+  for (const group of chunk(unknown, IN_CHUNK)) {
+    const rows = await deps.db.select({ uuid: schema.employees.uuid, code: schema.employees.code }).from(schema.employees).where(inArray(schema.employees.uuid, group));
+    for (const r of rows) parentCode.set(r.uuid, r.code);
+  }
+
+  /** The owner's `n` consecutive codes, ending at the counter value their reservation returned. */
+  const run = (uuid: string, endValue: number): string[] => {
+    const n = need(uuid);
+    const parent = parentCode.get(uuid) ?? null;
+    return Array.from({ length: n }, (_, k) => childCodeAt(parent, endValue - n + 1 + k, minWidth));
+  };
+
+  // The leaf half: bump every owner's counter in one batch, by the size of that owner's run. A scope with no
+  // counter row yet updates nothing, which is exactly how the first-touch set is identified - no extra read to
+  // find it.
+  const scopes = owners.map((uuid) => ({ uuid, scope: ownedScope(table, uuid) }));
+  const seeding: { uuid: string; scope: string }[] = [];
+  if (resync) {
+    seeding.push(...scopes);
+  } else {
+    const bumped = await batchRows(
+      deps,
+      scopes.map(({ uuid, scope }) =>
+        deps.db.update(schema.codeSequences).set({ next: sql`${schema.codeSequences.next} + ${need(uuid)}` }).where(eq(schema.codeSequences.scope, scope)).returning(),
+      ),
+    );
+    scopes.forEach(({ uuid, scope }, i) => {
+      const row = (bumped[i] as { next: number }[] | undefined)?.[0];
+      if (row) out.set(uuid, run(uuid, row.next));
+      else seeding.push({ uuid, scope });
+    });
+    if (!seeding.length) return out;
+  }
+
+  // Scopes with no counter yet, plus (on a resync) the ones whose counter is not to be trusted: establish the
+  // high-water mark from what is actually stored, then take the number past it.
+  //
+  // `max(stored counter, high-water mark) + 1` in the conflict branch covers both reasons this row may already
+  // exist. Two writers reaching a brand-new scope together: the loser takes the number AFTER the winner's
+  // rather than colliding with it. A counter that had fallen behind: it jumps to the mark instead of handing
+  // out a number that is already on disk again.
+  const seen = new Map<string, (string | null)[]>();
+  for (const group of chunk(seeding.map((f) => f.uuid), IN_CHUNK)) {
+    const rows = (await deps.db.select({ owner: ownerCol, code: table.code }).from(table).where(inArray(ownerCol, group))) as { owner: string; code: string | null }[];
+    for (const r of rows) seen.set(r.owner, [...(seen.get(r.owner) ?? []), r.code]);
+  }
+  const created = await batchRows(
+    deps,
+    seeding.map(({ uuid, scope }) => {
+      const mark = maxChildSeg(seen.get(uuid) ?? [], parentCode.get(uuid) ?? null);
+      // `next` lands on the LAST value of the run in both branches, which is what `run()` counts back from.
+      return deps.db
+        .insert(schema.codeSequences)
+        .values({ scope, next: mark + need(uuid) })
+        .onConflictDoUpdate({ target: schema.codeSequences.scope, set: { next: sql`max(${schema.codeSequences.next}, ${mark}) + ${need(uuid)}` } })
+        .returning();
+    }),
+  );
+  seeding.forEach(({ uuid }, i) => {
+    const row = (created[i] as { next: number }[] | undefined)?.[0];
+    if (row) out.set(uuid, run(uuid, row.next));
+  });
+  return out;
+}
+
+// D1 caps bound params per statement, not per batch - these statements carry two or three each, so the only
+// reason to chunk is to keep a single batch a sane size. Reads are chunked at the usual inArray width.
+const IN_CHUNK = 90;
+const BATCH_STMTS = 90;
+
+/** Run builders as batches and hand back each one's rows, in the order given. */
+async function batchRows(deps: Deps, stmts: PromiseLike<unknown>[]): Promise<unknown[]> {
+  const out: unknown[] = [];
+  for (const group of chunk(stmts, BATCH_STMTS)) {
+    if (group.length === 1) out.push(await group[0]!);
+    else out.push(...(await deps.db.batch(group as unknown as Parameters<Deps["db"]["batch"]>[0])));
+  }
+  return out;
+}
+
+// How many times a create re-reads its scope after losing the race above. Four covers the burst a handful of
+// simultaneous writers make - each retry reads AFTER the winner committed, so attempts thin out rather than
+// pile up - and past that the scope is contended by something a longer wait would not fix.
+const CODE_ATTEMPTS = 4;
+
+/** Run an insert that allocates its own code, re-allocating if a simultaneous create took the code first.
+ *
+ *  The allocation has to happen INSIDE `write` (`code: await allocFlatCode(…)` in the `.values()`, which is
+ *  how every call site already spells it), because re-reading the scope is the whole point: the winner has
+ *  committed by the time the loser looks again, so the second attempt composes the next code rather than the
+ *  same one. What survives every attempt reaches the caller as the retryable 409 middleware/errorHandler.ts
+ *  makes of a code collision - the only case a client is ever asked to retry by hand.
+ *
+ *  `lost` says which collisions are a lost race rather than a fault. It defaults to the code index; a create
+ *  that allocates a second number the same way (a card's per-board key) widens it to that index too. */
+export async function withFreshCode<R>(
+  write: (attempt: number) => Promise<R>,
+  lost: (err: unknown) => boolean = isCodeCollision,
+  attempts: number = CODE_ATTEMPTS,
+): Promise<R> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await write(attempt);
+    } catch (e) {
+      if (attempt >= attempts || !lost(e)) throw e;
+    }
+  }
+}

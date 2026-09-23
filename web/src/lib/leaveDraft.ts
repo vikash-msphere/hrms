@@ -1,0 +1,6 @@
+// A "request leave for these dates" draft: produced by the dashboard team-timeline's day selection and fed to
+// the shared RequestLeaveDialog as its initial values. `startSession`/`endSession` (1 = first half / morning,
+// 2 = second half / afternoon) carry half-day edges; absent means a full day (1 -> 2). `leaveType` (a
+// `leave-types/{id}` path) preselects the type - the Leaves page's balance cards hand it over so "I want to
+// spend this balance" lands on a form already set to that type.
+export type LeaveDraft = { from?: string; to?: string; startSession?: number; endSession?: number; leaveType?: string; reason?: string };

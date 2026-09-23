@@ -1,0 +1,543 @@
+/// <reference types="vite/client" />
+/// <reference types="@cloudflare/vitest-pool-workers" />
+import { env } from "cloudflare:test";
+import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { eq } from "drizzle-orm";
+// Glob every migration (ordered by filename) instead of importing one by name, so squashing or adding
+// migrations never breaks this suite. Concatenated in journal order to build the schema for miniflare.
+const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
+import * as schema from "../src/db/schema";
+import type { Bindings } from "../src/env";
+import { makeDeps, type Deps } from "../src/deps";
+import { emitEvent } from "../src/services/eventBus";
+import { invalidateAutomationCache, MAX_TOTAL_DISPATCHES } from "../src/services/automationEngine";
+import { AUTOMATIONS } from "../bootstrap/collections/automations";
+import { genId } from "../src/lib/idCodec";
+import type { AppUser } from "../src/env";
+import { createOvertimeRequest, approveOvertimeRequest } from "../src/services/overtimeRequests";
+import { createTicket } from "../src/services/tickets";
+
+// Events are emitted with a null actor (the "who" isn't a seeded users row, and no tested rule targets the
+// actor recipient) - keeps event_log's actor FK happy.
+const actor = null;
+
+// End-to-end workflow tests. Unlike the rest of the suite (pure), these run the REAL engine against a REAL D1
+// (miniflare): emitEvent -> event_log -> dispatchAutomations -> actions. `apiCall` actions re-dispatch through
+// the app's own middleware (app.fetch) against this same DB, so a rule that "creates a ticket" really inserts a
+// ticket row. Each test seeds ONLY the rule(s) under test so assertions are deterministic.
+
+// A valid 32-byte base64 key so makeDeps' encryptor/idCodec construct. (No encryption is exercised here.)
+const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+let deps: Deps;
+
+
+const b = env as unknown as Bindings; // the pool's ProvidedEnv, typed as our worker Bindings
+
+beforeAll(async () => {
+  (b as Record<string, unknown>).FIELD_ENCRYPTION_KEY = KEY;
+  (b as Record<string, unknown>).WIRE_ID_KEY = KEY;
+  for (const stmt of migrationSql.split("--> statement-breakpoint")) {
+    const s = stmt.trim();
+    if (s) await b.DB.prepare(s).run();
+  }
+  deps = makeDeps(b);
+});
+
+// Tables the tests write to, cleared before each (FK-safe order: children before employees).
+const TABLES = [
+  schema.ticketTodos, schema.tickets, schema.notifications, schema.transitions, schema.checkIns, schema.goals,
+  schema.bonuses, schema.workflowInstances, schema.jobs, schema.automationRuns, schema.eventLog,
+  schema.automations, schema.jobRequisitions, schema.overtimeRequests, schema.backgroundChecks,
+  schema.assetRequests, schema.assets, schema.assetCategories, schema.aiSuggestions, schema.announcements,
+  schema.accessRules, schema.users, schema.employees, schema.roles,
+];
+beforeEach(async () => {
+  for (const t of TABLES) await deps.db.delete(t);
+});
+
+// Insert a seeded rule BY NAME (so we test the real shipped definition), optionally overriding enabled.
+// Employee codes come from a COUNTER, not from random characters. `04-${genId().slice(0, 3)}` draws three
+// base32 characters - 32,768 possibilities - and this file seeds a whole roster, so the birthday bound makes a
+// duplicate `employees.code` (UNIQUE) a matter of when, not if: the suite failed roughly one run in a hundred
+// on an insert that has nothing to do with what is being tested. A counter is unique by construction.
+let seedSeq = 0;
+const nextCode = () => `04-${(++seedSeq).toString(36).padStart(3, "0")}`;
+
+async function seedRule(name: string, enabled = true) {
+  const a = AUTOMATIONS.find((r) => r.name === name);
+  if (!a) throw new Error(`no seeded automation named "${name}"`);
+  await deps.db.insert(schema.automations).values({
+    uuid: genId(), code: `aut-${genId().slice(0, 4)}`, name: a.name, description: a.description,
+    triggerType: a.trigger, conditionJson: a.condition ? JSON.stringify(a.condition) : null,
+    actionsJson: JSON.stringify(a.actions), disabled: !enabled,
+  });
+  invalidateAutomationCache(); // the engine caches the enabled set for 5s; drop it so the new rule is seen now
+}
+
+async function seedEmployee(over: Partial<typeof schema.employees.$inferInsert> = {}): Promise<string> {
+  const uuid = genId();
+  await deps.db.insert(schema.employees).values({
+    uuid, code: over.code ?? nextCode(), firstName: "Test", lastName: "User",
+    workEmail: `${uuid}@test.example`, status: "active", ...over,
+  });
+  return uuid;
+}
+
+// A real users row (its role FK needs a roles row) so a service call has a valid, loggable actor.
+async function seedActor(employeeId: string): Promise<AppUser> {
+  await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee" }).onConflictDoNothing();
+  const uuid = genId();
+  const email = `${uuid}@test.example`;
+  await deps.db.insert(schema.users).values({ uuid, code: `u-${genId().slice(0, 4)}`, email, role: "employee", employeeId });
+  return { uuid, email, role: "employee", status: "active", employeeId, employeeCode: null } as unknown as AppUser;
+}
+
+const ticketsFor = (emp: string) => deps.db.select().from(schema.tickets).where(eq(schema.tickets.employeeId, emp));
+const notifsFor = (emp: string) => deps.db.select().from(schema.notifications).where(eq(schema.notifications.recipientId, emp));
+
+describe("workflows e2e: new-hire provisioning (on-behalf ticket create)", () => {
+  it("raises IT + facilities tickets OWNED BY the new hire, and notifies hire + manager", async () => {
+    const mgr = await seedEmployee({ code: "04-900" });
+    const hire = await seedEmployee({ code: "04-901", managerId: mgr, departmentId: null });
+    await seedRule("Provision IT & workspace for new hires");
+
+    await emitEvent(deps, actor, "employee.created", { subject: `employees/${hire}`, employeeId: hire, payload: { departmentId: null, startDate: null } });
+
+    const tickets = await ticketsFor(hire);
+    expect(tickets.length).toBe(2); // two apiCall POST /v1/tickets, on behalf of the hire
+    expect(new Set(tickets.map((t) => t.category))).toEqual(new Set(["it", "facilities"]));
+    expect(tickets.every((t) => t.employeeId === hire)).toBe(true); // owned by the hire, not "system"
+
+    expect((await notifsFor(hire)).length).toBe(1); // notify subject ("setting up your workspace")
+    expect((await notifsFor(mgr)).length).toBe(1); // notifyManager
+
+    const runs = await deps.db.select().from(schema.automationRuns);
+    expect(runs.length).toBe(1);
+    expect(runs[0]!.status).toBe("done");
+  });
+});
+
+describe("workflows e2e: durable waitFor (loan disbursement SLA)", () => {
+  it("suspends on loan.approved, then resumes and notifies on loan.disbursed", async () => {
+    const emp = await seedEmployee({ code: "04-902" });
+    await seedRule("Track loan disbursement");
+
+    await emitEvent(deps, actor, "loan.approved", { subject: `loans/${genId()}`, employeeId: emp, payload: { amount: 100000, emiAmount: 5000 } });
+
+    // Immediate notify (EMI) + a waiting workflow instance awaiting loan.disbursed.
+    expect((await notifsFor(emp)).length).toBe(1);
+    let insts = await deps.db.select().from(schema.workflowInstances);
+    expect(insts.length).toBe(1);
+    expect(insts[0]!.status).toBe("waiting");
+    expect(insts[0]!.awaitedTypes ?? "").toContain("loan.disbursed");
+
+    // The correlated event resumes it (first arm wins -> done) and fires the arm's notify.
+    await emitEvent(deps, actor, "loan.disbursed", { subject: `loans/${genId()}`, employeeId: emp, payload: { amount: 100000 } });
+    insts = await deps.db.select().from(schema.workflowInstances);
+    expect(insts[0]!.status).toBe("done");
+    expect((await notifsFor(emp)).length).toBe(2); // + "your loan has been disbursed"
+  });
+});
+
+describe("workflows e2e: {{today}} + fan-out + condition (milestone anniversary)", () => {
+  it("awards a bonus stamped today and broadcasts, only when years >= 3", async () => {
+    const emp = await seedEmployee({ code: "04-903" });
+    await seedRule("Reward milestone work anniversaries"); // condition years >= 3
+
+    // Below threshold: nothing happens.
+    await emitEvent(deps, actor, "schedule.workAnniversary", { subject: `employees/${emp}`, employeeId: emp, payload: { years: 1 } });
+    expect((await deps.db.select().from(schema.bonuses)).length).toBe(0);
+
+    // At/above threshold: a bonus dated today + the employee notify.
+    await emitEvent(deps, actor, "schedule.workAnniversary", { subject: `employees/${emp}`, employeeId: emp, payload: { years: 5 } });
+    const bonuses = await deps.db.select().from(schema.bonuses).where(eq(schema.bonuses.employeeId, emp));
+    expect(bonuses.length).toBe(1);
+    const today = new Date().toISOString().slice(0, 10);
+    expect(new Date(bonuses[0]!.awardDate).toISOString().slice(0, 10)).toBe(today); // {{today}} resolved
+    expect((await notifsFor(emp)).length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("workflows e2e: condition gate + apiCall PATCH (close requisition)", () => {
+  async function seedReq(): Promise<string> {
+    const uuid = genId();
+    await deps.db.insert(schema.jobRequisitions).values({ uuid, code: `jr-${genId().slice(0, 4)}`, title: "Engineer", status: "open" });
+    return uuid;
+  }
+  // Keyed on `application.hired`, not `offer.accepted`: a team that hires straight off the pipeline board never
+  // writes an offer down, and their requisition has to close too.
+  it("marks the requisition filled when openings <= 1", async () => {
+    const req = await seedReq();
+    await seedRule("Close the requisition when filled");
+    await emitEvent(deps, actor, "application.hired", { subject: `applications/${genId()}`, payload: { requisitionId: req, openings: 1 } });
+    const row = (await deps.db.select().from(schema.jobRequisitions).where(eq(schema.jobRequisitions.uuid, req)))[0]!;
+    expect(row.status).toBe("filled");
+  });
+  it("leaves it open when openings > 1 (condition fails)", async () => {
+    const req = await seedReq();
+    await seedRule("Close the requisition when filled");
+    await emitEvent(deps, actor, "application.hired", { subject: `applications/${genId()}`, payload: { requisitionId: req, openings: 3 } });
+    const row = (await deps.db.select().from(schema.jobRequisitions).where(eq(schema.jobRequisitions.uuid, req)))[0]!;
+    expect(row.status).toBe("open");
+  });
+});
+
+describe("workflows e2e: a newly-wired emit drives a rule (overtime SLA, service-level)", () => {
+  it("createOvertimeRequest emits overtime.requested; the SLA suspends; approval resolves it", async () => {
+    const mgr = await seedEmployee({ code: "04-950" });
+    const emp = await seedEmployee({ code: "04-951", managerId: mgr });
+    const empActor = await seedActor(emp);
+    await seedRule("Overtime decision SLA");
+
+    // Drive the REAL service (not a hand-emitted event) - proves the emit we added actually fires.
+    const ot = await createOvertimeRequest(deps, empActor, { employee: `employees/${emp}`, start_time: "2026-07-01T09:00:00Z", end_time: "2026-07-01T12:00:00Z" });
+
+    expect((await deps.db.select().from(schema.eventLog).where(eq(schema.eventLog.type, "overtime.requested"))).length).toBe(1);
+    let insts = await deps.db.select().from(schema.workflowInstances);
+    expect(insts.length).toBe(1);
+    expect(insts[0]!.status).toBe("waiting");
+    expect(insts[0]!.awaitedTypes ?? "").toContain("overtime.approved");
+
+    await approveOvertimeRequest(deps, await seedActor(mgr), ot.uuid); // the manager decides; emits overtime.approved (same subject) -> resumes
+    insts = await deps.db.select().from(schema.workflowInstances);
+    expect(insts[0]!.status).toBe("done");
+    expect((await deps.db.select().from(schema.eventLog).where(eq(schema.eventLog.type, "overtime.approved"))).length).toBe(1);
+  });
+});
+
+describe("workflows e2e: cross-section action-item + data-passing (expiring doc -> ticket)", () => {
+  it("opens an HR ticket owned by the employee and the notify cites it (captureAs -> results)", async () => {
+    const emp = await seedEmployee({ code: "04-970" });
+    await seedRule("Open a renewal task for an expiring document"); // condition daysLeft <= 15
+
+    await emitEvent(deps, actor, "document.expiring", { subject: `personal-documents/${genId()}`, employeeId: emp, payload: { daysLeft: 10, title: "Passport" } });
+
+    const tickets = await ticketsFor(emp);
+    expect(tickets.length).toBe(1);
+    expect(tickets[0]!.category).toBe("hr"); // opened on behalf of the employee, into the HR queue
+    expect(tickets[0]!.subject).toBe("Renew an expiring document");
+
+    const notifs = await notifsFor(emp);
+    expect(notifs.length).toBe(1);
+    expect(notifs[0]!.body).toContain("Renew an expiring document"); // {{results.renewalTicket.subject}} resolved
+  });
+});
+
+describe("workflows e2e: correlation trace links one workflow's event + runs", () => {
+  it("all runs from one inbound event share its trace; independent events get distinct traces", async () => {
+    const emp = await seedEmployee({ code: "04-990" });
+    await seedRule("New hire: complete-your-profile goal");
+    await seedRule("Initiate a new hire's background check"); // a second rule on the same trigger
+
+    await emitEvent(deps, actor, "employee.created", { subject: `employees/${emp}`, employeeId: emp, payload: {} });
+
+    const runs = await deps.db.select().from(schema.automationRuns);
+    expect(runs.length).toBe(2); // both rules fired
+    const trace = runs[0]!.correlationId;
+    expect(trace).toBeTruthy();
+    expect(runs.every((r) => r.correlationId === trace)).toBe(true); // same workflow execution
+    expect(runs.every((r) => r.employeeId === emp)).toBe(true); // cause denormalized onto each run
+    const ev = (await deps.db.select().from(schema.eventLog).where(eq(schema.eventLog.type, "employee.created")))[0]!;
+    expect(ev.correlationId).toBe(trace); // the triggering event shares the trace
+
+    // A second, independent hire is its own workflow - distinct trace (root-per-emit isolation).
+    const emp2 = await seedEmployee({ code: "04-991" });
+    await emitEvent(deps, actor, "employee.created", { subject: `employees/${emp2}`, employeeId: emp2, payload: {} });
+    const other = (await deps.db.select().from(schema.automationRuns).where(eq(schema.automationRuns.employeeId, emp2)))[0]!;
+    expect(other.correlationId).toBeTruthy();
+    expect(other.correlationId).not.toBe(trace);
+  });
+});
+
+describe("workflows e2e: apiCall creates a record in another module (new hire -> goal)", () => {
+  it("creates a complete-your-profile goal owned by the new hire", async () => {
+    const emp = await seedEmployee({ code: "04-985" });
+    await seedRule("New hire: complete-your-profile goal");
+
+    await emitEvent(deps, actor, "employee.created", { subject: `employees/${emp}`, employeeId: emp, payload: { departmentId: null, startDate: null } });
+
+    const goals = await deps.db.select().from(schema.goals).where(eq(schema.goals.employeeId, emp));
+    expect(goals.length).toBe(1);
+    expect(goals[0]!.title).toBe("Complete your employee profile");
+  });
+});
+
+describe("workflows e2e: state-changing chain (IT ticket -> auto-append triage checklist)", () => {
+  it("appends the standard triage todos to a new IT ticket via apiCall :addTodos", async () => {
+    const emp = await seedEmployee({ code: "04-980" });
+    const empActor = await seedActor(emp);
+    await seedRule("Seed a triage checklist on IT tickets"); // condition category == it
+
+    // Raising the ticket emits ticket.created -> the rule runs :addTodos on that same ticket.
+    const ticket = await createTicket(deps, empActor, { category: "it", subject: "Laptop won't boot" });
+
+    const todos = await deps.db.select().from(schema.ticketTodos).where(eq(schema.ticketTodos.ticketId, ticket.uuid));
+    expect(todos.length).toBe(4); // the four triage steps were added by the automation
+    expect(todos.map((t) => t.text)).toContain("Resolve & verify the fix");
+  });
+});
+
+describe("workflows e2e: condition gate on a real field (extended-leave coverage)", () => {
+  it("nudges the manager only when leave is 5+ days", async () => {
+    const mgr = await seedEmployee({ code: "04-960" });
+    const emp = await seedEmployee({ code: "04-961", managerId: mgr });
+    await seedRule("Extended leave: arrange coverage"); // condition days >= 5
+
+    await emitEvent(deps, actor, "leave.approved", { subject: `leave-requests/${genId()}`, employeeId: emp, payload: { days: 2 } });
+    expect((await notifsFor(mgr)).length).toBe(0);
+
+    await emitEvent(deps, actor, "leave.approved", { subject: `leave-requests/${genId()}`, employeeId: emp, payload: { days: 7 } });
+    expect((await notifsFor(mgr)).length).toBe(1);
+  });
+});
+
+// The asset-request fulfilment chain is the most connected rule shipped: it creates a record in another module,
+// remembers that record's path across a durable suspend, and then acts on it again when the hand-over happens.
+// If templating over the results bag, `waitFor` correlation, or a verb call on a captured path ever break, an
+// approved request would quietly stop being chased - so all three are asserted here against the real engine.
+describe("workflows e2e: asset request -> hand-over ticket -> auto-resolve", () => {
+  it("opens an IT ticket on approval, then resolves it when the asset is handed over", async () => {
+    const mgr = await seedEmployee({ code: "04-970" });
+    const emp = await seedEmployee({ code: "04-971", managerId: mgr });
+    await seedRule("Asset request approved: open the hand-over ticket, then chase it");
+    const request = `asset-requests/${genId()}`;
+
+    await emitEvent(deps, actor, "assetRequest.approved", { subject: request, employeeId: emp, payload: { categoryId: genId() } });
+
+    const tickets = await ticketsFor(emp);
+    expect(tickets.length).toBe(1);
+    expect(tickets[0]!.category).toBe("it");
+    expect(tickets[0]!.state).toBe("OPEN");
+    // The requester is told which ticket carries their kit - the path came back from the create call.
+    const told = await notifsFor(emp);
+    expect(told.length).toBe(1);
+    expect(told[0]!.body).toContain("tickets/");
+    // The chain is suspended, waiting for the hand-over rather than polling for it.
+    const waiting = await deps.db.select().from(schema.workflowInstances);
+    expect(waiting.length).toBe(1);
+    expect(waiting[0]!.status).toBe("waiting");
+    expect(waiting[0]!.awaitedTypes ?? "").toContain("assetRequest.issued");
+
+    // Handing the asset over resumes the chain: the ticket resolves itself and the holder is told to scan.
+    await emitEvent(deps, actor, "assetRequest.issued", { subject: request, employeeId: emp, payload: { categoryId: genId(), assetId: genId() } });
+
+    const resumed = await deps.db.select().from(schema.workflowInstances);
+    expect(resumed[0]!.status).toBe("done");
+    const resolved = await ticketsFor(emp);
+    expect(resolved.length).toBe(1); // resolved, not a second ticket
+    expect(resolved[0]!.state).toBe("RESOLVED");
+    // Three messages by now: the rule's "approved", the rule's "scan the tag", and the ticket service's own
+    // "your ticket was resolved" (the resolve went through the real endpoint, so its side effects happened too).
+    const after = await notifsFor(emp);
+    expect(after.length).toBe(3);
+    expect(after.some((n) => n.title === "Your kit is ready")).toBe(true);
+  });
+
+  it("stays suspended when somebody else's request is issued (correlation is per employee)", async () => {
+    const emp = await seedEmployee({ code: "04-972" });
+    const other = await seedEmployee({ code: "04-973" });
+    await seedRule("Asset request approved: open the hand-over ticket, then chase it");
+
+    await emitEvent(deps, actor, "assetRequest.approved", { subject: `asset-requests/${genId()}`, employeeId: emp, payload: { categoryId: genId() } });
+    await emitEvent(deps, actor, "assetRequest.issued", { subject: `asset-requests/${genId()}`, employeeId: other, payload: { categoryId: genId() } });
+
+    const insts = await deps.db.select().from(schema.workflowInstances);
+    expect(insts[0]!.status).toBe("waiting"); // the other person's hand-over is not this request's
+    expect((await ticketsFor(emp))[0]!.state).toBe("OPEN");
+  });
+});
+
+describe("workflows e2e: damaged-on-receipt raises a ticket (condition on the scan's own report)", () => {
+  it("ignores a good condition and raises a high-priority ticket for a damaged one", async () => {
+    const emp = await seedEmployee({ code: "04-974" });
+    await seedRule("Asset arrived damaged: raise it with IT");
+    const asset = `assets/${genId()}`;
+
+    await emitEvent(deps, actor, "asset.acknowledged", { subject: asset, employeeId: emp, payload: { assetTag: "MS-LAP-001", condition: "good", scanned: true, waitedDays: 1 } });
+    expect((await ticketsFor(emp)).length).toBe(0);
+
+    await emitEvent(deps, actor, "asset.acknowledged", { subject: asset, employeeId: emp, payload: { assetTag: "MS-LAP-001", condition: "damaged", scanned: true, waitedDays: 1 } });
+    const tickets = await ticketsFor(emp);
+    expect(tickets.length).toBe(1);
+    expect(tickets[0]!.priority).toBe("high");
+    // The tag names the physical thing - a ticket that can't say which laptop is useless to whoever picks it up.
+    expect(tickets[0]!.subject).toContain("MS-LAP-001");
+    expect(tickets[0]!.description).toContain("damaged");
+  });
+});
+
+describe("workflows e2e: offboarding reclaim ticket counts the kit from the inventory itself", () => {
+  it("reads what the leaver still holds and puts that number in the ticket", async () => {
+    const leaver = await seedEmployee({ code: "04-975" });
+    const category = genId();
+    await deps.db.insert(schema.assetCategories).values({ uuid: category, code: "01", name: "Laptop", tagCode: "LAP" });
+    for (const tag of ["MS-LAP-001", "MS-LAP-002"]) {
+      await deps.db.insert(schema.assets).values({ uuid: genId(), code: `as-${genId().slice(0, 4)}`, assetTag: tag, name: "MacBook", categoryId: category, assignedTo: leaver, status: "assigned" });
+    }
+    await seedRule("Offboarding closed: reclaim whatever kit is still on their record");
+
+    await emitEvent(deps, actor, "transition.completed", { subject: `transitions/${genId()}`, employeeId: leaver, payload: { kind: "offboarding" } });
+
+    const tickets = await ticketsFor(leaver);
+    expect(tickets.length).toBe(1);
+    expect(tickets[0]!.subject).toContain("2 asset(s)"); // the GET's own answer, templated in
+    expect(tickets[0]!.priority).toBe("high");
+  });
+
+  it("does nothing for an onboarding transition (the condition gates on kind)", async () => {
+    const emp = await seedEmployee({ code: "04-976" });
+    await seedRule("Offboarding closed: reclaim whatever kit is still on their record");
+    await emitEvent(deps, actor, "transition.completed", { subject: `transitions/${genId()}`, employeeId: emp, payload: { kind: "onboarding" } });
+    expect((await ticketsFor(emp)).length).toBe(0);
+  });
+});
+
+// The runaway guard is correct, but a guard nobody can see is a guard that silently eats work. Before this,
+// an exhausted budget only produced a console.warn: the Workflows UI showed the runs that DID fire and no
+// hint that anything was refused. It now also writes one automation_runs row, which is the surface someone
+// actually opens.
+describe("workflows e2e: an exhausted dispatch budget is visible, not just logged", () => {
+  it("writes exactly one 'dropped' run naming no rule, however many events are refused", async () => {
+    const emp = await seedEmployee({ code: "04-980" });
+    await seedRule("Provision IT & workspace for new hires");
+
+    const prev = deps.automationBudget;
+    deps.automationBudget = { n: MAX_TOTAL_DISPATCHES, dropped: 0 }; // already exhausted
+    try {
+      for (let i = 0; i < 3; i++) {
+        await emitEvent(deps, actor, "employee.created", { subject: `employees/${emp}`, employeeId: emp, payload: { departmentId: null, startDate: null } });
+      }
+      expect(deps.automationBudget.dropped).toBe(3); // every one was refused...
+    } finally {
+      deps.automationBudget = prev;
+    }
+
+    // ...but only the first is recorded. A row per dropped event would be the same runaway this guard exists
+    // to stop, and one row already carries the fact.
+    const runs = await deps.db.select().from(schema.automationRuns);
+    expect(runs.length).toBe(1);
+    expect(runs[0]!.status).toBe("dropped");
+    expect(runs[0]!.automationId).toBeNull(); // no rule was loaded, so none is to blame
+    expect(runs[0]!.eventType).toBe("employee.created");
+    expect(runs[0]!.resultJson).toContain("Dispatch budget");
+
+    // The rule never ran, so nothing it would have done exists.
+    expect((await ticketsFor(emp)).length).toBe(0);
+  });
+});
+
+// A person who may act on a flagged post: an active user whose ROLE grant carries `moderation.read`. Nothing
+// seeds that capability for any role, which is the posture the feature ships with - so the test states it,
+// the way an org does, by putting somebody in a role that holds it.
+async function seedModerator(): Promise<string> {
+  const employeeId = await seedEmployee({ code: "04-960" });
+  await deps.db.insert(schema.roles).values({ name: "moderator", label: "Moderator" }).onConflictDoNothing();
+  // THE GRANT IS THE POINT, not the role name. `moderation` is private by default - nothing seeds it for
+  // anybody - so an org that wants a moderation queue grants it, and that ACL row is what the capability
+  // audience asks about. Seeding a role NAME alone proves nothing: with no rule behind it the grant is empty
+  // and the audience is empty, which is exactly how this test failed first time round.
+  await deps.db.insert(schema.accessRules).values({
+    uuid: genId(), subject: "moderator", subjectKind: "role", namespace: "moderation",
+    pattern: "moderation.*", scopeKind: "all", scopeCode: "", level: "read", effect: "allow",
+  });
+  await deps.db.insert(schema.users).values({ uuid: genId(), code: `u-${genId().slice(0, 4)}`, email: `mod-${genId().slice(0, 4)}@test.example`, role: "moderator", employeeId });
+  return employeeId;
+}
+
+// A post on the wall WITH the flag already standing against it, which is the state the event is emitted in:
+// `recordFlag` writes the advisory row and then emits, in that order, precisely so a rule reacting to the
+// event finds the flag it is reacting to. Seeding only the post made `moderation:decide` answer 404 - "there
+// is nothing to decide" - and the takedown rule silently did nothing, which is what a wrong emit order would
+// look like in production too.
+async function seedFlaggedPost(title: string): Promise<string> {
+  const uuid = genId();
+  await deps.db.insert(schema.announcements).values({
+    uuid, code: `a-${genId().slice(0, 6)}`, title, body: "The body.", published: true, disabled: false,
+  });
+  await deps.db.insert(schema.aiSuggestions).values({
+    hostCollection: "announcements", hostRecordId: uuid, feature: "moderation",
+    payloadJson: JSON.stringify({ hazards: ["S10"], excerpt: "The body.", anonymous: false }),
+    model: "@cf/meta/llama-guard-3-8b", basis: 1,
+  });
+  return uuid;
+}
+
+// The flag as `services/moderation.ts recordFlag` emits it, minus the scan that produced it: this file tests
+// what a RULE does with an event, and the scanner's half (that a flag emits this) is pinned in
+// test/moderation.test.ts.
+const flagEvent = (post: string, pass: "hazard" | "conduct") =>
+  emitEvent(deps, actor, "moderation.flagged", {
+    subject: `announcements/${post}`,
+    employeeId: null,
+    payload: { collection: "announcements", pass, hazards: pass === "hazard" ? "S10" : "W1", hazardLabels: pass === "hazard" ? "Hate" : "Personal abuse", title: "About Bob", anonymous: false },
+  });
+
+describe("workflows e2e: acting on a flagged post", () => {
+  it("tells whoever may moderate, without touching the post", async () => {
+    const mod = await seedModerator();
+    const post = await seedFlaggedPost("About Bob");
+    await seedRule("Tell the moderators about a flagged post");
+
+    await flagEvent(post, "hazard");
+
+    // THE AUDIENCE IS THE CAPABILITY, not a department or a list: the rule says `moderation.read` and the
+    // engine asks the ACL who holds it. That is what keeps it right when an org moves moderation to another
+    // role - a hand-kept list of employees would go on notifying whoever was in it the day it was written.
+    expect((await notifsFor(mod)).length).toBe(1);
+    // And the post is untouched, which is the whole posture of the feature: this rule informs, it does not act.
+    const row = (await deps.db.select().from(schema.announcements).where(eq(schema.announcements.uuid, post)))[0];
+    expect(row?.disabled).toBe(false);
+  });
+
+  it("takes the post down when the org has opted into that, and says so", async () => {
+    const mod = await seedModerator();
+    const post = await seedFlaggedPost("About Bob");
+    await seedRule("Take down a post the safety model flagged");
+
+    await flagEvent(post, "hazard");
+
+    // The apiCall re-dispatched `POST /v1/moderation:decide` through the app's own middleware as the system
+    // principal, and the post really came off the wall - `disabled`, the same column a moderator's own hide
+    // sets, so every visibility filter honours it and the hide is reversible.
+    const row = (await deps.db.select().from(schema.announcements).where(eq(schema.announcements.uuid, post)))[0];
+    expect(row?.disabled).toBe(true);
+    expect((await notifsFor(mod)).length).toBe(1); // ...and the moderators were told it happened.
+
+    // `done`, not `partial`. The flag row's `decided_by` is a foreign key into `users` and the automation
+    // runs as a principal that has no row there: written verbatim it failed the FK AFTER the post had been
+    // hidden, so the post came down, the flag stayed pending, and the call answered 500. A rule that half
+    // works is the worst of the three outcomes, so it is asserted rather than left to the two rows below.
+    const runs = await deps.db.select().from(schema.automationRuns);
+    expect(runs[0]!.status).toBe("done");
+    const flag = (await deps.db.select().from(schema.aiSuggestions))[0];
+    expect(flag?.state).toBe("accepted"); // upheld, and off the queue
+    expect(flag?.decidedBy).toBeNull(); // by nobody: no person decided this
+  });
+
+  it("does NOT take a post down on a conduct flag, only on the safety model's", async () => {
+    await seedModerator();
+    const post = await seedFlaggedPost("About Bob");
+    await seedRule("Take down a post the safety model flagged");
+
+    await flagEvent(post, "conduct");
+
+    // THE CONDITION THAT MAKES THE RULE SAFE TO SHIP AT ALL. A conduct flag is a general model reading this
+    // org's rubric about tone; hiding on it would eventually take down a post somebody merely disagreed
+    // with. The rule is `pass == "hazard"` and this is the case that proves the other half is excluded.
+    const row = (await deps.db.select().from(schema.announcements).where(eq(schema.announcements.uuid, post)))[0];
+    expect(row?.disabled).toBe(false);
+    expect((await deps.db.select().from(schema.automationRuns)).length).toBe(0);
+  });
+
+  it("ships the takedown disabled and the notification enabled", () => {
+    // A rule that hides real posts on a model's say-so must be something an org turns ON deliberately; a rule
+    // that tells the moderators costs nothing when the model is wrong. If these two ever flip, an upgrade
+    // starts hiding posts for every org that took it.
+    const takedown = AUTOMATIONS.find((a) => a.name === "Take down a post the safety model flagged");
+    const tell = AUTOMATIONS.find((a) => a.name === "Tell the moderators about a flagged post");
+    expect(takedown?.enabled).toBe(false);
+    expect(takedown?.condition).toEqual({ field: "pass", op: "eq", value: "hazard" });
+    expect(tell?.enabled ?? true).toBe(true);
+  });
+});

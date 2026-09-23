@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- `interactive-widget=resizes-content` shrinks the layout viewport when the on-screen keyboard opens, so a
+         bottom-anchored sheet (every dialog on a phone) lifts above the keys instead of sitting behind them.
+         Browsers that ignore it fall back to the visualViewport measurement in components/ui/dialog.tsx.
+         `viewport-fit=cover` is what makes `env(safe-area-inset-*)` report a real number: without it iOS
+         letterboxes the app inside the safe area and every inset reads 0, so the bottom nav, the sheet
+         footers and the standalone status-bar padding that are written against those insets do nothing.
+         Opting in paints edge to edge, which is why the shell reserves the insets itself (index.css). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#1D4C91" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- iOS ignores the web manifest's icon list and reads this by convention (see scripts/genIcons.ts). -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>%VITE_APP_NAME%</title>
+    <!-- Apply the saved theme before first paint so there is no light/dark flash on load. External (not
+         inline) so the SPA CSP can use `script-src 'self'` with no `'unsafe-inline'`. See web/public/_headers. -->
+    <script src="/theme-init.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

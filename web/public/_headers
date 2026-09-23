@@ -1,0 +1,63 @@
+# Response headers for the static SPA (served by Cloudflare from web/dist). The Worker's own /v1 JSON
+# responses set their own stricter CSP in src/middleware/securityHeaders.ts; this file governs the app shell
+# and its bundled assets. script-src is 'self' only (the theme bootstrap is an external file, and the
+# module-preload polyfill is disabled in vite.config.ts), so no inline scripts are permitted. style-src keeps
+# 'unsafe-inline' because React and the card-template renderer set element style attributes.
+# NO remote origin appears anywhere in this policy. The app's typefaces (the UI font, the org wordmark and the
+# faces a post can be set in) are self-hosted via @fontsource and ship as same-origin bundled assets, and the
+# error tracker is reached through the Worker's own /diag relay (src/routes/diag.ts) rather than by the browser
+# posting to a vendor host - so connect-src stays 'self'. That relay exists because ad and tracking blockers
+# carry every ingest host on their default lists; it is not a CSP workaround, but keeping this line at 'self'
+# is a real second benefit of it.
+# worker-src allows blob: for the SAME reason, and it is load-bearing rather than cosmetic: Sentry's session
+# replay compresses its recording in a Web Worker built from a blob URL, and under `default-src 'self'` that
+# Worker constructor throws where nothing catches it - replay records nothing, reports no error, and the
+# feature looks configured while being dead. child-src repeats it for Safari <=15.4, which never learned
+# worker-src. Widening this costs little: constructing a blob Worker already requires script execution in the
+# page, which script-src governs. The alternative is self-hosting the worker (`workerUrl`), which trades this
+# token for an unhashed asset in web/public and a copy step - not worth it for one library.
+# The service worker (push-sw.js) is unaffected either way: it is a same-origin file, covered by 'self'.
+# 'wasm-unsafe-eval' is the narrow permission to COMPILE WebAssembly - it grants nothing else, and in
+# particular is not 'unsafe-eval' (no eval/new Function). pdf.js decodes JBIG2 and JPEG2000 images (what
+# office scanners emit) and runs its colour engine in wasm; Chromium refuses to compile a module without this
+# token whenever a script-src is set, so scanned documents render with missing images.
+# frame-src allows blob: ONLY: the in-app PDF viewers (payslip preview, letter-template preview) fetch the PDF
+# through the authorized API, wrap the bytes in a same-origin Blob, and show them in an iframe. Without it the
+# frame falls back to default-src 'self', which excludes blob: - the viewer renders as an empty box. No remote
+# origin is framed, and object-src stays 'none' (no <object>/<embed> plugin surface).
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:; child-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Permissions-Policy: geolocation=(), microphone=(), camera=(self), payment=(), usb=(), serial=(), midi=()
+# NO Strict-Transport-Security here, deliberately. This file cannot condition a header on the request being
+# HTTPS, so an STS header set here is also sent over plain HTTP - which RFC 6797 s7.2 forbids, and which
+# breaks local development concretely: `wrangler dev` serves the app over http://localhost, Chrome pins the
+# host to HTTPS, and the next service-worker script fetch is upgraded to https://localhost where nothing is
+# listening ("An unknown error occurred when fetching the script"). Enable HSTS at the ZONE level instead
+# (Cloudflare dashboard -> SSL/TLS -> Edge Certificates -> HSTS), where it applies only to real HTTPS
+# traffic and covers the API responses too, not just these static assets. See docs/deploy-security.md.
+
+# Caching. Everything Vite emits under /assets/ carries a content hash in its filename, so a given URL's bytes
+# can never change - a new build produces a new URL. Those are safe to pin in the browser forever, which keeps
+# a repeat visit from revalidating ~2000 files. The pdf.js sidecar data under /assets/pdfjs/ is the exception:
+# it is copied verbatim out of node_modules and is NOT content-hashed, so it gets a normal one-day cache and
+# revalidates rather than being pinned to a stale pdfjs-dist version.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/assets/pdfjs/*
+  Cache-Control: public, max-age=86400, must-revalidate
+
+# The shell and everything reachable by a stable URL must revalidate, or a deploy never reaches an open tab.
+/
+  Cache-Control: no-cache
+/index.html
+  Cache-Control: no-cache
+/manifest.webmanifest
+  Cache-Control: no-cache
+/theme-init.js
+  Cache-Control: no-cache
+/push-sw.js
+  Cache-Control: no-cache

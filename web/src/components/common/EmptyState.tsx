@@ -1,0 +1,50 @@
+import * as React from "react";
+import { type LucideIcon, Inbox } from "lucide-react";
+import { type Illustration, illustrationSrc } from "@/lib/illustrations";
+import { ART_DIECUT } from "@/lib/kudosArt";
+
+export function EmptyState({
+  icon: Icon = Inbox,
+  illustration,
+  title,
+  description,
+  action,
+}: {
+  icon?: LucideIcon;
+  // Prefer an illustration on the page-level zero state a user is likely to meet first (a brand-new
+  // module, no search results); the icon stays right for small in-card and in-tab emptiness.
+  illustration?: Illustration;
+  title: string;
+  description?: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    // Tighter on a phone: 16px of side padding rather than 24 (the description is the widest thing here and
+    // it is already capped at max-w-sm), and 48px of air above and below instead of 64 - a zero state that
+    // fills the screen reads as a failure rather than as "nothing here yet".
+    // data-sentry-unmask: an empty state is standing copy - "No payslips yet", and what would put one here -
+    // so on a masked route (payslips, the profile) it was the emptiness itself that got hidden, which is
+    // exactly the state a bug report is usually about. Nothing here renders a record's values.
+    <div
+      data-sentry-unmask
+      className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card/50 px-4 py-12 text-center sm:px-6 sm:py-16"
+    >
+      {illustration ? (
+        <img
+          src={illustrationSrc(illustration)}
+          alt=""
+          aria-hidden
+          loading="lazy"
+          className={`mb-6 h-32 w-auto max-w-[15rem] opacity-90 sm:h-40 ${ART_DIECUT}`}
+        />
+      ) : (
+        <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-accent text-accent-foreground">
+          <Icon className="h-6 w-6" />
+        </div>
+      )}
+      <h3 className="text-base font-semibold text-foreground">{title}</h3>
+      {description && <p className="mt-1 max-w-sm text-sm text-muted-foreground">{description}</p>}
+      {action && <div className="mt-5">{action}</div>}
+    </div>
+  );
+}

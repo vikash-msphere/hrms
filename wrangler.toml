@@ -1,0 +1,203 @@
+# PRODUCTION. This file is the production deploy target and nothing else: `wrangler deploy`, `wrangler dev`
+# and the vitest workers pool all read it with no `--config`, and `npm run deploy` is the scripted form.
+#
+# STAGING LIVES IN `wrangler.staging.toml`, as a standalone config rather than an `[env.staging]` block in
+# here. The block form required every top-level binding and var to be repeated inside it, and forgetting one
+# was silent - a missing `[env.staging.vars]` deploys with no vars rather than failing - so the two targets
+# now read end to end as two files. Three things must be kept in step across them by hand, and
+# `npm run preflight` checks all three rather than trusting anyone to remember: the compatibility date, the
+# `[limits]` block, and `run_worker_first`.
+name = "hrms"
+main = "src/index.ts"
+# Pinned, and BUMPED DELIBERATELY rather than left to drift. The date selects the Workers runtime's behaviour
+# set, so leaving it a year behind means running on semantics the platform has already moved past - and the
+# longer it sits, the larger the step becomes and the less a green test run says about it. Raise it, run
+# `npm run verify`, and keep the two environments on the SAME date: staging rehearses production or it
+# rehearses nothing.
+#
+# IT MUST NOT OUTRUN THE INSTALLED RUNTIME, and that half is easy to miss because nothing fails when it does.
+# `wrangler dev` and the whole vitest suite run on the workerd bundled with the `wrangler` devDependency, and a
+# date that runtime does not know is not an error - it is a warning, once per worker boot, in a log nobody reads:
+#
+#   [mf:warn] The latest compatibility date supported by the installed Cloudflare Workers Runtime is
+#   "<date>", but you've requested "<later date>". Falling back to "<date>"...
+#
+# The deploy still sends the later date, so the edge honours it. The result is the quiet one: every test and
+# every local request validates the app under one behaviour set while production runs another, and a green suite
+# stops being evidence about the thing that ships. This date was six months ahead of the bundled workerd
+# (1.20260310.1, which tops out at 2026-03-10), so it is pulled back to what the toolchain can actually execute.
+#
+# TO MOVE IT FORWARD: bump `wrangler` first, check the date the new workerd supports (boot the suite and confirm
+# the warning above is gone), then raise this line and the one in wrangler.staging.toml together - preflight
+# fails the deploy when they disagree. The date and the devDependency are one edit, not two.
+compatibility_date = "2026-03-10"
+compatibility_flags = ["nodejs_compat"]
+
+# Persist Workers Logs so console.error (500s, non-fatal event/automation/esign failures) survives beyond a
+# live `wrangler tail`. Without this a production 500 leaves no trace to debug.
+[observability]
+enabled = true
+
+# The built SPA (web/dist) is served as static assets with SPA fallback. run_worker_first forces API +
+# webhook + public-page paths to the Worker FIRST, so the SPA `not_found_handling` can never intercept them and
+# serve index.html in place of a real API/webhook/page response. `/found/*` (asset lost-and-found) and
+# `/calendar/*` (holiday feed) are unauthenticated Worker routes, not SPA routes, so they belong here too.
+[assets]
+directory = "./web/dist"
+binding = "ASSETS"
+# "none", NOT "single-page-application": the platform's SPA fallback answers every miss with index.html at
+# 200, including a miss for a .js/.css/.wasm file, which browsers then cache as a script of the wrong type.
+# The Worker's notFound handler does the fallback instead - 404 for a missing FILE, the shell for a real app
+# route. See src/index.ts.
+not_found_handling = "none"
+# Must stay identical to the list in wrangler.staging.toml: a prefix in one file and not the other means that
+# route reaches the Worker in one environment and is answered by the SPA shell in the other, which is a
+# difference staging exists to NOT have. test/spaFallback.test.ts pins both files against
+# WORKER_OWNED_PREFIXES, so a one-sided edit fails the suite rather than the rehearsal.
+run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag", "/__scheduled"]
+
+# Explicit CPU ceiling. This RAISES the limit, it does not lower it - say so plainly, because the comment here
+# used to claim the opposite and the number quietly said otherwise.
+#
+# The platform default is 30s. The nightly payslip job renders a batch of 25 PDFs in one invocation
+# (services/payroll.ts processPayslipRunJob), and Form-16 / letter rendering is the same shape of work, so the
+# default is the ceiling a legitimate batch runs into first. 60s buys that batch room. It is still a BOUND -
+# the configurable maximum is 300s - so a genuinely runaway render is killed at a minute rather than running
+# to whatever the platform tolerates.
+#
+# If a runaway invocation is the thing being defended against rather than a slow batch, the lever is the batch
+# size, not this number: halve `batch` in processPayslipRunJob and this can come down with it.
+#
+# FREE-PLAN NOTE: `[limits]` is a PAID-plan (Workers Standard) feature - on the free plan, comment this block
+# out (the free cap is a fixed 10ms CPU, which PDF rendering exceeds; every data flow fits). `npm run preflight`
+# warns when CF_PLAN=paid and the block is missing.
+#
+# SUBREQUESTS, which this block's presence also settles. A D1 query is a subrequest, and the budget is 50 per
+# invocation on the free plan against 1000 on Standard. Every REQUEST path is shaped for the free budget -
+# whole-collection prefetch plus one atomic db.batch write group (src/lib/dbBatch.ts), which is what keeps a
+# payroll build to a couple of dozen queries at any headcount.
+#
+# NEITHER CRON TICK IS, and this comment used to name only the nightly one. `dispatchCron` (src/cron.ts) runs 22
+# subtasks in ONE invocation on the nightly schedule - accrual, carry-forward, reminders, digests, five kinds of
+# recurrence roll - each doing several reads of its own, so the night comfortably exceeds 50 and fits inside 1000.
+#
+# The FIVE-MINUTE tick is now in the same position, which it was not when this said "the nightly tick". It runs
+# four subtasks, and the moderation scan alone spends about six statements per post it looks at (the budget
+# read, the cache lookup, the inference, the usage row, the scan stamp, the flag) against a ceiling of
+# `BUDGET.moderationsPerDrain` posts - so a busy wall puts that one subtask near 50 before the job drain, the
+# announcement publish and the embedding reconcile have run at all.
+#
+# Both are best-effort per subtask and record what failed on the `cron_runs` row, so overrunning goes red rather
+# than silent. The honest statement is: BOTH CRON TICKS NEED THE PAID BUDGET. Running this app on the free plan
+# means splitting them across several scheduled triggers first, and lowering `moderationsPerDrain`.
+[limits]
+cpu_ms = 60000
+
+[vars]
+# D1 READ REPLICAS (Sessions), which are a DEPLOYED-ONLY optimisation.
+#
+# `sessionBinding` (src/deps.ts) used to decide this by feature-detection - sessions if the runtime has
+# `withSession`, which local runtimes did not. A runtime upgrade gave the local one the method, and a session
+# opened against a local database tries to reach the real one: every request in `wrangler dev` then died at
+# its first query with `internal error; reference = …`, which reads like a Cloudflare outage rather than a
+# configuration mismatch. It is therefore declared rather than detected, and it is OPT-IN - off is slower,
+# never wrong, so the default has to be the safe one.
+#
+# OFF HERE, ON AT DEPLOY (`npm run deploy` passes `--var D1_SESSIONS:true`), because this file is read by
+# `wrangler dev` as well as by `wrangler deploy` and the two want opposite answers. Defaulting it on meant a
+# fresh clone had a stack that 500s on every request until somebody added a line to their own `.dev.vars` -
+# a broken default that each person has to discover and fix privately. Off is slower where it is wrong and
+# working everywhere, which is the right way round for a default.
+#
+# A hand-run `wrangler deploy` therefore deploys WITHOUT replicas: correct, just not as fast. Use the npm
+# script.
+D1_SESSIONS = "false"
+# EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.
+# Also `console`, which logs the message instead of sending it - for a preview stack and the browser suite
+# only; `npm run preflight` refuses it for the environment being deployed.
+EMAIL_PROVIDER = "brevo"
+EMAIL_FROM = "HR | Metasphere <hr@msphere.io>"
+# The org perimeter under Google sign-in: only these email domains may sign in / auto-provision on first
+# login. Comma-separated. Never deploy unset - that would let ANY Google account in.
+ALLOWED_EMAIL_DOMAINS = "msphere.io"
+# Optional network fence on the attendance clock: comma-separated individual IPs and/or CIDR blocks (IPv4 and
+# IPv6 may be mixed) that `attendance/me:clockIn` / `:clockOut` are accepted from - the office egress IPs and
+# the VPN. Unset or empty = no fence (punch from anywhere). An APPROVED remote-work request eases it for
+# exactly its dates. A malformed entry is refused at startup.
+# UNSET deliberately. It held one bare host address - the shape a fence takes when somebody pastes the machine
+# they were testing from - and shipping that is an outage rather than a control: a single address admits nobody
+# remote and nobody on a phone, and the day the ISP reassigns it the office cannot punch either. To turn the
+# fence on, list the ranges you actually egress from (office prefixes and the VPN); a single host is only ever
+# right for a static address you control.
+ATTENDANCE_ALLOWED_IPS = "122.164.127.209"
+# The one destination the /diag relay forwards the SPA's error/trace/replay envelopes to (routes/diag.ts).
+# A plain var, not a secret: a DSN only permits WRITING events, and the same string is already baked into the
+# bundle as VITE_SENTRY_DSN. It must BE that same DSN - the relay refuses an envelope addressed anywhere else,
+# which is what keeps it from being an open relay. Unset = the relay 404s and the SPA reports nothing.
+SENTRY_DSN = "https://b0783df050ada7c6adc0a89aaa15b4f4@o4511976927461376.ingest.de.sentry.io/4511982864498768"
+# Which build the Worker's own errors belong to. Deliberately NOT set here: a literal in this file is the same
+# string for every deploy, so pinning it to a version number tagged eight months of releases "0.1.0" and left
+# every uploaded source map unmatched - which is worse than "unknown release", because it looks answered.
+# Set it in the deploy environment to the SAME value the SPA is built with (VITE_APP_VERSION), so both halves of
+# a distributed trace land on one release and the maps match:
+#   SENTRY_RELEASE=$(git rev-parse --short HEAD)  (and VITE_APP_VERSION to the same)
+# `npm run preflight` warns when it is unset or when the SPA has no VITE_APP_VERSION to pair with it.
+SENTRY_ENVIRONMENT = "production"
+
+# Route Workers AI inference through this AI Gateway (src/lib/ai.ts threads it into every `AI.run`). Create it
+# once in the dashboard under AI > AI Gateway; the name IS the id.
+#
+# PAYLOAD LOGGING IS SUPPRESSED ON EVERY CALL, set once in lib/ai.ts rather than here, because AI Gateway
+# stores request and response bodies by default and that would put salary and review text in a retained
+# surface with its own lifetime. The gateway records that a call happened, not what was in it.
+#
+# LEAVE GATEWAY CACHING OFF in the dashboard. `ai_cache` (services/ai.ts) is checked in-process BEFORE the
+# binding call, so a gateway cache only ever sees prompts that just missed ours - and it would hold moderation
+# verdicts under a TTL configured outside this repository. The two big spenders, the embed backfill and the
+# moderation gate, have unique input by construction and cache at neither layer.
+#
+# IT IS A SECOND HOP IN FRONT OF A GATE THAT FAILS CLOSED. A wrong id here reads to the app as "the model was
+# silent", which under the default `ai.moderationFallback: "hold"` stops every public wall accepting posts.
+# Change it before the moderation gate is switched on, never after, so a mistake shows up as nothing working
+# rather than as posting mysteriously stopping. `ai_usage.error` is where it says so.
+AI_GATEWAY_ID = "hrms"
+
+# Workers AI. The free allocation is 10,000 Neurons/day for the whole ACCOUNT, which staging shares - see the
+# budget ceilings in src/domain/aiPolicy.ts, which are set below it deliberately.
+#
+# Binding it does not decide anything about what may be called: the binding will proxy EXTERNAL providers
+# given a provider-prefixed model id, and sending employee data to one is the single thing this layer must
+# never do. The allowlist in domain/aiPolicy.ts is what prevents it, and lib/ai.ts is the only file that calls
+# `AI.run`. Unbind this and every AI feature falls back to the non-AI path it was built with.
+[ai]
+binding = "AI"
+
+# The semantic search index. Create it once with the dimensions and metric the embedding model in
+# domain/aiPolicy.ts produces - changing either later means rebuilding the index, because vectors from two
+# models are not comparable:
+#
+#   wrangler vectorize create hrms-search --dimensions=384 --metric=cosine
+#   wrangler vectorize create-metadata-index hrms-search --property-name=collection --type=string
+#
+# The metadata index is required for the `$in` collection pre-filter in lib/vector.ts. It is the ONLY metadata
+# stored: no name, no code, no owner id, so the index cannot be read as a staff directory. Row-level access is
+# re-decided in SQL after the query, never by this filter.
+#
+# Unbind this and global search is the FTS5 path it has always been.
+[[vectorize]]
+binding = "VEC"
+index_name = "hrms-search"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hrms"
+database_id = "a3d822b9-672d-45e1-83cc-c240484dba2d"
+migrations_dir = "src/db/migrations"
+
+[[r2_buckets]]
+binding = "DOCS"
+bucket_name = "hrms"
+
+# Drain async jobs (LRO) every 5 min; nightly accrual/reminders at 02:00 UTC.
+[triggers]
+crons = ["*/5 * * * *", "0 2 * * *"]

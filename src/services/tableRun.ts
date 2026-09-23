@@ -1,0 +1,1167 @@
+// Runs one saved grid: base rows for the caller's own scope, then each selected source joined onto them in a
+// batch, then one cell per selected column.
+//
+// It decides NO access. Everything it is allowed to touch arrived as `scopes` - the per-collection list
+// verdicts the authz middleware resolved for this request (scopesForCollections), exactly the map
+// `people-analytics` and `dashboard-summary` are handed. A column whose collection is missing from that map is
+// dropped from the answer; the base rows, every LINKED row and every SOURCE read are bound by `applyScope`
+// like any other list; and the employee sub-resources (identity / personal / bank) are additionally gated per
+// row and per FIELD by the same in-memory `decide()` the profile endpoint runs.
+//
+// The distinction that matters, because getting it wrong is silent: presence in `scopes` is the BOOLEAN half
+// of the decision only - a collection is in the map when the caller may list it AT ANY BREADTH - and the
+// breadth lives on the ListScope. Gating anything on presence alone hands a whole page's rows to a caller
+// entitled to one of them. See `scopedTo` in loadSource.
+//
+// Cost discipline: one query per SOURCE per page, never one per row. A source nobody selected is never read.
+import { and, eq, ne, not, gt, gte, lt, lte, inArray, isNull, isNotNull, or, sql, type SQL } from "drizzle-orm";
+import { getTableConfig, type AnySQLiteColumn, type SQLiteTable } from "drizzle-orm/sqlite-core";
+import { getTableColumns } from "drizzle-orm";
+import * as schema from "../db/schema";
+import type { Deps } from "../deps";
+import type { AppUser } from "../env";
+import { selfContextOf } from "../lib/selfContext";
+import type { ListScope } from "../domain/access";
+import { deniedSubresourceKeys } from "../http/tableFieldAccess";
+import { deniedRedactedFields } from "../http/fieldAccess";
+import { applyScope } from "./listScope";
+import { publicStateFilter } from "./stateFilter";
+import { redactedFieldsOf } from "../domain/manifests";
+import { keysetPage } from "./keysetPage";
+import { TABLES, listOwnerColumn } from "../lib/authzResolve";
+import { audit } from "../lib/audit";
+import { invalidArgument, forbidden } from "../lib/errors";
+import { MAX_COLUMNS, type ViewFilter, type ViewSpec } from "../domain/tableFields";
+import { fullHeader, headerLabels } from "../domain/tableHeaders";
+import { resolveFields, type ResolvedField } from "./tableCatalog";
+import { getFieldDefs, maskIdentityValue } from "./identityDetails";
+import { maskAccount } from "./bankDetails";
+import { refPayComponents, refPayPeriods, refPayGrades, refSalaryStructures } from "../lib/refData";
+import { getSettingValue } from "./settings";
+import { orgToday } from "./orgDay";
+import { applyStructure, ctcLines, DEFAULT_CTC_CONFIG, type CtcConfig } from "../domain/payroll";
+import { structureLinesById } from "./salaryStructures";
+import { peopleAnalytics } from "./peopleAnalytics";
+import { byIdChunks } from "../lib/dbBatch";
+import { round2 } from "../domain/money";
+
+export type RunColumn = {
+  key: string;
+  /** The header, shortened to whatever THIS grid's other columns leave unambiguous (domain/tableHeaders). */
+  label: string;
+  /** The whole trail spelled out, when the header is shorter than it. What the grid shows on hover. */
+  full_label?: string;
+  kind: ResolvedField["kind"];
+  collection: string;
+  /** True when the value is masked because the caller lacks the `unmask` capability. */
+  masked?: boolean;
+};
+
+export type RunRow = {
+  /** The base row's wire path, so the grid can link a row back to the record it came from. */
+  path: string;
+  cells: Record<string, unknown>;
+  /** Column keys this caller may not read on THIS row (per-field deny) - rendered as a restricted marker. */
+  denied?: string[];
+};
+
+export type RunResult = {
+  base: string;
+  columns: RunColumn[];
+  rows: RunRow[];
+  next_page_token?: string;
+  /** Columns the view asks for that this caller does not get, with the reason. */
+  dropped: { field: string; reason: string }[];
+};
+
+export type RunOptions = {
+  maxPageSize: number;
+  pageToken?: string;
+  /**
+   * May this caller see the real value behind a masked column - asked PER FIELD, because `unmask` is
+   * grantable per field (`unmask.*.bank-account.account_number`), not only as one switch over all PII.
+   * Decided by the route from the grant (http/tableFieldAccess.ts `unmaskGate`); absent = everything masked.
+   * A plain boolean is the all-or-nothing form, which is what a caller holding the broad capability means.
+   */
+  unmask?: boolean | ((field: { subresource?: string; fieldKey?: string }) => boolean);
+  /** The view's own code, for the audit row. */
+  viewCode?: string | null;
+};
+
+const INTERNAL_ID = /^[0-9a-hj-km-np-tv-z]{13}$/;
+const ymd = (d: Date | number) => new Date(d).toISOString().slice(0, 10);
+
+/**
+ * The state-visibility predicate for one collection, or undefined where the manifest has no rule for it or the
+ * caller may see restricted rows. Mechanical, exactly like `applyScope`: `seeRestricted` is the verdict the
+ * middleware already resolved, and this only maps it onto the table's own columns.
+ *
+ * Fail-closed on an absent scope, because the ListScope is where `seeRestricted` lives: no scope means the
+ * caller was never granted the collection, and `applyScope` beside this is already answering `1 = 0`.
+ */
+const stateCond = (user: AppUser, collection: string, table: SQLiteTable | undefined, scope: ListScope | undefined): SQL | undefined =>
+  table ? publicStateFilter(user.policy.state_visibility?.[collection], table, scope?.seeRestricted ?? false) : undefined;
+
+/** The wire column name a base-record field projects - the name `policy.redacted_fields` is written in. */
+const wireNameOf = (field: ResolvedField): string => field.key.split(".").pop()!;
+
+/**
+ * Is this field one `policy.redacted_fields` gates per row? True for a plain column of a base or a linked row
+ * that the manifest lists (`tickets.description`, `offers.base_comp`); never for a SOURCE field, which is
+ * gated by its sub-resource instead (`deniedSubresourceKeys`).
+ */
+const redactionGated = (user: AppUser, field: ResolvedField): boolean =>
+  !field.source && redactedFieldsOf(user.policy, field.collection).includes(wireNameOf(field));
+
+// Every id-keyed loader below reads a whole page's worth of employees in one `IN`, which sat right on D1's
+// bound-parameter cap and went over it as soon as `applyScope` bound anything alongside it - see
+// lib/dbBatch.ts#byIdChunks for the full account of why the cap is where it is.
+
+/** Run `spec` and return one page of the grid. */
+export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string, ListScope>, spec: ViewSpec, opts: RunOptions): Promise<RunResult> {
+  const base = spec.base;
+  const table = TABLES[base] as (SQLiteTable & Record<string, any>) | undefined;
+  const scope = scopes.get(base);
+  if (!table) throw invalidArgument(`unknown table base: ${base}`);
+  // The middleware only puts a collection in the map when this caller's own `GET /v1/<base>` would be allowed.
+  if (!scope) throw forbidden(`you cannot list ${base}`);
+  if (spec.columns.length > MAX_COLUMNS) throw invalidArgument(`a table may hold at most ${MAX_COLUMNS} columns`);
+
+  const listable = new Set(scopes.keys());
+  // Only the nodes this view actually reaches into are built - the base itself plus one per distinct link path
+  // its keys name, rather than the whole reachable tree.
+  const byKey = await resolveFields(deps, base, listable, [
+    ...spec.columns.map((c) => c.field),
+    ...(spec.filters ?? []).map((f) => f.field),
+    ...(spec.sort ?? []).map((s) => s.field),
+  ]);
+
+  // ---- Which columns this caller actually gets ------------------------------------------------------------
+  const dropped: { field: string; reason: string }[] = [];
+  const selected: { col: { field: string; label?: string }; field: ResolvedField }[] = [];
+  for (const col of spec.columns) {
+    if (col.hidden) continue;
+    const field = byKey.get(col.field);
+    if (!field) {
+      // Either the field does not exist (a stale saved view after a schema change) or the caller may not list
+      // the collection behind it. Both are "you do not get this column", said out loud rather than silently.
+      dropped.push({ field: col.field, reason: "not available to you" });
+      continue;
+    }
+    selected.push({ col, field });
+  }
+  // Decided ONCE PER FIELD and memoized, because it is a decision over the grant and every row of the page
+  // renders the same columns - asking per cell would re-decide it a hundred times for one response. Covers
+  // the filter-only fields too (`judgedOnly` below), which are resolved later and are not in `selected`.
+  const unmaskMemo = new Map<string, boolean>();
+  const askUnmask = (field: ResolvedField): boolean =>
+    typeof opts.unmask === "function" ? opts.unmask({ subresource: subresourceOf(field), fieldKey: field.fieldKey }) : opts.unmask === true;
+  const unmaskable = (field: ResolvedField): boolean => {
+    let v = unmaskMemo.get(field.key);
+    if (v === undefined) unmaskMemo.set(field.key, (v = askUnmask(field)));
+    return v;
+  };
+  // The headers are named as a SET, not one at a time: a column is qualified by the links that reach it only
+  // as far as the columns beside it make it ambiguous, so a grid with one "Name" keeps "Name" and a grid with
+  // three grows all three by a hop. An author's own header is fixed, and the rest are named around it.
+  const headerOf = selected.map(({ col, field }) => ({
+    key: field.key,
+    label: field.label,
+    trail: field.trail,
+    nodeName: field.nodeName,
+    fixed: col.label || undefined,
+  }));
+  const shortened = headerLabels(headerOf);
+  const columns: RunColumn[] = selected.map(({ field }, i) => {
+    const label = shortened[i]!;
+    const full = fullHeader(headerOf[i]!);
+    return {
+      key: field.key,
+      label,
+      // Only when it says more than the header does: shortening costs the reader nothing if the whole trail
+      // is one hover away, and a tooltip repeating the header is a tooltip nobody needs.
+      full_label: full === label ? undefined : full,
+      kind: field.kind,
+      collection: field.collection,
+      masked: field.masked && !unmaskable(field) ? true : undefined,
+    };
+  });
+
+  // ---- The base page -------------------------------------------------------------------------------------
+  const cols = getTableColumns(table) as Record<string, any>;
+  // The owner column comes from the registry, NOT from guessing `employeeId`. Every base whose owner is named
+  // something else - `employees` by `uuid`, `assets` by `assignedTo`, `referrals` by `referrerId`,
+  // `transition-tasks` by `assigneeId` - resolved to undefined under the guess, and `applyScope` fails closed
+  // on a missing owner column, so an own-breadth caller got an empty grid with nothing saying why. See
+  // lib/authzResolve.ts#LIST_OWNER_COLUMNS.
+  const conds: (SQL | undefined)[] = [applyScope(scope, table.code, listOwnerColumn(base, table))];
+  if (table.deleteTime) conds.push(isNull(table.deleteTime));
+  // ...and the state-visibility half of the same verdict, which the base page did not carry. Every ordinary
+  // list binds it (services/crud.ts, services/announcements.ts visibleWhere) off the SAME `seeRestricted` the
+  // middleware resolved, so a caller who may not open a restricted row does not see it listed either. The grid
+  // bound only the breadth, which made a saved view the one list in the app that answered with rows the
+  // collection's own list hides - and `state_visibility` is policy DATA, so an org that gates a second
+  // collection gets the item lane, the search index and every list narrowed, and the grid not.
+  conds.push(stateCond(user, base, table, scope));
+  // The two standing narrowings a report is asked for: one department, one person. Applied only where the base
+  // actually carries the column - they never WIDEN, so a base without them simply ignores them.
+  const params = spec.params ?? {};
+  const depId = params.department?.split("/").pop();
+  const empId = params.employee?.split("/").pop();
+  if (depId && cols.departmentId) conds.push(eq(table.departmentId, depId));
+  if (empId) {
+    if (base === "employees") conds.push(eq(table.uuid, empId));
+    else if (cols.employeeId) conds.push(eq(table.employeeId, empId));
+  }
+  // Filters on the base's own columns go into SQL; everything else is applied over the page below.
+  //
+  // WITHIN A PARAMETER BUDGET, which is the half that was missing. D1 binds at most 100 parameters per
+  // statement (lib/dbBatch.ts#PARAM_CAP) and an `in` filter spends ONE PER ITEM: `?filter=in` with a
+  // comma-separated list, plus the caller's scope predicates and the keyset bounds in the same statement, went
+  // past the cap and the whole grid answered `D1_ERROR: too many SQL variables` - a 500 on a saved view, at
+  // whatever list length happened to cross it. The budget leaves room for everything else the statement binds;
+  // a filter that would not fit is DEFERRED to the in-memory half rather than refused, so the view still
+  // answers and still narrows - which is why that path had to be made correct for unselected fields first.
+  //
+  // A REDACTION-GATED FIELD IS NEVER PUSHED. `policy.redacted_fields` is decided per row, over the row's own
+  // code, so the only place it can be applied is in memory - and a predicate in SQL judges the REAL column
+  // before any of that runs. That is the PII probe again in the one shape the PII gate could not have covered:
+  // an `@identity`/`@bank` field carries a `source` and was never pushable, while `tickets.description` and
+  // `leave-requests.reason` are plain columns of the base and were. A hidden `contains` filter on one of them
+  // then narrowed the page by a value the caller holds no read on, and repeating the probe reads it out a
+  // letter at a time - through the very deny that was supposed to take the field away. Deferring costs a page
+  // filtered in memory and keeps the answer identical for a caller who may read the field.
+  const deferred: ViewFilter[] = [];
+  let paramsSpent = 0;
+  for (const f of spec.filters ?? []) {
+    const field = byKey.get(f.field);
+    if (!field) continue;
+    const cost = filterParamCost(f);
+    const pushable = field.path.length === 0 && !field.source && !redactionGated(user, field) && paramsSpent + cost <= FILTER_PARAM_BUDGET;
+    const sqlCond = pushable ? baseFilterSql(table, field, f) : undefined;
+    if (sqlCond) {
+      conds.push(sqlCond);
+      paramsSpent += cost;
+    } else deferred.push(f);
+  }
+
+  // A deferred filter's field is NOT necessarily a selected column. It can be a hidden one (`ViewColumn.hidden`
+  // - "narrow by department without showing the department") or a field the view filters on and never
+  // displays. Its cell is computed below into a side map, used for the predicate and never returned.
+  //
+  // THE SAME IS TRUE OF A SORT, and that half was missed. `cleanSort` (services/tableViews.ts) validates a
+  // sort key's SHAPE and never that it names a selected column, so "order by hire date, don't show hire date"
+  // saves fine - and the sort below read `row.cells[s.field]`, which is `undefined` for every row of a field
+  // that was never selected. `compareCells(undefined, undefined)` is 0, so the sort was a silent no-op on a
+  // view that looked correctly configured. The `byKey.has` guard in front of it made it look handled: `byKey`
+  // holds every RESOLVED field, selected or not, so it passed.
+  //
+  // RESOLVED HERE, above the sources, because the PII gate down there has to cover these fields too - see the
+  // note on `ofSource`. `gated` is therefore the whole set of fields this request can ACT on, displayed or
+  // not, and is what every access decision below is taken over - which is also why the sort's fields have to
+  // join it rather than being computed later: a field the caller may not read must not become one a sort can
+  // order the page by.
+  const judgedOnly = [...new Set([...deferred.map((f) => f.field), ...(spec.sort ?? []).map((s) => s.field)])]
+    .map((key) => byKey.get(key))
+    .filter((f): f is ResolvedField => !!f && !selected.some((s) => s.field.key === f.key));
+  const gated: ResolvedField[] = [...selected.map((s) => s.field), ...judgedOnly];
+
+  const page = await keysetPage<Record<string, any>>(deps, table, base, and(...(conds.filter(Boolean) as SQL[])), {
+    max: opts.maxPageSize,
+    pageToken: opts.pageToken,
+  });
+  const baseRows = page.items;
+
+  // ---- Linked rows: one query per (path, collection), never one per row ------------------------------------
+  // `linked` maps "employeeId" / "employeeId.departmentId" to the row each base row's chain lands on.
+  const linked = new Map<string, Map<string, Record<string, any>>>();
+  // Over `gated`, so a field the view only FILTERS on brings its own chain with it - the deferred half is
+  // judged on real values, which it cannot be if the row they live on was never loaded.
+  const linkPaths = new Set<string>();
+  for (const field of gated) if (field.path.length) linkPaths.add(field.path.join("."));
+  // Employee sub-resource sources need the employee ROW (its code gates the sub-resource, and the PII blobs
+  // live on it), so their subject path is loaded even when no column of that row was picked.
+  for (const field of gated) if (field.source && field.path.length) linkPaths.add(field.path.join("."));
+
+  // Load shallow-to-deep so a depth-2 link can read the ids off its depth-1 parent.
+  for (const path of [...linkPaths].sort((a, b) => a.split(".").length - b.split(".").length)) {
+    const segs = path.split(".");
+    const parentPath = segs.slice(0, -1).join(".");
+    const fkCol = segs[segs.length - 1]!;
+    const parents: Record<string, any>[] = parentPath
+      ? [...(linked.get(parentPath)?.values() ?? [])]
+      : baseRows;
+    const target = targetOf(parentPath ? collectionAt(base, segs.slice(0, -1)) : base, fkCol);
+    if (!target || !listable.has(target.collection)) continue;
+    const ids = [...new Set(parents.map((r) => r[fkCol]).filter((v): v is string => typeof v === "string"))];
+    if (!ids.length) {
+      linked.set(path, new Map());
+      continue;
+    }
+    // Bound by the caller's scope for the TARGET collection too: following a link must not become a way to
+    // read a row of a collection the caller may list only narrowly. The owner column is the target's own -
+    // guessing `employeeId` here blanked the commonest column in the app, because the commonest link target
+    // is `employees` (owned by `uuid`), so a caller reading employees at `me` breadth got a name column that
+    // was empty on every row of a grid whose base rows were all correctly their own.
+    // ...and by the target's own soft-delete, which the base page (above) and every PII source (below) already
+    // apply and this did not. A deleted row is one no list in the app will answer with, so a grid that
+    // dereferences an FK into one was the single place a deleted employee's name, a retired department or a
+    // removed project kept being published - to whoever could see the row pointing at it. A dangling link
+    // renders empty, which is what the rest of the app shows for a reference it cannot resolve.
+    const targetTable = TABLES[target.collection] as SQLiteTable & Record<string, any>;
+    const targetScope = scopes.get(target.collection)!;
+    const rows = await byIdChunks(ids, (group) =>
+      deps.db
+        .select()
+        .from(targetTable)
+        .where(and(
+          inArray(targetTable.uuid, group),
+          applyScope(targetScope, targetTable.code, listOwnerColumn(target.collection, targetTable)),
+          targetTable.deleteTime ? isNull(targetTable.deleteTime) : undefined,
+          stateCond(user, target.collection, targetTable, targetScope),
+        )) as PromiseLike<Record<string, any>[]>,
+    );
+    linked.set(path, new Map(rows.map((r) => [r.uuid as string, r])));
+  }
+
+  /** The row a field's path lands on, for one base row. */
+  const rowAt = (baseRow: Record<string, any>, path: string[]): Record<string, any> | undefined => {
+    if (!path.length) return baseRow;
+    let cur: Record<string, any> | undefined = baseRow;
+    for (let i = 0; i < path.length; i++) {
+      const id: unknown = cur?.[path[i]!];
+      if (typeof id !== "string") return undefined;
+      cur = linked.get(path.slice(0, i + 1).join("."))?.get(id);
+      if (!cur) return undefined;
+    }
+    return cur;
+  };
+
+  // ---- Sources -------------------------------------------------------------------------------------------
+  // Per subject path: the employee row each base row resolves to, then one load per selected source.
+  const sourceValues = new Map<string, Map<string, Record<string, unknown>>>(); // `${path}|${source}` -> rowId -> values
+  const deniedByRow = new Map<string, Set<string>>();
+  const usedSources = new Set<string>();
+  for (const field of gated) if (field.source) usedSources.add(`${field.path.join(".")}|${field.source}`);
+
+  // The request's own matcher context (lib/selfContext.ts#selfContextOf), so a cell is judged by the same
+  // question the gate asked: rebuilt from the employee code alone it cannot match `my-reports` / `my-org`, and
+  // a manager's grid over their own team came back with its redacted columns blank.
+  const self = selfContextOf(user);
+  for (const used of usedSources) {
+    const [pathKey, source] = used.split("|") as [string, string];
+    const path = pathKey ? pathKey.split(".") : [];
+    // rowId -> the employee row this source is about.
+    const subjects = new Map<string, Record<string, any>>();
+    for (const r of baseRows) {
+      const emp = rowAt(r, path);
+      if (emp) subjects.set(r.uuid as string, emp);
+    }
+    if (!subjects.size) continue;
+    const values = await loadSource(deps, user, scopes, source, subjects, spec, opts);
+    sourceValues.set(used, values);
+    // Per-row + per-field access for the three field-gated sub-resources. Both decisions are pure in-memory
+    // matches against the caller's grant - the same ones GET /v1/employees/<id>/identity is answered by.
+    const sub = SUBRESOURCE[source];
+    if (!sub) continue;
+    // EVERY field of this source the request can act on - the columns it DISPLAYS and the ones it only
+    // FILTERS on (`gated`, not `selected`).
+    //
+    // A filter-only field is never returned, but the rows that survive the predicate are chosen BY ITS VALUE,
+    // so leaving it out of this gate published that value a bit at a time: a hidden
+    // `@personal.<field> contains "…"` on a grid whose base the caller may list narrowed the page by PII they
+    // hold no read on, and repeating the probe reads it out. The `denied` guard on the judged-only cell below
+    // could never fire either, because only selected keys were ever put in the set - so the one line that
+    // looked like it covered this was dead. Filtering by a column is not a way to read it, and that has to be
+    // true of the DECISION as well as of the payload.
+    const ofSource = gated.filter((f) => f.source === source && f.path.join(".") === pathKey);
+    const keys = ofSource.map((f) => f.fieldKey ?? f.leaf);
+    for (const [rowId, emp] of subjects) {
+      const denied = deniedByRow.get(rowId) ?? new Set<string>();
+      const bad = deniedSubresourceKeys(user.grant, emp.code as string | null, sub, keys, self);
+      for (const f of ofSource) if (bad.has(f.fieldKey ?? f.leaf)) denied.add(f.key);
+      if (denied.size) deniedByRow.set(rowId, denied);
+    }
+  }
+
+  // ---- Redacted base fields ------------------------------------------------------------------------------
+  //
+  // The second half of per-field access, and the half the grid did not have. The three PII SOURCES above are
+  // gated by `deniedSubresourceKeys`; a plain COLUMN of a base or a linked row is gated by
+  // `policy.redacted_fields`, which http/accessHint.ts `redactFields` applies to every serialized resource in
+  // the app - `offers.base_comp`, `candidates.email/phone/notes`, `leave-requests.reason`, `tickets.description`.
+  // Projecting the raw column went round it: a deny on `tickets.*.description` removed the field from the
+  // tickets list and the ticket itself and left it readable, on the same rows, as a column of a saved grid.
+  //
+  // Decided per ROW (the redaction is scoped by the row's own code) and memoized per (field, code), because a
+  // page of tickets from one department resolves the same linked row over and over. A field the caller may not
+  // read joins `deniedByRow` exactly as a denied PII field does, so it is nulled in the cell, listed in
+  // `denied`, and - because `gated` carries the filter-only and sort-only fields too - cannot be probed by
+  // filtering or ordering on it either.
+  const redacted = gated.filter((f) => redactionGated(user, f)).map((f) => ({ field: f, wire: wireNameOf(f) }));
+  if (redacted.length) {
+    const memo = new Map<string, boolean>();
+    for (const r of baseRows) {
+      const rowId = r.uuid as string;
+      for (const { field, wire } of redacted) {
+        // No row at the end of the link is no value to redact - the cell renders empty on its own, and a
+        // `denied` marker there would claim a restriction where there is simply nothing.
+        const on = rowAt(r, field.path);
+        if (!on) continue;
+        const code = (on.code as string | null | undefined) ?? null;
+        const memoKey = `${field.key}|${code ?? ""}`;
+        let bad = memo.get(memoKey);
+        if (bad === undefined) memo.set(memoKey, (bad = deniedRedactedFields(user.grant, field.collection, code, [wire], self).has(wire)));
+        if (!bad) continue;
+        const denied = deniedByRow.get(rowId) ?? new Set<string>();
+        denied.add(field.key);
+        deniedByRow.set(rowId, denied);
+      }
+    }
+  }
+
+  // ---- Cells ---------------------------------------------------------------------------------------------
+  //
+  // `judgedOnly` (resolved above, with `gated`) is the filter-only half: a hidden column, or a field the view
+  // filters on and never displays. The loading above anticipates both - the link paths and the sources are
+  // registered off `gated`. Only the CELL was missing, so `row.cells[f.field]` was `undefined` and `matches`
+  // judged every row against nothing: a filter on a hidden linked column emptied the grid, silently and
+  // always. Those cells are computed here into a side map, used for the predicate and never returned.
+  const rows: RunRow[] = [];
+  const judged = new Map<string, Record<string, unknown>>();
+  for (const r of baseRows) {
+    const rowId = r.uuid as string;
+    const denied = deniedByRow.get(rowId);
+    const cells: Record<string, unknown> = {};
+    for (const { field } of selected) {
+      if (denied?.has(field.key)) {
+        cells[field.key] = null;
+        continue;
+      }
+      cells[field.key] = cellValue(base, field, r, rowAt, sourceValues, unmaskable(field));
+    }
+    if (judgedOnly.length) {
+      const extra: Record<string, unknown> = {};
+      // A field this caller may not see stays null here too - the field-access denial applies to what a filter
+      // may judge on, not only to what a cell may show.
+      // `judgedOnly` fields never reach `selected`, so they are not in the memo - decide them the same way,
+      // or a filter would judge on a masked string and quietly match nothing.
+      for (const field of judgedOnly) extra[field.key] = denied?.has(field.key) ? null : cellValue(base, field, r, rowAt, sourceValues, unmaskable(field));
+      judged.set(rowId, extra);
+    }
+    rows.push({ path: `${base}/${rowId}`, cells, ...(denied?.size ? { denied: [...denied] } : {}) });
+  }
+
+  // Deferred filters (anything not a plain base column, plus anything the parameter budget could not fit) over
+  // the assembled page. Filtering a page at a time is the same answer as filtering the union: each row is
+  // judged on its own values.
+  //
+  // It is applied AFTER the page was cut, though, so a page can come back short - or EMPTY - while
+  // `next_page_token` still names more: the rows that match are further down the cursor. A client that reads
+  // one page and stops therefore sees fewer rows than exist, and on a filter whose matches all sit past the
+  // first page boundary it sees none at all and renders an empty report.
+  //
+  // So this contract is on the CLIENT as much as here: a short page is not an answer, and `next_page_token` is
+  // what says so. The grid follows the cursor until it has a screenful or the report ends (PAGE_TARGET in
+  // web/src/pages/TableBuilder.tsx), which is also what makes the page-at-a-time sort below add up.
+  const cellFor = (row: RunRow, key: string) =>
+    key in row.cells ? row.cells[key] : judged.get(row.path.split("/").pop()!)?.[key];
+  const filtered = deferred.length ? rows.filter((row) => deferred.every((f) => matches(cellFor(row, f.field), f, byKey.get(f.field)?.kind))) : rows;
+
+  // The saved sort, applied to the page. Base rows page in the cursor's own (createdAt, uuid) order - that is
+  // what makes a page boundary stable - so this ORDERS A PAGE, exactly as CrudSpec.sort does for every other
+  // collection. The grid follows the cursor to the end of the report and DataTable then sorts the whole set,
+  // so a multi-page view still reads in the author's order; this is what makes a one-page view and an export
+  // come out sorted without the client having to.
+  //
+  // Read through `cellFor`, NOT `row.cells` - a sort key need not be a displayed column (see `judgedOnly`), and
+  // `cells` only ever holds the selected ones. Reading it directly made every sort by a hidden or unselected
+  // field compare `undefined` with `undefined` for every pair, which is a stable no-op: the page came back in
+  // cursor order with nothing to say it had ignored the view's sort.
+  for (const s of [...(spec.sort ?? [])].reverse()) {
+    if (!byKey.has(s.field)) continue;
+    const dir = s.dir === "asc" ? 1 : -1;
+    filtered.sort((a, b) => dir * compareCells(cellFor(a, s.field), cellFor(b, s.field)));
+  }
+
+  // ---- Audit ---------------------------------------------------------------------------------------------
+  // One row per RUN that touched masked PII, not one per person: a per-record row (what a profile read writes)
+  // would put a page of rows in the feed for one report and bury the trail it exists to be. Field keys and
+  // counts only - never a value.
+  const sensitive = columns.filter((c) => selected.find((s) => s.field.key === c.key)?.field.masked);
+  if (sensitive.length) {
+    // WHICH fields came back unmasked, not whether the caller holds the capability. Now that `unmask` is
+    // grantable per field, one boolean would say "unmasked: true" for a run that revealed an account number
+    // and masked every statutory id - and the trail exists to answer exactly which values left.
+    const revealed = sensitive.filter((c) => !c.masked).map((c) => c.key);
+    await audit(deps, user, "table-views.run.sensitive", "table-views", undefined, {
+      view: opts.viewCode ?? null,
+      base,
+      fields: sensitive.map((c) => c.key).slice(0, 64),
+      rows: filtered.length,
+      unmasked: revealed.length > 0,
+      ...(revealed.length ? { unmasked_fields: revealed.slice(0, 64) } : {}),
+    });
+  }
+
+  return { base, columns, rows: filtered, next_page_token: page.nextPageToken, dropped };
+}
+
+// ---- Column values --------------------------------------------------------------------------------------
+
+/** The sub-resource each PII source is field-gated under. */
+const SUBRESOURCE: Record<string, string | undefined> = { identity: "identity", personal: "personal-info", bank: "bank-account" };
+
+/**
+ * The sub-resource a field is field-gated under - the first half of the `identity.uan` /
+ * `bank-account.account_number` target a per-field rule names.
+ *
+ * The catalogue sets `subresource` on every source field (services/tableCatalog.ts), and SUBRESOURCE above is
+ * the same mapping keyed by source. Preferring the field's own value keeps this honest if a source ever gates
+ * under something other than its key; falling back to the map means a field that predates the property still
+ * resolves rather than silently becoming un-unmaskable.
+ */
+const subresourceOf = (field: ResolvedField): string | undefined => field.subresource ?? (field.source ? SUBRESOURCE[field.source] : undefined);
+
+function cellValue(
+  base: string,
+  field: ResolvedField,
+  baseRow: Record<string, any>,
+  rowAt: (r: Record<string, any>, p: string[]) => Record<string, any> | undefined,
+  sources: Map<string, Map<string, Record<string, unknown>>>,
+  unmask: boolean,
+): unknown {
+  if (field.source) {
+    const v = sources.get(`${field.path.join(".")}|${field.source}`)?.get(baseRow.uuid as string)?.[field.leaf];
+    if (v === undefined) return null;
+    if (field.masked && !unmask && typeof v === "string") {
+      return field.source === "bank" ? maskAccount(v) : maskIdentityValue(v);
+    }
+    return v;
+  }
+  const row = rowAt(baseRow, field.path);
+  if (!row) return null;
+  const raw = row[field.leaf];
+  if (raw === undefined || raw === null) return null;
+  // A foreign key leaves as `<collection>/<internal id>`, which the outbound edge (middleware/encodeWireIds)
+  // rewrites to a wire token. Never the bare id: that is the one shape that would publish an internal id.
+  if (field.kind === "ref") return typeof raw === "string" && field.refCollection ? `${field.refCollection}/${raw}` : null;
+  if (raw instanceof Date) return field.kind === "datetime" ? raw.toISOString() : ymd(raw);
+  if (typeof raw === "number" && (field.kind === "date" || field.kind === "datetime")) {
+    return field.kind === "datetime" ? new Date(raw).toISOString() : ymd(raw);
+  }
+  // Defence in depth: an internal id must never leave as a bare string. A reference is emitted as
+  // `<collection>/<id>` (which the outbound edge tokenizes); anything else that LOOKS like an id is a column
+  // the catalogue should not have offered, so it is dropped rather than published.
+  if (typeof raw === "string" && INTERNAL_ID.test(raw)) return null;
+  return raw;
+}
+
+/** The collection a chain of FK columns lands on (used to resolve the next hop's target). */
+function collectionAt(base: string, path: string[]): string {
+  let cur = base;
+  for (const seg of path) {
+    const t = targetOf(cur, seg);
+    if (!t) return cur;
+    cur = t.collection;
+  }
+  return cur;
+}
+
+// The collection a foreign-key column points at, resolved from the schema (not a hand-written map). Memoised
+// per isolate: the answer is a property of the schema, so it can never change while the worker is alive.
+const targetCache = new Map<string, { collection: string } | null>();
+function targetOf(collection: string, fkColumn: string): { collection: string } | null {
+  const key = `${collection}.${fkColumn}`;
+  const hit = targetCache.get(key);
+  if (hit !== undefined) return hit;
+  const table = TABLES[collection];
+  let found: { collection: string } | null = null;
+  if (table) {
+    const cols = getTableColumns(table as SQLiteTable) as Record<string, { name: string }>;
+    const wire = cols[fkColumn]?.name;
+    for (const fk of getTableConfig(table as SQLiteTable).foreignKeys) {
+      const ref = fk.reference();
+      if (ref.columns.length !== 1 || ref.columns[0]!.name !== wire) continue;
+      const targetName = getTableConfig(ref.foreignTable as SQLiteTable).name;
+      const target = Object.entries(TABLES).find(([, t]) => getTableConfig(t as SQLiteTable).name === targetName);
+      if (target) found = { collection: target[0] };
+      break;
+    }
+  }
+  targetCache.set(key, found);
+  return found;
+}
+
+// ---- Filters ----------------------------------------------------------------------------------------------
+
+/**
+ * `%` and `_` inside a `contains` needle, escaped rather than removed.
+ *
+ * They used to be STRIPPED, which silently searched for a different string than the one typed - `50%` searched
+ * `50`, `first_name` searched `firstname` - and disagreed with `matches()` below, the in-memory half of the
+ * same operator, which never stripped anything. So the same saved filter meant two things depending on whether
+ * its column happened to sit on the base table. Escaped under an explicit ESCAPE clause, the pattern means
+ * exactly what the reader wrote, and the two halves agree. The backslash itself is escaped first, or a needle
+ * ending in one would escape the closing `%` this builds.
+ */
+const likeEscape = (s: string) => s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+
+/** Operators that ORDER two values rather than compare them as text. */
+const ORDERING_OPS = new Set(["gt", "gte", "lt", "lte"]);
+
+/** Kinds stored as an instant or a flag but RENDERED as text - the pair whose two forms read differently. */
+const RENDERED_KINDS = new Set<ResolvedField["kind"]>(["date", "datetime", "bool"]);
+
+/**
+ * An ordering comparison over TEXT, case-folded, as SQL.
+ *
+ * `gt`/`lt` on a text column went to SQLite as a BINARY comparison, which orders it lexicographically and
+ * answers - while the in-memory half read `Number(cell)`, got `NaN`, and answered false for every row. So a
+ * saved filter like "name is after M" returned the whole page when the column sat on the base table and
+ * nothing when it sat behind a link: the fourth instance of the split `likeEscape`, `lowerEq` and
+ * `equalsValue` each closed for their own operator. Folded case on both sides, matching `lowerEq` next door,
+ * so the two halves order the same strings the same way.
+ */
+const lowerCmp = (col: unknown, op: string, v: string | number | boolean): SQL | undefined => {
+  const rhs = String(v).toLowerCase();
+  const lhs = sql`lower(${col as never})`;
+  switch (op) {
+    case "gt": return sql`${lhs} > ${rhs}`;
+    case "gte": return sql`${lhs} >= ${rhs}`;
+    case "lt": return sql`${lhs} < ${rhs}`;
+    case "lte": return sql`${lhs} <= ${rhs}`;
+    default: return undefined;
+  }
+};
+
+/** The items of an `in` filter's comma-joined value. One place, so the SQL half and the cost estimate below
+ *  can never disagree about how many parameters the list is going to spend. */
+const inList = (v: ViewFilter["value"]) => String(v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+
+/**
+ * Bound parameters the pushed-down filters may spend between them.
+ *
+ * D1's ceiling is 100 PER STATEMENT and the filters are not the only thing binding in this one: `applyScope`
+ * spends one for a dept/own breadth and two per per-object share or deny, the department and employee params
+ * one each, and the keyset cursor two. 40 leaves that room with margin, and is far above what a report
+ * actually asks for - the only filter that can spend more than one parameter is `in`, and a list of forty
+ * values is already a browse rather than a filter. Past the budget a filter is deferred to the in-memory
+ * half, which narrows the same rows; nothing is refused and nothing is silently dropped.
+ */
+const FILTER_PARAM_BUDGET = 40;
+
+/** What pushing this filter into SQL would cost in bound parameters. Must mirror `baseFilterSql` exactly. */
+const filterParamCost = (f: ViewFilter): number =>
+  f.op === "empty" || f.op === "not_empty" ? 0 : f.op === "in" ? inList(f.value).length : 1;
+
+/** Kinds whose values are TEXT, and so are compared case-insensitively - see `textual` below. */
+const TEXT_KINDS = new Set<ResolvedField["kind"]>(["text", "enum", "ref"]);
+
+/**
+ * `eq` / `ne` / `in` on a text column, compared case-insensitively.
+ *
+ * The two halves of every other operator already agree on case: `contains` is `LIKE` in SQL (case-insensitive
+ * for ASCII under SQLite's default `case_sensitive_like=OFF`) and `String(cell).toLowerCase().includes(...)`
+ * in memory. Equality did not: `eq(col, v)` is BINARY and case-SENSITIVE, while `matches()` lowercases both
+ * sides. So one saved filter meant two things depending on whether its column happened to sit on the base
+ * table - "Status is Active" found the rows when the column was behind a link and none of them when it was
+ * not. Same split the `likeEscape` note above this exists to close, one operator over.
+ *
+ * Case-insensitive is the direction that matches: it is what `contains` already does, what the in-memory half
+ * already does, and what someone typing a value into a report filter means. Only TEXT-valued kinds go through
+ * it - `coerce` turns a number, a boolean and a date into non-strings, which have no case to fold.
+ */
+const textual = (field: ResolvedField, v: string | number | boolean) => TEXT_KINDS.has(field.kind) && typeof coerce(field, v) === "string";
+const lowerEq = (col: unknown, v: string | number | boolean): SQL => sql`lower(${col as never}) = ${String(v).toLowerCase()}`;
+
+/** A filter on a plain base column, pushed into SQL. Returns undefined when it cannot be (then it is deferred). */
+function baseFilterSql(table: SQLiteTable & Record<string, any>, field: ResolvedField, f: ViewFilter): SQL | undefined {
+  const col = table[field.leaf];
+  if (!col) return undefined;
+  const v = f.value;
+  switch (f.op) {
+    // EMPTY STRING COUNTS AS EMPTY, matching the in-memory half below (`cell === ""` is empty there). SQL's
+    // `IS NULL` alone made the same saved filter answer differently depending on whether the column happened
+    // to sit on the base table or behind a link - the same split `likeEscape`, `lowerEq` and `equalsValue`
+    // were each written to close, one operator over. The write paths normalise `""` to null, so this is the
+    // two halves stating one rule rather than a live divergence.
+    case "empty": return or(isNull(col), eq(col, ""));
+    case "not_empty": return and(isNotNull(col), ne(col, ""));
+    case "eq": return v == null ? undefined : textual(field, v) ? lowerEq(col, v) : eq(col, coerce(field, v));
+    case "ne": return v == null ? undefined : textual(field, v) ? not(lowerEq(col, v)) : ne(col, coerce(field, v));
+    // Ordering on a TEXT column is a string comparison on both halves (see `lowerCmp`); on every other kind it
+    // is the typed comparison `coerce` binds.
+    case "gt": return v == null ? undefined : textual(field, v) ? lowerCmp(col, "gt", v) : gt(col, coerce(field, v));
+    case "gte": return v == null ? undefined : textual(field, v) ? lowerCmp(col, "gte", v) : gte(col, coerce(field, v));
+    case "lt": return v == null ? undefined : textual(field, v) ? lowerCmp(col, "lt", v) : lt(col, coerce(field, v));
+    case "lte": return v == null ? undefined : textual(field, v) ? lowerCmp(col, "lte", v) : lte(col, coerce(field, v));
+    // A date, a datetime and a boolean are STORED as an instant or as 0/1 and RENDERED as `ymd()` / ISO / true
+    // (see `cellValue`), so a LIKE over the stored form asks a different question from the one the reader is
+    // looking at: `contains "2026"` matched nothing against `1767225600000` on a base column and matched on
+    // `2026-01-15` behind a link. There is no spelling of this in SQL that is the same question, so it is not
+    // pushed at all - the in-memory half compares the text the grid actually shows, and is the only answer.
+    case "contains":
+      if (RENDERED_KINDS.has(field.kind)) return undefined;
+      return typeof v === "string" && v ? sql`${col} like ${`%${likeEscape(v)}%`} escape '\\'` : undefined;
+    case "in": {
+      const list = inList(v);
+      return list.length ? or(...list.map((x) => (textual(field, x) ? lowerEq(col, x) : eq(col, coerce(field, x))))) : undefined;
+    }
+    default: return undefined;
+  }
+}
+
+const coerce = (field: ResolvedField, v: string | number | boolean) => {
+  if (field.kind === "number" || field.kind === "money") return Number(v);
+  if (field.kind === "bool") return boolBit(v);
+  if (field.kind === "date" || field.kind === "datetime") return new Date(String(v));
+  return v;
+};
+
+/** A truthy/falsy filter value or cell as the 0/1 SQLite stores. One place, so `coerce` (the SQL half) and
+ *  `equalsValue` (the in-memory half) can never disagree about what "true" is. */
+const boolBit = (v: unknown): number => (v === true || v === 1 || v === "true" || v === "1" ? 1 : 0);
+
+/**
+ * Kind-aware equality for the in-memory half, asking the same question `baseFilterSql` asks SQL.
+ *
+ * It used to be `String(cell).toLowerCase() === String(value).toLowerCase()` for EVERY kind, which is only the
+ * right question for a text one. On a number or money column SQL compares `Number(value)` against the stored
+ * number, so `eq 1200000.00` matched - while the string form compared "1200000" with "1200000.00" and matched
+ * nothing. Same filter, two answers, decided by whether the column happened to sit on the base table: a saved
+ * grid filtering CTC found everyone when the column was `compensation.ctc_annual` and nobody when it was
+ * `@comp.ctc_annual` behind a link. `ne` inverted the same mistake and excluded nobody at all.
+ *
+ * This is the third instance of one split - `likeEscape` closed it for `contains`, `lowerEq` for text equality
+ * - so the rule is now stated per KIND in one function rather than per operator: numbers compare numerically,
+ * booleans as the 0/1 `coerce` binds, dates as instants (a `date` cell is `ymd()` by the time it reaches here
+ * and a `datetime` cell is ISO, and both parse to the instant SQL compares the column against), and everything
+ * else case-insensitively, which is what `lowerEq` does on the other side.
+ *
+ * A value that parses to nothing on a typed kind matches nothing, rather than falling back to a string compare
+ * that would answer a different question again.
+ */
+function equalsValue(cell: unknown, v: ViewFilter["value"], kind?: ResolvedField["kind"]): boolean {
+  if (v == null) return false;
+  if (kind === "number" || kind === "money") {
+    const l = Number(cell);
+    const r = Number(v);
+    return Number.isFinite(l) && Number.isFinite(r) && l === r;
+  }
+  if (kind === "bool") return boolBit(cell) === boolBit(v);
+  if (kind === "date" || kind === "datetime") {
+    const l = Date.parse(String(cell));
+    const r = Date.parse(String(v));
+    return Number.isFinite(l) && Number.isFinite(r) && l === r;
+  }
+  return String(cell).toLowerCase() === String(v).toLowerCase();
+}
+
+/**
+ * The in-memory half, over an assembled cell. Same operators, same meaning as `baseFilterSql`.
+ *
+ * `kind` is the catalogue's own type for the column, and the ordering operators NEED it. A date cell is
+ * `ymd()` / ISO TEXT by the time it reaches here (see `cellValue`), so comparing it with `Number(cell)` gave
+ * `NaN`, and `NaN > NaN` is false - every one of gt/gte/lt/lte answered false for every row. A date RANGE
+ * filter on any column behind a link or a source therefore returned an empty grid, silently and always, while
+ * the identical filter on a base column went to SQL and worked. Dates are compared as instants and everything
+ * else numerically, and a bound that parses to nothing excludes the row rather than throwing.
+ *
+ * A date-only bound against a datetime cell resolves to UTC midnight, which is what `coerce` does on the SQL
+ * side for the same input - so a filter reads the same either side of the split.
+ */
+function matches(cell: unknown, f: ViewFilter, kind?: ResolvedField["kind"]): boolean {
+  const v = f.value;
+  if (f.op === "empty") return cell === null || cell === undefined || cell === "";
+  if (f.op === "not_empty") return !(cell === null || cell === undefined || cell === "");
+  if (cell === null || cell === undefined) return false;
+  if (ORDERING_OPS.has(f.op)) {
+    // Text orders as text, case-folded, which is what `lowerCmp` binds on the SQL side. Reading it as a number
+    // made every ordering filter on a text column false wherever it was judged here.
+    if (kind !== undefined && TEXT_KINDS.has(kind)) {
+      const l = String(cell).toLowerCase();
+      const r = String(v ?? "").toLowerCase();
+      switch (f.op) {
+        case "gt": return l > r;
+        case "gte": return l >= r;
+        case "lt": return l < r;
+        default: return l <= r; // "lte"
+      }
+    }
+    const temporal = kind === "date" || kind === "datetime";
+    const l = temporal ? Date.parse(String(cell)) : Number(cell);
+    const r = temporal ? Date.parse(String(v ?? "")) : Number(v);
+    if (!Number.isFinite(l) || !Number.isFinite(r)) return false;
+    switch (f.op) {
+      case "gt": return l > r;
+      case "gte": return l >= r;
+      case "lt": return l < r;
+      default: return l <= r; // "lte"
+    }
+  }
+  switch (f.op) {
+    case "eq": return equalsValue(cell, v, kind);
+    case "ne": return !equalsValue(cell, v, kind);
+    // `contains` is `LIKE` on the other side, which SQLite answers over the column's text form - so this stays
+    // a string test on both halves whatever the kind is.
+    case "contains": return String(cell).toLowerCase().includes(String(v ?? "").toLowerCase());
+    // Split through the SAME `inList` the SQL half spends its parameters on, so the two can never disagree
+    // about how many items a list has (it drops empties; a bare `split(",")` kept them, and an empty item
+    // compared equal to an empty cell).
+    case "in": return inList(v).some((x) => equalsValue(cell, x, kind));
+    default: return true;
+  }
+}
+
+// ---- Source loaders ---------------------------------------------------------------------------------------
+// Each returns `baseRowId -> { <leaf>: value }` for the whole page in one or two queries. `subjects` maps a
+// base row to the EMPLOYEE row the source is about, which is what makes a source work identically whether the
+// grid's base is people or the tickets they raised.
+
+async function loadSource(
+  deps: Deps,
+  user: AppUser,
+  scopes: Map<string, ListScope>,
+  source: string,
+  subjects: Map<string, Record<string, any>>,
+  spec: ViewSpec,
+  opts: RunOptions,
+): Promise<Map<string, Record<string, unknown>>> {
+  const out = new Map<string, Record<string, unknown>>();
+  const byEmp = new Map<string, string[]>(); // employee id -> base row ids
+  // The DISTINCT employees this page is about. Two tickets from the same person are one employee here, so the
+  // decrypt (and every query below) happens once for them rather than once per row.
+  const people = new Map<string, Record<string, any>>();
+  for (const [rowId, emp] of subjects) {
+    const empId = emp.uuid as string;
+    people.set(empId, emp);
+    const list = byEmp.get(empId) ?? [];
+    list.push(rowId);
+    byEmp.set(empId, list);
+  }
+  const empIds = [...people.keys()];
+  const put = (empId: string, values: Record<string, unknown>) => {
+    for (const rowId of byEmp.get(empId) ?? []) out.set(rowId, { ...(out.get(rowId) ?? {}), ...values });
+  };
+  const params = spec.params ?? {};
+
+  /**
+   * The caller's list scope for the collection a source reads, bound to that table's own (code, owner) pair -
+   * the same predicate the base page and every linked row already carry.
+   *
+   * Presence in `scopes` is only the BOOLEAN half of the decision: `scopesForCollections` puts a collection in
+   * the map when `decide()` allows a bare `GET /v1/<collection>` AT ANY BREADTH, and the breadth lives on the
+   * ListScope. So gating a source on `listable.has(...)` alone - which is all the catalogue does, and all this
+   * function used to do - reads the whole page's worth of rows for a caller entitled to one of them: a reader
+   * holding `compensation.read` at `me` breadth, on a grid based on People they may list by department, got
+   * every colleague's CTC, payslip net, loan balance and tax declarations. `applyScope` fails closed on an
+   * absent scope (`1 = 0`), so an unmapped collection yields nothing rather than everything.
+   *
+   * The collection is `SOURCES[].collection` from domain/tableFields.ts - the one whose LIST decision gates the
+   * source, and therefore the one whose SCOPE does too.
+   */
+  const scopedTo = (collection: string, code: AnySQLiteColumn, owner: AnySQLiteColumn): SQL | undefined =>
+    and(
+      applyScope(scopes.get(collection), code, owner),
+      // The state half rides here too, for the same reason it rides on the base page and the linked rows: a
+      // source is a LIST of another collection, so the whole of that collection's list verdict applies to it.
+      stateCond(user, collection, TABLES[collection], scopes.get(collection)),
+    );
+
+  switch (source) {
+    // The three PII blobs already ride on the employee row this page loaded - decrypt CPU, zero extra reads.
+    case "identity": {
+      const defs = await getFieldDefs(deps);
+      for (const [empId, emp] of people) {
+        const values = await decryptBlob(deps, emp.identityDetailsEnc);
+        put(empId, Object.fromEntries(defs.map((d) => [d.key, values[d.key] ?? null])));
+      }
+      return out;
+    }
+    case "personal": {
+      for (const [empId, emp] of people) put(empId, await decryptBlob(deps, emp.personalDetailsEnc));
+      return out;
+    }
+    case "bank": {
+      for (const [empId, emp] of people) put(empId, await decryptBlob(deps, emp.bankDetailsEnc));
+      return out;
+    }
+    case "comp": {
+      const rows = await byIdChunks(empIds, (ids) =>
+        deps.db
+          .select()
+          .from(schema.compensation)
+          .where(and(
+            inArray(schema.compensation.employeeId, ids),
+            isNull(schema.compensation.deleteTime),
+            scopedTo("compensation", schema.compensation.code, schema.compensation.employeeId),
+          )),
+      );
+      const components = await refPayComponents(deps);
+      const pfBasis = (await getSettingValue<CtcConfig>(deps, "ctc", DEFAULT_CTC_CONFIG)).pf_wage_basis ?? "basic";
+      // Through lib/refData, like `components` above: both are whole-catalog reads that resolve a stored
+      // foreign key to a name, and a grid run alongside a compensation read in the same request (or the same
+      // batch envelope, which shares one Deps) would otherwise pay each of them twice.
+      const grades = await refPayGrades(deps);
+      const structures = await refSalaryStructures(deps);
+      const gradeName = new Map(grades.map((g) => [g.uuid, g.name]));
+      const structureName = new Map(structures.map((s) => [s.uuid, s.name]));
+      // Newest effective row per employee - the one in force, the same pick letters and payroll make.
+      const current = new Map<string, (typeof rows)[number]>();
+      for (const r of rows) {
+        const held = current.get(r.employeeId);
+        if (!held || +new Date(r.effectiveFrom) > +new Date(held.effectiveFrom)) current.set(r.employeeId, r);
+      }
+      // One read per DISTINCT structure, not one per person: a page of 100 people on two salary structures
+      // used to be 100 reads of the same two rows.
+      const structureLines = new Map<string, Awaited<ReturnType<typeof structureLinesById>>>();
+      const linesFor = async (structureId: string | null) => {
+        if (!structureId) return null;
+        if (!structureLines.has(structureId)) structureLines.set(structureId, await structureLinesById(deps, structureId));
+        return structureLines.get(structureId)!;
+      };
+      for (const [empId, emp] of people) {
+        const row = current.get(empId);
+        if (!row) continue;
+        const eff = applyStructure(components, await linesFor(row.structureId));
+        const { lines, ctcMonthly } = ctcLines(row.basePay, eff, !!emp.epfEnrolled, row.specialAllowance, pfBasis);
+        const values: Record<string, unknown> = {
+          ctc_annual: row.ctcAnnual,
+          base_pay: row.basePay,
+          special_allowance: row.specialAllowance,
+          effective_from: ymd(row.effectiveFrom),
+          pay_grade: row.payGradeId ? (gradeName.get(row.payGradeId) ?? null) : null,
+          structure: row.structureId ? (structureName.get(row.structureId) ?? null) : null,
+          ctc_monthly: ctcMonthly,
+        };
+        // The breakdown, one cell per component, matched to the annexure line by name.
+        const byName = new Map(lines.map((l) => [l.name, l.monthly]));
+        for (const c of components) values[`component:${c.uuid}`] = byName.get(c.name) ?? null;
+        put(empId, values);
+      }
+      return out;
+    }
+    case "position": {
+      const rows = await byIdChunks(empIds, (ids) =>
+        deps.db.select().from(schema.positions).where(and(
+          inArray(schema.positions.employeeId, ids),
+          scopedTo("positions", schema.positions.code, schema.positions.employeeId),
+        )),
+      );
+      const current = new Map<string, (typeof rows)[number]>();
+      for (const r of rows) {
+        const held = current.get(r.employeeId);
+        if (!held || +new Date(r.effectiveFrom) > +new Date(held.effectiveFrom)) current.set(r.employeeId, r);
+      }
+      for (const [empId, r] of current) put(empId, { job_title: r.jobTitle ?? null, location: r.location ?? null, effective_from: ymd(r.effectiveFrom) });
+      return out;
+    }
+    case "payslip": {
+      // The period the view names, or the most recent one that has slips.
+      const periods = await refPayPeriods(deps);
+      const wanted = params.pay_period?.split("/").pop();
+      const rows = await byIdChunks(empIds, (ids) =>
+        deps.db.select().from(schema.payslips).where(and(
+          inArray(schema.payslips.employeeId, ids),
+          scopedTo("payslips", schema.payslips.code, schema.payslips.employeeId),
+        )),
+      );
+      if (!rows.length) return out;
+      // A page of a hundred people can carry more than a hundred DISTINCT runs (each person's whole slip
+      // history is read here), so this list is chunked for its own sake, not only because empIds was.
+      const runs = await byIdChunks([...new Set(rows.map((r) => r.runId))], (ids) =>
+        deps.db.select().from(schema.payrollRuns).where(inArray(schema.payrollRuns.uuid, ids)),
+      );
+      const periodOfRun = new Map(runs.map((r) => [r.uuid, r.payPeriodId]));
+      const periodLabel = new Map(periods.map((p) => [p.uuid, p.label]));
+      const periodEnd = new Map(periods.map((p) => [p.uuid, +new Date(p.periodEnd)]));
+      const pick = new Map<string, (typeof rows)[number]>();
+      for (const r of rows) {
+        const period = periodOfRun.get(r.runId);
+        if (!period) continue;
+        if (wanted && period !== wanted) continue;
+        const held = pick.get(r.employeeId);
+        const heldPeriod = held ? periodOfRun.get(held.runId) : undefined;
+        if (!held || (periodEnd.get(period) ?? 0) > (periodEnd.get(heldPeriod ?? "") ?? 0)) pick.set(r.employeeId, r);
+      }
+      for (const [empId, r] of pick) {
+        put(empId, {
+          gross: r.gross, taxable_gross: r.taxableGross, total_deductions: r.totalDeductions, tax: r.tax, net: r.net,
+          period: periodLabel.get(periodOfRun.get(r.runId) ?? "") ?? null,
+        });
+      }
+      return out;
+    }
+    case "leave": {
+      const rows = await byIdChunks(empIds, (ids) =>
+        deps.db.select().from(schema.leaveBalances).where(and(
+          inArray(schema.leaveBalances.employeeId, ids),
+          scopedTo("leave-balances", schema.leaveBalances.code, schema.leaveBalances.employeeId),
+        )),
+      );
+      const acc = new Map<string, Record<string, unknown>>();
+      for (const r of rows) {
+        const v = acc.get(r.employeeId) ?? {};
+        v[`type:${r.leaveTypeId}`] = r.balanceDays;
+        acc.set(r.employeeId, v);
+      }
+      for (const [empId, v] of acc) put(empId, v);
+      return out;
+    }
+    case "asset": {
+      const rows = await byIdChunks(empIds, (ids) =>
+        deps.db
+          .select()
+          .from(schema.assets)
+          .where(and(
+            inArray(schema.assets.assignedTo, ids),
+            scopedTo("assets", schema.assets.code, schema.assets.assignedTo),
+          )),
+      );
+      const acc = new Map<string, { count: number; tags: string[] }>();
+      for (const r of rows) {
+        if (!r.assignedTo) continue;
+        const v = acc.get(r.assignedTo) ?? { count: 0, tags: [] };
+        v.count += 1;
+        if (r.assetTag) v.tags.push(r.assetTag);
+        acc.set(r.assignedTo, v);
+      }
+      for (const [empId, v] of acc) put(empId, { count: v.count, tags: v.tags.join(", ") });
+      return out;
+    }
+    case "loan": {
+      const rows = await byIdChunks(empIds, (ids) =>
+        deps.db
+          .select()
+          .from(schema.loans)
+          .where(and(
+            inArray(schema.loans.employeeId, ids),
+            isNull(schema.loans.deleteTime),
+            scopedTo("loans", schema.loans.code, schema.loans.employeeId),
+          )),
+      );
+      const acc = new Map<string, { outstanding: number; monthly: number; count: number }>();
+      for (const r of rows) {
+        if (r.status !== "DISBURSED" && r.status !== "APPROVED") continue;
+        const v = acc.get(r.employeeId) ?? { outstanding: 0, monthly: 0, count: 0 };
+        v.outstanding += Math.max(0, r.principal - (r.repaid ?? 0));
+        v.monthly += r.monthlyAmount ?? 0;
+        v.count += 1;
+        acc.set(r.employeeId, v);
+      }
+      for (const [empId, v] of acc) put(empId, { outstanding: round2(v.outstanding), monthly: round2(v.monthly), count: v.count });
+      return out;
+    }
+    case "benefit": {
+      const rows = await byIdChunks(empIds, (ids) =>
+        deps.db
+          .select()
+          .from(schema.benefitEnrollments)
+          .where(and(
+            inArray(schema.benefitEnrollments.employeeId, ids),
+            isNull(schema.benefitEnrollments.deleteTime),
+            scopedTo("benefit-enrollments", schema.benefitEnrollments.code, schema.benefitEnrollments.employeeId),
+          )),
+      );
+      const plans = await deps.db.select().from(schema.benefitPlans);
+      const planName = new Map(plans.map((p) => [p.uuid, p.name]));
+      const acc = new Map<string, string[]>();
+      for (const r of rows) {
+        if (r.status !== "enrolled") continue;
+        const v = acc.get(r.employeeId) ?? [];
+        v.push(planName.get(r.planId) ?? "");
+        acc.set(r.employeeId, v);
+      }
+      for (const [empId, v] of acc) put(empId, { plans: v.filter(Boolean).join(", "), count: v.length });
+      return out;
+    }
+    case "dependent": {
+      const rows = await byIdChunks(empIds, (ids) =>
+        deps.db
+          .select()
+          .from(schema.dependents)
+          .where(and(
+            inArray(schema.dependents.employeeId, ids),
+            isNull(schema.dependents.deleteTime),
+            scopedTo("dependents", schema.dependents.code, schema.dependents.employeeId),
+          )),
+      );
+      const acc = new Map<string, string[]>();
+      for (const r of rows) {
+        const v = acc.get(r.employeeId) ?? [];
+        v.push(r.name);
+        acc.set(r.employeeId, v);
+      }
+      for (const [empId, v] of acc) put(empId, { count: v.length, names: v.join(", ") });
+      return out;
+    }
+    case "tax": {
+      const fy = params.financial_year;
+      const rows = await byIdChunks(empIds, (ids) => {
+        const conds = [
+          inArray(schema.taxDeclarations.employeeId, ids),
+          isNull(schema.taxDeclarations.deleteTime),
+          scopedTo("tax-declarations", schema.taxDeclarations.code, schema.taxDeclarations.employeeId),
+        ];
+        if (fy) conds.push(eq(schema.taxDeclarations.financialYear, fy));
+        return deps.db.select().from(schema.taxDeclarations).where(and(...conds));
+      });
+      const acc = new Map<string, { declared: number; verified: number }>();
+      for (const r of rows) {
+        const v = acc.get(r.employeeId) ?? { declared: 0, verified: 0 };
+        v.declared += r.declaredAmount ?? 0;
+        if (r.status === "VERIFIED") v.verified += r.verifiedAmount ?? r.declaredAmount ?? 0;
+        acc.set(r.employeeId, v);
+      }
+      for (const [empId, v] of acc) put(empId, { declared: round2(v.declared), verified: round2(v.verified) });
+      return out;
+    }
+    case "metric": {
+      // The measures are computed by the people-analytics service itself, under the SAME scope map - one
+      // implementation of every measure, gated once. Only reached when a measure column was selected.
+      // The default window is "this month so far", and BOTH ends of it have to be read in the org's
+      // timezone or the grid disagrees with every other surface for part of each day - a UTC "today" rolls
+      // the window into the next month early east of UTC and keeps it a day behind west of it, and on the
+      // 1st that also moves `from`. See services/orgDay.ts.
+      const today = await orgToday(deps);
+      const from = params.from || `${today.slice(0, 7)}-01`;
+      const to = params.to || today;
+      // The people THIS PAGE is about, by name. Left to choose its own roster, peopleAnalytics takes the first
+      // `maxPeople` employees in name order - a set with no relationship to the rows being rendered - so on any
+      // org past that cap a grid showed a blank measure cell for every row outside it, and `truncated`, the one
+      // signal that anything had been dropped, was discarded here. Naming the ids only ever narrows: the
+      // caller's own `employees` scope still decides who may be in the answer at all.
+      const report = await peopleAnalytics(deps, scopes, { from, to, employeeIds: [...people.keys()] });
+      const byId = new Map(report.people.map((p) => [p.employee.split("/").pop()!, p.values]));
+      for (const empId of people.keys()) {
+        const values = byId.get(empId);
+        if (values) put(empId, values as Record<string, unknown>);
+      }
+      return out;
+    }
+    default:
+      return out;
+  }
+}
+
+
+/** Null-last, numbers numerically, everything else by locale - the same order DataTable sorts by. */
+function compareCells(a: unknown, b: unknown): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  if (typeof a === "boolean" && typeof b === "boolean") return a === b ? 0 : a ? 1 : -1;
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+}
+
+async function decryptBlob(deps: Deps, enc: string | null | undefined): Promise<Record<string, string>> {
+  if (!enc) return {};
+  try {
+    return JSON.parse(await deps.encryptor.decrypt(enc)) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+

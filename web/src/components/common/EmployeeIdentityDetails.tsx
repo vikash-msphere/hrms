@@ -1,0 +1,183 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { IdCard, Paperclip, Download } from "lucide-react";
+import { IconEdit } from "@/components/common/IconEdit";
+import { get, patch, upload, download } from "@/api";
+import { isConflict } from "@/lib/formError";
+import type { IdentityDetails } from "@/types";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Field } from "@/components/common/Field";
+import { WriteDialog } from "@/components/common/WriteDialog";
+import { FieldAccess } from "@/components/access/FieldAccess";
+import { AccessAction } from "@/components/access/AccessAction";
+import { useToast } from "@/components/ui/use-toast";
+
+/** Configured identity fields (PAN/UAN/Aadhaar etc.) for one employee. The set of fields and
+ *  which are required/sensitive is configured centrally in Settings. Sensitive values are
+ *  encrypted at rest and only ever shown masked. Access: owner, HR, super_admin. */
+export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity", onSaved }: { employeeId: string; canEdit: boolean; title?: string; onSaved?: () => void }) {
+  const { toast } = useToast();
+  const [data, setData] = useState<IdentityDetails | null>(null);
+  const [denied, setDenied] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState<Record<string, string>>({});
+  // Hidden file input for attaching/replacing a field's supporting document.
+  const fileRef = useRef<HTMLInputElement>(null);
+  const docTarget = useRef<string | null>(null);
+
+  // The loader is the effect's dependency (see the note in EmployeeBankDetails).
+  const load = useCallback(async () => {
+    try {
+      setData(await get<IdentityDetails>(`employees/${employeeId}/identity`));
+    } catch (e) {
+      if ((e as { status?: number }).status === 403) setDenied(true);
+    }
+  }, [employeeId]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  function pickDoc(fieldKey: string) {
+    docTarget.current = fieldKey;
+    fileRef.current?.click();
+  }
+  async function onDocPicked(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    const field = docTarget.current;
+    e.target.value = "";
+    if (!file || !field) return;
+    try {
+      await upload(`employees/${employeeId}`, file, { verb: "uploadIdentityDoc", params: { field } });
+      toast({ title: "Document attached", variant: "success" });
+      void load();
+    } catch (err) {
+      toast({ title: "Upload failed", description: (err as Error).message, variant: "destructive" });
+    }
+  }
+  const getDoc = (field: string) => download(`employees/${employeeId}`, `${field}-document`, { verb: "downloadIdentityDoc", params: { field } });
+
+  function openEdit() {
+    // Sensitive fields are never returned in full, so they start blank (placeholder shows the mask).
+    const seed: Record<string, string> = {};
+    for (const f of data?.fields ?? []) seed[f.key] = f.sensitive ? "" : f.value ?? "";
+    setForm(seed);
+    setOpen(true);
+  }
+
+  async function save() {
+    try {
+      // The version this panel read: these values are one blob merged over a server-side read, so an
+      // unversioned write does not lose a race, it overwrites the other editor's field with the old value.
+      const updated = await patch<IdentityDetails>(`employees/${employeeId}/identity`, { values: form }, data?.etag);
+      setData(updated);
+      toast({ title: "Identity details saved", variant: "success" });
+      onSaved?.();
+    } catch (e) {
+      if (isConflict(e)) {
+        await load();
+        throw new Error("Somebody else changed these details while you had them open. They have been reloaded - check them and save again.");
+      }
+      throw e;
+    }
+  }
+
+  if (denied) return null;
+  const fields = data?.fields ?? [];
+  // A mandatory field is only missing if it ends up empty: a sensitive one that already holds a value is left
+  // blank on purpose ("leave blank to keep"), so it counts as filled.
+  const missing = fields.filter((f) => f.mandatory && !f.denied && !(form[f.key] ?? "").trim() && !(f.sensitive && f.has_value));
+
+  return (
+    <Card className="sentry-mask">
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
+        <CardTitle className="text-base">
+          <AccessAction collection="employees" objectPath={`employees/${employeeId}`} field="identity" label="Identity">
+            <span className="flex items-center gap-2"><IdCard className="h-4 w-4 text-primary" /> {title}</span>
+          </AccessAction>
+        </CardTitle>
+        {canEdit && fields.length > 0 && <IconEdit label="Edit" onClick={openEdit} />}
+      </CardHeader>
+      <CardContent>
+        <input ref={fileRef} type="file" className="hidden" onChange={onDocPicked} />
+        {fields.length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">No identity fields configured. Add them in Settings.</p>
+        ) : (
+          <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+            {fields.map((f) => {
+              const docMode = f.document ?? "none";
+              return (
+              <div key={f.key}>
+                <dt className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  {f.label}
+                  {f.sensitive && <Badge variant="muted" className="px-1 py-0 text-[10px]">sensitive</Badge>}
+                  {f.denied && <Badge variant="muted" className="px-1 py-0 text-[10px]">restricted</Badge>}
+                  {docMode === "required" && !f.has_doc && !f.denied && <Badge variant="warning" className="px-1 py-0 text-[10px]">doc required</Badge>}
+                  <FieldAccess field={`identity.${f.key}`} label={f.label} />
+                </dt>
+                <dd className="mt-0.5 flex items-center gap-2 text-sm font-medium">
+                  <span>{f.value || <span className="text-muted-foreground">-</span>}</span>
+                  {f.has_doc && !f.denied && (
+                    <button type="button" onClick={() => getDoc(f.key)} className="inline-flex items-center gap-1 text-xs font-normal text-primary hover:underline">
+                      <Download className="h-3 w-3" /> document
+                    </button>
+                  )}
+                  {canEdit && docMode !== "none" && !f.denied && (
+                    <button type="button" onClick={() => pickDoc(f.key)} className="inline-flex items-center gap-1 text-xs font-normal text-muted-foreground hover:text-foreground">
+                      <Paperclip className="h-3 w-3" /> {f.has_doc ? "replace" : "attach"}
+                    </button>
+                  )}
+                </dd>
+              </div>
+            );})}
+          </dl>
+        )}
+      </CardContent>
+
+      <WriteDialog
+      className="sentry-mask"
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Edit identity details"
+        description="Government IDs used for payroll, statutory filings and background checks. Sensitive values are encrypted and only ever shown masked."
+        collection="employees"
+        objectPath={`employees/${employeeId}`}
+        guardLabel="identity details"
+        form={form}
+        submitLabel="Save"
+        canSubmit={missing.length === 0}
+        whyNot={missing.length ? `Required: ${missing.map((f) => f.label).join(", ")}.` : undefined}
+        onSubmit={save}
+      >
+            {fields.map((f) => {
+              const docMode = f.document ?? "none";
+              const empty = !(form[f.key] ?? "").trim() && !(f.sensitive && f.has_value);
+              return (
+                <Field
+                  key={f.key}
+                  label={f.label}
+                  field={`identity.${f.key}`}
+                  error={f.mandatory && empty ? "Required." : undefined}
+                  hint={
+                    f.sensitive
+                      ? f.has_value
+                        ? "Leave blank to keep the current value."
+                        : "Shown masked once saved."
+                      : docMode === "required" && !f.has_doc
+                        ? "A supporting document is required - attach it from the card after saving."
+                        : undefined
+                  }
+                >
+                  <Input
+                    value={form[f.key] ?? ""}
+                    onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
+                    placeholder={f.sensitive && f.has_value ? f.value : ""}
+                  />
+                </Field>
+              );
+            })}
+      </WriteDialog>
+    </Card>
+  );
+}

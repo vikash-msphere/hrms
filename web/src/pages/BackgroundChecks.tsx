@@ -1,0 +1,523 @@
+import { useMemo, useRef, useState } from "react";
+import { UserCheck, Plus, Check, Link2, Pencil, Trash2, RotateCcw, ShieldX, Play, AlertTriangle } from "lucide-react";
+import { create, patch } from "@/api";
+import { useCollection } from "@/hooks/useCollection";
+import { useSoftDelete } from "@/hooks/useSoftDelete";
+import { usePermission } from "@/lib/perm";
+import { cn, formatDate, formatMoney, idOf, personName } from "@/lib/utils";
+import { useOrg, currencyDecimals } from "@/lib/org";
+import { outlierIds } from "@/lib/tableSignals";
+import { describeError } from "@/lib/formError";
+import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
+import type { BackgroundCheck, Employee, Me } from "@/types";
+import { PageHeader } from "@/components/common/PageHeader";
+import { DataState } from "@/components/common/DataState";
+import { EmptyState } from "@/components/common/EmptyState";
+import { DataTable, type Column } from "@/components/common/DataTable";
+import { type TableInsight } from "@/components/common/TableInsights";
+import { stateColumn } from "@/components/common/stateColumn";
+import { metaColumns } from "@/components/common/metaColumns";
+import { ActivitySection } from "@/components/common/ActivitySection";
+import { useDeepOpen } from "@/hooks/useDeepOpen";
+import { RowActions, type RowAction } from "@/components/common/RowActions";
+import { Field, FieldRow } from "@/components/common/Field";
+import { ProofField, fileProof } from "@/components/common/ProofField";
+import { Checkbox } from "@/components/ui/checkbox";
+import { setRouteRecord, recordUrl } from "@/router";
+import { PhotoAvatar } from "@/components/common/PhotoAvatar";
+import { Button } from "@/components/ui/button";
+import { AccessAction } from "@/components/access/AccessAction";
+import { Badge } from "@/components/ui/badge";
+import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { useKpiFocus } from "@/lib/kpiFocus";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox } from "@/components/ui/combobox";
+import { WriteDialog } from "@/components/common/WriteDialog";
+import { useToast } from "@/components/ui/use-toast";
+import { humanize } from "@/lib/utils";
+
+const TYPES = ["identity", "address", "education", "employment", "criminal", "reference", "credit", "other"];
+const STATUSES = [
+  { value: "pending", label: "Pending" },
+  { value: "in_progress", label: "In progress" },
+  { value: "clear", label: "Clear" },
+  { value: "discrepancy", label: "Discrepancy" },
+  { value: "failed", label: "Failed" },
+];
+const statusLabel = (s: string) => STATUSES.find((x) => x.value === s)?.label ?? s;
+// Reaching one of these ends the check, which is what dates the completion.
+const OUTCOMES = ["clear", "discrepancy", "failed"];
+const EMPTY = { employee: "", check_type: "identity", status: "pending", vendor: "", reference_no: "", initiated_date: "", completed_date: "", notes: "", document: "" };
+// What a new joiner's verification normally consists of. Four dialog trips for one hire is not a workflow.
+const STANDARD_SET = ["identity", "address", "education", "employment"];
+// `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
+// local parts, which is a different day for part of every day and a different day again from the one the
+// server validates against.
+// A check still with the vendor. Past this many days open it is the one to chase - the table flags the same age.
+const STALE_DAYS = 14;
+const isOpenCheck = (c: BackgroundCheck) => !c.delete_time && (c.status === "pending" || c.status === "in_progress");
+// Days on the ORG's calendar: `initiated_date` is date-only, so `new Date(...)` reads it at UTC midnight and
+// differencing that against `Date.now()` is a third clock - neither the viewer's nor the org's - which moves
+// the chase list by a day for part of every day.
+const isStaleCheck = (c: BackgroundCheck) =>
+  isOpenCheck(c) && !!c.initiated_date && daysBetweenYmd(c.initiated_date.slice(0, 10), todayStr()) > STALE_DAYS;
+
+function StatusBadge({ s }: { s: string }) {
+  if (s === "clear") return <Badge variant="success" className="gap-1"><Check className="h-3 w-3" /> Clear</Badge>;
+  if (s === "discrepancy") return <Badge variant="warning">Discrepancy</Badge>;
+  if (s === "failed") return <Badge variant="destructive">Failed</Badge>;
+  if (s === "in_progress") return <Badge variant="secondary">In progress</Badge>;
+  return <Badge variant="muted">Pending</Badge>;
+}
+
+export default function BackgroundChecks({ me, openId }: { me: Me; openId?: string }) {
+  void me;
+  // `all: true`: the clash guard below searches these rows, and on one page it searched the 100 most recent
+  // checks in the WHOLE org - so ordering a second check on somebody whose first is older than that window
+  // showed no warning at all, and the comment on that guard states the cost in money ("two vendor invoices
+  // for one answer"). Advisory is the right call; silently not checking is not.
+  const { rows, state, error, reload } = useCollection<BackgroundCheck>("background-checks", { showDeleted: true, all: true });
+  useDeepOpen(openId, rows, openEdit);
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
+  const { toast } = useToast();
+  const sd = useSoftDelete("background-checks", "background check", reload);
+  const writable = usePermission("background-checks.write");
+  const canPurge = usePermission("background-checks.admin");
+  // The org's own money formatter, so vendor invoices read in the same unit as every other money surface.
+  const { org } = useOrg();
+  const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
+
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<BackgroundCheck | null>(null);
+  const [form, setForm] = useState(EMPTY);
+  // The vendor's report staged for upload on save (the linked one lives in `form.document`).
+  const [proof, setProof] = useState<File | null>(null);
+  // Order the whole standard set for a new joiner rather than one check at a time.
+  const [standardSet, setStandardSet] = useState(false);
+  // Which of the standard-set checks this dialog has already created, so a retry after a partial run resumes
+  // rather than restarting (see `submit`). Cleared when the dialog closes.
+  const filedThisDialog = useRef(new Set<string>());
+
+  const empById = useMemo(() => new Map(employees.map((e) => [idOf(e.path), e])), [employees]);
+  const emp = (p?: string) => (p ? empById.get(idOf(p)) : undefined);
+  // `empById` above is the same lookup this needs, so it is reused rather than re-scanned: this is a
+  // DataTable column accessor, called per row per compare during a sort (see `personName`).
+  const empName = (p?: string, unknown?: string) => personName(empById, p, unknown);
+
+  const stats = useMemo(() => {
+    const live = rows.filter((c) => !c.delete_time);
+    return {
+      open: live.filter(isOpenCheck).length,
+      discrepancy: live.filter((c) => c.status === "discrepancy" || c.status === "failed").length,
+      clear: live.filter((c) => c.status === "clear").length,
+      // Open past the point a vendor should have answered: the queue worth chasing today, not just the queue.
+      stale: live.filter(isStaleCheck).length,
+      // Nobody has told the vendor to start yet - the delay is ours, not theirs.
+      notStarted: live.filter((c) => c.status === "pending").length,
+    };
+  }, [rows]);
+
+  // Clicking a metric narrows the table to exactly the rows it counted.
+  const kf = useKpiFocus<BackgroundCheck, "open" | "adverse" | "clear" | "stale" | "notStarted">({
+    open: { label: "open checks", match: isOpenCheck },
+    adverse: { label: "adverse outcomes", match: (c) => c.status === "discrepancy" || c.status === "failed" },
+    clear: { label: "cleared checks", match: (c) => c.status === "clear" },
+    stale: { label: `checks open past ${STALE_DAYS} days`, match: isStaleCheck },
+    notStarted: { label: "checks not started", match: (c) => c.status === "pending" },
+  });
+  const shown = useMemo(() => kf.apply(rows), [rows, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function openCreate() { setEditing(null); setForm({ ...EMPTY, initiated_date: todayStr() }); setProof(null); setStandardSet(false); setOpen(true); }
+  function openEdit(c: BackgroundCheck) {
+    setEditing(c);
+    setForm({
+      employee: c.employee ? `employees/${idOf(c.employee)}` : "", check_type: c.check_type, status: c.status,
+      vendor: c.vendor ?? "", reference_no: c.reference_no ?? "", initiated_date: c.initiated_date ?? "",
+      completed_date: c.completed_date ?? "", notes: c.notes ?? "", document: c.document ?? "",
+    });
+    setProof(null);
+    setStandardSet(false);
+    setOpen(true);
+    // A check under discussion gets pasted into a thread; `useDeepOpen` above reads this back.
+    setRouteRecord(idOf(c.path));
+  }
+  function closeDialog() { setOpen(false); setRouteRecord(null); filedThisDialog.current = new Set(); }
+  function copyLink(c: BackgroundCheck) {
+    navigator.clipboard.writeText(recordUrl("background-checks", idOf(c.path))).then(
+      () => toast({ title: "Link copied", description: "Anyone who can see this check can open it." }),
+      () => toast({ title: "Couldn't copy the link", variant: "destructive" }),
+    );
+  }
+  function bodyFromForm(checkType: string, document: string) {
+    return {
+      // The subject is fixed at create: the row's code is allocated under them, and a code never moves, so the
+      // server refuses `employee` on a patch (src/services/backgroundChecks.ts). Sending it unchanged would be
+      // refused just the same - a merge-patch is judged on the keys present, not on whether the value differs.
+      ...(editing ? {} : { employee: form.employee }),
+      check_type: checkType, status: form.status,
+      vendor: form.vendor.trim(), reference_no: form.reference_no.trim(),
+      // `format: date` fields, and "" is not a date - an empty one is left out.
+      ...(form.initiated_date ? { initiated_date: form.initiated_date } : {}),
+      ...(form.completed_date ? { completed_date: form.completed_date } : {}),
+      notes: form.notes.trim(),
+      document,
+    };
+  }
+  async function submit() {
+    // The vendor's report lands on the employee's own document shelf first, then the check links it.
+    const document = proof
+      ? await fileProof({
+          file: proof,
+          title: `${humanize(form.check_type)} verification${form.vendor.trim() ? ` - ${form.vendor.trim()}` : ""}`,
+          employee: form.employee,
+        })
+      : form.document;
+    if (editing) {
+      await patch("background-checks/" + idOf(editing.path), bodyFromForm(form.check_type, document), editing.etag);
+      toast({ title: "Check updated", variant: "success" });
+    } else if (standardSet) {
+      // One vendor, one initiation date, four checks: what actually gets ordered for a new joiner.
+      //
+      // RESUMABLE. A throw reaches WriteDialog, which keeps the form exactly as typed, so pressing Save again
+      // re-ran the loop from the start and created duplicates of whatever had already landed - and a duplicate
+      // background check is not cosmetic, it is a second open order with a vendor about a named person.
+      // `filedThisDialog` survives between attempts, so a retry picks up at the type that failed.
+      for (const t of STANDARD_SET) {
+        if (filedThisDialog.current.has(t)) continue;
+        try {
+          await create("background-checks", bodyFromForm(t, t === form.check_type ? document : ""));
+        } catch (e) {
+          reload(); // the ones that landed are real, and belong on screen
+          throw new Error(`Added ${filedThisDialog.current.size} of ${STANDARD_SET.length}. ${describeError(e)} Press Save again to carry on from the ${humanize(t).toLowerCase()} check.`);
+        }
+        filedThisDialog.current.add(t);
+      }
+      toast({ title: `${STANDARD_SET.length} checks added`, description: STANDARD_SET.map(humanize).join(", "), variant: "success" });
+    } else {
+      await create("background-checks", bodyFromForm(form.check_type, document));
+      toast({ title: "Check added", variant: "success" });
+    }
+    setProof(null);
+    setRouteRecord(null);
+    reload();
+  }
+  // One validity check shared by the Enter shortcut and the submit button, so they can't disagree.
+  const dateConflict = !!form.initiated_date && !!form.completed_date && form.completed_date < form.initiated_date;
+  const canSubmit = !!form.employee && !dateConflict;
+  // The same check ordered twice on one person is two vendor invoices for one answer. Warn, never block: a
+  // re-run after a discrepancy is legitimate.
+  const openClash = useMemo(() => {
+    if (!form.employee) return null;
+    return rows.find((c) =>
+      !c.delete_time && c.path !== editing?.path &&
+      c.employee && idOf(c.employee) === idOf(form.employee) &&
+      c.check_type === form.check_type &&
+      (c.status === "pending" || c.status === "in_progress")) ?? null;
+  }, [rows, form.employee, form.check_type, editing?.path]);
+  // Turnaround, shown while the dates are being typed rather than only in the table afterwards.
+  const turnaround = form.initiated_date && form.completed_date && !dateConflict
+    ? Math.round((Date.parse(`${form.completed_date}T00:00:00`) - Date.parse(`${form.initiated_date}T00:00:00`)) / 86400000)
+    : null;
+
+  async function setStatus(c: BackgroundCheck, status: string) {
+    try { await patch("background-checks/" + idOf(c.path), { status }, c.etag); toast({ title: `Marked ${statusLabel(status).toLowerCase()}`, variant: "success" }); reload(); }
+    catch (e) { toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" }); }
+  }
+
+  /** How long a check has been out with the vendor. Zero for anything that has come back or been dropped. */
+  const openDays = (c: BackgroundCheck) =>
+    !c.delete_time && (c.status === "pending" || c.status === "in_progress") && c.initiated_date
+      ? Math.max(0, daysBetweenYmd(c.initiated_date.slice(0, 10), todayStr()))
+      : 0;
+
+  // Checks that are dragging by their OWN vendor's standards. Measured against that vendor's median rather
+  // than a flat number of days, because turnaround varies by an order of magnitude between vendors, and
+  // against the median rather than the mean, because the slow check is exactly what would drag a mean.
+  const slowForVendor = useMemo(
+    () => outlierIds(
+      rows.filter((c) => !c.delete_time && openDays(c) > 0),
+      { valueOf: (c) => openDays(c), idOf: (c) => c.path, groupOf: (c) => c.vendor ?? "", factor: 3 },
+    ),
+    [rows],
+  );
+
+  // The only question a screening register is really asked: what is stuck, and with whom.
+  const checkInsights = (cs: BackgroundCheck[]): TableInsight[] => {
+    const out: TableInsight[] = [];
+    const stuck = cs.filter((c) => openDays(c) > 14);
+    if (stuck.length > 0) {
+      out.push({
+        id: "stuck",
+        label: `${stuck.length} open over two weeks`,
+        tone: "warning",
+        hint: "Sent to the vendor and still not back. Longest first.",
+        filters: { open_days: ">14" },
+        sort: "open_days.desc",
+      });
+    }
+    const failed = cs.filter((c) => !c.delete_time && c.status === "failed");
+    if (failed.length > 0) {
+      out.push({
+        id: "failed",
+        label: `${failed.length} came back adverse`,
+        tone: "destructive",
+        filters: { status: statusLabel("failed") },
+      });
+    }
+    // Open far longer than that VENDOR's own usual. Distinct from the two-week chip: a vendor who normally
+    // turns checks round in three days has a problem at nine, and one who takes three weeks does not. The
+    // comparison is per vendor and against the median, so one very slow check cannot move the bar it is
+    // being measured against.
+    const slow = cs.filter((c) => slowForVendor.has(c.path));
+    if (slow.length > 0) {
+      out.push({
+        id: "slow-for-vendor",
+        label: `${slow.length} slow for their vendor`,
+        tone: "warning",
+        hint: "Open several times longer than that vendor's own typical turnaround.",
+        filters: { pace: "Slow for this vendor" },
+        sort: "open_days.desc",
+      });
+    }
+    return out;
+  };
+
+  const columns: Column<BackgroundCheck>[] = [
+    {
+      id: "employee", header: "Employee", filter: "select", groupBy: true, accessor: (c) => empName(c.employee),
+      cell: (c) => {
+        const e = emp(c.employee);
+        return <span className="inline-flex items-center gap-2"><PhotoAvatar employeeId={c.employee ? idOf(c.employee) : ""} name={empName(c.employee)} photo={e?.photo} className="h-6 w-6" /> {empName(c.employee)}</span>;
+      },
+    },
+    { id: "check_type", header: "Check", filter: "select", groupBy: true, accessor: (c) => humanize(c.check_type), cell: (c) => <span className="inline-flex items-center gap-1.5"><Badge variant="secondary">{humanize(c.check_type)}</Badge>{c.transition && <span className="text-[10px] uppercase tracking-wide text-muted-foreground" title="From onboarding">onboarding</span>}</span> },
+    { id: "status", header: "Status", filter: "select", groupBy: true, accessor: (c) => statusLabel(c.status), cell: (c) => <StatusBadge s={c.status} /> },
+    // Grouping by vendor is how the "who is slow" conversation starts; blank is a check nobody has sent out.
+    { id: "vendor", header: "Vendor", filter: "select", groupBy: true, accessor: (c) => c.vendor ?? "", cell: (c) => c.vendor || <span className="text-muted-foreground">-</span> },
+    {
+      id: "initiated", header: "Initiated", filter: "date", dateHint: "past", accessor: (c) => c.initiated_date ?? "",
+      // For open checks show how long they've been sitting - that's the "chase the vendor" signal.
+      cell: (c) => {
+        if (!c.initiated_date) return <span className="text-muted-foreground">-</span>;
+        const isOpen = !c.delete_time && (c.status === "pending" || c.status === "in_progress");
+        const age = isOpen ? Math.max(0, daysBetweenYmd(c.initiated_date.slice(0, 10), todayStr())) : null;
+        return (
+          <span>
+            {formatDate(c.initiated_date)}
+            {age != null && age >= 1 && (
+              <span className={age > 14 ? "text-xs font-medium text-warning dark:text-warning" : "text-xs text-muted-foreground"} title={age > 14 ? "Open for more than two weeks" : "Days open"}> · {age}d open</span>
+            )}
+          </span>
+        );
+      },
+    },
+    {
+      id: "completed", header: "Completed", filter: "date", dateHint: "past", accessor: (c) => c.completed_date ?? "",
+      // Show the turnaround alongside the date - "how long did this check take" without mental math.
+      cell: (c) => {
+        if (!c.completed_date) return <span className="text-muted-foreground">-</span>;
+        const days = c.initiated_date && c.completed_date >= c.initiated_date
+          ? Math.round((new Date(c.completed_date).getTime() - new Date(c.initiated_date).getTime()) / 86400000)
+          : null;
+        return <span>{formatDate(c.completed_date)}{days != null && <span className="text-xs text-muted-foreground" title="Turnaround"> · {days}d</span>}</span>;
+      },
+    },
+    { id: "reference", header: "Reference", defaultHidden: true, accessor: (c) => c.reference_no ?? "", cell: (c) => c.reference_no || "-" },
+    // Days a check has been open, zero once it has landed. The "Initiated" cell already shows this in
+    // passing; as a column of its own it can be sorted, filtered ("open more than 14 days") and is what
+    // makes the chase-the-vendor chip above the table narrow to exactly the rows it counted.
+    {
+      // Averaged in the footer rather than summed: "our checks take nine days" is the figure that decides
+      // whether a vendor is kept, and it reads per vendor the moment the table is grouped by one. A total of
+      // everybody's waiting days is a number nobody has a use for.
+      id: "open_days", header: "Days open", align: "right", defaultHidden: true, filter: "number", aggregate: "avg", formatTotal: (n) => `${n} days`,
+      accessor: (c) => openDays(c),
+      cell: (c) => { const d = openDays(c); return d > 0 ? <span className={cn("tabular-nums", d > 14 && "font-medium text-warning")}>{d}</span> : <span className="text-muted-foreground">-</span>; },
+    },
+    {
+      // What screening costs. Summed under the column and per fold, so grouping by vendor answers the two
+      // questions this page exists to inform - who is quick, and who is cheap - side by side.
+      //
+      // Blank rather than zero when nothing was recorded: a check run in-house genuinely cost nothing and is
+      // stored as 0, while an invoice that has not landed is absent, and averaging those together would be
+      // wrong in the direction that flatters the slowest vendor. A blank is also what a caller who may not
+      // read the figure sees - the field is redacted per row - so the column never claims a check was free.
+      id: "cost", header: "Cost", align: "right", defaultHidden: true, filter: "number", aggregate: "sum",
+      formatTotal: (n) => money(n),
+      accessor: (c) => c.cost ?? null,
+      cell: (c) => (c.cost == null ? <span className="text-muted-foreground">-</span> : <span className="tabular-nums">{money(c.cost)}</span>),
+    },
+    {
+      // The flag behind the "slow for their vendor" chip. A real column so it sorts, exports and can be
+      // turned off, and so the chip can narrow to exactly the rows it counted - no filter grammar can say
+      // "unusual for its own group".
+      id: "pace", header: "Pace", defaultHidden: true, filter: "select", sortable: false,
+      accessor: (c) => (slowForVendor.has(c.path) ? "Slow for this vendor" : ""),
+      cell: (c) => (slowForVendor.has(c.path) ? <span className="text-warning">Slow</span> : <span className="text-muted-foreground">-</span>),
+    },
+    stateColumn<BackgroundCheck>(),
+    ...metaColumns<BackgroundCheck>(),
+    {
+      id: "actions", header: "", sortable: false, filter: "none", align: "right",
+      cell: (c) => {
+        const items: RowAction[] = [];
+        if (c.delete_time) {
+          if (writable) items.push({ label: "Restore", icon: <RotateCcw className="h-4 w-4" />, onClick: () => sd.restore(c), verb: "restore" });
+          if (canPurge) items.push({ label: "Delete permanently", icon: <ShieldX className="h-4 w-4" />, onClick: () => sd.permanentlyDelete(c), destructive: true, verb: "delete" });
+        } else if (writable) {
+          // Quick status moves matching the workflow: pending → in progress → clear/discrepancy.
+          if (c.status === "pending") items.push({ label: "Mark in progress", icon: <Play className="h-4 w-4" />, onClick: () => setStatus(c, "in_progress") });
+          if (c.status !== "clear") items.push({ label: "Mark clear", icon: <Check className="h-4 w-4" />, onClick: () => setStatus(c, "clear") });
+          if (c.status === "pending" || c.status === "in_progress") items.push({ label: "Mark discrepancy", icon: <AlertTriangle className="h-4 w-4" />, onClick: () => setStatus(c, "discrepancy") });
+          items.push({ label: "Edit", icon: <Pencil className="h-4 w-4" />, onClick: () => openEdit(c) });
+          items.push({ label: "Delete", icon: <Trash2 className="h-4 w-4" />, onClick: () => sd.softDelete(c), destructive: true, verb: "delete" });
+        }
+        return <RowActions actions={items} />;
+      },
+    },
+  ];
+
+  const addBtn = writable && <AccessAction collection="background-checks" create><Button onClick={openCreate}><Plus className="h-4 w-4" /> Add check</Button></AccessAction>;
+
+  return (
+    <div>
+      <PageHeader title="Background Verification" description="Track pre-employment verification checks per employee and their outcomes." actions={addBtn} />
+
+      <SummaryStrip
+        items={[
+          { label: "Open", value: stats.open, hint: "in progress", tone: stats.open > 0 ? "warning" : "muted", ...kf.kpi("open") },
+          { label: "Not started", value: stats.notStarted, hint: stats.notStarted ? "nobody ordered these" : "all ordered", tone: stats.notStarted > 0 ? "warning" : "muted", ...kf.kpi("notStarted") },
+          { label: `Open over ${STALE_DAYS}d`, value: stats.stale, icon: AlertTriangle, hint: stats.stale ? "chase the vendor" : "none overdue", tone: stats.stale > 0 ? "destructive" : "muted", ...kf.kpi("stale") },
+          { label: "Discrepancy / failed", value: stats.discrepancy, tone: stats.discrepancy > 0 ? "destructive" : "muted", hint: stats.discrepancy ? "needs a decision" : "none adverse", ...kf.kpi("adverse") },
+          { label: "Clear", value: stats.clear, tone: stats.clear > 0 ? "success" : "muted", hint: "verified, no issues", ...kf.kpi("clear") },
+        ]}
+      />
+
+      <DataState state={state} error={error} onRetry={reload}>
+        {rows.length === 0 ? (
+          <EmptyState icon={UserCheck} title="No background checks" description="Record verification checks (identity, address, education, employment, criminal) and track each to a clear or discrepancy outcome." action={addBtn} />
+        ) : (
+          <DataTable columns={columns} insights={checkInsights} tableId="background-checks" rows={shown} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : "No checks match"} accessCollection="background-checks" accessTargetOf={(c) => ({ objectPath: c.path, label: `${empName(c.employee)} · ${humanize(c.check_type)}`, can: c.access?.can })} />
+        )}
+      </DataState>
+
+      <WriteDialog
+        open={open}
+        onClose={closeDialog}
+        title={editing ? "Edit background check" : "Add background check"}
+        description={
+          OUTCOMES.includes(form.status)
+            ? form.status === "clear"
+              ? "Recording a clear outcome closes this check - it drops out of the open count."
+              : "An adverse outcome is what HR follows up on; the notes are the record of what was found."
+            : "One verification per employee, tracked from initiated to its outcome. Open checks are counted until they land."
+        }
+        collection="background-checks"
+        objectPath={editing?.path}
+        guardLabel="background check"
+        form={{ ...form, proof: proof ? `${proof.name}:${proof.size}` : null, standardSet }}
+        draftKey={editing ? undefined : "background-check"}
+        applyDraft={editing ? undefined : (d) => setForm({ ...EMPTY, ...d } as typeof form)}
+        onStartOver={editing ? undefined : () => setForm({ ...EMPTY, initiated_date: todayStr() })}
+        submitLabel={editing ? "Save changes" : standardSet ? `Add ${STANDARD_SET.length} checks` : "Add check"}
+        canSubmit={canSubmit}
+        whyNot={!form.employee ? "Pick whose check this is." : "The completed date is before the initiated date."}
+        onSubmit={submit}
+        footerStart={editing && (
+          <Button type="button" variant="ghost" size="sm" onClick={() => copyLink(editing)}>
+            <Link2 className="h-4 w-4" /> Copy link
+          </Button>
+        )}
+      >
+          {/* Fixed at create: the check's code is allocated under its subject, so the server refuses a re-point.
+              Shown rather than hidden - whose check this is, is the first thing the form has to say. */}
+          <Field label="Employee" hint={editing ? "The subject can't be changed. File a new check against the right employee and delete this one." : undefined}>
+            <Combobox
+              value={form.employee}
+              onValueChange={(v) => setForm({ ...form, employee: v })}
+              disabled={!!editing}
+              placeholder="Select an employee…"
+              searchPlaceholder="Search employees…"
+              options={employees.filter((e) => !e.disabled).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))}
+            />
+          </Field>
+          {openClash && (
+            <p className="-mt-1 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
+              <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
+              A {humanize(openClash.check_type).toLowerCase()} check for {empName(openClash.employee)} is already {statusLabel(openClash.status).toLowerCase()}
+              {openClash.vendor ? ` with ${openClash.vendor}` : ""} - ordering it again means paying for the same answer twice.
+            </p>
+          )}
+          {!editing && (
+            <label className="flex items-start gap-2 rounded-lg border p-3">
+              <Checkbox checked={standardSet} onCheckedChange={(v) => setStandardSet(v === true)} className="mt-0.5" />
+              <span>
+                <span className="text-sm font-medium">Order the standard set</span>
+                <span className="block text-xs text-muted-foreground">
+                  {standardSet
+                    ? `${STANDARD_SET.map(humanize).join(", ")} - four checks with this vendor and initiation date.`
+                    : "A new joiner usually needs identity, address, education and employment verified."}
+                </span>
+              </span>
+            </label>
+          )}
+          <FieldRow>
+            <Field label="Check type" hint={standardSet ? "The set covers this and three more." : undefined}>
+              <Select value={form.check_type} onValueChange={(v) => setForm({ ...form, check_type: v })} disabled={standardSet}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{TYPES.map((t) => <SelectItem key={t} value={t}>{humanize(t)}</SelectItem>)}</SelectContent>
+              </Select>
+            </Field>
+            <Field label="Status" hint={OUTCOMES.includes(form.status) ? "An outcome closes the check." : "Still open - it keeps showing in the open count."}>
+              {/* Reaching an outcome dates the completion (and going back to open clears it), which is what the
+                  Completed field used to only promise. */}
+              <Select
+                value={form.status}
+                onValueChange={(v) => setForm({
+                  ...form,
+                  status: v,
+                  completed_date: OUTCOMES.includes(v) ? (form.completed_date || todayStr()) : "",
+                })}
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{STATUSES.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}</SelectContent>
+              </Select>
+            </Field>
+            <Field label="Vendor / agency"><Input value={form.vendor} onChange={(e) => setForm({ ...form, vendor: e.target.value })} placeholder="Name of the verification agency" /></Field>
+            <Field label="Reference no." hint="Vendor case ref."><Input value={form.reference_no} onChange={(e) => setForm({ ...form, reference_no: e.target.value })} placeholder="Optional" /></Field>
+            <Field label="Initiated"><Input type="date" value={form.initiated_date} onChange={(e) => setForm({ ...form, initiated_date: e.target.value })} /></Field>
+            <Field
+              label="Completed"
+              hint={turnaround != null ? `${turnaround} ${turnaround === 1 ? "day" : "days"} turnaround.` : "Set when an outcome is chosen above."}
+              error={dateConflict ? "Completed is before the initiated date." : undefined}
+            >
+              <Input type="date" value={form.completed_date} min={form.initiated_date || undefined} onChange={(e) => setForm({ ...form, completed_date: e.target.value })} />
+            </Field>
+          </FieldRow>
+          <Field
+            label="Notes"
+            hint={form.status === "discrepancy" || form.status === "failed" ? "What was found, and what happens next." : undefined}
+          >
+            <Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Findings, discrepancies, follow-ups…" />
+          </Field>
+          {/* The vendor's report. Notes summarise a finding; a dispute is settled against the document. */}
+          {!standardSet && (
+            <ProofField
+              label="Vendor report"
+              collection="personal-documents"
+              hint={form.employee ? "Filed as this employee's own document." : "Pick the employee first - the report is filed under them."}
+              documentPath={form.document || null}
+              fileName={`${humanize(form.check_type)} verification.pdf`}
+              file={proof}
+              onFile={setProof}
+              onUnlink={() => setForm({ ...form, document: "" })}
+              dropHint="PDF or image of the vendor's report."
+            />
+          )}
+          {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
+      </WriteDialog>
+    </div>
+  );
+}

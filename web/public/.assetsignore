@@ -1,0 +1,9 @@
+# Files present in web/dist that Cloudflare should NOT publish as static assets. Everything under
+# web/public is copied into the build verbatim, which is right for the app's own files but also sweeps up
+# the documentation that sits next to the bundled artwork. Serving those adds nothing and quietly exposes
+# how the asset sets are organised.
+#
+# `_headers` is consumed by Cloudflare to build the response-header rules and is never served, so it needs
+# no entry here.
+**/README.md
+icon-maskable.svg

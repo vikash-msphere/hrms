@@ -1,0 +1,50 @@
+node_modules
+web/dist
+# `tsc -p web` incremental state. A build artifact that was tracked: it is rewritten by every typecheck, so it
+# turned `npm run verify` into a dirty working tree and put a meaningless diff in front of every real one.
+web/tsconfig.tsbuildinfo
+.dev.vars
+# VAPID keypair from scripts/genVapidKeys.ts - holds the web-push PRIVATE key. Belongs in a password
+# manager and in `wrangler secret put`, never in the repo.
+.vapid.json
+.wrangler
+src/http/openapi.d.ts
+CLAUDE.md
+
+# local dev stack logs (scripts/start.sh)
+/tmp/
+misc/
+.tokensave/
+.DS_Store
+
+# Claude Code local session state
+.claude/projects/
+.claude/scheduled_tasks.lock
+
+# scratch: wrangler resource-creation output
+cf.txt
+
+# Local scratch that must never reach a release commit. The ignored zip below carries the note about this
+# already having happened once; these are the files that were sitting untracked in the root next to it -
+# an 11.7 MB binary and a saved web page with its asset directory - one `git add -A` away from the same
+# outcome. `.mcp.json` is this machine's MCP server list, not the project's.
+/aep
+/HRMS Production Launch Sequence.html
+/HRMS Production Launch Sequence_files/
+.mcp.json
+
+# Downloaded source archive; the extracted assets are committed, so the zip itself is disposable. Keep it OUT
+# of web/public: everything under that directory is copied into web/dist verbatim and uploaded to Cloudflare,
+# which shipped 7.6 MB of publicly downloadable dead weight. Extract from somewhere else.
+web/public/assets/illustrations.zip
+.repowise/
+web/src/web/dummy-non-existing-folder/
+
+# Playwright
+/test-results/
+# A second run on this machine (E2E_LANE=1..9) keeps its artifacts apart from the first's - see e2e/lane.ts.
+/test-results-*/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/

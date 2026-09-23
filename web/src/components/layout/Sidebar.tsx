@@ -1,0 +1,432 @@
+import { useState, useEffect, useRef } from "react";
+import type { HTMLAttributes } from "react";
+import { Building, X, ChevronDown, ChevronsLeft, ChevronsRight } from "lucide-react";
+import { NAV, itemVisible, itemPageKeys } from "@/nav";
+import { hasCapability } from "@/lib/perm";
+import { useApprovals } from "@/lib/approvals";
+import { useNotifications } from "@/lib/notifications";
+import { cn } from "@/lib/utils";
+import { AccessTarget } from "@/components/access/AccessTarget";
+import { useOrg, orgAnniversary, orgNameFontStack, orgNameWeight, orgNameSizePx, CELEBRATION_WEEK_DAYS } from "@/lib/org";
+import { useMedia } from "@/hooks/useMedia";
+import { useTheme } from "@/lib/theme";
+import { lockPageScroll } from "@/lib/scrollLock";
+import { readLocal, writeLocal } from "@/lib/localPref";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import type { Me } from "@/types";
+
+// Nav keys that are NOT a single collection (so no collection-scope access target on them).
+const NON_COLLECTION_KEYS = new Set(["dashboard", "profile", "documents"]);
+
+// Which sidebar groups the user has collapsed, persisted per user in localStorage (a pure UI preference,
+// so no server round-trip). Stored as the set of collapsed group labels.
+const collapseKey = (email: string) => `nav:collapsed:${email}`;
+function loadCollapsed(email: string): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(collapseKey(email)) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+function saveCollapsed(email: string, set: Set<string>) {
+  try {
+    localStorage.setItem(collapseKey(email), JSON.stringify([...set]));
+  } catch {
+    /* ignore */
+  }
+}
+
+// Whether the whole sidebar is collapsed to an icon rail, a per-user preference (localStorage, pure UI).
+const railKey = (email: string) => `nav:rail:${email}`;
+// Guarded like its sibling writer: the Sidebar mounts in the app shell, so an unguarded read here took the
+// whole frame down (not one page) on a browser with site data blocked.
+const loadRail = (email: string) => readLocal(railKey(email)) === "1";
+const saveRail = (email: string, on: boolean) => writeLocal(railKey(email), on ? "1" : "0");
+
+// A festive balloon-and-ribbon overlay shown during the company anniversary week (matches the balloon+ribbon
+// reference): big glossy teardrop balloons cluster up-and-right (overlapping only the logo's right edge),
+// their strings trailing into a curved constant-width red banner along the bottom carrying "<n> YRS".
+function AnniversaryBanner({ className, years }: { className?: string; years?: number }) {
+  // Balloon: a broad rounded dome up top, widest in the upper third, then tapering down to the tie point
+  // (cx, cy+ry) - the natural pear/egg balloon shape, not a perfect circle or a thin teardrop.
+  const balloonPath = (cx: number, cy: number, rx: number, ry: number) =>
+    `M${cx} ${cy - ry} C ${cx + rx * 0.78} ${cy - ry} ${cx + rx} ${cy - ry * 0.62} ${cx + rx} ${cy - ry * 0.22} C ${cx + rx} ${cy + ry * 0.3} ${cx + rx * 0.32} ${cy + ry * 0.78} ${cx} ${cy + ry} C ${cx - rx * 0.32} ${cy + ry * 0.78} ${cx - rx} ${cy + ry * 0.3} ${cx - rx} ${cy - ry * 0.22} C ${cx - rx} ${cy - ry * 0.62} ${cx - rx * 0.78} ${cy - ry} ${cx} ${cy - ry} Z`;
+  // Gather point on the ribbon where the balloon strings meet - off to the right, not the center.
+  const gx = 156, gy = 150;
+  const balloons = [
+    { cx: 178, cy: 18, rx: 46, ry: 56, t: 12, g: "annivRed" },
+    { cx: 224, cy: 40, rx: 39, ry: 48, t: 16, g: "annivGreen" },
+    { cx: 192, cy: 58, rx: 39, ry: 48, t: 14, g: "annivGold" },
+  ];
+  const label = years != null ? `${years} ${years === 1 ? "YR" : "YRS"}` : "";
+  return (
+    <svg viewBox="0 0 200 224" className={className} aria-hidden="true">
+      <defs>
+        <radialGradient id="annivRed" cx="36%" cy="28%" r="78%"><stop offset="0%" stopColor="#ff8585" /><stop offset="55%" stopColor="#e23b3b" /><stop offset="100%" stopColor="#a81818" /></radialGradient>
+        <radialGradient id="annivGreen" cx="36%" cy="28%" r="78%"><stop offset="0%" stopColor="#bdec92" /><stop offset="55%" stopColor="#7cb342" /><stop offset="100%" stopColor="#4f8a2c" /></radialGradient>
+        <radialGradient id="annivGold" cx="36%" cy="28%" r="78%"><stop offset="0%" stopColor="#ffe9a8" /><stop offset="55%" stopColor="#f6b73c" /><stop offset="100%" stopColor="#d6890c" /></radialGradient>
+        <linearGradient id="annivRibbon" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#e63b3b" /><stop offset="100%" stopColor="#9e1414" /></linearGradient>
+        <linearGradient id="annivRibbonFold" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8e1515" /><stop offset="100%" stopColor="#6a0f0f" /></linearGradient>
+      </defs>
+      {/* balloon strings (behind the balloons), gathering at the ribbon */}
+      {balloons.map((b, i) => <path key={`s${i}`} d={`M${b.cx} ${b.cy + b.ry} Q ${(b.cx + gx) / 2} ${(b.cy + gy) / 2 + 10} ${gx} ${gy}`} fill="none" stroke="#9aa0a6" strokeWidth="1" />)}
+      {/* glossy teardrop balloons with a highlight (the teardrop's lower point is the tie - no extra knot) */}
+      {balloons.map((b, i) => (
+        <g key={i} transform={`rotate(${b.t} ${b.cx} ${b.cy + b.ry})`}>
+          <path d={balloonPath(b.cx, b.cy, b.rx, b.ry)} fill={`url(#${b.g})`} />
+          <ellipse cx={b.cx - b.rx * 0.32} cy={b.cy - b.ry * 0.36} rx={b.rx * 0.24} ry={b.ry * 0.3} fill="#ffffff" opacity="0.5" />
+        </g>
+      ))}
+      {/* red banner (the ribbon.png shape): swallowtail tails behind, an arched band whose ends fold down over
+          them, with the darker underside showing at each fold. */}
+      <path d="M44 160 20 160 23 214 33 203 43 214Z" fill="url(#annivRibbon)" stroke="#7a1010" strokeWidth="1" strokeLinejoin="round" />
+      <path d="M156 160 180 160 177 214 167 203 157 214Z" fill="url(#annivRibbon)" stroke="#7a1010" strokeWidth="1" strokeLinejoin="round" />
+      <path d="M30 150 Q100 116 170 150 L170 190 Q100 156 30 190 Z" fill="url(#annivRibbon)" stroke="#7a1010" strokeWidth="1.1" strokeLinejoin="round" />
+      <path d="M30 189 C38 195 39 205 33 211 28 203 27 195 30 189 Z" fill="url(#annivRibbonFold)" />
+      <path d="M170 189 C162 195 161 205 167 211 172 203 173 195 170 189 Z" fill="url(#annivRibbonFold)" />
+      {/* "<n> YRS" centered on the band, in a festive script */}
+      {label && (
+        <text x="100" y="153" textAnchor="middle" dominantBaseline="central" fontSize="27" fontWeight="800" letterSpacing="0.5" fill="#ffffff" stroke="#7a1010" strokeWidth="0.3" style={{ fontFamily: '"Arial Rounded MT Bold", "Marker Felt", "Trebuchet MS", system-ui, sans-serif' }}>{label}</text>
+      )}
+    </svg>
+  );
+}
+
+function Brand({ collapsed }: { collapsed?: boolean }) {
+  const { org } = useOrg();
+  // Dark-theme logo variant, when the org uploaded one. Picked here rather than with CSS because the logo is an
+  // <img> data URL: that SVG is an isolated document, so neither our `.dark` class nor its own
+  // prefers-color-scheme rules (those follow the OS) track the in-app theme.
+  const { resolved } = useTheme();
+  const logo = (resolved === "dark" ? org.logo_dark : undefined) || org.logo;
+  // A wordmark (logo + name drawn as one wide image) replaces the square-mark-plus-text pair and spans the
+  // sidebar's width. It can't shrink into the w-16 icon rail, so the rail keeps using the square mark.
+  const wordmark = (resolved === "dark" ? org.wordmark_dark : undefined) || org.wordmark;
+  // Drape a celebration banner across the logo while the incorporation anniversary is in the dashboard's
+  // "this week" window - i.e. exactly when it's counted in the Celebrations StatCard.
+  const anniv = orgAnniversary(org.incorporation_date);
+  const celebrating = anniv != null && anniv.in_days <= CELEBRATION_WEEK_DAYS;
+  const annivTitle = celebrating ? `${anniv!.years}-year company anniversary` : undefined;
+  if (wordmark && !collapsed) {
+    return (
+      <div className="min-w-0 flex-1 px-4 py-4">
+        <div className="relative" title={annivTitle}>
+          {/* w-full + object-contain: fills the sidebar width, height capped, never distorted whatever the
+              uploaded aspect ratio is. The wordmark carries the org name, so it takes the name as alt text. */}
+          <img src={wordmark} alt={org.logo_text?.trim() || org.name} className="max-h-11 w-full object-contain object-left" />
+          {celebrating && (
+            <AnniversaryBanner years={anniv!.years} className="pointer-events-none absolute -top-[10px] -left-[5px] h-[52px] w-[46px] overflow-visible drop-shadow-md" />
+          )}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className={cn("flex items-center gap-2.5 py-4", collapsed ? "justify-center px-0" : "min-w-0 flex-1 px-4")}>
+      <div className="relative shrink-0" title={annivTitle}>
+        {logo ? (
+          <img src={logo} alt="" className="h-9 w-9 rounded-lg object-cover" />
+        ) : (
+          <div className="brand-gradient flex h-9 w-9 items-center justify-center rounded-lg text-white shadow-sm">
+            <Building className="h-5 w-5" />
+          </div>
+        )}
+        {celebrating && (
+          <AnniversaryBanner years={anniv!.years} className="pointer-events-none absolute -top-[6px] -left-[5px] h-[52px] w-[46px] overflow-visible drop-shadow-md" />
+        )}
+      </div>
+      {!collapsed && (
+        <div className="leading-tight">
+          <div className="truncate text-foreground" style={{ fontFamily: orgNameFontStack(org.name_font), fontWeight: orgNameWeight(org.name_weight), fontSize: orgNameSizePx(org.name_size) }}>{org.logo_text?.trim() || org.name}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function Sidebar({
+  me,
+  current,
+  mobileOpen,
+  onNavigate,
+}: {
+  me: Me;
+  current: string;
+  mobileOpen: boolean;
+  onNavigate: () => void;
+}) {
+  const approvals = useApprovals();
+  const { unreadByPage } = useNotifications();
+  const has = (perm: string) => hasCapability(me.capabilities, perm);
+  // The second half of a nav gate, for the entries that are about OTHER PEOPLE: does this caller's grant reach
+  // past their own rows in that collection (users/me `caller_access.read_scopes`)? The capability alone cannot
+  // say - it is scope-stripped - so "Team goals" sat in every employee's sidebar over their own two goals.
+  const reachesOthers = (collection: string) => !!me.scopes.read[collection];
+  // Unread notifications owned by a nav item = sum over its page subtree (the item + its tabs). Approvals keeps
+  // its own pending count (not notifications). There is no Notifications nav ITEM - the feed is reached from the
+  // bell in the top bar, which carries the grand total - so no branch for it here.
+  const itemBadge = (item: (typeof NAV)[number]["items"][number]): number => {
+    if (item.key === "approvals") return approvals.total;
+    return itemPageKeys(item).reduce((s, k) => s + (unreadByPage[k] ?? 0), 0);
+  };
+  const groups = NAV.map((g) => ({
+    ...g,
+    items: g.items.filter((i) => itemVisible(i, has, reachesOthers)),
+  })).filter((g) => g.items.length > 0);
+
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed(me.email));
+  // The save is OUTSIDE the updater: a React updater must be pure, and StrictMode (web/src/main.tsx)
+  // deliberately invokes it twice, so a localStorage write in there happens twice per click.
+  const toggleGroup = (label: string) => {
+    const next = new Set(collapsed);
+    next.has(label) ? next.delete(label) : next.add(label);
+    setCollapsed(next);
+    saveCollapsed(me.email, next);
+  };
+
+  // Whole-sidebar icon-rail collapse: the user's manual preference, OR auto when the sidebar is docked but the
+  // viewport is narrow (md up to just below lg). Below md the sidebar is a full-width drawer, so the rail never
+  // applies there. `rail` is the effective state; `toggleRail` only flips the manual preference.
+  const docked = useMedia("(min-width: 768px)");
+  const autoNarrow = useMedia("(min-width: 768px) and (max-width: 1023px)");
+  const [railPref, setRailPref] = useState(() => loadRail(me.email));
+  const rail = docked && (railPref || autoNarrow);
+  const toggleRail = () => setRailPref((v) => { const next = !v; saveRail(me.email, next); return next; });
+
+  // --- drawer behaviour (below md only) ---------------------------------------------------------------------
+  // Open, the drawer is a modal surface and has to behave like one: Escape closes it, the page behind it does
+  // not scroll, and nothing outside it is reachable. Closed, it is still in the DOM off-canvas, so it must be
+  // taken out of the tab order too - otherwise tabbing off the top bar walks invisibly through forty nav links.
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const drawerOpen = mobileOpen && !docked;
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onNavigate();
+    };
+    document.addEventListener("keydown", onKey);
+    const unlock = lockPageScroll();
+    // Move focus into the panel so a screen reader and a keyboard both land where the drawer opened.
+    drawerRef.current?.focus();
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      unlock();
+    };
+  }, [drawerOpen, onNavigate]);
+
+  // Swipe left to dismiss. Touch-only, horizontal-only, and it defers to a vertical gesture (the nav list
+  // scrolls), so scrolling the menu never closes it by accident.
+  const touch = useRef<{ x: number; y: number; axis: "" | "x" | "y" } | null>(null);
+  const onTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0];
+    touch.current = { x: t.clientX, y: t.clientY, axis: "" };
+  };
+  const onTouchMove = (e: React.TouchEvent) => {
+    const s = touch.current;
+    if (!s) return;
+    const dx = e.touches[0].clientX - s.x;
+    const dy = e.touches[0].clientY - s.y;
+    if (!s.axis && Math.abs(dx) + Math.abs(dy) > 12) s.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+    if (s.axis === "x" && dx < -56) {
+      touch.current = null;
+      onNavigate();
+    }
+  };
+  const onTouchEnd = () => {
+    touch.current = null;
+  };
+
+  // `inert` removes a subtree from focus, hit-testing and the a11y tree in one attribute - exactly what an
+  // off-canvas drawer needs. React 18's DOM typings predate it, so it is applied as an untyped attribute
+  // (React still forwards it, and browsers without support just see an unknown attribute).
+  const inertWhenClosed = (!mobileOpen && !docked ? { inert: "" } : {}) as HTMLAttributes<HTMLElement>;
+
+  return (
+    <>
+      {/* Scrim behind the mobile drawer. `inert` when closed so it cannot swallow taps meant for the page. */}
+      <div
+        className={cn(
+          "fixed inset-0 z-40 bg-foreground/40 backdrop-blur-sm transition-opacity md:hidden",
+          mobileOpen ? "opacity-100" : "pointer-events-none opacity-0"
+        )}
+        aria-hidden
+        onClick={onNavigate}
+      />
+      <aside
+        ref={drawerRef}
+        // Modal-drawer semantics apply only while it IS a drawer; docked, it is plain page furniture and
+        // announcing a dialog would be a lie. `inert` (closed, undocked) is what removes the off-canvas links
+        // from the tab order and the accessibility tree in one attribute.
+        role={drawerOpen ? "dialog" : undefined}
+        aria-modal={drawerOpen ? true : undefined}
+        aria-label={drawerOpen ? "Navigation" : undefined}
+        tabIndex={drawerOpen ? -1 : undefined}
+        {...inertWhenClosed}
+        onTouchStart={drawerOpen ? onTouchStart : undefined}
+        onTouchMove={drawerOpen ? onTouchMove : undefined}
+        onTouchEnd={drawerOpen ? onTouchEnd : undefined}
+        className={cn(
+          // Mobile: a fixed off-canvas drawer. Desktop: sticky to the viewport at full height (md:sticky +
+          // md:h-screen) so it never stretches with tall page content; the nav inside scrolls on its own.
+          // Collapsed to a w-16 icon rail when `rail` is set (see above); full w-64 otherwise.
+          // standalone:pt-safe-t: installed as a PWA there is no browser chrome, so the drawer's own top
+          // edge is what the status bar/notch overlaps.
+          // `pl-safe-l` is the landscape notch: the drawer is fixed to the left edge on a phone, so it is
+          // exactly what the notch covers. From `md` it is sticky inside the shell, which pads itself.
+          "fixed inset-y-0 left-0 z-50 flex flex-col border-r border-sidebar-border bg-sidebar pl-safe-l transition-[transform,width] standalone:pt-safe-t md:sticky md:top-0 md:h-screen md:shrink-0 md:translate-x-0 md:pl-0",
+          rail ? "w-16" : "w-64",
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        )}
+      >
+        <div className={cn("flex items-center", rail ? "justify-center pt-1" : "justify-between")}>
+          <Brand collapsed={rail} />
+          {/* Finger-sized close, and labelled: an unlabelled X is the most common unnamed control in a drawer. */}
+          <button
+            type="button"
+            aria-label="Close navigation"
+            className="mr-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-sidebar-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground md:hidden"
+            onClick={onNavigate}
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        {/* overscroll-contain: scrolling to the end of the nav list must not start scrolling the page behind
+            the open drawer. The safe-area padding keeps the last item above the home indicator. */}
+        <nav
+          className={cn(
+            "flex-1 space-y-3 overflow-y-auto overscroll-contain pt-1",
+            "pb-[calc(0.75rem+env(safe-area-inset-bottom))]",
+            rail ? "px-2" : "px-3",
+          )}
+        >
+          {rail ? (
+            // Icon rail: labels + group headers collapse to icons; the label (and unread count) live in a
+            // hover tooltip, and unread badges shrink to a corner dot. Groups are split by a thin divider.
+            <TooltipProvider delayDuration={0}>
+              {groups.map((group, gi) => {
+                const isActive = (i: (typeof group.items)[number]) => i.key === current || !!i.tabs?.some((t) => t.key === current);
+                return (
+                  <div key={group.label} className="space-y-1">
+                    {gi > 0 && <div className="mx-2 my-2 border-t border-sidebar-border/60" aria-hidden />}
+                    {group.items.map((item) => {
+                      const active = isActive(item);
+                      const Icon = item.icon;
+                      const badge = itemBadge(item);
+                      return (
+                        <Tooltip key={item.key}>
+                          <TooltipTrigger asChild>
+                            <a
+                              href={`/${item.key}`}
+                              onClick={onNavigate}
+                              aria-current={active ? "page" : undefined}
+                              aria-label={item.label}
+                              className={cn(
+                                "relative flex h-10 items-center justify-center rounded-lg transition-colors",
+                                active ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm" : "text-sidebar-foreground hover:bg-foreground/[0.06] hover:text-foreground",
+                              )}
+                            >
+                              <Icon className="h-[18px] w-[18px] shrink-0" />
+                              {badge > 0 && <span className={cn("absolute right-1.5 top-1.5 h-2 w-2 rounded-full", active ? "bg-sidebar-accent-foreground" : "bg-primary")} aria-hidden />}
+                            </a>
+                          </TooltipTrigger>
+                          <TooltipContent side="right">{item.label}{badge > 0 ? ` (${badge > 99 ? "99+" : badge})` : ""}</TooltipContent>
+                        </Tooltip>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </TooltipProvider>
+          ) : (
+          groups.map((group) => {
+            // An item is "active" for the current route when it IS the route or owns it as a workspace tab.
+            const isActive = (i: (typeof group.items)[number]) => i.key === current || !!i.tabs?.some((t) => t.key === current);
+            // Keep a group open if it holds the active page, even when the user collapsed it, so the current
+            // location is never hidden. Single-item groups (e.g. Admin) are never collapsible.
+            const hasActive = group.items.some(isActive);
+            const collapsible = group.items.length > 1;
+            const isOpen = !collapsible || hasActive || !collapsed.has(group.label);
+            return (
+            <div key={group.label}>
+              <button
+                type="button"
+                onClick={() => collapsible && toggleGroup(group.label)}
+                aria-expanded={isOpen}
+                className={cn(
+                  "flex w-full items-center justify-between rounded-md px-3 pb-1.5 pt-1 text-[11px] font-semibold uppercase tracking-wider text-sidebar-foreground/70 transition-colors",
+                  collapsible && "hover:text-sidebar-foreground",
+                )}
+              >
+                {group.label}
+                {collapsible && (
+                  <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", !isOpen && "-rotate-90")} />
+                )}
+              </button>
+              {isOpen && (
+              <div className="space-y-1">
+                {group.items.map((item) => {
+                  const active = isActive(item);
+                  const Icon = item.icon;
+                  const badge = itemBadge(item);
+                  // Workspace items aren't a single collection, so no collection-scope access icon on them.
+                  const collection = item.tabs || NON_COLLECTION_KEYS.has(item.key) ? undefined : item.key;
+                  return (
+                    <div key={item.key} className="relative">
+                      {/* Left accent rail on the active item for at-a-glance wayfinding. */}
+                      {active && (
+                        <span className="absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-primary" aria-hidden />
+                      )}
+                      <a
+                        href={`/${item.key}`}
+                        onClick={onNavigate}
+                        aria-current={active ? "page" : undefined}
+                        className={cn(
+                          "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                          active
+                            ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
+                            : "text-sidebar-foreground hover:bg-foreground/[0.06] hover:text-foreground"
+                        )}
+                      >
+                        <Icon className="h-[18px] w-[18px] shrink-0" />
+                        {item.label}
+                        {badge > 0 && (
+                          <span className={cn(
+                            "ml-auto rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none tabular-nums",
+                            // Inverted against the row it sits on, so it reads as a count either way round.
+                            active ? "bg-sidebar-accent-foreground text-sidebar-accent" : "bg-primary text-primary-foreground",
+                          )}>
+                            {badge > 99 ? "99+" : badge}
+                          </span>
+                        )}
+                      </a>
+                      {collection && (
+                        <span className="absolute right-2 top-1/2 -translate-y-1/2">
+                          <AccessTarget target={{ collection, label: item.label }} />
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              )}
+            </div>
+            );
+          })
+          )}
+        </nav>
+        {docked && !autoNarrow && (
+          // A small handle straddling the sidebar's right edge (no dedicated row, so it costs no menu space).
+          <button
+            type="button"
+            onClick={toggleRail}
+            title={rail ? "Expand sidebar" : "Collapse sidebar"}
+            aria-label={rail ? "Expand sidebar" : "Collapse sidebar"}
+            className="absolute bottom-4 right-0 z-20 hidden h-6 w-6 translate-x-1/2 items-center justify-center rounded-full border border-sidebar-border bg-sidebar text-sidebar-foreground/60 shadow-sm transition-colors hover:text-foreground md:flex"
+          >
+            {rail ? <ChevronsRight className="h-3.5 w-3.5" /> : <ChevronsLeft className="h-3.5 w-3.5" />}
+          </button>
+        )}
+      </aside>
+    </>
+  );
+}
