@@ -34,8 +34,11 @@ enabled = true
 # limit does not rehearse it: without this, staging ran on the platform default (30s) while production has 60s,
 # so the one failure staging is best placed to catch - a payslip batch that outgrew its invocation - would fail
 # there, get written off as "staging is slower", and pass in production for another month.
-[limits]
-cpu_ms = 60000
+#
+# COMMENTED OUT, in step with wrangler.toml: the account is on the FREE plan, where `[limits]` is unavailable.
+# Uncomment both files together when moving to the paid plan.
+# [limits]
+# cpu_ms = 60000
 
 # Identical to production's by requirement, not by coincidence: `run_worker_first` decides which paths reach
 # the Worker at all, and a prefix present in one file and missing from the other means that route serves the

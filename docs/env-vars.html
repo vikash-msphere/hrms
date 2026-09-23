@@ -1204,9 +1204,11 @@ wrangler vectorize create-metadata-index hrms-search --property-name=collection 
           <input type="checkbox" data-id="CF_PLAN">
           <div class="body">
             <div class="row-head"><span class="name">CF_PLAN</span><span class="tag opt">optional</span><span class="tag">ci var</span></div>
-            <p><code>paid</code> (default, Workers Standard) or <code>free</code>. A GitHub repository
-              <em>variable</em>, not a secret. Decides whether the <code>[limits]</code> block in
-              <code>wrangler.toml</code> is valid.</p>
+            <p><code>free</code> or <code>paid</code> (Workers Standard). A GitHub <em>variable</em> in the
+              <code>production</code> environment, not a secret. Decides whether the <code>[limits]</code>
+              block in <code>wrangler.toml</code> is valid. <code>deploy.yml</code> defaults it to
+              <code>free</code>, the plan in use, with <code>[limits]</code> commented out in both wrangler
+              configs to match; <code>npm run preflight</code> run locally still defaults to <code>paid</code>.</p>
             <p class="risk"><b>The check only proves the two agree with each other.</b> Preflight cannot see
               the Cloudflare account, so <code>plan=paid</code> in the output is not evidence you are on
               Workers Standard &mdash; confirm that in the dashboard. On the free plan comment out

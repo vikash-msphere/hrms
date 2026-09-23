@@ -68,9 +68,10 @@ run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "
 # If a runaway invocation is the thing being defended against rather than a slow batch, the lever is the batch
 # size, not this number: halve `batch` in processPayslipRunJob and this can come down with it.
 #
-# FREE-PLAN NOTE: `[limits]` is a PAID-plan (Workers Standard) feature - on the free plan, comment this block
-# out (the free cap is a fixed 10ms CPU, which PDF rendering exceeds; every data flow fits). `npm run preflight`
-# warns when CF_PLAN=paid and the block is missing.
+# COMMENTED OUT: this account is on the FREE plan, where `[limits]` is not available (it is a PAID-plan,
+# Workers Standard, feature) and preflight refuses a deploy that carries it with CF_PLAN=free. The free cap is a
+# fixed 10ms CPU, which PDF rendering exceeds; every data flow fits. To move to the paid plan: uncomment the
+# block here AND in wrangler.staging.toml, and set CF_PLAN=paid in the `production` GitHub environment.
 #
 # SUBREQUESTS, which this block's presence also settles. A D1 query is a subrequest, and the budget is 50 per
 # invocation on the free plan against 1000 on Standard. Every REQUEST path is shaped for the free budget -
@@ -90,8 +91,8 @@ run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "
 # Both are best-effort per subtask and record what failed on the `cron_runs` row, so overrunning goes red rather
 # than silent. The honest statement is: BOTH CRON TICKS NEED THE PAID BUDGET. Running this app on the free plan
 # means splitting them across several scheduled triggers first, and lowering `moderationsPerDrain`.
-[limits]
-cpu_ms = 60000
+# [limits]
+# cpu_ms = 60000
 
 [vars]
 # D1 READ REPLICAS (Sessions), which are a DEPLOYED-ONLY optimisation.

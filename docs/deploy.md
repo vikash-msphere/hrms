@@ -11,11 +11,12 @@ dev-bypass rules) are in `docs/deploy-security.md` — follow both.
 - A Cloudflare account with Workers Paid or Free tier (D1 + R2 both work on Free).
   - **Free tier:** every data flow fits (DB access is batched for the 50-subrequests-per-invocation budget),
     but the fixed 10ms CPU cap breaks server-side PDF generation (payslips, letters, Form-16, e-sign
-    stamping) — those requests will error. Comment out the `[limits]` block in `wrangler.toml` before a
-    free-plan deploy (`[limits]` itself is a paid feature), and deploy with `CF_PLAN=free` so the preflight
-    check agrees.
-  - **Paid ($5/mo Workers Standard):** everything works; the `[limits]` block applies as written. This is
-    the default (`CF_PLAN=paid`).
+    stamping) — those requests will error, and both cron ticks overrun the 50-subrequest budget (see the
+    note above `[limits]` in `wrangler.toml`). **This is the plan in use:** `[limits]` (a paid feature) is
+    commented out in both `wrangler.toml` and `wrangler.staging.toml`, and `deploy.yml` defaults to
+    `CF_PLAN=free` so the preflight check agrees. Locally, deploy with `CF_PLAN=free npm run deploy`.
+  - **Paid ($5/mo Workers Standard):** everything works. To switch: uncomment `[limits]` in both wrangler
+    configs and set `CF_PLAN=paid` in the `production` GitHub environment.
 - A Google Cloud project (any — it only hosts the OAuth client; free) and, in practice, Google Workspace
   for your org domain (sign-in works with any Google account, but the domain allow-list expects org
   addresses, and MFA/device policy is enforced in the Workspace admin console).
@@ -281,9 +282,10 @@ applied, editing it is a no-op against the remote schema that no deploy reports.
 catches it, and it can only do so for migrations listed in `src/db/migrations/meta/_frozen.json` - so run
 `scripts/freezeMigrations.ts` and commit its output after any deploy that applies a new migration.
 
-The preflight step reads `CF_PLAN` from a repository **variable** (not a secret), defaulting to `paid`. Set
-`CF_PLAN=free` under the `production` environment if the account is on the free plan, or the deploy ships a
-`[limits]` block Cloudflare rejects. Note what this check does and does not prove: it asserts only that
+The preflight step reads `CF_PLAN` from a **variable** (not a secret) in the `production` environment,
+defaulting to `free` - the plan in use, with `[limits]` commented out to match. On moving to the paid plan,
+set `CF_PLAN=paid` there and uncomment `[limits]` in both wrangler configs; preflight fails a deploy where
+the two disagree. Note what this check does and does not prove: it asserts only that
 `CF_PLAN` and the `[limits]` block agree with each other. It cannot see the account, so `plan=paid` in the
 output is not evidence the account is on Workers Standard - confirm that in the dashboard.
 

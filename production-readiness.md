@@ -104,11 +104,13 @@ hold. `docs/deploy.md` is the runbook; this is the ordered list, and the order i
 
 Each of these leaves production working but weaker.
 
-- **Workers Standard ($5/mo).** `wrangler.toml` ships `[limits] cpu_ms = 60000`, a paid-plan feature. On
-  Free, the fixed 10ms CPU cap breaks every server-side render — payslips, letters, Form 16, e-sign
-  stamping — and D1 is capped at 100k reads/day. Preflight reporting `plan=paid` is **not** evidence: it is
-  the default `CF_PLAN` value, and the check only asserts that the flag and the `[limits]` block agree.
-  Confirm the plan in the dashboard.
+- **Workers Standard ($5/mo).** The account is on the FREE plan today: `[limits] cpu_ms = 60000` (a
+  paid-plan feature) is commented out in both wrangler configs and `deploy.yml` defaults to `CF_PLAN=free`.
+  On Free, the fixed 10ms CPU cap breaks every server-side render — payslips, letters, Form 16, e-sign
+  stamping — both cron ticks overrun the 50-subrequest budget, and D1 is capped at 100k reads/day. Moving to
+  Standard is uncommenting `[limits]` in both configs plus `CF_PLAN=paid` in the `production` environment.
+  Preflight's `plan` is **not** evidence of the account's plan: the check only asserts that the flag and the
+  `[limits]` block agree. Confirm the plan in the dashboard.
 - **WAF rate limits.** The code-side limiter is a FLOOR, not the control: `src/lib/isolateRate.ts` counts in
   one isolate's memory, so a caller spread over enough colos gets one allowance per isolate. It covers the
   unauthenticated lanes per route and `/v1` per caller (`src/middleware/rateLimit.ts` — four budgets: PDF
