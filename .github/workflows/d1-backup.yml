@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24" # same major as verify.yml, which says why
       - run: npm ci
       # wrangler validates `[assets].directory` on every subcommand, so the d1/r2 calls below need
       # web/dist to exist. This job uploads no assets, so an empty directory is enough - no SPA build.

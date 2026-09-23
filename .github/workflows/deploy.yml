@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24" # same major as verify.yml, which says why
       - run: npm ci
       # ONE release string for the whole deploy, resolved once. Both halves of a distributed trace have to
       # claim the SAME release or the SPA's span and the Worker's span land on two, and only one of them has
