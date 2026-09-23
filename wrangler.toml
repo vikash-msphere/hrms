@@ -134,7 +134,7 @@ ATTENDANCE_ALLOWED_IPS = "122.164.127.209"
 # A plain var, not a secret: a DSN only permits WRITING events, and the same string is already baked into the
 # bundle as VITE_SENTRY_DSN. It must BE that same DSN - the relay refuses an envelope addressed anywhere else,
 # which is what keeps it from being an open relay. Unset = the relay 404s and the SPA reports nothing.
-SENTRY_DSN = "https://b0783df050ada7c6adc0a89aaa15b4f4@o4511976927461376.ingest.de.sentry.io/4511982864498768"
+SENTRY_DSN = "https://81c7110603c88a153e994da72b1b631e@o4511976927461376.ingest.de.sentry.io/4512136651735120"
 # Which build the Worker's own errors belong to. Deliberately NOT set here: a literal in this file is the same
 # string for every deploy, so pinning it to a version number tagged eight months of releases "0.1.0" and left
 # every uploaded source map unmatched - which is worse than "unknown release", because it looks answered.
