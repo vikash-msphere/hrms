@@ -47,6 +47,13 @@ export default defineWorkersConfig({
     poolOptions: {
       workers: {
         wrangler: { configPath: "./wrangler.toml" },
+        // NO REMOTE BINDINGS. wrangler.toml binds Workers AI (`[ai]`) and Vectorize (`[[vectorize]]`), which
+        // exist only on Cloudflare, and by default the pool opens a remote proxy session for them - which needs
+        // a logged-in wrangler. A laptop that ran `wrangler login` passes silently while talking to the real
+        // account; CI has no login and dies before a single test with "You must be logged in to use wrangler
+        // dev in remote mode". The unit suite must never reach Cloudflare either way: every AI and search path
+        // under test goes through the ports in src/ports, which the tests fake.
+        remoteBindings: false,
         // Test-only stand-ins for the runtime secrets that `makeDeps` requires (src/deps.ts asserts them so a
         // misconfigured deploy fails fast). Real values are Worker secrets (`wrangler secret put`) and NEVER
         // live in the repo; locally they come from .dev.vars, which CI does not have. These placeholders keep
