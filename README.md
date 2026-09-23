@@ -110,8 +110,9 @@ which only works together with `ALLOW_DEV_AUTH=true`.
 ## Working in this repo
 
 - **One gate:** `npm run verify` (`api:lint` at `--fail-severity=warn`, then `lint`, `typecheck` and
-  `test:gate`). It runs as a pre-commit hook and before every production deploy (`.github/workflows/deploy.yml`),
-  and on demand in CI (`.github/workflows/verify.yml`, manual only). It must be green before anything moves.
+  `test:gate`). It runs as a pre-commit hook, in `npm run deploy`, and on demand in CI
+  (`.github/workflows/verify.yml`, manual only). The CI deploy (`deploy.yml`) does not run it, so run
+  `verify.yml` on a release commit before pushing it to `prod`.
 - **Contract first:** add or change an endpoint in `openapi.yaml`, run `npm run api:types`, then implement.
   `openapiRoutesDrift` and `customMethodsDrift` fail when code and contract disagree.
 - **Collections:** there is exactly one way to build one - write a spec, mount it

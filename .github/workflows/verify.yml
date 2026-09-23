@@ -1,6 +1,6 @@
 name: verify
 # Manual only: run it from the Actions tab and pick the branch. Nothing starts it on a push or a pull request.
-# deploy.yml runs the same `npm run verify` before every production deploy, so a push to `prod` is still gated.
+# deploy.yml does NOT run it either, so a push to `prod` is not gated by it: run this on the release commit first.
 on:
   workflow_dispatch: {}
 

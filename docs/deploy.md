@@ -265,13 +265,13 @@ deploy, steps 5, 6, 8) is automated by `.github/workflows/deploy.yml`, which run
 `prod` is the release branch; `dev` is the trunk. Work merges to `dev` continuously, and a deploy happens
 only when `dev` is merged into `prod`. Keeping them apart is what lets production be frozen through a
 monthly payroll cutover while development carries on - retargeting the workflow at `dev` would make every
-merge a production deploy. `verify.yml` is manual only (Actions → verify → Run workflow, on any branch):
-nothing runs it on a push or a pull request, so the gate a `prod` push always passes through is the
-`npm run verify` step inside `deploy.yml`.
+merge a production deploy. `npm run verify` runs in CI only when somebody asks for it: `verify.yml` is manual
+only (Actions → verify → Run workflow, on any branch), and `deploy.yml` does not run it. Run `verify.yml` on
+the commit being released before pushing it to `prod` - the deploy ships whatever it is given.
 
-The workflow runs, in order: `npm run preflight`, `npm run verify` (spectral + eslint + tsc + the vitest gate),
-`npm run build:web`, `npm run db:migrate:remote`, then `npx wrangler deploy`. That is the same chain as
-`npm run deploy` with the SPA build hoisted ahead of the migration, because wrangler validates
+The workflow runs, in order: `npm run preflight`, `npm run build:web`, `npm run db:migrate:remote`, then
+`npx wrangler deploy`. That is the `npm run deploy` chain minus `verify`, with the SPA build hoisted ahead of
+the migration, because wrangler validates
 `[assets].directory` on *every* subcommand - a missing `web/dist` fails `d1 migrations apply`. Remote
 migrations are idempotent - wrangler skips any already recorded in D1 - so re-runs are safe. The bootstrap
 catalog (step 7) is deliberately **not** in CI: it applies exactly once to an empty database and would

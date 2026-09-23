@@ -62,9 +62,9 @@ jobs:
           # in the `production` environment is not enough - so without this line preflight warned "not set"
           # on every deploy, even with the secret configured.
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-      # Gate the deploy on `npm run verify` (spectral + eslint + tsc + the vitest gate). verify.yml is manual
-      # only, so this is the one place it runs without somebody asking.
-      - run: npm run verify
+      # No `npm run verify` here, deliberately: verify runs only when somebody asks for it (verify.yml, manual,
+      # any branch). Run it on the commit being released BEFORE pushing to `prod` - this workflow ships whatever
+      # it is given, and preflight above checks config only, not code.
       # Build the SPA BEFORE any wrangler command: wrangler validates `[assets].directory` on every
       # subcommand (including `d1 migrations apply`), so a missing web/dist fails the migration step.
       #

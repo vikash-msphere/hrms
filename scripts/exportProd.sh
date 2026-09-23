@@ -32,7 +32,7 @@
 #   --no-git             a NEW destination stays plain files (default: git init + one commit on `dev`)
 #   --secrets-example    also copy .dev.vars.example (the secret NAMES). Off by default - read the file first.
 #   --verify             prove the export before it is synced: symlink this repo's node_modules into the
-#                        temporary tree and run `npm run verify` (the same gate deploy.yml runs) and
+#                        temporary tree and run `npm run verify` (the gate verify.yml runs) and
 #                        `npm run build:web` there. Takes a few minutes. A failure leaves the destination as is.
 #
 # Always runs two closure scans, and either one failing fails the run:
@@ -361,7 +361,7 @@ if [ "$VERIFY" = 1 ]; then
       exit 1
     fi
   }
-  # `npm run verify` itself, not a copy of its steps: it is what verify.yml and deploy.yml run, so proving it
+  # `npm run verify` itself, not a copy of its steps: it is what verify.yml runs, so proving it
   # here cannot drift from package.json. It runs the full suite when --no-tests is off, so its output goes to
   # a log outside the export (it can never be committed): the gate's summary on success, the last 40 lines on
   # failure.
@@ -437,7 +437,9 @@ Review, then commit and deploy:
   cd $DEST
   git diff
   git add -A && git commit -m "chore: sync from hrms $SOURCE_REV"
-  git push origin dev && git push origin dev:prod     # the push to prod is the deploy
+  git push origin dev
+  # run verify.yml on dev from the Actions tab - the deploy does not run it - then:
+  git push origin dev:prod     # the push to prod is the deploy
 EOF
   fi
 fi
@@ -452,7 +454,8 @@ Next:
   Make \`dev\` the default branch on GitHub: the nightly/weekly backup workflows run from it.
   .github/workflows/deploy.yml runs on a push to \`prod\` (or by hand, workflow_dispatch). When the
   steps below are done:  git push origin dev:prod
-  verify.yml is manual only - run it from the Actions tab; deploy.yml runs the same gate itself.
+  Nothing runs \`npm run verify\` on its own: run verify.yml from the Actions tab on the commit you are
+  about to push to \`prod\`. deploy.yml does not run it.
 
 Not exported, and not in git anywhere - set these on the Worker with \`wrangler secret put\`:
   FIELD_ENCRYPTION_KEY, WIRE_ID_KEY, AUTH_SESSION_KEY, GOOGLE_CLIENT_ID/SECRET, EMAIL_API_KEY
