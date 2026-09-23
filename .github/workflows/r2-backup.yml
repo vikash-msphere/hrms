@@ -24,6 +24,10 @@ name: r2-backup
 #      Neither the deploy nor the d1-backup workflow uses these, and this workflow uses nothing else.
 #   4. Optionally add a lifecycle rule on `hrms-backup` to expire objects after your retention period.
 #
+# WHAT IS NOT COPIED. `backups/` - the nightly D1 dumps d1-backup.yml writes into the live bucket. They are a
+# backup already, and they are not documents: the copy to hrms-backup is for what cannot be rebuilt. Their
+# retention is a lifecycle rule on the `backups/` prefix of `hrms`.
+#
 # NOTE ON ENCRYPTION. Document bodies in R2 are encrypted under FIELD_ENCRYPTION_KEY, so this copy is only as
 # recoverable as that key. Escrow the key somewhere outside Cloudflare, or the backup restores nothing.
 # See docs/deploy.md "Backups & disaster recovery".
@@ -35,6 +39,9 @@ on:
 concurrency:
   group: r2-backup-production
   cancel-in-progress: false
+
+# No checkout and no GitHub API call: the job needs nothing from the GitHub token, so it gets nothing.
+permissions: {}
 
 jobs:
   sync:
@@ -58,6 +65,7 @@ jobs:
           fi
           aws s3 sync \
             "s3://hrms" "s3://hrms-backup" \
+            --exclude "backups/*" \
             --endpoint-url "https://${ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --checksum-algorithm CRC32 \
             --no-progress

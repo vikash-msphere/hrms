@@ -1,17 +1,25 @@
 name: verify
+# Manual only: run it from the Actions tab and pick the branch. Nothing starts it on a push or a pull request.
+# deploy.yml runs the same `npm run verify` before every production deploy, so a push to `prod` is still gated.
 on:
-  push:
-  pull_request:
+  workflow_dispatch: {}
+
+# The job only reads the tree. Declared, not inherited, so the token cannot write whatever the repo default is.
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Actions are pinned to a commit, not a tag: a tag can be moved to different code, a commit cannot. The
+      # comment is the release the commit was cut as - bump both together.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           # 24, not 20: the tree needs it (@zxing/library >= 24; wrangler, miniflare, pdfjs-dist >= 22), and Node 20's
           # npm 10 refuses the npm 11 lockfile in `npm ci` as "not in sync". Keep every workflow on the same major.
           node-version: "24"
       - run: npm ci
-      # Single gate: spectral (--fail-severity=warn) + tsc + vitest. Fails the build on any warning.
+      # Single gate: spectral (--fail-severity=warn) + eslint + tsc + the vitest gate. Fails on any warning.
       - run: npm run verify
