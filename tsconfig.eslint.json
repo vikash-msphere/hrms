@@ -1,0 +1,7 @@
+{
+  // The Worker program the type-aware lint rules run against (eslint.config.js). Only `src`: the rules lint
+  // `src/**` and nothing else, and `tsconfig.json`'s `test` tree - which reaches into the SPA through `@/` -
+  // roughly doubles the program while contributing no file the rules look at.
+  "extends": "./tsconfig.json",
+  "include": ["src"]
+}

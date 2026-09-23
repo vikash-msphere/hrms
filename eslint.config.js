@@ -21,12 +21,17 @@
 // One of the gaps was live (the Excel export dropped its promise, so a stale chunk made the button do nothing
 // at all, silently).
 //
-// What actually costs the heap is ONE program spanning everything. Scoped per tsconfig - `src/**` against the
-// Worker project, `web/src/**` against the SPA's - each pass builds only its own program, and the two run in
-// the same `eslint .` inside the default heap. The generated `src/http/openapi.d.ts` is still pulled in by the
-// Worker program; it is ignored for linting and costs parse time, not correctness. Measured: the whole
-// `eslint .` is ~45s on a laptop, inside Node's default heap, with no NODE_OPTIONS. If a future change makes
-// that untrue, scope the rules further - do not turn them off.
+// What actually costs the heap is the type PROGRAMS, and typescript-eslint keeps every program it builds for
+// the life of the process. Scoped per tsconfig - `src/**` against `tsconfig.eslint.json` (src only, none of
+// the `test` tree the full tsconfig drags in), `web/src/**` against the SPA's - each block builds only its own
+// program. They are also run as TWO PROCESSES (`npm run lint`: everything but `web/src`, then `web/src`), so
+// the two programs never share a heap. One `eslint .` holding both peaked at 3.7GB resident and died "heap out
+// of memory" in CI, where the runner's default heap limit is about 2GB, not the 4GB a laptop gets. Measured
+// split: each process fits a 1.5GB heap cap (about 1.7GB resident), with no NODE_OPTIONS. A bare `eslint .`
+// still lints the same files with the same rules - it just needs the laptop's heap. If a future change makes
+// either half outgrow the cap, scope the rules further - do not turn them off. The generated
+// `src/http/openapi.d.ts` is still pulled in by the Worker program; it is ignored for linting and costs parse
+// time, not correctness.
 //
 // Only these two rules are on. The rest of `recommendedTypeChecked` reports ~270 findings here, essentially
 // all of them defensive null-checks the compiler can prove redundant but which are load-bearing at runtime
@@ -124,7 +129,7 @@ export default tseslint.config(
   // what make that statement mean something.
   {
     files: ["src/**/*.ts"],
-    languageOptions: { parserOptions: { project: "./tsconfig.json", tsconfigRootDir: import.meta.dirname } },
+    languageOptions: { parserOptions: { project: "./tsconfig.eslint.json", tsconfigRootDir: import.meta.dirname } },
     rules: {
       "@typescript-eslint/no-floating-promises": "error",
       "@typescript-eslint/no-misused-promises": "error",

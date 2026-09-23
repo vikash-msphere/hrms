@@ -18,7 +18,7 @@
     "db:migrate:staging": "wrangler d1 migrations apply hrms-staging --remote --config wrangler.staging.toml",
     "api:lint": "spectral lint openapi.yaml --fail-severity=warn",
     "api:types": "openapi-typescript openapi.yaml -o src/http/openapi.d.ts",
-    "lint": "eslint . --max-warnings 0",
+    "lint": "eslint . --max-warnings 0 --ignore-pattern \"web/src/**\" && eslint web/src --max-warnings 0",
     "typecheck": "npm run api:types && tsc --noEmit && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p e2e/tsconfig.json",
     "test": "vitest run",
     "test:ai": "AI_LOCAL_TEST=1 vitest run test/aiLocalIntegration.test.ts",
