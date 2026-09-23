@@ -1,18 +1,25 @@
 name: e2e
+# Manual only, like verify.yml: run it from the Actions tab and pick the branch. Nothing starts it on a push or
+# a pull request.
 on:
-  push:
-  pull_request:
+  workflow_dispatch: {}
 
-# Its own workflow, not a job inside `verify`. `verify` (spectral + tsc + vitest) is the gate on every commit
-# and it has to stay a signal you can trust at a glance; a browser lane fails for reasons a unit suite never
-# does (a timing race, a runner without enough CPU), and folding it in would make one red mark mean two very
-# different things. Separate workflows keep "the code is wrong" and "the app did not behave" apart.
+# Its own workflow, not a job inside `verify`. `verify` (spectral + eslint + tsc + the vitest gate) has to stay
+# a signal you can trust at a glance; a browser lane fails for reasons a unit suite never does (a timing race,
+# a runner without enough CPU), and folding it in would make one red mark mean two very different things.
+# Separate workflows keep "the code is wrong" and "the app did not behave" apart.
+
+# The job only reads the tree. Declared, not inherited, so the token cannot write whatever the repo default is.
+permissions:
+  contents: read
+
 jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Pinned to a commit, not a tag (see verify.yml).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24" # same major as verify.yml, which says why
       - run: npm ci
@@ -25,7 +32,7 @@ jobs:
       # than the local default of system Chrome.
       - run: npm run test:e2e
       # The trace is how a failure gets diagnosed without reproducing it locally.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: playwright-report

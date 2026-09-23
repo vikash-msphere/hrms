@@ -264,9 +264,11 @@ deploy, steps 5, 6, 8) is automated by `.github/workflows/deploy.yml`, which run
 `prod` is the release branch; `dev` is the trunk. Work merges to `dev` continuously, and a deploy happens
 only when `dev` is merged into `prod`. Keeping them apart is what lets production be frozen through a
 monthly payroll cutover while development carries on - retargeting the workflow at `dev` would make every
-merge a production deploy. `verify.yml` gates every push and pull request on both branches either way.
+merge a production deploy. `verify.yml` is manual only (Actions → verify → Run workflow, on any branch):
+nothing runs it on a push or a pull request, so the gate a `prod` push always passes through is the
+`npm run verify` step inside `deploy.yml`.
 
-The workflow runs, in order: `npm run preflight`, `npm run verify` (spectral + tsc + vitest),
+The workflow runs, in order: `npm run preflight`, `npm run verify` (spectral + eslint + tsc + the vitest gate),
 `npm run build:web`, `npm run db:migrate:remote`, then `npx wrangler deploy`. That is the same chain as
 `npm run deploy` with the SPA build hoisted ahead of the migration, because wrangler validates
 `[assets].directory` on *every* subcommand - a missing `web/dist` fails `d1 migrations apply`. Remote
@@ -354,8 +356,10 @@ Two layers, both required:
 
    This runs from CI, not the Worker (the Workers runtime has no D1 export API): the
    **`.github/workflows/d1-backup.yml`** workflow does it nightly (03:30 UTC) and on `workflow_dispatch` —
-   `wrangler d1 export` → `wrangler r2 object put hrms/backups/db/<date>.sql` + a 30-day GitHub artifact. It
-   uses the same `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` secrets as the deploy workflow.
+   `wrangler d1 export` → `wrangler r2 object put hrms/backups/db/<date>.sql`. It uses the same
+   `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` secrets as the deploy workflow. The dump is never stored
+   on GitHub (no artifact): it is the whole database in plain SQL, and a repo artifact is downloadable by
+   everyone with read access. Set retention with an R2 lifecycle rule on the `backups/` prefix of `hrms`.
 
 3. **Weekly R2 document sync** — the documents need their own answer, because they are the part nothing can
    rebuild. A payslip can be regenerated from its payroll run; a letter carrying an employee's e-signature,
@@ -365,8 +369,9 @@ Two layers, both required:
    - **Versioning on the live bucket**, enabled in the dashboard (R2 → `hrms` → Settings). Covers an
      overwrite or a delete.
    - **`.github/workflows/r2-backup.yml`**, Sundays 04:00 UTC and on `workflow_dispatch`: `aws s3 sync` from
-     `hrms` into a separate `hrms-backup` bucket. Covers losing the bucket. It runs `--delete`-free on
-     purpose, so a document deleted in the app stays in the backup. It needs an R2 **S3 API token** —
+     `hrms` into a separate `hrms-backup` bucket. Covers losing the bucket. It leaves out `backups/`, so
+     the D1 dumps are not copied. It runs `--delete`-free on purpose, so a document deleted in the app
+     stays in the backup. It needs an R2 **S3 API token** —
      `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`, a different credential from `CLOUDFLARE_API_TOKEN` —
      because `wrangler r2 object` cannot list a bucket and so cannot sync one. Setup steps are at the top of
      the workflow file.

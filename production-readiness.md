@@ -47,8 +47,9 @@ hold. `docs/deploy.md` is the runbook; this is the ordered list, and the order i
 
 1. Commit the working tree, untracked source included, and clear the strays. `web/web/dist/` in particular
    is a build run from the wrong directory that `.gitignore` does not cover — delete it, do not ignore it.
-2. Open a PR to `dev` so `verify.yml` proves a clean `npm ci` and a clean `api:types` regeneration on
-   neutral ground. The `e2e` workflow runs on the same push.
+2. Push to `dev` and run `verify.yml` on it by hand (Actions → verify → Run workflow; it has no automatic
+   trigger) to prove a clean `npm ci` and a clean `api:types` regeneration on neutral ground. The `e2e`
+   workflow runs on the push.
 3. Create `prod`, the release branch. `deploy.yml` triggers on push to it, and the branch does not exist
    yet: `git checkout -b prod && git push -u origin prod`. A release branch separate from the `dev` trunk
    (rather than retargeting the workflow at `dev`) is what lets production be frozen through a monthly

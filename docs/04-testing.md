@@ -6,8 +6,9 @@ run against the real `workerd` with live D1 and R2 bindings, applying the migrat
 `src/db/migrations/` into a fresh database per file.
 
 `npm run verify` (`api:lint` → `lint` → `typecheck` → `test:gate`) is the only gate that matters. It runs as a
-pre-commit hook (`.husky/pre-commit`, installed by `npm install`) and in CI
-(`.github/workflows/verify.yml`), and `npm run deploy` chains it after `preflight`.
+pre-commit hook (`.husky/pre-commit`, installed by `npm install`), before every production deploy
+(`.github/workflows/deploy.yml`, and `npm run deploy` chains it after `preflight`), and on demand in CI
+(`.github/workflows/verify.yml`, manual only - nothing starts it on a push or a pull request).
 
 > **Why the gate runs `test:gate` and not `test`.** Vitest can exit **0 having run no tests**: when the
 > workers pool fails while building its Miniflare options — `parseProjectOptions` reads `wrangler.toml` and

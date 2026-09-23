@@ -9,6 +9,11 @@ concurrency:
   group: deploy-production
   cancel-in-progress: false
 
+# The job only reads the tree; the deploy itself goes through CLOUDFLARE_API_TOKEN, not the GitHub token.
+# Declared, not inherited, so the token cannot write whatever the repo default is.
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -17,8 +22,10 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Pinned to a commit, not a tag (see verify.yml). This job holds the Cloudflare token, so it is the one
+      # where a moved tag would cost the most.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24" # same major as verify.yml, which says why
       - run: npm ci
@@ -47,7 +54,8 @@ jobs:
           HSTS_CONFIRMED: ${{ vars.HSTS_CONFIRMED }}
           SENTRY_RELEASE: ${{ env.RELEASE }}
           VITE_APP_VERSION: ${{ env.RELEASE }}
-      # Gate the deploy on the same checks as CI (spectral + tsc + vitest).
+      # Gate the deploy on `npm run verify` (spectral + eslint + tsc + the vitest gate). verify.yml is manual
+      # only, so this is the one place it runs without somebody asking.
       - run: npm run verify
       # Build the SPA BEFORE any wrangler command: wrangler validates `[assets].directory` on every
       # subcommand (including `d1 migrations apply`), so a missing web/dist fails the migration step.

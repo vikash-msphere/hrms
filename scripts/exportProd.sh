@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Export the deployable subset of this repo into a clean tree, ready to push to a separate repo.
+# Export the deployable subset of this repo into a separate repo, and keep that repo in sync on every re-run.
 #
 # What "deployable" means here: everything `npm ci && npm run deploy` touches (Worker sources, the SPA, the
 # prod bootstrap catalog, the verify gate, the deploy workflow) and nothing else. Dev tooling, docs, design
@@ -12,16 +12,28 @@
 #   scripts/exportProd.sh ~/git/hrms-prod        # export to a directory of your choice
 #   DEST=~/git/hrms-prod scripts/exportProd.sh   # same, via the environment
 #
+# THE DESTINATION IS UPDATED, NEVER WIPED. The export is built in a temporary directory first, the closure
+# scans (and --verify) run there, and only when they pass is it rsynced into the destination - copying only
+# the files whose content changed and deleting the ones the source no longer has. Two cases:
+#   - the destination is missing or empty: it gets the whole tree, then `git init` + one commit on `dev`.
+#   - the destination is a git repo (a previous export): only the changes land, UNCOMMITTED, so they can be
+#     read with `git diff` before they are committed. Deletions are listed; git can bring any of them back.
+# A non-empty directory that is NOT a git repo is refused: a sync that deletes what the export lacks would
+# remove whatever else is in it. So is a repo with uncommitted changes, which the sync would mix into.
+# PROTECT (below) lists what the sync never writes or deletes: .git, installs, build output, local state, and
+# src/db/migrations/meta/_frozen.json, which exists only in the destination repo.
+#
 # Flags:
-#   --force              wipe the destination if it already exists (refuses otherwise)
+#   --force              sync even into a repo with uncommitted changes, or a non-empty non-git directory
 #   --no-illustrations   skip web/public/assets/illustrations (24 MB / ~1700 files). The announcement
 #                        IllustrationPicker renders empty; nothing else changes.
 #   --no-tests           omit test/ + vitest.config.ts, narrow `verify` to api:lint + lint + typecheck, and add
 #                        the node types to tsconfig (test/ is what pulls them in today). Loses the unit gate.
-#   --no-git             leave the tree as plain files (default: git init + one commit on `main`)
+#   --no-git             a NEW destination stays plain files (default: git init + one commit on `dev`)
 #   --secrets-example    also copy .dev.vars.example (the secret NAMES). Off by default - read the file first.
-#   --verify             prove the export: symlink this repo's node_modules into it and run `npm run verify`
-#                        (the same gate deploy.yml runs) and `npm run build:web` there. Takes a few minutes.
+#   --verify             prove the export before it is synced: symlink this repo's node_modules into the
+#                        temporary tree and run `npm run verify` (the same gate deploy.yml runs) and
+#                        `npm run build:web` there. Takes a few minutes. A failure leaves the destination as is.
 #
 # Always runs two closure scans, and either one failing fails the run:
 #   - every exported .ts/.tsx/.mjs/.js: a relative or `@/` import, or a quoted repo path in code (not in a
@@ -51,7 +63,9 @@
 # THE BROWSER LANE (e2e/, playwright.config.ts, scripts/e2eStack.sh) is exported as source and is wired into
 # nothing that runs on its own:
 #   - `.github/workflows/e2e.yml` is skipped while the other workflows are copied, so no CI job starts a
-#     browser. `verify` (spectral + eslint + tsc + the vitest gate) and `deploy` never invoke it.
+#     browser. It could not run here anyway: the lane seeds from the demo data, which is never exported. (In
+#     the source repo it is manual only.) `verify` (spectral + eslint + tsc + the vitest gate) and `deploy`
+#     never invoke it.
 #   - `typecheck` still typechecks e2e/tsconfig.json. That is a tsc pass over the specs, not a browser run,
 #     and it is what keeps them honest about the app modules they import (src/lib/session).
 #   - `npm run test:e2e` is run by hand or not at all. It needs a database seeded from scripts/seed.sql +
@@ -95,20 +109,39 @@ DEST="${DEST:-$DEST_DEFAULT}"
 cd "$(dirname "$0")/.."   # project root
 ROOT="$PWD"
 
-# Expand ~ and make the path absolute BEFORE any rm -rf touches it.
+# Expand ~ and make the path absolute BEFORE the sync's --delete is pointed at it.
 DEST="${DEST/#\~/$HOME}"
 case "$DEST" in /*) ;; *) DEST="$PWD/$DEST" ;; esac
-if [ "$DEST" = "$ROOT" ]; then echo "✗ destination is the source repo. Pick another directory." >&2; exit 1; fi
+DEST="${DEST%/}"
+case "$DEST/" in "$ROOT"/*) echo "✗ destination is the source repo or inside it. Pick another directory." >&2; exit 1 ;; esac
 
-if [ -e "$DEST" ]; then
-  if [ "$FORCE" = 1 ]; then
-    echo "→ wiping $DEST (--force)"; rm -rf "$DEST"
-  elif [ -n "$(ls -A "$DEST" 2>/dev/null)" ]; then
-    echo "✗ $DEST exists and is not empty. Pass --force to replace it." >&2; exit 1
+# new: missing or empty - gets everything, and a first commit. update: a git repo - gets the changes only.
+if [ -n "$(ls -A "$DEST" 2>/dev/null)" ]; then
+  MODE=update
+  if [ ! -d "$DEST/.git" ]; then
+    if [ "$FORCE" != 1 ]; then
+      echo "✗ $DEST is not empty and not a git repo. The sync deletes what the export lacks, so it would remove" >&2
+      echo "  everything else in there. Pick an empty directory or a previous export, or pass --force." >&2
+      exit 1
+    fi
+    echo "  · $DEST is not a git repo - syncing anyway (--force); nothing can bring back what it deletes"
+  elif [ -n "$(git -C "$DEST" status --porcelain)" ]; then
+    if [ "$FORCE" != 1 ]; then
+      echo "✗ $DEST has uncommitted changes. Commit or stash them first so the export's changes are the only" >&2
+      echo "  ones in the diff, or pass --force to sync on top of them." >&2
+      exit 1
+    fi
+    echo "  · $DEST has uncommitted changes - syncing on top of them (--force)"
   fi
+else
+  MODE=new
 fi
-mkdir -p "$DEST"
-echo "→ exporting to $DEST"
+
+# Built here, proved here, and only then synced. A failed scan or --verify exits before the destination is
+# touched, and the trap removes the tree either way.
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/hrms-export.XXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
+echo "→ building the export in $STAGE"
 
 # --- what goes in ------------------------------------------------------------------------------------------
 
@@ -139,7 +172,9 @@ EXPORT_SCRIPTS=(
   genChangeDdl.ts         # db:generate step
   genVapidKeys.ts         # only to mint a new web-push keypair
   freezeMigrations.ts     # docs/deploy.md step 7a: writes the _frozen.json lock preflight checks, at launch
-  aiSpend.ts             # `npm run ai:spend`: measured AI cost against the estimates, read from the live account
+  aiSpend.ts              # `npm run ai:spend`: measured AI cost against the estimates, read from the live account
+  esignChain.ts           # which CCA root a provider's signed PDF chains to (web/src/lib/ccaRoots.ts says when)
+  testEmail.ts            # email-provider smoke test; env overrides beat .dev.vars, so it runs without one
 )
 # The unit gate's two scripts. `test:gate` is the last step of `verify`, and `posttest*` reaps the workerd
 # processes a run leaves behind. Both go when --no-tests drops the suite.
@@ -153,55 +188,55 @@ SEED_TESTS=(test/seedDrift.test.ts test/manifestSeedDrift.test.ts test/seedIdSha
 RSYNC_EXCL=(--exclude '.claude' --exclude '.DS_Store' --exclude 'node_modules')
 
 for t in "${EXPORT_TREES[@]}"; do
-  rsync -a "${RSYNC_EXCL[@]}" --exclude 'openapi.d.ts' --exclude 'genDemo.ts' --exclude 'demo.sql' "$t" "$DEST/"
+  rsync -a "${RSYNC_EXCL[@]}" --exclude 'openapi.d.ts' --exclude 'genDemo.ts' --exclude 'demo.sql' "$t" "$STAGE/"
 done
 
-mkdir -p "$DEST/web"
-rsync -a "${RSYNC_EXCL[@]}" --exclude 'web' web/src "$DEST/web/"        # web/src/web is build junk
+mkdir -p "$STAGE/web"
+rsync -a "${RSYNC_EXCL[@]}" --exclude 'web' web/src "$STAGE/web/"        # web/src/web is build junk
 if [ "$ILLUSTRATIONS" = 1 ]; then
-  rsync -a "${RSYNC_EXCL[@]}" web/public "$DEST/web/"
+  rsync -a "${RSYNC_EXCL[@]}" web/public "$STAGE/web/"
 else
-  rsync -a "${RSYNC_EXCL[@]}" --exclude 'assets/illustrations' web/public "$DEST/web/"
+  rsync -a "${RSYNC_EXCL[@]}" --exclude 'assets/illustrations' web/public "$STAGE/web/"
   echo "  · skipped web/public/assets/illustrations (--no-illustrations)"
 fi
 for f in "${EXPORT_WEB[@]}"; do
-  if [ -e "web/$f" ]; then cp -p "web/$f" "$DEST/web/$f"; else echo "  · web/$f missing, skipped"; fi
+  if [ -e "web/$f" ]; then cp -p "web/$f" "$STAGE/web/$f"; else echo "  · web/$f missing, skipped"; fi
 done
 
-for f in "${EXPORT_ROOT[@]}"; do cp -p "$f" "$DEST/$f"; done
+for f in "${EXPORT_ROOT[@]}"; do cp -p "$f" "$STAGE/$f"; done
 # .dev.vars.example is NOT copied by default: it sits next to the real .dev.vars and nothing but a reading
 # eye keeps a live value from being pasted into it. Pass --secrets-example once you have looked at the file.
 if [ "$SECRETS_EXAMPLE" = 1 ] && [ -f .dev.vars.example ]; then
-  cp -p .dev.vars.example "$DEST/"
+  cp -p .dev.vars.example "$STAGE/"
   echo "  · copied .dev.vars.example - confirm it holds NAMES only before pushing"
 fi
 
-mkdir -p "$DEST/scripts"
-for f in "${EXPORT_SCRIPTS[@]}"; do cp -p "scripts/$f" "$DEST/scripts/$f"; done
+mkdir -p "$STAGE/scripts"
+for f in "${EXPORT_SCRIPTS[@]}"; do cp -p "scripts/$f" "$STAGE/scripts/$f"; done
 
-mkdir -p "$DEST/.github/workflows"
+mkdir -p "$STAGE/.github/workflows"
 for f in .github/workflows/*.yml; do
   # The specs are exported; the CI job that drives a browser is not. Nothing in the export starts one.
   case "$(basename "$f")" in e2e.yml) continue ;; esac
-  cp -p "$f" "$DEST/.github/workflows/"
+  cp -p "$f" "$STAGE/.github/workflows/"
 done
 
 # husky: only the hook itself. `npm ci` runs `prepare: husky`, which regenerates .husky/_ - but the directory
 # has to exist or that command fails and takes `npm ci` down with it.
-mkdir -p "$DEST/.husky"
-cp -p .husky/pre-commit "$DEST/.husky/"
+mkdir -p "$STAGE/.husky"
+cp -p .husky/pre-commit "$STAGE/.husky/"
 
 if [ "$TESTS" = 1 ]; then
-  rsync -a "${RSYNC_EXCL[@]}" test "$DEST/"
-  cp -p vitest.config.ts "$DEST/"
-  for f in "${TEST_SCRIPTS[@]}"; do cp -p "scripts/$f" "$DEST/scripts/$f"; done
-  for f in "${SEED_TESTS[@]}"; do rm -f "$DEST/$f"; done
+  rsync -a "${RSYNC_EXCL[@]}" test "$STAGE/"
+  cp -p vitest.config.ts "$STAGE/"
+  for f in "${TEST_SCRIPTS[@]}"; do cp -p "scripts/$f" "$STAGE/scripts/$f"; done
+  for f in "${SEED_TESTS[@]}"; do rm -f "$STAGE/$f"; done
   echo "  · pruned ${#SEED_TESTS[@]} seed-data tests (the seed SQL is not exported)"
   # The browser lane, source only: the specs, the Playwright config and the stack script they boot. No
   # workflow runs it and `verify` does not call it - `npm run test:e2e`, by hand, is the only way in.
-  rsync -a "${RSYNC_EXCL[@]}" e2e "$DEST/"
-  cp -p playwright.config.ts "$DEST/"
-  cp -p scripts/e2eStack.sh "$DEST/scripts/"
+  rsync -a "${RSYNC_EXCL[@]}" e2e "$STAGE/"
+  cp -p playwright.config.ts "$STAGE/"
+  cp -p scripts/e2eStack.sh "$STAGE/scripts/"
   echo "  · exported the browser lane (e2e/, playwright.config.ts, scripts/e2eStack.sh); it boots on"
   echo "    scripts/seed.sql + scripts/templates.sql, which are demo data and are NOT exported"
 else
@@ -222,7 +257,7 @@ else
     pkg.scripts.verify = "npm run api:lint && npm run lint && npm run typecheck";
     delete pkg.scripts.test; delete pkg.scripts.precommit;
     writeFileSync(p, JSON.stringify(pkg, null, 2) + "\n");
-  ' "$DEST/package.json"
+  ' "$STAGE/package.json"
   # test/ is where @types/node reaches the program (via vitest), and src uses `Buffer`. Drop the tests and
   # tsc loses that declaration - 10 TS2591 errors. Ask for the node types directly instead. @types/node is
   # already in the lockfile transitively, so this needs no dependency change.
@@ -233,12 +268,12 @@ else
       .replace(/"types":\s*\[[^\]]*\]/, `"types": ["@cloudflare/workers-types", "node"]`)
       .replace(/"include":\s*\[[^\]]*\]/, `"include": ["src"]`);
     writeFileSync(p, src);
-  ' "$DEST/tsconfig.json"
-  rm -f "$DEST/.husky/pre-commit"; rmdir "$DEST/.husky" 2>/dev/null || true
+  ' "$STAGE/tsconfig.json"
+  rm -f "$STAGE/.husky/pre-commit"; rmdir "$STAGE/.husky" 2>/dev/null || true
   echo '  · omitted test/ + the browser lane, narrowed `verify` to api:lint + lint + typecheck (--no-tests)'
 fi
 
-echo "→ exported $(find "$DEST" -type f | wc -l | tr -d ' ') files, $(du -sh "$DEST" | cut -f1 | tr -d ' ')"
+echo "→ built $(find "$STAGE" -type f | wc -l | tr -d ' ') files, $(du -sh "$STAGE" | cut -f1 | tr -d ' ')"
 
 # --- closure scan: does anything exported import something that was not? -----------------------------------
 
@@ -286,7 +321,7 @@ for (const f of files.filter((f) => /\.(ts|tsx|mjs|js|jsx)$/.test(f))) {
 }
 if (missing.size) { console.error("✗ closure: " + missing.size + " dangling reference(s)\n  " + [...missing].join("\n  ")); process.exit(1); }
 console.log("✓ closure: every relative and @/ import resolves inside the export");
-' "$DEST"
+' "$STAGE"
 
 # The same rule for package.json: a script that names a file the export does not carry fails on first use -
 # and when that script is a step of `verify`, the first use is the production deploy. A token counts as a file
@@ -307,22 +342,22 @@ for (const [name, cmd] of Object.entries(pkg.scripts)) {
 }
 if (missing.length) { console.error("✗ package.json: " + missing.length + " script(s) name a file that was not exported\n  " + missing.join("\n  ")); process.exit(1); }
 console.log("✓ package.json: every file an npm script names is in the export");
-' "$DEST"
+' "$STAGE"
 
 # --- optional: run the real gate inside the export --------------------------------------------------------
 
 if [ "$VERIFY" = 1 ]; then
-  echo "→ verifying in $DEST (node_modules symlinked from this repo)"
-  ln -sfn "$ROOT/node_modules" "$DEST/node_modules"
+  echo "→ verifying in $STAGE (node_modules symlinked from this repo)"
+  ln -sfn "$ROOT/node_modules" "$STAGE/node_modules"
   # Each step runs quiet, but a failure re-runs it loud and stops: `set -e` does NOT fire on the left side of
-  # an && list, so a silent `cmd >/dev/null && echo ✓` would let a broken export sail through to the commit.
+  # an && list, so a silent `cmd >/dev/null && echo ✓` would let a broken export sail through to the sync.
   step() { # label, command...
     local label="$1"; shift
-    if (cd "$DEST" && "$@" >/dev/null 2>&1); then
+    if (cd "$STAGE" && "$@" >/dev/null 2>&1); then
       echo "  ✓ $label"
     else
       echo "  ✗ $label FAILED - rerunning to show why:" >&2
-      (cd "$DEST" && "$@") || true
+      (cd "$STAGE" && "$@") || true
       exit 1
     fi
   }
@@ -331,34 +366,93 @@ if [ "$VERIFY" = 1 ]; then
   # a log outside the export (it can never be committed): the gate's summary on success, the last 40 lines on
   # failure.
   log="${TMPDIR:-/tmp}/hrms-export-verify.log"
-  if (cd "$DEST" && npm run verify >"$log" 2>&1); then
+  if (cd "$STAGE" && npm run verify >"$log" 2>&1); then
     echo "  ✓ verify"
     grep -E "✓ test gate" "$log" | sed 's/^ */    /' || true
   else
     echo "  ✗ verify FAILED (full log: $log):" >&2; tail -40 "$log" >&2; exit 1
   fi
   step build:web npm run build:web
-  rm -f "$DEST/node_modules"; rm -rf "$DEST/web/dist" "$DEST/src/http/openapi.d.ts"   # generated, not source
+  rm -f "$STAGE/node_modules"; rm -rf "$STAGE/web/dist" "$STAGE/src/http/openapi.d.ts"   # generated, not source
 fi
 
-# --- optional: make it a repo ------------------------------------------------------------------------------
+# --- sync into the destination ------------------------------------------------------------------------------
 
-if [ "$GIT" = 1 ]; then
-  git -C "$DEST" init -q -b main
+# What the sync never writes or deletes in the destination. Each is either the destination repo's own (its
+# history, its migration freeze) or regenerated there (installs, build output, local state). Anchored with a
+# leading `/` so a same-named path deeper in the tree is still synced. `--delete` spares excluded paths, which
+# is what makes this list protective and not merely a copy filter.
+PROTECT=(
+  /.git                                # the destination repo's history
+  /src/db/migrations/meta/_frozen.json # written by scripts/freezeMigrations.ts in the destination, committed there
+  /node_modules /.husky/_              # npm ci, and its `prepare: husky`
+  /web/dist /src/http/openapi.d.ts /web/tsconfig.tsbuildinfo   # build:web, api:types, tsc -p web
+  /.wrangler /test-results* /playwright-report                 # wrangler and test run state
+  /.dev.vars /.vapid.json              # local secrets, if anyone keeps them next to a checkout
+  .DS_Store
+)
+PROTECT_ARGS=()
+for p in "${PROTECT[@]}"; do PROTECT_ARGS+=(--exclude "$p"); done
+
+mkdir -p "$DEST"
+# --checksum: the tree is rebuilt from scratch on every run, so every mtime is new and size+mtime would call
+# every file changed. Comparing content is what makes "only the changes" true, and it is cheap at this size.
+changes="$(rsync -a --checksum --delete --itemize-changes "${PROTECT_ARGS[@]}" "$STAGE/" "$DEST/")"
+# Itemize codes: `>f` a file sent (new or changed), `*deleting` removed. `.f`/`.d` lines are attribute-only.
+sent="$(printf '%s\n' "$changes" | grep -c '^>f' || true)"
+deleted="$(printf '%s\n' "$changes" | grep '^\*deleting' | grep -v '/$' || true)"
+ndeleted="$(printf '%s' "$deleted" | grep -c . || true)"
+echo "→ synced into $DEST: $sent file(s) added or changed, $ndeleted deleted"
+# awk, not `| head`: under pipefail, head closing the pipe early kills the writer and fails the script.
+if [ "$ndeleted" -gt 0 ]; then
+  printf '%s\n' "$deleted" | awk 'NR <= 25 { sub(/^\*deleting +/, ""); print "    - " $0 }'
+  if [ "$ndeleted" -gt 25 ]; then echo "    … and $((ndeleted - 25)) more"; fi
+fi
+
+# --- git -----------------------------------------------------------------------------------------------------
+
+# The source commit the export came from, marked when the working tree had changes on top of it.
+SOURCE_REV="$(git -C "$ROOT" rev-parse --short HEAD)"
+if ! git -C "$ROOT" diff --quiet HEAD; then SOURCE_REV="$SOURCE_REV+uncommitted"; fi
+if [ "$MODE" = new ] && [ "$GIT" = 1 ]; then
+  # `dev`, not `main`: the repos this deploys from have exactly two branches, `dev` and `prod`, and a push to
+  # `prod` is the deploy (.github/workflows/deploy.yml). There is no `main`.
+  git -C "$DEST" init -q -b dev
   git -C "$DEST" add -A
   git -C "$DEST" commit -q --no-verify -m "chore: initial deployable tree" \
-    -m "Worker sources (src/), the SPA (web/), the production bootstrap catalog and the deploy workflows.
-Dev tooling, docs, demo data and design assets are not part of the deploy and stay in the source repo."
-  echo "✓ committed $(git -C "$DEST" rev-parse --short HEAD) on main ($(git -C "$DEST" ls-files | wc -l | tr -d ' ') files tracked)"
+    -m "Exported from hrms $SOURCE_REV. Worker sources (src/), the SPA (web/), the production bootstrap catalog
+and the deploy workflows. Dev tooling, docs, demo data and design assets are not part of the deploy and stay
+in the source repo."
+  echo "✓ committed $(git -C "$DEST" rev-parse --short HEAD) on dev ($(git -C "$DEST" ls-files | wc -l | tr -d ' ') files tracked)"
+elif [ "$MODE" = update ] && [ -d "$DEST/.git" ]; then
+  # Left uncommitted on purpose: the diff is the review. Committing it is one command, below.
+  if [ -z "$(git -C "$DEST" status --porcelain)" ]; then
+    echo "✓ $DEST is already up to date with hrms $SOURCE_REV - nothing to commit"
+  else
+    echo "→ uncommitted in $DEST ($(git -C "$DEST" rev-parse --abbrev-ref HEAD)):"
+    git -C "$DEST" status --short | awk 'NR <= 25 { print "    " $0 } END { if (NR > 25) print "    … and " NR - 25 " more" }'
+    cat <<EOF
+
+Review, then commit and deploy:
+  cd $DEST
+  git diff
+  git add -A && git commit -m "chore: sync from hrms $SOURCE_REV"
+  git push origin dev && git push origin dev:prod     # the push to prod is the deploy
+EOF
+  fi
 fi
+
+if [ "$MODE" = update ]; then exit 0; fi   # the one-time setup below was printed on the first export
 
 cat <<EOF
 
 Next:
   cd $DEST
-  git remote add origin git@github.com:<org>/<repo>.git && git push -u origin main
+  git remote add origin git@github.com:<org>/<repo>.git && git push -u origin dev
+  Make \`dev\` the default branch on GitHub: the nightly/weekly backup workflows run from it.
   .github/workflows/deploy.yml runs on a push to \`prod\` (or by hand, workflow_dispatch). When the
-  steps below are done:  git push origin main:prod
+  steps below are done:  git push origin dev:prod
+  verify.yml is manual only - run it from the Actions tab; deploy.yml runs the same gate itself.
 
 Not exported, and not in git anywhere - set these on the Worker with \`wrangler secret put\`:
   FIELD_ENCRYPTION_KEY, WIRE_ID_KEY, AUTH_SESSION_KEY, GOOGLE_CLIENT_ID/SECRET, EMAIL_API_KEY

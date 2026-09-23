@@ -7,8 +7,8 @@
 // 0. A plain `--config` typo does exit 1, so this is the pool-load path specifically, which is exactly the
 // path a CI runner exercises differently from a laptop.
 //
-// That matters because `npm run verify` is the ONLY gate this repo has, on every push (.github/workflows/
-// verify.yml) and ahead of every production deploy (deploy.yml, which chains `preflight && verify`). A green
+// That matters because `npm run verify` is the ONLY gate this repo has: ahead of every production deploy
+// (deploy.yml, which chains `preflight && verify`) and whenever verify.yml is run by hand. A green
 // `verify` over an unrun suite is worse than a red one: it is the specific failure that looks like success,
 // on the check that stands between a payroll change and production.
 //
