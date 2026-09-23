@@ -124,6 +124,7 @@ EXPORT_ROOT=(
   .spectral.yaml                   # ruleset for api:lint
   drizzle.config.ts                # db:generate, for future schema changes
   eslint.config.js                 # the `lint` step of `verify`
+  tsconfig.eslint.json             # the src-only program eslint.config.js's type-aware rules run against
   .gitignore
 )
 # web/ config. The SPA root is ./web (vite.config.ts `root`), output ../web/dist.
@@ -276,6 +277,12 @@ for (const f of files.filter((f) => /\.(ts|tsx|mjs|js|jsx)$/.test(f))) {
   // a file as data has to find it here. Under --no-tests the lane is gone and there is nothing to scan.
   for (const m of src.matchAll(/["'"'"'`]((?:src|web|scripts|bootstrap|test|e2e)\/[A-Za-z0-9_./-]+\.(?:ts|tsx|sql|json|yaml|toml|css|svg|png))["'"'"'`]/g))
     if (!existsSync(resolve(root, m[1])) && !GENERATED.includes(m[1])) missing.add(rel + " READS " + m[1]);
+  // A `./`-relative path in a string, resolved against the file naming it - the shape a config uses for its
+  // neighbours (eslint.config.js `project: "./tsconfig.eslint.json"`). The line above only sees paths under
+  // a known top-level directory, so a ROOT-level file a config points at went unchecked: the export shipped
+  // eslint.config.js without the tsconfig it names, and lint failed in the exported repo with TS5012.
+  for (const m of src.matchAll(/["'"'"'`](\.\/[A-Za-z0-9_./-]+\.(?:ts|tsx|json|yaml|toml))["'"'"'`]/g))
+    if (!existsSync(resolve(dirname(f), m[1]))) missing.add(rel + " READS " + m[1]);
 }
 if (missing.size) { console.error("✗ closure: " + missing.size + " dangling reference(s)\n  " + [...missing].join("\n  ")); process.exit(1); }
 console.log("✓ closure: every relative and @/ import resolves inside the export");
