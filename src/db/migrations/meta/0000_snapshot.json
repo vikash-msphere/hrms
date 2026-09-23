@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "074bc515-3581-4cf8-9dfb-48d5a3c0709c",
+  "id": "f5a8a1f8-458f-48c3-8da7-5f29603ecfc4",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -9336,6 +9336,89 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "idempotency_keys": {
+      "name": "idempotency_keys",
+      "columns": {
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "method": {
+          "name": "method",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "path": {
+          "name": "path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "headers_json": {
+          "name": "headers_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "body": {
+          "name": "body",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idempotency_keys_created_idx": {
+          "name": "idempotency_keys_created_idx",
+          "columns": [
+            "created_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "idempotency_keys_principal_key_pk": {
+          "columns": [
+            "principal",
+            "key"
+          ],
+          "name": "idempotency_keys_principal_key_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "interview_feedback": {
       "name": "interview_feedback",
       "columns": {
@@ -13212,6 +13295,13 @@
         "bank_file_at": {
           "name": "bank_file_at",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "bank_file_bank": {
+          "name": "bank_file_bank",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

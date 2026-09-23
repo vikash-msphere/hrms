@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import { Megaphone, Plus, Pencil, Trash2, MessageCircle, SmilePlus, Eye, EyeOff, ChevronDown, Trophy, Award, BarChart3, MessageSquare, Send, CalendarClock, Pin, PinOff, Link2, Maximize2, X, CheckCheck, Users, Mail, BellOff, Search, ArrowUp, ArrowLeft, ChevronUp, FilterX, Loader2 } from "lucide-react";
-import { patch, invoke, get, ApiError } from "@/api";
+import { patch, invoke, invokeIdempotent, get, ApiError } from "@/api";
 import { navigate, recordUrl, pagePath } from "@/router";
 import { useCollection, type LoadState } from "@/hooks/useCollection";
 import { useDebounced } from "@/hooks/useDebounced";
@@ -312,12 +312,22 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   // markRead grant, and neither becomes true by asking again. Restoring the dot on those made the post unread,
   // which re-armed the dwell observer that had just fired, which asked again - a post deleted under a reader
   // fired :markRead every 2.5 seconds for as long as the page stayed open, each one a console error.
+  //
+  // The 404 also says the card itself is stale, so it leaves the board: left in place it still offered React,
+  // Reply and Vote on a post that no longer exists, each one another 404.
   function markRead(path: string) {
     setReadHere((s) => (s.has(path) ? s : new Set(s).add(path)));
-    invoke<Announcement>("announcements/" + idOf(path), "markRead")
+    invokeIdempotent<Announcement>("announcements/" + idOf(path), "markRead")
       .then(fold)
       .catch((e: unknown) => {
         const status = e instanceof ApiError ? e.status : 0;
+        if (status === 404) {
+          const drop = (prev: Announcement[]) => (prev.some((r) => r.path === path) ? prev.filter((r) => r.path !== path) : prev);
+          setRows(drop);
+          srch.setRows(drop);
+          setSoloRows(drop);
+          return;
+        }
         if (status >= 400 && status < 500) return;
         setReadHere((s) => {
           const n = new Set(s);
@@ -341,6 +351,14 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   // remove if present; one reaction per viewer per target). The chip moves FIRST and the request follows: a
   // reaction is a reflex, and a chip that waits a round-trip to answer the tap invites a second tap that undoes
   // the first. The server's reserialized row replaces the guess when it lands; a failure puts the old row back.
+  //
+  // ONE POST'S TAPS GO OUT IN ORDER. Because the chip moves before the request, a second tap (switching 👍 to
+  // ❤️) is sent while the first is still on the wire, and nothing made the server apply them in tap order: the
+  // ❤️ could land first and the 👍 then switched the reader back, leaving them on the emoji they had just moved
+  // away from, with whichever answer arrived last on screen. So each post's requests are chained, and only the
+  // LAST tap's answer is folded in - an earlier one describes a state the reader has already tapped past, and
+  // folding it would flick the chips back for a round trip.
+  const reactChains = useRef(new Map<string, { tail: Promise<unknown>; seq: number }>());
   async function toggleReact(a: Announcement, emoji: string, replyId?: string) {
     const before = a;
     setSource((prev) => prev.map((r) => {
@@ -348,11 +366,22 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
       if (!replyId) return { ...r, reactions: applyReaction(r.reactions, emoji, myEmp) };
       return { ...r, replies: (r.replies ?? []).map((rep) => (rep.id === replyId ? { ...rep, reactions: applyReaction(rep.reactions, emoji, myEmp) } : rep)) };
     }));
+    const chain = reactChains.current.get(a.path) ?? { tail: Promise.resolve(), seq: 0 };
+    const mine = ++chain.seq;
+    const sent = chain.tail
+      .catch(() => {})
+      .then(() => invoke<Announcement>("announcements/" + idOf(a.path), "react", undefined, replyId ? { emoji, reply: replyId } : { emoji }));
+    chain.tail = sent;
+    reactChains.current.set(a.path, chain);
+    const latest = () => chain.seq === mine;
     try {
-      fold(await invoke<Announcement>("announcements/" + idOf(a.path), "react", undefined, replyId ? { emoji, reply: replyId } : { emoji }));
+      const row = await sent;
+      if (latest()) fold(row);
     } catch (e) {
-      fold(before);
+      if (latest()) fold(before);
       toast({ title: "Couldn't react", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      if (latest()) reactChains.current.delete(a.path);
     }
   }
 

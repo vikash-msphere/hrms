@@ -26,6 +26,8 @@ import { jsonBody } from "./jsonRequest";
 import { queryFlag, queryParam } from "./query";
 import { crudService, type CrudService, type CrudSpec, type CrudTable } from "../services/crud";
 import type { PurgeCascade } from "../services/softDelete";
+import { isInternalId } from "../lib/idCodec";
+import { invalidArgument } from "../lib/errors";
 
 /**
  * One custom method. The common shape is `{schema?, run}`: the factory parses the body, calls `run`, then
@@ -253,8 +255,16 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
   // org-documents :acknowledge), and no `patch` means it is read-only history. Mounting nothing is the honest
   // answer: the route does not exist, rather than existing and refusing.
   if (canCreate && createSchema) {
-    app.post("/", zValidator("json", createSchema), async (c) =>
-      item(c, await svc.create(c.get("deps"), c.get("user"), c.req.valid("json") as I, queryParam(c, "id"))));
+    app.post("/", zValidator("json", createSchema), async (c) => {
+      // A caller-chosen `?id` becomes the row's PRIMARY KEY, so it is checked HERE, once, for every collection -
+      // not in the generic create alone, which the bespoke `overrides.create` of most collections replace
+      // wholesale (and which used to be the only place it was checked). An id that is not a canonical internal id
+      // cannot be tokenized on the way out, so it would either leak raw or break the outbound edge and every
+      // cursor that lands on its row.
+      const id = queryParam(c, "id");
+      if (id !== undefined && !isInternalId(id)) throw invalidArgument("`id` must be a 13-character base32 resource id");
+      return item(c, await svc.create(c.get("deps"), c.get("user"), c.req.valid("json") as I, id));
+    });
   }
   if (canUpdate && updateSchema) {
     app.patch(`/:${param}`, zValidator("json", updateSchema), async (c) =>

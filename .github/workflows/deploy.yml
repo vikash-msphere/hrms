@@ -66,13 +66,13 @@ jobs:
       - run: npm run db:migrate:remote
       # Uploads Worker + web/dist assets, registers crons.
       #
-      # `--env=""` names the top-level (production) environment EXPLICITLY. It is what a bare `wrangler deploy`
-      # already targets, but wrangler warns when a config declares named environments and the command names
-      # none - and the day that warning becomes an error, or the default changes, a bare deploy is the wrong
-      # environment rather than a failed one.
+      # `--config` is left off deliberately: wrangler.toml IS production, and staging is a separate file
+      # (wrangler.staging.toml) that this workflow must never reach. That is what replaced the `--env=""`
+      # this line used to carry - with no named environments left in the config, there is no default to get
+      # wrong and nothing for wrangler to warn about.
       #
       # `--var` MERGES with the `[vars]` block rather than replacing it (verified against
       # `wrangler deploy --dry-run`: every configured var survives alongside this one), which is what makes
       # this the right place for the release. wrangler.toml deliberately does NOT carry SENTRY_RELEASE - a
       # literal there is the same string for every deploy, which is how every release ended up tagged "0.1.0".
-      - run: npx wrangler deploy --env="" --var SENTRY_RELEASE:"$RELEASE"
+      - run: npx wrangler deploy --var SENTRY_RELEASE:"$RELEASE"

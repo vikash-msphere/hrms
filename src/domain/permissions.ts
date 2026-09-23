@@ -413,8 +413,11 @@ function stripScope(pattern: string): string {
   for (let i = 1; i < toks.length; i++) {
     const t = toks[i]!;
     // In grant PATTERNS the id position is always one of these scope tokens (never a literal code), so
-    // structural sub-resource names like "bank-account" (which contain '-') are correctly kept.
-    const isScope = t === "*" || t === "**" || t === "me" || t === "my-dept" || t.endsWith("-*");
+    // structural sub-resource names like "bank-account" (which contain '-') are correctly kept. The manager
+    // chain is a scope like any other: kept, `leave-requests.my-reports.approve` became the capability
+    // `leave-requests.my-reports.approve`, which no `hasCapability(caps, "leave-requests.approve")` matches - so
+    // the approval pages hid from a manager the API was letting approve.
+    const isScope = t === "*" || t === "**" || t === "me" || t === "my-dept" || t === "my-reports" || t === "my-org" || t.endsWith("-*");
     if (!isScope) out.push(t);
   }
   return out.filter(Boolean).join(".");

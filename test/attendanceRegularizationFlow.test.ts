@@ -35,6 +35,9 @@ beforeAll(async () => {
 const TABLES = [schema.attendanceSessions, schema.attendanceRegularizations, schema.notifications, schema.auditLog, schema.eventLog, schema.settings, schema.users, schema.employees, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
+  // One actor files and approves; the attendance effect is the subject, not maker-checker
+  // (test/decisionGuard.test.ts), so the org opts into self-approval.
+  await deps.db.insert(schema.settings).values({ key: "approvals", value: JSON.stringify({ allow_self_approval: true }) });
 });
 
 async function seedActor(): Promise<AppUser> {

@@ -143,6 +143,8 @@ export const UNSTAMPED_TABLES: Record<string, string> = {
   audit_log: "paged by its own timestamp; never cached as a collection",
   // Allocation counters behind owned codes. Never read over the wire.
   code_sequences: "internal counter, not part of any resource",
+  // Replay answers for re-sent writes (middleware/idempotency.ts). The write it replays stamps its own table.
+  idempotency_keys: "internal replay store; the write it answers for is stamped",
   // The digest worker's queue. Its OUTPUT is a notification, and `notifications` is a stamped collection.
   notification_digest_queue: "internal queue; the notification it produces is stamped",
   // Loss-of-pay corrections waiting for a run to pay them. Not its own wire collection, and - the reason it

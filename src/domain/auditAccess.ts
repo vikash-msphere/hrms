@@ -108,6 +108,10 @@ export const READ_VERBS = new Set([
   // the vocabulary: a reviewer filtering for "viewed" to answer "who opened this person's medical document"
   // got nothing back, and the rows that did exist sat under "other".
   "leave-requests:download", "tickets:attachment",
+  // The two JSON reads behind a review's drawer: the delivered-work evidence and the 360 picker's suggested
+  // colleagues. Both handlers read and answer ("Nothing is written: nominating is still a separate act"), so
+  // opening a review must not land in the trail as a change to it.
+  "reviews:evidence", "reviews:collaborators",
 ]);
 
 // Collections whose writes never reach the activity feed. These are recipient/caller-owned personal state with

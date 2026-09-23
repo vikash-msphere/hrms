@@ -338,7 +338,7 @@ export default function Timesheets({ me }: { me: Me }) {
     if (!(await confirmDecision(confirm, verb, `${e.hours}h logged on ${formatDate(e.date)}`))) return;
     setDeciding(`${e.path}|${verb}`);
     try {
-      await invoke(`time-entries/${idOf(e.path)}`, verb);
+      await invoke(`time-entries/${idOf(e.path)}`, verb, e.etag); // decided against the version on screen
       toast({ title: verb === "approve" ? "Entry approved" : "Entry rejected", variant: "success" });
       // Awaited: `deciding` clears in `finally` right after this, which re-offers the Approve/Reject buttons -
       // an un-awaited reload left the just-decided row on screen, inviting a second decide on an entry the

@@ -23,8 +23,11 @@ test("somebody keeps their own contact and emergency details", async ({ as }) =>
   const panel = page.getByRole("tabpanel");
   // `.nth(1)`: the Profile tab carries three cards with the same unlabelled pencil - Personal, Contact,
   // Emergency, in that order - and this half wants the second. The dialog's own title is asserted below, so a
-  // pencil that moves takes the spec with it rather than silently editing the wrong card.
-  await panel.getByRole("button", { name: /^(Add|Edit)$/ }).nth(1).click();
+  // pencil that moves takes the spec with it rather than silently editing the wrong card. Each pencil appears
+  // only once its card has loaded, so all three are waited for before one is picked by place.
+  const pencils = panel.getByRole("button", { name: /^(Add|Edit)$/ });
+  await expect(pencils).toHaveCount(3, { timeout: 30_000 });
+  await pencils.nth(1).click();
 
   const form = page.getByRole("dialog");
   await expect(form.getByText("Edit contact details")).toBeVisible();
@@ -44,7 +47,8 @@ test("somebody keeps their own contact and emergency details", async ({ as }) =>
   // somebody else entirely - but it is read from the same encrypted blob and filled in the same sitting, so it
   // is the third card on this tab rather than a button in the page header.
   const contact = `E2E Kin ${stamp}`;
-  await panel.getByRole("button", { name: /^(Add|Edit)$/ }).nth(2).click();
+  await expect(pencils).toHaveCount(3, { timeout: 30_000 });
+  await pencils.nth(2).click();
   const second = page.getByRole("dialog");
   await expect(second.getByText("Edit emergency details")).toBeVisible({ timeout: 30_000 });
   // `.first()`: the form carries a second contact with the same three labels under the first.

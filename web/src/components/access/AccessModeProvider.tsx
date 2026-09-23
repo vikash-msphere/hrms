@@ -144,8 +144,19 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
   // only place rules change while browsing). Failure -> empty (no tint, mode still works).
   const [rules, setRules] = React.useState<AccessRule[]>([]);
   const on = enabled && available;
+  // A superseded load is dropped. The read pages through every rule, so it can take several round trips, and
+  // turning the mode off and on (or closing the modal) starts a fresh one while an older one is still paging:
+  // left alone, the OLDER answer could land last and put back the rules from before the change - a deny just
+  // written, untinted, until the next reload.
   React.useEffect(() => {
-    if (on && target === null) fetchAllAccessRules().then(setRules).catch(() => setRules([]));
+    if (!on || target !== null) return;
+    let live = true;
+    fetchAllAccessRules()
+      .then((r) => live && setRules(r))
+      .catch(() => live && setRules([]));
+    return () => {
+      live = false;
+    };
   }, [on, target]);
   const denyFor = React.useCallback(
     (t: AccessTargetRef): boolean =>

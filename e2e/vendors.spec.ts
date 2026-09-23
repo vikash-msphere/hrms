@@ -73,10 +73,11 @@ test("a duplicate vendor name warns, a bad email blocks, and editing shows what'
     expensePath = expense.path;
     const submitted = await page.request.post(`/v1/${expense.path}:submit`, { headers: SPA_HEADERS });
     expect(submitted.status(), await submitted.text()).toBe(200);
-    const approved = await page.request.post(`/v1/${expense.path}:approve`, { headers: SPA_HEADERS });
+    // Approved by finance, not the filer: nobody decides their own expense (services/decisionGuard.ts).
+    const approved = await (await as("payroll")).request.post(`/v1/${expense.path}:approve`, { headers: SPA_HEADERS });
     expect(approved.status(), await approved.text()).toBe(200);
 
-    // Those three writes went straight to the API, so the page this browser is holding never heard about them:
+    // Those writes went straight to the API, so the page this browser is holding never heard about them:
     // it already read this vendor's (empty) spend when the dialog was open a moment ago, and a cached read is
     // not re-issued for a write it was never told about. A reload is what a session that missed a write does.
     await page.reload();

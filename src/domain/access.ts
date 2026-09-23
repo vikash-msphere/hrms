@@ -2,9 +2,10 @@
 // (`["hr_admin",...].includes(actor.role)`), services/routes ask "can this actor do X" against the
 // single GRANTS policy. Coarse capability checks live here; instance/scoped decisions call decide()
 // directly (resolveRequest + the actor's employeeCode).
-import { capabilitiesOf, decide, resolveRequest } from "./permissions";
+import { capabilitiesOf, decide, resolveRequest, matchTokens, LVL, deptOf as permDeptOf } from "./permissions";
 import { hasCapability } from "./capabilityMatch";
-import type { Grant, SelfContext } from "./permissions";
+import type { Grant, Level, SelfContext } from "./permissions";
+import { isUnder } from "./codes";
 import { isPublicState, SUBRESOURCE_BODY, type StateRule } from "./manifests";
 import { COLLECTIONS } from "./collections";
 import type { AppUser } from "../env";
@@ -368,4 +369,83 @@ export function verbScopeFor(
     seeRestricted: seeRestrictedFor(actor, collection),
     subtrees,
   };
+}
+
+// ---- The bound on what an access admin may hand out ------------------------------------------------------
+//
+// assertNotSelfWidening (services/accessRules.ts) stops an access admin granting THEMSELVES more; nothing
+// stopped them granting it to somebody else, or cloning super's rules onto another role. Delegating the ACL
+// was therefore delegating super by proxy, one step removed. The bound: a non-super author may write an allow
+// rule only when their own grant already COVERS it, at that level (or that verb), at that breadth.
+//
+// Coverage is decided PATTERN AGAINST PATTERN rather than by probing one synthetic key, because a rule is a
+// set of keys and one probe answers for one of them: `employees.*.bank-account.**` read and `employees.me.**`
+// read agree on the probe `employees.zzzzz` and disagree about everybody's bank details.
+//
+// Relative scopes cover only themselves (or what `*`/`**` covers): `me` in the author's grant means the
+// author's own rows and `me` in the rule means the grantee's own - the same relation, so one covers the other.
+// `my-dept` in the author's grant does not cover the grantee's `me`, because nothing in the pattern puts the
+// grantee in the author's department.
+function scopeCovers(pt: string, rt: string, self: SelfContext): boolean {
+  if (pt === rt) return true;
+  if (pt === "*") return rt !== "**";
+  if (rt === "me" || rt === "my-dept" || rt === "my-reports" || rt === "my-org" || rt === "*" || rt === "**") return false;
+  if (rt.endsWith("-*")) {
+    const prefix = rt.slice(0, -2);
+    if (pt.endsWith("-*")) return isUnder(pt.slice(0, -2), prefix);
+    if (pt === "me") return !!self.employeeCode && isUnder(self.employeeCode, prefix);
+    if (pt === "my-dept") {
+      const d = permDeptOf(self.employeeCode);
+      return !!d && isUnder(d, prefix);
+    }
+    return false;
+  }
+  // A literal: a collection, sub-resource or verb name, or an exact code. The engine's own token match answers
+  // it, with the author as the caller (an exact code under the author's own code is theirs).
+  return matchTokens([pt], [rt], self);
+}
+
+function patternCovers(p: string[], pi: number, r: string[], ri: number, self: SelfContext): boolean {
+  if (pi >= p.length) return ri >= r.length;
+  if (p[pi] === "**") {
+    for (let i = ri; i <= r.length; i++) if (patternCovers(p, pi + 1, r, i, self)) return true;
+    return false;
+  }
+  if (ri >= r.length) return false;
+  if (!scopeCovers(p[pi]!, r[ri]!, self)) return false;
+  return patternCovers(p, pi + 1, r, ri + 1, self);
+}
+
+/** Do two patterns share any key? Deliberately generous: a deny that touches a rule anywhere refuses it. */
+const overlaps = (a: string[], b: string[], self: SelfContext) => patternCovers(a, 0, b, 0, self) || patternCovers(b, 0, a, 0, self);
+
+/**
+ * May this author write an allow rule with `pattern` at `level` (a standard rule) or, with no level, the
+ * custom-method rule `pattern` (its last token is the verb)? Deny rules only ever subtract, so they are within
+ * anyone's authority and are not asked about here.
+ */
+export function ruleWithinAuthority(actor: Pick<AppUser, "grant" | "employeeCode">, rule: { pattern: string; level?: Level | null }): boolean {
+  const self: SelfContext = { employeeCode: actor.employeeCode ?? null };
+  const grant = actor.grant;
+  const level = rule.level ?? null;
+  const toks = rule.pattern.split(".");
+  // An all-scope verb rule is stored as `<collection>.**.<verb>` (services/accessRules.ts buildPattern): the
+  // item form and the collection-level form at once, since the ACL cannot tell which one a verb has. Holding
+  // the form that exists is holding the verb, so each form is asked about on its own.
+  const forms = !level && toks.length === 3 && toks[1] === "**" ? [[toks[0]!, toks[2]!], [toks[0]!, "*", toks[2]!]] : [toks];
+  const covered = (f: string[]) =>
+    level
+      ? Object.entries(grant.levels).some(([p, lvl]) => LVL[lvl] >= LVL[level] && patternCovers(p.split("."), 0, f, 0, self))
+      : grant.allow.some((p) => patternCovers(p.split("."), 0, f, 0, self));
+  const denied = (f: string[]) => (grant.deny ?? []).some((d) => overlaps(d.split("."), level ? [...f, level] : f, self));
+  return forms.some((f) => covered(f) && !denied(f));
+}
+
+/**
+ * May this caller administer the sign-in account with this code - the engine's answer for
+ * `PATCH /v1/users/<code>` on the caller's own grant? For an edit to something else that would move an account as
+ * a side effect (services/employees.ts: a work-email change re-pointing the login).
+ */
+export function mayAdministerAccount(actor: Pick<AppUser, "grant" | "employeeCode">, userCode: string): boolean {
+  return decide(actor.grant, resolveRequest("PATCH", `/v1/users/${userCode}`), { employeeCode: actor.employeeCode ?? null }).allow;
 }

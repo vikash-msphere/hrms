@@ -155,7 +155,7 @@ const SheetHeader = ({ className, children, ...props }: React.HTMLAttributes<HTM
   >
     <div className="min-w-0 flex-1">{children}</div>
     {/* A finger-sized close box around a 16px glyph - the previous target was the glyph itself. */}
-    <DialogPrimitive.Close className="-mr-1.5 -mt-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-muted-foreground opacity-70 ring-offset-background transition-opacity hover:bg-accent hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring">
+    <DialogPrimitive.Close data-history-close="" className="-mr-1.5 -mt-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-muted-foreground opacity-70 ring-offset-background transition-opacity hover:bg-accent hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring">
       <X className="h-4 w-4" />
       <span className="sr-only">Close</span>
     </DialogPrimitive.Close>

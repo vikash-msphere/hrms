@@ -255,6 +255,8 @@ describe("the sandwich rule", () => {
 describe("the document rule", () => {
   it("is checked on APPROVAL, not when the request is filed", async () => {
     const { actor, leaveTypeId } = await fixture({ restrictions: { request: { document_required_over_days: 1 } } });
+    // One actor files and decides; the rule under test is the document, not maker-checker.
+    await setSetting("approvals", { allow_self_approval: true });
     // Filing works: the row has to exist before a file can be attached to it.
     const row = await file(deps, actor, leaveTypeId, "2026-03-10", "2026-03-11");
     await expect(approveLeaveRequest(deps, actor, row.uuid)).rejects.toThrow(/supporting document/i);

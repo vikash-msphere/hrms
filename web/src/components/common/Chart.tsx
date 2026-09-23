@@ -5,6 +5,10 @@ import { useTheme } from "@/lib/theme";
 import { chartColors, heatmapColors, heatmapDays, heatmapPoints } from "@/lib/chartTheme";
 import { Skeleton } from "@/components/ui/skeleton";
 
+/** Text as markup that reads back as the same text - for strings handed to a library that uses innerHTML. */
+const escapeText = (s: string): string =>
+  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
 // The app's one chart primitive: line, bar, mixed axis, pie, donut, percentage bar and calendar heatmap, all
 // drawn by frappe-charts (MIT, no runtime dependencies, plain SVG).
 //
@@ -337,14 +341,20 @@ export function Chart(props: ChartProps) {
 
   // The data, in the library's shape. Re-derived whenever the numbers change, which is also what drives the
   // update below - so a filter change redraws the same chart instead of building a new one.
+  //
+  // EVERY STRING IS ESCAPED on the way in. frappe writes labels, series names and marker labels with
+  // innerHTML (its tooltip and axis builders), and several charts are fed user text - a custom grid labels
+  // its bars with whatever the rows say. Escaped, the markup shows as the text it is; the browser decodes the
+  // entities back on render, so what is drawn reads exactly as the label - which is also why the selection
+  // paint below can keep matching on the raw labels.
   const data: FrappeData = React.useMemo(
     () =>
       type === "heatmap"
         ? { dataPoints: dayPoints, start, end }
         : {
-            labels: labels ?? [],
-            datasets: (drawDatasets ?? []).map((d) => ({ name: d.name, values: d.values, ...(d.chartType ? { chartType: d.chartType } : {}) })),
-            ...(markers?.length ? { yMarkers: markers.map((m) => ({ label: m.label, value: m.value, options: { labelPos: "left" as const } })) } : {}),
+            labels: (labels ?? []).map(escapeText),
+            datasets: (drawDatasets ?? []).map((d) => ({ name: d.name == null ? d.name : escapeText(d.name), values: d.values, ...(d.chartType ? { chartType: d.chartType } : {}) })),
+            ...(markers?.length ? { yMarkers: markers.map((m) => ({ label: escapeText(m.label), value: m.value, options: { labelPos: "left" as const } })) } : {}),
           },
     [type, labels, drawDatasets, dayPoints, start, end, markers],
   );

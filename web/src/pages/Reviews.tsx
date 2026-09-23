@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ClipboardCheck, ChevronRight, Check, SkipForward, UserPlus, MessageSquareQuote, CircleAlert, Hourglass, CheckCircle2, AlarmClock, ChevronsDownUp, ChevronsUpDown, BellRing, FileDown, Target } from "lucide-react";
-import { create, get, invoke } from "@/api";
+import { create, get, invoke, invokeRead } from "@/api";
 import { useRoute, setQueryParams, navigate } from "@/router";
 import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
@@ -631,7 +631,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
   const loadCollaborators = useCallback(async () => {
     if (collaborators || !(review.access?.can ?? []).includes("collaborators")) return;
     try {
-      const res = await invoke<{ collaborators: { employee: string; name: string; reasons: { detail: string }[] }[] }>(`reviews/${idOf(review.path ?? "")}`, "collaborators");
+      const res = await invokeRead<{ collaborators: { employee: string; name: string; reasons: { detail: string }[] }[] }>(`reviews/${idOf(review.path ?? "")}`, "collaborators");
       setCollaborators(res.collaborators);
     } catch {
       setCollaborators([]); // silent: the picker still works off the client-side guess

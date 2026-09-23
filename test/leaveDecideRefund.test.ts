@@ -36,6 +36,8 @@ beforeAll(async () => {
 const TABLES = [schema.leaveRequests, schema.leaveBalances, schema.leaveTypes, schema.notifications, schema.auditLog, schema.eventLog, schema.settings, schema.users, schema.employees, schema.roles, schema.codeSequences];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
+  // One actor files and decides; the refund is the subject, not maker-checker (test/decisionGuard.test.ts).
+  await deps.db.insert(schema.settings).values({ key: "approvals", value: JSON.stringify({ allow_self_approval: true }) });
   deps.refCache?.clear();
   deps.clock = { now: () => new Date() };
 });

@@ -17,7 +17,7 @@ import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lifecycle";
 import { validateAutomation, evalCondition, isScheduled, privilegedActionKinds, type Automation, type Condition, type Action, type Schedule } from "../domain/automations";
 import { invalidateAutomationCache } from "./automationEngine";
-import type { DomainEvent } from "../domain/events";
+import { sensitiveFieldsInCondition, type DomainEvent } from "../domain/events";
 import { atVersion, checkEtag, updateAtVersion, versionConflict } from "./versionGuard";
 
 export type AutomationInput = {
@@ -63,6 +63,15 @@ function assertMayAuthorActions(actor: AppUser, actions: Action[] | undefined): 
   if (privileged.length) throw forbidden(`only a super admin may author automations with ${privileged.join("/")} action(s)`);
 }
 
+// A CONDITION IS A READ. A rule no super admin authored is templated over a payload with its money masked
+// (services/automationEngine.ts), but its condition is evaluated against the real event - so "notify me when
+// netPay > 150000" would read each payslip one bit at a time. Such a rule may not test those fields at all.
+function assertMayConditionOn(actor: AppUser, a: Automation): void {
+  if (isSuperGrant(actor.grant)) return;
+  const fields = sensitiveFieldsInCondition(a.triggerType, a.condition);
+  if (fields.length) throw forbidden(`only a super admin may write a condition on ${fields.join(", ")}`);
+}
+
 /** The same gate, asked about a rule as it is STORED - for the verbs that act on an existing rule rather than
  *  on a submitted body (enable / disable / delete). A malformed `actions_json` fails closed. */
 function assertMayActOnStored(actor: AppUser, row: { actionsJson: string }): void {
@@ -102,6 +111,7 @@ export async function createAutomation(deps: Deps, actor: AppUser, input: Automa
   const a = toAutomation(input);
   assertValid(a);
   assertMayAuthorActions(actor, a.actions);
+  assertMayConditionOn(actor, a);
   const row = (await deps.db
     .insert(schema.automations)
     .values({
@@ -143,6 +153,7 @@ export async function updateAutomation(deps: Deps, actor: AppUser, id: string, p
   );
   assertValid(merged);
   assertMayAuthorActions(actor, merged.actions);
+  assertMayConditionOn(actor, merged);
   // Re-stamped on EVERY update, not only when the actions move: trust belongs to whoever last decided what
   // this rule does. A rule a super admin wrote and an hr_admin then re-pointed at a different trigger is an
   // hr_admin's rule, and its relayed events must be treated as such.

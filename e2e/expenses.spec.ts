@@ -70,37 +70,43 @@ test("an expense moves through the approve and pay queues, asking at each step",
   await form.getByRole("button", { name: "Submit", exact: true }).click();
   await expect(toast(page, "Expense submitted")).toBeVisible();
 
+  // SOMEBODY ELSE DECIDES. The person an expense is about may not approve or pay it (services/decisionGuard.ts),
+  // so finance - payroll holds `expenses.*.approve` and `.pay` - works the queues from here.
+  const finance = await as("payroll");
+  await gotoRoute(finance, "expenses", "Expenses");
+
   // The approval queue - the tab this page opens on for anybody who can decide.
-  await page.getByRole("tab", { name: /^To approve/ }).click();
-  const inReview = page.locator("tbody tr").filter({ hasText: what });
+  await finance.getByRole("tab", { name: /^To approve/ }).click();
+  const inReview = finance.locator("tbody tr").filter({ hasText: what });
   await expect(inReview).toHaveCount(1);
 
   await inReview.getByRole("button", { name: "Approve", exact: true }).click();
-  const approve = page.getByRole("dialog");
+  const approve = finance.getByRole("dialog");
   await expect(approve.getByText("Approve this request?")).toBeVisible();
   // The dialog names the expense it is deciding, so it can never be mistaken for the row above or below.
   await expect(approve).toContainText(what);
   await approve.getByRole("button", { name: "Approve", exact: true }).click();
-  await expect(toast(page, "Approved")).toBeVisible();
-  await expect(page.locator("tbody tr").filter({ hasText: what })).toHaveCount(0);
+  await expect(toast(finance, "Approved")).toBeVisible();
+  await expect(finance.locator("tbody tr").filter({ hasText: what })).toHaveCount(0);
 
   // Approved and owed: it is now in the payables queue, and nowhere else. The queue is its own server-side
   // read, so this is what a person who has just approved something and gone to pay it actually does.
-  await page.reload();
-  await expect(page.getByRole("main")).toBeVisible();
-  await page.getByRole("tab", { name: /^To pay/ }).click();
-  const payable = page.locator("tbody tr").filter({ hasText: what });
+  await finance.reload();
+  await expect(finance.getByRole("main")).toBeVisible();
+  await finance.getByRole("tab", { name: /^To pay/ }).click();
+  const payable = finance.locator("tbody tr").filter({ hasText: what });
   await expect(payable).toHaveCount(1);
 
   await payable.getByRole("button", { name: "Mark paid", exact: true }).click();
-  const pay = page.getByRole("dialog");
+  const pay = finance.getByRole("dialog");
   await expect(pay.getByLabel(/Payment reference/)).toBeVisible();
   await pay.getByLabel(/Payment reference/).fill("E2E-UTR-1");
   await pay.getByRole("button", { name: "Mark paid", exact: true }).click();
-  await expect(toast(page, "Marked paid")).toBeVisible();
-  await expect(page.locator("tbody tr").filter({ hasText: what })).toHaveCount(0);
+  await expect(toast(finance, "Marked paid")).toBeVisible();
+  await expect(finance.locator("tbody tr").filter({ hasText: what })).toHaveCount(0);
 
-  // And the ledger has it, paid - which is the state surviving a reload rather than living in this browser.
+  // And the ledger has it, paid - which is the state surviving a reload rather than living in this browser,
+  // and what the person who filed it sees.
   await page.reload();
   await expect(page.getByRole("main")).toBeVisible();
   // Not `exact`: the tab carries a "new since you last looked" badge, so its accessible name is "All 1" as

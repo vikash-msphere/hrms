@@ -29,7 +29,8 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 import { round2 } from "../domain/money";
 import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
-import { checkEtag, updateAtVersion } from "./versionGuard";
+import { atVersion, checkEtag, updateAtVersion } from "./versionGuard";
+import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 const MANUAL_REPAY_DEDUP_MS = 60_000; // an identical manual repayment within 60s = accidental double-submit
 
 export async function listLoans(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, status?: string, showDeleted = false, deletedOnly = false) {
@@ -103,20 +104,36 @@ async function setStatus(deps: Deps, id: string, set: Record<string, unknown>, e
 }
 
 // PENDING -> APPROVED: fix the monthly installment amount (principal / installments) and default the start date.
-export async function approveLoan(deps: Deps, actor: AppUser, id: string) {
+//
+// BOUND TO THE VERSION READ. A pending loan stays editable by the borrower, so the principal the instalment is
+// priced from must be the principal that is approved: the flip matches the row's `updated_at` as well as its
+// status, and an edit landing between this read and the write makes the approval a conflict rather than an
+// approval of a figure nobody looked at. With an If-Match, the version the APPROVER looked at is checked too.
+export async function approveLoan(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   const row = await load(deps, id);
   if (row.status !== "PENDING") throw failedPrecondition("only a pending loan can be approved");
+  assertReviewedVersion(row, ifMatch);
+  await assertNotSubject(deps, actor, row.employeeId, "approve", row.kind);
   const monthly = round2(row.principal / Math.max(1, row.installments));
-  const updated = await setStatus(deps, id, { status: "APPROVED", monthlyAmount: monthly, decidedBy: actor.uuid, ...(row.startDate ? {} : { startDate: new Date() }) }, "PENDING");
-  if (!updated) throw failedPrecondition("only a pending loan can be approved");
+  const updated = (await deps.db
+    .update(schema.loans)
+    .set({ status: "APPROVED", monthlyAmount: monthly, decidedBy: actor.uuid, ...(row.startDate ? {} : { startDate: new Date() }), updatedAt: new Date() })
+    .where(and(atVersion(schema.loans, row), eq(schema.loans.status, "PENDING")))
+    .returning())[0];
+  if (!updated) {
+    const now = await load(deps, id);
+    if (now.status !== "PENDING") throw failedPrecondition("only a pending loan can be approved");
+    throw aborted("the loan changed since it was read; re-read it and try again");
+  }
   await audit(deps, actor, "loan.approve", "loans", id, stateMeta(row.status, "APPROVED", { employee: `employees/${row.employeeId}`, diff: { status: { from: row.status, to: "APPROVED" }, monthlyAmount: { from: row.monthlyAmount, to: monthly } } }), updated);
   await notify(deps, { recipient: row.employeeId, type: "loan.approved", title: `${row.kind === "advance" ? "Advance" : "Loan"} approved`, body: `Your ${row.kind} was approved (monthly ${monthly}).`, link: "loans", actorId: actor.employeeId });
   await emitEvent(deps, actor, "loan.approved", { subject: `loans/${id}`, employeeId: row.employeeId, payload: { amount: row.principal, emiAmount: monthly, installments: row.installments } });
   return updated;
 }
-export async function rejectLoan(deps: Deps, actor: AppUser, id: string) {
+export async function rejectLoan(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   const row = await load(deps, id);
   if (row.status !== "PENDING") throw failedPrecondition("only a pending loan can be rejected");
+  assertReviewedVersion(row, ifMatch);
   const updated = await setStatus(deps, id, { status: "REJECTED", decidedBy: actor.uuid }, "PENDING");
   if (!updated) throw failedPrecondition("only a pending loan can be rejected");
   await audit(deps, actor, "loan.reject", "loans", id, stateMeta(row.status, "REJECTED", { employee: `employees/${row.employeeId}` }), updated);
@@ -124,9 +141,11 @@ export async function rejectLoan(deps: Deps, actor: AppUser, id: string) {
   await emitEvent(deps, actor, "loan.rejected", { subject: `loans/${id}`, employeeId: row.employeeId, payload: { amount: row.principal } });
   return updated;
 }
-export async function disburseLoan(deps: Deps, actor: AppUser, id: string) {
+export async function disburseLoan(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   const row = await load(deps, id);
   if (row.status !== "APPROVED") throw failedPrecondition("only an approved loan can be disbursed");
+  assertReviewedVersion(row, ifMatch);
+  await assertNotSubject(deps, actor, row.employeeId, "disburse", row.kind);
   const updated = await setStatus(deps, id, { status: "DISBURSED" }, "APPROVED");
   if (!updated) throw failedPrecondition("only an approved loan can be disbursed");
   await audit(deps, actor, "loan.disburse", "loans", id, stateMeta(row.status, "DISBURSED", { employee: `employees/${row.employeeId}` }), updated);
@@ -141,6 +160,8 @@ export async function recordLoanRepayment(deps: Deps, actor: AppUser, id: string
   const row = await load(deps, id);
   if (row.status !== "DISBURSED") throw failedPrecondition("only a disbursed loan can take repayments");
   if (!(amount > 0)) throw invalidArgument("amount must be greater than 0");
+  // A recorded repayment writes down what the borrower owes, so the borrower may not be the one recording it.
+  await assertNotSubject(deps, actor, row.employeeId, "record repayments on", row.kind);
   const applied = round2(Math.min(amount, row.principal - row.repaid)); // never over-repay past the principal
   // Guard against an accidental double-submit: an identical manual (runId null) repayment of the same amount
   // within the window is almost always the same entry arriving twice (a double-click, a client retry).

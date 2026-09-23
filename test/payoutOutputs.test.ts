@@ -210,6 +210,25 @@ describe("bank file: the payment lines match the run, for the right people, on t
     expect(rows[0]![0]).toBe("111111");
   });
 
+  it("binds a run to the first bank a file was made for, so two banks cannot both pay it", async () => {
+    // Every file carries every payable employee. Two files for two banks on one run, both submitted, is every
+    // salary paid twice - so the second bank is refused, and the first can be regenerated as often as needed.
+    const actor = await seedActor();
+    await seedSetting("organization", { name: "Test Co", banks: [BANK, "ICICI Bank"], default_currency: "INR" });
+    await seedBankTemplate(actor);
+    await seedBankTemplate(actor, "ICICI Bank");
+    const paid = await seedEmployee({ code: "04-001" });
+    await setBankDetails(deps, actor, paid, { bank_name: BANK, account_number: "111111" });
+    const runId = await seedRun([{ employeeId: paid, net: 1000 }]);
+
+    await buildBankFile(deps, null, runId, BANK);
+    await expect(buildBankFile(deps, null, runId, "ICICI Bank")).rejects.toThrow(/HDFC Bank/);
+    // The same bank again is a regeneration, not a second payout.
+    expect(dataRows((await buildBankFile(deps, null, runId, BANK)).bytes)).toHaveLength(1);
+    const run = (await deps.db.select().from(schema.payrollRuns))[0]!;
+    expect(run.bankFileBank).toBe(BANK);
+  });
+
   it("will not produce a file for a run that is not approved", async () => {
     const actor = await seedActor();
     await seedSetting("organization", { name: "Test Co", banks: [BANK], default_currency: "INR" });

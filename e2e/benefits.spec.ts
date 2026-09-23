@@ -1,4 +1,4 @@
-import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
 
 // Enrolling in a benefit, with a dependent on the cover.
 //
@@ -17,6 +17,9 @@ test("an employee adds a dependent and enrols in a plan that covers them", async
   // line that came with it from failing a test that the retry already recovered.
   allowConsoleErrors(employee, /status of 500|status of 503/i);
   const planName = `E2E Health ${Date.now()}`;
+  // Stamped like the plan: a retry after a failure past the Add press finds the first attempt's dependent still
+  // on this shared employee, and two rows of one name make every lookup below ambiguous.
+  const depName = `E2E Dependent ${Date.now() % 1_000_000}`;
 
   // The catalogue is HR's business (Settings → Benefit plans), so the plan arrives through the API and this
   // spec stays about the employee's side of it.
@@ -28,9 +31,12 @@ test("an employee adds a dependent and enrols in a plan that covers them", async
   await employee.getByRole("button", { name: "Add dependent" }).first().click();
   const dep = employee.getByRole("dialog");
   await expect(dep.getByRole("heading", { name: "Add dependent" })).toBeVisible();
-  await dep.getByLabel("Name").fill("E2E Dependent");
+  await dep.getByLabel("Name").fill(depName);
   await dep.getByRole("button", { name: /^(Add|Save)/ }).last().click();
-  await expect(toast(employee, "Dependent added")).toBeVisible();
+  // Waited on the OUTCOME, not the toast: the toast appears only when the write answers, and on a loaded lane
+  // that can be past the default expect timeout. The dependent's chip is the record landing.
+  const depChip = employee.locator("span").filter({ hasText: depName });
+  await expect(depChip).toBeVisible({ timeout: 30_000 });
 
   // Then the plan. The card carries the press, and the dialog is where the dependent is put on the cover.
   const card = employee.locator("div.shadow-card, div.rounded-lg.border").filter({ hasText: planName }).first();
@@ -38,12 +44,11 @@ test("an employee adds a dependent and enrols in a plan that covers them", async
   await card.getByRole("button", { name: "Enrol" }).click();
   const enrol = employee.getByRole("dialog");
   await expect(enrol.getByRole("heading", { name: `Enrol in ${planName}` })).toBeVisible();
-  await enrol.getByRole("checkbox", { name: /E2E Dependent/ }).click();
+  await enrol.getByRole("checkbox", { name: new RegExp(depName) }).click();
   await enrol.getByRole("button", { name: "Enrol", exact: true }).click();
-  await expect(toast(employee, `Enrolled in ${planName}`)).toBeVisible();
 
   // The card now says they are in - and offers to CHANGE rather than to enrol again.
-  await expect(card.getByRole("button", { name: "Change" })).toBeVisible();
+  await expect(card.getByRole("button", { name: "Change" })).toBeVisible({ timeout: 30_000 });
 
   // Waiving is the other press the card offers right beside it - never pressed anywhere before. Enrolled,
   // it asks first (ending real cover, not a no-op), and the card goes back to offering Enrol afterwards.
@@ -52,7 +57,6 @@ test("an employee adds a dependent and enrols in a plan that covers them", async
   await expect(waiveConfirm.getByText(`Waive ${planName}?`)).toBeVisible();
   await expect(waiveConfirm.getByText(/dependents.*ends/i)).toBeVisible();
   await waiveConfirm.getByRole("button", { name: "Waive", exact: true }).click();
-  await expect(toast(employee, `Waived ${planName}`)).toBeVisible();
   await expect(card.getByRole("button", { name: "Enrol" })).toBeVisible({ timeout: 30_000 });
   // Waived, so there is nothing left to waive - the button is gone rather than offered a second time.
   await expect(card.getByRole("button", { name: "Waive" })).toHaveCount(0);
@@ -60,11 +64,10 @@ test("an employee adds a dependent and enrols in a plan that covers them", async
   // Removing the dependent itself - a different row entirely from the plan card, and never pressed anywhere
   // before this. No success toast of its own (only a failure one), so the chip actually leaving is the only
   // signal there is. This doubles as this spec's own cleanup for the dependent it added.
-  const depChip = employee.locator("span").filter({ hasText: "E2E Dependent" });
   await expect(depChip).toBeVisible({ timeout: 30_000 });
   await depChip.getByRole("button", { name: "Remove" }).click();
   const removeConfirm = employee.getByRole("dialog");
-  await expect(removeConfirm.getByText("Remove E2E Dependent?")).toBeVisible({ timeout: 30_000 });
+  await expect(removeConfirm.getByText(`Remove ${depName}?`)).toBeVisible({ timeout: 30_000 });
   await removeConfirm.getByRole("button", { name: "Remove", exact: true }).click();
   await expect(depChip).toHaveCount(0, { timeout: 30_000 });
 

@@ -1277,6 +1277,19 @@ CREATE TABLE `holidays` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `holidays_code_unique` ON `holidays` (`code`);--> statement-breakpoint
 CREATE INDEX `holidays_page_idx` ON `holidays` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE TABLE `idempotency_keys` (
+	`principal` text NOT NULL,
+	`key` text NOT NULL,
+	`method` text NOT NULL,
+	`path` text NOT NULL,
+	`status` integer DEFAULT 0 NOT NULL,
+	`headers_json` text,
+	`body` text,
+	`created_at` integer NOT NULL,
+	PRIMARY KEY(`principal`, `key`)
+);
+--> statement-breakpoint
+CREATE INDEX `idempotency_keys_created_idx` ON `idempotency_keys` (`created_at`);--> statement-breakpoint
 CREATE TABLE `interview_feedback` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1816,6 +1829,7 @@ CREATE TABLE `payroll_runs` (
 	`gross` real,
 	`net` real,
 	`bank_file_at` integer,
+	`bank_file_bank` text,
 	`unpriced_json` text,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,

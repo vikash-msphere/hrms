@@ -11,7 +11,8 @@ import type { AppUser } from "../env";
 import { audit, auditMany } from "../lib/audit";
 import { byIdChunks } from "../lib/dbBatch";
 import { clearCache, clearCachePrefix } from "../lib/cache";
-import { notFound, failedPrecondition, alreadyExists, invalidArgument } from "../lib/errors";
+import { notFound, failedPrecondition, alreadyExists, invalidArgument, forbidden } from "../lib/errors";
+import { ruleWithinAuthority } from "../domain/access";
 import { validateAccessRule, type AccessRuleInput } from "../domain/policyValidate";
 import { deriveNarrowing } from "../domain/compileGrants";
 import { EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
@@ -136,6 +137,20 @@ function assertNotSelfWidening(actor: AppUser, subjectKind: "role" | "user", sub
   }
   if (subject === EVERYONE_ROLE && !isSuperGrant(actor.grant)) {
     throw failedPrecondition("the 'everyone' role includes you, so its rules are super-admin only");
+  }
+}
+
+/**
+ * AND NOBODY AUTHORS MORE THAN THEY HOLD. The self-widening guard above covers the author's own subjects; this
+ * covers everyone else's. Without it an access admin could write `compensation.**: admin` for a role they do
+ * not hold, or clone super's rules onto one, which is delegating super by proxy. Super is exempt: `**` covers
+ * everything, so the check would only cost it a walk. Clone and the four-eyes approve inherit it - clone
+ * creates through `createAccessRule`, and approving a pending rule is authoring it a second time.
+ */
+function assertWithinAuthority(actor: AppUser, rule: { pattern: string; level: "read" | "write" | "admin" | null; effect: string }): void {
+  if (rule.effect !== "allow" || isSuperGrant(actor.grant)) return;
+  if (!ruleWithinAuthority(actor, rule)) {
+    throw forbidden(`you can only grant access you hold yourself - "${rule.pattern}"${rule.level ? ` at ${rule.level}` : ""} is beyond your own`);
   }
 }
 
@@ -342,6 +357,8 @@ export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown
   assertNotSelfWidening(actor, r.subjectKind, subject);
 
   const pattern = await buildPattern(deps, r);
+  // Nobody hands out more than they hold (domain/access.ts ruleWithinAuthority). A deny only subtracts.
+  assertWithinAuthority(actor, { pattern, level: r.level ?? null, effect: r.effect });
   const n = deriveNarrowing(pattern);
   const values = {
     subject,
@@ -589,6 +606,9 @@ export async function decideAccessRule(deps: Deps, actor: AppUser, id: string, d
 
   const applying = decision === "approve";
   const removing = row.status === "pending_delete";
+  // Approving a pending GRANT is authoring it a second time, so the approver is bound the same way the
+  // author was: the second pair of hands must be able to give this access themselves.
+  if (applying && !removing) assertWithinAuthority(actor, { pattern: row.pattern, level: row.level ?? null, effect: row.effect });
   if ((applying && removing) || (!applying && !removing)) {
     // approve a removal -> the row goes; reject a grant -> the request goes. Either way nothing is left behind.
     await deps.db.delete(schema.accessRules).where(ruleById(id));

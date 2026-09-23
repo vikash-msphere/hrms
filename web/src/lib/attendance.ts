@@ -9,6 +9,29 @@ import { leaveCover, type LeaveRange, type DayCredit } from "../../../src/domain
 // reads it rather than being restated per page.
 export type { LeaveRange, DayCredit };
 
+/** The paths of the leave types that are not paid (`paid: false`, e.g. "Loss of Pay"). */
+export function unpaidLeaveTypes(types: readonly { path: string; paid?: boolean | null }[]): Set<string> {
+  return new Set(types.filter((t) => t.paid === false).map((t) => t.path));
+}
+
+/**
+ * One approved leave request as the range `leaveCover` reads - sessions AND whether its type is paid. Unpaid
+ * leave excuses nothing (src/domain/attendance.ts LeaveRange), so the grid shows those days the way payroll
+ * docks them; built in one place so no surface forgets the flag.
+ */
+export function leaveRangeOf(
+  l: { start_date: string; end_date: string; start_session?: number | null; end_session?: number | null; leave_type?: string | null },
+  unpaid: ReadonlySet<string>,
+): LeaveRange {
+  return {
+    start: l.start_date,
+    end: l.end_date,
+    startSession: l.start_session ?? undefined,
+    endSession: l.end_session ?? undefined,
+    ...(l.leave_type && unpaid.has(l.leave_type) ? { paid: false } : {}),
+  };
+}
+
 /** How a day mark reads on screen. One table, so the badge, the picker and the toast agree. */
 export const CREDIT_LABEL: Record<DayCredit, string> = { full: "Full day", half: "Half day", absent: "Absent" };
 

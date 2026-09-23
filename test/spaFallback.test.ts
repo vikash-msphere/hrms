@@ -13,9 +13,13 @@ import type { Bindings } from "../src/env";
 
 // Inlined at build time rather than read with node:fs: these run inside workerd, which has no filesystem.
 // Same approach the migration suite uses to pull in its .sql files.
-const wranglerToml = Object.values(
-  import.meta.glob("../wrangler.toml", { query: "?raw", import: "default", eager: true }) as Record<string, string>
-)[0]!;
+// Both deploy targets, because they are separate files now: production in wrangler.toml, staging in
+// wrangler.staging.toml. A prefix added to one and not the other means that route reaches the Worker in one
+// environment and is answered by the SPA shell in the other - exactly the difference staging exists to not
+// have, and invisible until somebody rehearses a release and the route 404s there alone.
+const wranglerConfigs = Object.entries(
+  import.meta.glob("../wrangler*.toml", { query: "?raw", import: "default", eager: true }) as Record<string, string>
+);
 
 const viteConfig = Object.values(
   import.meta.glob("../web/vite.config.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>
@@ -24,14 +28,21 @@ const viteConfig = Object.values(
 describe("SPA fallback", () => {
   // wrangler.toml decides which paths reach the Worker at all; WORKER_OWNED_PREFIXES decides how a miss among
   // them is answered. A prefix in one and not the other is invisible until that route starts serving HTML.
-  it("WORKER_OWNED_PREFIXES matches run_worker_first in wrangler.toml", () => {
-    const matches = [...wranglerToml.matchAll(/^\s*run_worker_first\s*=\s*\[([^\]]*)\]/gm)];
-    expect(matches.length).toBeGreaterThan(0); // the regex silently passing on zero matches would prove nothing
-    for (const [, list] of matches) {
-      const prefixes = [...list!.matchAll(/"([^"]+)"/g)]
-        .map((m) => m[1]!.replace(/\/\*$/, "")) // "/v1/*" -> "/v1"
-        .sort();
-      expect(prefixes).toEqual([...WORKER_OWNED_PREFIXES].sort());
+  it("WORKER_OWNED_PREFIXES matches run_worker_first in every wrangler config", () => {
+    // Two files are expected. One means the staging config was deleted or renamed and this gate quietly
+    // stopped covering it, which is the failure mode a `for` loop over whatever matched cannot report.
+    expect(wranglerConfigs.map(([path]) => path).sort()).toEqual(
+      ["../wrangler.staging.toml", "../wrangler.toml"],
+    );
+    for (const [path, toml] of wranglerConfigs) {
+      const matches = [...toml.matchAll(/^\s*run_worker_first\s*=\s*\[([^\]]*)\]/gm)];
+      expect(matches.length, path).toBeGreaterThan(0); // the regex silently passing on zero matches would prove nothing
+      for (const [, list] of matches) {
+        const prefixes = [...list!.matchAll(/"([^"]+)"/g)]
+          .map((m) => m[1]!.replace(/\/\*$/, "")) // "/v1/*" -> "/v1"
+          .sort();
+        expect(prefixes, path).toEqual([...WORKER_OWNED_PREFIXES].sort());
+      }
     }
   });
 

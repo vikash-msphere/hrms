@@ -9,7 +9,7 @@ import { usePermission } from "@/lib/perm";
 import { navigate } from "@/router";
 import type { LeaveDraft } from "@/lib/leaveDraft";
 import { RequestLeaveDialog } from "@/components/common/RequestLeaveDialog";
-import { summarizeByDay, buildAttendanceRows, fmtHM, fmtDuration, localDay, localMinutes, enumerateDays, weekdayOf, DEFAULT_SCHEDULE, type AttendanceSchedule, type DayStatus, type AttendanceRow } from "@/lib/attendance";
+import { summarizeByDay, buildAttendanceRows, fmtHM, fmtDuration, localDay, localMinutes, enumerateDays, weekdayOf, DEFAULT_SCHEDULE, leaveRangeOf, unpaidLeaveTypes, type AttendanceSchedule, type DayStatus, type AttendanceRow } from "@/lib/attendance";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -293,6 +293,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   // the breakdown affordance, every leave type resolves to the single neutral colour.
   const typeById = useMemo(() => new Map(leaveTypes.map((t) => [idOf(t.path), t] as const)), [leaveTypes]);
   const activeLeaveTypes = useMemo(() => leaveTypes.filter((t) => !t.delete_time && !t.disabled), [leaveTypes]);
+  const unpaidTypes = useMemo(() => unpaidLeaveTypes(leaveTypes), [leaveTypes]);
   const colorOf = (leaveTypeRef?: string) => {
     if (!distinctLeaveColors) return ONE_LEAVE_COLOR;
     const id = leaveTypeRef ? idOf(leaveTypeRef) : "";
@@ -366,13 +367,9 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       const summaries = summarizeByDay(byEmp.get(eid) ?? [], schedule);
       const punchedDays = new Set(summaries.map((s) => s.day)); // days the employee actually clocked in
       // The session flags come along, so a half-day leave reads as half a day here too rather than as a day
-      // fully excused (see lib/attendance.ts `leaveRanges`).
-      const leaveRanges = (leavesByEmp.get(eid) ?? []).map((l) => ({
-        start: l.start_date.slice(0, 10),
-        end: l.end_date.slice(0, 10),
-        startSession: l.start_session,
-        endSession: l.end_session,
-      }));
+      // fully excused (see lib/attendance.ts `leaveRanges`) - and so does whether the leave is paid, so unpaid
+      // leave reads here the way payroll docks it.
+      const leaveRanges = (leavesByEmp.get(eid) ?? []).map((l) => leaveRangeOf({ ...l, start_date: l.start_date.slice(0, 10), end_date: l.end_date.slice(0, 10) }, unpaidTypes));
       const onLeaveDay = (day: string) => leaveRanges.some((r) => r.start <= day && day <= r.end);
       // Split the employee's events: count-as-work events credit per-day worked minutes; the rest just mark
       // Only count_as_work events touch attendance, and only as credited minutes: an event that doesn't count
@@ -411,7 +408,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       out.set(eid, new Map(shown.map((r) => [r.day, r] as const)));
     }
     return out;
-  }, [sessions, sessionsTruncated, employees, leavesByEmp, eventsByEmp, holidays, schedule, startMs, endMs, workDays]);
+  }, [sessions, sessionsTruncated, employees, leavesByEmp, eventsByEmp, holidays, schedule, startMs, endMs, workDays, unpaidTypes]);
 
   // Styled tooltip card for an attendance day: a colored status header, the punch times / hours worked, and
   // late-arrival / early-departure chips (kept even when flexible hours count the day as full).

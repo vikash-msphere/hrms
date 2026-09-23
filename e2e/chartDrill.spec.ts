@@ -131,16 +131,23 @@ test.describe("chart drill-through", () => {
       // stroke is centred on it, so it is in the ink whatever the chart's size - and `getScreenCTM` maps it to
       // where the pointer has to go. A synthetic `dispatchEvent` would pass this line without proving a person
       // can press the slice at all, which is the one thing worth proving here.
-      const at = await slices.first().evaluate((el) => {
-        const p = el as unknown as SVGPathElement;
-        const pt = p.getPointAtLength(p.getTotalLength() / 8);
-        const m = p.getScreenCTM();
-        if (!m) return null;
-        return { x: pt.x * m.a + pt.y * m.c + m.e, y: pt.x * m.b + pt.y * m.d + m.f };
-      });
-      if (!at) throw new Error("e2e: the donut slice has no screen geometry to press");
-      await page.mouse.click(at.x, at.y);
-      await expect.poll(() => page.url()).toContain("slice=state%3A");
+      // Measured and pressed as ONE retried unit: the ticket list is shared, other specs file tickets while this
+      // runs, and the chart redraws with them - a point measured before a redraw can be pressed after it. The
+      // unit stops the moment the URL carries the slice, so a press that merely landed late is never pressed a
+      // second time (the same slice again would clear it).
+      await expect(async () => {
+        if (page.url().includes("slice=state%3A")) return;
+        const at = await slices.first().evaluate((el) => {
+          const p = el as unknown as SVGPathElement;
+          const pt = p.getPointAtLength(p.getTotalLength() / 8);
+          const m = p.getScreenCTM();
+          if (!m) return null;
+          return { x: pt.x * m.a + pt.y * m.c + m.e, y: pt.x * m.b + pt.y * m.d + m.f };
+        });
+        if (!at) throw new Error("e2e: the donut slice has no screen geometry to press");
+        await page.mouse.click(at.x, at.y);
+        await expect.poll(() => page.url(), { timeout: 5_000 }).toContain("slice=state%3A");
+      }).toPass({ timeout: 30_000 });
       await expect(page.getByRole("button", { name: "Show all" })).toBeVisible();
 
       // A reload keeps it: the pick is in the URL, which is what makes a narrowed page shareable.

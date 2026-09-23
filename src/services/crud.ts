@@ -15,9 +15,9 @@ import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { notFound, aborted, alreadyExists, unimplemented, invalidArgument, errorChainText } from "../lib/errors";
 
-// The shape of an internal resource id: 8 random bytes in Crockford base32 (lib/idCodec genId). The only id a
-// caller-supplied `?id` may be, since it becomes the row's primary key.
-const INTERNAL_ID_RE = /^[0-9a-hj-km-np-tv-z]{13}$/;
+// The shape of an internal resource id (lib/idCodec isInternalId): the only id a caller-supplied `?id` may be,
+// since it becomes the row's primary key. The route checks it first; this is the service's own backstop.
+import { isInternalId } from "../lib/idCodec";
 import { etagOf } from "../http/serialize";
 import { softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import { keysetPage } from "./keysetPage";
@@ -231,7 +231,7 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
       // outbound wire edge only tokenizes a 13-char base32 internal id (middleware/encodeWireIds REF_RE), so
       // any other spelling silently creates a row whose id is published raw and never becomes a wire token.
       // Refusing it is also the only thing standing between the caller and an arbitrary-length PK.
-      if (id !== undefined && !INTERNAL_ID_RE.test(id)) throw invalidArgument("`id` must be a 13-character base32 resource id");
+      if (id !== undefined && !isInternalId(id)) throw invalidArgument("`id` must be a 13-character base32 resource id");
       // `InsertOf` narrows what a SPEC may hand back; inside the factory the value is an ordinary column bag
       // again. Omit over a generic `T["$inferInsert"]` does not resolve to a concrete key set, so the two
       // consumers below need the un-narrowed shape - the constraint's whole job is at the spec boundary above.

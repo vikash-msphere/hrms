@@ -9,12 +9,25 @@ evidence lives. `BUDGET` and `ESTIMATED_NEURONS` in `src/domain/aiPolicy.ts` are
 guesses - 1 neuron per embed, 60 per guard pass, 120 per conduct pass and per generation - and nothing in the
 repo reads a real figure back.
 
-## The decision: no AI Gateway
+## The decision: AI Gateway on, with its cache off
 
-`AI_GATEWAY_ID` stays unset. `src/lib/ai.ts` keeps its gateway support, because removing it would mean
-re-deciding this later with the code gone, but nothing in the deploy path sets the var.
+`AI_GATEWAY_ID` is set per environment - `hrms` in `[vars]`, `hrms-staging` in `[env.staging.vars]`. Setup
+and the three gateway settings are `docs/deploy-ai.md` step 3.
 
-Four reasons, weakest to strongest.
+This reverses the recommendation this file originally carried, which was not to use one. The analysis below
+is unchanged and was not the reason: it still says the analytics largely duplicate `ai_usage`, the cache is
+worth nothing behind `ai_cache`, and the hop is a real cost in front of a gate that fails closed. The decision
+is to buy per-request observability anyway and manage the hop, on the grounds that it is one variable, it is
+reversible by commenting out two lines, and a week of real logs settles empirically what this file could only
+argue. **The gateway's own cache stays off** - that part of the analysis is acted on rather than overridden.
+
+What this changes about the risks: the second hop is now real, so `AI_GATEWAY_ID` is changed before the
+moderation gate goes live and never after, and the first day's job is confirming the Logs view shows metadata
+and no bodies.
+
+### Why it was argued against
+
+Four reasons, weakest to strongest. They are the cost side of the decision above, not a case against it.
 
 **It duplicates `ai_usage`.** The gateway's analytics are `model`, `provider`, `gateway`, timestamp and a
 count. `ai_usage` (`src/db/schema.ts:1770`) already records `model`, `role`, `feature`, `userId`, `subject`,
@@ -31,15 +44,30 @@ status, cost and duration per request, with a lifetime and a deletion story sepa
 logging docs do not state precedence between that per-request header and a gateway-level setting, so the
 guarantee the code comment asserts is undocumented rather than wrong.
 
-**It puts a second hop in front of a gate that fails closed.** This is the one that decides it. A wrong or
-deleted gateway id reads to the app as "the model was silent", which lands at `src/services/moderation.ts:232`
-and is resolved by `ai.moderationFallback` - default `hold`. A typo in a var stops every wall accepting posts,
-and the only place that says so is `ai_usage.error`. Today there is one hop between `aiEmbed`/`aiGenerate` and
-a model. Adding a second to gain analytics we already have is the wrong trade.
+**It puts a second hop in front of a gate that fails closed.** The heaviest of the four, and the one the
+operating rules above exist to contain. A wrong or deleted gateway id reads to the app as "the model was
+silent", which lands at `src/services/moderation.ts:232` and is resolved by `ai.moderationFallback` - default
+`hold`. A typo in a var stops every wall accepting posts, and the only place that says so is
+`ai_usage.error`. Hence: the id changes before the gate is live, never after.
 
-## Where the numbers come from instead
+### What was checked and does not apply
 
-Two sources, both without a gateway.
+Two capabilities that would have argued FOR a gateway on their own, both of which die on this architecture:
+
+- **Retry and model fallback** are Universal Endpoint features, reached over REST. `src/lib/ai.ts` calls
+  `binding.run(...)`, and the docs present fallback only through the REST path. Retry in front of a
+  fail-closed gate would genuinely reduce held posts, and it is not available without rewriting the transport.
+- **DLP** would be a second net under the `aiPolicy.ts` denylist, but whether it works with
+  `cf-aig-collect-log-payload: false`, or on binding calls at all, is undocumented. Its Block action returns
+  400, which on the moderation path reads as "model silent" and holds the post - the same hazard with a new
+  trigger. Flag mode only reports what `assertDeclaredReadable` already refuses earlier, by collection.
+
+Both become live questions if this app ever calls a provider other than Workers AI, which is when the
+Universal Endpoint and the whole trade would be worth re-opening.
+
+## Where the neuron numbers come from
+
+Two sources, neither of which is the gateway.
 
 **Ours, per call.** `ai_usage`, queried as `docs/deploy-ai.md` step 7 already shows. It answers which feature
 spent what, who asked, how long it took and what failed. What it cannot answer is what a call actually cost,

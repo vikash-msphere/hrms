@@ -1,0 +1,112 @@
+# STAGING. A deploy target in its own right, not a variation on production:
+#
+#   npx wrangler deploy --config wrangler.staging.toml
+#   npx wrangler d1 migrations apply hrms-staging --remote --config wrangler.staging.toml
+#   npx wrangler secret put EMAIL_API_KEY --config wrangler.staging.toml
+#   npm run deploy:staging          # preflight + verify + build + the deploy line above
+#
+# WHY A SEPARATE FILE rather than the `[env.staging]` block this used to be. Wrangler does not inherit
+# top-level bindings or vars into a named environment - every one has to be repeated inside the block - and a
+# repeat that is *silently optional* is the worst kind: forget `[env.staging.vars]` and staging deploys with
+# no vars at all rather than failing, forget `[[env.staging.d1_databases]]` and it deploys with no database.
+# Nothing in the file says which keys were meant to be there. Two files make each target readable end to end,
+# and make "what does staging actually run with" a question you answer by reading one file top to bottom.
+#
+# WHAT THAT COSTS, stated plainly: the duplication is now across files, where a diff does not show it. Three
+# things must be kept in step by hand, and `npm run preflight` checks all three rather than trusting anyone to
+# remember - the compatibility date, the `[limits]` block, and `run_worker_first`.
+#
+# WHAT MUST NOT MATCH: the D1 database, the R2 bucket, the Vectorize index and the AI Gateway id are all
+# per-environment and sharing any of them would have staging write into production's data.
+name = "hrms-staging"
+main = "src/index.ts"
+# Keep in step with wrangler.toml - preflight fails the deploy when the two disagree. Staging rehearses
+# production under production's runtime semantics or it rehearses nothing, and the read-the-note-in-the-other-
+# file version of this rule is exactly what drifted before. See the long note in wrangler.toml for why the
+# date must also not outrun the workerd bundled with the installed `wrangler`.
+compatibility_date = "2026-03-10"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# The SAME CPU envelope as production. Staging exists to rehearse a release, and a rehearsal under a different
+# limit does not rehearse it: without this, staging ran on the platform default (30s) while production has 60s,
+# so the one failure staging is best placed to catch - a payslip batch that outgrew its invocation - would fail
+# there, get written off as "staging is slower", and pass in production for another month.
+[limits]
+cpu_ms = 60000
+
+# Identical to production's by requirement, not by coincidence: `run_worker_first` decides which paths reach
+# the Worker at all, and a prefix present in one file and missing from the other means that route serves the
+# SPA shell in one environment and a real response in the other. test/spaFallback.test.ts pins both files
+# against WORKER_OWNED_PREFIXES for that reason. See the note on the production [assets] block.
+[assets]
+directory = "./web/dist"
+binding = "ASSETS"
+not_found_handling = "none"
+run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag", "/__scheduled"]
+
+[vars]
+# Off here as in production, and turned on at deploy time by `npm run deploy:staging` (`--var
+# D1_SESSIONS:true`) - see the long note in wrangler.toml. This file is read by `wrangler dev --config
+# wrangler.staging.toml` too, and a session opened against a local database dies at its first query.
+D1_SESSIONS = "false"
+# EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY - set it
+# on THIS worker (`wrangler secret put EMAIL_API_KEY --config wrangler.staging.toml`); a secret does not
+# travel between the two. Also `console`, which logs the message instead of sending it.
+EMAIL_PROVIDER = "resend"
+EMAIL_FROM = "hr@msphere.io"
+# Staging rehearses a RELEASE, and the nightly cron is part of what gets rehearsed - probation reminders,
+# expiring-document nudges, anniversary mail, one message per matching employee. Against its own copy of the
+# database, with a real vendor and a real company sender, that is real mail to real people about a rehearsal.
+# So every message is diverted here instead, with the intended recipient kept in the subject (src/lib/email.ts).
+# Change it to the address that should receive staging's mail. Production must never set this - preflight
+# refuses it there, because diverting every payslip notification to one mailbox is a silent outage.
+EMAIL_REDIRECT_TO = "hr@msphere.io"
+ALLOWED_EMAIL_DOMAINS = "msphere.io"
+# Optional network fence on the attendance clock: comma-separated individual IPs and/or CIDR blocks (IPv4 and
+# IPv6 may be mixed) that `attendance/me:clockIn` / `:clockOut` are accepted from - the office egress IPs and
+# the VPN. Unset or empty = no fence (punch from anywhere). An APPROVED remote-work request eases it for
+# exactly its dates. A malformed entry is refused at startup.
+# ATTENDANCE_ALLOWED_IPS = "203.0.113.7, 198.51.100.0/24, 2001:db8::/32"
+# The same project as production; SENTRY_ENVIRONMENT below is what separates the two in the tracker.
+SENTRY_DSN = "https://b0783df050ada7c6adc0a89aaa15b4f4@o4511976927461376.ingest.de.sentry.io/4511982864498768"
+SENTRY_ENVIRONMENT = "staging"
+# SENTRY_RELEASE is set at deploy time, never here - see the note in wrangler.toml.
+# Its OWN gateway, for the same reason it gets its own index. The log allowance is per ACCOUNT on the free
+# plan (100,000 across every gateway), so one id shared by both environments merges their logs and spends one
+# budget on two stories - and staging is the noisier of the two. Create it beside the production one.
+AI_GATEWAY_ID = "hrms-staging"
+
+# Staging shares production's 10,000 Neuron/day account allocation, so a rehearsal can starve the live app.
+# Either leave this bound and give staging a small slice of the budget in settings, or delete this block and
+# let staging exercise the non-AI fallback paths, which is the more useful rehearsal of the two.
+[ai]
+binding = "AI"
+
+# Its OWN index, never production's. Staging runs against a copy of the database with different record ids,
+# so sharing one index would mean staging's upserts overwriting production's entries and its searches
+# returning rows that do not exist there. Create it with the same dimensions and metric:
+#
+#   wrangler vectorize create hrms-search-staging --dimensions=384 --metric=cosine
+#   wrangler vectorize create-metadata-index hrms-search-staging --property-name=collection --type=string
+[[vectorize]]
+binding = "VEC"
+index_name = "hrms-search-staging"
+
+# Fill in database_id after `wrangler d1 create hrms-staging`. Deploying this file with the placeholder still
+# in it is a blocking preflight error; a production deploy reports it as a warning, because a half-provisioned
+# staging is worth knowing about but is not production's problem.
+[[d1_databases]]
+binding = "DB"
+database_name = "hrms-staging"
+database_id = "REPLACE_WITH_STAGING_D1_ID"
+migrations_dir = "src/db/migrations"
+
+[[r2_buckets]]
+binding = "DOCS"
+bucket_name = "hrms-staging"
+
+[triggers]
+crons = ["*/5 * * * *", "0 2 * * *"]

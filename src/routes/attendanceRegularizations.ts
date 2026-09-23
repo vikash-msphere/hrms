@@ -38,8 +38,8 @@ export const attendanceRegularizations = collectionRoutes<RegularizationInput, t
     return listRegularizations(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), emp ? emp.split("/").pop()! : undefined);
   },
   verbs: {
-    approve: { run: (deps, user, id) => approveRegularization(deps, user, id) },
-    reject: { run: (deps, user, id) => rejectRegularization(deps, user, id) },
+    approve: { run: (deps, user, id, _body, c) => approveRegularization(deps, user, id, c.req.header("If-Match")) },
+    reject: { run: (deps, user, id, _body, c) => rejectRegularization(deps, user, id, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelRegularization(deps, user, id) },
   },
 });

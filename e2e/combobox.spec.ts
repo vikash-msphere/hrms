@@ -26,7 +26,9 @@ test("the shared picker filters as you type, and Enter takes the highlighted row
 
   // Type a few letters and take the match with the keyboard alone.
   await picker.click();
-  await dialog.getByPlaceholder("Search…").fill(person.first_name);
+  // The FULL name: the first employee listed is often one another spec provisioned, whose first name is just
+  // "E2E" - a filter on that matches every such person, and the top row is then somebody else.
+  await dialog.getByPlaceholder("Search…").fill(person.name);
   await expect(dialog.getByRole("option", { name: person.name })).toBeVisible();
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("ArrowUp"); // back to the top of the filtered list

@@ -282,12 +282,12 @@ export const cashfreeProvider: EsignProvider = {
     const expected = await hmacB64(secret, ts + i.rawBody);
     if (!timingSafeEqual(provided, expected)) return null;
     // Replay protection: reject a payload whose signed timestamp is > 5 min from now. The timestamp is epoch
-    // seconds (some deliveries use ms); normalize before comparing. A missing/unparseable ts already failed above.
-    const tsNum = Number(ts);
-    if (Number.isFinite(tsNum)) {
-      const tsMs = tsNum > 1e12 ? tsNum : tsNum * 1000;
-      if (Math.abs(Date.now() - tsMs) > WEBHOOK_SKEW_MS) return null;
-    }
+    // seconds (some deliveries use ms); normalize before comparing. A timestamp that is not a number is REFUSED:
+    // it was skipped instead, so any captured delivery signed over a non-numeric timestamp replayed forever.
+    const tsNum = /^\d+$/.test(ts.trim()) ? Number(ts) : NaN;
+    if (!Number.isFinite(tsNum)) return null;
+    const tsMs = tsNum > 1e12 ? tsNum : tsNum * 1000;
+    if (Math.abs(Date.now() - tsMs) > WEBHOOK_SKEW_MS) return null;
     // Drop stale redeliveries: a webhook past the max retry count is left to the poll fallback (refreshEsign / cron).
     const attempt = Number(i.headers["x-webhook-attempt"] || "0");
     if (Number.isFinite(attempt) && attempt > MAX_WEBHOOK_ATTEMPT) return null;

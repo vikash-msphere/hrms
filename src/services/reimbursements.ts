@@ -18,6 +18,7 @@ import { outstandingOf } from "../domain/loans";
 import { repaidCreditStmt } from "./loans";
 import { runBatch, runBatchChecked } from "../lib/dbBatch";
 import { genId } from "../lib/idCodec";
+import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 
 export type ReimbursementInput = {
   employee?: string | null;
@@ -102,13 +103,15 @@ async function resolveAdvance(deps: Deps, path: string | null | undefined, emplo
   return advanceId;
 }
 
-async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED") {
+async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", ifMatch?: string) {
   const row = await getReimbursement(deps, actor, id);
-  // Who may approve/reject/cancel is enforced centrally by the verb's grant (middleware). Here only the
-  // instance state matters: the claim must still be pending.
+  // Who may approve/reject/cancel is enforced centrally by the verb's grant (middleware). Here the claim must
+  // still be pending, be the version the decider read, and - to approve - not be the decider's own.
   if (row.state !== "PENDING") {
     throw failedPrecondition(to === "CANCELLED" ? "only pending claims can be cancelled" : "claim is not pending");
   }
+  assertReviewedVersion(row, ifMatch);
+  if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "reimbursement claim");
   // APPROVING A CLAIM FILED AGAINST AN ADVANCE discharges the advance instead of paying the money out again.
   //
   // ONE ATOMIC BATCH with the state flip, and that is the whole difficulty. The flip is the exactly-once guard
@@ -197,8 +200,8 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   return updated;
 }
 
-export const approveReimbursement = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "APPROVED");
-export const rejectReimbursement = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "REJECTED");
+export const approveReimbursement = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "APPROVED", ifMatch);
+export const rejectReimbursement = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", ifMatch);
 export const cancelReimbursement = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");
 
 // ---- Expense bridge -------------------------------------------------------------------------------------
@@ -310,9 +313,11 @@ export function markReimbursementsSettledStmt(deps: Deps, ids: string[], at: Dat
 }
 
 // Separate-mode :pay - mark an approved claim paid out-of-band (no payroll run).
-export async function payReimbursement(deps: Deps, actor: AppUser, id: string) {
+export async function payReimbursement(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   const row = await getReimbursement(deps, actor, id);
   if (row.state !== "APPROVED") throw failedPrecondition("only approved claims can be marked paid");
+  assertReviewedVersion(row, ifMatch);
+  await assertNotSubject(deps, actor, row.employeeId, "mark paid", "reimbursement claim");
   // Guard on APPROVED so pay is EXACTLY-ONCE (0 rows = already paid by a concurrent call): no double payout notification.
   const [updated] = await deps.db
     .update(schema.reimbursements)

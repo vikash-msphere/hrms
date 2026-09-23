@@ -12,6 +12,7 @@ import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
+import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 
 // Work-from-home / remote-day requests: an employee asks to work remotely over a date range; a manager (own
 // dept) or HR approves/rejects, the owner cancels while pending. Mirrors the overtime/regularization pattern
@@ -69,9 +70,11 @@ export async function createRemoteWorkRequest(deps: Deps, actor: AppUser, input:
   return row;
 }
 
-async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", note?: string | null) {
+async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", note?: string | null, ifMatch?: string) {
   const row = await getRemoteWorkRequest(deps, actor, id);
   if (row.state !== "PENDING") throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
+  assertReviewedVersion(row, ifMatch);
+  if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "remote work request");
   // Guard the flip on PENDING so the decision is EXACTLY-ONCE (0 rows = already decided by a concurrent call).
   const [updated] = await deps.db
     .update(schema.remoteWorkRequests)
@@ -87,6 +90,6 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   return updated;
 }
 
-export const approveRemoteWorkRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null) => decide(deps, actor, id, "APPROVED", note);
-export const rejectRemoteWorkRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null) => decide(deps, actor, id, "REJECTED", note);
+export const approveRemoteWorkRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "APPROVED", note, ifMatch);
+export const rejectRemoteWorkRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "REJECTED", note, ifMatch);
 export const cancelRemoteWorkRequest = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");

@@ -14,6 +14,7 @@ import { DEFAULT_ATTENDANCE, type AttendanceConfig, localDay } from "../domain/a
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { restateLopForDay } from "./payroll";
+import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 
 // Attendance regularization requests: an employee asks to correct a whole day's clock times, submitting the
 // COMPLETE intended set of in/out pairs for the day. A manager (own dept) or HR approves; on approval the
@@ -81,10 +82,14 @@ export async function createRegularization(deps: Deps, actor: AppUser, input: Re
   return row;
 }
 
-async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED") {
+async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", ifMatch?: string) {
   const row = await getRegularization(deps, actor, id);
-  // Who may approve/reject/cancel is gated by the verb's grant (middleware). Here only state matters.
+  // Who may approve/reject/cancel is gated by the verb's grant (middleware). Here: state, the version the
+  // decider read, and - to approve - that it is not their own, since approval rewrites the day's punches and
+  // with them the day's loss of pay.
   if (row.state !== "PENDING") throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
+  assertReviewedVersion(row, ifMatch);
+  if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "regularization");
   // Guard the flip on PENDING so approval is EXACTLY-ONCE: without it a double-clicked approve would
   // supersede the day's punches + insert the correction sessions twice (0 rows = already decided).
   const [updated] = await deps.db
@@ -160,6 +165,6 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   return updated;
 }
 
-export const approveRegularization = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "APPROVED");
-export const rejectRegularization = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "REJECTED");
+export const approveRegularization = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "APPROVED", ifMatch);
+export const rejectRegularization = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", ifMatch);
 export const cancelRegularization = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");

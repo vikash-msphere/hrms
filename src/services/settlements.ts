@@ -14,7 +14,7 @@ import {
 } from "./taxProjection";
 import { encashmentRateConfig } from "./leaveEncashments";
 import { orgToday, dayStartMs } from "./orgDay";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, lopDayUnits, eventCreditByDay, sessionWorkedMinutes } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, lopDayUnits, eventCreditByDay, sessionWorkedMinutes, unpaidLeaveDayUnits } from "../domain/attendance";
 import { marksForPeriod } from "./attendanceDayMarks";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidReimbursements, markReimbursementsSettledStmt, releaseReimbursementsSettledStmt } from "./reimbursements";
@@ -114,6 +114,69 @@ function releaseSettlementStmts(deps: Deps, refs: SettledRefs, at: Date): BatchS
   return stmts;
 }
 
+/**
+ * Which pay periods a committed run has already paid this employee for, around their exit.
+ *
+ * `finalPaid`: the period containing the settlement date has an APPROVED or PUBLISHED run item for them, so its
+ * salary is paid and the settlement must not price those days again. `unpaid`: the periods that ended inside
+ * their employment, before the exit month, with no committed item - paid by neither path, and reported rather
+ * than priced, since whether a month was paid off-system is not something this can know. Three reads: runs for
+ * the candidate periods, then this employee's items in them (pay periods come off the per-request snapshot).
+ */
+async function runCoverage(deps: Deps, employeeId: string, startedMs: number | null, settleMs: number): Promise<{ finalPaid: boolean; finalPeriodName: string | null; unpaid: string[] }> {
+  const periods = (await refPayPeriods(deps)).filter((p) => +new Date(p.periodStart) <= settleMs && (startedMs == null || +new Date(p.periodEnd) >= startedMs));
+  if (!periods.length) return { finalPaid: false, finalPeriodName: null, unpaid: [] };
+  const runs = await byIdChunks(periods.map((p) => p.uuid), (group) =>
+    deps.db
+      .select({ uuid: schema.payrollRuns.uuid, payPeriodId: schema.payrollRuns.payPeriodId })
+      .from(schema.payrollRuns)
+      .where(and(inArray(schema.payrollRuns.payPeriodId, group), inArray(schema.payrollRuns.state, ["APPROVED", "PUBLISHED"]))));
+  const periodOfRun = new Map(runs.map((r) => [r.uuid, r.payPeriodId]));
+  const paidPeriods = new Set<string>();
+  if (runs.length) {
+    const items = await byIdChunks(runs.map((r) => r.uuid), (group) =>
+      deps.db.select({ runId: schema.payrollRunItems.runId }).from(schema.payrollRunItems).where(and(eq(schema.payrollRunItems.employeeId, employeeId), inArray(schema.payrollRunItems.runId, group))));
+    for (const it of items) {
+      const p = periodOfRun.get(it.runId);
+      if (p) paidPeriods.add(p);
+    }
+  }
+  const final = periods.find((p) => +new Date(p.periodStart) <= settleMs && settleMs <= +new Date(p.periodEnd)) ?? null;
+  const unpaid = periods
+    .filter((p) => p !== final && +new Date(p.periodEnd) < settleMs && !paidPeriods.has(p.uuid))
+    .sort((a, b) => +new Date(a.periodStart) - +new Date(b.periodStart))
+    .map((p) => `pay-periods/${p.uuid}`);
+  return { finalPaid: !!final && paidPeriods.has(final.uuid), finalPeriodName: final?.label ?? null, unpaid };
+}
+
+/**
+ * Approved UNPAID leave day-units in the final month's employed window - what the exit month docks when
+ * automatic loss of pay is off, matching the run build (services/payroll.ts). Two reads: holidays come off the
+ * per-request snapshot, leave is bound to the month in SQL.
+ */
+async function finalMonthUnpaidLeaveDays(deps: Deps, employeeId: string, fromMs: number, untilMs: number, endYmd: string, att: AttendanceConfig): Promise<number> {
+  const toMs = Math.max(untilMs, Date.parse(`${endYmd}T00:00:00Z`));
+  const unpaidTypes = new Set((await refLeaveTypes(deps)).filter((t) => t.paid === false).map((t) => t.uuid));
+  if (!unpaidTypes.size) return 0;
+  const holidays = new Set(
+    (await refHolidays(deps))
+      .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= fromMs && +new Date(h.date) <= toMs)
+      .map((h) => utcDay(+new Date(h.date))),
+  );
+  const ranges = (await deps.db
+    .select()
+    .from(schema.leaveRequests)
+    .where(and(
+      eq(schema.leaveRequests.employeeId, employeeId),
+      eq(schema.leaveRequests.state, "APPROVED"),
+      gte(schema.leaveRequests.endDate, new Date(fromMs - 86_400_000)),
+      lte(schema.leaveRequests.startDate, new Date(toMs + 2 * 86_400_000)),
+    )))
+    .filter((l) => +new Date(l.endDate) >= fromMs && +new Date(l.startDate) <= toMs)
+    .map((l) => ({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)), startSession: l.startSession, endSession: l.endSession, ...(unpaidTypes.has(l.leaveTypeId) ? { paid: false } : {}) }));
+  return unpaidLeaveDayUnits(utcDay(fromMs), endYmd, att.work_days, holidays, ranges);
+}
+
 // Unexcused absence day-units inside the final month's employed window, from exactly the facts a payroll run
 // uses (holidays, approved leave, attendance punches) so the exit month is docked the same way every other
 // month is. Scoped to one employee and one month, so it stays a handful of reads.
@@ -153,6 +216,7 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
   // was narrowed for exactly this reason; these are the two it left behind.
   const windowFrom = new Date(fromMs - 86_400_000);
   const windowTo = new Date(toMs + 2 * 86_400_000);
+  const unpaidTypes = new Set((await refLeaveTypes(deps)).filter((t) => t.paid === false).map((t) => t.uuid));
   const leaveRanges = (await deps.db
     .select()
     .from(schema.leaveRequests)
@@ -165,8 +229,9 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
     .filter((l) => l.state === "APPROVED" && +new Date(l.endDate) >= fromMs && +new Date(l.startDate) <= toMs)
     // The half-day SESSIONS travel with the range, for the reason domain/attendance.ts#leaveCover gives: a
     // boundary session costs half a day of balance, so excusing the whole day from loss of pay pays for the
-    // half the leaver neither worked nor took.
-    .map((l) => ({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)), startSession: l.startSession, endSession: l.endSession }));
+    // half the leaver neither worked nor took. And whether the leave is PAID travels too: an unpaid range
+    // excuses nothing (domain/attendance.ts LeaveRange), exactly as the run build reads it.
+    .map((l) => ({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)), startSession: l.startSession, endSession: l.endSession, ...(unpaidTypes.has(l.leaveTypeId) ? { paid: false } : {}) }));
   const workedByDay = new Map<string, number>();
   for (const s of await deps.db
     .select()
@@ -445,7 +510,14 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   const daysInMonth = daysInMonthUTC(settlementDate);
   const monthStartMs = Date.UTC(settlementDate.getUTCFullYear(), settlementDate.getUTCMonth(), 1);
   const startedThisMonth = emp.startDate && +new Date(emp.startDate) > monthStartMs ? +new Date(emp.startDate) : monthStartMs;
-  const daysWorkedInMonth = Math.max(0, Math.round((settleMs - startedThisMonth) / 86_400_000) + 1);
+  // WHO ALREADY PAID WHICH MONTH. A run prices everybody not yet `terminated`, and this settlement is routinely
+  // computed before the exit transition flips the status - so a committed run for the exit month has ALREADY
+  // paid that month's salary, and pricing its days here again paid it twice. The run build skips a leaver
+  // whose settlement is dated inside its period (services/payroll.ts `settledOut`); this is the other order.
+  // Earlier months with no committed run item while employed are the opposite gap - paid by neither path - and
+  // are named on the audit record for payroll to settle by hand rather than guessed at here.
+  const coverage = await runCoverage(deps, employeeId, emp.startDate ? +new Date(emp.startDate) : null, settleMs);
+  const daysWorkedInMonth = coverage.finalPaid ? 0 : Math.max(0, Math.round((settleMs - startedThisMonth) / 86_400_000) + 1);
   // Absences are only countable up to today: a settlement computed BEFORE the last working day must not dock days
   // that haven't happened yet (the same clamp the payroll build applies to a mid-period build).
   const lopUntilMs = Math.min(settleMs, +deps.clock.now());
@@ -453,9 +525,13 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   // resolved from whichever source named it, and today's day comes from the clock.
   const todayYmd = localDay(+deps.clock.now(), tz);
   const lopEndYmd = settleYmd < todayYmd ? settleYmd : todayYmd;
-  const lopDaysInFinalMonth = att.lop_enabled && lopUntilMs >= startedThisMonth
-    ? await finalMonthLopDays(deps, employeeId, startedThisMonth, lopUntilMs, lopEndYmd, att)
-    : 0;
+  // With automatic loss of pay off, approved UNPAID leave in the exit month is still docked - the same rule the
+  // run build applies (services/payroll.ts), and the leaver has no later run to correct a disagreement.
+  const lopDaysInFinalMonth = coverage.finalPaid || lopUntilMs < startedThisMonth
+    ? 0
+    : att.lop_enabled
+      ? await finalMonthLopDays(deps, employeeId, startedThisMonth, lopUntilMs, lopEndYmd, att)
+      : await finalMonthUnpaidLeaveDays(deps, employeeId, startedThisMonth, lopUntilMs, lopEndYmd, att);
 
   // ---- Exit benefits --------------------------------------------------------------------------------------
   // Statutory gratuity, and the s.10(10AA) exemption on the leave being encashed, both need completed service.
@@ -650,7 +726,11 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   }
   const row = (await deps.db.select().from(schema.settlements).where(eq(schema.settlements.uuid, settlementId)).limit(1))[0]!;
 
-  await audit(deps, actor, "settlement.compute", "settlements", row.uuid, { employee: `employees/${employeeId}` });
+  await audit(deps, actor, "settlement.compute", "settlements", row.uuid, {
+    employee: `employees/${employeeId}`,
+    ...(coverage.finalPaid ? { final_month: `paid by the committed run for ${coverage.finalPeriodName}` } : {}),
+    ...(coverage.unpaid.length ? { unpaid_periods: coverage.unpaid } : {}),
+  });
   // Let the leaver know their full & final settlement has been prepared (visible on their profile).
   if (employeeId !== actor.employeeId)
     await notify(deps, { recipient: employeeId, type: "settlement.ready", title: "Full & final settlement ready", body: `Your final settlement has been computed (net ${settlement.net}).`, link: "profile", subject: `settlements/${row.uuid}`, actorId: actor.employeeId });

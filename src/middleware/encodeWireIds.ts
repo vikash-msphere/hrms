@@ -5,7 +5,7 @@
 // The pagination cursor carries a token already (built in the service), so it is not an id string here.
 import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../env";
-import type { IdCodec } from "../lib/idCodec";
+import { isInternalId, type IdCodec } from "../lib/idCodec";
 
 // Collections whose item path is an internal id (key-based settings/preferences are excluded).
 export const ENCODABLE = new Set<string>([
@@ -49,11 +49,16 @@ const REF_RE = /^([a-z][a-z-]*)\/([0-9a-hj-km-np-tv-z]{13})(:[a-zA-Z]+|\/[a-z][a
 const MAX_DEPTH = 40; // bound recursion (responses are server-generated, but stay symmetric with the decoder)
 
 // Collect every (collection, id) referenced by id-shaped strings under `node`.
+//
+// ONLY IDS THE CODEC CAN ENCODE. Responses carry user text verbatim (titles, bios, comments), and a string can
+// look exactly like `<collection>/<13 chars>` without being a canonical id - the last character's spare bit
+// set. `encode` throws on such a value, and one throw here used to fail the whole response for every reader of
+// the record that carried it. A string that is not a real id is text, and text is left alone.
 export function collectRefs(node: unknown, acc: Set<string>, depth = 0): void {
   if (depth > MAX_DEPTH) return;
   if (typeof node === "string") {
     const m = REF_RE.exec(node);
-    if (m && ENCODABLE.has(m[1]!)) acc.add(`${m[1]}/${m[2]}`);
+    if (m && ENCODABLE.has(m[1]!) && isInternalId(m[2])) acc.add(`${m[1]}/${m[2]}`);
   } else if (Array.isArray(node)) {
     for (const v of node) collectRefs(v, acc, depth + 1);
   } else if (node && typeof node === "object") {

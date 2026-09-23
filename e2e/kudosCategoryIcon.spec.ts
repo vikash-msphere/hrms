@@ -12,7 +12,12 @@ test("a category's icon is found by search, picked, and reads back as picked aft
   // If-Match), so a concurrent save from a sibling panel spec is REFUSED rather than allowed to drop this
   // category. That refusal is the app working; the retry below is the answer to it.
   allowConsoleErrors(page, /status of 409/i);
-  const name = `E2E icon category ${Date.now()}`;
+  const base = `E2E icon category ${Date.now()}`;
+  // Each attempt below adds its OWN category: an attempt that saved but failed its verification leaves its row
+  // in the config, and the panel refuses a second category of the same name - so a retry reusing the name
+  // could never save at all.
+  let attempt = 0;
+  let name = base;
 
   await gotoRoute(page, "settings/kudos", "Kudos levels");
   const rocket = page.locator('button[title="rocket"]');
@@ -24,6 +29,7 @@ test("a category's icon is found by search, picked, and reads back as picked aft
     // the floor. Retried as one whole unit (open the panel fresh, add, pick, save, verify), because
     // re-applying the Add to the version that won is the only thing that can settle it.
     await expect(async () => {
+      name = `${base}-${++attempt}`;
       await page.reload();
       await expect(page.getByRole("heading", { name: "Kudos levels" }).first()).toBeVisible({ timeout: 30_000 });
       await page.getByRole("button", { name: "Add category" }).click();
@@ -74,9 +80,9 @@ test("a category's icon is found by search, picked, and reads back as picked aft
     // Leave the org's kudos config exactly as this run found it. Scoped by VALUE here, checked one row at a
     // time - the try block above may have failed before ever reaching the saved row, so this can't assume
     // "last" the way the happy path above does, and `input[value=...]` would only ever check the attribute
-    // React never writes for a controlled field, never the live value. Every matching row, not just the
-    // first: a retry above that saved successfully but failed its OWN verification re-adds this same name on
-    // its next attempt, so more than one can exist by the time this runs.
+    // React never writes for a controlled field, never the live value. Every row this run added, matched on
+    // the shared prefix: an attempt above that saved but failed its OWN verification leaves its row behind,
+    // so more than one can exist by the time this runs.
     await page.reload().catch(() => undefined);
     for (let guard = 0; guard < 5; guard++) {
       const rows = page.locator("div.editor-row").filter({ has: page.getByPlaceholder("Category name (e.g. Teamwork)") });
@@ -84,7 +90,7 @@ test("a category's icon is found by search, picked, and reads back as picked aft
       let target: import("@playwright/test").Locator | null = null;
       for (let i = 0; i < count; i++) {
         const candidate = rows.nth(i);
-        if ((await candidate.getByPlaceholder("Category name (e.g. Teamwork)").inputValue()) === name) { target = candidate; break; }
+        if ((await candidate.getByPlaceholder("Category name (e.g. Teamwork)").inputValue()).startsWith(base)) { target = candidate; break; }
       }
       if (!target) break;
       await target.getByRole("button", { name: "Remove category" }).click();

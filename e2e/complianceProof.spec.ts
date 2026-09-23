@@ -46,12 +46,19 @@ test("a filing's proof clears the warning, uploads, opens, and can be unlinked",
     // the menu to follow it, and a press on an item that is still moving never lands ("element is not
     // stable", then "element is outside of the viewport", until the budget runs out). Scrolled to first, and
     // re-opened on a miss rather than waited out.
+    // A miss CLOSES the menu before re-opening it: a menu left open follows its row wherever the re-sort took
+    // it, off the viewport included, and pressing that same stranded item again never lands (seen 2026-09-23,
+    // "element is outside of the viewport" for the whole minute).
     const editItem = page.getByRole("menuitem", { name: "Edit" });
+    let missed = false;
     await expect(async () => {
-      if (!(await editItem.count())) {
-        await row.scrollIntoViewIfNeeded();
-        await row.getByRole("button", { name: "Actions" }).click({ timeout: 10_000 });
+      if (missed) {
+        await page.keyboard.press("Escape"); // may close a toast first - then the count below fails and we go again
+        await expect(editItem).toHaveCount(0, { timeout: 2_000 });
       }
+      missed = true;
+      await row.scrollIntoViewIfNeeded();
+      await row.getByRole("button", { name: "Actions" }).click({ timeout: 10_000 });
       await editItem.click({ timeout: 5_000 });
       await expect(page.getByRole("dialog").getByText("Proof on file")).toBeVisible({ timeout: 10_000 });
     }).toPass({ timeout: 60_000 });

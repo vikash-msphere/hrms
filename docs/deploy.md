@@ -58,6 +58,16 @@ Edit the committed `wrangler.toml`:
 Do **not** put secrets here — `wrangler.toml` is committed. The bindings (`DB`, `DOCS`) and cron triggers
 are already declared; leave them as-is.
 
+**Staging is a second file, not a section.** `wrangler.staging.toml` is a standalone config for the
+`hrms-staging` Worker, reached with `--config` (`npm run deploy:staging`, `npm run db:migrate:staging`,
+`wrangler secret put <NAME> --config wrangler.staging.toml`). It used to be an `[env.staging]` block here,
+which required every top-level binding and var to be repeated inside it and failed *silently* when one was
+missed — a config with no `[env.staging.vars]` deploys with no vars rather than erroring. Three keys have to
+stay in step across the two files and `npm run preflight` checks all three: `compatibility_date`,
+`run_worker_first` and the `[limits]` block. Everything else is deliberately per-environment — its own D1,
+R2 bucket, Vectorize index and AI Gateway id — because sharing any of those would have a rehearsal write
+into production's data.
+
 ## 3. Set up Google sign-in
 
 The Worker runs its own Google-OIDC flow (`src/routes/authRoutes.ts` / `src/middleware/auth.ts`):
@@ -367,6 +377,6 @@ Two layers, both required:
 > same effect — see `docs/deploy-security.md` §2.
 
 To rehearse a restore, apply the export to the **staging** D1 (`wrangler d1 execute hrms-staging --remote
---file=<export>.sql`) and smoke-test before trusting it against production. Confirm the first nightly D1
+--config wrangler.staging.toml --file=<export>.sql`) and smoke-test before trusting it against production. Confirm the first nightly D1
 export and the first weekly R2 sync actually landed, rather than assuming a green workflow means a usable
 copy.

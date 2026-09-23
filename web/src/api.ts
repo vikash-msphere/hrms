@@ -209,6 +209,25 @@ const TRANSIENT = new Set([502, 503, 504]);
 const READ_ATTEMPTS = 3;
 const settle = (attempt: number) => new Promise((r) => setTimeout(r, 150 * attempt));
 
+/**
+ * Is this a gateway saying "not right now", for a READ?
+ *
+ * The TRANSIENT statuses, and also a 500 the Worker did not write. The app's own 500 is always
+ * `application/problem+json` with a `/errors/...` type (middleware/errorHandler.ts answers `/errors/internal`),
+ * and that one stays an answer: it is the same every time it is asked. A 500 in any other shape came from a hop
+ * in between - a connection the runtime dropped on the way to the Worker (`wrangler dev`'s ProxyWorker answers
+ * those as a plain-text 500), a proxy that could not reach it, the edge's own error page - and it says nothing
+ * about the request, so a read is as free to ask again as it is after a 502. Left out, one dropped connection
+ * blanked whichever panel's batch it carried.
+ */
+async function isGatewayRefusal(res: Response): Promise<boolean> {
+  if (TRANSIENT.has(res.status)) return true;
+  if (res.status !== 500) return false;
+  if (!(res.headers.get("Content-Type") ?? "").includes("problem+json")) return true;
+  const problem = (await res.clone().json().catch(() => null)) as Problem | null;
+  return !problem?.type?.startsWith("/errors/");
+}
+
 // A 429 is the per-caller budget in middleware/rateLimit.ts (or an isolate floor on a public lane). Unlike a
 // gateway blip it is not over in a moment, so it gets its OWN rule rather than joining TRANSIENT:
 //
@@ -263,14 +282,33 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   // claimed OUTSIDE the retry - it is a single in-flight response, not a request that can be made again.
   const prefetched = await claimMePrefetch(path, init);
   const isRead = (init.method ?? "GET").toUpperCase() === "GET" || !!init.safeToRepeat;
-  const attempts = isRead ? READ_ATTEMPTS : 1;
+  // A DELETE is the one write that is safe to send twice: the second copy finds the row already gone. So a
+  // gateway refusal (never a 429 - that is a budget, and the server said wait) is asked again like a read, and
+  // a 404 on a REPEAT is the earlier copy having landed with its answer lost on the way back - done, not failed.
+  // Without this, one dropped connection on a Remove press left the row on screen behind an error toast.
+  const isDelete = (init.method ?? "").toUpperCase() === "DELETE";
+  // Every other write carries an Idempotency-Key, minted once for this call and re-sent with each attempt:
+  // the server keeps the first copy's answer and hands it to a repeat instead of doing the write twice
+  // (src/middleware/idempotency.ts). That is what makes a create or a `:submit` safe to ask again when the
+  // connection drops, where before it could only fail - the write may have landed, and nothing could tell.
+  const keyed = !isRead && !isDelete;
+  const idemKey = keyed ? crypto.randomUUID() : undefined;
+  const attempts = isRead || isDelete || keyed ? READ_ATTEMPTS : 1;
+  let tries = 0;
   for (let attempt = 1; ; attempt++) {
+    tries = attempt;
     try {
       res =
         (attempt === 1 ? prefetched : undefined) ??
         (await fetch(`/v1${path}`, {
           ...init,
-          headers: { "Content-Type": "application/json", "X-Requested-By": "hrms-spa", ...viewAsHeader(path, init), ...(init.headers ?? {}) },
+          headers: {
+            "Content-Type": "application/json",
+            "X-Requested-By": "hrms-spa",
+            ...viewAsHeader(path, init),
+            ...(idemKey ? { "Idempotency-Key": idemKey } : {}),
+            ...(init.headers ?? {}),
+          },
           credentials: "include",
         }));
     } catch {
@@ -280,9 +318,17 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
       continue;
     }
     if (attempt >= attempts) break;
-    if (TRANSIENT.has(res.status)) {
+    if (await isGatewayRefusal(res)) {
       await discard(res);
       await settle(attempt);
+      continue;
+    }
+    // A keyed write whose first copy is still running: the server says when to ask for its answer.
+    if (keyed && res.status === 409 && res.headers.has("Retry-After")) {
+      const wait = retryAfterMs(res);
+      if (wait === null) break;
+      await discard(res);
+      await new Promise((r) => setTimeout(r, wait));
       continue;
     }
     // Budget refusal: wait exactly as long as the server asked, and only when that is short (see above).
@@ -294,6 +340,10 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
       continue;
     }
     break;
+  }
+  if (isDelete && tries > 1 && res.status === 404) {
+    await discard(res);
+    return undefined as T;
   }
   if (res.status === 401) handle401();
   if (!res.ok) {
@@ -620,6 +670,25 @@ export function invoke<T>(path: string, verb: string, etag?: string, body?: Reco
   }));
 }
 
+/** Call a custom method that only READS - it answers with data and changes nothing (the server lists it in
+ *  READ_VERBS). AEP delivers every custom method as a POST, so `invoke` would treat it as a write: no retry
+ *  when the connection drops, and a refetch of the collection and the bell after every answer. Neither is
+ *  right for a read, so this skips the invalidation and marks the call safe to repeat. */
+export function invokeRead<T>(path: string, verb: string, body?: Record<string, unknown>): Promise<T> {
+  return api<T>(`/${path}:${verb}`, {
+    method: "POST",
+    safeToRepeat: true,
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+}
+
+/** `invoke` for a write that lands the same way however many times it is sent - a read receipt, which sets
+ *  "read" rather than toggling it. Invalidates like any write, and is asked again when a gateway drops it, as a
+ *  read would be: a second copy of an idempotent write changes nothing the first did not. */
+export function invokeIdempotent<T>(path: string, verb: string): Promise<T> {
+  return withInvalidation(path, verb, api<T>(`/${path}:${verb}`, { method: "POST", safeToRepeat: true }));
+}
+
 type BinaryOpts = { verb?: string; params?: Record<string, string>; body?: Record<string, unknown>; signal?: AbortSignal };
 
 /** POST a binary-returning custom method and hand back the raw bytes, plus the name the server asked it to be
@@ -667,7 +736,7 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<{ blob: Blob;
         continue;
       }
     }
-    if (!TRANSIENT.has(res.status) || attempt >= READ_ATTEMPTS || opts.signal?.aborted) break;
+    if (attempt >= READ_ATTEMPTS || opts.signal?.aborted || !(await isGatewayRefusal(res))) break;
     // Let go of the response this attempt is about to replace - see `discard`. These are the requests that
     // carry a whole PDF render behind them, so a parked body stream here holds a connection for exactly as
     // long as the retry path takes, on the retry paths (a gateway rolling between isolates) where the pool is

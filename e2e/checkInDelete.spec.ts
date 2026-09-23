@@ -46,7 +46,16 @@ test("a 1:1 is deleted from its own card", async ({ as }) => {
       await page.getByRole("button", { name: "Delete" }).click();
       const confirm = page.getByRole("dialog").filter({ hasText: "Delete this 1:1?" });
       await expect(confirm).toBeVisible({ timeout: 30_000 });
+      // Waited on the DELETE's own answer. The card leaves the list before the request lands, so checking the
+      // row straight after found it not yet deleted, failed the attempt, and the `finally` purge then raced the
+      // page's own DELETE - which is how "the row came back gone ENTIRELY" (the purge won) and the page's
+      // DELETE answered 404.
+      const deleted = page.waitForResponse(
+        (r) => r.request().method() === "DELETE" && r.url().includes(`/v1/${path}`) && !r.url().includes("force="),
+        { timeout: 30_000 },
+      );
       await confirm.getByRole("button", { name: "Delete", exact: true }).click();
+      expect((await deleted).status()).toBeLessThan(300);
 
       // Off the list.
       await expect(page.getByRole("button").filter({ hasText: notes })).toHaveCount(0, { timeout: 30_000 });

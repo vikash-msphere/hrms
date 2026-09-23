@@ -328,7 +328,15 @@ export async function scopesForCollections(deps: Deps, user: AppUser, collection
   // Same context the item lane decides with, so a fan-out (search, the summaries, the table builder) scopes a
   // manager's collections exactly as a plain list of one of them would. Cached, so this is free once warm.
   const self = await selfContextFor(deps, user);
-  const listable = collections.filter((col) => decide(user.grant, resolveRequest("GET", `/v1/${col}`), self).allow);
+  // UNDER VIEW-AS, a collection the REAL caller could not list stays out too. The rows are scoped as the
+  // subject sees them - that is what the surface is for - but a fan-out was the one lane where a simulation
+  // could surface a whole collection its operator has no read on (the item and list lanes re-decide on the
+  // real grant, see `reDecide` below). The intersection keeps the honest use and closes the sideways read.
+  const sim = user.simulatedBy;
+  const realSelf = sim ? { employeeCode: sim.employeeCode ?? null } : null;
+  const listable = collections.filter((col) =>
+    decide(user.grant, resolveRequest("GET", `/v1/${col}`), self).allow
+    && (!sim || decide(sim.grant, resolveRequest("GET", `/v1/${col}`), realSelf!).allow));
   const out = new Map<string, ListScope>();
   if (listable.length === 0) return out;
   const roleSubjects = roleSubjectsOf(user, user.grant);
@@ -848,7 +856,14 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // The committed-cost forecast is gated on COMPENSATION, not on a collection of its own: it owns no rows
     // and every figure in it is derived from compensation the caller may already list. Binding the scope of
     // the collection the DATA comes from is what makes a manager's forecast their team's.
-    if (collection === "payroll-forecast") c.set("scope", scopeFor(user, "compensation", await selfContextFor(c.get("deps"), user)));
+    if (collection === "payroll-forecast") {
+      const scope = scopeFor(user, "compensation", await selfContextFor(c.get("deps"), user));
+      // Under view-as, the same intersection as scopesForCollections: an operator who cannot list compensation
+      // as themselves gets an empty forecast, not the subject's (an `own` breadth with no owner binds nothing).
+      const sim = user.simulatedBy;
+      const realMayList = !sim || decide(sim.grant, resolveRequest("GET", "/v1/compensation"), { employeeCode: sim.employeeCode ?? null }).allow;
+      c.set("scope", realMayList ? scope : { ...scope, breadth: "own", ownerId: null, subtrees: [], shares: [] });
+    }
     if (collection === "expense-close") c.set("closeScopes", await scopesForCollections(c.get("deps"), user, [...CLOSE_COLLECTIONS]));
     // An item verb that answers with records from collections the path does not name gets the same fan-out
     // map, for the same reason (MULTI_SCOPE_VERBS above). `reviews:evidence` is the one: it reads a person's

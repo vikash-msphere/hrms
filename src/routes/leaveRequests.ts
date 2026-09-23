@@ -53,8 +53,8 @@ export const leaveRequests = collectionRoutes<LeaveRequestInput, typeof schema.l
       c.req.query("employee"),
     ),
   verbs: {
-    approve: { run: (deps, user, id) => approveLeaveRequest(deps, user, id) },
-    reject: { run: (deps, user, id) => rejectLeaveRequest(deps, user, id) },
+    approve: { run: (deps, user, id, _body, c) => approveLeaveRequest(deps, user, id, c.req.header("If-Match")) },
+    reject: { run: (deps, user, id, _body, c) => rejectLeaveRequest(deps, user, id, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelLeaveRequest(deps, user, id) },
     // A supporting document (sick note, travel paperwork) goes up as raw bytes against the request that needs
     // it; the answer is the request itself, now flagged as documented. Same slot shape as a claim's receipt.

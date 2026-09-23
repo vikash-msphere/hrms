@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { UserRound } from "lucide-react";
 import { get, patch } from "@/api";
 import { isConflict } from "@/lib/formError";
@@ -48,10 +48,14 @@ export function EmployeeProfilePersonal({ employeeId, canEdit, onSaved }: { empl
   const dobError = dob && dob > todayStr() ? "That's in the future." : undefined;
   const dobWarn = !dobError && age != null && (age < 14 || age > 100);
 
+  // Saves made since mount; a read that left before one is dropped - see EmployeePersonalDetails.
+  const writes = useRef(0);
   // The loader is the effect's dependency (see the note in EmployeeBankDetails).
   const load = useCallback(async () => {
     try {
-      setData(await get<PersonalDetails>(`employees/${employeeId}/personal-info`));
+      const at = writes.current;
+      const read = await get<PersonalDetails>(`employees/${employeeId}/personal-info`);
+      if (at === writes.current) setData(read);
     } catch (e) {
       if ((e as { status?: number }).status === 403) setDenied(true);
     }
@@ -72,6 +76,7 @@ export function EmployeeProfilePersonal({ employeeId, canEdit, onSaved }: { empl
     // while this one was open.
     try {
       const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form, data?.etag);
+      writes.current++;
       setData(updated);
       toast({ title: "Personal details saved", variant: "success" });
       onSaved?.();
@@ -95,7 +100,8 @@ export function EmployeeProfilePersonal({ employeeId, canEdit, onSaved }: { empl
             <span className="flex items-center gap-2"><UserRound className="h-4 w-4 text-primary" /> Personal</span>
           </AccessAction>
         </CardTitle>
-        {canEdit && <IconEdit onClick={openEdit} />}
+        {/* Only once the record is in - see EmployeePersonalDetails. */}
+        {canEdit && data && <IconEdit onClick={openEdit} />}
       </CardHeader>
       <CardContent>
         <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">

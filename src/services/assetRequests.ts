@@ -12,6 +12,7 @@ import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { updateAsset } from "./assets";
+import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 
 // Asset requests: an employee asks for kit ("I need a laptop"), naming a CATEGORY rather than a specific
 // machine - which one they get is inventory's call. A manager (own dept) or HR approves/rejects, the owner
@@ -79,10 +80,12 @@ export async function createAssetRequest(deps: Deps, actor: AppUser, input: Asse
   return row;
 }
 
-async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", note?: string | null) {
+async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", note?: string | null, ifMatch?: string) {
   const row = await getAssetRequest(deps, id);
   const stuck = to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending";
   if (row.state !== "PENDING") throw failedPrecondition(stuck);
+  assertReviewedVersion(row, ifMatch);
+  if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "asset request");
   // Guard the flip on PENDING so the decision is EXACTLY-ONCE (0 rows = already decided by a concurrent call).
   const [updated] = await deps.db
     .update(schema.assetRequests)
@@ -106,8 +109,8 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   return updated;
 }
 
-export const approveAssetRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null) => decide(deps, actor, id, "APPROVED", note);
-export const rejectAssetRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null) => decide(deps, actor, id, "REJECTED", note);
+export const approveAssetRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "APPROVED", note, ifMatch);
+export const rejectAssetRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "REJECTED", note, ifMatch);
 export const cancelAssetRequest = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");
 
 /**
@@ -118,9 +121,11 @@ export const cancelAssetRequest = (deps: Deps, actor: AppUser, id: string) => de
  * silently. The hand-over is `updateAsset`, so the asset lands in `pending_ack`, the holder is notified, and
  * custody is still proved by scanning the tag.
  */
-export async function issueAssetRequest(deps: Deps, actor: AppUser, id: string, assetPath?: string | null) {
+export async function issueAssetRequest(deps: Deps, actor: AppUser, id: string, assetPath?: string | null, ifMatch?: string) {
   const row = await getAssetRequest(deps, id);
   if (row.state !== "APPROVED") throw failedPrecondition("only an approved request can be issued");
+  assertReviewedVersion(row, ifMatch);
+  await assertNotSubject(deps, actor, row.employeeId, "issue", "asset request");
   const assetId = idFromPath(assetPath);
   if (!assetId) throw invalidArgument("asset is required");
   const asset = (await deps.db.select().from(schema.assets).where(eq(schema.assets.uuid, assetId)).limit(1))[0];

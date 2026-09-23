@@ -6,6 +6,7 @@ import { csrf } from "./middleware/csrf";
 import { auth } from "./middleware/auth";
 import { authz } from "./middleware/authz";
 import { rateLimit } from "./middleware/rateLimit";
+import { idempotency } from "./middleware/idempotency";
 import { encodeWireIdsMiddleware } from "./middleware/encodeWireIds";
 import { decodeWireIdsRequest } from "./middleware/decodeWireIds";
 import { codecFor } from "./lib/idCodec";
@@ -250,6 +251,7 @@ app.use("/v1/*", auth);
 // rule is - and the counterpart inside /v1 to the one lib/isolateRate.ts puts under the public lanes.
 app.use("/v1/*", rateLimit);
 app.use("/v1/*", authz); // ENFORCE: path-based authz is the sole gate; fail-closed (null/error/unmatched -> deny)
+app.use("/v1/*", idempotency); // a write re-sent with the same Idempotency-Key is answered from the first copy
 
 app.route("/v1/users", users);
 app.route("/v1/api-keys", apiKeys); // machine credentials: a key acts as its owner, narrowed by its scope

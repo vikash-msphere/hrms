@@ -45,8 +45,8 @@ export const remoteWorkRequests = collectionRoutes<RemoteWorkInput, typeof schem
       c.req.query("state"), c.req.query("q"), c.req.query("from"), c.req.query("to"),
     ),
   verbs: {
-    approve: { run: async (deps, user, id, _body, c) => approveRemoteWorkRequest(deps, user, id, await noteOf(c)) },
-    reject: { run: async (deps, user, id, _body, c) => rejectRemoteWorkRequest(deps, user, id, await noteOf(c)) },
+    approve: { run: async (deps, user, id, _body, c) => approveRemoteWorkRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
+    reject: { run: async (deps, user, id, _body, c) => rejectRemoteWorkRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelRemoteWorkRequest(deps, user, id) },
   },
 });

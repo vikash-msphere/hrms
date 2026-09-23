@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { HeartPulse } from "lucide-react";
 import { get, patch } from "@/api";
 import { isConflict } from "@/lib/formError";
@@ -34,10 +34,16 @@ export function EmployeeEmergencyDetails({ employeeId, canEdit, onSaved }: { emp
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<PersonalDetails>({});
 
+  // Saves made since mount. A read that left before a save answers with the blob the save replaced, and when
+  // it landed second it put the old values back on the card over the save's own answer - see
+  // EmployeePersonalDetails, which carries the same guard.
+  const writes = useRef(0);
   // The loader is the effect's dependency (see the note in EmployeeBankDetails).
   const load = useCallback(async () => {
     try {
-      setData(await get<PersonalDetails>(`employees/${employeeId}/personal-info`));
+      const at = writes.current;
+      const read = await get<PersonalDetails>(`employees/${employeeId}/personal-info`);
+      if (at === writes.current) setData(read);
     } catch (e) {
       if ((e as { status?: number }).status === 403) setDenied(true);
     }
@@ -69,6 +75,7 @@ export function EmployeeEmergencyDetails({ employeeId, canEdit, onSaved }: { emp
     ) as PersonalDetails;
     try {
       const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, changed, data?.etag);
+      writes.current++;
       setData(updated);
       toast({ title: "Emergency details saved", variant: "success" });
       onSaved?.();
@@ -96,7 +103,8 @@ export function EmployeeEmergencyDetails({ employeeId, canEdit, onSaved }: { emp
             <span className="flex items-center gap-2"><HeartPulse className="h-4 w-4 text-destructive" /> Emergency</span>
           </AccessAction>
         </CardTitle>
-        {canEdit && <IconEdit onClick={openEdit} />}
+        {/* Only once the record is in: an editor opened before it seeds from nothing and saves with no version. */}
+        {canEdit && data && <IconEdit onClick={openEdit} />}
       </CardHeader>
       <CardContent>
         <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">

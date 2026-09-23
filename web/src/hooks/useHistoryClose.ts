@@ -9,9 +9,9 @@ import { dropDialogEntry, isSelfPop, pushDialogEntry } from "@/lib/dialogHistory
 // Radix renders the content element's subtree only while the layer is open, so a component mounted INSIDE it
 // is mounted exactly for one opening: pushing a history entry on mount and consuming it on unmount needs no
 // open prop threaded from the caller. On a back press the entry we pushed is popped, and we close the layer by
-// dispatching Escape at its own content node rather than by reaching for the caller's setState - which means
-// each one closes through the path it already owns, including any unsaved-changes guard hanging off
-// onOpenChange.
+// pressing its own Close button (`data-history-close`, or Escape at its content node when it has none) rather
+// than by reaching for the caller's setState - which means each one closes through the path it already owns,
+// including any unsaved-changes guard hanging off onOpenChange.
 //
 // "Inside it" is the whole contract, and getting it wrong is invisible until someone presses Back. The wrapper
 // components in components/ui are NOT that place: a page writes `<Dialog open={false}><DialogContent/></Dialog>`
@@ -44,7 +44,13 @@ function useHistoryClose(node: HTMLElement | null, enabled: boolean) {
       if (isSelfPop()) return;
       pushed.current = false;
       popping.current = true;
-      nodeRef.current?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      // The layer's own Close button when it has one, and Escape only when it does not. Both reach the same
+      // onOpenChange(false), guards included - but Escape goes to whichever dismissable layer is TOPMOST, and
+      // a toast that appeared after this dialog opened is one: the back press dismissed "3 new notifications"
+      // and left the dialog exactly where it was. A press on the button belongs to this layer alone.
+      const close = nodeRef.current?.querySelector<HTMLElement>("[data-history-close]");
+      if (close) close.click();
+      else nodeRef.current?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       setTimeout(() => { popping.current = false; }, 0);
     };
     window.addEventListener("popstate", onPop);

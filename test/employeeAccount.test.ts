@@ -10,6 +10,7 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { eq } from "drizzle-orm";
 import { createEmployee, updateEmployee } from "../src/services/employees";
+import { grantFor } from "../src/domain/grants";
 
 // An access rule names a `users/{id}` subject (domain/policyValidate.ts), so a person with no account row can
 // neither be granted access nor be offered by the access modal's people picker. That is why the account is
@@ -31,9 +32,9 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  for (const t of [schema.employees, schema.users, schema.codeSequences, schema.roles]) await deps.db.delete(t);
+  for (const t of [schema.notifications, schema.auditLog, schema.accessRules, schema.userRoles, schema.users, schema.employees, schema.codeSequences, schema.roles]) await deps.db.delete(t);
   // `users.role` is a FK to the roles catalog (roles are data), and the provisioned account is an `employee`.
-  await deps.db.insert(schema.roles).values([{ name: "employee", label: "Employee" }, { name: "hr_admin", label: "HR admin" }]).onConflictDoNothing();
+  await deps.db.insert(schema.roles).values([{ name: "employee", label: "Employee" }, { name: "hr_admin", label: "HR admin" }, { name: "super_admin", label: "Super admin" }]).onConflictDoNothing();
 });
 
 const accountFor = async (employeeId: string) =>
@@ -138,5 +139,54 @@ describe("employee sign-in accounts", () => {
     await deps.db.insert(schema.employees).values({ uuid: id, code: "04-0011", firstName: "Divya", lastName: "Rao", workEmail: "old@test.example" });
     await updateEmployee(deps, actor, id, { work_email: "new@test.example" });
     expect((await accountFor(id))?.email).toBe("new@test.example");
+  });
+});
+
+// The sign-in account is the identity every grant hangs off, and auth resolves a caller by its email. Whoever
+// edits employee records must not thereby choose the login address of an account that holds MORE than a plain
+// provisioned employee does - that is re-pointing somebody else's privileges at a mailbox the editor picked.
+describe("a work-email edit and a privileged account", () => {
+  const hr = { ...actor, grant: grantFor("hr_admin") } as unknown as AppUser;
+  const superAdmin = { uuid: genId(), email: "root@test.example", role: "super_admin", employeeId: null, grant: grantFor("super_admin") } as unknown as AppUser;
+  const auditActions = async () => (await deps.db.select().from(schema.auditLog)).map((r) => r.action);
+
+  it("HR still corrects a plain employee's address, and the login follows", async () => {
+    const row = await hire("typo@test.example");
+    await updateEmployee(deps, hr, row.uuid, { work_email: "fixed@test.example" });
+    expect((await accountFor(row.uuid))?.email).toBe("fixed@test.example");
+  });
+
+  it("HR editing an account admin's work email leaves their sign-in address where it was", async () => {
+    const row = await hire("boss@test.example", "Boss");
+    await deps.db.update(schema.users).set({ role: "super_admin" }).where(eq(schema.users.employeeId, row.uuid));
+    await updateEmployee(deps, hr, row.uuid, { work_email: "boss@elsewhere.example" });
+    // The employee record moves (HR owns it); the login does not, and the mismatch is on the record.
+    expect((await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, row.uuid)))[0]?.workEmail).toBe("boss@elsewhere.example");
+    const account = await accountFor(row.uuid);
+    expect(account?.email).toBe("boss@test.example");
+    expect(account?.sessionsValidFrom).toBeNull(); // nobody was signed out either
+    expect(await auditActions()).toContain("employee.loginEmailMismatch");
+  });
+
+  it("an extra role or a personal grant counts as privileged too", async () => {
+    const extra = await hire("extra@test.example", "Extra");
+    const extraAcct = (await accountFor(extra.uuid))!;
+    await deps.db.insert(schema.userRoles).values({ userId: extraAcct.uuid, role: "hr_admin" });
+    await updateEmployee(deps, hr, extra.uuid, { work_email: "extra2@test.example" });
+    expect((await accountFor(extra.uuid))?.email).toBe("extra@test.example");
+
+    const ruled = await hire("ruled@test.example", "Ruled");
+    const ruledAcct = (await accountFor(ruled.uuid))!;
+    await deps.db.insert(schema.accessRules).values({ uuid: genId(), subject: ruledAcct.uuid, subjectKind: "user", namespace: "payslips", pattern: "payslips.**", scopeKind: "all", level: "read", effect: "allow" });
+    await updateEmployee(deps, hr, ruled.uuid, { work_email: "ruled2@test.example" });
+    expect((await accountFor(ruled.uuid))?.email).toBe("ruled@test.example");
+  });
+
+  it("an account admin's edit moves the login as before", async () => {
+    const row = await hire("boss@test.example", "Boss");
+    await deps.db.update(schema.users).set({ role: "super_admin" }).where(eq(schema.users.employeeId, row.uuid));
+    await updateEmployee(deps, superAdmin, row.uuid, { work_email: "boss@new.example" });
+    expect((await accountFor(row.uuid))?.email).toBe("boss@new.example");
+    expect(await auditActions()).not.toContain("employee.loginEmailMismatch");
   });
 });

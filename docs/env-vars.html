@@ -468,6 +468,58 @@
     white-space: nowrap;
   }
 
+  /* ---------- per-row lane marks ---------- */
+  /* The tick on the left means "set in production". These say where else the value is dealt with, so a row
+     can be honestly finished without being set in production at all - "don't set" is an answer, not a gap. */
+
+  .pick {
+    margin-left: auto; /* row-head is flex: this pushes the group to the right edge */
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .pick-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--f-display);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    white-space: nowrap;
+  }
+
+  /* Smaller than the row's own tick on purpose: these are secondary marks, and one that looked equal to it
+     would read as a second primary answer. */
+  .pick-item input[type="checkbox"] {
+    width: 13px;
+    height: 13px;
+    margin: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  .pick-item.on { color: var(--accent-ink); }
+  .pick-item.on.skip { color: var(--warn); }
+  .pick-item.skip input[type="checkbox"] { accent-color: var(--warn); }
+
+  .breakdown {
+    margin-top: 9px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-family: var(--f-mono);
+    font-size: 11px;
+    color: var(--ink-3);
+  }
+
+  .breakdown b { font-weight: 500; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .breakdown .zero { opacity: .45; }
+
   .tag.req { background: var(--accent-wash); color: var(--accent-ink); }
   .tag.opt { background: transparent; color: var(--ink-3); border: 1px solid var(--rule); }
   .tag.no { background: var(--danger-wash); color: var(--danger); }
@@ -551,6 +603,10 @@
       <div class="meter-count"><span id="done">0</span> / <span id="total">0</span></div>
       <div class="meter-label">values accounted for</div>
       <div class="meter-track"><div class="meter-fill" id="fill"></div></div>
+      <!-- Filled by the script: one figure per lane, so "accounted for" can be read as what it is made of.
+           A value marked only "don't set" counts as accounted for and is not progress, which is the
+           distinction a single number hides. -->
+      <div class="breakdown" id="breakdown" aria-live="polite"></div>
     </div>
   </div>
 </header>
@@ -631,10 +687,11 @@
           <div class="body">
             <div class="row-head"><span class="name">DB</span><span class="tag req">required</span><span class="tag">binding</span></div>
             <p>The D1 database. <code>database_id</code> comes from <code>wrangler d1 create hrms</code>;
-              <code>migrations_dir</code> is <code>src/db/migrations</code>. Staging carries its own id under
-              <code>[env.staging]</code>.</p>
-            <p class="risk"><b>Preflight blocks this.</b> A literal <code>REPLACE_WITH_STAGING_D1_ID</code> left in
-              the environment being deployed is a hard error, not a warning.</p>
+              <code>migrations_dir</code> is <code>src/db/migrations</code>. Staging carries its own id, in
+              <code>wrangler.staging.toml</code>.</p>
+            <p class="risk"><b>Preflight blocks this.</b> A literal <code>REPLACE_WITH_STAGING_D1_ID</code> is a
+              hard error in the config being deployed, and a warning in the other one &mdash; a half-provisioned
+              staging is worth knowing about without stopping a production release.</p>
           </div>
         </label>
 
@@ -700,7 +757,8 @@ wrangler vectorize create-metadata-index hrms-search --property-name=collection 
         <h2>Required secrets</h2>
         <span class="where">wrangler secret put &middot; never committed</span>
         <p><b>Set where:</b> <code>npx wrangler secret put NAME</code> from the repo root (add
-          <code>--env staging</code> for the <code>hrms-staging</code> worker), or Cloudflare dashboard &rarr;
+          <code>--config wrangler.staging.toml</code> for the <code>hrms-staging</code> worker &mdash; a secret
+          does not travel between the two), or Cloudflare dashboard &rarr;
           Workers &amp; Pages &rarr; <code>hrms</code> &rarr; Settings &rarr; Variables and Secrets &rarr; Add
           &rarr; type <em>Secret</em>. Either way they live on the Worker and survive redeploys, so they are
           set once and never put in GitHub. Generate fresh values for production &mdash; never reuse anything
@@ -866,9 +924,9 @@ wrangler vectorize create-metadata-index hrms-search --property-name=collection 
           commit and deploy. <b>Not</b> in the Cloudflare dashboard: Workers &amp; Pages &rarr;
           <code>hrms</code> &rarr; Settings &rarr; Variables and Secrets will accept a plaintext edit there,
           and the next <code>wrangler deploy</code> replaces the whole set with this file, so a dashboard-only
-          value disappears at the next release with nothing to show for it. Redeclare each of these under
-          <code>[env.staging.vars]</code> too &mdash; wrangler does not inherit top-level vars into a named
-          environment.</p>
+          value disappears at the next release with nothing to show for it. Staging has its own copy of this
+          block in <code>wrangler.staging.toml</code>: the two files share nothing, so a var added here and
+          not there simply does not exist in a rehearsal.</p>
       </header>
       <div class="rows">
 
@@ -924,7 +982,7 @@ wrangler vectorize create-metadata-index hrms-search --property-name=collection 
           <div class="body">
             <div class="row-head"><span class="name">EMAIL_REDIRECT_TO</span><span class="tag opt">staging only</span><span class="tag">var</span></div>
             <p>Diverts every outbound message to this one address, keeping the intended recipient in the
-              subject (<code>src/lib/email.ts</code>). Set it under <code>[env.staging.vars]</code>: a
+              subject (<code>src/lib/email.ts</code>). Set it in <code>wrangler.staging.toml</code>: a
               rehearsal runs the nightly cron against a copy of the database, with a real vendor and a real
               company sender, so without it staging mails real employees about a rehearsal.</p>
             <p class="risk"><b>Preflight fails the deploy if the environment being deployed sets it.</b> In
@@ -957,13 +1015,17 @@ wrangler vectorize create-metadata-index hrms-search --property-name=collection 
               Unset = call the <code>AI</code> binding directly. Payload logging is suppressed on every call
               either way (<code>src/lib/ai.ts</code>): the gateway records that a call happened, not what was
               in it.</p>
-            <p class="risk"><b>Deliberately unset, and the support exists so the choice can be revisited.</b>
-              The analytics duplicate <code>ai_usage</code>, the cache sits behind <code>ai_cache</code> and
-              sees only its misses, and the gateway becomes a second hop in front of the moderation gate: a
-              wrong id reads as "the model was silent", which under the default <code>hold</code> posture
-              stops every public wall accepting posts. The per-model numbers come from
-              <code>aiInferenceAdaptiveGroups</code> on the GraphQL Analytics API instead, which needs no
-              gateway. Reasoning in <code>ai-observability-plan.md</code>.</p>
+            <p class="risk"><b>Set per environment, and the gateway must exist first.</b> Production uses
+              <code>hrms</code>, staging <code>hrms-staging</code>; a name with no gateway behind it fails the
+              call rather than falling back to the binding. Two of them because the log allowance is per
+              ACCOUNT on the free plan (100,000 across every gateway). Leave gateway CACHING off:
+              <code>ai_cache</code> is checked before the binding call, so a gateway cache sees only what ours
+              missed, and it would hold moderation verdicts under a TTL set outside this repository.</p>
+            <p class="risk"><b>Change it before the moderation gate goes live, never after.</b> A wrong id
+              reads to the app as "the model was silent", which under the default <code>hold</code> posture
+              stops every public wall accepting posts, with <code>ai_usage.error</code> the only place that
+              says why. Setup and settings in <code>docs/deploy-ai.md</code> step 3; the per-model neuron
+              numbers still come from <code>aiInferenceAdaptiveGroups</code>, which needs no gateway.</p>
           </div>
         </label>
 
@@ -1444,20 +1506,112 @@ wrangler vectorize create-metadata-index hrms-search --property-name=collection 
 
     var state = load();
 
+    // The lanes a row can be marked in, beyond the tick on the left (which means "set in production").
+    // `skip` carries a different tone in the CSS because it is the one answer that is not progress: the row
+    // is dealt with precisely by not setting the value.
+    var LANES = [
+      { key: "staging", label: "staging", hint: "set on the hrms-staging worker" },
+      { key: "local", label: "local", hint: "set in .dev.vars for local development" },
+      { key: "skip", label: "don't set", hint: "deliberately left unset in every environment" },
+    ];
+
+    var breakdownEl = document.getElementById("breakdown");
+
+    // A value stored by an earlier version of this page is a bare boolean meaning the production tick.
+    // Read it as one rather than dropping it, or everybody's ticks vanish the first time they reload.
+    function entry(id) {
+      var raw = state[id];
+      if (raw === true) return { prod: true };
+      if (raw && typeof raw === "object") return raw;
+      return {};
+    }
+
+    var laneBoxes = []; // [{ id, key, input }] - built below, one per row per lane
+
+    boxes.forEach(function (b) {
+      var head = b.closest(".row").querySelector(".row-head");
+      if (!head) return;
+      var pick = document.createElement("span");
+      pick.className = "pick";
+
+      LANES.forEach(function (lane) {
+        // A <span>, not a <label>: these sit inside the row's own <label>, and nesting one label in another
+        // is invalid HTML - the inner one is what a browser is entitled to ignore. The checkbox carries its
+        // own accessible name instead, and the text beside it is decoration.
+        var item = document.createElement("span");
+        item.className = "pick-item " + lane.key;
+
+        var input = document.createElement("input");
+        input.type = "checkbox";
+        input.dataset.lane = lane.key;
+        input.dataset.for = b.dataset.id;
+        input.setAttribute("aria-label", b.dataset.id + ": " + lane.hint);
+        input.title = lane.hint;
+
+        var text = document.createElement("span");
+        text.textContent = lane.label;
+
+        item.appendChild(input);
+        item.appendChild(text);
+        pick.appendChild(item);
+        laneBoxes.push({ id: b.dataset.id, key: lane.key, input: input, item: item });
+      });
+
+      head.appendChild(pick);
+    });
+
     function paint() {
-      var n = 0;
+      var counts = { prod: 0, staging: 0, local: 0, skip: 0 };
+      var accounted = 0;
+
       boxes.forEach(function (b) {
-        if (b.checked) n++;
+        var e = entry(b.dataset.id);
+        var any = b.checked || LANES.some(function (l) { return e[l.key] === true; });
+        if (b.checked) counts.prod++;
+        LANES.forEach(function (l) { if (e[l.key] === true) counts[l.key]++; });
+        if (any) accounted++;
+        // The struck-through, greyed row still means the production tick specifically. A row marked only
+        // "staging" is not finished, and showing it as done would be the page lying about the deploy.
         b.closest(".row").classList.toggle("is-done", b.checked);
       });
-      doneEl.textContent = String(n);
-      fillEl.style.width = boxes.length ? (n / boxes.length) * 100 + "%" : "0%";
+
+      laneBoxes.forEach(function (lb) {
+        lb.item.classList.toggle("on", lb.input.checked);
+      });
+
+      doneEl.textContent = String(accounted);
+      fillEl.style.width = boxes.length ? (accounted / boxes.length) * 100 + "%" : "0%";
+
+      breakdownEl.textContent = "";
+      [{ key: "prod", label: "prod" }].concat(LANES).forEach(function (l) {
+        var n = counts[l.key];
+        var chip = document.createElement("span");
+        if (!n) chip.className = "zero";
+        chip.appendChild(document.createTextNode(l.label + " "));
+        var b2 = document.createElement("b");
+        b2.textContent = String(n);
+        chip.appendChild(b2);
+        breakdownEl.appendChild(chip);
+      });
     }
 
     boxes.forEach(function (b) {
-      b.checked = state[b.dataset.id] === true;
+      b.checked = entry(b.dataset.id).prod === true;
       b.addEventListener("change", function () {
-        state[b.dataset.id] = b.checked;
+        var e = entry(b.dataset.id);
+        e.prod = b.checked;
+        state[b.dataset.id] = e;
+        save(state);
+        paint();
+      });
+    });
+
+    laneBoxes.forEach(function (lb) {
+      lb.input.checked = entry(lb.id)[lb.key] === true;
+      lb.input.addEventListener("change", function () {
+        var e = entry(lb.id);
+        e[lb.key] = lb.input.checked;
+        state[lb.id] = e;
         save(state);
         paint();
       });
@@ -1469,6 +1623,7 @@ wrangler vectorize create-metadata-index hrms-search --property-name=collection 
       state = {};
       save(state);
       boxes.forEach(function (b) { b.checked = false; });
+      laneBoxes.forEach(function (lb) { lb.input.checked = false; });
       paint();
     });
 
@@ -1490,6 +1645,17 @@ wrangler vectorize create-metadata-index hrms-search --property-name=collection 
       });
     });
   })();
+
+  // ---------- only the checkbox toggles ----------
+  // Each row is a <label>, which is what gives its checkbox an accessible name - but it also means a click
+  // anywhere in the row toggles the tick, so selecting a variable name to read it, or reaching for the copy
+  // button, silently marks the row done. The label keeps naming the control; it just stops activating it.
+  document.addEventListener("click", function (e) {
+    var label = e.target.closest ? e.target.closest("label.row") : null;
+    if (!label) return;
+    if (e.target.matches('input[type="checkbox"]')) return;
+    e.preventDefault();
+  });
 
   // ---------- copy buttons ----------
   // Built here rather than written into each row: there are 51 of them, three rows name two variables at

@@ -49,10 +49,10 @@ export const reimbursements = collectionRoutes<ReimbursementInput, typeof schema
   },
   list: (c, page) => listReimbursements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("q")),
   verbs: {
-    approve: { run: (deps, user, id) => approveReimbursement(deps, user, id) },
-    reject: { run: (deps, user, id) => rejectReimbursement(deps, user, id) },
+    approve: { run: (deps, user, id, _body, c) => approveReimbursement(deps, user, id, c.req.header("If-Match")) },
+    reject: { run: (deps, user, id, _body, c) => rejectReimbursement(deps, user, id, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelReimbursement(deps, user, id) },
-    pay: { run: (deps, user, id) => payReimbursement(deps, user, id) },
+    pay: { run: (deps, user, id, _body, c) => payReimbursement(deps, user, id, c.req.header("If-Match")) },
     // The receipt goes up as raw bytes; the answer is the claim itself, now carrying its receipt flag.
     upload: {
       run: async (deps, user, id, _body, c) => {

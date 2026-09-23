@@ -13,6 +13,7 @@ import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/e
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { checkEtag, updateAtVersion } from "./versionGuard";
+import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 
 type Status = typeof schema.timeEntries.$inferSelect.status;
 export type TimeEntryInput = {
@@ -115,10 +116,13 @@ export async function updateTimeEntry(deps: Deps, actor: AppUser, id: string, pa
 }
 
 // Workflow transitions. submit (DRAFT/REJECTED -> SUBMITTED), approve / reject (SUBMITTED -> APPROVED/REJECTED).
-async function transition(deps: Deps, actor: AppUser, id: string, allowedFrom: Status[], to: Status, decided: boolean) {
+async function transition(deps: Deps, actor: AppUser, id: string, allowedFrom: Status[], to: Status, decided: boolean, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.timeEntries).where(eq(schema.timeEntries.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("time entry not found");
   if (!allowedFrom.includes(row.status)) throw failedPrecondition(`a ${row.status.toLowerCase()} entry can't move to ${to.toLowerCase()}`);
+  if (decided) assertReviewedVersion(row, ifMatch);
+  // Approved hours are billable time on the record, so nobody signs off their own.
+  if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "time entry");
   // Guard the flip on the read status so the transition is EXACTLY-ONCE (0 rows = a concurrent call moved it).
   const updated = (await deps.db.update(schema.timeEntries).set({ status: to, ...(decided ? { decidedBy: actor.uuid } : {}), updatedAt: new Date() }).where(and(eq(schema.timeEntries.uuid, id), eq(schema.timeEntries.status, row.status))).returning())[0];
   if (!updated) throw failedPrecondition(`a ${row.status.toLowerCase()} entry can't move to ${to.toLowerCase()}`);
@@ -132,6 +136,6 @@ async function transition(deps: Deps, actor: AppUser, id: string, allowedFrom: S
   return updated;
 }
 export const submitTimeEntry = (deps: Deps, actor: AppUser, id: string) => transition(deps, actor, id, ["DRAFT", "REJECTED"], "SUBMITTED", false);
-export const approveTimeEntry = (deps: Deps, actor: AppUser, id: string) => transition(deps, actor, id, ["SUBMITTED"], "APPROVED", true);
-export const rejectTimeEntry = (deps: Deps, actor: AppUser, id: string) => transition(deps, actor, id, ["SUBMITTED"], "REJECTED", true);
+export const approveTimeEntry = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => transition(deps, actor, id, ["SUBMITTED"], "APPROVED", true, ifMatch);
+export const rejectTimeEntry = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => transition(deps, actor, id, ["SUBMITTED"], "REJECTED", true, ifMatch);
 

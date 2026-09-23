@@ -53,8 +53,11 @@ test("a missing section is nudged, jumped to, filled in, and the nudge goes away
   await expect(panel.getByText("Emergency contact name")).toBeVisible({ timeout: 30_000 });
 
   // `.nth(2)`: three cards on this tab carry the same unlabelled pencil - Personal, Contact, Emergency, in
-  // that order. The dialog's own title is asserted below, so a card that moves takes the spec with it.
-  await panel.getByRole("button", { name: /^(Add|Edit)$/ }).nth(2).click();
+  // that order. The dialog's own title is asserted below, so a card that moves takes the spec with it. Each
+  // pencil appears only once its card has loaded, so all three are waited for before one is picked by place.
+  const pencils = panel.getByRole("button", { name: /^(Add|Edit)$/ });
+  await expect(pencils).toHaveCount(3, { timeout: 30_000 });
+  await pencils.nth(2).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("Edit emergency details")).toBeVisible({ timeout: 30_000 });
   // Half filled is the mistake worth catching: a contact needs both halves to be worth calling, and the form

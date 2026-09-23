@@ -118,10 +118,12 @@ Each of these leaves production working but weaker.
 - **Sentry release wiring.** Set `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` in the deploy
   environment, plus `VITE_APP_VERSION` and a matching `SENTRY_RELEASE`, or the uploaded source maps match
   no event. Then set alert routing, or nobody reads the issues.
-- **Staging, or delete the env block.** `env.staging.database_id` is still `REPLACE_WITH_STAGING_D1_ID` and
-  the bucket does not exist. Both are free to create, and staging is the only place to rehearse a migration,
-  a restore or a payroll run. If it will never be used, delete the `[env.staging]` blocks rather than
-  leaving them to fail on first use.
+- **Staging, or delete the file.** `database_id` in `wrangler.staging.toml` is still
+  `REPLACE_WITH_STAGING_D1_ID`, and neither the bucket nor the `hrms-search-staging` index exists. All three
+  are free to create, and staging is the only place to rehearse a migration, a restore or a payroll run —
+  which matters more now that the migration freeze (`docs/deploy.md` §7a) makes a schema change unrepeatable.
+  Deploy it with `npm run deploy:staging`. If it will never be used, delete `wrangler.staging.toml` rather
+  than leaving it to fail on first use.
 - **Backups: enable R2 versioning on `hrms` and create `hrms-backup`.** D1 is recoverable two ways; without
   those two steps the documents are recoverable zero ways. See `docs/deploy.md` "Backups & disaster
   recovery" — the workflow is written, the buckets and the R2 S3 API token are not.

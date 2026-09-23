@@ -97,7 +97,9 @@ export default function Loans({ me }: { me: Me }) {
       recordRepayment: "Repayment recorded",
     };
     setActing(`${l.path}:${verb}`);
-    try { await invoke(`loans/${idOf(l.path)}`, verb, undefined, body); toast({ title: done[verb] ?? "Updated", variant: "success" }); reload(); }
+    // The row's etag rides along so a decision is refused if the loan changed since it was shown here (a
+    // borrower raising the principal while the approver reads the old figure).
+    try { await invoke(`loans/${idOf(l.path)}`, verb, l.etag, body); toast({ title: done[verb] ?? "Updated", variant: "success" }); reload(); }
     catch (e) {
       if (rethrow) throw e;
       toast({ title: "Couldn't update the loan", description: (e as Error).message, variant: "destructive" });

@@ -249,7 +249,28 @@ export function eventCreditByDay(opts: {
  * `startSession` of `start` through `endSession` of `end`. Omitted means the whole of that boundary day, which
  * is the column default and what a caller that does not model halves should pass.
  */
-export type LeaveRange = { start: string; end: string; startSession?: number; endSession?: number };
+//
+// `paid: false` is a leave type that is not paid (`leave_types.paid`, e.g. the seeded "Loss of Pay"). It
+// records WHY the employee was away, and excuses nothing: the day is still owed and still unworked, so it is
+// docked like any other unworked day. Omitted means paid, which is every other leave type.
+export type LeaveRange = { start: string; end: string; startSession?: number; endSession?: number; paid?: boolean };
+
+// The AM/PM cover of day `d` by `ranges`, sessions tracked rather than summed (see leaveCover).
+function sessionCover(d: string, ranges: LeaveRange[]): number {
+  let am = false;
+  let pm = false;
+  for (const r of ranges) {
+    if (d < r.start || d > r.end) continue;
+    // Interior days are whole; only the range's own endpoints can carry a session flag.
+    const first = d === r.start ? (r.startSession ?? 1) : 1;
+    const last = d === r.end ? (r.endSession ?? 2) : 2;
+    if (first <= 1) am = true;
+    if (last >= 2) pm = true;
+    if (am && pm) return 1;
+  }
+  return (am ? 0.5 : 0) + (pm ? 0.5 : 0);
+}
+const isPaid = (r: LeaveRange) => r.paid !== false;
 
 /**
  * How much of day `d` approved leave excuses: 0, 0.5 (one session) or 1 (both).
@@ -263,20 +284,30 @@ export type LeaveRange = { start: string; end: string; startSession?: number; en
  * The attendance grid and the payroll build have to agree about which days leave excuses - a day the grid calls
  * "On leave" and payroll then docks half of is the exact drift `eventCreditByDay` warns about one file over -
  * and the only way two copies of this rule stay in step is for there to be one.
+ *
+ * PAID LEAVE ONLY. An unpaid range covers nothing here - see LeaveRange.
  */
 export function leaveCover(d: string, ranges: LeaveRange[]): number {
-  let am = false;
-  let pm = false;
-  for (const r of ranges) {
-    if (d < r.start || d > r.end) continue;
-    // Interior days are whole; only the range's own endpoints can carry a session flag.
-    const first = d === r.start ? (r.startSession ?? 1) : 1;
-    const last = d === r.end ? (r.endSession ?? 2) : 2;
-    if (first <= 1) am = true;
-    if (last >= 2) pm = true;
-    if (am && pm) return 1;
+  return sessionCover(d, ranges.filter(isPaid));
+}
+
+/**
+ * Day-units of approved UNPAID leave over [startYmd, endYmd]: the scheduled, non-holiday working days an
+ * unpaid range covers, half-day aware, less any part of the same day paid leave already covers.
+ *
+ * What a run docks for unpaid leave when automatic loss of pay is OFF (services/payroll.ts). With it on, this
+ * is already inside `lopDayUnits` - an unpaid day is owed and unworked like any absence - so the two are never
+ * added together.
+ */
+export function unpaidLeaveDayUnits(startYmd: string, endYmd: string, workDays: number[], holidays: Set<string>, ranges: LeaveRange[]): number {
+  const unpaid = ranges.filter((r) => !isPaid(r));
+  if (!unpaid.length) return 0;
+  let units = 0;
+  for (const d of enumerate(startYmd, endYmd)) {
+    if (!workDays.includes(weekdayOf(d)) || holidays.has(d)) continue;
+    units += Math.max(0, Math.min(sessionCover(d, unpaid), 1 - leaveCover(d, ranges)));
   }
-  return (am ? 0.5 : 0) + (pm ? 0.5 : 0);
+  return Math.round(units * 2) / 2;
 }
 
 /**
@@ -303,8 +334,8 @@ function derivedCredit(worked: number | undefined, fullDayMinutes: number, halfD
 
 // Unexcused loss-of-pay DAY-UNITS over the period for one employee (fractional).
 //
-// Every scheduled working day that is not a holiday OWES a day of work, less whatever approved leave excuses
-// (a half-day leave leaves half a day owed). Against that sits what the day was WORTH: normally the minutes
+// Every scheduled working day that is not a holiday OWES a day of work, less whatever approved PAID leave
+// excuses (a half-day leave leaves half a day owed; unpaid leave excuses nothing). Against that sits what the day was WORTH: normally the minutes
 // punched, on the half-day ladder `derivedCredit` states - and where HR has marked the day, the mark instead.
 // What is left over is unexcused, and a day worth more than it owed settles at zero rather than going
 // negative (voluntary overtime does not bank against another day's absence).

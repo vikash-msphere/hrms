@@ -45,8 +45,18 @@ export function KudosLevelsTab() {
   async function save() {
     const cleanedLevels = levels.map((l) => ({ name: l.name.trim(), points: Number(l.points) || 0 })).filter((l) => l.name);
     if (!cleanedLevels.length) { toast({ title: "Add at least one level", variant: "destructive" }); return; }
-    // Categories de-duped (case-insensitive by name), blanks dropped. Empty list is valid (no category axis).
-    // Prompts are trimmed with blank lines dropped; an empty list is omitted from the blob.
+    // Two categories of one name (case-insensitive) are refused, not merged: the save used to keep the first and
+    // drop the rest without a word, so a category added under a name already on the list - icon, art, prompts
+    // and all - vanished behind a "saved" toast.
+    const names = categories.map((c) => c.name.trim().toLowerCase()).filter(Boolean);
+    const clash = names.find((n, i) => names.indexOf(n) !== i);
+    if (clash) {
+      const shown = categories.find((c) => c.name.trim().toLowerCase() === clash)!.name.trim();
+      toast({ title: `Two categories are called "${shown}"`, description: "Rename or remove one, then save.", variant: "destructive" });
+      return;
+    }
+    // Blanks dropped. Empty list is valid (no category axis). Prompts are trimmed with blank lines dropped; an
+    // empty list is omitted from the blob.
     const seen = new Set<string>();
     const cleanedCats = categories
       .map((c) => {

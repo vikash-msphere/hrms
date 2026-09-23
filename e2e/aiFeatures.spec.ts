@@ -234,7 +234,9 @@ test.describe("an AI feature switched on", () => {
       await page.getByRole("menuitem", { name: "Poll" }).click();
       const poll = page.getByRole("dialog");
       await expect(poll.getByRole("button", { name: /^Draft$/ })).toBeVisible({ timeout: 30_000 });
-      await page.keyboard.press("Escape");
+      // Closed by its own button, not Escape: a toast is the topmost dismissable layer and takes the first
+      // Escape, and HR's bell raises "N new notifications" whenever other specs' work reaches them.
+      await poll.getByRole("button", { name: "Cancel" }).click();
       await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
 
       // A KUDOS DOES NOT, and this is the positive control's other half: without it, the assertion above

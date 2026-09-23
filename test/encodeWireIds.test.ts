@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { makeIdCodec } from "../src/lib/idCodec";
+import { makeIdCodec, isInternalId, genId } from "../src/lib/idCodec";
 import { encodeWireIds, collectRefs } from "../src/middleware/encodeWireIds";
 
 const KEY = Buffer.alloc(32, 7).toString("base64");
@@ -51,8 +51,29 @@ describe("encodeWireIds", () => {
     expect(refs.size).toEqual(0); // settings/preferences excluded; foo not a known collection
   });
 
+  it("leaves an id-SHAPED string that is not a canonical id untouched instead of failing the response", async () => {
+    // 13 alphabet characters whose last one carries the spare 65th bit: the regex matches, the codec cannot
+    // encode it. User text shaped like this used to make the whole response a 500 for every reader.
+    const bogus = "zzzzzzzzzzzzz";
+    const out = await encodeWireIds(codec, { title: `goals/${bogus}`, path: `goals/${EVE}` });
+    expect(out.title).toEqual(`goals/${bogus}`);
+    expect(await codec.decode("goals", out.path.split("/")[1]!)).toEqual(EVE);
+  });
+
   it("the same id under different collections encodes differently (collection-bound)", async () => {
     const out = await encodeWireIds(codec, { a: `employees/${EVE}`, b: `documents/${EVE}` });
     expect(out.a.split("/")[1]).not.toEqual(out.b.split("/")[1]);
+  });
+});
+
+describe("isInternalId", () => {
+  it("accepts minted ids and refuses non-canonical, wrong-length and foreign strings", () => {
+    for (let i = 0; i < 50; i++) expect(isInternalId(genId())).toBe(true);
+    expect(isInternalId(EVE)).toBe(true);
+    expect(isInternalId("zzzzzzzzzzzzz")).toBe(false); // spare bit set
+    expect(isInternalId("abc")).toBe(false);
+    expect(isInternalId(`${EVE}0`)).toBe(false);
+    expect(isInternalId("ILOU000000000")).toBe(false); // outside the alphabet
+    expect(isInternalId(undefined)).toBe(false);
   });
 });

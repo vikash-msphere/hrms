@@ -11,11 +11,12 @@ import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
+import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 
 // Overtime requests: an employee logs extra hours for a day; a manager (own dept) or HR approves/rejects, the
 // owner cancels while pending. Mirrors attendance-regularizations (request -> decide), without a side effect
 // on approval - the approved record IS the tracked overtime. Who may approve/reject/cancel is the verb's grant
-// (middleware); the service only guards state transitions.
+// (middleware); the service guards state transitions and maker-checker (services/decisionGuard.ts).
 export type OvertimeInput = {
   employee?: string | null;
   start_time?: string; // ISO datetime when the overtime began
@@ -64,9 +65,12 @@ export async function createOvertimeRequest(deps: Deps, actor: AppUser, input: O
   return row;
 }
 
-async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", note?: string | null) {
+async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", note?: string | null, ifMatch?: string) {
   const row = await getOvertimeRequest(deps, actor, id);
   if (row.state !== "PENDING") throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
+  assertReviewedVersion(row, ifMatch);
+  // Approved overtime is paid by the next run, so the person it pays may not be the one approving it.
+  if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "overtime request");
   // Guard the flip on PENDING so the decision is EXACTLY-ONCE: a double-clicked/concurrent call that also
   // read PENDING loses here (0 rows) instead of both firing the notify/event side-effects twice.
   const [updated] = await deps.db
@@ -83,8 +87,8 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   return updated;
 }
 
-export const approveOvertimeRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null) => decide(deps, actor, id, "APPROVED", note);
-export const rejectOvertimeRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null) => decide(deps, actor, id, "REJECTED", note);
+export const approveOvertimeRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "APPROVED", note, ifMatch);
+export const rejectOvertimeRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "REJECTED", note, ifMatch);
 export const cancelOvertimeRequest = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");
 
 // Approved overtime not yet paid by any run, optionally only up to a period-end (so future-dated OT isn't

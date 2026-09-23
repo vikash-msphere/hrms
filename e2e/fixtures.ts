@@ -88,6 +88,16 @@ const IGNORED_CONSOLE = [
   //
   // Scoped to the endpoint, not to the status: a 404 anywhere else is still a spec failure.
   /status of 404\b.*\/v1\/letterheads\/[^/]+:image/i,
+  // A read receipt for a board post another spec deleted while this page had it on screen.
+  //
+  // The feed is org-wide and a dozen specs post to it and delete their posts again. A card that stays in view
+  // for the dwell time fires `:markRead`, so a page that read the list just before another browser's delete
+  // sends a receipt for a post that is gone, and 404 is the honest answer. `Announcements.tsx#markRead`
+  // settles on it and drops the card; the console line is the only trace. Seen 2026-09-23: two of these
+  // failed `aiFeatures.spec.ts` on the Feed, both answered 404 right after their DELETE in the worker log.
+  //
+  // Scoped to the endpoint, not to the status: a 404 anywhere else is still a spec failure.
+  /status of 404\b.*\/v1\/announcements\/[^/]+:markRead/i,
 ];
 
 // The relay's own path. A failed resource load is logged against the url that failed, so a console error
@@ -131,6 +141,21 @@ export function allowConsoleErrors(page: Page, pattern: RegExp) {
  *
  * A spec that calls this MUST also stub `**\/diag`, or its envelopes go to the real project.
  */
+/**
+ * Whether a 500 came from a hop between the browser and the Worker rather than from the app - the rule
+ * `web/src/api.ts#isGatewayRefusal` applies, so a test and the app agree on what is infra.
+ *
+ * The app's 500 is always problem+json with a `/errors/...` type. The header settles most cases with no body.
+ * A body that cannot be read settles the rest: the app cancels a response's body only when it is about to
+ * retry it (`discard`), and it retries a 500 only when that 500 is not its own - its own is never cancelled,
+ * so it is always readable here.
+ */
+export async function notTheApps500(res: import("@playwright/test").Response): Promise<boolean> {
+  if (!(res.headers()["content-type"] ?? "").includes("problem+json")) return true;
+  const body = await res.text().catch(() => null);
+  return body === null || !/"type"\s*:\s*"\/errors\//.test(body);
+}
+
 export async function enableTelemetry(page: Page) {
   await page.addInitScript(() => {
     (window as unknown as { __hrmsSentryOptIn?: boolean }).__hrmsSentryOptIn = true;
@@ -158,9 +183,12 @@ export const test = base.extend<Fixtures>({
     // answers with a 500 of its own when it cannot reach the Worker at all - `FetchError: ... read ECONNRESET`,
     // which workerd produces under sixteen browsers exactly as it produces the restart 503 documented above.
     // The console line is identical to a real one ("the server responded with a status of 500"), so the only
-    // way to tell them apart is the BODY: Prism's carries its own `stoplight.io/prism/errors` type. Those urls
-    // are collected here and the console entries naming them are dropped at the end; every other 500 is the
-    // app's own errorHandler and still fails the spec.
+    // way to tell them apart is the BODY, and the rule is the one `web/src/api.ts#isGatewayRefusal` uses: the
+    // app's errorHandler always answers a 500 as problem+json with a `/errors/...` type. Anything else came
+    // from a hop in between - Prism names the problem after the error it caught (`"type":"FetchError"` for a
+    // socket reset, `stoplight.io/prism/errors#UNKNOWN` otherwise), and `wrangler dev`'s ProxyWorker answers a
+    // dropped connection with a plain-text 500 that Prism passes through. Those urls are collected here and the
+    // console entries naming them are dropped at the end; every 500 the app wrote still fails the spec.
     const proxyFailed = new Set<string>();
     const bodiesRead: Promise<void>[] = [];
 
@@ -188,14 +216,7 @@ export const test = base.extend<Fixtures>({
       // Read before the console entry is judged - the body settles first, and the check happens after the run.
       page.on("response", (res) => {
         if (res.status() !== 500) return;
-        bodiesRead.push(
-          res
-            .text()
-            .then((body) => {
-              if (/stoplight\.io\/prism\/errors/.test(body)) proxyFailed.add(res.url());
-            })
-            .catch(() => undefined),
-        );
+        bodiesRead.push(notTheApps500(res).then((infra) => void (infra && proxyFailed.add(res.url()))));
       });
       page.on("console", (m) => {
         if (m.type() !== "error") return;

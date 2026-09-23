@@ -35,6 +35,7 @@ import { DEFAULT_ATTENDANCE, type AttendanceConfig } from "../domain/attendance"
 import { refHolidays, refLeaveTypes } from "../lib/refData";
 import { getAttachment } from "./attachments";
 import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
+import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 
 // Holidays (UTC YYYY-MM-DD) in [startMs, endMs] - the days leave shouldn't count. Non-deleted, non-disabled
 // holidays of any kind, minus the location-scoped ones that aren't this employee's (a Mumbai-only holiday must
@@ -614,8 +615,12 @@ async function leaveRefundStmts(deps: Deps, requestId: string, from: string, emp
     ))];
 }
 
-async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED") {
+async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", ifMatch?: string) {
   const row = await getLeaveRequest(deps, actor, id);
+  assertReviewedVersion(row, ifMatch);
+  // Approved leave excuses the days it covers (and unpaid leave is only docked if somebody else decided it), so
+  // the person on leave may not be the one approving it.
+  if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "leave request");
   // Who may approve/reject/cancel is gated by the verb's grant (middleware). Here only the instance state +
   // dates matter. Approve/reject act on a PENDING request; cancel also works on an APPROVED leave that
   // hasn't started yet (so an employee can call off an upcoming approved leave and get the balance back).
@@ -700,6 +705,6 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   return updated;
 }
 
-export const approveLeaveRequest = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "APPROVED");
-export const rejectLeaveRequest = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "REJECTED");
+export const approveLeaveRequest = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "APPROVED", ifMatch);
+export const rejectLeaveRequest = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", ifMatch);
 export const cancelLeaveRequest = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");

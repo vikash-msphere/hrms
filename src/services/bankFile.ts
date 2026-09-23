@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import { and, eq, inArray, isNull, isNotNull, ne } from "drizzle-orm";
+import { and, eq, inArray, isNull, isNotNull, ne, or } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -109,6 +109,9 @@ function cellValue(col: BankFormatColumn, c: Ctx): string | number | undefined {
   }
 }
 
+const bankAlreadyChosen = (chosen: string) =>
+  failedPrecondition(`this run's payout file was already made for ${chosen}; a file for another bank would pay every salary on it a second time. Regenerate the ${chosen} file instead.`);
+
 export async function buildBankFile(deps: Deps, actor: AppUser | null, runId: string, bank: string, acknowledged = false): Promise<{ bytes: Uint8Array; fileName: string }> {
   if (!bank) throw invalidArgument("bank query parameter is required");
   const run = (await deps.db.select().from(schema.payrollRuns).where(eq(schema.payrollRuns.uuid, runId)).limit(1))[0];
@@ -117,6 +120,10 @@ export async function buildBankFile(deps: Deps, actor: AppUser | null, runId: st
   // Separation of duties on the step where the money leaves: off unless the org asks for it, and refused
   // BEFORE any of the work below, so a caller who may not do this never reaches the decrypted accounts.
   await assertMayGenerateBankFile(deps, actor, run);
+  // ONE BANK PER RUN. Every file below carries every payable employee, so a second bank's file for the same run
+  // is every salary a second time if both reach a bank. Refused up front here (before any account is
+  // decrypted) and claimed atomically once the file has passed its checks, further down.
+  if (run.bankFileBank && run.bankFileBank !== bank) throw bankAlreadyChosen(run.bankFileBank);
 
   const fmt = (await getBankFormats(deps))[bank];
   if (!fmt?.columns?.length) throw invalidArgument(`no format configured for ${bank}`);
@@ -205,6 +212,18 @@ export async function buildBankFile(deps: Deps, actor: AppUser | null, runId: st
 
   if (missingAccount.length) {
     throw failedPrecondition(`${missingAccount.length} payable employee(s) have no bank account on file: ${missingAccount.slice(0, 8).join(", ")}${missingAccount.length > 8 ? ", …" : ""}. Add their bank details, then regenerate the bank file.`);
+  }
+
+  // Claim the run for this bank - AFTER every check above, so a file that was refused claims nothing, and
+  // guarded, so two people generating for two banks at once cannot both win: the loser matches no row.
+  const claimed = await deps.db
+    .update(schema.payrollRuns)
+    .set({ bankFileBank: bank })
+    .where(and(eq(schema.payrollRuns.uuid, runId), or(isNull(schema.payrollRuns.bankFileBank), eq(schema.payrollRuns.bankFileBank, bank))))
+    .returning({ uuid: schema.payrollRuns.uuid });
+  if (!claimed.length) {
+    const now = (await deps.db.select({ bank: schema.payrollRuns.bankFileBank }).from(schema.payrollRuns).where(eq(schema.payrollRuns.uuid, runId)).limit(1))[0];
+    throw bankAlreadyChosen(now?.bank ?? "another bank");
   }
 
   // Fill a copy of the template: write each data row from data_start_row down.

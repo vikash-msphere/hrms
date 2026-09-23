@@ -35,7 +35,7 @@ export const timeEntries = collectionRoutes<TimeEntryInput, typeof schema.timeEn
   list: (c, page) => listTimeEntries(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("from"), c.req.query("to"), c.req.query("status"), page.showDeleted, page.deletedOnly),
   verbs: {
     submit: { run: (deps, user, id) => submitTimeEntry(deps, user, id) },
-    approve: { run: (deps, user, id) => approveTimeEntry(deps, user, id) },
-    reject: { run: (deps, user, id) => rejectTimeEntry(deps, user, id) },
+    approve: { run: (deps, user, id, _body, c) => approveTimeEntry(deps, user, id, c.req.header("If-Match")) },
+    reject: { run: (deps, user, id, _body, c) => rejectTimeEntry(deps, user, id, c.req.header("If-Match")) },
   },
 });

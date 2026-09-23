@@ -108,11 +108,11 @@ export const expenses = collectionRoutes<ExpenseInput, typeof schema.expenses>({
     }),
   verbs: {
     submit: { run: (deps, user, id) => submitExpense(deps, user, id) },
-    approve: { run: (deps, user, id) => approveExpense(deps, user, id) },
+    approve: { run: (deps, user, id, _body, c) => approveExpense(deps, user, id, c.req.header("If-Match")) },
     // A rejection may carry its reason, so the submitter learns why (the body is optional on the wire).
     reject: {
       schema: z.object({ note: z.string().max(1000).nullable().optional() }).strict(),
-      run: (deps, user, id, body: { note?: string | null }) => rejectExpense(deps, user, id, body?.note ?? null),
+      run: (deps, user, id, body: { note?: string | null }, c) => rejectExpense(deps, user, id, body?.note ?? null, c.req.header("If-Match")),
     },
     cancel: { run: (deps, user, id) => cancelExpense(deps, user, id) },
     // Fill a DRAFT claim's fields from its receipt. The TEXT is posted by the client because the Worker
@@ -131,7 +131,7 @@ export const expenses = collectionRoutes<ExpenseInput, typeof schema.expenses>({
       },
     },
     // The payment details are optional and shaped by the service, so the body is taken as sent.
-    pay: { run: async (deps, user, id, _body, c) => payExpense(deps, user, id, await jsonBody(c)) },
+    pay: { run: async (deps, user, id, _body, c) => payExpense(deps, user, id, await jsonBody(c), c.req.header("If-Match")) },
     // The invoice goes up as raw bytes, but the answer is the expense itself (now carrying its invoice flag).
     upload: {
       run: async (deps, user, id, _body, c) => {

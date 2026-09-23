@@ -16,7 +16,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { systemActor } from "../lib/systemActor";
 import type { AppUser } from "../env";
-import type { DomainEvent } from "../domain/events";
+import { redactSensitivePayload, type DomainEvent } from "../domain/events";
 import { allocFlatCode } from "./codeAlloc";
 import { notify, notifyManager, notifyAudience, audienceEmployeeIds, managerIdOf } from "./notifications";
 import type { Action, Automation, EvalContext, RecipientSpec, WaitArm, Schedule, EmailAttachmentSpec } from "../domain/automations";
@@ -30,6 +30,7 @@ import { payrollScheduleMetrics } from "./payroll";
 import { renderEmail, loadEmailBrand, escapeHtml } from "../lib/emailLayout";
 import { fanOutEmail } from "./emailFanOut";
 import { ENCODABLE } from "../middleware/encodeWireIds";
+import { isInternalId } from "../lib/idCodec";
 
 export { systemActor };
 
@@ -147,6 +148,14 @@ function parseAutomation(row: AutomationRow): Automation {
 }
 
 const nowIso = () => new Date().toISOString();
+
+/** The context with the event's sensitive values masked, including an event a `waitFor` resumed on. */
+function redactedCtx(ctx: EvalContext): EvalContext {
+  const results = { ...(ctx.results ?? {}) };
+  const resume = results.resumeEvent;
+  if (resume && typeof resume === "object" && !Array.isArray(resume)) results.resumeEvent = redactSensitivePayload(ctx.type, resume as Record<string, unknown>);
+  return { ...ctx, payload: redactSensitivePayload(ctx.type, ctx.payload ?? {}), results };
+}
 function contextOf(event: DomainEvent): EvalContext {
   const now = nowIso();
   return { type: event.type, subject: event.subject, actorId: event.actorId, employeeId: event.employeeId, payload: event.payload, results: {}, now, today: now.slice(0, 10) };
@@ -199,13 +208,13 @@ function template(value: unknown, ctx: EvalContext): unknown {
 async function outboundCtx(deps: Deps, ctx: EvalContext): Promise<EvalContext> {
   const ref = async (v: string | null | undefined) => {
     const m = v ? /^([a-z][a-z-]*)\/([0-9a-hj-km-np-tv-z]{13})$/.exec(v) : null;
-    if (!m || !ENCODABLE.has(m[1]!)) return v ?? null;
+    if (!m || !ENCODABLE.has(m[1]!) || !isInternalId(m[2])) return v ?? null;
     return `${m[1]}/${await deps.idCodec.encode(m[1]!, m[2]!)}`;
   };
   // A bare uuid has no collection in it, so it is tokenized against the table it comes from: `employeeId` is
   // an `employees` row, `actorId` a `users` row (resolveRecipient reads it out of `users`).
   const bare = async (collection: string, v: string | null | undefined) =>
-    (v && /^[0-9a-hj-km-np-tv-z]{13}$/.test(v) ? await deps.idCodec.encode(collection, v) : v ?? null);
+    (v && isInternalId(v) ? await deps.idCodec.encode(collection, v) : v ?? null);
   return {
     ...ctx,
     subject: await ref(ctx.subject),
@@ -332,11 +341,15 @@ type ActionOutcome = { kind: string; status: "done" | "skipped" | "error" | "sus
 // `origin` is the rule these actions came from - carried so `emitEvent` can say whether what it relays is
 // allowed to reach a privileged rule, and so a suspended continuation remembers whose it was (see RuleOrigin).
 async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, action: Action, depth: number, origin: RuleOrigin): Promise<ActionOutcome> {
+  // What a rule no super admin authored may read of the event: the payload with its money masked (domain/
+  // events.ts SENSITIVE_PAYLOAD_FIELDS), the same line the event log's own serializer draws below super. Only
+  // the lanes such a rule can author template over it; the privileged kinds are super-authored by construction.
+  const readable = origin.trusted ? ctx : redactedCtx(ctx);
   switch (action.kind) {
     case "notify": {
-      const recipient = await resolveRecipient(deps, ctx, action.recipient);
+      const recipient = await resolveRecipient(deps, readable, action.recipient);
       if (!recipient) return { kind: action.kind, status: "skipped", detail: "no recipient" };
-      const out = await outboundCtx(deps, ctx); // the title/body are read by a person, not by the app
+      const out = await outboundCtx(deps, readable); // the title/body are read by a person, not by the app
       await notify(deps, { recipient, type: action.type ?? event.type, title: String(template(action.title, out)), body: action.body ? String(template(action.body, out)) : null, link: action.link ?? null, subject: event.subject ?? undefined, action: action.action ?? null });
       return { kind: action.kind, status: "done" };
     }
@@ -348,8 +361,8 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
     case "notifyAudience": {
       // Template the audience too, so a rule can target a department/employees carried in the event
       // (e.g. { kind: "department", department: "{{departmentId}}" }).
-      const audience = template(action.audience, ctx) as typeof action.audience;
-      const out = await outboundCtx(deps, ctx);
+      const audience = template(action.audience, readable) as typeof action.audience;
+      const out = await outboundCtx(deps, readable);
       await notifyAudience(deps, audience, { type: action.type ?? event.type, title: String(template(action.title, out)), body: action.body ? String(template(action.body, out)) : null, link: action.link ?? null });
       return { kind: action.kind, status: "done" };
     }
@@ -370,7 +383,9 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
       await emitEvent(deps, systemActor(), action.type, {
         subject: event.subject,
         employeeId: event.employeeId,
-        payload: template(action.payload ?? event.payload, ctx) as Record<string, unknown>,
+        // Relayed over the READABLE context: re-emitting the event whole must not be a way to launder its
+        // money into a payload the next rule reads unmasked.
+        payload: template(action.payload ?? (origin.trusted ? event.payload : redactSensitivePayload(event.type, event.payload ?? {})), readable) as Record<string, unknown>,
         depth: depth + 1,
         relayedUntrusted: !origin.trusted,
       });

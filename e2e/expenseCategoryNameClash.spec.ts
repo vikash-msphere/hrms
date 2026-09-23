@@ -55,7 +55,9 @@ test("a repeated category name is flagged but still saves, and the edit dialog c
     expect(made.status(), await made.text()).toBe(200);
     const expense = (await made.json()) as { path: string };
     await page.request.post(`/v1/${expense.path}:submit`, { headers: SPA_HEADERS });
-    const approved = await page.request.post(`/v1/${expense.path}:approve`, { headers: SPA_HEADERS });
+    // Approved by finance, not the filer: nobody decides their own expense (services/decisionGuard.ts).
+    const finance = await as("payroll");
+    const approved = await finance.request.post(`/v1/${expense.path}:approve`, { headers: SPA_HEADERS });
     expect(approved.status(), await approved.text()).toBe(200);
 
     // The twin WITHOUT the expense sorts alongside this one under the same name, so the GL code is what

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { FileSearch, CheckSquare, Award, Users, MessageSquare } from "lucide-react";
-import { invoke } from "@/api";
+import { invokeRead } from "@/api";
 import { Button } from "@/components/ui/button";
 import { formatDate } from "@/lib/utils";
 import { navigate } from "@/router";
@@ -45,7 +45,7 @@ export function ReviewEvidenceCard({ reviewId, can, subject, onUse }: {
   async function run() {
     setBusy(true);
     try {
-      const res = await invoke<{ evidence: Evidence }>(`reviews/${reviewId}`, "evidence");
+      const res = await invokeRead<{ evidence: Evidence }>(`reviews/${reviewId}`, "evidence");
       setPack(res.evidence);
     } catch {
       // Silent: this is a reading aid beside a form somebody opened to do something else.

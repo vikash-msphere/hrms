@@ -48,9 +48,9 @@ export const assetRequests = collectionRoutes<AssetRequestInput, typeof schema.a
     );
   },
   verbs: {
-    approve: { run: async (deps, user, id, _body, c) => approveAssetRequest(deps, user, id, await noteOf(c)) },
-    reject: { run: async (deps, user, id, _body, c) => rejectAssetRequest(deps, user, id, await noteOf(c)) },
+    approve: { run: async (deps, user, id, _body, c) => approveAssetRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
+    reject: { run: async (deps, user, id, _body, c) => rejectAssetRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelAssetRequest(deps, user, id) },
-    issue: { schema: issueSchema, run: (deps, user, id, body: { asset: string }) => issueAssetRequest(deps, user, id, body?.asset) },
+    issue: { schema: issueSchema, run: (deps, user, id, body: { asset: string }, c) => issueAssetRequest(deps, user, id, body?.asset, c.req.header("If-Match")) },
   },
 });

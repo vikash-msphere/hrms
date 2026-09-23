@@ -23,13 +23,15 @@ test("reacting with a second emoji clears the first, and toggling it off brings 
   const seeded = await author.request.post(`/v1/${post.path}:react`, { headers: SPA_HEADERS, data: { emoji: "❤️" } });
   expect(seeded.status(), await seeded.text()).toBe(200);
 
-  /** Whether the reader still holds a reaction of their own on this post - asked of the record. */
-  const reacted = async (): Promise<boolean> => {
+  /** The emoji the reader holds on this post, or null for none - asked of the record. */
+  const mine = async (): Promise<string | null | undefined> => {
     const res = await reader.request.get(`/v1/${post.path}`);
-    if (!res.ok()) return true; // unknown is not "cleared"
+    if (!res.ok()) return undefined; // unknown is neither side of the toggle
     const { reactions = [] } = (await res.json()) as { reactions?: { emoji: string; reacted?: boolean }[] };
-    return reactions.some((r) => r.reacted);
+    return reactions.find((r) => r.reacted)?.emoji ?? null;
   };
+  /** Whether the reader still holds a reaction of their own on this post. */
+  const reacted = async (): Promise<boolean> => (await mine()) !== null;
 
   try {
     await gotoRoute(reader, "announcements", "Feed");
@@ -52,6 +54,9 @@ test("reacting with a second emoji clears the first, and toggling it off brings 
     await card.getByRole("button", { name: /❤️/ }).click();
     await expect(card.getByRole("button", { name: /👍/ })).toHaveCount(0);
     await expect(card.getByRole("button", { name: /❤️/ })).toContainText("2");
+    // The chips above move before their requests land, so the record can still be a tap behind. The loop below
+    // reads "not reacted" as "already cleared", which is only true once the switch itself is on the record.
+    await expect.poll(mine, { timeout: 15_000 }).toBe("❤️");
 
     // Toggled off again: MY share of it clears, but the author's own ❤️ (seeded above) is still there -
     // one person clearing their reaction doesn't erase somebody else's.

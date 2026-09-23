@@ -19,7 +19,8 @@ WAF_RATE_LIMIT_CONFIRMED=2026-09-10 npm run deploy
 The date is the day you last verified the rules below in the dashboard. It is an error to omit it for a
 production deploy, an error if it is not an ISO date or is in the future, and a warning once it is more than a
 year old — a rule deleted in a later cleanup should not stay covered by a claim made before it existed. Named
-preview environments (`--env staging`) get a warning rather than a block.
+preview environments (any config other than `wrangler.toml` — `--config wrangler.staging.toml`) get a
+warning rather than a block.
 
 **Plan tier decides which set of rules you get, and it is not only a rate-limiting question.**
 `wrangler.toml` ships `[limits] cpu_ms = 60000`, which is a Workers Standard (paid) feature. On the Free

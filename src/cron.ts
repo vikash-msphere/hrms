@@ -26,6 +26,7 @@ import { drainSearchEmbeddings } from "./services/searchEmbed";
 import { drainModeration, reconcileHolds } from "./services/moderation";
 import { sweepCardDuplicates, pruneDuplicateSuggestions } from "./services/cardDuplicateSweep";
 import { sweepAiCache, sweepAiUsage } from "./services/ai";
+import { sweepIdempotencyKeys } from "./middleware/idempotency";
 import { nextOccurrence } from "./services/events";
 import { purgeExpiredAccessRules, reviewStandingAccess } from "./services/accessRules";
 import { purgeIdentityFieldsSlice, IDENTITY_PURGE_JOB, type IdentityPurgeCursor } from "./services/identityDetails";
@@ -232,6 +233,8 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // with a record they had a model consulted about, so without a window it is a permanent per-person log
     // going back to deployment - the half of "answer this a year later" that had no code behind it.
     const aiUsageSwept = await run("sweepAiUsage", () => sweepAiUsage(deps));
+    // Replay answers for re-sent writes (middleware/idempotency.ts). A retry follows its write within seconds.
+    const idempotencySwept = await run("sweepIdempotencyKeys", () => sweepIdempotencyKeys(deps));
     // Periodic recertification of STANDING privilege (opt-in per org via the `access-review` setting). The
     // expiry sweep above only handles access somebody knew was temporary; this is the rest - the grant made
     // for one project or one person's leave cover that nobody's job it is to remove. No-ops on every tick
@@ -251,7 +254,7 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // mirror of `retireOrphans`: that closes a flag with no host, this re-queues a host with no flag.
     const holdsRequeued = await run("reconcileHolds", async () => (await reconcileHolds(deps)).requeued);
     return {
-      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, attentionDigests, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, payrollBudgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, aiUsageSwept, accessReviewed, duplicatesFlagged, duplicatesPruned, holdsRequeued },
+      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, attentionDigests, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, payrollBudgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, aiUsageSwept, idempotencySwept, accessReviewed, duplicatesFlagged, duplicatesPruned, holdsRequeued },
       failures,
     };
   }

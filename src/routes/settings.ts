@@ -22,7 +22,15 @@ import { getFieldDefs, identityValueCounts, purgeIdentityFieldsSlice, IDENTITY_P
 import { allocFlatCode } from "../services/codeAlloc";
 import * as schema from "../db/schema";
 
-const writeSchema = z.object({ value: z.unknown().optional(), key: z.string().optional() }).strict();
+// `value` IS REQUIRED AND IS AN OBJECT. Every setting is a JSON object blob - `getSettingValue` spreads it over
+// its defaults - and several per-key validators below return early on a non-object, on the understanding that
+// nothing but an object arrives. With `value` optional and untyped, a PATCH of `null`, a string or an array
+// sailed past those validators and was stored; every read of that key then fell back to (or spread characters
+// over) the defaults, on a screen that had said it saved.
+const writeSchema = z.object({
+  value: z.custom<Record<string, unknown>>((v) => !!v && typeof v === "object" && !Array.isArray(v), { message: "value must be a JSON object" }),
+  key: z.string().optional(),
+}).strict();
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 // The key an identity field gets when none was given, exactly as the editor derives it (web/src/pages/Settings).
@@ -723,8 +731,23 @@ function validateAttention(value: unknown): void {
   }
 }
 
+/**
+ * Maker-checker (services/decisionGuard.ts). Strict, because the one leaf decides whether people may approve
+ * their own money: a string "true" read as the default would be the safe direction, but a save that reported
+ * success and changed nothing is the kind of answer this registry exists to refuse.
+ */
+function validateApprovals(value: unknown): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw invalidArgument("approvals must be an object");
+  const v = value as Record<string, unknown>;
+  for (const k of Object.keys(v)) if (k !== "allow_self_approval") throw invalidArgument(`approvals.${k} is not a setting`);
+  if (v.allow_self_approval !== undefined && typeof v.allow_self_approval !== "boolean") {
+    throw invalidArgument("approvals.allow_self_approval must be true or false");
+  }
+}
+
 const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
   ["ai", validateAi],
+  ["approvals", validateApprovals],
   ["attention", validateAttention],
   ["ctc", validateCtc],
   ["esign", validateEsign],

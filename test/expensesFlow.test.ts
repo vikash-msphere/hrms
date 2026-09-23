@@ -38,6 +38,9 @@ const TABLES = [
 ];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
+  // One actor submits and decides. The lifecycle is the subject here, not maker-checker
+  // (test/decisionGuard.test.ts), so the org opts into self-approval.
+  await deps.db.insert(schema.settings).values({ key: "approvals", value: JSON.stringify({ allow_self_approval: true }) });
 });
 
 const short = (p: string) => `${p}-${genId().slice(0, 6)}`;

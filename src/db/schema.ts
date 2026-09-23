@@ -1740,6 +1740,21 @@ export const jobs = sqliteTable("jobs", {
 
 // One row per scheduled (cron) tick, written by runScheduled: makes "did it run / when / how long / did it
 // fail" observable (the crons themselves are stateless Cloudflare triggers that record nothing). Admin-only.
+// One row per write a client sent with an `Idempotency-Key` (middleware/idempotency.ts): the answer it got, so
+// a retry of the same write is handed that answer instead of doing the write twice. `status` 0 marks a write
+// still in flight. Keyed per principal, because a key is only unique within the client that minted it. Swept
+// nightly (cron.ts) - a retry arrives within seconds, so a day is a generous window.
+export const idempotencyKeys = sqliteTable("idempotency_keys", {
+  principal: text("principal").notNull(),
+  key: text("key").notNull(),
+  method: text("method").notNull(),
+  path: text("path").notNull(),
+  status: integer("status").notNull().default(0),
+  headersJson: text("headers_json"), // the answer's Content-Type, ETag and Location, replayed with it
+  body: text("body"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+}, (t) => ({ pk: primaryKey({ columns: [t.principal, t.key] }), createdIdx: index("idempotency_keys_created_idx").on(t.createdAt) }));
+
 export const cronRuns = sqliteTable("cron_runs", {
   uuid: pk(),
   code: codeCol(),
@@ -2606,6 +2621,10 @@ export const payrollRuns = sqliteTable("payroll_runs", {
   // leaves the company, and deleting a run RELEASES every payable it paid back into the queue - so once this
   // is stamped the run can no longer be deleted, otherwise the next run would pay the same one-offs again.
   bankFileAt: integer("bank_file_at", { mode: "timestamp_ms" }),
+  // The bank the run's payout file was made for. Every file carries every payable employee, so files for two
+  // banks on one run are every salary paid twice if both are submitted. The first generation claims the run
+  // for its bank (services/bankFile.ts); the same bank can regenerate, another is refused. NULL = no file yet.
+  bankFileBank: text("bank_file_bank"),
   // Employee ids the last build CONSIDERED but could not price - a JSON array, written by the same atomic
   // batch that writes the items and cleared whenever the run is reset to "never built".
   //

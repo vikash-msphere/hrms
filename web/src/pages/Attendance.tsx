@@ -11,7 +11,7 @@ import { exportTable } from "@/lib/exportTable";
 import { cn, idOf, formatDate } from "@/lib/utils";
 import {
   summarizeByDay, buildAttendanceRows, statsOf, fmtDay, fmtHM, fmtHM24, fmtDuration, fmtDurationShort,
-  localDay, localMinutes, zonedInstant, weekdayOf, hhmmToMin, signedDuration, STATUS_UI,
+  localDay, localMinutes, zonedInstant, weekdayOf, hhmmToMin, signedDuration, STATUS_UI, leaveRangeOf, unpaidLeaveTypes,
   type DayStatus, type AttendanceRow, type AttendanceSchedule, type LeaveRange, type WindowStats,
 } from "@/lib/attendance";
 import { useAttendanceWindow } from "@/hooks/useAttendanceWindow";
@@ -152,9 +152,10 @@ export default function Attendance({ me }: { me: Me }) {
   }, [holidays]);
   const holidaySet = useMemo(() => new Set(holidayByDay.keys()), [holidayByDay]);
   const myApprovedLeaves = useMemo(() => leaves.filter((l) => mine(l.employee) && upper(l.state) === "APPROVED"), [leaves, mine]);
+  const unpaidTypes = useMemo(() => unpaidLeaveTypes(leaveTypes), [leaveTypes]);
   const leaveRanges = useMemo<LeaveRange[]>(
-    () => myApprovedLeaves.map((l) => ({ start: l.start_date, end: l.end_date, startSession: l.start_session, endSession: l.end_session })),
-    [myApprovedLeaves],
+    () => myApprovedLeaves.map((l) => leaveRangeOf(l, unpaidTypes)),
+    [myApprovedLeaves, unpaidTypes],
   );
   // The approved leave covering a given day (for the expanded "why no punches" detail).
   const leaveForDay = useCallback((day: string) => myApprovedLeaves.find((l) => l.start_date <= day && day <= l.end_date), [myApprovedLeaves]);
@@ -336,11 +337,11 @@ export default function Attendance({ me }: { me: Me }) {
       if (!l.employee || upper(l.state) !== "APPROVED") continue;
       const k = idOf(l.employee);
       const arr = m.get(k);
-      const range = { start: l.start_date, end: l.end_date, startSession: l.start_session, endSession: l.end_session };
+      const range = leaveRangeOf(l, unpaidTypes);
       if (arr) arr.push(range); else m.set(k, [range]);
     }
     return m;
-  }, [leaves]);
+  }, [leaves, unpaidTypes]);
 
   const team = useMemo(() => {
     if (!canApprove) return [];

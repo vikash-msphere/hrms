@@ -39,11 +39,21 @@ const ids = { anaEmp: genId(), boEmp: genId(), carlaEmp: genId(), ana: genId(), 
 
 // Two access admins: `ana` authors, `bo` approves (four eyes needs two humans).
 const actor = (uuid: string, email: string, employeeId: string): AppUser =>
-  // The grant is EMPTY_GRANT's shape, not a hand-rolled one: `{denies, customs}` named fields `Grant` has never
-  // had (they are `deny` and `allow`), and the `as never` cast is what let that compile. `isSuperGrant` reads
+  // The grant is `Grant`'s real shape (`levels`/`allow`), not a hand-rolled one: `{denies, customs}` named
+  // fields `Grant` has never had, and the `as never` cast is what let that compile. `isSuperGrant` reads
   // `g.allow`, so every call through this fixture threw "Cannot read properties of undefined (reading
   // 'includes')" instead of reaching the self-widening guard it was written to prove.
-  ({ uuid, email, role: "hr_admin", roles: ["hr_admin"], status: "active", employeeId, employeeCode: null, name: email, grant: { levels: {}, allow: [] }, policy: DEFAULT_POLICY }) as AppUser;
+  //
+  // And it CARRIES AUTHORITY. An access admin may only hand out what they hold themselves (domain/access.ts
+  // ruleWithinAuthority), so an empty grant can grant nothing at all. These two hold admin over exactly the
+  // collections this suite writes rules for - delegated, NOT super (no `**`), which is what the self-widening
+  // cases below depend on.
+  ({ uuid, email, role: "hr_admin", roles: ["hr_admin"], status: "active", employeeId, employeeCode: null, name: email, grant: DELEGATED, policy: DEFAULT_POLICY }) as AppUser;
+const DELEGATED_OVER = ["attendance", "compensation", "employees", "expenses", "holidays", "leave-requests"];
+const DELEGATED = {
+  levels: Object.fromEntries(DELEGATED_OVER.flatMap((c) => [[c, "admin"], [`${c}.**`, "admin"]])),
+  allow: DELEGATED_OVER.map((c) => `${c}.**`),
+} as AppUser["grant"];
 const ana = () => actor(ids.ana, "ana@test.example", ids.anaEmp);
 const bo = () => actor(ids.bo, "bo@test.example", ids.boEmp);
 
@@ -477,5 +487,23 @@ describe("per-rule guards survive the trip from the rules table to the decision"
     await createAccessRule(deps, ana(), capped({}));
     const [g] = await guardsFor("expenses.**.approve");
     expect(g).toEqual({ condition: null, fromIp: null, window: null });
+  });
+});
+
+// A delegated access admin hands out only what they hold (domain/access.ts ruleWithinAuthority) - otherwise
+// delegating the ACL is delegating super, one step removed.
+describe("a rule author cannot grant past their own authority", () => {
+  it("refuses a rule on a collection the author holds nothing on, and allows a deny there", async () => {
+    await expect(createAccessRule(deps, ana(), grantEmployeeRead({ collection: "payslips" }))).rejects.toThrow(/only grant access you hold/);
+    expect(await deps.db.select().from(schema.accessRules)).toHaveLength(0);
+    // A deny only subtracts, so it is inside anyone's authority.
+    await expect(createAccessRule(deps, ana(), { subject_kind: "role", subject: "employee", collection: "payslips", scope: "all", effect: "deny" })).resolves.toBeTruthy();
+  });
+
+  it("refuses APPROVING a pending grant the approver could not have written", async () => {
+    await setApproval(true);
+    const pending = await createAccessRule(deps, ana(), grantEmployeeRead());
+    const narrowBo = { ...bo(), grant: { levels: {}, allow: ["access-rules.**"] } } as unknown as AppUser;
+    await expect(decideAccessRule(deps, narrowBo, pending.uuid, "approve")).rejects.toThrow(/only grant access you hold/);
   });
 });

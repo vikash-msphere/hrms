@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { weekdayOf, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, localDay, utcDay, creditUnits, type DayCredit, type WorkEvent } from "../src/domain/attendance";
+import { weekdayOf, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, localDay, utcDay, creditUnits, leaveCover, unpaidLeaveDayUnits, type DayCredit, type WorkEvent } from "../src/domain/attendance";
 
 const WORK = [1, 2, 3, 4, 5]; // Mon-Fri
 const FULL = 480; // minutes for a full day
@@ -373,5 +373,29 @@ describe("a day mark replaces what the punches say a day is worth", () => {
       marksByDay: marks("full"), // Mon only
     });
     expect(units).toBe(2); // Mon marked full(0) + Tue short(1) + Wed no punch(1)
+  });
+});
+
+// UNPAID LEAVE IS NOT AN EXCUSE. An approved "Loss of Pay" request says the day is not worked AND not paid; it
+// used to excuse the day like any other leave, so an employee on approved unpaid leave was paid in full - and
+// the same day, unrequested, would have been docked.
+describe("unpaid leave", () => {
+  const base = { startYmd: "2026-06-01", endYmd: "2026-06-03", workDays: WORK, holidays: new Set<string>(), workedByDay: new Map<string, number>(), fullDayMinutes: FULL, halfDayMinutes: HALF };
+
+  it("does not excuse the days it covers, while paid leave still does", () => {
+    const paid = lopDayUnits({ ...base, leaveRanges: [{ start: "2026-06-01", end: "2026-06-03" }] });
+    const unpaid = lopDayUnits({ ...base, leaveRanges: [{ start: "2026-06-01", end: "2026-06-03", paid: false }] });
+    expect(paid).toBe(0);
+    expect(unpaid).toBe(3);
+    expect(leaveCover("2026-06-02", [{ start: "2026-06-01", end: "2026-06-03", paid: false }])).toBe(0);
+  });
+
+  it("prices its own days when automatic loss of pay is off, half-day aware and skipping holidays", () => {
+    const ranges = [
+      { start: "2026-06-01", end: "2026-06-03", paid: false, endSession: 1 }, // Mon..Wed AM
+      { start: "2026-06-05", end: "2026-06-05" }, // Fri, paid leave - not counted
+    ];
+    // Mon + Tue(holiday, skipped) + Wed half = 1.5
+    expect(unpaidLeaveDayUnits("2026-06-01", "2026-06-07", WORK, new Set(["2026-06-02"]), ranges)).toBe(1.5);
   });
 });

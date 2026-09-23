@@ -23,7 +23,9 @@ test("committed spend replaces the breakdown's empty state with a real row", asy
   const expense = (await made.json()) as { path: string };
   const submitted = await page.request.post(`/v1/${expense.path}:submit`, { headers: SPA_HEADERS });
   expect(submitted.status(), await submitted.text()).toBe(200);
-  const approved = await page.request.post(`/v1/${expense.path}:approve`, { headers: SPA_HEADERS });
+  // Approved by somebody else - payroll holds `expenses.*.approve` - since nobody decides their own expense
+  // (services/decisionGuard.ts).
+  const approved = await (await as("payroll")).request.post(`/v1/${expense.path}:approve`, { headers: SPA_HEADERS });
   expect(approved.status(), await approved.text()).toBe(200);
 
   try {

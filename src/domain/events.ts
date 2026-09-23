@@ -322,3 +322,50 @@ export function isKnownEventType(type: string): boolean {
 export function fieldsForEventType(type: string): EventField[] {
   return [...COMMON_EVENT_FIELDS, ...(BY_TYPE.get(type)?.fields ?? [])];
 }
+
+// ---- Sensitive payload fields ------------------------------------------------------------------------------
+//
+// The money an event carries: a payslip's net pay, a loan's principal and instalment, a claim's amount, an
+// offer's CTC and the band behind it, a budget's spend. The event log already refuses these below super - its
+// serializer redacts payload VALUES for anyone else (http/serialize.ts toEventLogResource) - and a rule is a
+// second way to read the same payload: a rule written by somebody who is not a super admin templated
+// `{{netPay}}` into a notification to themselves and read every payslip as it published. So the same line
+// holds there: a rule no super admin authored is templated over a payload with these masked
+// (services/automationEngine.ts), and may not condition on them (services/automations.ts) - a condition is a
+// read too, one bit at a time.
+//
+// By NAME, across every event, rather than flagged per field: a payload can carry a key its catalog entry does
+// not list, and a money figure under an unlisted key is exactly the one a per-entry flag would let through.
+export const SENSITIVE_PAYLOAD_FIELDS: ReadonlySet<string> = new Set([
+  "amount", "emiAmount", "outstanding", "principal", "netPay",
+  "spent", "budget", "projected",
+  "baseComp", "offerAmount", "bandMin", "bandMid", "bandMax",
+]);
+export const REDACTED = "[redacted]";
+
+/** The payload with every sensitive value masked; the keys stay, so a template still resolves them. */
+export function redactSensitivePayload(_type: string, payload: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(payload ?? {})) out[k] = SENSITIVE_PAYLOAD_FIELDS.has(k) && v != null ? REDACTED : v;
+  return out;
+}
+
+/**
+ * The sensitive payload fields a condition reads, however it spells them (`netPay` or `payload.netPay`), found
+ * anywhere in the tree (`all`/`any`/`not` nest). Structural, so a condition shape added later is still walked.
+ */
+export function sensitiveFieldsInCondition(_type: string, condition: unknown): string[] {
+  const found = new Set<string>();
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (!node || typeof node !== "object") return;
+    for (const [k, v] of Object.entries(node)) {
+      if (k === "field" && typeof v === "string") {
+        const name = (v.startsWith("payload.") ? v.slice("payload.".length) : v).split(".")[0]!;
+        if (SENSITIVE_PAYLOAD_FIELDS.has(name)) found.add(name);
+      } else walk(v);
+    }
+  };
+  walk(condition);
+  return [...found];
+}

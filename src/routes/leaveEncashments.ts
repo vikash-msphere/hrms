@@ -40,8 +40,8 @@ export const leaveEncashments = collectionRoutes<EncashmentInput, typeof schema.
     return listEncashments(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), emp ? emp.split("/").pop()! : undefined);
   },
   verbs: {
-    approve: { run: (deps, user, id) => approveEncashment(deps, user, id) },
-    reject: { run: (deps, user, id) => rejectEncashment(deps, user, id) },
+    approve: { run: (deps, user, id, _body, c) => approveEncashment(deps, user, id, c.req.header("If-Match")) },
+    reject: { run: (deps, user, id, _body, c) => rejectEncashment(deps, user, id, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelEncashment(deps, user, id) },
   },
 });

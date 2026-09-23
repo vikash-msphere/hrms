@@ -113,6 +113,26 @@ describe("create", () => {
     });
     expect(dup.status).toBe(409);
   });
+
+  it("refuses a caller-chosen id that is not a canonical internal id - on the generic AND the bespoke creates", async () => {
+    // The generic create used to be the only place `?id` was checked (regex only), and every collection with its
+    // own `overrides.create` skipped even that. The check now sits in the factory, ahead of both.
+    for (const bad of ["zzzzzzzzzzzzz", "short", "../../x", "ILOU000000000"]) {
+      const generic = await call(`/v1/holidays?id=${encodeURIComponent(bad)}`, {
+        method: "POST",
+        body: JSON.stringify({ display_name: "Holi", date: "2099-03-03" }),
+        headers: { "Content-Type": "application/json" },
+      });
+      expect(generic.status, `holidays ?id=${bad}`).toBe(400);
+      const bespoke = await call(`/v1/loans?id=${encodeURIComponent(bad)}`, {
+        method: "POST",
+        body: JSON.stringify({ principal: 1000, installments: 2 }),
+        headers: { "Content-Type": "application/json" },
+      });
+      expect(bespoke.status, `loans ?id=${bad}`).toBe(400);
+    }
+    expect(await deps.db.select().from(schema.holidays)).toEqual([]);
+  });
 });
 
 describe("read", () => {

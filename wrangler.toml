@@ -1,3 +1,12 @@
+# PRODUCTION. This file is the production deploy target and nothing else: `wrangler deploy`, `wrangler dev`
+# and the vitest workers pool all read it with no `--config`, and `npm run deploy` is the scripted form.
+#
+# STAGING LIVES IN `wrangler.staging.toml`, as a standalone config rather than an `[env.staging]` block in
+# here. The block form required every top-level binding and var to be repeated inside it, and forgetting one
+# was silent - a missing `[env.staging.vars]` deploys with no vars rather than failing - so the two targets
+# now read end to end as two files. Three things must be kept in step across them by hand, and
+# `npm run preflight` checks all three rather than trusting anyone to remember: the compatibility date, the
+# `[limits]` block, and `run_worker_first`.
 name = "hrms"
 main = "src/index.ts"
 # Pinned, and BUMPED DELIBERATELY rather than left to drift. The date selects the Workers runtime's behaviour
@@ -19,8 +28,8 @@ main = "src/index.ts"
 # (1.20260310.1, which tops out at 2026-03-10), so it is pulled back to what the toolchain can actually execute.
 #
 # TO MOVE IT FORWARD: bump `wrangler` first, check the date the new workerd supports (boot the suite and confirm
-# the warning above is gone), then raise this line and the staging one together. The date and the devDependency
-# are one edit, not two.
+# the warning above is gone), then raise this line and the one in wrangler.staging.toml together - preflight
+# fails the deploy when they disagree. The date and the devDependency are one edit, not two.
 compatibility_date = "2026-03-10"
 compatibility_flags = ["nodejs_compat"]
 
@@ -41,6 +50,10 @@ binding = "ASSETS"
 # The Worker's notFound handler does the fallback instead - 404 for a missing FILE, the shell for a real app
 # route. See src/index.ts.
 not_found_handling = "none"
+# Must stay identical to the list in wrangler.staging.toml: a prefix in one file and not the other means that
+# route reaches the Worker in one environment and is answered by the SPA shell in the other, which is a
+# difference staging exists to NOT have. test/spaFallback.test.ts pins both files against
+# WORKER_OWNED_PREFIXES, so a one-sided edit fails the suite rather than the rehearsal.
 run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag", "/__scheduled"]
 
 # Explicit CPU ceiling. This RAISES the limit, it does not lower it - say so plainly, because the comment here
@@ -116,7 +129,7 @@ ALLOWED_EMAIL_DOMAINS = "msphere.io"
 # remote and nobody on a phone, and the day the ISP reassigns it the office cannot punch either. To turn the
 # fence on, list the ranges you actually egress from (office prefixes and the VPN); a single host is only ever
 # right for a static address you control.
-# ATTENDANCE_ALLOWED_IPS = "203.0.113.0/24, 198.51.100.7, 2001:db8::/32"
+ATTENDANCE_ALLOWED_IPS = "122.164.127.209"
 # The one destination the /diag relay forwards the SPA's error/trace/replay envelopes to (routes/diag.ts).
 # A plain var, not a secret: a DSN only permits WRITING events, and the same string is already baked into the
 # bundle as VITE_SENTRY_DSN. It must BE that same DSN - the relay refuses an envelope addressed anywhere else,
@@ -130,6 +143,24 @@ SENTRY_DSN = "https://b0783df050ada7c6adc0a89aaa15b4f4@o4511976927461376.ingest.
 #   SENTRY_RELEASE=$(git rev-parse --short HEAD)  (and VITE_APP_VERSION to the same)
 # `npm run preflight` warns when it is unset or when the SPA has no VITE_APP_VERSION to pair with it.
 SENTRY_ENVIRONMENT = "production"
+
+# Route Workers AI inference through this AI Gateway (src/lib/ai.ts threads it into every `AI.run`). Create it
+# once in the dashboard under AI > AI Gateway; the name IS the id.
+#
+# PAYLOAD LOGGING IS SUPPRESSED ON EVERY CALL, set once in lib/ai.ts rather than here, because AI Gateway
+# stores request and response bodies by default and that would put salary and review text in a retained
+# surface with its own lifetime. The gateway records that a call happened, not what was in it.
+#
+# LEAVE GATEWAY CACHING OFF in the dashboard. `ai_cache` (services/ai.ts) is checked in-process BEFORE the
+# binding call, so a gateway cache only ever sees prompts that just missed ours - and it would hold moderation
+# verdicts under a TTL configured outside this repository. The two big spenders, the embed backfill and the
+# moderation gate, have unique input by construction and cache at neither layer.
+#
+# IT IS A SECOND HOP IN FRONT OF A GATE THAT FAILS CLOSED. A wrong id here reads to the app as "the model was
+# silent", which under the default `ai.moderationFallback: "hold"` stops every public wall accepting posts.
+# Change it before the moderation gate is switched on, never after, so a mistake shows up as nothing working
+# rather than as posting mysteriously stopping. `ai_usage.error` is where it says so.
+AI_GATEWAY_ID = "hrms"
 
 # Workers AI. The free allocation is 10,000 Neurons/day for the whole ACCOUNT, which staging shares - see the
 # budget ceilings in src/domain/aiPolicy.ts, which are set below it deliberately.
@@ -160,7 +191,7 @@ index_name = "hrms-search"
 [[d1_databases]]
 binding = "DB"
 database_name = "hrms"
-database_id = "98bb8050-7b26-4b8e-8642-6681a19dd682"
+database_id = "a3d822b9-672d-45e1-83cc-c240484dba2d"
 migrations_dir = "src/db/migrations"
 
 [[r2_buckets]]
@@ -169,82 +200,4 @@ bucket_name = "hrms"
 
 # Drain async jobs (LRO) every 5 min; nightly accrual/reminders at 02:00 UTC.
 [triggers]
-crons = ["*/5 * * * *", "0 2 * * *"]
-
-# ---------------------------------------------------------------------------------------------------------
-# Named environments. The top-level config above is the default target (`wrangler deploy`) and is production.
-# Staging is a separate deploy target (`wrangler deploy --env staging`) with its OWN D1 + R2 so migrations
-# and releases can be rehearsed before prod. Wrangler does NOT inherit top-level bindings/vars into a named
-# env, so they are redeclared here. Fill in the staging database_id after `wrangler d1 create hrms-staging`.
-[env.staging]
-name = "hrms-staging"
-compatibility_date = "2026-03-10" # keep in step with the top-level date - see the note there
-compatibility_flags = ["nodejs_compat"]
-
-[env.staging.observability]
-enabled = true
-
-# The SAME CPU envelope as production. Staging exists to rehearse a release, and a rehearsal under a different
-# limit does not rehearse it: without this, staging ran on the platform default (30s) while production has 60s,
-# so the one failure staging is best placed to catch - a payslip batch that outgrew its invocation - would fail
-# there, get written off as "staging is slower", and pass in production for another month.
-[env.staging.limits]
-cpu_ms = 60000
-
-[env.staging.assets]
-directory = "./web/dist"
-binding = "ASSETS"
-not_found_handling = "none" # the Worker owns the SPA fallback - see the note on the top-level [assets]
-run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag", "/__scheduled"]
-
-[env.staging.vars]
-# EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.
-# Also `console`, which logs the message instead of sending it - for a preview stack and the browser suite
-# only; `npm run preflight` refuses it for the environment being deployed.
-EMAIL_PROVIDER = "resend"
-EMAIL_FROM = "hr@msphere.io"
-# Staging rehearses a RELEASE, and the nightly cron is part of what gets rehearsed - probation reminders,
-# expiring-document nudges, anniversary mail, one message per matching employee. Against its own copy of the
-# database, with a real vendor and a real company sender, that is real mail to real people about a rehearsal.
-# So every message is diverted here instead, with the intended recipient kept in the subject (src/lib/email.ts).
-# Change it to the address that should receive staging's mail. Production must never set this - preflight
-# refuses it there, because diverting every payslip notification to one mailbox is a silent outage.
-EMAIL_REDIRECT_TO = "hr@msphere.io"
-ALLOWED_EMAIL_DOMAINS = "msphere.io"
-# Optional network fence on the attendance clock: comma-separated individual IPs and/or CIDR blocks (IPv4 and
-# IPv6 may be mixed) that `attendance/me:clockIn` / `:clockOut` are accepted from - the office egress IPs and
-# the VPN. Unset or empty = no fence (punch from anywhere). An APPROVED remote-work request eases it for
-# exactly its dates. A malformed entry is refused at startup.
-# ATTENDANCE_ALLOWED_IPS = "203.0.113.7, 198.51.100.0/24, 2001:db8::/32"
-# Staging reports into the same project as production; `environment` on the event (from the SPA's build MODE)
-# is what separates them in the tracker. See the note in [vars].
-SENTRY_DSN = "https://b0783df050ada7c6adc0a89aaa15b4f4@o4511976927461376.ingest.de.sentry.io/4511982864498768"
-# What separates staging's issues from production's in the tracker - both report into the same project.
-SENTRY_ENVIRONMENT = "staging"
-# SENTRY_RELEASE = "abc1234"
-
-# Staging shares production's 10,000 Neuron/day account allocation, so a rehearsal can starve the live app.
-# Either leave this bound and give staging a small slice of the budget in settings, or unbind it and let
-# staging exercise the non-AI fallback paths, which is the more useful rehearsal of the two.
-[env.staging.ai]
-binding = "AI"
-
-# Its OWN index, never production's. Staging runs against a copy of the database with different record ids,
-# so sharing one index would mean staging's upserts overwriting production's entries and its searches
-# returning rows that do not exist there.
-[[env.staging.vectorize]]
-binding = "VEC"
-index_name = "hrms-search-staging"
-
-[[env.staging.d1_databases]]
-binding = "DB"
-database_name = "hrms-staging"
-database_id = "REPLACE_WITH_STAGING_D1_ID"
-migrations_dir = "src/db/migrations"
-
-[[env.staging.r2_buckets]]
-binding = "DOCS"
-bucket_name = "hrms-staging"
-
-[env.staging.triggers]
 crons = ["*/5 * * * *", "0 2 * * *"]

@@ -31,7 +31,7 @@ import { runBatch, runBatchChecked, chunk, byIdChunks, insertBatches, groupBy, t
 import { getSettingValue } from "./settings";
 import { documentLetterhead, letterheadMark, type OrgWithDocumentLogos } from "./letterheads";
 import type { LetterheadSpec } from "../lib/letterPdf";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, type LeaveRange, localDay, utcDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, sessionWorkedMinutes } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, type LeaveRange, localDay, utcDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, sessionWorkedMinutes, unpaidLeaveDayUnits } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidOvertimeAll, markOvertimePaidByRun, resetOvertimePaidByRun } from "./overtimeRequests";
 import { resetCompArrearsPaidByRun, markCompArrearsPaidByRun, splitDriftFor } from "./compensation";
@@ -39,7 +39,7 @@ import { renderPayslipPdf } from "../lib/pdf";
 import { payslipTemplateOrDefault, type PayslipTemplate } from "../domain/payslipTemplate";
 import { etagOf } from "../http/serialize";
 import { keysetPage } from "./keysetPage";
-import { refDepartments, refHolidays, refPayComponents, refPayPeriods } from "../lib/refData";
+import { refDepartments, refHolidays, refLeaveTypes, refPayComponents, refPayPeriods } from "../lib/refData";
 import { marksForPeriod } from "./attendanceDayMarks";
 
 // Resolve user ids to a display name: the linked employee's full name, else the user's email.
@@ -629,10 +629,9 @@ function assertEtag(row: { updatedAt: Date }, ifMatch?: string) {
 // per employee here, instead of one query per employee. The lookup itself is `compAsOf` (taxProjection.ts), so
 // the run and the year's tax projection price a month by exactly the same rule.
 
-// Gather the period's attendance facts once (holidays, approved leave, punches) so the per-employee LOP
-// in buildRunItems is pure map lookups. `endYmd` is clamped to today so a mid-period build never charges
-// not-yet-arrived days as absences.
-async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSelect, att: AttendanceConfig) {
+// The period's calendar and its approved leave: what loss of pay needs, and ALSO what the unpaid-leave dock
+// needs when automatic loss of pay is off (buildRunItems) - which is why it is read on its own.
+async function periodLeave(deps: Deps, period: typeof schema.payPeriods.$inferSelect, att: AttendanceConfig) {
   const tz = att.timezone || "Asia/Kolkata";
   const startMs = +new Date(period.periodStart);
   const endMs = +new Date(period.periodEnd);
@@ -640,7 +639,7 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
   // the org timezone (`localDay`). Mixing the two is what the domain helper's header describes: read through
   // `localDay`, the period's own bounds and every holiday shifted a day earlier west of UTC, so LOP enumerated
   // a window one day off the period - charging the day before it began and never checking the day it ended -
-  // while excusing the day before each holiday and docking the holiday itself. The punch days below stay on
+  // while excusing the day before each holiday and docking the holiday itself. The punch days stay on
   // `localDay`, because a punch IS an instant and the day it belongs to is the org's.
   const startYmd = utcDay(startMs);
   const periodEndYmd = utcDay(endMs);
@@ -652,15 +651,19 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
       .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= startMs && +new Date(h.date) <= endMs)
       .map((h) => utcDay(+new Date(h.date))),
   );
-  // EVERY READ BELOW IS BOUND TO THE PERIOD IN SQL. All three used to read their whole table and keep the
-  // one month that mattered: approved leave, attendance punches, count-as-work events. Like the ESI probe
-  // further down, the cost grew with HISTORY rather than headcount - invisible on a fresh database, and on a
-  // real one `attendance_sessions` alone is two rows per employee per working day, all of them read (and
-  // billed) on every payroll build. The JS predicates are kept exactly as they were; the SQL windows are the
-  // same bounds, only decided by the database. `state` joins them because it is the same one-column filter.
+  // EVERY READ HERE AND IN assembleLop IS BOUND TO THE PERIOD IN SQL. All three used to read their whole
+  // table and keep the one month that mattered: approved leave, attendance punches, count-as-work events. Like
+  // the ESI probe further down, the cost grew with HISTORY rather than headcount - invisible on a fresh
+  // database, and on a real one `attendance_sessions` alone is two rows per employee per working day, all of
+  // them read (and billed) on every payroll build. The JS predicates are kept exactly as they were; the SQL
+  // windows are the same bounds, only decided by the database.
   // The half-day SESSIONS travel with the range. `leaveDays` charges only half a day to the balance for a
   // boundary session, so a range carried here as whole days excused a full day of loss of pay for half a day
   // of leave - see domain/attendance.ts#leaveCover.
+  // And so does whether the leave is PAID. An unpaid type (the seeded "Loss of Pay") used to excuse its days
+  // like any other leave, so an employee on approved unpaid leave was paid in full - the same day, unrequested,
+  // would have been docked. From the cached leave-type snapshot, so this costs no read of its own.
+  const unpaidTypes = new Set((await refLeaveTypes(deps)).filter((t) => t.paid === false).map((t) => t.uuid));
   const leaveByEmp = new Map<string, LeaveRange[]>();
   for (const l of await deps.db
     .select()
@@ -668,9 +671,26 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
     .where(and(eq(schema.leaveRequests.state, "APPROVED"), gte(schema.leaveRequests.endDate, new Date(startMs)), lte(schema.leaveRequests.startDate, new Date(endMs))))) {
     if (l.state !== "APPROVED" || +new Date(l.endDate) < startMs || +new Date(l.startDate) > endMs) continue;
     const arr = leaveByEmp.get(l.employeeId) ?? [];
-    arr.push({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)), startSession: l.startSession, endSession: l.endSession });
+    arr.push({
+      start: utcDay(+new Date(l.startDate)),
+      end: utcDay(+new Date(l.endDate)),
+      startSession: l.startSession,
+      endSession: l.endSession,
+      ...(unpaidTypes.has(l.leaveTypeId) ? { paid: false } : {}),
+    });
     leaveByEmp.set(l.employeeId, arr);
   }
+  return { startYmd, periodEndYmd, todayYmd, endYmd, holidays, leaveByEmp };
+}
+
+// Gather the period's attendance facts once (holidays, approved leave, punches) so the per-employee LOP
+// in buildRunItems is pure map lookups. `endYmd` is clamped to today so a mid-period build never charges
+// not-yet-arrived days as absences.
+async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSelect, att: AttendanceConfig) {
+  const tz = att.timezone || "Asia/Kolkata";
+  const startMs = +new Date(period.periodStart);
+  const endMs = +new Date(period.periodEnd);
+  const { startYmd, periodEndYmd, todayYmd, endYmd, holidays, leaveByEmp } = await periodLeave(deps, period, att);
   const workedByEmp = new Map<string, Map<string, number>>(); // employee -> day -> worked minutes
   // SUPERSEDED PUNCHES ARE NOT PUNCHES. An approved attendance regularization marks the day's existing
   // sessions `superseded_by` and writes the corrected pairs beside them (services/attendanceRegularizations.ts),
@@ -766,7 +786,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // salary, statutory contributions and all. (Leavers are out of runs deliberately: the FnF is their payout.)
   // Filtered in SQL, not read-all-then-filter: D1 bills rows read, and a build on a large org otherwise pays
   // for every leaver and every soft-deleted row it is about to discard.
-  const employees = await deps.db
+  const roster = await deps.db
     .select()
     .from(schema.employees)
     .where(and(isNull(schema.employees.deleteTime), ne(schema.employees.status, "terminated")));
@@ -781,6 +801,22 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // runs in that FY (this run excluded), so a salary/bonus change redistributes the balance automatically.
   const tds = tdsComponent(components);
   const period = (await deps.db.select().from(schema.payPeriods).where(eq(schema.payPeriods.uuid, run.payPeriodId)).limit(1))[0];
+  // A LEAVER WITH A SETTLEMENT IS PAID BY IT. The FnF is routinely computed before the exit transition flips the
+  // status to `terminated` (services/settlements.ts), and it prices the exit month's days itself - so a run
+  // that still counted them on the roster paid the same final month twice: once on the payslip, once in the
+  // settlement's net. Anyone whose settlement is dated on or before this period's end is left to it, and named
+  // in the build's audit record so the omission is visible rather than silent. (A settlement computed AFTER a
+  // committed run for its month finds that run and pays no salary for it - the other half of the same rule.)
+  const settledOut = new Map<string, Date>();
+  if (period) {
+    for (const s of await deps.db
+      .select({ employeeId: schema.settlements.employeeId, settlementDate: schema.settlements.settlementDate })
+      .from(schema.settlements)
+      .where(lte(schema.settlements.settlementDate, new Date(period.periodEnd)))) {
+      settledOut.set(s.employeeId, s.settlementDate);
+    }
+  }
+  const employees = roster.filter((e) => !settledOut.has(e.uuid));
   const fy = fyWindow(period?.payDate ?? new Date());
   const cfg = tds ? await loadTaxConfig(deps) : null;
   // Employee-side Professional Tax (kind "deduction"); the slab table is settings data. Resolved here rather
@@ -884,6 +920,9 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // holidays, approved leave and attendance punches ONCE; the per-employee absent-day count + amount follow.
   const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
   const lop = att.lop_enabled && period ? await assembleLop(deps, period, att) : null;
+  // With automatic LOP off, approved UNPAID leave still docks its own days (see the per-employee block below),
+  // so the period's leave is read on its own - one leave read, from the same helper assembleLop uses.
+  const unpaidLeave = !lop && period ? await periodLeave(deps, period, att) : null;
 
   // Proration for partial-period employment (mid-period joiners/leavers): a per-employee factor on the regular
   // earnings, by the configured basis. Needs the period ymds + holidays (for the working-days basis); reuse the
@@ -899,7 +938,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // only ever EXCUSES a day (LOP, and the working-days proration basis), so the lenient reading can never dock
   // someone for a day the office may have been shut. Leave charging, where the distinction changes what an
   // employee spends, is precise about both (services/leaveRequests.ts).
-  const holidaySet = !period ? new Set<string>() : lop?.holidays ?? new Set(
+  const holidaySet = !period ? new Set<string>() : lop?.holidays ?? unpaidLeave?.holidays ?? new Set(
     (await refHolidays(deps))
       .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= +new Date(period.periodStart) && +new Date(h.date) <= +new Date(period.periodEnd))
       .map((h) => utcDay(+new Date(h.date))),
@@ -1123,6 +1162,20 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
         // `units` carries the day count as DATA: the statutory register reports non-contributing (NCP) days and
         // must not have to parse them back out of a display label.
         lines.push({ code: "LOP", name: `Loss of pay (${dayUnits}d)`, kind: "earning", amount: round2(-amt), units: dayUnits });
+      }
+    } else if (unpaidLeave) {
+      // AUTOMATIC LOSS OF PAY IS OFF, and approved UNPAID leave is still docked. Attendance-driven docking is an
+      // org's choice; unpaid leave is not - the employee asked for days without pay and somebody approved them,
+      // so paying those days in full because the punch-clock rule is switched off pays for time nobody worked
+      // and the request itself said would not be paid. Same window clamp, wage, divisor and ceiling as above;
+      // with automatic LOP on, these days are already inside `lopDayUnits`, so the two never stack.
+      const fromYmd = empStartYmd && empStartYmd > unpaidLeave.startYmd ? empStartYmd : unpaidLeave.startYmd;
+      const toYmd = empEndYmd && empEndYmd < unpaidLeave.endYmd ? empEndYmd : unpaidLeave.endYmd;
+      const dayUnits = unpaidLeaveDayUnits(fromYmd, toYmd, att.work_days, unpaidLeave.holidays, unpaidLeave.leaveByEmp.get(e.uuid) ?? []);
+      const amt = Math.min(lopAmount(lopWage, dayUnits, att.lop_basis ?? "working_days", workingDaysInPeriod), Math.max(0, round2(regularGross - manualLop)));
+      if (amt > 0) {
+        autoLop = amt;
+        lines.push({ code: "LOP", name: `Unpaid leave (${dayUnits}d)`, kind: "earning", amount: round2(-amt), units: dayUnits });
       }
     }
     const lopTotal = round2(autoLop + manualLop);
@@ -1486,6 +1539,8 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   await audit(deps, actor, "payroll.build", "payroll-runs", runId, {
     employees: itemRows.length,
     ...(unpriced.length ? { unpriced: unpriced.length } : {}),
+    // Leavers paid by their full-and-final settlement instead (see `settledOut` above).
+    ...(settledOut.size ? { settled_out: [...settledOut.keys()].filter((id) => roster.some((e) => e.uuid === id)).map((id) => `employees/${id}`) } : {}),
     diff: {
       employees: { from: priorTotals?.employees ?? null, to: itemRows.length },
       gross: { from: priorTotals?.gross ?? null, to: built.gross },

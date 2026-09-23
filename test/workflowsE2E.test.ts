@@ -199,7 +199,7 @@ describe("workflows e2e: a newly-wired emit drives a rule (overtime SLA, service
     expect(insts[0]!.status).toBe("waiting");
     expect(insts[0]!.awaitedTypes ?? "").toContain("overtime.approved");
 
-    await approveOvertimeRequest(deps, empActor, ot.uuid); // emits overtime.approved (same subject) -> resumes
+    await approveOvertimeRequest(deps, await seedActor(mgr), ot.uuid); // the manager decides; emits overtime.approved (same subject) -> resumes
     insts = await deps.db.select().from(schema.workflowInstances);
     expect(insts[0]!.status).toBe("done");
     expect((await deps.db.select().from(schema.eventLog).where(eq(schema.eventLog.type, "overtime.approved"))).length).toBe(1);

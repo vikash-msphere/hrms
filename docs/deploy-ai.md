@@ -63,26 +63,41 @@ npx wrangler vectorize create hrms-search-staging --dimensions=384 --metric=cosi
 npx wrangler vectorize create-metadata-index hrms-search-staging --property-name=collection --type=string
 ```
 
-...or delete the `[[env.staging.vectorize]]` and `[env.staging.ai]` blocks from `wrangler.toml` and let
-staging exercise the non-AI fallback paths, which is the more useful rehearsal of the two.
+...or delete the `[[vectorize]]` and `[ai]` blocks from `wrangler.staging.toml` and let staging exercise the
+non-AI fallback paths, which is the more useful rehearsal of the two.
 
-## 3. Skip the AI Gateway
+## 3. Create the AI Gateways
 
-**Leave `AI_GATEWAY_ID` unset.** `src/lib/ai.ts` supports a gateway and setting the var routes inference
-through one, but the deploy does not, and the reasoning is in `ai-observability-plan.md`. In short: its
-analytics duplicate `ai_usage`, its cache sits behind `ai_cache` and only ever sees that cache's misses, and
-it adds a second hop in front of a gate that fails closed - a wrong gateway id reads to the app as "the model
-was silent", which under the default posture stops every wall accepting posts (step 5).
+Each config names its own: `AI_GATEWAY_ID = "hrms"` in `wrangler.toml` `[vars]`, and `"hrms-staging"` in
+`wrangler.staging.toml` `[vars]`. Both have to exist before a deploy that uses them, because a name with no
+gateway behind it fails the call rather than falling back to the binding.
 
-The per-model numbers step 8 asks for do not need it. They come from `aiInferenceAdaptiveGroups` on the
-GraphQL Analytics API, which is account-level and independent of AI Gateway.
+Dashboard: **AI → AI Gateway → Create Gateway**. The name is the id, so create them exactly as spelled above.
 
-**Payload logging is suppressed on every call regardless** (`src/lib/ai.ts` sends
-`cf-aig-collect-log-payload: false`), because AI Gateway stores request and response bodies by default and
-that would put salary and review text in a third retained surface with its own lifetime. That header is sent
-whether or not a gateway is configured, so turning one on later cannot quietly start recording prompts. Note
-that Cloudflare's logging docs do not state precedence between the header and a gateway-level setting, so
-verify it against a live gateway before relying on it.
+Two are needed because the log allowance is per ACCOUNT on the free plan - 100,000 across every gateway - so
+one id shared by both environments merges their logs and spends one budget on two stories.
+
+**Set these three on each gateway before any traffic reaches it.**
+
+| Setting | Value | Why |
+|---|---|---|
+| Caching | **off** | `ai_cache` is checked in-process before the binding call, so a gateway cache sees only what ours just missed. It would also hold moderation verdicts under a TTL configured outside this repository. |
+| Logs | **on, delete oldest at the cap** | The cap is 100,000 account-wide. Deleting oldest keeps it a rolling window; the other setting stops recording and the first you know is a gap. |
+| Log payloads | leave default | Every call already carries `cf-aig-collect-log-payload: false` from `src/lib/ai.ts`, so this cannot be turned on by accident from the app's side. |
+
+**Payload logging is suppressed on every call** because AI Gateway stores request and response bodies by
+default, and that would put salary and review text in a third retained surface with its own lifetime. The
+gateway records that a call happened, not what was in it. That header is sent whether or not a gateway is
+configured, so it was already true before this step. Cloudflare's logging docs do not state precedence
+between the header and a gateway-level setting, so confirm on the first day that the Logs view shows metadata
+and no bodies.
+
+**Change `AI_GATEWAY_ID` before the moderation gate is switched on, never after.** A wrong or deleted id
+reads to the app as "the model was silent", which under the default `hold` posture (step 5) stops every public
+wall accepting posts. Made before the gate is live, that mistake looks like nothing working. Made after, it
+looks like posting mysteriously stopping, and `ai_usage.error` is the only place that says otherwise.
+
+To go back to calling the binding directly, comment out both vars and deploy. Nothing else changes.
 
 ## 4. Migrate and deploy
 

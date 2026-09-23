@@ -13,6 +13,7 @@ import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
+import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 import { getSettingValue } from "./settings";
 import { currentComp, monthlyRecurringGross } from "./taxProjection";
 import { applyStructure } from "../domain/payroll";
@@ -268,9 +269,11 @@ export async function createAutoEncashment(deps: Deps, employeeId: string, leave
 // approve: PENDING -> APPROVED, debits the balance (re-checked against the live balance, since leave may have
 // been taken since the request was raised). reject: PENDING -> REJECTED. cancel: PENDING -> CANCELLED (no
 // balance move), or APPROVED-and-unpaid -> CANCELLED (credits the days back). PAID rows are immutable.
-export async function approveEncashment(deps: Deps, actor: AppUser, id: string) {
+export async function approveEncashment(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   const row = await getEncashment(deps, actor, id);
   if (row.state !== "PENDING") throw failedPrecondition("encashment is not pending");
+  assertReviewedVersion(row, ifMatch);
+  await assertNotSubject(deps, actor, row.employeeId, "approve", "leave encashment");
   const balance = await balanceOf(deps, row.employeeId, row.leaveTypeId);
   if (row.days > balance) throw failedPrecondition(`insufficient leave balance (${balance} day(s) available)`);
   // Re-check the annual cap against LIVE committed (APPROVED+PAID) days: the cap at create time counted only
@@ -319,9 +322,10 @@ export async function approveEncashment(deps: Deps, actor: AppUser, id: string) 
   return updated;
 }
 
-export async function rejectEncashment(deps: Deps, actor: AppUser, id: string) {
+export async function rejectEncashment(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   const row = await getEncashment(deps, actor, id);
   if (row.state !== "PENDING") throw failedPrecondition("encashment is not pending");
+  assertReviewedVersion(row, ifMatch);
   // Guard the flip on PENDING, like the approve and cancel beside it - and here it is the balance that pays
   // for its absence. The check above is a read, so a concurrent `:approve` can win its own guarded flip and
   // DEBIT the employee's leave days in between; an unguarded write then stamped REJECTED over the approval

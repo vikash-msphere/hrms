@@ -9,6 +9,7 @@ import { applyScope } from "./listScope";
 import { scopeFor } from "../domain/access";
 import { isSuperGrant, EVERYONE_ROLE, roleSubjectsOf } from "../domain/grants";
 import { loadObjectExceptionCodes } from "../lib/policyLoad";
+import { selfContextFor } from "../lib/selfContext";
 
 const MAX_BYTES = 3 * 1024 * 1024; // 3 MB
 // Cap ids per batch request. Each photo can be up to MAX_BYTES and is base64-encoded into the response, so the
@@ -73,7 +74,9 @@ export async function getPhoto(deps: Deps, actor: AppUser, employeeId: string) {
 export async function batchGetPhotos(deps: Deps, actor: AppUser, employeeIds: string[]): Promise<{ employeeId: string; dataUri: string }[]> {
   const wanted = [...new Set(employeeIds)].slice(0, MAX_BATCH);
   if (!wanted.length) return [];
-  const scope = scopeFor(actor, "employees");
+  // With the caller's full matcher context (manager chain included), as the list itself is scoped - without it a
+  // manager holding employees through `my-reports` saw their reports in the directory and no faces on them.
+  const scope = scopeFor(actor, "employees", await selfContextFor(deps, actor));
   const roleSubjects = roleSubjectsOf(actor, actor.grant);
   const exc = await loadObjectExceptionCodes(deps, actor.uuid, roleSubjects, "employees");
   scope.shares = exc.shares;

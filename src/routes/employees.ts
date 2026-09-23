@@ -203,8 +203,13 @@ async function identityDoc(c: Context<AppEnv>, id: string, action: "upload" | "d
 // merge the patch over the stored blob and return the merged result - so a PATCH naming one writable key was
 // handed every other field on the record, per-field denies and all. A deny that a GET honours and a PATCH
 // hands over is not a deny; it is a longer way of asking.
+//
+// The matcher context is `c.get("self")` - the one the gate decided the request with, manager chain included -
+// rather than one rebuilt from the employee code alone. Rebuilt, a field held through `my-reports`/`my-org`
+// matched nothing here and was redacted from a response the gate had just allowed.
+const selfOf = (c: Context<AppEnv>) => c.get("self") ?? { employeeCode: c.get("user").employeeCode };
 const redactedSub = <T extends Record<string, unknown>>(c: Context<AppEnv>, sub: "bank-account" | "personal-info" | "tax", view: T): T =>
-  redactFlat(view, sub, c.get("objectGrant"), fieldScopeCode(c), { employeeCode: c.get("user").employeeCode });
+  redactFlat(view, sub, c.get("objectGrant"), fieldScopeCode(c), selfOf(c));
 
 export const employees = new Hono<AppEnv>()
   // Singleton sub-resources (bank account, identity, personal info). Access (owner/HR/super_admin)
@@ -222,13 +227,13 @@ export const employees = new Hono<AppEnv>()
   .get("/:employee_id/identity", async (c) => {
     const id = c.req.param("employee_id")!;
     const view = await getIdentityDetails(c.get("deps"), c.get("user"), id);
-    return c.json({ path: `employees/${id}/identity`, ...redactIdentity(view, c.get("objectGrant"), fieldScopeCode(c), { employeeCode: c.get("user").employeeCode }) });
+    return c.json({ path: `employees/${id}/identity`, ...redactIdentity(view, c.get("objectGrant"), fieldScopeCode(c), selfOf(c)) });
   })
   .patch("/:employee_id/identity", async (c) => {
     const id = c.req.param("employee_id")!;
     const body = await jsonBody<{ values?: Record<string, string> }>(c);
     const view = await setIdentityDetails(c.get("deps"), c.get("user"), id, body.values ?? {}, c.req.header("If-Match"));
-    return c.json({ path: `employees/${id}/identity`, ...redactIdentity(view, c.get("objectGrant"), fieldScopeCode(c), { employeeCode: c.get("user").employeeCode }) });
+    return c.json({ path: `employees/${id}/identity`, ...redactIdentity(view, c.get("objectGrant"), fieldScopeCode(c), selfOf(c)) });
   })
   .get("/:employee_id/personal-info", async (c) => {
     const id = c.req.param("employee_id")!;

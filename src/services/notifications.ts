@@ -14,6 +14,7 @@ import { pushToEmployee } from "./webPush";
 import { byIdChunks, insertBatches, runBatch } from "../lib/dbBatch";
 import { activeDelegatesFor } from "./approvalDelegations";
 import { ENCODABLE } from "../middleware/encodeWireIds";
+import { isInternalId } from "../lib/idCodec";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 import { liveEmployee, isLiveEmployee, LIVE_EMPLOYEE_COLUMNS, type LiveEmployeeColumns } from "./liveEmployee";
 import { holdsCapability, roleHolderEmployeeIds } from "./capabilityHolders";
@@ -34,7 +35,9 @@ async function pushLink(deps: Deps, link?: string | null): Promise<string | unde
   const raw = link?.trim();
   if (!raw) return undefined;
   const m = /^([a-z][a-z-]*)\/([0-9a-hj-km-np-tv-z]{13})((?::[a-zA-Z]+|\/[a-z][a-z-]*)?)$/.exec(raw);
-  if (!m || !ENCODABLE.has(m[1]!)) return `/${raw.replace(/^\/+/, "")}`;
+  // Leading BACKSLASHES go with the slashes: a URL parser reads `\` as `/` in an http(s) URL, so `/\host` is
+  // the protocol-relative `//host` - another origin - by the time the service worker opens it.
+  if (!m || !ENCODABLE.has(m[1]!) || !isInternalId(m[2])) return `/${raw.replace(/^[/\\]+/, "")}`;
   return `/${m[1]}/${await deps.idCodec.encode(m[1]!, m[2]!)}${m[3]}`;
 }
 

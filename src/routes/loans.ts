@@ -52,9 +52,10 @@ export const loans = collectionRoutes<LoanInput, typeof schema.loans>({
   },
   list: (c, page) => listLoans(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("status"), page.showDeleted, page.deletedOnly),
   verbs: {
-    approve: { run: (deps, user, id) => approveLoan(deps, user, id) },
-    reject: { run: (deps, user, id) => rejectLoan(deps, user, id) },
-    disburse: { run: (deps, user, id) => disburseLoan(deps, user, id) },
+    // If-Match binds a decision to the version the decider looked at (services/decisionGuard.ts).
+    approve: { run: (deps, user, id, _body, c) => approveLoan(deps, user, id, c.req.header("If-Match")) },
+    reject: { run: (deps, user, id, _body, c) => rejectLoan(deps, user, id, c.req.header("If-Match")) },
+    disburse: { run: (deps, user, id, _body, c) => disburseLoan(deps, user, id, c.req.header("If-Match")) },
     recordRepayment: { schema: repaymentSchema, run: (deps, user, id, body) => recordLoanRepayment(deps, user, id, body.amount, body.allow_duplicate === true) },
   },
 });

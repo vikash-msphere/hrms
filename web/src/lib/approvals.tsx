@@ -3,6 +3,8 @@ import { useCollection } from "@/hooks/useCollection";
 import { get } from "@/api";
 import { subscribeInvalidations, storedCopiesTrusted, storedIdentity, subscribePurge } from "@/lib/resourceStore";
 import { registerHydrator, put, del } from "@/lib/clientStore";
+import { readSetting } from "@/lib/settingsStore";
+import { idOf } from "@/lib/utils";
 import type { LeaveRequest, Reimbursement, OvertimeRequest, RemoteWorkRequest, AttendanceRegularization, LeaveEncashment, Loan, TimeEntry, Expense, AssetRequest } from "@/types";
 
 // A prior-employer tax declaration awaiting HR/payroll verification (GET /v1/tax-verifications). Not a
@@ -77,9 +79,33 @@ const canApprove = (r: { access?: { can?: string[] } }) => (r.access?.can ?? [])
 // Items the caller may approve, awaiting their decision. Most collections call the awaiting state PENDING on a
 // `state` field; timesheets use `status: SUBMITTED`, loans use `status: PENDING` - so the awaiting value is
 // passed per collection.
-const awaiting = <T extends { access?: { can?: string[] } }>(rows: T[], status: (r: T) => string | undefined, value: string) =>
-  rows.filter((r) => upper(status(r)) === value && canApprove(r));
-const pending = <T extends { state: string; access?: { can?: string[] } }>(rows: T[]) => awaiting(rows, (r) => r.state, "PENDING");
+//
+// NOT THE VIEWER'S OWN. The grant that lets a manager approve their department's requests also matches their own
+// (their rows sit under their own department), so `access.can` says "approve" on them - but the server refuses
+// anybody deciding their own request in their favour (services/decisionGuard.ts), so listing it would offer an
+// action whose only outcome is a refusal. `mine` is null when the org allows self-approval, or when the viewer
+// has no employee record and so owns no requests.
+type Awaitable = { access?: { can?: string[] }; employee?: string | null };
+
+/**
+ * The org's maker-checker switch (settings/approvals.allow_self_approval). False until it is read, which is the
+ * default and the answer for every org that has not changed it - so a page hides the viewer's own
+ * approve/pay affordances first and shows them only once the org is known to allow it.
+ */
+export function useSelfApprovalAllowed(): boolean {
+  const [allowSelf, setAllowSelf] = useState(false);
+  useEffect(() => {
+    let live = true;
+    readSetting<{ allow_self_approval?: boolean }>("approvals")
+      .then((v) => { if (live) setAllowSelf(v?.allow_self_approval === true); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, []);
+  return allowSelf;
+}
+const awaiting = <T extends Awaitable>(rows: T[], status: (r: T) => string | undefined, value: string, mine: string | null) =>
+  rows.filter((r) => upper(status(r)) === value && canApprove(r) && !(mine && r.employee && idOf(r.employee) === mine));
+const pending = <T extends Awaitable & { state: string }>(rows: T[], mine: string | null) => awaiting(rows, (r) => r.state, "PENDING", mine);
 // Decided (history): any terminal state - i.e. not awaiting a decision and not a pre-submission draft. Covers
 // APPROVED/REJECTED/CANCELLED (state collections), plus loans' DISBURSED/CLOSED etc. Newest-decided first.
 const NOT_DECIDED = new Set(["", "PENDING", "DRAFT", "SUBMITTED"]);
@@ -132,7 +158,7 @@ function writeSummaryDisk(s: Summary) {
   put("snapshot", SUMMARY_KEY, JSON.stringify(s));
 }
 
-function ActiveProvider({ queues, withHistory, children }: { queues: readonly string[]; withHistory: boolean; children: ReactNode }) {
+function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { queues: readonly string[]; withHistory: boolean; selfEmployeeId?: string | null; children: ReactNode }) {
   // The badge: counts only, one request, every queue the caller may decide in. A caller who may decide in none
   // gets an empty map (the endpoint queries nothing for them).
   const [summary, setSummary] = useState<Summary>(() => readSummaryDisk() ?? {});
@@ -205,20 +231,23 @@ function ActiveProvider({ queues, withHistory, children }: { queues: readonly st
   }, [wantTax]);
   useEffect(() => { void loadTax(); }, [loadTax]);
 
-  const leaves = useMemo(() => pending(leave.rows), [leave.rows]);
-  const reimbs = useMemo(() => pending(reimb.rows), [reimb.rows]);
-  const overtimes = useMemo(() => pending(overtime.rows), [overtime.rows]);
-  const remotes = useMemo(() => pending(remote.rows), [remote.rows]);
-  const regularizations = useMemo(() => pending(regular.rows), [regular.rows]);
-  const encashments = useMemo(() => pending(encash.rows), [encash.rows]);
-  const loans = useMemo(() => awaiting(loan.rows, (r) => r.status, "PENDING"), [loan.rows]);
-  const timeEntries = useMemo(() => awaiting(time.rows, (r) => r.status, "SUBMITTED"), [time.rows]);
+  const allowSelf = useSelfApprovalAllowed();
+  const mine = allowSelf ? null : selfEmployeeId ?? null;
+
+  const leaves = useMemo(() => pending(leave.rows, mine), [leave.rows, mine]);
+  const reimbs = useMemo(() => pending(reimb.rows, mine), [reimb.rows, mine]);
+  const overtimes = useMemo(() => pending(overtime.rows, mine), [overtime.rows, mine]);
+  const remotes = useMemo(() => pending(remote.rows, mine), [remote.rows, mine]);
+  const regularizations = useMemo(() => pending(regular.rows, mine), [regular.rows, mine]);
+  const encashments = useMemo(() => pending(encash.rows, mine), [encash.rows, mine]);
+  const loans = useMemo(() => awaiting(loan.rows, (r) => r.status, "PENDING", mine), [loan.rows, mine]);
+  const timeEntries = useMemo(() => awaiting(time.rows, (r) => r.status, "SUBMITTED", mine), [time.rows, mine]);
   // Company expenses call the awaiting state SUBMITTED, and a recurring TEMPLATE is never awaiting anything
   // (it stays DRAFT and only seeds real expenses), so it can't reach the queue.
-  const expenses = useMemo(() => awaiting(expense.rows.filter((r) => !r.recurring), (r) => r.state, "SUBMITTED"), [expense.rows]);
+  const expenses = useMemo(() => awaiting(expense.rows.filter((r) => !r.recurring), (r) => r.state, "SUBMITTED", mine), [expense.rows, mine]);
   // Only the decision is an approval: an APPROVED asset request is waiting on a hand-over (`:issue` from the
   // person's profile), not on anybody's judgement, so it leaves the queue as soon as it is decided.
-  const assetRequests = useMemo(() => pending(assetReq.rows), [assetReq.rows]);
+  const assetRequests = useMemo(() => pending(assetReq.rows, mine), [assetReq.rows, mine]);
 
   // Refetch what this page is showing, plus the badge. A disabled collection's reload is a no-op read-through,
   // so this stays correct whichever queues the route asked for.
@@ -319,6 +348,7 @@ export function ApprovalsProvider({
   enabled,
   queues,
   history = false,
+  selfEmployeeId,
   children,
 }: {
   enabled: boolean;
@@ -326,8 +356,10 @@ export function ApprovalsProvider({
   /** The route also lists DECIDED requests (the inbox's History tab), so its queues are read regardless of
    *  whether anything is pending in them. */
   history?: boolean;
+  /** The viewer's own employee id: their own requests are not theirs to decide (services/decisionGuard.ts). */
+  selfEmployeeId?: string | null;
   children: ReactNode;
 }) {
   if (!enabled) return <ApprovalsContext.Provider value={EMPTY}>{children}</ApprovalsContext.Provider>;
-  return <ActiveProvider queues={queues} withHistory={history}>{children}</ActiveProvider>;
+  return <ActiveProvider queues={queues} withHistory={history} selfEmployeeId={selfEmployeeId}>{children}</ActiveProvider>;
 }

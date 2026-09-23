@@ -15,6 +15,7 @@ import { useOrg, currencyDecimals } from "@/lib/org";
 import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { useTabActivity, markTabSeen } from "@/lib/tabActivity";
 import { useRoutedTabs } from "@/lib/routedTabs";
+import { useSelfApprovalAllowed } from "@/lib/approvals";
 import type { Expense, Vendor, ExpenseCategory, ExpenseBudget, Employee, Department, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -355,10 +356,14 @@ export default function Expenses({ me }: { me: Me }) {
     [deptFilter, deptQ.state, deptQ.rows, ledgerAll],
   );
   const templates = useMemo(() => rows.filter((r) => r.recurring), [rows]);
-  const toReviewLocal = useMemo(() => ledgerAll.filter((r) => up(r.state) === "SUBMITTED"), [ledgerAll]);
-  const toPayLocal = useMemo(() => ledgerAll.filter((r) => up(r.state) === "APPROVED" && !r.reimbursable), [ledgerAll]);
-  const toReview = reviewQ.state === "ready" && tab === "review" ? reviewQ.rows.filter((r) => !r.recurring) : toReviewLocal;
-  const toPay = payQ.state === "ready" && tab === "pay" ? payQ.rows.filter((r) => !r.recurring && !r.reimbursable) : toPayLocal;
+  // The viewer's own expenses are not theirs to approve or pay (services/decisionGuard.ts) unless the org allows
+  // self-approval, so they leave both decision queues - they are waiting on somebody else.
+  const allowSelf = useSelfApprovalAllowed();
+  const decidable = useCallback((r: Expense) => allowSelf || !isOwn(r), [allowSelf, isOwn]);
+  const toReviewLocal = useMemo(() => ledgerAll.filter((r) => up(r.state) === "SUBMITTED" && decidable(r)), [ledgerAll, decidable]);
+  const toPayLocal = useMemo(() => ledgerAll.filter((r) => up(r.state) === "APPROVED" && !r.reimbursable && decidable(r)), [ledgerAll, decidable]);
+  const toReview = reviewQ.state === "ready" && tab === "review" ? reviewQ.rows.filter((r) => !r.recurring && decidable(r)) : toReviewLocal;
+  const toPay = payQ.state === "ready" && tab === "pay" ? payQ.rows.filter((r) => !r.recurring && !r.reimbursable && decidable(r)) : toPayLocal;
   const viaPayroll = useMemo(() => ledgerAll.filter((r) => up(r.state) === "APPROVED" && r.reimbursable), [ledgerAll]);
   const mine = useMemo(() => ledgerAll.filter(isOwn), [ledgerAll, isOwn]);
   // "This month" is the ORG's month, not the browser's. A local-clock boundary
@@ -828,7 +833,9 @@ export default function Expenses({ me }: { me: Me }) {
   // ---- per-row affordances -------------------------------------------------------------------------------
   // One primary button (the move this row is actually waiting for) with everything else behind the row menu:
   // six inline ghost buttons per row read as a toolbar, not a decision.
-  const canDo = (r: Expense, verb: string) => (r.access?.can ?? []).includes(verb);
+  // Approve and pay are also refused on the viewer's own row (see `decidable` above): the grant says yes, the
+  // maker-checker rule says no, and an affordance whose only outcome is a refusal is not offered.
+  const canDo = (r: Expense, verb: string) => (r.access?.can ?? []).includes(verb) && ((verb !== "approve" && verb !== "pay") || decidable(r));
   function primaryAction(r: Expense) {
     const s = up(r.state);
     if (s === "DRAFT" && !r.recurring && (isOwn(r) || canApprove) && canDo(r, "submit")) {

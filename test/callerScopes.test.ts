@@ -21,6 +21,20 @@ import type { Role } from "../src/env";
 const code = "04-1c-0a9"; // dept "04-1c"
 const actorFor = (role: Role) => ({ grant: grantFor(role), employeeCode: code });
 
+describe("capabilitiesOf - manager-chain scopes strip like every other scope token", () => {
+  it("a rule scoped to the reporting line yields the plain capability the SPA gates on", () => {
+    const caps = capabilitiesOf({
+      levels: { "leave-requests.my-reports.**": "read", "goals.my-org.**": "write" },
+      allow: ["leave-requests.my-reports.approve", "goals.my-org.comment"],
+    });
+    expect(caps).toContain("leave-requests.read");
+    expect(caps).toContain("leave-requests.approve");
+    expect(caps).toContain("goals.write");
+    expect(caps).toContain("goals.comment");
+    expect(caps.some((c) => c.includes("my-reports") || c.includes("my-org"))).toBe(false);
+  });
+});
+
 describe("callerScopes - the breadth a capability string drops", () => {
   it("an employee reaches NOTHING of somebody else's, for every self-service collection", () => {
     const { read, write } = callerScopes(actorFor("employee"));

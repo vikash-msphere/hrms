@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Contact } from "lucide-react";
 import { get, patch } from "@/api";
 import { isConflict } from "@/lib/formError";
@@ -26,10 +26,18 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
   // Empty passes: the inline error should fire on a malformed entry, never on a field nobody has touched.
   const emailOk = !form.personal_email?.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.personal_email.trim());
 
+  // Saves made since mount. The first read can still be on the wire when somebody opens the editor and saves -
+  // it answers with the blob that save replaced, and landing second it put the old values back on the card over
+  // the save's own answer, so a saved detail read as never saved until a reload. A read that left before a save
+  // is therefore dropped. The two sibling cards over this blob (EmployeeEmergencyDetails,
+  // EmployeeProfilePersonal) carry the same guard.
+  const writes = useRef(0);
   // The loader is the effect's dependency (see the note in EmployeeBankDetails).
   const load = useCallback(async () => {
     try {
-      setData(await get<PersonalDetails>(`employees/${employeeId}/personal-info`));
+      const at = writes.current;
+      const read = await get<PersonalDetails>(`employees/${employeeId}/personal-info`);
+      if (at === writes.current) setData(read);
     } catch (e) {
       if ((e as { status?: number }).status === 403) setDenied(true);
     }
@@ -51,6 +59,7 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
     // whole-blob writes racing, and without If-Match the later one silently wins.
     try {
       const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form, data?.etag);
+      writes.current++;
       setData(updated);
       toast({ title: "Contact details saved", variant: "success" });
       onSaved?.();
@@ -74,7 +83,9 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
             <span className="flex items-center gap-2"><Contact className="h-4 w-4 text-primary" /> Contact</span>
           </AccessAction>
         </CardTitle>
-        {canEdit && <IconEdit onClick={openEdit} />}
+        {/* Only once the record is in: an editor opened before it seeds from nothing and saves with no version -
+            and this one saves the WHOLE form, so that would blank every field the reader never saw. */}
+        {canEdit && data && <IconEdit onClick={openEdit} />}
       </CardHeader>
       <CardContent>
         <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">

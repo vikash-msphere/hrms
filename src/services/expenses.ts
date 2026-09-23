@@ -31,6 +31,7 @@ import { budgetPhase, budgetProjection, computeBudgetSpendMany, computeBudgetSpe
 import { unclaimedCardTotals } from "./cardStatements";
 import type { CloseCheck } from "../domain/expenses";
 import { visibleByDelete } from "./softDelete";
+import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 
 export type ExpenseInput = {
   employee?: string | null;
@@ -519,7 +520,9 @@ export async function submitExpense(deps: Deps, actor: AppUser, id: string) {
     // happened without a lane at all; the reason is recorded so the approver opening it knows why it is in
     // front of them.
     const blocks = await autoApproveDecision(deps, updated, settings.auto_approve_requires ?? []);
-    if (!blocks.length) return approveExpense(deps, actor, id);
+    // The lane is the ORG's decision, configured in advance, so it is not the submitter approving their own
+    // claim - which is why it, and only it, passes the maker-checker guard (services/decisionGuard.ts).
+    if (!blocks.length) return approve(deps, actor, id, undefined, true);
     await audit(deps, actor, "expense.auto_approve.held", "expenses", id, {
       amount: updated.amount,
       held_by: blocks.map((b) => b.guard),
@@ -552,9 +555,13 @@ async function secondApprovalGate(deps: Deps, actor: AppUser, row: { amount: num
   return { needsAnother: false };
 }
 
-export async function approveExpense(deps: Deps, actor: AppUser, id: string) {
+export const approveExpense = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => approve(deps, actor, id, ifMatch, false);
+
+async function approve(deps: Deps, actor: AppUser, id: string, ifMatch: string | undefined, autoLane: boolean) {
   const row = await getExpense(deps, actor, id);
   if (row.state !== "SUBMITTED") throw failedPrecondition("only submitted expenses can be approved");
+  assertReviewedVersion(row, ifMatch);
+  if (!autoLane) await assertNotSubject(deps, actor, row.employeeId, "approve", "expense");
 
   // A large claim's FIRST approval records who gave it and stops there. The row stays SUBMITTED, so it is
   // still in everybody's approval queue - which is true, and is what keeps the queue counts right without a
@@ -604,9 +611,10 @@ export async function approveExpense(deps: Deps, actor: AppUser, id: string) {
 
 // A rejection carries its reason: the submitter is told WHY (in the notification and on the record), so the
 // next attempt can fix the thing that was wrong instead of guessing.
-export async function rejectExpense(deps: Deps, actor: AppUser, id: string, note?: string | null) {
+export async function rejectExpense(deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) {
   const row = await getExpense(deps, actor, id);
   if (row.state !== "SUBMITTED") throw failedPrecondition("only submitted expenses can be rejected");
+  assertReviewedVersion(row, ifMatch);
   const reason = (note ?? "").trim() || null;
   const [updated] = await deps.db
     .update(schema.expenses)
@@ -635,9 +643,11 @@ export async function cancelExpense(deps: Deps, actor: AppUser, id: string) {
 
 // APPROVED -> PAID (out-of-band vendor payment). Reimbursable expenses are paid via payroll (their linked
 // reimbursement), so :pay is refused for them.
-export async function payExpense(deps: Deps, actor: AppUser, id: string, input: ExpensePayInput = {}) {
+export async function payExpense(deps: Deps, actor: AppUser, id: string, input: ExpensePayInput = {}, ifMatch?: string) {
   const row = await getExpense(deps, actor, id);
   if (row.state !== "APPROVED") throw failedPrecondition("only approved expenses can be marked paid");
+  assertReviewedVersion(row, ifMatch);
+  await assertNotSubject(deps, actor, row.employeeId, "mark paid", "expense");
   if (row.reimbursable) throw failedPrecondition("a reimbursable expense is paid to the employee via payroll, not marked paid here");
   const now = new Date();
   const [updated] = await deps.db

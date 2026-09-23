@@ -710,7 +710,7 @@ export default function App() {
     <ConfirmProvider>
     <OrgProvider>
     <AccessModeProvider userEmail={realMe?.email ?? me.email} capabilities={realMe?.capabilities ?? []}>
-    <ApprovalsProvider enabled={APPROVAL_CAPS.some((c) => hasCapability(gme.capabilities, c))} queues={QUEUES_BY_ROUTE[route.page] ?? NO_QUEUES} history={route.page === "approvals"}>
+    <ApprovalsProvider enabled={APPROVAL_CAPS.some((c) => hasCapability(gme.capabilities, c))} queues={QUEUES_BY_ROUTE[route.page] ?? NO_QUEUES} history={route.page === "approvals"} selfEmployeeId={gme.employee_id}>
     <NotificationsProvider>
     <ClockProvider me={gme}>
       <NotificationClearOnLeave page={route.page} />

@@ -11,7 +11,7 @@ import { cn, idOf, formatDate } from "@/lib/utils";
 import {
   buildAttendanceRows, groupWeeks, statsOf, summarizeByDay,
   fmtDay, fmtDayLong, fmtDuration, fmtDurationShort, fmtHM, fmtMinOfDay, hhmmToMin, localDay, localMinutes,
-  signedDuration, monthGridDays, weekdayOrder, CREDIT_LABEL, DOW, STATUS_UI,
+  signedDuration, monthGridDays, weekdayOrder, CREDIT_LABEL, DOW, STATUS_UI, leaveRangeOf, unpaidLeaveTypes,
   type AttendanceRow, type AttendanceSchedule, type DayCredit, type DayStatus, type LeaveRange, type WeekGroup, type WindowStats,
 } from "@/lib/attendance";
 import type { AttendanceWindow } from "@/hooks/useAttendanceWindow";
@@ -181,10 +181,10 @@ export function AttendanceHistory({
     () => (givenLeave ? [] : ownLeaves.filter((l) => (l.state ?? "").toUpperCase() === "APPROVED")),
     [givenLeave, ownLeaves],
   );
+  const unpaidTypes = useMemo(() => unpaidLeaveTypes(leaveTypes), [leaveTypes]);
   const leaveRanges = useMemo<LeaveRange[]>(
-    () => givenLeave?.ranges
-      ?? ownApproved.map((l) => ({ start: l.start_date, end: l.end_date, startSession: l.start_session, endSession: l.end_session })),
-    [givenLeave, ownApproved],
+    () => givenLeave?.ranges ?? ownApproved.map((l) => leaveRangeOf(l, unpaidTypes)),
+    [givenLeave, ownApproved, unpaidTypes],
   );
   const leaveForDay = useCallback(
     (day: string) => (givenLeave ? givenLeave.forDay(day) : ownApproved.find((l) => l.start_date <= day && day <= l.end_date)),

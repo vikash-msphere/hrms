@@ -68,6 +68,18 @@ export function base32ToBytes(s: string, byteLen: number): Uint8Array<ArrayBuffe
   return out;
 }
 
+/**
+ * Is `s` an internal id this codec can round-trip: 13 characters of the alphabet that decode CANONICALLY to 8
+ * bytes (the 65th bit zero)?
+ *
+ * The regex alone is not the question. A 13-character string whose last character carries the spare bit
+ * passes `[0-9a-hj-km-np-tv-z]{13}` and then makes `encode` throw - so every place that is handed an id it did
+ * not mint (a caller-chosen `?id=`, a string in a response body that merely LOOKS like a ref) asks this.
+ */
+export function isInternalId(s: unknown): s is string {
+  return typeof s === "string" && s.length === 13 && base32ToBytes(s, 8) !== null;
+}
+
 // A new internal id: 8 random bytes -> 13-char base32 string (the PK / FK value, internal only).
 export function genId(): string {
   return bytesToBase32(crypto.getRandomValues(new Uint8Array(8)));

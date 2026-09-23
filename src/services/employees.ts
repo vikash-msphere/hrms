@@ -1,15 +1,16 @@
 import { allocFlatCode, allocUnderDept, withFreshCode, CODE_WIDTH } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
-import type { ListScope } from "../domain/access";
+import { mayAdministerAccount, type ListScope } from "../domain/access";
 import { eq, and, asc, isNotNull, isNull, sql } from "drizzle-orm";
+import { roleHolderEmployeeIds, holdsForAnyone } from "./capabilityHolders";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, fieldDiff } from "../lib/audit";
 import { emitEvent } from "./eventBus";
-import { notify } from "./notifications";
+import { notify, notifyMany } from "./notifications";
 import { invalidArgument, notFound, aborted, isCodeCollision, isEmployeeNumberCollision } from "../lib/errors";
 import { moveEmployee } from "./codeCascade";
 import { keysetPage } from "./keysetPage";
@@ -126,7 +127,28 @@ async function provisionAccount(deps: Deps, employeeId: string, workEmail: strin
   // access rules and keys that were meant for them. Exactly what the comment above says this exists to avoid.
   await deps.db
     .insert(schema.users)
-    .values({ code: await allocFlatCode(deps, schema.users), email, role: "employee", employeeId });
+    .values({ code: await allocFlatCode(deps, schema.users), email, role: PROVISIONED_ROLE, employeeId });
+}
+
+// The role an account is provisioned with on hire - the least any signed-in person holds.
+const PROVISIONED_ROLE = "employee";
+
+/**
+ * Does this account hold nothing beyond what hiring gives anybody: the provisioned role as its primary, no
+ * secondary role, and no access rule written for it personally? Such an account is what HR creates by hiring,
+ * so HR re-pointing its sign-in address hands nobody anything HR could not have given. Two reads, on a
+ * work-email change only.
+ */
+async function isPlainAccount(deps: Deps, account: { uuid: string; role: string }): Promise<boolean> {
+  if (account.role !== PROVISIONED_ROLE) return false;
+  const extraRole = (await deps.db.select({ role: schema.userRoles.role }).from(schema.userRoles).where(eq(schema.userRoles.userId, account.uuid))).some((r) => r.role !== PROVISIONED_ROLE);
+  if (extraRole) return false;
+  const ownRule = await deps.db
+    .select({ uuid: schema.accessRules.uuid })
+    .from(schema.accessRules)
+    .where(and(eq(schema.accessRules.subjectKind, "user"), eq(schema.accessRules.subject, account.uuid), eq(schema.accessRules.effect, "allow")))
+    .limit(1);
+  return ownRule.length === 0;
 }
 
 export async function createEmployee(deps: Deps, actor: AppUser, input: EmployeeInput, id?: string) {
@@ -193,7 +215,14 @@ export async function createEmployee(deps: Deps, actor: AppUser, input: Employee
 // before accounts were provisioned on create). A DIFFERENT account already holding the new address is left
 // alone: `email` is UNIQUE, and stealing or clobbering it would sign somebody else out of their own account -
 // the employee edit still stands, and the two rows are reconciled by whoever owns that other account.
-async function syncAccountEmail(deps: Deps, employeeId: string, workEmail: string) {
+//
+// WHO MAY MOVE IT. The account is the identity every grant hangs off, and auth resolves a caller by this column,
+// so moving it re-points whatever that account holds at the new mailbox. Editing employee records is HR's; the
+// accounts themselves are not (`users.*` is an account admin's). So the login follows the work email only when
+// the editor may administer that account, or when the account is a PLAIN one - the default role, no second role,
+// no rule of its own - which is no more than HR hands anybody by hiring them. Anything more privileged keeps its
+// sign-in address, the mismatch goes on the record, and the account admins are told.
+async function syncAccountEmail(deps: Deps, actor: AppUser, employeeId: string, workEmail: string) {
   const taken = (
     await deps.db
       .select({ uuid: schema.users.uuid })
@@ -209,9 +238,27 @@ async function syncAccountEmail(deps: Deps, employeeId: string, workEmail: strin
     return;
   }
   const linked = (
-    await deps.db.select({ uuid: schema.users.uuid }).from(schema.users).where(eq(schema.users.employeeId, employeeId)).limit(1)
+    await deps.db.select({ uuid: schema.users.uuid, code: schema.users.code, role: schema.users.role }).from(schema.users).where(eq(schema.users.employeeId, employeeId)).limit(1)
   )[0];
   if (!linked) return provisionAccount(deps, employeeId, workEmail);
+  if (!(await isPlainAccount(deps, linked)) && !(linked.code && mayAdministerAccount(actor, linked.code))) {
+    await audit(deps, actor, "employee.loginEmailMismatch", "employees", employeeId, {
+      account: `users/${linked.uuid}`,
+      work_email: workEmail.toLowerCase(),
+      reason: "the account holds more than a plain employee account, and only an account admin may move its sign-in address",
+    });
+    const admins = await roleHolderEmployeeIds(deps, holdsForAnyone("users.*", "write"), actor.employeeId);
+    if (admins.length) {
+      await notifyMany(deps, admins, {
+        type: "account.loginEmailMismatch",
+        title: "Sign-in address left unchanged",
+        body: `A work email was changed to ${workEmail.toLowerCase()}, but the linked account holds elevated access, so its sign-in address was not moved. Update it from the account if the change is right.`,
+        link: "settings/accounts",
+        actorId: actor.employeeId,
+      }).catch(() => {});
+    }
+    return;
+  }
   // Lowercased, for the reason `provisionAccount` gives: this column is what a login is looked up by.
   //
   // AND THE LIVE SESSIONS END WITH IT. A session cookie carries the EMAIL and nothing else (lib/session.ts), and
@@ -351,7 +398,7 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
   // Diff non-sensitive fields (never the encrypted national id) for the activity trail; fall back to field names.
   // The sign-in account is keyed by email, so a corrected work address has to move with it - otherwise the
   // account keeps the old address and the person's next login mints a SECOND one under the new email.
-  if (set.workEmail && set.workEmail.toLowerCase() !== row.workEmail.toLowerCase()) await syncAccountEmail(deps, id, set.workEmail);
+  if (set.workEmail && set.workEmail.toLowerCase() !== row.workEmail.toLowerCase()) await syncAccountEmail(deps, actor, id, set.workEmail);
   const keys = Object.keys(set).filter((k) => k !== "updatedAt" && k !== "nationalIdEnc");
   const diff = fieldDiff(row, updated!, keys, "employees");
   const changedSensitive = "nationalIdEnc" in set;

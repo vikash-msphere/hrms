@@ -3184,6 +3184,11 @@ function DefaultsTab({ toast }: { toast: Toast }) {
     }
   }
 
+  // Nothing editable until the stored values are in. The fields start on built-in defaults, and a switch
+  // pressed in that window was overwritten a moment later when the stored blob landed - so a save then wrote
+  // the old value back, as if the change had never been made.
+  if (!ready) return <PanelSkeleton />;
+
   return (
     <Card>
       <CardContent className="space-y-4 pt-4 sm:pt-6">

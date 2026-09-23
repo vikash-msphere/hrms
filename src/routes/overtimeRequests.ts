@@ -38,8 +38,8 @@ export const overtimeRequests = collectionRoutes<OvertimeInput, typeof schema.ov
   },
   list: (c, page) => listOvertimeRequests(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("q")),
   verbs: {
-    approve: { run: async (deps, user, id, _body, c) => approveOvertimeRequest(deps, user, id, await noteOf(c)) },
-    reject: { run: async (deps, user, id, _body, c) => rejectOvertimeRequest(deps, user, id, await noteOf(c)) },
+    approve: { run: async (deps, user, id, _body, c) => approveOvertimeRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
+    reject: { run: async (deps, user, id, _body, c) => rejectOvertimeRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelOvertimeRequest(deps, user, id) },
   },
 });

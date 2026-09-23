@@ -2,7 +2,7 @@
 // production: a config value that is still a placeholder, an optional feature that will ship silently
 // switched off, or a wrangler.toml block that does not match the Cloudflare plan being deployed to.
 //
-//   Run:  node --import ./scripts/tsResolve.mjs scripts/preflight.ts [--env <name>]
+//   Run:  node --import ./scripts/tsResolve.mjs scripts/preflight.ts [--config <wrangler config>]
 //
 // Wired into `npm run deploy`. ERRORs exit non-zero and stop the deploy; WARNs print and continue, because
 // they describe features that are legitimately optional (push, staging) rather than broken ones.
@@ -44,40 +44,108 @@ function gitRelease(): string | undefined {
   }
 }
 
+// WHICH CONFIG IS BEING DEPLOYED. Each target is a whole file of its own - wrangler.toml is production,
+// wrangler.staging.toml is staging - so "which environment" is a path rather than a section name, and the
+// flag mirrors wrangler's own:
+//
+//   npm run preflight                                        # production
+//   npm run preflight -- --config wrangler.staging.toml      # staging
+//
+// `--env <name>` is still accepted, because it is what every runbook and workflow said for a year: it maps
+// to `wrangler.<name>.toml`. It is a translation, not a second mode - there are no `[env.*]` blocks left to
+// parse, and a check that had to reason about sections now reads one file that means one thing.
+const CONFIG_PROD = "wrangler.toml";
+const configFlag = process.argv.indexOf("--config");
 const envFlag = process.argv.indexOf("--env");
-const targetEnv = envFlag >= 0 ? process.argv[envFlag + 1] : undefined;
+const targetConfig =
+  configFlag >= 0
+    ? process.argv[configFlag + 1]!
+    : envFlag >= 0
+      ? `wrangler.${process.argv[envFlag + 1]}.toml`
+      : CONFIG_PROD;
+// Production is the one target the strict checks apply to in full. A named preview stack legitimately wants
+// an email sink and does not front the surfaces the edge controls protect.
+const isProduction = targetConfig === CONFIG_PROD;
+// "production", or the name out of wrangler.<name>.toml - what a message about the environment should call
+// it, rather than the path it happens to live at.
+const targetName = isProduction ? "production" : (targetConfig.match(/^wrangler\.(.+)\.toml$/)?.[1] ?? targetConfig);
 const plan = (process.env.CF_PLAN ?? "paid").toLowerCase();
 
-const wrangler = read("wrangler.toml");
+const wrangler = read(targetConfig);
 const webEnv = read("web/.env");
 
+if (!wrangler.trim()) {
+  // Every check below reads this string, and an empty one passes all of them. A mistyped --config would
+  // otherwise report a clean preflight for a file that does not exist.
+  errors.push(`${targetConfig} is empty or missing - preflight has nothing to check. Pass --config <file> pointing at a wrangler config that exists.`);
+}
+
+// The other config, read only so a production deploy can still report a half-provisioned staging. It is
+// informational there and blocking when staging is the target, which is the same split the placeholder check
+// used to express with section names.
+const otherConfig = isProduction ? "wrangler.staging.toml" : CONFIG_PROD;
+const otherWrangler = read(otherConfig);
+
 // --- 1. Placeholders that would deploy a broken binding -----------------------------------------------
-// A literal REPLACE_WITH_* left in the target environment's config means the deploy points at nothing.
-// Which environment a line belongs to is decided by the nearest preceding section header: anything under
-// `[env.<name>...]` belongs to that named environment, anything else to the default (production) one.
+// A literal REPLACE_WITH_* left in the config being deployed means the deploy points at nothing.
 {
-  let section: string | undefined; // undefined = the default/top-level environment
-  for (const line of wrangler.split("\n")) {
-    const header = line.match(/^\s*\[+\s*(?:env\.([a-z0-9_-]+)|[a-z0-9_.]+)/i);
-    if (header) section = header[1]; // a non-env header resets to the default environment
-    const placeholder = line.match(/^\s*([a-z_]+)\s*=\s*"(REPLACE_WITH_[A-Z0-9_]+)"/);
-    if (!placeholder) continue;
-    const where = section ? `env.${section}` : "the default (production) environment";
-    const msg = `wrangler.toml: ${placeholder[1]} is still the placeholder ${placeholder[2]} in ${where}.`;
-    // Only fatal when deploying the environment that actually carries the placeholder.
-    if (section === targetEnv || (!section && !targetEnv)) errors.push(msg);
-    else warns.push(`${msg} Provision it before deploying that environment.`);
+  const placeholders = (text: string, file: string) =>
+    text
+      .split("\n")
+      .map((line) => line.match(/^\s*([a-z_]+)\s*=\s*"(REPLACE_WITH_[A-Z0-9_]+)"/))
+      .filter((m): m is RegExpMatchArray => Boolean(m))
+      .map((m) => `${file}: ${m[1]} is still the placeholder ${m[2]}.`);
+
+  for (const msg of placeholders(wrangler, targetConfig)) errors.push(msg);
+  for (const msg of placeholders(otherWrangler, otherConfig)) {
+    warns.push(`${msg} Provision it before deploying that environment.`);
   }
 }
 
-// --- 2. Plan vs wrangler.toml -------------------------------------------------------------------------
+// --- 1a. The two configs must agree where a rehearsal depends on it -----------------------------------
+// Splitting staging into its own file removed one failure mode (a binding silently missing from an
+// `[env.staging]` block) and introduced another: the duplication is now across files, where no diff shows
+// it. Three keys are only meaningful if they match, and each one is a difference that makes staging stop
+// rehearsing production while still looking green.
+if (otherWrangler.trim()) {
+  const value = (text: string, key: string) => text.match(new RegExp(`^\\s*${key}\\s*=\\s*(.+?)\\s*(?:#.*)?$`, "m"))?.[1];
+  const prod = isProduction ? wrangler : otherWrangler;
+  const staging = isProduction ? otherWrangler : wrangler;
+
+  // The runtime's behaviour set. Rehearsing on a different one is rehearsing a different platform.
+  const prodDate = value(prod, "compatibility_date");
+  const stagingDate = value(staging, "compatibility_date");
+  if (prodDate && stagingDate && prodDate !== stagingDate) {
+    errors.push(`compatibility_date disagrees: wrangler.toml has ${prodDate}, wrangler.staging.toml has ${stagingDate}. Staging rehearses production's runtime semantics or it rehearses nothing - set both to the same date.`);
+  }
+
+  // Which paths reach the Worker at all. A prefix in one file and not the other means that route serves the
+  // SPA shell in one environment and a real response in the other.
+  const prodRoutes = value(prod, "run_worker_first");
+  const stagingRoutes = value(staging, "run_worker_first");
+  if (prodRoutes && stagingRoutes && prodRoutes !== stagingRoutes) {
+    errors.push(`run_worker_first disagrees between wrangler.toml and wrangler.staging.toml. A path that reaches the Worker in one environment and the SPA fallback in the other is the difference staging exists to catch, not to have.`);
+  }
+
+  // The CPU envelope. Without it staging runs on the platform default (30s) against production's 60s, and a
+  // payslip batch that outgrew its invocation fails there, gets written off as "staging is slower", and
+  // passes in production for another month.
+  const hasLimitsIn = (text: string) => /^\s*\[limits\]/m.test(text);
+  if (hasLimitsIn(prod) !== hasLimitsIn(staging)) {
+    warns.push(`only one of wrangler.toml / wrangler.staging.toml has a [limits] block, so the two run under different CPU ceilings and a rehearsal does not rehearse the limit.`);
+  } else if (hasLimitsIn(prod) && value(prod, "cpu_ms") !== value(staging, "cpu_ms")) {
+    warns.push(`[limits] cpu_ms disagrees between wrangler.toml (${value(prod, "cpu_ms")}) and wrangler.staging.toml (${value(staging, "cpu_ms")}).`);
+  }
+}
+
+// --- 2. Plan vs the config being deployed --------------------------------------------------------------
 const hasLimits = /^\s*\[limits\]/m.test(wrangler);
 if (plan === "free" && hasLimits) {
-  errors.push("wrangler.toml has a [limits] block, which is a paid-plan (Workers Standard) feature, but CF_PLAN=free. Comment the block out, or deploy on the paid plan.");
+  errors.push(`${targetConfig} has a [limits] block, which is a paid-plan (Workers Standard) feature, but CF_PLAN=free. Comment the block out, or deploy on the paid plan.`);
 } else if (plan !== "free" && plan !== "paid") {
   errors.push(`CF_PLAN must be "paid" or "free" (got "${plan}").`);
 } else if (plan === "paid" && !hasLimits) {
-  warns.push("CF_PLAN=paid but wrangler.toml has no [limits] block - PDF/Form-16 rendering runs without an explicit CPU ceiling.");
+  warns.push(`CF_PLAN=paid but ${targetConfig} has no [limits] block - PDF/Form-16 rendering runs without an explicit CPU ceiling.`);
 }
 
 // --- 2a. The local auth bypass must never reach a DEPLOYED environment --------------------------------
@@ -88,23 +156,19 @@ if (plan === "free" && hasLimits) {
 // (docs/deploy.md, docs/deploy-security.md §3) while strictly milder ones - a staging placeholder, an email
 // sink - were hard errors here.
 //
-// Fatal for EVERY environment in the file, not just the one being deployed, which is where this differs from
-// the email checks below: a redirect sink is the right setting for a rehearsal environment, and an auth
-// bypass is never the right setting for anything that is deployed at all. The bypass belongs in `.dev.vars`,
-// which is local-only and git-ignored and is not read from here.
+// Fatal in EVERY config, not just the one being deployed, which is where this differs from the email checks
+// below: a redirect sink is the right setting for a rehearsal environment, and an auth bypass is never the
+// right setting for anything that is deployed at all. The bypass belongs in `.dev.vars`, which is local-only
+// and git-ignored and is not read from here.
 //
 // What this cannot see: `wrangler deploy --var`, and a variable set by hand in the dashboard. The runbook
 // covers both; this covers the file, which is the way one actually gets committed.
-{
-  let section: string | undefined;
-  for (const line of wrangler.split("\n")) {
-    const header = line.match(/^\s*\[+\s*(?:env\.([a-z0-9_-]+)|[a-z0-9_.]+)/i);
-    if (header) section = header[1];
+for (const [file, text] of [[targetConfig, wrangler], [otherConfig, otherWrangler]] as const) {
+  for (const line of text.split("\n")) {
     const hit = line.match(/^\s*(ALLOW_DEV_AUTH|DEV_FAKE_EMAIL)\s*=/);
     if (!hit) continue;
-    const where = section ? `env.${section}` : "the default (production) environment";
     errors.push(
-      `wrangler.toml: ${hit[1]} is set in ${where} - with DEV_FAKE_EMAIL and ALLOW_DEV_AUTH="true" both present the Worker authenticates nobody and answers every request as that one identity (src/middleware/auth.ts). Remove it; the bypass belongs in .dev.vars, which is never deployed.`,
+      `${file}: ${hit[1]} is set - with DEV_FAKE_EMAIL and ALLOW_DEV_AUTH="true" both present the Worker authenticates nobody and answers every request as that one identity (src/middleware/auth.ts). Remove it; the bypass belongs in .dev.vars, which is never deployed.`,
     );
   }
 }
@@ -114,17 +178,11 @@ if (plan === "free" && hasLimits) {
 // right setting for the browser suite and for a preview stack, and a silent disaster in production: every
 // offer letter, interview invite and payslip notification is accepted, recorded as sent, and thrown away.
 // Nothing downstream can tell - the send resolves - so this is the only place it can be caught.
-{
-  let section: string | undefined;
-  for (const line of wrangler.split("\n")) {
-    const header = line.match(/^\s*\[+\s*(?:env\.([a-z0-9_-]+)|[a-z0-9_.]+)/i);
-    if (header) section = header[1];
-    if (!/^\s*EMAIL_PROVIDER\s*=\s*"console"/.test(line)) continue;
-    const where = section ? `env.${section}` : "the default (production) environment";
-    const msg = `wrangler.toml: EMAIL_PROVIDER = "console" in ${where} - that provider sends nothing, it only logs.`;
-    if (section === targetEnv || (!section && !targetEnv)) errors.push(msg);
-    else warns.push(`${msg} Fine for a preview environment; never deploy it as production.`);
-  }
+if (/^\s*EMAIL_PROVIDER\s*=\s*"console"/m.test(wrangler)) {
+  const msg = `${targetConfig}: EMAIL_PROVIDER = "console" - that provider sends nothing, it only logs.`;
+  // Blocking for production, informational for a preview stack, which is the one place it is the right answer.
+  if (isProduction) errors.push(msg);
+  else warns.push(`${msg} Fine for a preview environment; never deploy it as production.`);
 }
 
 // --- 2b-ii. The local-model transport must not reach a deploy ------------------------------------------
@@ -136,19 +194,13 @@ if (plan === "free" && hasLimits) {
 // The var is already harmless in the sense that matters - `assertLoopback` refuses any host but this machine,
 // so it cannot become an egress channel wherever it is set. This check is about INTENT rather than safety: it
 // is a development setting, it belongs in .dev.vars and e2e/e2e.vars, and a deploy carrying it is a mistake
-// whichever environment it lands in. Unscoped for that reason, unlike the email sinks below, which are right
-// for a rehearsal environment and wrong only in production.
-{
-  let section: string | undefined;
-  for (const line of wrangler.split("\n")) {
-    const header = line.match(/^\s*\[+\s*(?:env\.([a-z0-9_-]+)|[a-z0-9_.]+)/i);
-    if (header) section = header[1];
-    if (!/^\s*AI_LOCAL_URL\s*=/.test(line)) continue;
-    const where = section ? `env.${section}` : "the default (production) environment";
-    errors.push(
-      `wrangler.toml: AI_LOCAL_URL is set in ${where} - that redirects the whole AI layer at a model on the developer's machine (src/lib/aiLocal.ts), which no deployed Worker can reach. Remove it; it belongs in .dev.vars and e2e/e2e.vars, neither of which is deployed.`,
-    );
-  }
+// whichever environment it lands in. Checked in both configs for that reason, unlike the email sinks below,
+// which are right for a rehearsal environment and wrong only in production.
+for (const [file, text] of [[targetConfig, wrangler], [otherConfig, otherWrangler]] as const) {
+  if (!/^\s*AI_LOCAL_URL\s*=/m.test(text)) continue;
+  errors.push(
+    `${file}: AI_LOCAL_URL is set - that redirects the whole AI layer at a model on the developer's machine (src/lib/aiLocal.ts), which no deployed Worker can reach. Remove it; it belongs in .dev.vars and e2e/e2e.vars, neither of which is deployed.`,
+  );
 }
 
 // --- 2c. ...and the redirect sink must not reach production either -------------------------------------
@@ -158,27 +210,16 @@ if (plan === "free" && hasLimits) {
 // scoped to the environment being deployed - and a preview environment on a real provider WITHOUT it is
 // flagged the other way, because that one mails real people from a real sender.
 {
-  let section: string | undefined;
-  const provider = new Map<string | undefined, string>();
-  const redirect = new Set<string | undefined>();
-  for (const line of wrangler.split("\n")) {
-    const header = line.match(/^\s*\[+\s*(?:env\.([a-z0-9_-]+)|[a-z0-9_.]+)/i);
-    if (header) section = header[1];
-    const p = line.match(/^\s*EMAIL_PROVIDER\s*=\s*"([^"]+)"/);
-    if (p) provider.set(section, p[1]!);
-    if (/^\s*EMAIL_REDIRECT_TO\s*=\s*"\S/.test(line)) redirect.add(section);
+  const redirected = /^\s*EMAIL_REDIRECT_TO\s*=\s*"\S/m.test(wrangler);
+  const provider = wrangler.match(/^\s*EMAIL_PROVIDER\s*=\s*"([^"]+)"/m)?.[1] ?? "resend";
+
+  if (redirected && isProduction) {
+    errors.push(`${targetConfig}: EMAIL_REDIRECT_TO is set - every message would be diverted to that one address instead of reaching the person it is addressed to.`);
   }
-  const where = (s: string | undefined) => (s ? `env.${s}` : "the default (production) environment");
-  for (const s of redirect) {
-    if (s === targetEnv || (!s && !targetEnv)) {
-      errors.push(`wrangler.toml: EMAIL_REDIRECT_TO is set in ${where(s)} - every message would be diverted to that one address instead of reaching the person it is addressed to.`);
-    }
-  }
-  // The inverse, for the environment actually being deployed: a preview/staging target on a real vendor with
-  // no sink and no redirect will mail whoever is in its database.
-  const target = targetEnv;
-  if (target && !redirect.has(target) && (provider.get(target) ?? "resend") !== "console") {
-    warns.push(`wrangler.toml: env.${target} sends through a real email provider with no EMAIL_REDIRECT_TO - a rehearsal there (the nightly cron included) will mail the real addresses in that environment's database. Set EMAIL_REDIRECT_TO, or EMAIL_PROVIDER = "console".`);
+  // The inverse, for a preview target: on a real vendor with no sink and no redirect it mails whoever is in
+  // that environment's copy of the database, the nightly cron included.
+  if (!isProduction && !redirected && provider !== "console") {
+    warns.push(`${targetConfig} sends through a real email provider with no EMAIL_REDIRECT_TO - a rehearsal there (the nightly cron included) will mail the real addresses in that environment's database. Set EMAIL_REDIRECT_TO, or EMAIL_PROVIDER = "console".`);
   }
 }
 
@@ -199,8 +240,8 @@ function datedAck(varName: string, missing: string, how: string, stale: string):
     // Blocking for production, a warning for a named preview environment - a rehearsal stack behind an access
     // policy is not the surface these protect, and gating it would only teach people to set the variable blindly.
     const msg = `${missing} ${how}`;
-    if (targetEnv) warns.push(msg);
-    else errors.push(msg);
+    if (isProduction) errors.push(msg);
+    else warns.push(msg);
     return;
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(ack)) {
@@ -218,7 +259,7 @@ function datedAck(varName: string, missing: string, how: string, stale: string):
 }
 
 {
-  const target = targetEnv ?? "production";
+  const target = targetName;
   // All three unauthenticated lanes - /diag, /auth/* and the e-sign callback - now carry an isolate-local
   // ceiling of their own (lib/isolateRate.ts). That is a floor, NOT the control, and the message says so: a
   // Worker cannot see traffic an edge rule blocks, and a per-isolate counter is not a limit across a fleet of
@@ -444,4 +485,4 @@ if (errors.length) {
   console.error(`\npreflight failed: ${errors.length} blocking issue(s).`);
   process.exit(1);
 }
-console.log(`preflight ok${warns.length ? ` (${warns.length} warning(s))` : ""} - plan=${plan}, env=${targetEnv ?? "production"}`);
+console.log(`preflight ok${warns.length ? ` (${warns.length} warning(s))` : ""} - plan=${plan}, config=${targetConfig}${isProduction ? " (production)" : ""}`);
