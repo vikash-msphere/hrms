@@ -1,3 +1,5 @@
+import type { CallerScopes } from "@/types";
+
 // Shared dashboard configuration: which KPI cards and which timeline markers each role sees. Stored in the
 // `settings/dashboard` blob and edited in Settings → Organization → Dashboard. Consumed by the dashboard
 // (Dashboard.tsx) and the team timeline. Keys here MUST match the KPI keys the dashboard renders and the
@@ -30,13 +32,20 @@ export const KPI_CATEGORIES: { key: KpiCategory; label: string; blurb: string }[
   { key: "snapshot", label: "At a glance", blurb: "Where the organization stands right now." },
 ];
 
-// Out-of-the-box visibility for a card with NO explicit audience: "everyone" (any employee), "hr" (HR admins
-// only - the HR/recruiting/finance/compliance ops cards), or "none" (nobody - hidden until an admin shares it).
-// An explicit audience in settings/dashboard always overrides this. Display default only - the data behind every
-// card is still gated by its collection's real grants, so a shared card shows only numbers the viewer may see.
+// Out-of-the-box visibility for a card with NO explicit audience: "everyone" (any employee), "hr" (whoever
+// runs HR - the HR/recruiting/finance/compliance ops cards), or "none" (nobody - hidden until an admin shares
+// it). An explicit audience in settings/dashboard always overrides this. Display default only - the data behind
+// every card is still gated by its collection's real grants, so a shared card shows only numbers the viewer may
+// see.
 export type KpiDefaultAudience = "everyone" | "hr" | "none";
-// The role that "hr" default cards resolve to (single HR role in this app; see lib/roles).
-export const HR_ROLE = "hr_admin";
+
+// Who "hr" default cards resolve to: anyone whose grant lets them edit EVERY employee record, read off the
+// caller's write breadth (users/me write_scopes). Not a role name - roles are an org's own data, so a
+// hardcoded `hr_admin` showed these cards to nobody in an org whose HR role is called something else. Write,
+// not read: the directory lets every employee read every employee.
+export function isHrViewer(scopes: Pick<CallerScopes, "write"> | undefined): boolean {
+  return scopes?.write.employees === "all";
+}
 
 // The KPI cards the dashboard can show. `category` places each in a band (above); order = display order within
 // its band. `defaultAudience` (omit = "none") sets who sees it before any config. Keys MUST match the keys the
@@ -99,9 +108,9 @@ export const KPI_DEFAULT_AUDIENCE: Record<string, KpiDefaultAudience> = Object.f
 
 // Whether a card with no explicit audience shows to this viewer, given its default audience. "none" shows to
 // nobody (not even super) - an admin must share it explicitly.
-export function kpiDefaultVisible(def: KpiDefaultAudience | undefined, role: string): boolean {
+export function kpiDefaultVisible(def: KpiDefaultAudience | undefined, hrViewer: boolean): boolean {
   if (def === "everyone") return true;
-  if (def === "hr") return role === HR_ROLE;
+  if (def === "hr") return hrViewer;
   return false;
 }
 

@@ -2943,7 +2943,7 @@ function DashboardTab({ toast }: { toast: Toast }) {
                         {Icon && <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />}
                         {d.label}
                       </span>
-                      <AudienceCell value={cfg.kpis?.[d.key]} roles={roles} employees={employees} defaultLabel={{ everyone: "Everyone (default)", hr: "HR Admin (default)", none: "No one · hidden" }[KPI_DEFAULT_AUDIENCE[d.key]]} onChange={(a) => setAud("kpis", d.key, a)} />
+                      <AudienceCell value={cfg.kpis?.[d.key]} roles={roles} employees={employees} defaultLabel={{ everyone: "Everyone (default)", hr: "HR · edits every employee (default)", none: "No one · hidden" }[KPI_DEFAULT_AUDIENCE[d.key]]} onChange={(a) => setAud("kpis", d.key, a)} />
                     </div>
                   );
                 })}
