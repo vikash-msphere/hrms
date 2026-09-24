@@ -1,8 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ShieldAlert, Pencil, MoreHorizontal, KeyRound } from "lucide-react";
 import { patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { roleLabel, type Role } from "@/lib/roles";
+import { roleLabel, registerRoleLabels, EVERYONE_ROLE } from "@/lib/roles";
 import { CopyEmail } from "@/components/common/CopyEmail";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf } from "@/lib/utils";
@@ -28,7 +28,6 @@ import { useToast } from "@/components/ui/use-toast";
 // login is the question an access review exists to ask.
 const DORMANT_DAYS = 90;
 
-const ROLE_OPTIONS: Role[] = ["employee", "manager", "hr_admin", "payroll_admin", "super_admin"];
 const NONE = "__none__";
 const roleVariant = (role: string) => (role === "super_admin" ? "default" : role === "employee" ? "muted" : "secondary");
 
@@ -42,6 +41,13 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
   // prevent. An absent warning reads as "no clash", not as "not checked".
   const { rows, state, error, reload } = useCollection<User>("users", { all: true });
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
+  // The roles this org actually has, read from the `roles` collection. Every assignable-role control below
+  // offers these and nothing else: a user's role is a foreign key to a roles row, so a name that is not in the
+  // table cannot be saved, and a role the org created has to be offered or it cannot be given to anyone.
+  // `everyone` is a rule subject every caller already holds, never a role a person is assigned.
+  const { rows: roleRows, state: rolesState } = useCollection<{ path: string; name: string; label?: string }>("roles", { all: true });
+  useEffect(() => registerRoleLabels(roleRows), [roleRows]);
+  const roleOptions = useMemo(() => roleRows.map((r) => r.name).filter((n) => n !== EVERYONE_ROLE), [roleRows]);
   const { toast } = useToast();
 
   const [editing, setEditing] = useState<User | null>(null);
@@ -217,7 +223,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
   const notYourself = (users: User[]) =>
     users.every((u) => u.email === me.email) ? "You can't change your own role or account this way." : null;
   const bulkActions: BulkAction<User>[] = [
-    ...ROLE_OPTIONS.map((r) => ({
+    ...roleOptions.map((r) => ({
       label: `Set role: ${roleLabel(r)}`,
       disabled: notYourself,
       confirm: {
@@ -278,11 +284,14 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
             <Select value={form.role} onValueChange={(v) => setForm({ ...form, role: v })} disabled={isSelf}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
-                {ROLE_OPTIONS.map((r) => (
+                {/* The user's current role is always listed, so the control shows what they hold even before
+                    the roles have loaded. */}
+                {(roleOptions.includes(form.role) ? roleOptions : [form.role, ...roleOptions]).map((r) => (
                   <SelectItem key={r} value={r}>{roleLabel(r)}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
+            {rolesState === "error" && <p className="mt-1 text-xs text-destructive">Couldn't load this organization's roles, so only the current one is offered.</p>}
           </Field>
           {/* ADDITIONAL roles. Separate from the primary rather than folded into one multi-select, because the
               primary is not interchangeable with these: it is what the audit trail records for every act this
@@ -295,7 +304,8 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
             accessTarget={{ collection: "users", field: "roles", label: "Additional roles" }}
           >
             <div className="flex flex-wrap gap-1.5">
-              {ROLE_OPTIONS.filter((r) => r !== form.role).map((r) => {
+              {/* Plus any extra role the user already holds that the list lacks, so it can still be taken off. */}
+              {[...roleOptions, ...form.roles.filter((r) => !roleOptions.includes(r))].filter((r) => r !== form.role).map((r) => {
                 const on = form.roles.includes(r);
                 return (
                   <Button

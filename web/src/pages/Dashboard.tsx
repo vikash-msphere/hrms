@@ -51,7 +51,7 @@ import { navigate } from "@/router";
 import { fireIntent } from "@/lib/intent";
 import { useMedia } from "@/hooks/useMedia";
 import type { Announcement, Celebration, Employee, Event, Holiday, LeaveRequest, LeaveType, Ticket, Me, Transition, JobRequisition, Expense, ComplianceEvent, Asset, Goal, Loan, Application, Interview, Referral, Review, TaxDeclaration, BackgroundCheck, Suggestion, BenefitEnrollment, Card as CardT, ExpenseBudget, DocumentResource, NoticePeriod, RemoteWorkRequest, TimeEntry, ReviewCycle, Offer, LeaveBalance, PayPeriod } from "@/types";
-import { type DashboardConfig, type KpiCategory, KPI_DEFS, KPI_CATEGORIES, KPI_DEFAULT_AUDIENCE, kpiDefaultVisible, MARKER_DEFS, visibleToViewer } from "@/lib/dashboardConfig";
+import { type DashboardConfig, type KpiCategory, KPI_DEFS, KPI_CATEGORIES, KPI_DEFAULT_AUDIENCE, kpiDefaultVisible, isHrViewer, MARKER_DEFS, visibleToViewer } from "@/lib/dashboardConfig";
 import { useDashPrefs } from "@/lib/dashboardPrefs";
 import { KPI_ICONS, CATEGORY_ICONS } from "@/lib/kpiIcons";
 import { StatCard } from "@/components/common/StatCard";
@@ -293,8 +293,9 @@ export default function Dashboard({ me }: { me: Me }) {
   const sortable = useSortable("data-dash-section", (id, t) => dropSection(id as SectionKey, t.index));
 
   // KPI visibility. A configured KPI follows its explicit role/user audience. An UNCONFIGURED one falls back to
-  // its default audience: everyone, HR admins only (HR-related cards), or none (hidden until shared).
-  const kpiVisible = (key: string) => visibleToViewer(dashCfg.kpis?.[key], me.role, me.employee_id, kpiDefaultVisible(KPI_DEFAULT_AUDIENCE[key], me.role));
+  // its default audience: everyone, HR only (HR-related cards, see isHrViewer), or none (hidden until shared).
+  const hrViewer = isHrViewer(me.scopes);
+  const kpiVisible = (key: string) => visibleToViewer(dashCfg.kpis?.[key], me.role, me.employee_id, kpiDefaultVisible(KPI_DEFAULT_AUDIENCE[key], hrViewer));
   // Timeline markers this viewer may NOT see -> hidden on the timeline.
   const hiddenMarkers = useMemo(
     () => MARKER_DEFS.filter((m) => !visibleToViewer(dashCfg.timeline?.[m.key], me.role, me.employee_id)).map((m) => m.key),
