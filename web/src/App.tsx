@@ -6,7 +6,7 @@ import { Skeleton } from "./components/ui/skeleton";
 import { StatsSkeleton, TableSkeleton } from "./components/common/Skeletons";
 import { Button } from "./components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./components/ui/dialog";
-import { api, setSessionExpiredHandler, setForbiddenHandler } from "./api";
+import { api, loginUrl, notifySignedIn, setSessionExpiredHandler, setForbiddenHandler } from "./api";
 import { useToast } from "./components/ui/use-toast";
 import { useViewAs, stopViewAs } from "./lib/viewAsStore";
 import { useMe, useRealMe } from "./useMe";
@@ -496,7 +496,7 @@ export default function App() {
           <p className="mt-1 text-sm text-muted-foreground">Please sign in again to continue.</p>
         </div>
         <a
-          href="/auth/login"
+          href={loginUrl()}
           className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
         >
           Sign in
@@ -780,7 +780,14 @@ export default function App() {
         <Toaster />
         <CommandPalette me={gme} open={paletteOpen} onOpenChange={setPaletteOpen} />
         <ShortcutLayer me={gme} page={route.page} />
-        <SessionExpiredDialog open={sessionExpired} onSignedIn={() => setSessionExpired(false)} />
+        <SessionExpiredDialog
+          open={sessionExpired}
+          onSignedIn={() => {
+            setSessionExpired(false);
+            // Resumes whatever was parked on the lapse - a page chunk the gate refused (lib/lazyPage.tsx).
+            notifySignedIn();
+          }}
+        />
       </div>
     </ClockProvider>
     </NotificationsProvider>

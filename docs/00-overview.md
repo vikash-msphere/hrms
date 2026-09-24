@@ -49,6 +49,12 @@ Either way, identity only says **who**; what they may do is the authz middleware
 callers use API keys, which act as their owning user with a narrowed grant. Setup for both modes is in
 `docs/deploy.md` §3.
 
+The same identity check gates the app's own code. Every path except the media reaches the Worker first, and
+`src/http/staticSite.ts` serves the shell and the JS/CSS chunks only to a verified session. A signed-out
+navigation gets a bare 302 to sign-in and any other request a bare 401, so a signed-out browser never
+receives the bundle. The media (fonts, images, pdf.js data) skips the Worker to stay off the daily request
+quota, and is guarded by a WAF rule on a shared cookie instead. See `docs/deploy-security.md` §5a.
+
 - **domain/** — pure functions: payroll math, leave, and the **authz engine** (`permissions.ts` matcher
   + decision ladder, `codes.ts` hierarchical-scope matching incl. `ancestorsOf`, `compileGrants.ts`
   grant<->`access_rules` rows, `collections.ts` + `policyValidate.ts` write-time guards, `grants.ts`/

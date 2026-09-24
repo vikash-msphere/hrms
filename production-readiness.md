@@ -118,6 +118,13 @@ Each of these leaves production working but weaker.
   3000 runaway detector over everything else). The limit across the fleet is still the WAF rule.
   `docs/deploy-security.md` §1 carries a table per plan tier; on Free you get one rule, so spend it on
   `/auth/*`.
+- **The media edge rule.** The app's code is gated by the Worker from the first deploy: a signed-out browser
+  gets a 302 to sign-in, or a 401 for a chunk, and never the bundle (`src/http/staticSite.ts`). The media
+  (fonts, images, icons, pdf.js data) skips the Worker to stay off the 100k/day request quota, and is open
+  to anyone until the WAF custom rule that checks the `hrms_edge` cookie is on. `npm run edge:rule` builds it.
+  Set `EDGE_KEY` a day BEFORE switching the rule on, then set `EDGE_RULE_CONFIRMED`; preflight warns until then
+  (`docs/deploy.md` §10, `docs/deploy-security.md` §5a). The rule needs the custom domain: nothing enforces it
+  on `*.workers.dev`.
 - **Sentry release wiring.** Set `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` in the deploy
   environment, plus `VITE_APP_VERSION` and a matching `SENTRY_RELEASE`, or the uploaded source maps match
   no event. Then set alert routing, or nobody reads the issues.
@@ -172,6 +179,12 @@ Each of these leaves production working but weaker.
   Trust is a column (`automations.super_authored`), stamped from the author on every write and carried through
   a `wait` / `waitFor` continuation; a refused hop is a `skipped` `automation_runs` row, not a silence.
   Pinned by `test/automationRelayTrust.test.ts`.
+- **The code gate checks the cookie, not the revocation stamp, and the media gate checks a shared key.** Both
+  are deliberate. The static-site gate verifies the session's signature and expiry (no D1 read per chunk), so a
+  cookie signed out elsewhere can still fetch code for the rest of its 12 hours - but no data, because `/v1`
+  checks the stamp. The media WAF rule can only compare one value on the Free plan, so everyone signed in holds
+  the same `EDGE_KEY` and a former holder keeps it until `npm run edge:rule -- --rotate`. It guards only files
+  with nothing of the app in them, whose hashed names are referenced only from gated code.
 - **`/readyz` is unauthenticated and touches D1.** A READY answer is cached in the isolate for 5 seconds, so
   a flood costs one D1 read per isolate per window. A failing probe is deliberately not cached, so an
   outage is still reported on the first call after it starts.
@@ -200,7 +213,7 @@ Each of these leaves production working but weaker.
 
 - `docs/deploy.md` — the numbered runbook, environment reference, CI wiring, backups and recovery.
 - `docs/deploy-security.md` — WAF tables per plan tier, secrets and rotation, the session break-glass, CSP,
-  telemetry, the e-sign trust store.
+  telemetry, who can download the app (the code gate and the media edge rule), the e-sign trust store.
 - `docs/session-recording-notice.md` — the employee notice for screen recording, and what to decide first.
 - `docs/security-review.md` — the archived 2026-07-04 review and its remediation ledger.
 - `client-storage.md` — what the SPA keeps in the browser, what makes a stored copy trustworthy, and what is

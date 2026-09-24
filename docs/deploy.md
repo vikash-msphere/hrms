@@ -57,7 +57,20 @@ Edit the committed `wrangler.toml`:
   malformed entry is a startup error, not a silently narrowed fence.
 
 Do **not** put secrets here — `wrangler.toml` is committed. The bindings (`DB`, `DOCS`) and cron triggers
-are already declared; leave them as-is.
+are already declared; leave them as-is. So are two settings that keep the app's code away from signed-out
+browsers, and both must stay as committed:
+
+- `[assets].run_worker_first` — `/*` followed by one `!` rule per media pattern. Every path except the media
+  (fonts, images, icons, pdf.js data) reaches the Worker first, which serves the shell and the JS/CSS chunks
+  only to a verified session (`src/http/staticSite.ts`). The `!` list is `EDGE_PATHS` in
+  `src/http/assetPaths.ts`; a test pins the two together.
+- `preview_urls = false` — with preview URLs on, every version ever uploaded stays reachable at its own
+  `<version>-hrms.<subdomain>.workers.dev` address, including builds from before the gate. Preflight refuses
+  a config without it.
+
+`workers_dev` is left unset, which keeps the `*.workers.dev` hostname on. The Worker gates the code there too,
+but the media edge rule (step 10) can only guard hostnames in a Cloudflare zone. Once the app has its custom
+domain, set `workers_dev = false` in both files.
 
 **Staging is a second file, not a section.** `wrangler.staging.toml` is a standalone config for the
 `hrms-staging` Worker, reached with `--config` (`npm run deploy:staging`, `npm run db:migrate:staging`,
@@ -65,7 +78,7 @@ are already declared; leave them as-is.
 which required every top-level binding and var to be repeated inside it and failed *silently* when one was
 missed — a config with no `[env.staging.vars]` deploys with no vars rather than erroring. Three keys have to
 stay in step across the two files and `npm run preflight` checks all three: `compatibility_date`,
-`run_worker_first` and the `[limits]` block. Everything else is deliberately per-environment — its own D1,
+`run_worker_first` and the `[limits]` block (plus `preview_urls = false` in each). Everything else is deliberately per-environment — its own D1,
 R2 bucket, Vectorize index and AI Gateway id — because sharing any of those would have a rehearsal write
 into production's data.
 
@@ -238,10 +251,24 @@ From there, the super admin provisions departments, employees, and role assignme
 
 - **WAF rate limits** — the Worker enforces none. Add the rules in `docs/deploy-security.md` §1 before
   going live (PDF/upload/batch/cron endpoints).
+- **Media edge rule** — the Worker keeps the app's CODE from signed-out browsers on its own; the media (fonts,
+  images, icons, pdf.js data) is served without the Worker, to keep it off the daily request quota, and a WAF
+  custom rule guards it with a shared cookie instead (`docs/deploy-security.md` §5a). The order matters:
+  1. `npm run edge:rule -- --host <app hostname>` mints the key and writes the rule to a gitignored file.
+  2. Hand the Worker the key with the `wrangler secret put EDGE_KEY` line it prints (piped from the file).
+  3. Wait a day, so signed-in browsers have loaded a page and been given the cookie. Switched on first, the
+     rule would block every open tab's images and fonts until it reloads.
+  4. Security → WAF → Custom rules → create **hrms media: edge cookie (production)**, *Edit expression*, paste
+     the rule file, action **Block**.
+  5. Set `EDGE_RULE_CONFIRMED` (a repository variable for CI, or the environment for `npm run deploy`) to the
+     date you verified it. Until then preflight warns that the media is open.
 - **CSP headers** — confirm the deployed host emits the `_headers` policy (`docs/deploy-security.md` §5).
 - **Smoke test** — open the app URL in a fresh browser profile; confirm the sign-in screen leads through
   Google and back authenticated, that an account outside `ALLOWED_EMAIL_DOMAINS` is refused, and that the
-  super admin can reach admin surfaces.
+  super admin can reach admin surfaces. Then, signed out (`curl -sI`, no cookie): `/` answers `302` to
+  `/auth/login`, the entry chunk `/assets/index-<hash>.js` answers `401`, and - once the media rule is on - a
+  font or `/favicon.svg` answers `403`. A deep link (`/leave-requests`) should come back to that page after
+  sign-in.
 - **Cron** — verify both triggers appear under the Worker's **Triggers** tab.
 - **Webhooks** — automation `webhook`/`apiCall` egress stays off unless explicitly wired
   (`docs/deploy-security.md` §6).
@@ -327,6 +354,7 @@ no `.env`/config file in production; `.dev.vars` exists for **local dev only** a
 | `ESIGN_CASHFREE_CLIENT_ID` | secret | optional | Cashfree Aadhaar e-sign client id; unset unless the provider is enabled |
 | `ESIGN_CASHFREE_CLIENT_SECRET` | secret | optional | Cashfree client secret; also the webhook HMAC key |
 | `ESIGN_CASHFREE_PUBLIC_KEY` | secret | optional | Cashfree public key for the production `X-Cf-Signature` 2FA header; unset in sandbox / client-id+secret-only mode |
+| `EDGE_KEY` | secret | recommended | The shared value of the `hrms_edge` cookie the media WAF rule checks (step 10). 32-128 chars of `[A-Za-z0-9_-]`; mint it with `npm run edge:rule`. Unset = no cookie is issued, and the rule must stay off |
 | `ALLOW_DEV_AUTH`, `DEV_FAKE_EMAIL` | var | **never in prod** | Local auth bypass — see `docs/deploy-security.md` §3 |
 | `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD` | var/secret | legacy | Cloudflare Access mode, used only when `GOOGLE_CLIENT_ID` is unset (`src/middleware/auth.ts`). Not the documented path |
 

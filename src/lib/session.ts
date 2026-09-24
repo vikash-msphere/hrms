@@ -26,8 +26,24 @@ const fromB64url = (s: string): Uint8Array<ArrayBuffer> => {
   return out;
 };
 
+// Imported keys, per isolate. `openSession` runs on every /v1 request AND on every request for app code (the
+// static-site gate, http/staticSite.ts), and re-importing the same raw secret each time was pure overhead. The
+// PROMISE is cached so concurrent first calls share one import, and a failed import is dropped rather than
+// remembered. Keyed by the secret itself: a deployment has one, tests use a handful, so the bound is only a
+// backstop against a caller that mints keys in a loop.
+const keyCache = new Map<string, Promise<CryptoKey>>();
+const KEY_CACHE_MAX = 8;
+
 async function hmacKey(secretB64: string, usage: KeyUsage): Promise<CryptoKey> {
-  return crypto.subtle.importKey("raw", new Uint8Array(Buffer.from(secretB64, "base64")), { name: "HMAC", hash: "SHA-256" }, false, [usage]);
+  const id = `${usage}:${secretB64}`;
+  let key = keyCache.get(id);
+  if (!key) {
+    if (keyCache.size >= KEY_CACHE_MAX) keyCache.clear();
+    key = crypto.subtle.importKey("raw", new Uint8Array(Buffer.from(secretB64, "base64")), { name: "HMAC", hash: "SHA-256" }, false, [usage]);
+    key.catch(() => keyCache.delete(id));
+    keyCache.set(id, key);
+  }
+  return key;
 }
 
 export async function sealSession(session: Session, secretB64: string): Promise<string> {

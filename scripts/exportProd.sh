@@ -173,6 +173,7 @@ EXPORT_SCRIPTS=(
   genVapidKeys.ts         # only to mint a new web-push keypair
   freezeMigrations.ts     # docs/deploy.md step 7a: writes the _frozen.json lock preflight checks, at launch
   aiSpend.ts              # `npm run ai:spend`: measured AI cost against the estimates, read from the live account
+  edgeRule.ts             # `npm run edge:rule`: mints the media edge key and builds the WAF rule that checks it
   esignChain.ts           # which CCA root a provider's signed PDF chains to (web/src/lib/ccaRoots.ts says when)
   testEmail.ts            # email-provider smoke test; env overrides beat .dev.vars, so it runs without one
 )

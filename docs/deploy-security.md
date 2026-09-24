@@ -508,6 +508,72 @@ Turn HSTS on in the Cloudflare dashboard — **SSL/TLS → Edge Certificates →
 If a machine has already been pinned this way, removing the header is not enough — clear the pin at
 `chrome://net-internals/#hsts` → *Delete domain security policies* → `localhost`.
 
+## 5a. Who can download the app
+
+A signed-out browser receives none of the app's code. The shell, every JS/CSS chunk and every client-side
+route reach the Worker first (`run_worker_first = ["/*", ...]`), and `src/http/staticSite.ts` answers them
+only for a verified session - the same credential check `/v1` starts with, at no D1 read:
+
+| Request, no valid session | Answer |
+|---|---|
+| A navigation (`/`, `/leave/123`) | `302 /auth/login?next=<path>`, empty body - no HTML, so not even a script tag |
+| Any other gated path (`/assets/*.js`, `*.css`, `/index.html`) | `401`, empty body - the same whether the file exists or not |
+| Access mode, no Access JWT | `401` for everything (its `/auth/login` bounces to `/`, so a redirect would loop) |
+
+A loader script that checks the session before fetching the rest would not do this: the chunks would still be
+public files, and one known name (a proxy log, a pasted stack trace, an ex-employee's history) leads to the
+entry chunk's list of all the others. Only a refusal before the asset store is asked closes it.
+
+What the gate does not check, deliberately: the user's revocation stamp (`sessions_valid_from`), which is a D1
+read per request. A cookie that was signed out elsewhere can still fetch code for the rest of its 12 hours,
+but it gets no data - `/v1` does check the stamp.
+
+**The media tier.** Fonts, images, icons, illustrations, stickers and pdf.js data (`EDGE_PATHS` in
+`src/http/assetPaths.ts`) are served by the asset layer WITHOUT the Worker, because each Worker invocation
+counts against the Free plan's 100,000 requests a day and these are the bulk of the files - 2,036 of the 2,084
+in a build, against 45 code files. A WAF **custom rule** guards them instead: Block, for this app's hostname
+and those paths, unless the request carries the `hrms_edge` cookie. The Worker hands that cookie to every
+signed-in browser (30 days, re-issued when stale, deleted on sign-out).
+
+This tier is weaker on purpose, and the trade is only made for files that carry nothing of the application:
+
+- The Free plan's rule language cannot verify a signature: `matches` (regex) is Business+,
+  `is_timed_hmac_valid_v0` and the `http.request.cookies` map are Pro+. What is left - `http.cookie
+  contains`, `wildcard`, `in` - can only compare one shared value.
+- So `EDGE_KEY` is a single random value every signed-in browser holds, and a former holder keeps it until it
+  is rotated. It is still unguessable from outside (43 characters of base64url), and the media's hashed names
+  are referenced only from gated code, so the key alone does not say what exists.
+- Custom rules are a separate allowance from the one Free-plan rate-limiting rule in §1 (five of them), so
+  this does not compete with the sign-in rate limit.
+- The rule only reaches hostnames in a Cloudflare zone. On `*.workers.dev`, media is unguarded (the code is
+  still gated there) - another reason for `workers_dev = false` once the custom domain is live.
+
+Setup and rotation are `npm run edge:rule` (`scripts/edgeRule.ts` explains both); the steps, and why the Worker
+must get the key a day BEFORE the rule is switched on, are in `docs/deploy.md` step 10. Rotate after someone
+leaves who should lose it: `--rotate` makes the rule accept both keys while browsers pick up the new one, and
+`--drop-previous` a few days later retires the old. `npm run preflight` warns until `EDGE_RULE_CONFIRMED` is set
+to the date the rule was verified; it cannot block, since the rule can only go on after a deploy.
+
+**What else stays visible, by design:** the `/auth/login` redirect (the Google client id and the hostname),
+`/v1` 401 bodies (the middleware answers before routing, so paths cannot be enumerated), the health probes and
+the token-guarded public pages. A signed-in employee still downloads every chunk, admin screens included -
+authorization is enforced by `/v1`, not by hiding code, and gating chunks per role would need a role read per
+chunk and a chunk-to-capability map that drifts.
+
+**Other doors to the same bytes:**
+
+- `preview_urls = false` in both wrangler files, because every uploaded version - including builds from
+  before this gate - is otherwise served at its own public version URL.
+- `/assets/*` is cached `private`, never `public`, so a shared cache (a TLS-inspecting corporate proxy) cannot
+  keep a copy for the next person.
+- Sign-out sends `Clear-Site-Data: "cache"`, so the year-long cached bundle does not outlive the session on a
+  shared machine, and a page restored from the back/forward cache re-checks its session and reloads into
+  sign-in.
+- `web/public/push-sw.js` must never gain a caching `fetch` handler: a cached shell would be served to whoever
+  opens the browser next, without reaching the gate.
+- Builds served before the gate went live were public, and may sit in web archives or caches
+  (`web.archive.org/web/*/<host>/*`). The gate protects every build from here on; it cannot recall those.
+
 ## 6. Webhook egress (if enabled later)
 
 Automation `webhook` actions are OFF unless a `WebhookSender` is wired into `makeDeps`. Before enabling it,

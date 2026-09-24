@@ -44,17 +44,23 @@
 # a repeat visit from revalidating ~2000 files. The pdf.js sidecar data under /assets/pdfjs/ is the exception:
 # it is copied verbatim out of node_modules and is NOT content-hashed, so it gets a normal one-day cache and
 # revalidates rather than being pinned to a stale pdfjs-dist version.
+#
+# `private`, never `public`: the code is served only to a signed-in browser (src/http/staticSite.ts), and
+# `public` would let a shared cache between the browser and Cloudflare - a TLS-inspecting corporate proxy is
+# the realistic one - keep a copy and hand it to the next person, session or not. The browser's own cache is
+# unaffected, so a repeat visit still revalidates nothing.
 /assets/*
-  Cache-Control: public, max-age=31536000, immutable
+  Cache-Control: private, max-age=31536000, immutable
 
 /assets/pdfjs/*
-  Cache-Control: public, max-age=86400, must-revalidate
+  Cache-Control: private, max-age=86400, must-revalidate
 
 # The shell and everything reachable by a stable URL must revalidate, or a deploy never reaches an open tab.
+# The shell's revalidation is also where a signed-out browser is turned away: it reaches the Worker every time.
 /
-  Cache-Control: no-cache
+  Cache-Control: private, no-cache
 /index.html
-  Cache-Control: no-cache
+  Cache-Control: private, no-cache
 /manifest.webmanifest
   Cache-Control: no-cache
 /theme-init.js

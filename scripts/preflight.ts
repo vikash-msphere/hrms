@@ -119,12 +119,21 @@ if (otherWrangler.trim()) {
     errors.push(`compatibility_date disagrees: wrangler.toml has ${prodDate}, wrangler.staging.toml has ${stagingDate}. Staging rehearses production's runtime semantics or it rehearses nothing - set both to the same date.`);
   }
 
-  // Which paths reach the Worker at all. A prefix in one file and not the other means that route serves the
-  // SPA shell in one environment and a real response in the other.
+  // Which paths reach the Worker - and so the session gate - at all. A pattern in one file and not the other
+  // means that file is served to anyone in one environment and only to a signed-in browser in the other.
   const prodRoutes = value(prod, "run_worker_first");
   const stagingRoutes = value(staging, "run_worker_first");
   if (prodRoutes && stagingRoutes && prodRoutes !== stagingRoutes) {
-    errors.push(`run_worker_first disagrees between wrangler.toml and wrangler.staging.toml. A path that reaches the Worker in one environment and the SPA fallback in the other is the difference staging exists to catch, not to have.`);
+    errors.push(`run_worker_first disagrees between wrangler.toml and wrangler.staging.toml. A file gated in one environment and public in the other is the difference staging exists to catch, not to have.`);
+  }
+
+  // Preview URLs keep every uploaded version reachable at its own address - including the builds from before
+  // the static-site gate, which hand the whole bundle to anyone. Both files must say so explicitly: unset is
+  // whatever the dashboard last held.
+  for (const [file, text] of [["wrangler.toml", prod], ["wrangler.staging.toml", staging]] as const) {
+    if (value(text, "preview_urls") !== "false") {
+      errors.push(`${file} must set \`preview_urls = false\`: with preview URLs on, every uploaded version - pre-gate builds included - serves the bundle at its own public address.`);
+    }
   }
 
   // The CPU envelope. Without it staging runs on the platform default (30s) against production's 60s, and a
@@ -234,13 +243,14 @@ for (const [file, text] of [[targetConfig, wrangler], [otherConfig, otherWrangle
 // only by opening the dashboard. This is the file that exists to catch "a config value that only shows up in
 // production". Dating the answer is the other half - a rule deleted a year later must not stay covered by a
 // claim made before it existed.
-function datedAck(varName: string, missing: string, how: string, stale: string): void {
+function datedAck(varName: string, missing: string, how: string, stale: string, blocking = true): void {
   const ack = (process.env[varName] ?? "").trim();
   if (!ack) {
     // Blocking for production, a warning for a named preview environment - a rehearsal stack behind an access
     // policy is not the surface these protect, and gating it would only teach people to set the variable blindly.
+    // `blocking: false` for a control that can only be switched on AFTER a deploy (the media edge rule below).
     const msg = `${missing} ${how}`;
-    if (isProduction) errors.push(msg);
+    if (isProduction && blocking) errors.push(msg);
     else warns.push(msg);
     return;
   }
@@ -285,6 +295,19 @@ function datedAck(varName: string, missing: string, how: string, stale: string):
     `Zone-level HSTS is not confirmed for ${target}. The app deliberately sends no Strict-Transport-Security header of its own (see web/public/_headers), so until this is on at the zone there is no transport pinning anywhere. Enable it in Cloudflare (SSL/TLS -> Edge Certificates -> HSTS), then say so:`,
     "Set HSTS_CONFIRMED to the ISO date you last verified it, e.g. HSTS_CONFIRMED=2026-09-10.",
     "re-check it in Cloudflare (SSL/TLS -> Edge Certificates -> HSTS) and re-date it.",
+  );
+
+  // The media edge rule (src/http/assetPaths.ts). The app's CODE is gated by the Worker whatever happens here;
+  // what this covers is the fonts, images, icons and pdf.js data the asset layer serves without it, which are
+  // open to anyone until the WAF custom rule is on. A WARNING, not a blocking error, because it cannot be
+  // otherwise: the rule may only be switched on AFTER a deploy has handed signed-in browsers the cookie it
+  // checks, so demanding it before the deploy would make the first one impossible.
+  datedAck(
+    "EDGE_RULE_CONFIRMED",
+    `The WAF rule guarding the media for ${target} is not confirmed, so fonts, images, icons and pdf.js data are served to anyone. Build it with \`npm run edge:rule\` and switch it on as docs/deploy.md describes, then say so:`,
+    "Set EDGE_RULE_CONFIRMED to the ISO date you last verified it, e.g. EDGE_RULE_CONFIRMED=2026-09-24.",
+    "re-check the rule in Cloudflare (Security -> WAF -> Custom rules) and re-date it.",
+    false,
   );
 }
 

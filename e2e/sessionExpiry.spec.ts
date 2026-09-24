@@ -37,3 +37,59 @@ test("a session that dies mid-form keeps the form", async ({ as }) => {
   await expect(page.getByPlaceholder("Vendor or supplier name")).toHaveValue(typed);
   await expect(page).toHaveURL(/\/vendors/);
 });
+
+// The same lapse, met by a page's CODE rather than its data. In production the static-site gate
+// (src/http/staticSite.ts) refuses every chunk to a signed-out browser, and a refused dynamic import reports only
+// "failed to fetch" - exactly what a chunk deleted by a newer deploy reports. So the crash boundary used to say
+// "this tab is out of date - reload", which is wrong twice: nothing shipped, and a reload leaves for sign-in.
+// What the app must do instead (web/src/lib/lazyPage.tsx): ask whether the session is alive, show the in-place
+// "Signed out" dialog, and once the person is back, load the page - in place where the browser will fetch the
+// chunk again, and through the one reload it offers where it will not. Chrome keeps a failed module fetch for the
+// life of the document (this spec's own trace showed no second request), so on Chrome it is the reload - offered,
+// never done behind the person's back, because anything else on screen would go with it.
+//
+// The suite serves the SPA from Vite, so the gate is not in the path here: the refusal is simulated by answering
+// that one page module with the 401 the gate would send, while the cleared cookie makes the app's own probe of
+// /v1/users/me genuinely 401 against the real Worker.
+test("a page chunk refused while signed out waits for sign-in instead of calling the tab out of date", async ({ as }) => {
+  // Two cold compiles of the page in Vite (before and after the reload) on top of the lapse itself.
+  test.slow();
+  const page = await as("super");
+  allowConsoleErrors(page, /401|Unauthorized|unauthenticated|dynamically imported module|Failed to load module/i);
+
+  await gotoRoute(page, "vendors", "Vendors");
+  // A marker a reload would wipe: the page must resume in place.
+  await page.evaluate(() => ((window as unknown as { __noReload?: number }).__noReload = 1));
+
+  const saved = await page.context().cookies();
+  await page.context().clearCookies();
+  const holidaysModule = /\/src\/pages\/Holidays\.tsx/;
+  await page.route(holidaysModule, (route) => route.fulfill({ status: 401, body: "" }));
+
+  // A client-side move to a page whose chunk this tab has never loaded - the moment the gate would refuse it.
+  await page.evaluate(() => {
+    history.pushState(null, "", "/holidays");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+
+  await expect(page.getByText("Signed out", { exact: true })).toBeVisible();
+  await expect(page.getByText("This tab is out of date")).toHaveCount(0);
+
+  // Signed back in (the cookie returns, and the module is served again), then "continue".
+  await page.unroute(holidaysModule);
+  await page.context().addCookies(saved);
+  await page.getByRole("button", { name: "I've signed in - continue" }).click();
+
+  // Back in, on the same document: either the page loaded in place, or it says plainly what one reload will do.
+  // Never the "out of date" diagnosis, and never a reload nobody asked for.
+  const holidays = page.getByRole("heading", { level: 1, name: "Holiday Calendar" });
+  const signedBackIn = page.getByRole("heading", { name: "You're signed back in" });
+  await expect(holidays.or(signedBackIn)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("This tab is out of date")).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { __noReload?: number }).__noReload)).toBe(1);
+
+  if (await signedBackIn.isVisible()) {
+    await page.getByRole("main").getByRole("button", { name: "Reload", exact: true }).click();
+  }
+  await expect(holidays).toBeVisible({ timeout: 30_000 });
+});

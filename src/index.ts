@@ -13,7 +13,7 @@ import { codecFor } from "./lib/idCodec";
 import { securityHeaders } from "./middleware/securityHeaders";
 import { bodyLimit } from "./middleware/bodyLimit";
 import { errorHandler } from "./middleware/errorHandler";
-import { AppError, publicPath } from "./lib/errors";
+import { AppError } from "./lib/errors";
 import { requestId } from "./middleware/requestId";
 import * as Sentry from "@sentry/cloudflare";
 import { runScheduled, NIGHTLY_CRON } from "./cron";
@@ -147,14 +147,12 @@ import { esignProviders } from "./routes/esignProviders";
 import { tableViews } from "./routes/tableViews";
 import { tableFields, tableDescribe } from "./routes/tableFields";
 import { authRoutes } from "./routes/authRoutes";
+import { WORKER_OWNED_PREFIXES } from "./http/assetPaths";
+import { serveStaticSite } from "./http/staticSite";
 
-/** Path prefixes the Worker owns outright, where a miss is a real 404 rather than a client-side route.
- *
- *  MUST mirror `run_worker_first` in wrangler.toml - that setting decides which paths reach the Worker
- *  ahead of the assets, and this decides how a miss among them is answered. test/spaFallback.test.ts pins
- *  the two together, because a prefix added to one and not the other fails in a way nothing else catches:
- *  the route starts replying 200 with the app shell instead of its 404. */
-export const WORKER_OWNED_PREFIXES = ["/v1", "/esign", "/auth", "/found", "/calendar", "/diag", "/__scheduled"];
+// Re-exported for the tests that pin it (test/spaFallback.test.ts); the list itself lives with the other
+// path rules in http/assetPaths.ts.
+export { WORKER_OWNED_PREFIXES };
 
 const app = new Hono<AppEnv>();
 app.onError(errorHandler);
@@ -167,10 +165,10 @@ app.use("*", requestId); // correlation id on every request/response + in error 
 // line is the concrete case, and a 413 was the one /v1 answer in the app shipping with no `nosniff`, no
 // `frame-ancestors` and no `Cache-Control`.
 //
-// DELIBERATELY NOT "*". The catch-all would also wrap the SPA fallback at the bottom of this file, whose
+// DELIBERATELY NOT "*". The catch-all would also wrap the static site at the bottom of this file, whose
 // headers come from the asset layer's `_headers` - and the API's CSP is `default-src 'none'`, which renders
-// the app shell as a blank page if it ever landed on one. The prefixes are the same set the fallback treats as
-// worker-owned, and the test that pins that list against wrangler.toml covers this registration with it.
+// the app shell as a blank page if it ever landed on one. The prefixes are the same set the static site treats
+// as worker-owned (http/assetPaths.ts).
 for (const prefix of [...WORKER_OWNED_PREFIXES.flatMap((p) => [p, `${p}/*`]), "/healthz", "/readyz"]) {
   app.use(prefix, securityHeaders);
 }
@@ -401,46 +399,11 @@ app.route("/v1/table-fields:describe", tableDescribe); // NL -> grid spec, befor
 app.route("/v1/table-fields", tableFields); // virtual: the custom-grid field catalogue (no table, no rows)
 app.route("/v1/table-views", tableViews); // saved custom grids (the definition; `:run` produces the rows)
 
-// A path whose last segment carries a file extension is asking for a FILE, not an app route. Deliberately
-// narrow: SPA routes are slash-separated words, so requiring a dot in the final segment (and no trailing
-// slash) never catches one.
-const LOOKS_LIKE_A_FILE = /\/[^/]+\.[a-z0-9]+$/i;
-
-// Everything the asset layer could not serve arrives here, because `not_found_handling` is "none" - the
-// SPA fallback is this function's job rather than the platform's.
-//
-// It has to be, because the platform's version answers EVERY miss with index.html at 200, including a miss
-// for /push-sw.js or /assets/<hash>.js. A browser asking for a script and receiving 200 text/html does not
-// see "missing file"; it sees a script of the wrong type, caches that answer, and keeps failing from cache
-// long after the file is back. That is not hypothetical: `emptyOutDir` empties web/dist at the start of
-// every build, so any fetch landing in that window got HTML, and a service-worker registration poisoned
-// this way stays broken until the browser's cache is cleared by hand.
-//
-// So: a request for a file that does not exist gets an honest 404, and only real app routes fall back to
-// the shell.
-app.notFound(async (c) => {
-  const path = c.req.path;
-  // A miss under a WORKER-OWNED prefix is a genuine 404 - the API, the e-sign callbacks, the unauthenticated
-  // public pages. These are emphatically not SPA routes, and answering them with the shell would turn "this
-  // holiday feed is disabled" or "that token is forged" into a 200 page.
-  const workerOwned = WORKER_OWNED_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
-  if (workerOwned || LOOKS_LIKE_A_FILE.test(path)) {
-    // `publicPath`, like every other problem body: a 404 under /v1 is reached with the path already decoded to
-    // internal ids, and this response never passes back through the outbound wire edge. See lib/errors.ts.
-    return c.body(JSON.stringify({ type: "/errors/not-found", title: "Not Found", status: 404, instance: publicPath(path) }), 404, {
-      "Content-Type": "application/problem+json",
-    });
-  }
-  // A client-side route: serve the shell and let the SPA router take it from here. Fetched through the
-  // ASSETS binding so index.html still carries the headers _headers assigns it (CSP, no-cache).
-  const shell = await c.env.ASSETS.fetch(new URL("/index.html", c.req.url));
-  // The shell's OWN status, not a hardcoded 200. If index.html is missing or the asset layer is unwell, this
-  // used to answer 200 with whatever came back - an error page, or nothing - and every monitor, crawler and
-  // browser cache would take that as a healthy app route. Pass the failure through instead; a working shell
-  // is a 200 either way.
-  if (!shell.ok) return new Response(shell.body, { status: shell.status, headers: shell.headers });
-  return new Response(shell.body, { status: 200, headers: shell.headers });
-});
+// Everything no route above claims: the app shell, its JS/CSS chunks and the client-side routes, served only to
+// a signed-in browser, with the SPA fallback decided here rather than by the platform. `run_worker_first` sends
+// every path except the media to the Worker, so this is where the app's code is answered. See
+// http/staticSite.ts.
+app.notFound(serveStaticSite);
 
 // One codec per isolate so the HKDF subkeys are derived once, not per request. The memo lives in
 // lib/idCodec.ts (keyed on the key material) rather than here, because `makeDeps` needs the same instance and
@@ -479,7 +442,9 @@ const handler = {
     }
     return app.fetch(decoded, env, ctx);
   },
-  // Non-/v1 paths are served from web/dist by the platform (SPA fallback).
+  // Everything outside the Worker's own routes - the shell, its chunks, the client-side routes - arrives here
+  // too and is answered by the static-site gate (app.notFound -> http/staticSite.ts). Only the media skips the
+  // Worker (http/assetPaths.ts EDGE_PATHS).
   async scheduled(event: ScheduledController, env: AppEnv["Bindings"], ctx: ExecutionContext) {
     // The 5-minute drain is chatty and self-correcting - a missed one is made up by the next. The NIGHTLY run
     // is the one worth a check-in: it does leave accrual, reminders and digests, and if it silently stops
