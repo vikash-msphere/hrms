@@ -224,8 +224,10 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   //     subject used to hold. On a permissions page that is the worst available outcome: a grant that is gone
   //     and a grid that says it is there are indistinguishable from a grid that is right. The reload is now
   //     unconditional, and it owns clearing `busy` (see reload's own finally).
-  async function setCell(kind: Kind, subject: string, collection: string, value: string, label: string) {
-    setBusy(true);
+  //
+  // `writeCell` is the write alone, shared by one cell and a whole group row. It returns null when the write
+  // landed, otherwise the error and how many of the rules it removed first could not be put back.
+  async function writeCell(kind: Kind, subject: string, collection: string, value: string): Promise<{ error: string; outstanding: number } | null> {
     const removed: AccessRule[] = [];
     try {
       for (const r of cellRules(kind, subject, collection)) {
@@ -236,15 +238,68 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
         const body = value === "deny" ? { effect: "deny" } : { level: value };
         await create("access-rules", { subject_kind: kind, subject, collection, ...ruleScopeFor({ collection }), ...body });
       }
-      toast({ title: `Updated ${label} · ${labelOf(collection)}` });
+      return null;
     } catch (e) {
-      const outstanding = removed.length - (await restoreAccessRules(removed));
+      return { error: String((e as Error).message), outstanding: removed.length - (await restoreAccessRules(removed)) };
+    }
+  }
+
+  async function setCell(kind: Kind, subject: string, collection: string, value: string, label: string) {
+    setBusy(true);
+    const failure = await writeCell(kind, subject, collection, value);
+    if (!failure) toast({ title: `Updated ${label} · ${labelOf(collection)}` });
+    else {
       toast({
         variant: "destructive",
         title: "Could not update",
-        description: outstanding
-          ? `${String((e as Error).message)} - and ${outstanding} rule${outstanding === 1 ? "" : "s"} that had to be removed first could not be put back. Check ${label} · ${labelOf(collection)} before relying on it.`
-          : String((e as Error).message),
+        description: failure.outstanding
+          ? `${failure.error} - and ${failure.outstanding} rule${failure.outstanding === 1 ? "" : "s"} that had to be removed first could not be put back. Check ${label} · ${labelOf(collection)} before relying on it.`
+          : failure.error,
+      });
+    }
+    await reload();
+  }
+
+  // Set one role's org-wide level on every collection a group header row covers - the rows shown under it, so
+  // a filter narrows what is changed exactly as it narrows what is seen. The server has no notion of a group
+  // (they are the curated catalogue above), so this is the per-cell write repeated, not a new kind of rule: a
+  // collection added to the group later does NOT inherit the level. Rows already at the level are skipped,
+  // and narrower rules (own/department scope, fields, custom methods) are never touched, same as one cell.
+  async function setGroup(subject: string, group: string, cols: readonly string[], value: string, label: string) {
+    const changing = cols.filter((c) => valueOf("role", subject, c) !== value);
+    if (!changing.length) return;
+    const n = changing.length;
+    const noun = `${n} ${group} collection${n === 1 ? "" : "s"}`;
+    const hidden = collections.filter((c) => groupOf(c) === group).length - cols.length;
+    const ok = await confirm({
+      title: `Set ${group} to "${value}" for ${label}?`,
+      description: [
+        value === "none"
+          ? `Removes ${label}'s org-wide access on ${noun}.`
+          : value === "deny"
+            ? `Blocks ${label} on ${noun}. A deny wins over every grant, including what Everyone holds.`
+            : `Sets ${label}'s org-wide level to ${value} on ${noun}.`,
+        cols.length > n ? `${cols.length - n} already at ${value} stay as they are.` : "",
+        hidden > 0 ? `${hidden} hidden by the current filter are not changed.` : "",
+        "Narrower rules (own/department scope, fields, custom methods) are not touched.",
+      ].filter(Boolean).join(" "),
+      destructive: value === "none" || value === "deny",
+      confirmLabel: "Apply",
+    });
+    if (!ok) return;
+    setBusy(true);
+    const failed: { collection: string; error: string; outstanding: number }[] = [];
+    for (const c of changing) {
+      const f = await writeCell("role", subject, c, value);
+      if (f) failed.push({ collection: c, ...f });
+    }
+    if (!failed.length) toast({ title: `Updated ${label} · ${group}`, description: `${noun} set to ${value}`, variant: "success" });
+    else {
+      const outstanding = failed.reduce((s, f) => s + f.outstanding, 0);
+      toast({
+        variant: "destructive",
+        title: `Updated ${n - failed.length} of ${n} ${group} collections for ${label}`,
+        description: `${labelOf(failed[0]!.collection)}: ${failed[0]!.error}${failed.length > 1 ? ` (and ${failed.length - 1} more)` : ""}${outstanding ? ` - ${outstanding} rule${outstanding === 1 ? "" : "s"} that had to be removed first could not be put back. Check ${label} · ${group} before relying on it.` : ""}`,
       });
     }
     await reload();
@@ -297,6 +352,29 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
           </span>
         )}
       </div>
+    );
+  };
+
+  // A group header row's cell: the level every collection under it shares, or "mixed" when they differ.
+  // Picking a level applies it to the whole group (setGroup). Read-only subjects get the summary only.
+  const groupCell = (subject: string, group: string, cols: readonly string[]) => {
+    const vals = new Set(cols.map((c) => valueOf("role", subject, c)));
+    const common = vals.size === 1 ? [...vals][0]! : "";
+    const label = roleLabel(subject);
+    if (isGlobal("role", subject) || !canManage) {
+      return common ? <CellOption value={common} /> : <span className="text-xs italic text-muted-foreground">mixed</span>;
+    }
+    return (
+      <Select value={common} onValueChange={(nv) => void setGroup(subject, group, cols, nv, label)} disabled={busy}>
+        <SelectTrigger
+          aria-label={`${label} · all ${group}`}
+          title={`Set ${label}'s org-wide level on every ${group} collection shown below`}
+          className="h-7 w-28 shrink-0 bg-transparent text-xs [&>span]:flex [&>span]:items-center [&>span]:line-clamp-none data-[placeholder]:italic data-[placeholder]:text-muted-foreground"
+        >
+          <SelectValue placeholder="mixed" />
+        </SelectTrigger>
+        <SelectContent>{CELL.map((l) => <SelectItem key={l} value={l}><CellOption value={l} /></SelectItem>)}</SelectContent>
+      </Select>
     );
   };
 
@@ -471,6 +549,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     <p className="mb-3 text-sm text-muted-foreground">
       Collection-wide access. Finer access - own/department scope, specific fields, custom methods, single
       objects - is on "All rules" and the in-context manage-access icons. A <strong>deny</strong> always wins.
+      {subjectKind === "role" && " A section's header row sets one level on every collection listed under it."}
     </p>
   );
 
@@ -750,7 +829,9 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
                     <React.Fragment key={group}>
                       <tr className="border-b bg-muted/20">
                         <td className="sticky left-0 z-10 bg-muted/20 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground" colSpan={1}>{group}</td>
-                        <td colSpan={roles.length} />
+                        {roles.map((role) => (
+                          <td key={role.name} className="px-3 py-1">{groupCell(role.name, group, cols)}</td>
+                        ))}
                       </tr>
                       {cols.map((c) => (
                         <tr key={c} className="border-b last:border-0">

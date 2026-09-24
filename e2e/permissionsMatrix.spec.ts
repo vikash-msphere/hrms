@@ -83,3 +83,67 @@ test("a level is set from the matrix, reads back, and the cell's key opens that 
     await page.request.delete(`/v1/roles/${name}`, { headers: SPA_HEADERS }).catch(() => undefined);
   }
 });
+
+// A section's header row sets one level on every collection listed under it. The filter narrows the section
+// to `letter-templates` + `letterheads`, so this also proves the write stops at what is shown: the other
+// Onboarding & compliance collections are hidden and must come out of it with no rule.
+test("a section header sets a level on every collection shown under it, and reads mixed when they differ", async ({ as }) => {
+  test.setTimeout(300_000);
+  const page = await as("super");
+  const stamp = `${test.info().parallelIndex}${Date.now() % 1_000_000}`;
+  const name = `e2e_matrix_group_${stamp}`;
+  const label = `E2E Matrix Group ${stamp}`;
+  const group = "Onboarding & compliance";
+  const shown = ["letter-templates", "letterheads"];
+
+  const made = await page.request.post("/v1/roles", { headers: SPA_HEADERS, data: { name, label } });
+  expect(made.status(), await made.text()).toBe(200);
+
+  try {
+    await gotoRoute(page, "settings/permissions", "Permissions");
+    await page.getByPlaceholder("Filter collections…").fill("letter");
+    await expect(page.getByRole("columnheader", { name: label })).toBeVisible({ timeout: 30_000 });
+    const headers = (await page.locator("thead th").allInnerTexts()).map((t) => t.trim());
+    const column = headers.indexOf(label);
+    expect(column, `the new role has no column in the matrix (headers: ${headers.join(", ")})`).toBeGreaterThan(0);
+
+    const header = page.locator("tbody tr").filter({ hasText: group }).first();
+    const groupLevel = header.locator("td").nth(column).getByRole("combobox");
+    await expect(groupLevel).toContainText("none", { timeout: 30_000 });
+
+    await groupLevel.click();
+    await page.getByRole("option", { name: /^read$/i }).click();
+    const ask = page.getByRole("dialog").filter({ hasText: `Set ${group} to "read" for ${label}?` });
+    await expect(ask).toBeVisible({ timeout: 15_000 });
+    await expect(ask).toContainText("hidden by the current filter are not changed");
+    await ask.getByRole("button", { name: "Apply", exact: true }).click();
+    await expect(toast(page, `Updated ${label} · ${group}`)).toBeVisible({ timeout: 30_000 });
+    await expect(groupLevel).toContainText("read");
+
+    const mine = (await accessRules(page)).filter((r) => r.subject === name);
+    expect(mine.map((r) => r.collection).sort(), "the header wrote rules outside the rows it showed").toEqual(shown);
+    for (const r of mine) {
+      expect(r.level).toBe("read");
+      expect(r.scope).toBe("all");
+    }
+
+    // One row moved on its own: the header stops claiming a single level for the section.
+    const row = page.locator("tbody tr").filter({ hasText: "Letterheads" }).first();
+    await row.locator("td").nth(column).getByRole("combobox").click();
+    await page.getByRole("option", { name: /^write$/i }).click();
+    await expect(groupLevel).toContainText("mixed", { timeout: 30_000 });
+
+    // And back to none through the header, which takes access away as well as handing it out.
+    await groupLevel.click();
+    await page.getByRole("option", { name: /^none$/i }).click();
+    const clear = page.getByRole("dialog").filter({ hasText: `Set ${group} to "none" for ${label}?` });
+    await clear.getByRole("button", { name: "Apply", exact: true }).click();
+    await expect(groupLevel).toContainText("none", { timeout: 30_000 });
+    expect((await accessRules(page)).filter((r) => r.subject === name)).toEqual([]);
+  } finally {
+    for (const rule of await accessRules(page)) {
+      if (rule.subject === name) await page.request.delete(`/v1/${rule.path}?force=true`, { headers: SPA_HEADERS }).catch(() => undefined);
+    }
+    await page.request.delete(`/v1/roles/${name}`, { headers: SPA_HEADERS }).catch(() => undefined);
+  }
+});
