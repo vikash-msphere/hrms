@@ -7,6 +7,10 @@ web/tsconfig.tsbuildinfo
 # VAPID keypair from scripts/genVapidKeys.ts - holds the web-push PRIVATE key. Belongs in a password
 # manager and in `wrangler secret put`, never in the repo.
 .vapid.json
+# Edge (WAF) media keys and the rule built from them, from scripts/edgeRule.ts. The key is a secret - it goes to
+# `wrangler secret put EDGE_KEY` and the dashboard rule, never into the repo.
+.edge-key.*.json
+.edge-rule.*.txt
 .wrangler
 src/http/openapi.d.ts
 CLAUDE.md

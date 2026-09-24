@@ -38,7 +38,57 @@ let redirectedOn401 = false;
 function redirectToLogin() {
   if (redirectedOn401) return;
   redirectedOn401 = true;
-  window.location.href = "/auth/login";
+  window.location.href = loginUrl();
+}
+/** The sign-in door, carrying the page to come back to. /auth/login keeps it only when it is a same-origin
+ *  path (src/routes/authRoutes.ts safeNext), and lands the person on it once they are through. */
+export function loginUrl(): string {
+  const here = window.location.pathname + window.location.search;
+  return here === "/" ? "/auth/login" : `/auth/login?next=${encodeURIComponent(here)}`;
+}
+
+// Has the session lapsed? For the failures that carry no status of their own. The static-site gate
+// (src/http/staticSite.ts) answers a signed-out request for a JS chunk with a 401, but a dynamic import that
+// fails reports only "failed to fetch" - the same thing a chunk deleted by a newer deploy reports. One raw
+// probe tells the two apart: a 401 here means signed out. A network failure is NOT an answer (false), so an
+// offline blip keeps its ordinary retry. Concurrent callers share the one request.
+let lapseProbe: Promise<boolean> | null = null;
+export function sessionLapsed(): Promise<boolean> {
+  lapseProbe ??= fetch("/v1/users/me", { credentials: "include", headers: { "X-Requested-By": "hrms-spa" } })
+    .then(
+      (res) => res.status === 401,
+      () => false
+    )
+    .finally(() => {
+      lapseProbe = null;
+    });
+  return lapseProbe;
+}
+
+// Work that is waiting for the person to sign back in - a lazy chunk the gate refused mid-session
+// (lib/lazyPage.tsx) - parked here and released by the session-expired dialog once its check succeeds.
+let signInWaiters: (() => void)[] = [];
+export function waitForSignIn(): Promise<void> {
+  return new Promise((resolve) => signInWaiters.push(resolve));
+}
+export function notifySignedIn(): void {
+  const waiting = signInWaiters;
+  signInWaiters = [];
+  for (const resume of waiting) resume();
+}
+
+// Back after signing out. Sign-out navigates to Google, and the browser may keep the app's page whole in its
+// back/forward cache - Back then restores it, with the previous person's data still rendered, without a single
+// request reaching the server. A restored page asks once whether its session is still alive; if not, it reloads,
+// and the reload reaches the static-site gate, which sends it to sign-in.
+// (Guarded: the unit suite imports modules that reach this file inside workerd, where there is no `window`.)
+if (typeof window !== "undefined") {
+  window.addEventListener("pageshow", (e) => {
+    if (!e.persisted) return;
+    void sessionLapsed().then((lapsed) => {
+      if (lapsed) window.location.reload();
+    });
+  });
 }
 // Mid-session expiry: once the app shell is up it registers a handler that shows a "sign in again" overlay
 // IN PLACE - the page (and any half-typed form) stays mounted while the user re-authenticates in another

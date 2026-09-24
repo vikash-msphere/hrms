@@ -244,6 +244,74 @@ function safeParse(json: string): unknown {
   }
 }
 
+export type BrowserIdentity = {
+  email: string;
+  /** When the caller arrived on a session COOKIE, the instant it was issued. `auth` checks it against the user's
+   *  revocation stamp once the row is loaded - it cannot be checked here, because the row is what says whether
+   *  anything has been revoked, and the email is all that is known at this point. Null on every other lane (dev
+   *  bypass, Access JWT): those carry no session to revoke. */
+  sessionIat: number | null;
+};
+
+/**
+ * Who a BROWSER caller is, from the credential their request carries alone: the dev bypass, the Google-mode
+ * session cookie or the Access JWT, whichever the deployment's mode selects. No database, no provisioning, no
+ * status check - those belong to `auth`, which calls this first and then resolves the person behind the email.
+ * Throws `unauthenticated` when the credential is missing or does not verify.
+ *
+ * Exported for the static-site gate (http/staticSite.ts), which must answer "is this a signed-in browser?" for
+ * every request for app code without spending a D1 read on it. It uses THIS function rather than a copy so the
+ * two can never disagree about which mode is on or what counts as a valid credential. API keys are deliberately
+ * not a lane here: `auth` handles them before calling this, and a machine caller has no use for the SPA.
+ */
+export async function resolveBrowserIdentity(c: Context<AppEnv>): Promise<BrowserIdentity> {
+  const team = c.env.CF_ACCESS_TEAM_DOMAIN;
+  // LOCAL-ONLY dev bypass. Requires BOTH DEV_FAKE_EMAIL and an explicit, dedicated `ALLOW_DEV_AUTH=true` flag.
+  // The flag exists only in `.dev.vars`; production secrets never set it, so a stray `DEV_FAKE_EMAIL` copied
+  // into a prod env is HARMLESS on its own - the request falls through to real JWT verification instead of
+  // silently bypassing auth. Two independent signals must align for the bypass to engage.
+  const devBypass = !!c.env.DEV_FAKE_EMAIL && c.env.ALLOW_DEV_AUTH === "true";
+  if (devBypass) return { email: c.env.DEV_FAKE_EMAIL!.toLowerCase(), sessionIat: null };
+  if (c.env.GOOGLE_CLIENT_ID) {
+    // Direct Google sign-in mode: the caller is whoever the signed session cookie says, verified by HMAC +
+    // expiry (stateless - zero reads). Everything `auth` does after this (status check, role grant,
+    // provisioning) still runs fresh per request, so disabling a user bites immediately despite the live cookie.
+    const token = getCookie(c, SESSION_COOKIE);
+    const session = token ? await openSession(token, c.env.AUTH_SESSION_KEY!, Date.now()) : null;
+    if (!session) throw unauthenticated("not signed in");
+    return { email: session.email.toLowerCase(), sessionIat: session.iat };
+  }
+  const token = c.req.header("Cf-Access-Jwt-Assertion");
+  if (!token) throw unauthenticated("missing Access token");
+  // ASSERTED HERE, not only at boot. `makeDeps` already refuses to start an Access-mode deploy that is
+  // missing either of these (deps.ts assertConfigured), which is the check that actually protects the
+  // deployment - this one exists because of HOW jose reads the options below: `jwtVerify` skips the
+  // `iss`/`aud` check ENTIRELY when the option is undefined rather than failing. So a `CF_ACCESS_AUD` that
+  // went missing would not narrow verification, it would remove it, and any token signed by the team's
+  // Access JWKS - including one minted for a DIFFERENT application in the same team - would authenticate.
+  // A silent widening is the wrong thing to leave depending on a check in another module.
+  if (!team || !c.env.CF_ACCESS_AUD) throw new Error("Access mode requires CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD");
+  jwks ??= createRemoteJWKSet(new URL(`${team}/cdn-cgi/access/certs`));
+  let claimed: unknown;
+  try {
+    const { payload } = await jwtVerify(token, jwks, { issuer: team, audience: c.env.CF_ACCESS_AUD });
+    claimed = payload.email;
+  } catch {
+    throw unauthenticated("invalid Access token");
+  }
+  // A verified Access token is not automatically a PERSON. A SERVICE TOKEN issued for the same application
+  // passes this verification with the same issuer and audience and carries no `email` claim at all - it
+  // identifies itself by `common_name`. `String(payload.email)` turned that into the literal string
+  // "undefined", which is a valid-looking email address to everything downstream: the lookup missed, so the
+  // provisioning path in `auth` minted a real `employee` account named "undefined" that every service-token
+  // request then shared. Today the domain allow-list happens to catch it (an empty domain matches nothing),
+  // but that list is optional in Access mode and is a perimeter, not a claim check. This app has no machine
+  // lane on the browser path - a machine caller uses an API key - so a token with no human behind it is
+  // refused here rather than allowed to become one.
+  if (typeof claimed !== "string" || !claimed.includes("@")) throw unauthenticated("Access token carries no email (a service token cannot sign in; use an API key)");
+  return { email: claimed.toLowerCase(), sessionIat: null };
+}
+
 // Authenticates the caller (Cloudflare Access JWT, or the app's own Google-OIDC session cookie - see
 // routes/authRoutes.ts for the mode split), resolves them, auto-provisions on first login.
 export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
@@ -267,61 +335,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     return;
   }
 
-  const team = c.env.CF_ACCESS_TEAM_DOMAIN;
-
-  let email: string;
-  // When the caller arrived on a session COOKIE, the instant it was issued. Checked against the user's
-  // revocation stamp once the row is loaded below - it cannot be checked here, because the row is what says
-  // whether anything has been revoked, and the email we are about to look them up by is all we have so far.
-  // Null on every other lane (dev bypass, Access JWT, API key): those carry no session to revoke.
-  let sessionIat: number | null = null;
-  // LOCAL-ONLY dev bypass. Requires BOTH DEV_FAKE_EMAIL and an explicit, dedicated `ALLOW_DEV_AUTH=true` flag.
-  // The flag exists only in `.dev.vars`; production secrets never set it, so a stray `DEV_FAKE_EMAIL` copied
-  // into a prod env is HARMLESS on its own - the request falls through to real JWT verification instead of
-  // silently bypassing auth. Two independent signals must align for the bypass to engage.
-  const devBypass = !!c.env.DEV_FAKE_EMAIL && c.env.ALLOW_DEV_AUTH === "true";
-  if (devBypass) {
-    email = c.env.DEV_FAKE_EMAIL!.toLowerCase();
-  } else if (c.env.GOOGLE_CLIENT_ID) {
-    // Direct Google sign-in mode: the caller is whoever the signed session cookie says, verified by HMAC +
-    // expiry (stateless - zero reads). Everything below (status check, role grant, provisioning) still runs
-    // fresh per request, so disabling a user bites immediately despite the live cookie.
-    const token = getCookie(c, SESSION_COOKIE);
-    const session = token ? await openSession(token, c.env.AUTH_SESSION_KEY!, Date.now()) : null;
-    if (!session) throw unauthenticated("not signed in");
-    email = session.email.toLowerCase();
-    sessionIat = session.iat;
-  } else {
-    const token = c.req.header("Cf-Access-Jwt-Assertion");
-    if (!token) throw unauthenticated("missing Access token");
-    // ASSERTED HERE, not only at boot. `makeDeps` already refuses to start an Access-mode deploy that is
-    // missing either of these (deps.ts assertConfigured), which is the check that actually protects the
-    // deployment - this one exists because of HOW jose reads the options below: `jwtVerify` skips the
-    // `iss`/`aud` check ENTIRELY when the option is undefined rather than failing. So a `CF_ACCESS_AUD` that
-    // went missing would not narrow verification, it would remove it, and any token signed by the team's
-    // Access JWKS - including one minted for a DIFFERENT application in the same team - would authenticate.
-    // A silent widening is the wrong thing to leave depending on a check in another module.
-    if (!team || !c.env.CF_ACCESS_AUD) throw new Error("Access mode requires CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD");
-    jwks ??= createRemoteJWKSet(new URL(`${team}/cdn-cgi/access/certs`));
-    let claimed: unknown;
-    try {
-      const { payload } = await jwtVerify(token, jwks, { issuer: team, audience: c.env.CF_ACCESS_AUD });
-      claimed = payload.email;
-    } catch {
-      throw unauthenticated("invalid Access token");
-    }
-    // A verified Access token is not automatically a PERSON. A SERVICE TOKEN issued for the same application
-    // passes this verification with the same issuer and audience and carries no `email` claim at all - it
-    // identifies itself by `common_name`. `String(payload.email)` turned that into the literal string
-    // "undefined", which is a valid-looking email address to everything downstream: the lookup missed, so the
-    // provisioning path below minted a real `employee` account named "undefined" that every service-token
-    // request then shared. Today the domain allow-list happens to catch it (an empty domain matches nothing),
-    // but that list is optional in Access mode and is a perimeter, not a claim check. This app has no machine
-    // lane on the browser path - a machine caller uses an API key - so a token with no human behind it is
-    // refused here rather than allowed to become one.
-    if (typeof claimed !== "string" || !claimed.includes("@")) throw unauthenticated("Access token carries no email (a service token cannot sign in; use an API key)");
-    email = claimed.toLowerCase();
-  }
+  const { email, sessionIat } = await resolveBrowserIdentity(c);
 
   // Resolve the caller AND their employee `code` (the dept-scope key) in one read via a left join, so
   // authz needs no extra caller lookup. The role grant + global manifest are loaded from the compiled

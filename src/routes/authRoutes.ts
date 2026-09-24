@@ -7,6 +7,7 @@ import { users } from "../db/schema";
 import { makeDeps } from "../deps";
 import { openSession, sealSession } from "../lib/session";
 import { counter, keyedCounter } from "../lib/isolateRate";
+import { EDGE_COOKIE } from "../http/assetPaths";
 
 // Direct Google sign-in (OIDC authorization-code flow), the no-per-seat-cost alternative to fronting the
 // app with Cloudflare Access. Selected by configuration: GOOGLE_CLIENT_ID set = Google mode; absent =
@@ -14,12 +15,15 @@ import { counter, keyedCounter } from "../lib/isolateRate";
 //
 // The flow is deliberately minimal - no library beyond `jose` (already used for the Access JWT):
 //   /auth/login     -> 302 to Google's consent screen, with `state` (CSRF) + `nonce` (token replay) parked
-//                      in short-lived HttpOnly cookies scoped to /auth.
+//                      in short-lived HttpOnly cookies scoped to /auth, and `?next=` (the page to return to,
+//                      same-origin only - see safeNext) parked beside them.
 //   /auth/callback  -> state must round-trip, code is exchanged server-side (client_secret never leaves the
 //                      Worker), the ID token is verified against Google's JWKS (issuer, audience=client_id,
 //                      expiry, signature, nonce, email_verified), the email's domain is checked against
-//                      ALLOWED_EMAIL_DOMAINS, and a signed stateless session cookie is set (lib/session.ts).
-//   /auth/logout    -> clears the session cookie (POST + the app's CSRF header, like every /v1 mutation).
+//                      ALLOWED_EMAIL_DOMAINS, a signed stateless session cookie is set (lib/session.ts), and
+//                      the browser lands on the parked page, or `/`.
+//   /auth/logout    -> clears the session cookie, the media cookie and the HTTP cache (POST + the app's CSRF
+//                      header, like every /v1 mutation).
 //
 // User provisioning does NOT happen here: the first authenticated /v1 request runs the same auto-provision
 // path Access logins use (middleware/auth.ts), so the two modes create identical users.
@@ -35,6 +39,37 @@ export const SESSION_COOKIE = "hrms_session";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const STATE_COOKIE = "hrms_oauth_state";
 const NONCE_COOKIE = "hrms_oauth_nonce";
+// Where to land after sign-in. Parked across the Google round trip like state and nonce, rather than carried in
+// `state` (which Google echoes in a URL) or in the redirect_uri (which must match the registered one exactly).
+const NEXT_COOKIE = "hrms_oauth_next";
+const NEXT_MAX = 2048;
+
+/**
+ * The same-origin page a sign-in may return to, or null. Reached from a URL anyone can craft
+ * (`/auth/login?next=...`), so the answer is only ever a path on THIS origin: an open redirect here would turn
+ * the company's own sign-in page into a phishing hop. Refused: anything not starting with one `/`
+ * (`//evil.example` and `/\evil.example` both resolve to another host), control characters (the URL parser
+ * silently strips tabs and newlines, so what was checked would not be what was followed), anything the URL
+ * parser resolves off-origin, and `/auth/` itself (a loop). Returns the normalised path + query, never a
+ * fragment - the server never sees one.
+ */
+export function safeNext(raw: string | null | undefined, origin: string): string | null {
+  if (typeof raw !== "string" || !raw || raw.length > NEXT_MAX) return null;
+  if (raw[0] !== "/" || raw[1] === "/" || raw[1] === "\\") return null;
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return null;
+  }
+  let url: URL;
+  try {
+    url = new URL(raw, origin);
+  } catch {
+    return null;
+  }
+  if (url.origin !== origin) return null;
+  if (url.pathname === "/auth" || url.pathname.startsWith("/auth/")) return null;
+  return url.pathname + url.search;
+}
 
 let googleJwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 
@@ -92,6 +127,11 @@ export const authRoutes = new Hono<AppEnv>()
     const nonce = randomToken();
     setCookie(c, STATE_COOKIE, state, OAUTH_COOKIE);
     setCookie(c, NONCE_COOKIE, nonce, OAUTH_COOKIE);
+    // The page the caller was sent here from (the static-site gate and the SPA both pass it). A sign-in started
+    // without one must not inherit a stale value from an abandoned attempt, so it is cleared rather than kept.
+    const next = safeNext(c.req.query("next"), new URL(c.req.url).origin);
+    if (next) setCookie(c, NEXT_COOKIE, next, OAUTH_COOKIE);
+    else deleteCookie(c, NEXT_COOKIE, { path: "/auth" });
     const url = new URL(GOOGLE_AUTH_URL);
     url.searchParams.set("client_id", c.env.GOOGLE_CLIENT_ID);
     url.searchParams.set("redirect_uri", `${new URL(c.req.url).origin}/auth/callback`);
@@ -110,8 +150,10 @@ export const authRoutes = new Hono<AppEnv>()
     const state = c.req.query("state");
     const cookieState = getCookie(c, STATE_COOKIE);
     const cookieNonce = getCookie(c, NONCE_COOKIE);
+    const cookieNext = getCookie(c, NEXT_COOKIE);
     deleteCookie(c, STATE_COOKIE, { path: "/auth" });
     deleteCookie(c, NONCE_COOKIE, { path: "/auth" });
+    deleteCookie(c, NEXT_COOKIE, { path: "/auth" });
     // A missing/mismatched state is a forged or stale callback - never exchange its code.
     if (!code || !state || !cookieState || state !== cookieState) return c.text("sign-in failed: state mismatch (try again)", 400);
 
@@ -171,13 +213,23 @@ export const authRoutes = new Hono<AppEnv>()
       path: "/",
       maxAge: SESSION_TTL_MS / 1000,
     });
-    return c.redirect("/");
+    // Validated again on the way out, not only when it was parked: the cookie is ours, but this is the line
+    // that decides where a freshly signed-in browser goes, and it should not depend on the cookie being so.
+    return c.redirect(safeNext(cookieNext, new URL(c.req.url).origin) ?? "/");
   })
   .post("/logout", async (c) => {
     // Same CSRF posture as every /v1 mutation: a cross-site form can't log the user out.
     if (c.req.header("X-Requested-By") !== "hrms-spa") return c.text("missing X-Requested-By header", 403);
     const token = getCookie(c, SESSION_COOKIE);
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
+    // What this browser keeps of the app after signing out. The media key goes (http/assetPaths.ts), and so
+    // does the HTTP cache: the bundle sits there pinned for a year (`immutable`), and on a shared machine the
+    // next person should not be able to dig it out. Local storage is already purged by the client before it
+    // calls this (lib/clientStore.ts purgeAll), and every /v1 answer is `no-store`. NOT "storage": that would
+    // also unregister the push service worker. The cost is a fresh download of the bundle on this device's
+    // next sign-in - only after an explicit sign-out, never on an expiry.
+    deleteCookie(c, EDGE_COOKIE, { path: "/" });
+    c.header("Clear-Site-Data", '"cache"');
 
     // Deleting the cookie only takes this browser's copy away; the TOKEN stays valid until it expires, because
     // it is verified by signature alone and nothing server-side is consulted. So signing out also stamps the

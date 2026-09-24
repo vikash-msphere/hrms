@@ -1,5 +1,8 @@
 // Web Push service worker: shows the pushed notification and focuses/opens the app on click. Kept to the two
 // push events on purpose - no fetch handler, no caching - so it can never interfere with normal app traffic.
+// That is also a SECURITY property now: the app's code is served only to a signed-in browser (the static-site
+// gate, src/http/staticSite.ts), and a fetch handler that cached the shell or its chunks would hand them to
+// whoever opens this browser next, signed in or not, without the request ever reaching the gate.
 self.addEventListener("push", (event) => {
   let data = {};
   try {

@@ -26,7 +26,7 @@ const MASK = "_";
  *
  * MASKED RATHER THAN RE-ENCODED, deliberately. Re-encoding is the prettier answer and cannot be relied on
  * here: `encode` is async and needs a codec, and the two places that build a problem outside a resolved
- * request (the body-cap refusal above Hono, and the SPA fallback's 404) have neither - so it would be a second
+ * request (the body-cap refusal above Hono, and the static site's 404 - http/staticSite.ts) have neither - so it would be a second
  * code path for a field no client reads (`instance` is unused by web/src/lib/problemText.ts). Masking is one
  * pure function that cannot throw and cannot leak. The real path still reaches the server-side log, which is
  * where it is actually wanted.

@@ -562,7 +562,7 @@ export default defineConfig(({ mode }) => ({
         target: PRISM_ORIGIN,
         configure: (proxy) => proxy.on("proxyReq", prepareForPrism),
       },
-      // The worker owns more than /v1 (WORKER_OWNED_PREFIXES in src/index.ts), and none of these paths are in
+      // The worker owns more than /v1 (WORKER_OWNED_PREFIXES in src/http/assetPaths.ts), and none of these paths are in
       // openapi.yaml, so they cannot go through Prism. Unproxied they fall through to the SPA's index.html,
       // which turns a sign-in redirect into the app reloading itself.
       // /diag is here for the same reason and for one of its own: it carries COMPRESSED BINARY (a session

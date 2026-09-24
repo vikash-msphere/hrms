@@ -135,7 +135,7 @@ function go(to: string, replace = false) {
 // is left to the browser.
 const WORKER_OWNED_PREFIXES = ["/v1", "/esign", "/auth", "/found", "/calendar", "/diag", "/healthz", "/readyz"];
 // A path whose last segment carries a file extension is asking for a FILE, not an app route (the same test the
-// Worker's fallback applies in src/index.ts).
+// Worker's static site applies in src/http/staticSite.ts).
 const LOOKS_LIKE_A_FILE = /\/[^/]+\.[a-z0-9]+$/i;
 
 function servedByWorker(path: string): boolean {

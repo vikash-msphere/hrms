@@ -32,29 +32,37 @@ main = "src/index.ts"
 # fails the deploy when they disagree. The date and the devDependency are one edit, not two.
 compatibility_date = "2026-03-10"
 compatibility_flags = ["nodejs_compat"]
+# Off. With preview URLs on, EVERY version ever uploaded is served at its own
+# `<version-prefix>-hrms.<subdomain>.workers.dev` address - including every build from before the static-site
+# gate (src/http/staticSite.ts), which serve the whole bundle to anyone. Nothing here uses preview URLs (the
+# deploy path is `wrangler deploy`), and a setting left unset is whatever the dashboard last held.
+preview_urls = false
 
 # Persist Workers Logs so console.error (500s, non-fatal event/automation/esign failures) survives beyond a
 # live `wrangler tail`. Without this a production 500 leaves no trace to debug.
 [observability]
 enabled = true
 
-# The built SPA (web/dist) is served as static assets with SPA fallback. run_worker_first forces API +
-# webhook + public-page paths to the Worker FIRST, so the SPA `not_found_handling` can never intercept them and
-# serve index.html in place of a real API/webhook/page response. `/found/*` (asset lost-and-found) and
-# `/calendar/*` (holiday feed) are unauthenticated Worker routes, not SPA routes, so they belong here too.
+# The built SPA (web/dist), served in two tiers so a signed-out browser never receives the app's code:
+#   - CODE (the shell, every JS/CSS chunk, every client-side route, the API) reaches the Worker FIRST, which
+#     answers it only for a verified session - src/http/staticSite.ts.
+#   - MEDIA (fonts, images, icons, pdf.js data, the manifest, the push service worker) is served by the asset
+#     layer without invoking the Worker, so it costs nothing against the daily request quota. A Cloudflare WAF
+#     rule guards it with the `hrms_edge` cookie instead - src/http/assetPaths.ts, `npm run edge:rule`.
 [assets]
 directory = "./web/dist"
 binding = "ASSETS"
 # "none", NOT "single-page-application": the platform's SPA fallback answers every miss with index.html at
 # 200, including a miss for a .js/.css/.wasm file, which browsers then cache as a script of the wrong type.
-# The Worker's notFound handler does the fallback instead - 404 for a missing FILE, the shell for a real app
-# route. See src/index.ts.
+# The Worker does the fallback instead - 404 for a missing FILE, the shell for a real app route.
 not_found_handling = "none"
-# Must stay identical to the list in wrangler.staging.toml: a prefix in one file and not the other means that
-# route reaches the Worker in one environment and is answered by the SPA shell in the other, which is a
-# difference staging exists to NOT have. test/spaFallback.test.ts pins both files against
-# WORKER_OWNED_PREFIXES, so a one-sided edit fails the suite rather than the rehearsal.
-run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag", "/__scheduled"]
+# `/*` then one `!` rule per media pattern: the `!` rules are matched FIRST and go straight to the asset layer,
+# everything else runs the Worker. The `!` list is EDGE_PATHS in src/http/assetPaths.ts, in order, and must never
+# match app code - that file would skip the session check. Keep it ON ONE LINE and identical in
+# wrangler.staging.toml: preflight compares the two lines verbatim, and test/spaFallback.test.ts pins both to
+# EDGE_PATHS, so a one-sided edit fails the suite rather than the rehearsal. (`/*` must be the only positive
+# rule: wrangler refuses one made redundant by a trailing `*`.)
+run_worker_first = ["/*", "!/favicon.svg", "!/apple-touch-icon.png", "!/icon-*.png", "!/manifest.webmanifest", "!/push-sw.js", "!/theme-init.js", "!/assets/*.woff2", "!/assets/*.svg", "!/assets/*.png", "!/assets/*.jpg", "!/assets/*.webp", "!/assets/illustrations/*", "!/assets/kudos/*", "!/assets/pdfjs/*"]
 
 # Explicit CPU ceiling. This RAISES the limit, it does not lower it - say so plainly, because the comment here
 # used to claim the opposite and the number quietly said otherwise.

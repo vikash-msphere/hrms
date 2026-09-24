@@ -26,6 +26,9 @@ main = "src/index.ts"
 # date must also not outrun the workerd bundled with the installed `wrangler`.
 compatibility_date = "2026-03-10"
 compatibility_flags = ["nodejs_compat"]
+# Off, as in production and for the same reason: each uploaded version would otherwise stay reachable at its
+# own preview address, pre-gate builds included. See the note in wrangler.toml.
+preview_urls = false
 
 [observability]
 enabled = true
@@ -40,15 +43,16 @@ enabled = true
 # [limits]
 # cpu_ms = 60000
 
-# Identical to production's by requirement, not by coincidence: `run_worker_first` decides which paths reach
-# the Worker at all, and a prefix present in one file and missing from the other means that route serves the
-# SPA shell in one environment and a real response in the other. test/spaFallback.test.ts pins both files
-# against WORKER_OWNED_PREFIXES for that reason. See the note on the production [assets] block.
+# Identical to production's by requirement, not by coincidence: `run_worker_first` decides which paths the
+# session gate sees at all, and a pattern present in one file and missing from the other means that file is
+# served to anyone in one environment and only to a signed-in browser in the other. test/spaFallback.test.ts
+# pins both files to EDGE_PATHS (src/http/assetPaths.ts) for that reason. See the note on the production
+# [assets] block.
 [assets]
 directory = "./web/dist"
 binding = "ASSETS"
 not_found_handling = "none"
-run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag", "/__scheduled"]
+run_worker_first = ["/*", "!/favicon.svg", "!/apple-touch-icon.png", "!/icon-*.png", "!/manifest.webmanifest", "!/push-sw.js", "!/theme-init.js", "!/assets/*.woff2", "!/assets/*.svg", "!/assets/*.png", "!/assets/*.jpg", "!/assets/*.webp", "!/assets/illustrations/*", "!/assets/kudos/*", "!/assets/pdfjs/*"]
 
 [vars]
 # Off here as in production, and turned on at deploy time by `npm run deploy:staging` (`--var

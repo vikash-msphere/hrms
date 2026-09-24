@@ -10,6 +10,7 @@
     "build": "npm run build:web",
     "preflight": "node --import ./scripts/tsResolve.mjs scripts/preflight.ts",
     "ai:spend": "node --import ./scripts/tsResolve.mjs scripts/aiSpend.ts",
+    "edge:rule": "node --import ./scripts/tsResolve.mjs scripts/edgeRule.ts",
     "deploy": "npm run preflight && npm run verify && npm run build && wrangler deploy",
     "deploy:staging": "npm run preflight -- --config wrangler.staging.toml && npm run verify && npm run build && wrangler deploy --config wrangler.staging.toml",
     "db:generate": "drizzle-kit generate && node --import ./scripts/tsResolve.mjs scripts/genSearchDdl.ts && node --import ./scripts/tsResolve.mjs scripts/genChangeDdl.ts",

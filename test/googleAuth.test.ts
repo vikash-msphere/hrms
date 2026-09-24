@@ -9,6 +9,7 @@ import { makeDeps } from "../src/deps";
 import * as schema from "../src/db/schema";
 import { genId } from "../src/lib/idCodec";
 import type { Bindings } from "../src/env";
+import { safeNext } from "../src/routes/authRoutes";
 
 // Direct Google sign-in mode: the stateless session codec, and the /auth routes' behavior in both auth
 // modes. The Google token exchange itself is not driven here (it needs Google); what IS pinned down is
@@ -129,6 +130,31 @@ describe("/auth routes (Google mode)", () => {
     expect(res.headers.getSetCookie().join(";")).toContain("hrms_session=;");
   });
 
+  // What the browser keeps after signing out: not the media key, and not the year-long cached bundle.
+  it("logout also drops the media cookie and the HTTP cache", async () => {
+    const res = await app.request("/auth/logout", { method: "POST", headers: { "X-Requested-By": "hrms-spa" } }, googleEnv());
+    expect(res.headers.getSetCookie().join(";")).toContain("hrms_edge=;");
+    expect(res.headers.get("clear-site-data")).toBe('"cache"');
+  });
+
+  // The page to come back to rides the round trip beside state and nonce - but only a page on this origin.
+  it("login parks a same-origin `next`, and clears any stale one when the request has none", async () => {
+    const parked = await app.request(`/auth/login?next=${encodeURIComponent("/leave/123?tab=history")}`, {}, googleEnv());
+    expect(parked.status).toBe(302);
+    const cookie = parked.headers.getSetCookie().find((c) => c.startsWith("hrms_oauth_next="));
+    expect(cookie).toBeDefined();
+    expect(decodeURIComponent(cookie!.split(";")[0]!.slice("hrms_oauth_next=".length))).toBe("/leave/123?tab=history");
+    expect(cookie).toContain("Path=/auth");
+    expect(cookie).toContain("HttpOnly");
+
+    for (const next of ["//evil.example/x", "https://evil.example/", "/auth/login"]) {
+      const res = await app.request(`/auth/login?next=${encodeURIComponent(next)}`, {}, googleEnv());
+      const set = res.headers.getSetCookie().find((c) => c.startsWith("hrms_oauth_next="));
+      // Refused values are not parked; the cookie is cleared instead (an empty value).
+      expect(set, next).toMatch(/^hrms_oauth_next=;/);
+    }
+  });
+
   it("a /v1 request without a session is 401; a forged session cookie is 401", async () => {
     const e = googleEnv();
     const none = await app.request("/v1/users/me", { headers: { "X-Requested-By": "hrms-spa" } }, e);
@@ -137,6 +163,37 @@ describe("/auth routes (Google mode)", () => {
     const forged = await sealSession({ email: "root@example.com", iat: now, exp: now + 60_000 }, OTHER_KEY);
     const bad = await app.request("/v1/users/me", { headers: { "X-Requested-By": "hrms-spa", cookie: `hrms_session=${forged}` } }, e);
     expect(bad.status).toBe(401);
+  });
+});
+
+describe("safeNext: sign-in only ever returns to a page on this origin", () => {
+  const origin = "https://hrms.example.com";
+  it("keeps a same-origin path and its query, normalised", () => {
+    expect(safeNext("/leave/123", origin)).toBe("/leave/123");
+    expect(safeNext("/leave?tab=history&x=1", origin)).toBe("/leave?tab=history&x=1");
+    expect(safeNext("/a/../payroll", origin)).toBe("/payroll");
+    // Encoded slashes stay a path on this origin - the browser requests them literally.
+    expect(safeNext("/%2F%2Fevil.example", origin)).toBe("/%2F%2Fevil.example");
+  });
+
+  it("refuses anything that could leave the origin, loop, or be read differently than it was checked", () => {
+    const refused = [
+      undefined,
+      null,
+      "",
+      "leave",
+      "//evil.example/path",
+      "/\\evil.example/path",
+      "https://evil.example/",
+      "javascript:alert(1)",
+      "/auth/login",
+      "/auth/callback?code=x",
+      "/auth",
+      "/leave\tx",
+      "/leave\nx",
+      `/${"a".repeat(2048)}`,
+    ];
+    for (const raw of refused) expect(safeNext(raw, origin), JSON.stringify(raw)).toBeNull();
   });
 });
 

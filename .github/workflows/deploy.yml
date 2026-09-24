@@ -44,17 +44,20 @@ jobs:
       # `production` environment variable CF_PLAN=paid AND uncomment `[limits]` in both wrangler configs -
       # preflight fails the deploy if the two disagree.
       #
-      # The two _CONFIRMED values are dated acknowledgements of edge controls configured in the Cloudflare
+      # The _CONFIRMED values are dated acknowledgements of edge controls configured in the Cloudflare
       # DASHBOARD, which a preflight cannot read for itself (no binding for the zone, no token to ask with) -
       # see the note in scripts/preflight.ts. They are plumbed from repository VARIABLES so that confirming
       # them is a one-line change in GitHub rather than an edit to this workflow, and so an expired
       # acknowledgement fails the deploy here instead of being silently carried. Set them, once the rules in
       # docs/deploy-security.md §1 and zone HSTS are actually in place, to the ISO date you verified them.
+      # EDGE_RULE_CONFIRMED (the media rule, docs/deploy.md) only warns while unset: that rule can only be
+      # switched on after a deploy has handed browsers the cookie it checks.
       - run: npm run preflight
         env:
           CF_PLAN: ${{ vars.CF_PLAN || 'free' }}
           WAF_RATE_LIMIT_CONFIRMED: ${{ vars.WAF_RATE_LIMIT_CONFIRMED }}
           HSTS_CONFIRMED: ${{ vars.HSTS_CONFIRMED }}
+          EDGE_RULE_CONFIRMED: ${{ vars.EDGE_RULE_CONFIRMED }}
           SENTRY_RELEASE: ${{ env.RELEASE }}
           VITE_APP_VERSION: ${{ env.RELEASE }}
           # Preflight only checks that the token is SET (it warns when source maps would not upload); the

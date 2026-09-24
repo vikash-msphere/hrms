@@ -15,7 +15,10 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <!-- iOS ignores the web manifest's icon list and reads this by convention (see scripts/genIcons.ts). -->
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- `use-credentials`: a manifest is fetched WITHOUT cookies by default, and the edge rule in front of the
+         media (src/http/assetPaths.ts) blocks any request that lacks the `hrms_edge` cookie - without this the
+         manifest would never load and the app could not be installed. -->
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
     <title>%VITE_APP_NAME%</title>
     <!-- Apply the saved theme before first paint so there is no light/dark flash on load. External (not
          inline) so the SPA CSP can use `script-src 'self'` with no `'unsafe-inline'`. See web/public/_headers. -->

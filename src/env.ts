@@ -104,9 +104,15 @@ export type Bindings = {
   // `@cf/baai/bge-small-en-v1.5`, so the local lane rehearses production's vector width.
   AI_LOCAL_CHAT_MODEL?: string;
   AI_LOCAL_EMBED_MODEL?: string;
-  // The built SPA in web/dist. Bound so the Worker can decide the SPA fallback itself instead of letting the
-  // asset layer answer every miss with index.html - see the notFound handler in src/index.ts.
+  // The built SPA in web/dist. Every path except the media in http/assetPaths.ts reaches the Worker first, which
+  // checks the caller is signed in before it asks this binding for anything, and decides the SPA fallback
+  // itself - see http/staticSite.ts.
   ASSETS: Fetcher;
+  // The shared value of the `hrms_edge` cookie that the Cloudflare WAF rule in front of the MEDIA checks (fonts,
+  // images, icons, pdf.js data - the files the asset layer serves without the Worker). The Worker hands it to
+  // every signed-in browser (http/staticSite.ts), and `npm run edge:rule` prints the matching rule. 32-128
+  // characters of [A-Za-z0-9_-]. Unset = no edge cookie is issued, so the WAF rule must stay off. Secret.
+  EDGE_KEY?: string;
   // Auth is one of two modes, selected by configuration (see routes/authRoutes.ts):
   //  - Access mode (default): Cloudflare Access fronts the app; CF_ACCESS_* are required.
   //  - Google mode: GOOGLE_CLIENT_ID set -> the Worker runs its own Google-OIDC sign-in (no per-seat Access
