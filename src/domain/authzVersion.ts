@@ -18,6 +18,11 @@
 // this costs no query. Hashed over the grant plus the caller's own scope key (their employee code, which is
 // what dept- and self-scoped rules match on, and which the code cascade rewrites when they move), it changes
 // exactly when the caller's effective access changes and at no other time.
+//
+// Plus the manifest's redacted-field list (`policy.redacted_fields`), which also rides the auth read. A field
+// newly listed there disappears from rows for every caller whose grant does not reach it, WITHOUT any grant
+// changing - so a stamp over the grant alone let those callers go on serving stored rows that still carried
+// the field.
 import type { Grant } from "./permissions";
 import { fnv1a64 } from "../lib/fnv";
 
@@ -26,19 +31,25 @@ import { fnv1a64 } from "../lib/fnv";
  * hash the same. Without this the version would flicker between requests and the client would purge its cache
  * for no reason.
  */
-function canonical(grant: Grant, scopeKey: string | null): string {
+function canonical(grant: Grant, scopeKey: string | null, redacted: Record<string, string[]>): string {
   const levels = Object.entries(grant.levels ?? {})
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([pattern, level]) => `${pattern}=${level}`)
     .join(",");
   const allow = [...(grant.allow ?? [])].sort().join(",");
   const deny = [...(grant.deny ?? [])].sort().join(",");
-  return `${scopeKey ?? ""}|${levels}|${allow}|${deny}`;
+  const fields = Object.entries(redacted)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([collection, keys]) => `${collection}=${[...keys].sort().join("+")}`)
+    .join(",");
+  return `${scopeKey ?? ""}|${levels}|${allow}|${deny}|${fields}`;
 }
 
-/** The caller's access version. Changes when their grant or their scope key does; stable otherwise.
+/** The caller's access version. Changes when their grant, their scope key or the redacted-field list does;
+ *  stable otherwise.
  *
  *  Hashed 64-bit (lib/fnv.ts) rather than 32: this value is an IDENTITY that decides whether a stored payload
  *  may still be served, so a collision means rows carrying the redactions and access hints of permissions the
  *  caller no longer holds. See that file for why the extra lane is worth its one pass. */
-export const authzVersion = (grant: Grant, employeeCode: string | null): string => fnv1a64(canonical(grant, employeeCode));
+export const authzVersion = (grant: Grant, employeeCode: string | null, redacted: Record<string, string[]> = {}): string =>
+  fnv1a64(canonical(grant, employeeCode, redacted));

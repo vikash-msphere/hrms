@@ -84,13 +84,15 @@ one id shared by both environments merges their logs and spends one budget on tw
 | Caching | **off** | `ai_cache` is checked in-process before the binding call, so a gateway cache sees only what ours just missed. It would also hold moderation verdicts under a TTL configured outside this repository. |
 | Logs | **on, delete oldest at the cap** | The cap is 100,000 account-wide. Deleting oldest keeps it a rolling window; the other setting stops recording and the first you know is a gap. |
 | Log payloads | leave default | Every call already carries `cf-aig-collect-log-payload: false` from `src/lib/ai.ts`, so this cannot be turned on by accident from the app's side. |
+| Workers AI Billing | **Standard billing** | "Unified billing" charges prepaid gateway credits instead of the account's Workers AI allocation. With no credits loaded, every call fails with "2021: Insufficient wholesale credits" and every AI feature answers "the model could not be reached just now". |
 
 **Payload logging is suppressed on every call** because AI Gateway stores request and response bodies by
 default, and that would put salary and review text in a third retained surface with its own lifetime. The
 gateway records that a call happened, not what was in it. That header is sent whether or not a gateway is
-configured, so it was already true before this step. Cloudflare's logging docs do not state precedence
-between the header and a gateway-level setting, so confirm on the first day that the Logs view shows metadata
-and no bodies.
+configured, so it was already true before this step. It travels in the binding's `extraHeaders`, not as the
+gateway option `collectLog: false`: that option drops the whole log entry and overrides the gateway's Logs
+setting, so a gateway with Logs on still shows nothing. Checked on `hrms`: the Logs view shows each call's
+model, tokens and status with empty request and response bodies.
 
 **Change `AI_GATEWAY_ID` before the moderation gate is switched on, never after.** A wrong or deleted id
 reads to the app as "the model was silent", which under the default `hold` posture (step 5) stops every public

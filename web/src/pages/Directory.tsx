@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Users, Plus, Mail, UserPlus, Clock, LayoutGrid, List, Network, Layers, Search, UserRound, CalendarDays, Laptop } from "lucide-react";
 import { create, patch, get } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -51,7 +51,7 @@ type ViewMode = "table" | "grid";
 // Which summary metric the list is currently scoped to (null = the whole directory).
 // The metric strip doubles as a filter set; these are the slices it can narrow the list to.
 type Focus = null | "clockedIn" | "joined" | "joining" | "probation" | "noManager";
-// A probation review is due when the end date is inside this window (or already past it).
+// A probation review is due when the end date falls between today and this many days out.
 const PROBATION_SOON_DAYS = 30;
 // Spelled out for the "Joined in" column, which is about the month of the year rather than a date.
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -77,10 +77,14 @@ function fullName(e: Employee) {
 function isJoiningSoon(e: Employee) {
   return !e.delete_time && !!e.start_date && e.start_date > todayStr();
 }
-// Probation ending inside the window (or already past it, unconfirmed): a review somebody owes.
+// Probation ending today or inside the window: a confirm-or-extend decision somebody owes. A date already
+// past is NOT counted: nothing records that a probation was confirmed, so "past" cannot tell an overdue
+// review from one settled years ago, and counting it swept in everyone who ever finished probation. Same
+// window as the dashboard's `probation_ending` card (services/dashboardSummary.ts), which links here.
 function isProbationDue(e: Employee) {
   if (e.delete_time || !e.probation_end_date) return false;
-  return daysBetweenYmd(todayStr(), e.probation_end_date) <= PROBATION_SOON_DAYS;
+  const days = daysBetweenYmd(todayStr(), e.probation_end_date);
+  return days >= 0 && days <= PROBATION_SOON_DAYS;
 }
 
 /** Hover peek for a person, built entirely from the already-loaded row (no fetch). Wraps its
@@ -220,6 +224,13 @@ export default function Directory({ me }: { me: Me }) {
   const lc = useLifecycle("employees", "employee", reload);
   const writable = usePermission("employees.write");
   const canPurge = usePermission("employees.admin");
+  // Whose probation dates this caller holds is the SERVER's answer: `probation_end_date` is a redacted field
+  // (src/domain/manifests.ts REDACTED_FIELDS), so it arrives only on the rows their grant reaches it on - HR's
+  // everyone, a manager's team, their own. The KPI, the insight chip and the column read nothing else, and
+  // vanish for a caller who holds no one else's. The caller's own row is left out of the follow-up count: a
+  // probation ending is a review somebody else owes them.
+  const isProbationDueToMe = useCallback((e: Employee) => idOf(e.path) !== me.employee_id && isProbationDue(e), [me.employee_id]);
+  const seesProbation = useMemo(() => rows.some((e) => idOf(e.path) !== me.employee_id && !!e.probation_end_date), [rows, me.employee_id]);
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Employee | null>(null);
@@ -314,11 +325,11 @@ export default function Directory({ me }: { me: Me }) {
     const live = visibleRows.filter((e) => !e.delete_time);
     if (focus === "clockedIn") return live.filter((e) => clockedIn.has(idOf(e.path)));
     if (focus === "joining") return live.filter(isJoiningSoon);
-    if (focus === "probation") return live.filter(isProbationDue);
+    if (focus === "probation") return live.filter(isProbationDueToMe);
     if (focus === "noManager") return live.filter((e) => !e.manager);
     const month = thisMonthStr();
     return live.filter((e) => (e.start_date ?? "").slice(0, 7) === month);
-  }, [visibleRows, focus, clockedIn]);
+  }, [visibleRows, focus, clockedIn, isProbationDueToMe]);
 
   // Department quick-filter chips, counted from the (live) rows the chips actually narrow: whichever row set
   // is showing (browse or search) with the picked metric already applied, and the department dimension itself
@@ -414,10 +425,10 @@ export default function Directory({ me }: { me: Me }) {
       // Who is still to arrive, whose probation review is due, and who reports to nobody: the three gaps HR
       // otherwise finds by scrolling the table with two hidden columns switched on.
       joining: live.filter(isJoiningSoon).length,
-      probation: live.filter(isProbationDue).length,
+      probation: live.filter(isProbationDueToMe).length,
       noManager: live.filter((e) => !e.manager).length,
     };
-  }, [rows, clockedIn]);
+  }, [rows, clockedIn, isProbationDueToMe]);
 
   function openCreate() {
     setEditing(null);
@@ -497,15 +508,14 @@ export default function Directory({ me }: { me: Me }) {
   const directoryInsights = (es: Employee[]): TableInsight[] => {
     const live = es.filter((e) => !e.delete_time && !e.disabled);
     const out: TableInsight[] = [];
-    const monthEnd = addDaysYmd(todayStr(), 30);
-    const probation = live.filter((e) => e.probation_end_date && e.probation_end_date >= todayStr() && e.probation_end_date <= monthEnd);
+    const probation = live.filter(isProbationDueToMe);
     if (probation.length > 0) {
       out.push({
         id: "probation",
-        label: `${probation.length} finishing probation in 30 days`,
+        label: `${probation.length} finishing probation in ${PROBATION_SOON_DAYS} days`,
         tone: "warning",
         hint: "Confirmation conversations to have before the date passes.",
-        filters: { probation_end_date: `${todayStr()}..${monthEnd}` },
+        filters: { probation_end_date: `${todayStr()}..${addDaysYmd(todayStr(), PROBATION_SOON_DAYS)}` },
         sort: "probation_end_date.asc",
       });
     }
@@ -677,7 +687,9 @@ export default function Directory({ me }: { me: Me }) {
         return n ? <span className="tabular-nums">{n}</span> : <span className="text-muted-foreground">-</span>;
       },
     },
-    { id: "probation_end_date", header: "Probation ends", defaultHidden: true, filter: "date", dateHint: "future", accessor: (e) => e.probation_end_date ?? "", cell: (e) => (e.probation_end_date ? formatDate(e.probation_end_date) : "-") },
+    ...(seesProbation
+      ? [{ id: "probation_end_date", header: "Probation ends", defaultHidden: true, filter: "date" as const, dateHint: "future" as const, accessor: (e: Employee) => e.probation_end_date ?? "", cell: (e: Employee) => (e.probation_end_date ? <span data-sentry-mask>{formatDate(e.probation_end_date)}</span> : "-") }]
+      : []),
     // Fetched on demand: the column offers "Deleted" with none loaded, and must not hide the value it just
     // went and got.
     stateColumn<Employee>({ hideDeleted: false, filterOptions: ["Deleted"] }),

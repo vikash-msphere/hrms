@@ -70,6 +70,7 @@ const NotificationPrefsPanel = lazy(() => import("@/components/notifications/Not
 const KudosLevelsTab = lazy(() => import("@/components/common/KudosLevelsTab").then((m) => ({ default: m.KudosLevelsTab })));
 const AiSettingsTab = lazy(() => import("@/components/common/AiSettingsTab").then((m) => ({ default: m.AiSettingsTab })));
 const AttentionSettingsTab = lazy(() => import("@/components/common/AttentionSettingsTab").then((m) => ({ default: m.AttentionSettingsTab })));
+const SignInSettingsTab = lazy(() => import("@/components/common/SignInSettingsTab").then((m) => ({ default: m.SignInSettingsTab })));
 const RolesPanel = lazy(() => import("@/components/common/RolesPanel").then((m) => ({ default: m.RolesPanel })));
 const RolesManagePanel = lazy(() => import("@/components/common/RolesManagePanel").then((m) => ({ default: m.RolesManagePanel })));
 const ApiKeysPanel = lazy(() => import("@/components/common/ApiKeysPanel").then((m) => ({ default: m.ApiKeysPanel })));
@@ -595,6 +596,7 @@ function pickSettingsPanel(key: string, me: Me, toast: Toast, slot: HTMLDivEleme
     case "ticket-categories": return <TicketsTab toast={toast} />;
     case "ticket-checklists": return <TicketChecklistsTab toast={toast} />;
     // Access & security
+    case "sign-in": return <SignInSettingsTab />;
     case "users": return <RolesPanel me={me} controlsSlot={slot} />;
     case "roles": return <RolesManagePanel controlsSlot={slot} />;
     case "permissions": return <PermissionsPanel controlsSlot={slot} />;

@@ -5,7 +5,7 @@ import {
   Coins, Layers, ListOrdered, Percent, Receipt, Wallet, FileSpreadsheet, FolderKanban,
   UserSearch, UserPlus, Target, ClipboardList, HeartPulse,
   FileText, PenLine, FileSignature, Bell, BellRing, LifeBuoy, ListTodo,
-  Users, Shield, KeyRound, Wrench, Plus, KanbanSquare, Tag, Sparkles, AlertTriangle,
+  Users, Shield, KeyRound, Wrench, Plus, KanbanSquare, Tag, Sparkles, AlertTriangle, LogIn,
 } from "lucide-react";
 
 // One flat registry of every settings panel. This is the single source of truth for the Settings hub grid,
@@ -97,6 +97,7 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
 
   // Access & security
   { key: "users", title: "Users", desc: "Sign-in accounts and the roles each person holds.", group: "Access & security", icon: Users, perm: "users.write", keywords: ["accounts", "login", "assign role"], target: { collection: "users", label: "Users" } },
+  { key: "sign-in", title: "Sign-in", desc: "What the app takes from someone's Google account when they sign in.", group: "Access & security", icon: LogIn, keywords: ["google", "oauth", "sso", "login", "profile photo", "picture", "avatar", "face"], target: { collection: "settings", objectPath: "settings/sign-in", label: "Sign-in" } },
   { key: "roles", title: "Roles", desc: "Create and rename the roles permissions attach to.", group: "Access & security", icon: Shield, perm: "users.write", target: { collection: "roles", label: "Roles" } },
   { key: "permissions", title: "Permissions", desc: "What each role can see and do, per collection.", group: "Access & security", icon: KeyRound, perm: "users.write", keywords: ["grants", "access rules", "capabilities"], target: { collection: "access-rules", label: "Roles & permissions" } },
   { key: "api-keys", title: "API keys", desc: "Machine credentials for scripts and integrations, scoped below your own access.", group: "Access & security", icon: KeyRound, perm: "api-keys.read", keywords: ["token", "bearer", "integration", "machine", "service account"], target: { collection: "api-keys", label: "API keys" } },

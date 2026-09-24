@@ -21,7 +21,7 @@ were found, not by severity.
 **Data integrity / money**
 - [15](#15) Removing an identity field runs an unbounded per-employee purge inside the request, destroying data before it fails
 - [17](#17) An open attendance session counts as zero minutes, so a clocked-in day is docked as a full absence
-- [14](#14) The attendance fence also fences clock-OUT, which locks the session open
+- [14](#14) ~~The attendance fence also fences clock-OUT, which locks the session open~~ **REVERSED: clock-out is fenced by product decision; the lockout lasts only until the next on-network punch**
 - [24](#24) Letter generation lets the caller overwrite any derived placeholder, including the CTC figure the code withholds
 - [6](#6) `changeRole` can blank `employees.location`
 - [5](#5) Employee sub-resource ETags collide — spurious 409 on unrelated PII edits
@@ -465,6 +465,11 @@ the generic lane (`services/crud.ts:181`) already does it correctly, so the shap
 ---
 
 ## 14. The attendance network fence also fences CLOCK-OUT, which locks the session open
+
+> **REVERSED.** Both punches are fenced: an unfenced clock-out let anyone close their session from home,
+> hours after leaving. Step 4 below overstates the cost. A clock-out from an allowed network still closes the
+> open session, so the lockout lasts only while the person is off-network, and #17 credits an open session
+> only up to the end of its own local day. The reasoning now lives on `assertPunchOrigin`.
 
 **Files:** `src/routes/attendance.ts:38-39`, `src/services/attendance.ts:112-118,149-162`
 

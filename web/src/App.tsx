@@ -412,30 +412,39 @@ export default function App() {
     return () => setSessionExpiredHandler(null);
   }, [me]);
 
-  // A 403 wall offers "Request access": one toast per collection per session, whose action notifies the
-  // access admins (access-rules:requestAccess - itself permission-gated, so the offer quietly apologises
-  // when the org hasn't enabled the flow). The probe opts out of the handler to avoid a toast loop.
+  // A 403 wall raises one toast per collection per session. Its "Request access" action notifies the access
+  // admins through access-rules:requestAccess, which is fail-closed: an org turns the flow on by granting that
+  // verb to Everyone. Until it does, the button could only ever 403, so it is offered only to a caller who
+  // holds the verb, and everyone else is told to ask an admin directly. The probe opts out of the handler to
+  // avoid a toast loop.
   const asked = useRef(new Set<string>());
+  const canRequestAccess = !!me && hasCapability(me.capabilities, "access-rules.requestAccess");
   useEffect(() => {
     if (!me) return;
     setForbiddenHandler((collection) => {
       if (asked.current.has(collection)) return;
       asked.current.add(collection);
+      const what = collection.replace(/-/g, " ");
+      if (!canRequestAccess) {
+        toast({ title: "You don't have access to that", description: `Ask an access admin for ${what}.`, duration: 10_000 });
+        return;
+      }
       toast({
         title: "You don't have access to that",
-        description: `Ask the access admins for ${collection.replace(/-/g, " ")}?`,
+        description: `Ask the access admins for ${what}?`,
+        duration: 10_000,
         action: {
           label: "Request access",
           onClick: () => {
             api("/access-rules:requestAccess", { method: "POST", body: JSON.stringify({ collection }), skipForbiddenHandler: true })
               .then(() => toast({ title: "Request sent", description: "The access admins have been notified.", variant: "success" }))
-              .catch(() => toast({ title: "Couldn't send the request", description: "Access requests aren't enabled here yet - ask an admin directly.", variant: "destructive" }));
+              .catch((e: unknown) => toast({ title: "Couldn't send the request", description: e instanceof Error ? e.message : "Try again, or ask an admin directly.", variant: "destructive" }));
           },
         },
       });
     });
     return () => setForbiddenHandler(null);
-  }, [me, toast]);
+  }, [me, toast, canRequestAccess]);
 
   // The code chunk that WILL render this route (detail pages differ from their list page).
   const routeChunk = () => {

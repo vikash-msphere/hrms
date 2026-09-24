@@ -280,10 +280,12 @@ export function accessHint(
  * serialized so no collection has to remember to do it.
  *
  * Each listed field is decided at `<collection>.<code>.<field>` level read and dropped from the payload when
- * that fails. ADDITIVE: a pattern's `**` matches trailing tokens, so `offers.**` / `leave-requests.my-dept.**`
- * already satisfy the field key and nobody loses a field by it being listed. What the list buys is the
- * ability to take one away - a deny on `offers.*.base_comp` removes that field and nothing else, scoped like
- * any other pattern - instead of forcing the choice between the whole record and none of it.
+ * that fails. A pattern's `**` matches trailing tokens, so `offers.**` / `leave-requests.my-dept.**` already
+ * satisfy the field key and their holders lose nothing by it being listed; a 2-token row grant
+ * (`employees.*`) does not, and needs its own `<collection>.<scope>.<field>.**` rule (manifests.ts
+ * REDACTED_FIELDS). What the list buys is the ability to take one away - a deny on `offers.*.base_comp`
+ * removes that field and nothing else, scoped like any other pattern - instead of forcing the choice between
+ * the whole record and none of it.
  *
  * Dropped, not nulled: an absent key reads as "not provided" to every client, while `null` on a field that is
  * genuinely nullable would be indistinguishable from a real empty value.

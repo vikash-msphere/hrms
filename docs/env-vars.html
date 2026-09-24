@@ -1014,7 +1014,9 @@ wrangler vectorize create-metadata-index hrms-search --property-name=collection 
             <p>Routes Workers AI inference through an AI Gateway for per-model analytics and a shared cache.
               Unset = call the <code>AI</code> binding directly. Payload logging is suppressed on every call
               either way (<code>src/lib/ai.ts</code>): the gateway records that a call happened, not what was
-              in it.</p>
+              in it. Keep the gateway's Logs setting on, and set its <b>Workers AI Billing</b> to
+              <b>Standard billing</b>: "Unified billing" with no prepaid credits fails every call with
+              "2021: Insufficient wholesale credits".</p>
             <p class="risk"><b>Set per environment, and the gateway must exist first.</b> Production uses
               <code>hrms</code>, staging <code>hrms-staging</code>; a name with no gateway behind it fails the
               call rather than falling back to the binding. Two of them because the log allowance is per

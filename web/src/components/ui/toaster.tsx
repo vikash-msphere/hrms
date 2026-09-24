@@ -23,10 +23,8 @@ export function Toaster() {
   const phone = useMedia("(max-width: 767px)");
   return (
     <ToastProvider swipeDirection={phone ? "down" : "right"}>
-      {/* `duration` is handed to Radix rather than stripped: the primitive runs its own close timer and falls
-          back to the provider's 5s when it is given nothing, so dropping it here capped every toast at five
-          seconds no matter what the caller asked for - and every caller that asks is an 8s Undo. The store's
-          own scheduleRemove uses the same value, so the two timers agree instead of racing. */}
+      {/* `duration` is handed to Radix rather than stripped: the primitive runs the only close timer (the store
+          fills in its default, see use-toast.ts), and it falls back to the provider's 5s when given nothing. */}
       {toasts.map(({ id, title, description, variant, action, duration, ...props }) => (
         <Toast key={id} variant={variant} duration={duration} {...props}>
           {ICONS[(variant as keyof typeof ICONS) ?? "default"] ?? ICONS.default}

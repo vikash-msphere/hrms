@@ -468,11 +468,16 @@ surfaces that do not serialize a resource decide the identical key for themselve
   The re-check costs one read per affected collection and only for a caller who is actually denied something.
 
 Both are per ROW, because the key is scoped by the row's own code; neither can be answered once for a
-collection. It is
-additive - a pattern's `**` matches trailing tokens, so every ordinary grant already satisfies the field key
-and nothing is narrowed by a field being listed. What it buys is the ability to take one away with a deny
-(`offers.*.base_comp.**`), scoped like any other pattern. PII sub-resources keep their own redactors
-(`http/fieldAccess.ts`), which are per-key inside the sub-resource.
+collection. A grant ending in `**` (`offers.**`, `leave-requests.my-dept.**`, every rule the ACL editor
+writes) matches the trailing field token, so it keeps the field, and listing a field takes nothing from its
+holder. What that buys is the ability to take one away with a deny (`offers.*.base_comp.**`), scoped like any
+other pattern. A 2-token row grant (`employees.*`, `employees.me`, `employees.my-dept`) stops at the row and
+does NOT reach the field, so listing a field on a collection granted that way withholds it from those holders
+unless they also carry `<collection>.<scope>.<field>.**` read. `employees.probation_end_date` is listed on
+exactly that basis: HR, managers (`my-dept`) and the person themselves hold the field rule, and an org-wide
+read-only directory grant does not (migration `0001_redact_probation_end_date` backfilled the rules onto live
+roles). PII sub-resources keep their own redactors (`http/fieldAccess.ts`), which are per-key inside the
+sub-resource.
 
 - **Protected fields** (`policy.protected_fields`) - for each protected field present, require `write` on
   `<collection>.<code>.<field>` (or `<collection>.<field>` on create). The single place mass-assignment /

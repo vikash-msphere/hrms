@@ -40,10 +40,10 @@ const db = drizzle(b.DB, { schema });
 
 /** The Workers AI binding, as a fake that records what it was asked. */
 function fakeBinding(reply: (model: string, input: Record<string, unknown>) => unknown) {
-  const calls: { model: string; input: Record<string, unknown> }[] = [];
+  const calls: { model: string; input: Record<string, unknown>; options: Record<string, unknown> }[] = [];
   const binding = {
-    run: async (model: string, input: Record<string, unknown>) => {
-      calls.push({ model, input });
+    run: async (model: string, input: Record<string, unknown>, options: Record<string, unknown>) => {
+      calls.push({ model, input, options });
       return reply(model, input);
     },
   };
@@ -66,6 +66,22 @@ const LOCAL_URL = "http://127.0.0.1:11434";
 const LOCAL_MODELS = { chat: "gemma3", embed: "all-minilm" };
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe("the Workers AI transport's gateway options", () => {
+  // `collectLog: false` is the binding's form of `cf-aig-collect-log`, which drops the WHOLE log entry and
+  // overrides the gateway's Logs setting. Sent on every call, it left the gateway with no logs at all while the
+  // comments said only the bodies were suppressed. The payload-only header is the one that keeps the metadata.
+  it("suppresses log bodies on every call, and never the log entry itself", async () => {
+    const { binding, calls } = fakeBinding(() => ({ response: "ok" }));
+
+    await makeTextModel(binding, "hrms").generate({ system: "s", user: "u" });
+    await makeTextModel(binding).generate({ system: "s", user: "u" });
+
+    const [viaGateway, direct] = calls.map((c) => c.options);
+    expect(viaGateway).toEqual({ gateway: { id: "hrms" }, extraHeaders: { "cf-aig-collect-log-payload": "false" } });
+    expect(direct).toEqual({ extraHeaders: { "cf-aig-collect-log-payload": "false" } });
+  });
+});
 
 describe("the two text transports", () => {
   it("both shortcut an empty batch without calling anything", async () => {

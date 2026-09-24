@@ -158,7 +158,13 @@ SENTRY_ENVIRONMENT = "production"
 #
 # PAYLOAD LOGGING IS SUPPRESSED ON EVERY CALL, set once in lib/ai.ts rather than here, because AI Gateway
 # stores request and response bodies by default and that would put salary and review text in a retained
-# surface with its own lifetime. The gateway records that a call happened, not what was in it.
+# surface with its own lifetime. The gateway records that a call happened, not what was in it. Leave the
+# gateway's own Logs setting ON: the app suppresses only the bodies, so metadata (model, tokens, cost, status,
+# latency) is logged per call.
+#
+# SET "WORKERS AI BILLING" TO STANDARD BILLING in the gateway's Settings. "Unified billing" charges prepaid
+# gateway credits instead of the account's Workers AI allocation, and with no credits loaded every call fails
+# with "2021: Insufficient wholesale credits" - every AI feature answers "the model could not be reached".
 #
 # LEAVE GATEWAY CACHING OFF in the dashboard. `ai_cache` (services/ai.ts) is checked in-process BEFORE the
 # binding call, so a gateway cache only ever sees prompts that just missed ours - and it would hold moderation

@@ -75,12 +75,13 @@ export const PROTECTED_FIELDS: Record<string, string[]> = {
  * personal phone number, and a leave approver read the sick note's stated reason - none of which the row
  * grant was ever meant to say yes to.
  *
- * ADDITIVE BY CONSTRUCTION, which is what makes this list safe to grow. A pattern's `**` matches trailing
- * tokens, so any ordinary grant - `offers.**`, `leave-requests.my-dept.**`, `candidates.me.**` - already
- * satisfies `<collection>.<code>.<field>.read`, and nobody loses a field by it being listed here. What the
- * entry BUYS is the ability to take one away: a deny on `offers.*.base_comp` now removes exactly that field
- * from exactly those callers, deny-wins and scoped like any other pattern, instead of forcing the choice
- * between the whole record and nothing. Same shape as the delete axis (permissions.ts `denyingPattern`).
+ * ADDITIVE FOR `**` GRANTS. A pattern's `**` matches trailing tokens, so a grant like `offers.**`,
+ * `leave-requests.my-dept.**` or `candidates.me.**` already satisfies `<collection>.<code>.<field>.read`, and
+ * its holder loses nothing by the field being listed. What the entry BUYS is the ability to take one away: a
+ * deny on `offers.*.base_comp` removes exactly that field from exactly those callers, deny-wins and scoped
+ * like any other pattern, instead of forcing the choice between the whole record and nothing. Same shape as
+ * the delete axis (permissions.ts `denyingPattern`). A 2-token row grant (`employees.*`) has no `**` tail and
+ * does NOT reach the field - see the `employees` entry below before listing a field on such a collection.
  *
  * Kept to fields that are genuinely a different sensitivity from the row they sit on - money, personal
  * contact details, free text about a person - rather than every column: each one is an in-memory decide()
@@ -106,6 +107,14 @@ export const REDACTED_FIELDS: Record<string, string[]> = {
   // Vendor pricing on a check about one person, on a row that person's own `me` rule can reach. Choosing an
   // agency is an HR decision; the subject of the check has no part in it and no business seeing the invoice.
   "background-checks": ["cost"],
+  // When somebody's probation ends is a confirm-or-extend decision owed by their management line and HR, not
+  // directory information - and the directory is readable far more widely than that. UNLIKE the entries above,
+  // listing this one takes the field away from 2-token grants (`employees.*`, `employees.me`,
+  // `employees.my-dept`): a pattern with no `**` tail stops at the row and never reaches
+  // `employees.<code>.probation_end_date`. Every holder that should keep it therefore carries an explicit
+  // `employees.<scope>.probation_end_date.**` read rule beside its row grant - seeded in grants.ts, and
+  // backfilled onto live roles by migration 0001.
+  employees: ["probation_end_date"],
   // NOT `reviews`: its manager comments and ratings are already withheld by the review's own state machine
   // (`_managerVisible`, http/serialize.ts), and a second mechanism over the same field would be two places
   // deciding one question.

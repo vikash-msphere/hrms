@@ -21,7 +21,7 @@ export const changes = new Hono<AppEnv>().get("/", async (c) => {
   // and field redactions computed under the old rights - and a collection they have just lost is filtered out
   // of `collections` below, so it could never be named. Comes off the grant the auth read already loaded.
   const user = c.get("user");
-  const authz_version = authzVersion(user.grant, user.employeeCode);
+  const authz_version = authzVersion(user.grant, user.employeeCode, user.policy.redacted_fields);
   if (answer.collections === null) return c.json({ now: answer.now, unknown_window: true, authz_version });
   const listable = c.get("listableCollections") ?? new Set<string>();
   return c.json({ now: answer.now, collections: answer.collections.filter((col) => listable.has(col)), authz_version });

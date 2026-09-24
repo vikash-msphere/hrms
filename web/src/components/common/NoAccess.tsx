@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Lock } from "lucide-react";
 import { api } from "@/api";
+import { AccessAction } from "@/components/access/AccessAction";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,8 +10,9 @@ import { useToast } from "@/components/ui/use-toast";
 
 // The wall a route puts up when the caller has no access to it. Reaching one means the URL was typed, kept as
 // a bookmark, or shared by somebody who does hold the access - the nav never offers a page it hides, and no
-// page component renders behind this. It offers the same way out as the 403 toast (access-rules:requestAccess,
-// itself permission-gated, so it apologises quietly where the org has not enabled the flow).
+// page component renders behind this. It offers the same way out as the 403 toast: access-rules:requestAccess,
+// which is fail-closed, so the button appears only for a caller who holds that verb. An org turns the flow on
+// by granting it to Everyone, from the key icon this button carries in access mode.
 //
 // The ask carries WHY and FOR HOW LONG. Both are what turns a request into something an admin can act on
 // without a side conversation: "I'm covering payroll while Sam is out, until Friday" is a decision they can
@@ -47,7 +49,7 @@ export function NoAccess({ collection, what }: { collection?: string; what?: str
         setAsking(false);
         toast({ title: "Request sent", description: "The access admins have been notified.", variant: "success" });
       })
-      .catch(() => toast({ title: "Couldn't send the request", description: "Access requests aren't enabled here yet - ask an admin directly.", variant: "destructive" }))
+      .catch((e: unknown) => toast({ title: "Couldn't send the request", description: e instanceof Error ? e.message : "Try again, or ask an admin directly.", variant: "destructive" }))
       .finally(() => setBusy(false));
   }
 
@@ -82,7 +84,11 @@ export function NoAccess({ collection, what }: { collection?: string; what?: str
         collection
           ? asking
             ? form
-            : <Button variant="outline" onClick={() => setAsking(true)}>Request access</Button>
+            : (
+              <AccessAction verb="requestAccess" collection="access-rules" label="Request access">
+                <Button variant="outline" onClick={() => setAsking(true)}>Request access</Button>
+              </AccessAction>
+            )
           : undefined
       }
     />

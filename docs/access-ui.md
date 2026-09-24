@@ -168,9 +168,11 @@ pre-selected chip that reads as a broken picker.
   self tier). Additive, deduplicating, confirm-first.
 - **Access requests**: `POST /v1/access-rules:requestAccess` notifies every access admin (roles holding
   `access-rules.write`) that the caller wants a collection/verb. Fail-closed verb - an org enables the
-  flow by granting `requestAccess` to Everyone from the "Who can manage access" icon. The web shell offers
-  it automatically: any 403 raises a one-per-collection toast with a "Request access" action, and the
-  `NoAccess` wall collects a reason and an optional duration (4h / a day / 3 days / a week, capped at a
+  flow by granting `requestAccess` to Everyone from the "Who can manage access" icon, or from the key icon
+  the wall's "Request access" button carries in access mode. The web shell offers it automatically, but
+  only to a caller who holds the verb: any 403 raises a one-per-collection toast, with a "Request access"
+  action for a holder and a plain "ask an access admin" line for everyone else, and the
+  `NoAccess` wall shows its button only to a holder. The wall collects a reason and an optional duration (4h / a day / 3 days / a week, capped at a
   fortnight server-side). The duration grants nothing - it travels to the admin so they set a matching
   expiry, which is the existing temporary-access mechanism. Every request also writes an
   `access-request.raised` audit row carrying the reason: a request that every admin ignores used to leave no
@@ -262,7 +264,7 @@ Every layer that shows or fetches is capability-gated, each at ONE central place
   the workspace tab bars.
 - **Routes**: `pageGate()`/`pageVisible()` (nav.ts) answer what a ROUTE requires, and `App` renders
   `<NoAccess>` instead of the page when the answer is no - so typing, bookmarking or pasting the URL of a
-  page the sidebar hides hands over the wall (with "Request access"), never the page. The same function
+  page the sidebar hides hands over the wall (with "Request access" where the org enabled it), never the page. The same function
   gates the sidebar, ⌘K and the g-chords, so all four can't disagree. Routes that render another page's
   component (the Settings deep links) or arrive from chrome (Support) declare their gate in `ALIAS_GATE`;
   only Dashboard, Profile and Notifications are identity surfaces open to everyone.
