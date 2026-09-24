@@ -69,7 +69,7 @@ export async function lastWriteAt(deps: Deps, now = Date.now()): Promise<number>
  * permissions have moved.
  */
 export function listEtag(lastWrite: number, user: AppUser, url: string, now = Date.now()): string {
-  return `W/"${lastWrite}-${Math.floor(now / WINDOW_MS)}-${authzVersion(user.grant, user.employeeCode)}-${requestKey(url)}"`;
+  return `W/"${lastWrite}-${Math.floor(now / WINDOW_MS)}-${authzVersion(user.grant, user.employeeCode, user.policy.redacted_fields)}-${requestKey(url)}"`;
 }
 
 /**

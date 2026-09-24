@@ -13,6 +13,7 @@
 //
 // They DO throw for policy violations - an unlisted model, a forbidden collection. Those are not runtime
 // conditions to degrade around, they are bugs, and the loudest possible failure is the correct one.
+import { captureMessage } from "@sentry/cloudflare";
 import { and, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -438,6 +439,16 @@ async function runRecorded<T>(
     // so it is charged here too. Recording a failure as free would let a broken model be retried all day.
     await recordUsage(deps, ctx, role, { inputHash, inputChars: input.length, outputChars: 0, neurons, cacheHit: false, outcome: "error", durationMs: deps.clock.now().getTime() - started, error: safeError(detail) });
     console.error(`ai ${ctx.feature} (${role}) failed ${safeError(detail)}`);
+    // Reported as well as logged. Every caller turns this refusal into a handled answer - a 409 for a draft,
+    // the plain result for an enrichment - so nothing throws past `withSentry`, and a model that fails every
+    // call was visible only in Workers logs and the usage table. The text is `safeError`'s, never the raw
+    // message: a provider error can quote the prompt back. One issue per feature and role, not per message,
+    // so a provider rewording its error does not split the count.
+    captureMessage(`ai ${ctx.feature} (${role}) failed: ${safeError(detail)}`, {
+      level: "error",
+      fingerprint: ["ai-call-failed", ctx.feature, role],
+      tags: { ai_feature: ctx.feature, ai_role: role },
+    });
     return refuse("error", detail);
   }
 }

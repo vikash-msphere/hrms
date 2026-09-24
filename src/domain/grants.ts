@@ -54,6 +54,10 @@ const OWN_PII: Record<string, Level> = {
   // Public "about me" one-liner: self-expression, so always self-writable (HR can also tidy it via its
   // own employees.*.bio grant). Display rides the base employee record read.
   "employees.me.bio.**": "write",
+  // Own probation end date: a redacted field (manifests.ts REDACTED_FIELDS) that no 2-token row grant reaches,
+  // so without this line a role reading its own row through `employees.*` (payroll) lost it. Read only - HR
+  // sets it. Powers the profile's "On probation · Nd left".
+  "employees.me.probation_end_date.**": "read",
 };
 
 // Attendance self-service - EVERY role is an employee who clocks in/out and can file/cancel their own
@@ -296,6 +300,8 @@ const manager: Grant = {
     // matches `employees.<member>` but not `employees.<member>.bank-account`, so a manager sees the team
     // roster without their PII (PII stays super-only by default). Own PII still via OWN_PII.
     "employees.my-dept": "read",
+    // The team's probation end dates: the manager is who the nightly reminder asks to confirm or extend.
+    "employees.my-dept.probation_end_date.**": "read",
     // Presence of each dept member - the same reading of leave + attendance the manager already holds
     // through `attendance.my-dept.**`, surfaced as the profile header's pill.
     "employees.my-dept.presence.**": "read",
@@ -389,6 +395,7 @@ const hr_admin: Grant = {
     // reaches anyone else's PII through a broad grant. (Re-parent via department is still 501-guarded.)
     employees: "write",
     "employees.*": "write",
+    "employees.*.probation_end_date.**": "read", // redacted field the row grant above does not reach
     "employees.*.department.**": "write",
     "employees.*.manager.**": "write",
     "employees.*.bio.**": "write", // moderate/tidy anyone's public about-me (not PII)
@@ -588,7 +595,7 @@ const payroll_admin: Grant = {
     "preferences.**": "write",
     ...OWN_PII, // own PII only; payroll no longer reaches others' bank/identity via a broad employees read
     employees: "read", // list the directory
-    "employees.*": "read", // base records (for payroll) - NOT the PII sub-resources
+    "employees.*": "read", // base records (for payroll) - NOT the PII sub-resources, NOT probation_end_date (redacted)
     "employees.*.tax.**": "write", // income-tax (TDS) projection for everyone (payroll runs it)
     "compensation.**": "write",
     "payroll-runs.**": "write",

@@ -397,8 +397,17 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   // promised. Prompt to propagate the moment it changes, instead of leaving the profile quietly inconsistent.
   const saveEmp = async () => {
     const enrolmentChanged = !!emp?.epf_enrolled !== empForm.epf_enrolled;
+    // Probation end date only when it was edited. It is a redacted field (policy.redacted_fields), and a redacted
+    // value reaches the client exactly as an unset one does - absent - so an editor whose grant does not reach
+    // it loads a blank here, and sending that blank back as `null` would erase a date they were never shown.
+    const probationEdited = empForm.probation_end_date !== (emp?.probation_end_date ?? "");
     await savePatch(
-      { start_date: empForm.start_date || null, probation_end_date: empForm.probation_end_date || null, epf_enrolled: empForm.epf_enrolled, eps_excluded: empForm.eps_excluded },
+      {
+        start_date: empForm.start_date || null,
+        ...(probationEdited ? { probation_end_date: empForm.probation_end_date || null } : {}),
+        epf_enrolled: empForm.epf_enrolled,
+        eps_excluded: empForm.eps_excluded,
+      },
       "Employment updated",
     );
     if (enrolmentChanged) await promptReapply();
@@ -564,7 +573,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                       both can be true at once: someone on probation can also be on leave today. */}
                   <PresencePill presence={presence} />
                   {emp.disabled && <Badge variant="secondary">Inactive</Badge>}
-                  {!emp.disabled && onProbation && <Badge variant="warning">{probationLabel(emp.probation_end_date!) || "On probation"}</Badge>}
+                  {!emp.disabled && onProbation && <Badge variant="warning" data-sentry-mask>{probationLabel(emp.probation_end_date!) || "On probation"}</Badge>}
                 </>
               }
               actions={
@@ -691,13 +700,13 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                       </div>
                       <div>
                         <dt className="text-muted-foreground">Probation ends</dt>
-                        <dd className="mt-0.5 font-medium">{emp.probation_end_date ? formatDate(emp.probation_end_date) : "-"}</dd>
+                        <dd className="mt-0.5 font-medium" data-sentry-mask>{emp.probation_end_date ? formatDate(emp.probation_end_date) : "-"}</dd>
                       </div>
                       <div>
                         <dt className="text-muted-foreground">Status</dt>
                         <dd className="mt-0.5">
                           {emp.probation_end_date ? (
-                            <Badge variant={onProbation ? "warning" : "success"}>{onProbation ? "On probation" : "Confirmed"}</Badge>
+                            <Badge variant={onProbation ? "warning" : "success"} data-sentry-mask>{onProbation ? "On probation" : "Confirmed"}</Badge>
                           ) : (
                             "-"
                           )}

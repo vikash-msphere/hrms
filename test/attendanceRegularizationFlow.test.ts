@@ -265,7 +265,7 @@ describe("attendance: a superseded open session does not count as being clocked 
     expect(rows.filter((s) => s.clockOut === null && s.supersededBy === null)).toHaveLength(1);
 
     // And the survivor is a real, closable session rather than an orphan.
-    const closed = await clockOut(deps, actor);
+    const closed = await clockOut(deps, actor, noFence);
     expect(closed.clockOut).not.toBeNull();
   });
 });

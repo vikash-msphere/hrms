@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bug, Video } from "lucide-react";
+import { Bug, Video, X } from "lucide-react";
 import { create } from "@/api";
 import { getSetting, invalidateSettings } from "@/lib/settingsStore";
 import { useIntent } from "@/lib/intent";
@@ -60,7 +60,8 @@ export function ReportProblemDialog() {
   //
   // The flush STOPS the recorder and starts a fresh buffer, so nothing is recorded on from here: reporting a
   // bug is not consent to be recorded for the rest of the afternoon. Continuous recording happens only inside
-  // the "Record the problem" window below. The id is held here until there is a ticket to attach it to.
+  // the "Record the problem" window below. The id is held here until there is a ticket to attach it to, and
+  // a demonstration recorded in that window (`recordedId`) takes its place.
   const [replayId, setReplayId] = useState<string | undefined>(undefined);
   useIntent("report-problem", () => {
     // Arriving here while a demonstration is running means the person came back: end it and show the form.
@@ -74,10 +75,19 @@ export function ReportProblemDialog() {
   // dialog only hides while one runs and takes the id when it ends.
   const recordingSession = useRecording();
   const recording = recordingSession?.target.kind === "report";
+  // The demonstration, held apart from the run-up above because it is the one the person made on purpose and
+  // can see: it shows as an attachment in place of the Record button, and removing it drops back to the
+  // run-up rather than to nothing, which is what was attached before they pressed Record. Removing only
+  // unlinks it from this report - the replay already uploaded when the window ended.
+  const [recordedId, setRecordedId] = useState<string | undefined>(undefined);
+  // A window stopped under the SDK's floor keeps nothing. Said beside the button, or pressing Stop early
+  // would bring the form back looking exactly as it did before they recorded anything.
+  const [tooShort, setTooShort] = useState(false);
   useEffect(() => onRecordingFinished((id, target) => {
     if (target.kind !== "report") return;
     setOpen(true);
-    setReplayId((prev) => id ?? prev);
+    if (id) setRecordedId(id);
+    setTooShort(!id);
   }), []);
 
   // Loaded when the dialog first opens, not on mount: this component is rendered on every page for every user,
@@ -130,7 +140,7 @@ export function ReportProblemDialog() {
   async function submit() {
     // Captured when the dialog opened. The fallback covers the one case that misses: a page open for less
     // than the SDK's 5s floor when the dialog was opened, where there was not yet a replay to keep.
-    const session_replay_id = replayId ?? (await captureSessionReplay());
+    const session_replay_id = recordedId ?? replayId ?? (await captureSessionReplay());
     let raised: Ticket;
     try {
       raised = await create<Ticket>("tickets", {
@@ -165,6 +175,8 @@ export function ReportProblemDialog() {
 
     setForm(EMPTY);
     setReplayId(undefined);
+    setRecordedId(undefined);
+    setTooShort(false);
     // Where the person is told a recording went with their report. It used to be a line in the dialog and is
     // said here instead: the dialog is a form, and this lands at the moment it actually happens rather than
     // as standing text above a button. Either branch says what was sent, so the answer is never silence.
@@ -192,7 +204,7 @@ export function ReportProblemDialog() {
       form={form}
       draftKey="problem:new"
       applyDraft={(d) => setForm(d)}
-      onStartOver={() => setForm(EMPTY)}
+      onStartOver={() => { setForm(EMPTY); setRecordedId(undefined); setTooShort(false); }}
       submitLabel="Send report"
       canSubmit={valid}
       whyNot={whyNot}
@@ -228,13 +240,32 @@ export function ReportProblemDialog() {
       )}
       {/* Under the fields, not above them: the form is what most people came to fill in, and an action that
           empties the screen sitting above the first input reads as the thing to do first.
-          The recording is disclosed on the success toast instead of here - see submit() - so this stays a
-          button and the dialog stays a form. */}
-      <div>
-        <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={() => { setOpen(false); startRecording({ kind: "report" }); }}>
-          <Video className="h-4 w-4" /> Record the problem
-        </Button>
-      </div>
+          The run-up captured on open is disclosed on the success toast - see submit(). A demonstration the
+          person recorded shows here instead, as an attachment in place of the button, with an X to drop it and
+          record again. */}
+      {recordedId ? (
+        <div className="flex items-center gap-2 rounded-md border bg-muted/40 py-1 pl-3 pr-1 text-sm">
+          <Video className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate">Screen recording attached</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0 text-muted-foreground"
+            aria-label="Remove recording"
+            onClick={() => setRecordedId(undefined)}
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-1">
+          <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={() => { setOpen(false); setTooShort(false); startRecording({ kind: "report" }); }}>
+            <Video className="h-4 w-4" /> Record the problem
+          </Button>
+          {tooShort && <p className="text-xs text-muted-foreground">That recording was too short to keep. Record for at least a few seconds.</p>}
+        </div>
+      )}
     </WriteDialog>
   );
 }

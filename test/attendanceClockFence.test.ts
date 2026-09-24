@@ -71,7 +71,7 @@ describe("attendance clock fence: no fence configured", () => {
   it("punches from any address, including one that cannot be established", async () => {
     await seedActor();
     await expect(clockIn(at("2026-03-10T04:00:00Z"), actor, { ip: OUTSIDE, allowList: undefined })).resolves.toBeTruthy();
-    await expect(clockOut(at("2026-03-10T12:00:00Z"), actor)).resolves.toBeTruthy();
+    await expect(clockOut(at("2026-03-10T12:00:00Z"), actor, { ip: null, allowList: undefined })).resolves.toBeTruthy();
   });
 });
 
@@ -80,6 +80,16 @@ describe("attendance clock fence: on-network", () => {
     await seedActor();
     await expect(clockIn(at("2026-03-10T04:00:00Z"), actor, { ip: INSIDE, allowList: FENCE })).resolves.toBeTruthy();
     await expect(clockIn(at("2026-03-10T04:05:00Z"), actor, { ip: OUTSIDE, allowList: FENCE })).rejects.toThrow(/approved network/);
+  });
+  it("fences clock-out the same way, and a refused clock-out closes from the network afterwards", async () => {
+    await seedActor();
+    await expect(clockIn(at("2026-03-10T04:00:00Z"), actor, { ip: INSIDE, allowList: FENCE })).resolves.toBeTruthy();
+    await expect(clockOut(at("2026-03-10T12:00:00Z"), actor, { ip: OUTSIDE, allowList: FENCE }))
+      .rejects.toMatchObject({ httpStatus: 403, type: "/errors/clock-network-fence" });
+    await expect(clockOut(at("2026-03-10T12:00:00Z"), actor, { ip: null, allowList: FENCE })).rejects.toThrow(/approved network/);
+    // The refusal left the session open; it is still the caller's and still closable from an allowed network.
+    const closed = await clockOut(at("2026-03-10T12:05:00Z"), actor, { ip: INSIDE, allowList: FENCE });
+    expect(closed.clockOut).not.toBeNull();
   });
   // The web clock branches on this type to offer the remote-work request instead of a dead-end toast, and
   // the API boundary uses it to suppress the "request access" offer (the caller holds the verb fine). Both
@@ -101,7 +111,7 @@ describe("attendance clock fence: approved remote work eases it, for that period
     await seedActor();
     await seedRemoteWork({ start: "2026-03-09", end: "2026-03-11", state: "APPROVED" });
     await expect(clockIn(at("2026-03-10T04:00:00Z"), actor, { ip: OUTSIDE, allowList: FENCE })).resolves.toBeTruthy();
-    await expect(clockOut(at("2026-03-10T12:00:00Z"), actor)).resolves.toBeTruthy();
+    await expect(clockOut(at("2026-03-10T12:00:00Z"), actor, { ip: OUTSIDE, allowList: FENCE })).resolves.toBeTruthy();
   });
   it("fences again on the days either side of the approved period", async () => {
     await seedActor();
@@ -134,9 +144,9 @@ describe("attendance clock fence: approved remote work eases it, for that period
     await seedActor();
     await seedRemoteWork({ start: "2026-03-10", end: "2026-03-10", state: "APPROVED", startSession: 1, endSession: 1 });
     await expect(clockIn(at("2026-03-10T03:30:00Z"), actor, { ip: OUTSIDE, allowList: FENCE })).resolves.toBeTruthy();
-    // The CLOSING punch is never fenced, even though the AM-only approval has run out by 14:00 local: a
-    // refused clock-out locks the session open, and an open session docks every later day as a full absence.
-    await expect(clockOut(at("2026-03-10T08:30:00Z"), actor)).resolves.toBeTruthy();
+    // The closing punch is judged at its own instant: by 14:00 local the AM-only approval has run out.
+    await expect(clockOut(at("2026-03-10T08:30:00Z"), actor, { ip: OUTSIDE, allowList: FENCE })).rejects.toThrow(/approved network/);
+    await expect(clockOut(at("2026-03-10T06:00:00Z"), actor, { ip: OUTSIDE, allowList: FENCE })).resolves.toBeTruthy();
   });
   it("places the punch on its ORG-timezone day, not its UTC day", async () => {
     await seedActor();

@@ -6,8 +6,9 @@ import * as dbSchema from "../src/db/schema";
 import { TABLES } from "../src/lib/authzResolve";
 import { CATALOG_COLLECTIONS, persistable } from "../web/src/lib/resourceStore";
 
-// The change stamps and their triggers are GENERATED from the authz collection->table registry and appended to
-// the single migration by `npm run db:generate` (drizzle-kit emits no triggers). Nothing at runtime would fail
+// The change stamps and their triggers are GENERATED from the authz collection->table registry (drizzle-kit
+// emits no triggers), and the block lives in migration 0000, which is applied to the live database and never
+// rewritten - `npm run db:generate` only checks it (scripts/genChangeDdl.ts). Nothing at runtime would fail
 // if the two fell out of step, which is the danger: a collection whose trigger was never generated is reported
 // as "unchanged" forever, so every client keeps serving whatever it had stored. That is a silent wrong answer,
 // so it gets a gate.
@@ -25,7 +26,8 @@ function schemaTableNames(): string[] {
 
 const files = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const paths = Object.keys(files).sort();
-const migration = paths.length === 1 ? files[paths[0]!]! : "";
+const holders = paths.filter((p) => files[p]!.includes(CHANGE_DDL_MARKER));
+const migration = holders.length === 1 ? files[holders[0]!]! : "";
 
 describe("generated change-stamp DDL matches the migration", () => {
   it("has the generated block, byte-identical to the generator's output", () => {

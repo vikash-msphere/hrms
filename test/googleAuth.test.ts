@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 /// <reference types="@cloudflare/vitest-pool-workers" />
 import { env } from "cloudflare:test";
-import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { sealSession, openSession } from "../src/lib/session";
 import { app } from "../src/index";
@@ -10,6 +10,8 @@ import * as schema from "../src/db/schema";
 import { genId } from "../src/lib/idCodec";
 import type { Bindings } from "../src/env";
 import { safeNext } from "../src/routes/authRoutes";
+import { syncGoogleProfile } from "../src/services/googleProfile";
+import { orgToday } from "../src/services/orgDay";
 
 // Direct Google sign-in mode: the stateless session codec, and the /auth routes' behavior in both auth
 // modes. The Google token exchange itself is not driven here (it needs Google); what IS pinned down is
@@ -102,7 +104,8 @@ describe("/auth routes (Google mode)", () => {
     expect(to.origin).toBe("https://accounts.google.com");
     expect(to.searchParams.get("client_id")).toBe("test-client-id.apps.googleusercontent.com");
     expect(to.searchParams.get("response_type")).toBe("code");
-    expect(to.searchParams.get("scope")).toBe("openid email");
+    // `profile` is what puts `picture` on the ID token - see the photo-import suite at the foot of this file.
+    expect(to.searchParams.get("scope")).toBe("openid email profile");
     const cookies = res.headers.getSetCookie().join(";");
     expect(cookies).toContain("hrms_oauth_state=");
     expect(cookies).toContain("hrms_oauth_nonce=");
@@ -335,6 +338,318 @@ describe("/auth is floored per caller, not per isolate", () => {
     // window it is the remainder of.
     expect(seconds).toBeGreaterThanOrEqual(1);
     expect(seconds).toBeLessThanOrEqual(60);
+  });
+});
+
+// WHAT A SIGN-IN WRITES ONTO THE EMPLOYEE RECORD, and the two different promises the two halves make.
+//
+// THE PHOTO IS A ONE-TIME FILL. The `picture` claim is free (the `profile` scope), and a new employee otherwise
+// has no face in the app until somebody uploads a JPEG by hand. What this suite holds down is everything that
+// makes "once" true: the claim on the employee row is the lock AND the memory, so a second sign-in imports
+// nothing, a photo somebody deliberately cleared is never restored, and a failed fetch gives the slot back
+// instead of spending the one chance that person gets. Plus the two refusals that keep an outbound fetch
+// honest - a host that is not Google's, and a body that is not the JPEG everything downstream serves it as.
+//
+// THE NAME IS A MIRROR, and off by default: `first_name`/`last_name` are NOT NULL and HR types them at hire, so
+// there is no empty slot and the only thing a sync can do is overwrite. The cases below are the guards that
+// make that safe to switch on - no write when nothing changed, no half-name, and an audit entry on every real
+// change so a name that moved can be traced to this and not to a person.
+describe("Google mode: syncing the profile", () => {
+  const migrations = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+  const b = env as unknown as Bindings;
+  const KEY32 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+  const EMAIL = "avatar@example.com";
+  const AVATAR = "https://lh3.googleusercontent.com/a/ACg8ocKtest=s96-c";
+  const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 1, 2, 3, 4]);
+
+  /** Somebody with a Google account and no employee record - what the auto-create is for. */
+  const NEW_EMAIL = "newjoiner@example.com";
+
+  const deps = () => makeDeps({ ...googleEnv() } as unknown as Bindings);
+  const employee = async () => (await deps().db.select().from(schema.employees).where(eq(schema.employees.workEmail, EMAIL)).limit(1))[0]!;
+
+  let calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  /** Stand in for Google's avatar CDN, recording what was asked for. */
+  const serve = (body: BodyInit | null, init?: ResponseInit) => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls.push(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      return new Response(body, init ?? { headers: { "content-type": "image/jpeg" } });
+    }) as typeof fetch;
+  };
+
+  beforeAll(async () => {
+    (b as unknown as Record<string, unknown>).FIELD_ENCRYPTION_KEY = KEY32;
+    (b as unknown as Record<string, unknown>).WIRE_ID_KEY = KEY32;
+    const sql = Object.keys(migrations).sort().map((k) => migrations[k]).join("\n");
+    for (const stmt of sql.split("--> statement-breakpoint")) {
+      const s = stmt.trim();
+      if (s) await b.DB.prepare(s).run().catch(() => {}); // tables may already exist from another suite
+    }
+  });
+
+  beforeEach(async () => {
+    const d = deps();
+    await d.db.delete(schema.employees).where(eq(schema.employees.workEmail, EMAIL));
+    await d.db.delete(schema.employees).where(eq(schema.employees.workEmail, NEW_EMAIL));
+    await d.db.delete(schema.users).where(eq(schema.users.email, EMAIL));
+    await d.db.delete(schema.users).where(eq(schema.users.email, NEW_EMAIL));
+    await d.db.delete(schema.settings).where(eq(schema.settings.key, "sign-in"));
+    await d.db.insert(schema.roles).values([{ name: "employee", label: "Employee" }]).onConflictDoNothing();
+    await d.db.insert(schema.employees).values({
+      uuid: genId(),
+      code: `e-${genId().slice(0, 5)}`,
+      firstName: "Ada",
+      lastName: "Avatar",
+      workEmail: EMAIL,
+    });
+    calls = [];
+    serve(JPEG);
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it("imports the photo once, at a usable size, and does nothing on the next sign-in", async () => {
+    await syncGoogleProfile(deps(), EMAIL, { picture: AVATAR });
+    const after = await employee();
+    expect(after.photoKey).toBe(`photos/${after.uuid}`);
+    expect(after.photoAt).not.toBeNull();
+    // Google renders whatever the size directive asks for, and the one on the claim is `s96`.
+    expect(calls).toEqual([AVATAR.replace("=s96-c", "=s400-c")]);
+    // The bytes are in the (encrypted) store and come back out as they went in.
+    expect(new Uint8Array((await deps().docs.get(after.photoKey!))!)).toEqual(JPEG);
+
+    // Second sign-in: the row already carries a photo, so the claim matches nothing and Google is never asked.
+    await syncGoogleProfile(deps(), EMAIL, { picture: AVATAR });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("never replaces a photo that is already there, and never restores one that was cleared", async () => {
+    // Uploaded here, by hand - the app's own photo always wins.
+    await deps().db.update(schema.employees).set({ photoKey: "photos/mine", photoAt: new Date() }).where(eq(schema.employees.workEmail, EMAIL));
+    await syncGoogleProfile(deps(), EMAIL, { picture: AVATAR });
+    expect((await employee()).photoKey).toBe("photos/mine");
+    expect(calls).toHaveLength(0);
+
+    // Cleared: `clearPhoto` nulls the key and STAMPS the time, which is how "I removed it on purpose" is told
+    // apart from "never had one". Handing Google's back here is the one outcome that would be unfixable.
+    await deps().db.update(schema.employees).set({ photoKey: null, photoAt: new Date() }).where(eq(schema.employees.workEmail, EMAIL));
+    await syncGoogleProfile(deps(), EMAIL, { picture: AVATAR });
+    expect((await employee()).photoKey).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does nothing at all when the org has switched it off", async () => {
+    await deps().db.insert(schema.settings).values({ key: "sign-in", value: JSON.stringify({ google_photo: false }) });
+    await syncGoogleProfile(deps(), EMAIL, { picture: AVATAR });
+    const after = await employee();
+    expect(calls).toHaveLength(0);
+    // The slot is untouched, not merely unfilled: stamping it would spend the person's one import silently,
+    // so turning the switch back on would do nothing for anybody who signed in while it was off.
+    expect(after.photoKey).toBeNull();
+    expect(after.photoAt).toBeNull();
+  });
+
+  it("refuses a URL that is not a Google avatar, without making the request", async () => {
+    for (const bad of [
+      "https://evil.example/a/photo=s96-c",
+      "http://lh3.googleusercontent.com/a/photo=s96-c", // not https
+      "https://lh3.googleusercontent.com.evil.example/a/photo", // suffix, not the domain
+      "https://lh3.googleusercontent.com/a/default-user=s96-c", // Google's generated initial, not a photograph
+      "not a url",
+    ]) {
+      await syncGoogleProfile(deps(), EMAIL, { picture: bad });
+    }
+    expect(calls).toHaveLength(0);
+    expect((await employee()).photoAt).toBeNull();
+  });
+
+  it("refuses a body that is not a JPEG, and gives the slot back so the next sign-in can retry", async () => {
+    serve(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } });
+    await syncGoogleProfile(deps(), EMAIL, { picture: AVATAR });
+    let after = await employee();
+    expect(after.photoKey).toBeNull();
+    // The claim is RELEASED. Left stamped, one bad response would cost this person the import permanently.
+    expect(after.photoAt).toBeNull();
+
+    serve(JPEG);
+    await syncGoogleProfile(deps(), EMAIL, { picture: AVATAR });
+    after = await employee();
+    expect(after.photoKey).toBe(`photos/${after.uuid}`);
+  });
+
+  // ---- the name, and its three modes ---------------------------------------------------------------------
+
+  const NAMES = { givenName: "Grace", familyName: "Hopper" };
+  const nameMode = (mode: unknown) => deps().db.insert(schema.settings).values({ key: "sign-in", value: JSON.stringify({ google_name: mode }) });
+  const nameAudits = async (uuid: string) =>
+    (await deps().db.select().from(schema.auditLog).where(eq(schema.auditLog.action, "employee.name.update"))).filter((a) => a.entityId === uuid);
+  /** An account that has USED the app - what `once` reads to tell a new joiner from everybody else. */
+  const seen = (at: Date | null) =>
+    deps().db.insert(schema.users).values({ uuid: genId(), code: `u-${genId().slice(0, 5)}`, email: EMAIL, role: "employee", status: "active", lastSeenAt: at });
+
+  it("takes the name at a first sign-in, by default, and records the change", async () => {
+    await seen(null); // the account exists (hiring creates it) but nobody has used it
+    const before = await employee();
+    await syncGoogleProfile(deps(), EMAIL, NAMES);
+    const after = await employee();
+    expect([after.firstName, after.lastName]).toEqual(["Grace", "Hopper"]);
+    // A real content change, so the row's version MOVES - an open profile form should conflict, unlike the
+    // photo claim, which deliberately holds `updated_at` still.
+    expect(+new Date(after.updatedAt)).toBeGreaterThanOrEqual(+new Date(before.updatedAt));
+
+    const entries = await nameAudits(after.uuid);
+    expect(entries).toHaveLength(1);
+    expect(JSON.parse(entries[0]!.meta!)).toMatchObject({
+      diff: { first_name: { from: "Ada", to: "Grace" }, last_name: { from: "Avatar", to: "Hopper" } },
+    });
+  });
+
+  it("stops arguing once the person has used the app - a correction made here survives every later sign-in", async () => {
+    await seen(new Date());
+    await syncGoogleProfile(deps(), EMAIL, NAMES);
+    const after = await employee();
+    expect([after.firstName, after.lastName]).toEqual(["Ada", "Avatar"]);
+    expect(await nameAudits(after.uuid)).toHaveLength(0);
+  });
+
+  it("never touches the name when the org says never", async () => {
+    await nameMode("never");
+    await seen(null);
+    await syncGoogleProfile(deps(), EMAIL, NAMES);
+    expect([(await employee()).firstName, (await employee()).lastName]).toEqual(["Ada", "Avatar"]);
+  });
+
+  it("mirrors on every sign-in when the org says always, however long they have been here", async () => {
+    await nameMode("always");
+    await seen(new Date());
+    await syncGoogleProfile(deps(), EMAIL, NAMES);
+    expect([(await employee()).firstName, (await employee()).lastName]).toEqual(["Grace", "Hopper"]);
+  });
+
+  it("reads a value it does not recognise as `never`, and the old boolean as what it used to mean", async () => {
+    await nameMode("alwyas"); // a typo must sync LESS than intended, never more
+    await seen(new Date());
+    await syncGoogleProfile(deps(), EMAIL, NAMES);
+    expect((await employee()).firstName).toBe("Ada");
+
+    // This setting shipped as a boolean before it grew a middle option; `true` meant today's "always".
+    await deps().db.update(schema.settings).set({ value: JSON.stringify({ google_name: true }) }).where(eq(schema.settings.key, "sign-in"));
+    await syncGoogleProfile(deps(), EMAIL, NAMES);
+    expect((await employee()).firstName).toBe("Grace");
+  });
+
+  it("writes nothing at all when the name already matches", async () => {
+    await nameMode("always");
+    await seen(new Date());
+    await syncGoogleProfile(deps(), EMAIL, { givenName: "Ada", familyName: "Avatar" });
+    // Every sign-in runs this. A rewrite-anyway would move the ETag on every one of them and 409 anybody with
+    // the profile open, and would fill the trail with entries that record no change.
+    expect(await nameAudits((await employee()).uuid)).toHaveLength(0);
+  });
+
+  it("refuses a half name, rather than blanking the other part", async () => {
+    await nameMode("always");
+    await seen(new Date());
+    for (const half of [{ givenName: "Grace" }, { familyName: "Hopper" }, { givenName: "  ", familyName: "Hopper" }]) {
+      await syncGoogleProfile(deps(), EMAIL, half);
+    }
+    const after = await employee();
+    expect([after.firstName, after.lastName]).toEqual(["Ada", "Avatar"]);
+  });
+
+  // ---- making the employee record -------------------------------------------------------------------------
+  //
+  // The one switch here that creates a PERSON rather than filling a field on one, which is why it is off by
+  // default and why "once" is structural: an employee holding the work address is the memory, and a leaver's
+  // soft-deleted row counts - coming back must be a rehire somebody decides, not a side effect of signing in.
+
+  const newcomer = async () =>
+    (await deps().db.select().from(schema.employees).where(eq(schema.employees.workEmail, NEW_EMAIL)))[0];
+  const createOn = (extra: Record<string, unknown> = {}) =>
+    deps().db.insert(schema.settings).values({ key: "sign-in", value: JSON.stringify({ google_employee: true, ...extra }) });
+
+  it("creates nobody unless the org asked for it", async () => {
+    await syncGoogleProfile(deps(), NEW_EMAIL, NAMES);
+    expect(await newcomer()).toBeUndefined();
+  });
+
+  it("creates the record from what the sign-in carries, and links the sign-in account to it", async () => {
+    await createOn();
+    await syncGoogleProfile(deps(), NEW_EMAIL, NAMES);
+    const emp = (await newcomer())!;
+    expect([emp.firstName, emp.lastName, emp.workEmail]).toEqual(["Grace", "Hopper", NEW_EMAIL]);
+    // The org's own calendar day, not the Worker's UTC one.
+    expect(emp.startDate && new Date(emp.startDate).toISOString().slice(0, 10)).toBe(await orgToday(deps()));
+    // It is a full `createEmployee`, so the person has a code, a human ID and an account - without the account
+    // link every `me`-scoped grant misses and they sign in to an empty app, which is the whole point of this.
+    expect(emp.code).toBeTruthy();
+    expect(emp.employeeNumber).toBeTruthy();
+    const account = (await deps().db.select().from(schema.users).where(eq(schema.users.email, NEW_EMAIL)))[0];
+    expect(account?.employeeId).toBe(emp.uuid);
+  });
+
+  it("adopts an account that signed in before there was a record to link it to", async () => {
+    // The ordinary order of events: the auth middleware minted this row on an earlier sign-in, unlinked,
+    // because no employee held the address yet.
+    await deps().db.insert(schema.users).values({ uuid: genId(), code: `u-${genId().slice(0, 5)}`, email: NEW_EMAIL, role: "employee", status: "active" });
+    await createOn();
+    await syncGoogleProfile(deps(), NEW_EMAIL, NAMES);
+    const rows = await deps().db.select().from(schema.users).where(eq(schema.users.email, NEW_EMAIL));
+    // Linked, not duplicated: a second account at the default role would hold none of the first one's grants.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.employeeId).toBe((await newcomer())!.uuid);
+  });
+
+  it("creates at most one, however many times they sign in", async () => {
+    await createOn();
+    await syncGoogleProfile(deps(), NEW_EMAIL, NAMES);
+    const first = (await newcomer())!;
+    await syncGoogleProfile(deps(), NEW_EMAIL, { givenName: "Someone", familyName: "Else" });
+    const rows = await deps().db.select().from(schema.employees).where(eq(schema.employees.workEmail, NEW_EMAIL));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.uuid).toBe(first.uuid);
+  });
+
+  it("does not resurrect a leaver whose record was deleted", async () => {
+    await deps().db.insert(schema.employees).values({
+      uuid: genId(),
+      code: `e-${genId().slice(0, 5)}`,
+      firstName: "Gone",
+      lastName: "Away",
+      workEmail: NEW_EMAIL,
+      deleteTime: new Date(),
+    });
+    await createOn();
+    await syncGoogleProfile(deps(), NEW_EMAIL, NAMES);
+    const rows = await deps().db.select().from(schema.employees).where(eq(schema.employees.workEmail, NEW_EMAIL));
+    // One row, still the deleted one. Coming back is a rehire a person decides, not a sign-in side effect.
+    expect(rows).toHaveLength(1);
+    expect([rows[0]!.firstName, rows[0]!.deleteTime]).toEqual(["Gone", rows[0]!.deleteTime]);
+    expect(rows[0]!.deleteTime).not.toBeNull();
+  });
+
+  it("will not make a record it can only name after an email address", async () => {
+    await createOn();
+    await syncGoogleProfile(deps(), NEW_EMAIL, { givenName: "Grace" });
+    expect(await newcomer()).toBeUndefined();
+  });
+
+  it("gives the person it just created their Google photo in the same pass", async () => {
+    await createOn();
+    await syncGoogleProfile(deps(), NEW_EMAIL, { ...NAMES, picture: AVATAR });
+    const emp = (await newcomer())!;
+    expect(emp.photoKey).toBe(`photos/${emp.uuid}`);
+  });
+
+  it("survives Google failing outright (a sign-in must never fail on a missing face)", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("network down");
+    }) as typeof fetch;
+    await expect(syncGoogleProfile(deps(), EMAIL, { picture: AVATAR })).resolves.toBeUndefined();
+    expect((await employee()).photoAt).toBeNull();
   });
 });
 

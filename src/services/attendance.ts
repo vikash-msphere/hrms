@@ -118,7 +118,7 @@ async function remoteWorkCovers(deps: Deps, employeeId: string, at: number): Pro
   return approved.some((r) => slotOf(+new Date(r.startDate), r.startSession) <= punchSlot && punchSlot <= slotOf(+new Date(r.endDate), r.endSession));
 }
 
-// The network fence, on CLOCK-IN ONLY. Empty/unset list = no fence. With a fence configured an unresolvable
+// The network fence, on BOTH punches. Empty/unset list = no fence. With a fence configured an unresolvable
 // client IP is a denial, not a pass: a punch we cannot place is exactly what the fence exists to stop.
 //
 // The fence answers "are you at work?", and approved remote work is the sanctioned answer "no, and that was
@@ -126,14 +126,12 @@ async function remoteWorkCovers(deps: Deps, employeeId: string, at: number): Pro
 // moment that period ends. The lookup runs ONLY after the IP misses, so the ordinary in-office punch (and
 // every punch in a deployment with no fence) still costs no extra read.
 //
-// WHY CLOCK-OUT IS NOT FENCED. "Are you at work?" is the question whose answer is NO at the moment somebody
-// leaves the building, so fencing the closing punch refused it for the ordinary case it was aimed at. The
-// session then stays open, `att_open_emp_idx` is a partial unique index on (employee, open), so every later
-// `clockIn` answers "already clocked in" and the person can never punch again - and loss of pay is derived
-// from punches, so every subsequent working day reads as a full absence (services/payroll.ts#assembleLop)
-// with nothing on screen explaining why. Recovery needed an approved regularization, i.e. an approver, before
-// the employee could clock in again. Closing a session you already opened asserts nothing about where you
-// are; the in-office punch that OPENED it is the one this fence exists to check.
+// Clock-out is fenced too, so the end of the working day is stamped from the workplace as well as its start:
+// an unfenced clock-out would let anyone close their session from home, hours after leaving. A refused
+// clock-out leaves the session open, which is recoverable without an approver: the next punch from an
+// allowed network closes it (and `clockIn` answers "already clocked in" until then), loss of pay credits an
+// open session only up to the end of its own local day (domain/attendance.ts#sessionWorkedMinutes), and an
+// attendance-regularization corrects the recorded time from any network.
 async function assertPunchOrigin(deps: Deps, employeeId: string, at: number, origin: PunchOrigin): Promise<void> {
   const rules = parseIpAllowList(origin.allowList);
   if (!rules.length) return;
@@ -171,12 +169,11 @@ export async function clockIn(deps: Deps, actor: AppUser, origin: PunchOrigin) {
 }
 
 // Clock out: close the caller's open session now. Errors if none is open.
-export async function clockOut(deps: Deps, actor: AppUser) {
+export async function clockOut(deps: Deps, actor: AppUser, origin: PunchOrigin) {
   const employeeId = actor.employeeId;
   if (!employeeId) throw invalidArgument("you are not linked to an employee record");
   const at = +deps.clock.now();
-  // NOT fenced - see assertPunchOrigin. Refusing the closing punch locks the session open, and an open
-  // session is what docks every later day as a full absence.
+  await assertPunchOrigin(deps, employeeId, at, origin);
   const open = await openSessionFor(deps, employeeId);
   if (!open) throw failedPrecondition("not clocked in");
   const [row] = await deps.db

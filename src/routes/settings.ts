@@ -806,6 +806,7 @@ export const UNVALIDATED_SETTING_KEYS = new Map<string, string>([
   ["notifications", "per-category enable/priority flags; nothing is computed from them and nothing is stored - the worst case is a notification not emitted"],
   ["payroll-approval", "one flag, read as `cfg.enabled === true` (services/payroll.ts)"],
   ["reimbursements", "one enum, read as `v.payout_mode === \"separate\"` - anything else is the default"],
+  ["sign-in", "two flags and one enum (services/googleProfile.ts), each read strictly: `google_photo` off only on `false`, `google_employee` on only on `true` (so a malformed value never creates people), and an unrecognised `google_name` reads as `never` - a bad value always syncs less, never more"],
   ["ticket-categories", "a routing catalogue; a malformed one throws where it is read rather than routing a ticket to the wrong team"],
   ["transition-templates", "checklists; findTemplate tolerates a miss by leaving the checklist empty, which is visible, and a malformed blob throws"],
 ]);

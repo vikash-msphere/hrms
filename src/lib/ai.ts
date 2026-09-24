@@ -13,6 +13,11 @@
 //      and it is sent on every call whether or not a gateway is configured, so turning one on later cannot
 //      quietly start recording payloads.
 //
+//      It goes in `extraHeaders`, NOT as the gateway's `collectLog: false`. That option is the binding's form
+//      of `cf-aig-collect-log`, which drops the WHOLE log entry and overrides the gateway's own setting: sent
+//      on every call, it left the gateway with no logs at all. The binding has no payload-only option, so the
+//      header is passed as-is; checked against the `hrms` gateway, which logged the call with empty bodies.
+//
 // What this file deliberately does NOT do: decide whether a call is affordable, cache its result, record it,
 // or judge whether the text was allowed anywhere near a model. services/ai.ts owns all four. Keeping them out
 // means this stays a transport that a test can replace with a fake in one line.
@@ -20,12 +25,13 @@ import { assertModelAllowed, MODELS } from "../domain/aiPolicy";
 import type { TextModel } from "../ports";
 
 /** Options threaded into every `AI.run` call. `gateway` is set only when the deployment names one. */
-type RunOptions = { gateway?: { id: string; collectLog: boolean }; returnRawResponse?: false };
+type RunOptions = { gateway?: { id: string }; extraHeaders: Record<string, string>; returnRawResponse?: false };
 
 export function makeTextModel(binding: Ai, gatewayId?: string): TextModel {
   // Metadata-only logging when a gateway is configured: usage and latency are recorded, prompts and
   // completions are not. `ai_usage` is the richer record anyway, and it is in our own database.
-  const options: RunOptions = gatewayId ? { gateway: { id: gatewayId, collectLog: false } } : {};
+  const extraHeaders = { "cf-aig-collect-log-payload": "false" };
+  const options: RunOptions = gatewayId ? { gateway: { id: gatewayId }, extraHeaders } : { extraHeaders };
 
   async function run<T>(model: string, input: unknown): Promise<T> {
     assertModelAllowed(model);

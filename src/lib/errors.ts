@@ -164,6 +164,15 @@ export function isUserEmployeeCollision(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\busers\.employee_id\b/i.test(errorChainText(err));
 }
 
+/** Two sign-ins of the same brand-new person both reached the auto-create in services/googleProfile.ts, or a
+ *  create raced HR adding the same hire. `employees.work_email` being UNIQUE is what stops the second row, and
+ *  the loser wants the row that now exists rather than a retry - there is only ever one person behind one work
+ *  address. Note the index covers the RAW column, so it also fires on a SOFT-DELETED leaver still holding the
+ *  address, which is deliberately not something an auto-create may step over. */
+export function isEmployeeWorkEmailCollision(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\bemployees\.work_email\b/i.test(errorChainText(err));
+}
+
 /** And on a person's human ID (EMP-0042), allocated max+1 from the org's format and unique. */
 export function isEmployeeNumberCollision(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\bemployees\.employee_number\b/i.test(errorChainText(err));

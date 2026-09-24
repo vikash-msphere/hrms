@@ -7,6 +7,7 @@ import { users } from "../db/schema";
 import { makeDeps } from "../deps";
 import { openSession, sealSession } from "../lib/session";
 import { counter, keyedCounter } from "../lib/isolateRate";
+import { syncGoogleProfile, type GoogleProfileClaims } from "../services/googleProfile";
 import { EDGE_COOKIE } from "../http/assetPaths";
 
 // Direct Google sign-in (OIDC authorization-code flow), the no-per-seat-cost alternative to fronting the
@@ -22,6 +23,11 @@ import { EDGE_COOKIE } from "../http/assetPaths";
 //                      expiry, signature, nonce, email_verified), the email's domain is checked against
 //                      ALLOWED_EMAIL_DOMAINS, a signed stateless session cookie is set (lib/session.ts), and
 //                      the browser lands on the parked page, or `/`.
+//
+// The `profile` scope is asked for so the ID token carries `picture` and `given_name`/`family_name`, which
+// services/googleProfile.ts writes onto the employee record as far as `settings/sign-in` allows - off the
+// response path, never awaited. Access mode gets none of this: an Access JWT carries an email and nothing else,
+// so there is nothing to sync.
 //   /auth/logout    -> clears the session cookie, the media cookie and the HTTP cache (POST + the app's CSRF
 //                      header, like every /v1 mutation).
 //
@@ -136,7 +142,10 @@ export const authRoutes = new Hono<AppEnv>()
     url.searchParams.set("client_id", c.env.GOOGLE_CLIENT_ID);
     url.searchParams.set("redirect_uri", `${new URL(c.req.url).origin}/auth/callback`);
     url.searchParams.set("response_type", "code");
-    url.searchParams.set("scope", "openid email");
+    // `profile` is what puts `picture` on the ID token (see the header note). Asked for whether or not the
+    // import is switched on: consent is granted once, at the account chooser, and making the scope depend on a
+    // settings row would re-prompt everybody the first time somebody flipped it.
+    url.searchParams.set("scope", "openid email profile");
     url.searchParams.set("state", state);
     url.searchParams.set("nonce", nonce);
     // Always show the account chooser: on a shared machine "sign in" must never silently resume whichever
@@ -181,6 +190,9 @@ export const authRoutes = new Hono<AppEnv>()
     // Verify the ID token cryptographically - the exchange being server-side is not, on its own, proof of
     // anything about the token's contents.
     let email: string;
+    // What this sign-in offers about the person, read off the VERIFIED payload and never off the token
+    // endpoint's raw JSON. What is done with it - and whether anything is - is settings/sign-in's decision.
+    const claims: GoogleProfileClaims = {};
     try {
       googleJwks ??= createRemoteJWKSet(new URL(GOOGLE_JWKS_URL));
       const { payload } = await jwtVerify(idToken, googleJwks, {
@@ -193,6 +205,9 @@ export const authRoutes = new Hono<AppEnv>()
         return c.text("sign-in failed: Google did not attest a verified email", 403);
       }
       email = payload.email.toLowerCase();
+      if (typeof payload.picture === "string") claims.picture = payload.picture;
+      if (typeof payload.given_name === "string") claims.givenName = payload.given_name;
+      if (typeof payload.family_name === "string") claims.familyName = payload.family_name;
     } catch {
       return c.text("sign-in failed: invalid token (try again)", 400);
     }
@@ -213,6 +228,21 @@ export const authRoutes = new Hono<AppEnv>()
       path: "/",
       maxAge: SESSION_TTL_MS / 1000,
     });
+    // Write what the org has asked for onto the employee record (services/googleProfile.ts). Entirely off the
+    // response path and never awaited: it makes an outbound request and a write, and a sign-in must not wait on
+    // either or fail with either. Deps are built inside the branch that needs them, the way /logout below does
+    // it and for the same reason - /login and /callback must keep working in Access mode, where there may be no
+    // app-side session config to build a Deps from at all.
+    if (claims.picture || claims.givenName || claims.familyName) {
+      const work = syncGoogleProfile(makeDeps(c.env), email, claims);
+      try {
+        c.executionCtx.waitUntil(work);
+      } catch {
+        /* no execution context (tests, in-process dispatch): `importGooglePhoto` never rejects, so dropping the
+           promise is safe, and awaiting it here would put a Google round trip in front of the redirect. */
+        void work;
+      }
+    }
     // Validated again on the way out, not only when it was parked: the cookie is ours, but this is the line
     // that decides where a freshly signed-in browser goes, and it should not depend on the cookie being so.
     return c.redirect(safeNext(cookieNext, new URL(c.req.url).origin) ?? "/");

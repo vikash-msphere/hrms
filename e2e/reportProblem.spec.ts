@@ -138,6 +138,8 @@ test.describe("report a problem", () => {
   });
 
   test('"Record the problem" hides the form, counts down in the top bar, and comes back with the draft', async ({ as }) => {
+    // Two recording windows past the SDK's floor, the settle before them and the send's own 30s budget.
+    test.setTimeout(120_000);
     const page = await as("employee");
     const envelopes = await stubTelemetryRelay(page);
     await gotoRoute(page, "leave-requests");
@@ -170,6 +172,18 @@ test.describe("report a problem", () => {
     await expect(page.getByRole("dialog")).toBeVisible();
     await expect(page.getByPlaceholder("The page went blank when I clicked Save")).toHaveValue(subject);
     await expect(page.getByRole("status").filter({ hasText: /Recording/ })).toHaveCount(0);
+
+    // The button has become the attachment, and the X undoes it: the button comes back to record again.
+    const back = page.getByRole("dialog");
+    await expect(back.getByText("Screen recording attached")).toBeVisible();
+    await expect(back.getByRole("button", { name: "Record the problem" })).toHaveCount(0);
+    await back.getByRole("button", { name: "Remove recording" }).click();
+    await expect(back.getByText("Screen recording attached")).toHaveCount(0);
+    await back.getByRole("button", { name: "Record the problem" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await page.waitForTimeout(7000);
+    await chip.getByRole("button", { name: "Stop" }).click();
+    await expect(page.getByRole("dialog").getByText("Screen recording attached")).toBeVisible();
 
     // And it still files, carrying the recording that now includes the demonstration. Given room, because
     // filing uploads that recording through the relay: on a wide run the default five seconds is the report

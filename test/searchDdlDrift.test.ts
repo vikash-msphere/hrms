@@ -4,17 +4,20 @@ import { renderSearchDdl, SEARCH_DDL_MARKER } from "../src/db/searchDdl";
 import { SEARCH_INDEX } from "../src/domain/searchIndex";
 import { CHANGE_DDL_MARKER } from "../src/db/changeDdl";
 
-// The FTS index and its sync triggers are GENERATED from SEARCH_INDEX and appended to the single migration by
-// `npm run db:generate` (drizzle-kit emits neither virtual tables nor triggers). Nothing at runtime would fail
-// if the two fell out of step - search would just quietly stop covering a renamed column, or index a stale
-// expression - so this gate makes that impossible: change the registry or the schema, re-run db:generate.
+// The FTS index and its sync triggers are GENERATED from SEARCH_INDEX (drizzle-kit emits neither virtual tables
+// nor triggers), and the block lives in migration 0000. Nothing at runtime would fail if the two fell out of
+// step - search would just quietly stop covering a renamed column, or index a stale expression - so this gate
+// makes that impossible. 0000 is applied to the live database and never rewritten, so a registry or schema
+// change that moves the generated DDL fails here (and in `npm run db:generate`) until the delta is written into
+// a new migration.
 const files = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const paths = Object.keys(files).sort();
-const migration = paths.length === 1 ? files[paths[0]!]! : "";
+const holders = paths.filter((p) => files[p]!.includes(SEARCH_DDL_MARKER));
+const migration = holders.length === 1 ? files[holders[0]!]! : "";
 
 describe("generated search DDL matches the migration", () => {
-  it("keeps exactly one squashed migration", () => {
-    expect(paths.length, `expected one migration, found: ${paths.join(", ")}`).toBe(1);
+  it("keeps the generated block in exactly one migration", () => {
+    expect(holders.length, `search DDL found in: ${holders.join(", ") || "no migration"}`).toBe(1);
   });
 
   it("has the generated block, byte-identical to the generator's output", () => {
@@ -75,14 +78,17 @@ describe("generated search DDL matches the migration", () => {
     return out.map((s) => s.trim()).filter((s) => s.length > 0);
   }
 
-  it("splits the way wrangler will, into statements D1 will accept", () => {
-    const statements = wranglerSplit(migration);
+  // Over EVERY migration, not just the one carrying the generated block: a hand-written migration goes through
+  // the same splitter at deploy time.
+  it.each(paths)("splits %s the way wrangler will, into statements D1 will accept", (path) => {
+    const sql = files[path]!;
+    const statements = wranglerSplit(sql);
     // Every statement must be comfortably under D1's ~100KB per-statement ceiling.
     const oversized = statements.filter((s) => Buffer.byteLength(s) > 90_000).map((s) => `${Buffer.byteLength(s)}B: ${s.slice(0, 80)}…`);
     expect(oversized, "wrangler would send an oversized statement - SQLITE_TOOBIG").toEqual([]);
     // And it must find as many statements as the file declares breakpoints: a splitter that swallowed
     // separators collapses hundreds of statements into a handful, which is exactly the failure above.
-    const declared = migration.split("--> statement-breakpoint").filter((s) => s.trim()).length;
+    const declared = sql.split("--> statement-breakpoint").filter((s) => wranglerSplit(s).length > 0).length;
     expect(statements.length).toBe(declared);
   });
 
