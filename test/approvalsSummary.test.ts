@@ -143,9 +143,10 @@ describe("approvals summary gating (middleware)", () => {
   it("scopes exactly the queues a role may approve in, at that role's breadth", async () => {
     const mgr = await approvalScopesFor(deps, actor("manager", "04-001-001"));
     expect([...mgr.keys()].sort()).toEqual(
-      ["asset-requests", "attendance-regularizations", "expenses", "leave-requests", "overtime-requests", "remote-work-requests", "time-entries"],
+      ["asset-requests", "attendance-regularizations", "expenses", "late-early-requests", "leave-requests", "overtime-requests", "remote-work-requests", "time-entries"],
     );
     expect(mgr.get("leave-requests")!.breadth).toBe("dept");
+    expect(mgr.get("late-early-requests")!.breadth).toBe("dept");
     const hr = await approvalScopesFor(deps, actor("hr_admin", "07-001-001"));
     expect(hr.get("leave-requests")!.breadth).toBe("all");
     expect(hr.has("loans")).toBe(false); // hr doesn't decide money advances; payroll does

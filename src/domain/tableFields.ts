@@ -53,6 +53,7 @@ export const BASES: Record<string, BaseDef> = {
   "attendance-regularizations": { label: "Attendance corrections" },
   "overtime-requests": { label: "Overtime requests" },
   "remote-work-requests": { label: "Remote work requests" },
+  "late-early-requests": { label: "Late & early requests" },
   shifts: { label: "Shifts" },
   "shift-assignments": { label: "Roster assignments" },
   projects: { label: "Projects" },

@@ -115,6 +115,11 @@ export const EVENT_TYPES: EventTypeDef[] = [
   { type: "overtime.approved", label: "Overtime approved", module: "Attendance", subjectCollection: "overtime-requests", fields: [{ name: "hours", type: "number" }] },
   { type: "remoteWork.requested", label: "Remote work requested", module: "Attendance", subjectCollection: "remote-work-requests", fields: [{ name: "from", type: "date" }, { name: "to", type: "date" }] },
   { type: "remoteWork.approved", label: "Remote work approved", module: "Attendance", subjectCollection: "remote-work-requests", fields: [{ name: "from", type: "date" }, { name: "to", type: "date" }] },
+  // `kind` and `minutes` are what a rule branches on ("tell the team channel about late arrivals over an hour");
+  // `autoApproved` separates the policy's own approvals from a person's, and `overLimit` the ones filed past the
+  // monthly allowance.
+  { type: "lateEarly.requested", label: "Late arrival / early departure requested", module: "Attendance", subjectCollection: "late-early-requests", fields: [{ name: "date", type: "date" }, { name: "kind", type: "string" }, { name: "minutes", type: "number" }, { name: "overLimit", type: "boolean" }] },
+  { type: "lateEarly.approved", label: "Late arrival / early departure approved", module: "Attendance", subjectCollection: "late-early-requests", fields: [{ name: "date", type: "date" }, { name: "kind", type: "string" }, { name: "minutes", type: "number" }, { name: "autoApproved", type: "boolean" }] },
 
   // Compensation & payroll
   { type: "reimbursement.submitted", label: "Reimbursement submitted", module: "Payroll", subjectCollection: "reimbursements", fields: [{ name: "amount", type: "number" }, { name: "categoryId", type: "ref" }] },

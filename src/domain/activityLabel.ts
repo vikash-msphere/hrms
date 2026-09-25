@@ -49,6 +49,7 @@ const LABELERS: Record<string, Labeler> = {
   "overtime-requests": (r) => u(shortDate(get(r, "date"))),
   "remote-work-requests": (r) => u(dateRange(get(r, "start_date"), get(r, "end_date"))),
   "attendance-regularizations": (r) => u(shortDate(get(r, "date"))),
+  "late-early-requests": (r) => u(shortDate(get(r, "date"))),
   "time-entries": (r) => u(shortDate(get(r, "date"))),
   "shift-assignments": (r) => u(shortDate(get(r, "date"))),
   "check-ins": (r) => u(shortDate(get(r, "meeting_date"))),
@@ -76,6 +77,13 @@ const LABELERS: Record<string, Labeler> = {
   "holiday-selections": (r) => u(shortDate(get(r, "created_at"))),
   "interview-feedback": (r) => u(txt(get(r, "recommendation"))),
   "leave-encashments": (r) => u(txt(get(r, "state"))),
+  // A ledger row's own facts: which kind it is and the signed days it moved the balance by.
+  "leave-adjustments": (r) => {
+    const d = Number(get(r, "days"));
+    return u([txt(get(r, "kind")), Number.isFinite(d) ? `${d > 0 ? "+" : ""}${d} days` : ""].filter(Boolean).join(" · "));
+  },
+  // Pay before HRMS: the year it belongs to and the last month it covers tell two entries apart.
+  "payroll-openings": (r) => u([txt(get(r, "financial_year")) && `FY ${txt(get(r, "financial_year"))}`, txt(get(r, "paid_through")) && `through ${txt(get(r, "paid_through"))}`].filter(Boolean).join(" · ")),
   // The offer's own dates; its candidate lives on the application it points at, which is a join away.
   "offers": (r) => u(shortDate(get(r, "offer_date")) || txt(get(r, "status"))),
   "operations": (r) => u(txt(get(r, "kind"))),

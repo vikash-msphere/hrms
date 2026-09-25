@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMemo, useState } from "react";
-import { CalendarCheck, ReceiptText, Hourglass, House, Check, X, CheckCheck, ExternalLink, Clock, Coins, Banknote, Timer, Inbox, Users, History, Landmark, Wallet, Laptop, type LucideIcon } from "lucide-react";
+import { CalendarCheck, ReceiptText, Hourglass, House, Check, X, CheckCheck, ExternalLink, Clock, Coins, Banknote, Timer, Inbox, Users, History, Landmark, Wallet, Laptop, AlarmClock, type LucideIcon } from "lucide-react";
 import { useCollection } from "@/hooks/useCollection";
 import { navigate } from "@/router";
 import { useApprovals, APPROVAL_COLLECTIONS } from "@/lib/approvals";
@@ -30,7 +30,8 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
-import type { Employee, LeaveRequest, LeaveType, LeaveBalance, ReimbursementCategory, Project, Me, Reimbursement, OvertimeRequest, RemoteWorkRequest, AttendanceRegularization, LeaveEncashment, Loan, TimeEntry, Expense, AssetCategory, AssetRequest } from "@/types";
+import type { Employee, LeaveRequest, LeaveType, LeaveBalance, ReimbursementCategory, Project, Me, Reimbursement, OvertimeRequest, RemoteWorkRequest, LateEarlyRequest, AttendanceRegularization, LeaveEncashment, Loan, TimeEntry, Expense, AssetCategory, AssetRequest } from "@/types";
+import { KIND_LABEL, fmtMinutes, type LateEarlyKind } from "@/lib/lateEarly";
 import type { ApprovalsBuckets, TaxVerification } from "@/lib/approvals";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { leaveDecisionContext, leaveSummary } from "@/lib/leaveApproval";
@@ -140,7 +141,7 @@ export default function Approvals({ me }: { me: Me }) {
 
   // Pending items + a shared reload come from the session-wide provider, so approving here also updates the
   // sidebar count badge.
-  const { leaves, reimbs, overtimes, remotes, regularizations, encashments, loans, timeEntries, expenses, assetRequests, taxVerifications, total, history, reload, loading, error } = useApprovals();
+  const { leaves, reimbs, overtimes, remotes, lateEarlies, regularizations, encashments, loans, timeEntries, expenses, assetRequests, taxVerifications, total, history, reload, loading, error } = useApprovals();
 
   // Reference lists exist to LABEL rows, so each one waits for a row of its own kind to be in the inbox (or in
   // the decided history, which the same buckets carry). An inbox holding two leave requests reads leave types -
@@ -229,6 +230,20 @@ export default function Approvals({ me }: { me: Me }) {
   const sumReimb = (r: Reimbursement) => `${money(r.amount)}${r.category ? ` · ${catName(r.category)}` : ""}${r.description ? ` · ${r.description}` : ""}`;
   const sumOt = (r: OvertimeRequest) => `${formatDate(r.date)} · ${Math.round(r.minutes / 6) / 10}h${r.reason ? ` · ${r.reason}` : ""}`;
   const sumRemote = (r: RemoteWorkRequest) => `${formatDate(r.start_date)} – ${formatDate(r.end_date)} · ${r.days} day${r.days === 1 ? "" : "s"}${r.reason ? ` · ${r.reason}` : ""}`;
+  // What is being asked, in the words the person used, and the one fact the decider weighs it against: whether it
+  // was filed past the monthly allowance the org set.
+  const sumLateEarly = (r: LateEarlyRequest) =>
+    `${formatDate(r.date)} · ${KIND_LABEL[r.kind as LateEarlyKind] ?? r.kind} · ${r.kind === "early_departure" ? "leave at" : "in by"} ${r.at} (${fmtMinutes(r.minutes ?? 0)})${r.over_limit ? " · past the monthly allowance" : ""}${r.reason ? ` · ${r.reason}` : ""}`;
+  // The same aid a correction gets: the person's own attendance around the day, one click away.
+  const lateEarlyContext = (r: LateEarlyRequest): React.ReactNode => {
+    const empId = r.employee ? idOf(r.employee) : undefined;
+    if (!empId) return null;
+    return (
+      <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={() => navigate(`employees/${empId}/attendance`)}>
+        See their attendance around {formatDate(r.date)}
+      </button>
+    );
+  };
   const sumEncash = (r: LeaveEncashment) => `${typeName(r.leave_type)} · ${r.days} day${r.days === 1 ? "" : "s"}${r.amount != null ? ` · ${money(r.amount)}` : ""}`;
   const sumLoan = (r: Loan) => `${r.kind === "advance" ? "Advance" : "Loan"} · ${money(r.principal)} · ${r.installments} installment${r.installments === 1 ? "" : "s"}${r.reason ? ` · ${r.reason}` : ""}`;
   const sumTime = (r: TimeEntry) => `${projName(r.project) ?? "Project"}${r.date ? ` · ${formatDate(r.date)}` : ""} · ${r.hours}h${r.description ? ` · ${r.description}` : ""}`;
@@ -251,6 +266,7 @@ export default function Approvals({ me }: { me: Me }) {
       group({ key: "reimb", label: "Reimbursements", icon: ReceiptText, collection: "reimbursements", items: items(b.reimbs), summary: sumReimb }),
       group({ key: "overtime", label: "Overtime", icon: Hourglass, collection: "overtime-requests", items: items(b.overtimes), summary: sumOt }),
       group({ key: "remote", label: "Remote work", icon: House, collection: "remote-work-requests", items: items(b.remotes), summary: sumRemote }),
+      group({ key: "late-early", label: "Late & early", icon: AlarmClock, collection: "late-early-requests", items: items(b.lateEarlies), summary: sumLateEarly, context: forHistory ? undefined : lateEarlyContext }),
       group({ key: "regularization", label: "Attendance", icon: Clock, collection: "attendance-regularizations", items: items(b.regularizations), summary: sumReg, context: forHistory ? undefined : regContext }),
       group({ key: "encashment", label: "Leave encashment", icon: Coins, collection: "leave-encashments", items: items(b.encashments), summary: sumEncash }),
       group({ key: "loan", label: "Loans & advances", icon: Banknote, collection: "loans", items: items(b.loans), summary: sumLoan }),
@@ -262,7 +278,7 @@ export default function Approvals({ me }: { me: Me }) {
   const isHistory = mode === "history";
   const allGroups = isHistory
     ? buildGroups(history, true)
-    : buildGroups({ leaves, reimbs, overtimes, remotes, regularizations, encashments, loans, timeEntries, expenses, assetRequests }, false);
+    : buildGroups({ leaves, reimbs, overtimes, remotes, lateEarlies, regularizations, encashments, loans, timeEntries, expenses, assetRequests }, false);
   // Metrics count the whole queue; the tabs below show whichever slice a metric has been clicked into, so the
   // numbers never move under the reader as they narrow.
   const queue = allGroups.flatMap((g) => g.items);

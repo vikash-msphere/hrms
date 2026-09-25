@@ -258,6 +258,15 @@ export function isReviewDuplicate(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\breviews\.(cycle_id|employee_id)\b/i.test(errorChainText(err));
 }
 
+/** That person already has pay before HRMS recorded for that financial year (`popen_emp_fy_idx`).
+ *
+ *  The services check for the live row first and say so in words (services/payrollOpenings.ts); this catches
+ *  what gets past the check - two imports racing, or a restore of a deleted row onto a year that has been
+ *  entered again since. Two live rows would count the same months' pay and tax twice in the year's TDS. */
+export function isPayrollOpeningDuplicate(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\bpayroll_openings\.(employee_id|financial_year)\b/i.test(errorChainText(err));
+}
+
 /** Two concurrent writes to one employee's effective-dated timeline both tried to leave it with an open row.
  *
  *  `comp_open_idx` / `pos_open_idx` are partial unique indexes on `employee_id where effective_to is null`, so

@@ -10,6 +10,8 @@ import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
 import { chunk } from "../lib/dbBatch";
 import { localDay } from "../domain/attendance";
+import { excusalsByDay, judgeDay, type LateEarlyKind } from "../domain/punctuality";
+import { punctualityPolicy } from "./lateEarlyRequests";
 import {
   METRICS,
   METRIC_GROUPS,
@@ -176,6 +178,7 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     managerId: t.employees.managerId,
     startDate: t.employees.startDate,
     endDate: t.employees.endDate,
+    trackedFrom: t.employees.trackedFrom,
   };
   const rosterWhere = (extra?: SQL) => and(...([
     applyScope(empScope, t.employees.code, t.employees.uuid),
@@ -238,6 +241,7 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     "leave-requests": [t.leaveRequests.code, t.leaveRequests.employeeId],
     "remote-work-requests": [t.remoteWorkRequests.code, t.remoteWorkRequests.employeeId],
     "overtime-requests": [t.overtimeRequests.code, t.overtimeRequests.employeeId],
+    "late-early-requests": [t.lateEarlyRequests.code, t.lateEarlyRequests.employeeId],
     "time-entries": [t.timeEntries.code, t.timeEntries.employeeId],
     cards: [t.cards.code, t.cards.employeeId],
     goals: [t.goals.code, t.goals.employeeId],
@@ -353,6 +357,19 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
         lte(t.overtimeRequests.date, toDate),
         inArray(t.overtimeRequests.employeeId, ids)))
       .groupBy(t.overtimeRequests.employeeId));
+  }
+
+  if (wants("late-early-requests")) {
+    // The approved requests themselves, not a count: the same rows move the punctuality measures' windows (an
+    // approved 10:30 start is on time at 10:30), and the count is taken from them afterwards.
+    add("lateEarly", db
+      .select({ employeeId: t.lateEarlyRequests.employeeId, date: t.lateEarlyRequests.date, kind: t.lateEarlyRequests.kind, at: t.lateEarlyRequests.at })
+      .from(t.lateEarlyRequests)
+      .where(scoped("late-early-requests",
+        eq(t.lateEarlyRequests.state, "APPROVED"),
+        gte(t.lateEarlyRequests.date, fromDate),
+        lte(t.lateEarlyRequests.date, toDate),
+        inArray(t.lateEarlyRequests.employeeId, ids))));
   }
 
   if (wants("expenses")) {
@@ -589,6 +606,19 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     });
   }
 
+  // Approved late arrivals / early departures, per person and day, under the org's policy for how an approved
+  // window is judged (grace on top or not). Empty for a caller who may not list the requests.
+  const policy = (await punctualityPolicy(deps)).attendance;
+  const lateEarlyByEmp = new Map<string, { date: string; kind: LateEarlyKind; at: string }[]>();
+  for (const row of byId.get("lateEarly") ?? []) {
+    const id = String(row.employeeId);
+    (lateEarlyByEmp.get(id) ?? lateEarlyByEmp.set(id, []).get(id)!).push({ date: ymd(+new Date(row.date)), kind: row.kind as LateEarlyKind, at: String(row.at) });
+  }
+  const excusalsOf = (id: string) => {
+    const reqs = lateEarlyByEmp.get(id);
+    return reqs?.length ? excusalsByDay(reqs) : undefined;
+  };
+
   const corrections = index("corrections");
   const leave = index("leave");
   const remote = index("remote");
@@ -608,7 +638,8 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     const values: Record<string, number | null> = {};
     const put = (key: string, v: number | null) => { if (keys.has(key)) values[key] = v; };
 
-    const att = summarizeAttendance(attendanceByEmp.get(p.uuid) ?? [], sched);
+    const att = summarizeAttendance(attendanceByEmp.get(p.uuid) ?? [], sched, excusalsOf(p.uuid), policy);
+    put("late_early_approved", lateEarlyByEmp.get(p.uuid)?.length ?? 0);
     put("days_present", att.days_present);
     put("days_late", att.days_late);
     put("days_left_early", att.days_left_early);
@@ -627,13 +658,16 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     // The days this person could have worked at all: the window's scheduled working days, clamped to their
     // employment and to today. Both the absence count and the remote share are shares of THIS, not of the
     // calendar - a joiner halfway through the month has not been absent for the half before they started, and
-    // has not been "20% remote" for it either.
+    // has not been "20% remote" for it either. Clamped to when HRMS records start as well (`tracked_from`):
+    // nobody can punch into a system they were not in yet, so those days are not absences either.
+    const joinedYmd = p.startDate ? ymd(+new Date(p.startDate)) : null;
+    const trackedYmd = p.trackedFrom ? ymd(+new Date(p.trackedFrom)) : null;
     const expected = expectedWorkingDays({
       fromYmd: q.from,
       toYmd: q.to,
       workDays: sched.work_days,
       holidays,
-      joinedYmd: p.startDate ? ymd(+new Date(p.startDate)) : null,
+      joinedYmd: trackedYmd && (!joinedYmd || trackedYmd > joinedYmd) ? trackedYmd : joinedYmd,
       leftYmd: p.endDate ? ymd(+new Date(p.endDate)) : null,
       todayYmd,
     });
@@ -731,13 +765,19 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
   if (q.series && q.employeeId && people.length === 1 && wants("attendance")) {
     const days = attendanceByEmp.get(q.employeeId) ?? [];
     const startMin = hhmmToMin(sched.shift_start);
+    const endMin = hhmmToMin(sched.shift_end);
     const graceOf = new Map((sched.grace_exceptions ?? []).map((e) => [e.date, e.extra_grace_minutes == null ? Infinity : sched.grace_minutes + e.extra_grace_minutes]));
+    const excusals = excusalsOf(q.employeeId);
     series = [...days]
       .sort((a, b) => a.day.localeCompare(b.day))
       .map((d) => ({
         day: d.day,
         worked_minutes: d.workedMinutes,
-        late: !sched.flexible_hours && localMinutes(d.firstIn, sched.timezone) > startMin + (graceOf.get(d.day) ?? sched.grace_minutes),
+        // Arrival only, as it always was here; judged by the rule the table above uses, approved window and all.
+        late: judgeDay({
+          arrMin: localMinutes(d.firstIn, sched.timezone), depMin: null, open: d.open, startMin, endMin,
+          grace: graceOf.get(d.day) ?? sched.grace_minutes, flexible: sched.flexible_hours, excusal: excusals?.get(d.day), policy,
+        }).late,
       }));
   }
 

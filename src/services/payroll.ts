@@ -20,7 +20,7 @@ import { loanPerquisiteMonthly, recoverableFrom, DEFAULT_LOAN_PERQUISITE_CONFIG,
 import { allStructureLines } from "./salaryStructures";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
-import { tdsComponent, loadTaxConfig, finalizedTotals, fyWindow, monthKey, compAsOf, compGrossPricer, unpaidEarningMonths, projectedGrossForMonths, employedMonthsInFy, collectibleMonths, assembleProjection, readDeclarations, verifiedDeductionsAll, EMPTY_FINALIZED_TOTALS } from "./taxProjection";
+import { tdsComponent, loadTaxConfig, finalizedTotals, fyWindow, monthKey, compAsOf, compGrossPricer, unpaidEarningMonths, projectedGrossForMonths, employedMonthsInFy, collectibleMonths, assembleProjection, readDeclarations, verifiedDeductionsAll, EMPTY_FINALIZED_TOTALS, payrollOpeningsFor, esiOpeningInPeriod } from "./taxProjection";
 import { reimbursementPayoutMode, approvedUnpaidReimbursementsAll, resetReimbursementsPaidByRun, markReimbursementsPaidByRun } from "./reimbursements";
 import { approvedUnpaidEncashmentsAll, resetEncashmentsPaidByRun, markEncashmentsPaidByRun } from "./leaveEncashments";
 import { LOP_ADJUST_CODE, lopAdjustLabel } from "../domain/lopAdjust";
@@ -31,7 +31,7 @@ import { runBatch, runBatchChecked, chunk, byIdChunks, insertBatches, groupBy, t
 import { getSettingValue } from "./settings";
 import { documentLetterhead, letterheadMark, type OrgWithDocumentLogos } from "./letterheads";
 import type { LetterheadSpec } from "../lib/letterPdf";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, type LeaveRange, localDay, utcDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, sessionWorkedMinutes, unpaidLeaveDayUnits } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, type LeaveRange, localDay, utcDay, workingDaysInRange, lopAmount, employmentFraction, eventCreditByDay, sessionWorkedMinutes, unpaidLeaveDayUnits } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidOvertimeAll, markOvertimePaidByRun, resetOvertimePaidByRun } from "./overtimeRequests";
 import { resetCompArrearsPaidByRun, markCompArrearsPaidByRun, splitDriftFor } from "./compensation";
@@ -41,6 +41,8 @@ import { etagOf } from "../http/serialize";
 import { keysetPage } from "./keysetPage";
 import { refDepartments, refHolidays, refLeaveTypes, refPayComponents, refPayPeriods } from "../lib/refData";
 import { marksForPeriod } from "./attendanceDayMarks";
+import { periodLop, punchDays, punctualityTouchesPay, shiftScheduleOf, type DayExcusal, type PeriodLop, type PunchDay, type PunctualityPolicy, type ShiftSchedule } from "../domain/punctuality";
+import { approvedExcusals, punctualityPolicy } from "./lateEarlyRequests";
 
 // Resolve user ids to a display name: the linked employee's full name, else the user's email.
 //
@@ -692,6 +694,9 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
   const endMs = +new Date(period.periodEnd);
   const { startYmd, periodEndYmd, todayYmd, endYmd, holidays, leaveByEmp } = await periodLeave(deps, period, att);
   const workedByEmp = new Map<string, Map<string, number>>(); // employee -> day -> worked minutes
+  // The raw punches too, for the punctuality policy's reading of the same days (first in, last out) - collected
+  // in the same pass, so it costs no read of its own.
+  const sessionsByEmp = new Map<string, { clockInMs: number; clockOutMs: number | null }[]>();
   // SUPERSEDED PUNCHES ARE NOT PUNCHES. An approved attendance regularization marks the day's existing
   // sessions `superseded_by` and writes the corrected pairs beside them (services/attendanceRegularizations.ts),
   // so the day recomputes from the corrections ALONE - that is the whole contract of a correction. Read
@@ -718,6 +723,7 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
     let m = workedByEmp.get(s.employeeId);
     if (!m) workedByEmp.set(s.employeeId, (m = new Map<string, number>()));
     m.set(day, (m.get(day) ?? 0) + minutes);
+    (sessionsByEmp.get(s.employeeId) ?? sessionsByEmp.set(s.employeeId, []).get(s.employeeId)!).push({ clockInMs: ms, clockOutMs: s.clockOut ? +new Date(s.clockOut) : null });
   }
   // count_as_work events credit their attendees' worked minutes, so a day spent off-site isn't docked as an
   // absence. Merged into workedByEmp rather than handled inside lopDayUnits because the credit rules need to
@@ -762,8 +768,67 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
   // attendance strip and every other reader still want them), and only the VALUE of the day changes.
   const marksByEmp = await marksForPeriod(deps, startMs, endMs);
 
+  // The punctuality policy's say in loss of pay (domain/punctuality.ts): an approved late arrival or early
+  // departure can credit the gap it covers, and unexcused lateness can dock. Assembled only when the policy
+  // touches pay at all, so an org that has turned neither on pays for none of it - not even the one read of the
+  // period's approved requests.
+  const policy = await punctualityPolicy(deps);
+  let punctuality: LopPunctuality | null = null;
+  if (punctualityTouchesPay(policy)) {
+    const punchesByEmp = new Map<string, Map<string, PunchDay>>();
+    for (const [emp, ss] of sessionsByEmp) punchesByEmp.set(emp, punchDays(ss, (ms) => localDay(ms, tz)));
+    punctuality = {
+      // The stored attendance blob carries the shift window the SPA saved; `AttendanceConfig` just never named it.
+      sched: shiftScheduleOf(att as unknown as Record<string, unknown>),
+      policy,
+      punchesByEmp,
+      excusalsByEmp: await approvedExcusals(deps, startMs, endMs),
+    };
+  }
+
   const workingDaysInPeriod = workingDaysInRange(startYmd, periodEndYmd, att.work_days, holidays);
-  return { startYmd, endYmd, holidays, leaveByEmp, workedByEmp, marksByEmp, workingDaysInPeriod };
+  return { startYmd, endYmd, holidays, leaveByEmp, workedByEmp, marksByEmp, punctuality, workingDaysInPeriod };
+}
+
+type LopPunctuality = {
+  sched: ShiftSchedule;
+  policy: PunctualityPolicy;
+  punchesByEmp: Map<string, Map<string, PunchDay>>;
+  excusalsByEmp: Map<string, Map<string, DayExcusal>>;
+};
+
+/**
+ * One employee's loss of pay over `[startYmd, endYmd]` from the period's assembled facts - the ONE reading the
+ * build's LOP line, the payslip's attendance strip and the restatement of a closed period all make, so they
+ * cannot dock different numbers of days for the same attendance.
+ *
+ * `trackedFrom` is the employee's `tracked_from`: a day before it with nothing recorded is not docked (see
+ * domain/attendance.ts lopDayUnits). A DATE-ONLY column, so its day is the UTC one it is stored at.
+ */
+function employeeLop(
+  lop: Awaited<ReturnType<typeof assembleLop>>,
+  att: AttendanceConfig,
+  employeeId: string,
+  startYmd: string,
+  endYmd: string,
+  trackedFrom: Date | number | null | undefined,
+): PeriodLop {
+  const pn = lop.punctuality;
+  return periodLop({
+    startYmd,
+    endYmd,
+    workDays: att.work_days,
+    holidays: lop.holidays,
+    leaveRanges: lop.leaveByEmp.get(employeeId) ?? [],
+    workedByDay: lop.workedByEmp.get(employeeId) ?? new Map<string, number>(),
+    marksByDay: lop.marksByEmp.get(employeeId),
+    trackedFromYmd: trackedFrom ? utcDay(+new Date(trackedFrom)) : null,
+    fullDayMinutes: att.full_day_minutes ?? 480,
+    halfDayMinutes: att.half_day_minutes ?? 240,
+    punctuality: pn
+      ? { sched: pn.sched, policy: pn.policy, punches: pn.punchesByEmp.get(employeeId) ?? new Map<string, PunchDay>(), excusals: pn.excusalsByEmp.get(employeeId) }
+      : undefined,
+  });
 }
 
 export async function createRun(deps: Deps, actor: AppUser, payPeriodPath: string) {
@@ -833,6 +898,22 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // The month whose SALARY this run prices (its period), which is what the projection must exclude from the
   // still-to-be-earned months. Distinct from the pay-date month, which is when the tax is collected.
   const runEarnedMonthKey = monthKey(period?.periodStart ?? new Date());
+  // Pay before HRMS this year (services/payrollOpenings.ts), read once for the two things the build asks of it.
+  // The first is here: an entry whose months reach THIS run's month says the system before HRMS already paid
+  // that person's salary for it, so pricing them again pays the month twice - and counts its income and tax
+  // twice in the year. That is always a mistake in the entry or in the choice of period, never something to
+  // price around, so the build refuses and names who.
+  const openings = await payrollOpeningsFor(deps, fy.financialYear);
+  if (period) {
+    const inRun = new Map(employees.map((e) => [e.uuid, `${e.firstName} ${e.lastName}`.trim()]));
+    const covered = openings.filter((o) => inRun.has(o.employeeId) && o.paidThrough >= runEarnedMonthKey).map((o) => inRun.get(o.employeeId)!);
+    if (covered.length) {
+      const named = covered.slice(0, 5).join(", ") + (covered.length > 5 ? ` and ${covered.length - 5} more` : "");
+      throw failedPrecondition(
+        `pay before HRMS already covers ${runEarnedMonthKey} for ${named}; build a later month, or correct their entry on the Opening balances page`,
+      );
+    }
+  }
 
   // A rebuild first releases everything the PREVIOUS build of this run marked paid (idempotency), and drops
   // the old items. All of it goes in ONE atomic batch - one subrequest, and a crash can't leave the run
@@ -1021,6 +1102,11 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
         if ((JSON.parse(it.linesJson) as Line[]).some((l) => l.code === "ESI")) esiContributing.add(it.employeeId);
       }
     }
+    // And the people the system before HRMS was deducting ESI for in this same contribution period (a payroll
+    // opening flagged as contributing, whose last month falls inside it).
+    for (const o of openings) {
+      if (o.esiContributing && esiOpeningInPeriod(o.paidThrough, cp)) esiContributing.add(o.employeeId);
+    }
   }
 
   for (const e of employees) {
@@ -1137,17 +1223,9 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       // not counted as unauthorised absences here (else a joiner is docked twice).
       const lopStartYmd = empStartYmd && empStartYmd > lop.startYmd ? empStartYmd : lop.startYmd;
       const lopEndYmd = empEndYmd && empEndYmd < lop.endYmd ? empEndYmd : lop.endYmd;
-      const dayUnits = lopDayUnits({
-        startYmd: lopStartYmd,
-        endYmd: lopEndYmd,
-        workDays: att.work_days,
-        holidays: lop.holidays,
-        leaveRanges: lop.leaveByEmp.get(e.uuid) ?? [],
-        workedByDay: lop.workedByEmp.get(e.uuid) ?? new Map<string, number>(),
-        marksByDay: lop.marksByEmp.get(e.uuid),
-        fullDayMinutes: att.full_day_minutes ?? 480,
-        halfDayMinutes: att.half_day_minutes ?? 240,
-      });
+      // Absence plus whatever the punctuality policy docks for unexcused lateness (domain/punctuality.ts).
+      const owed = employeeLop(lop, att, e.uuid, lopStartYmd, lopEndYmd, e.trackedFrom);
+      const dayUnits = owed.units;
       // Never dock more than the period's regular wage (a full-month absence zeroes the salary, it doesn't turn
       // it negative - which a prorated part-month at the full daily rate could otherwise do). `lopWage` is the
       // FULL monthly regular gross by default (basic + every recurring allowance + the Special Allowance plug),
@@ -1161,7 +1239,21 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
         autoLop = amt;
         // `units` carries the day count as DATA: the statutory register reports non-contributing (NCP) days and
         // must not have to parse them back out of a display label.
-        lines.push({ code: "LOP", name: `Loss of pay (${dayUnits}d)`, kind: "earning", amount: round2(-amt), units: dayUnits });
+        //
+        // ONE line whatever the punctuality policy adds to it, because every reader of this line (the NCP days,
+        // the restatement's charged units and daily rate in services/lopAdjustments.ts) reads it as THE
+        // attendance dock. What the marks contributed rides in `parts`, so the payslip can say it - a
+        // deduction the employee cannot trace to a cause is one they will ask about.
+        const parts = owed.penaltyUnits > 0
+          ? (() => {
+            const marks = round2(-amt * (owed.penaltyUnits / dayUnits));
+            return [
+              ...(owed.absenceUnits > 0 ? [{ label: `Absence (${owed.absenceUnits}d)`, amount: round2(-amt - marks) }] : []),
+              { label: `Late / early marks (${owed.penaltyUnits}d, ${owed.lateMarks + owed.earlyMarks} marks)`, amount: owed.absenceUnits > 0 ? marks : round2(-amt) },
+            ];
+          })()
+          : undefined;
+        lines.push({ code: "LOP", name: `Loss of pay (${dayUnits}d)`, kind: "earning", amount: round2(-amt), units: dayUnits, ...(parts ? { parts } : {}) });
       }
     } else if (unpaidLeave) {
       // AUTOMATIC LOSS OF PAY IS OFF, and approved UNPAID leave is still docked. Attendance-driven docking is an
@@ -1751,13 +1843,21 @@ async function changedInputsSince(
       employee: schema.taxDeclarations.employeeId,
       window: sql`${schema.taxDeclarations.financialYear} = ${runFy}`,
     },
+    // Pay and tax from before HRMS ran payroll count toward the year's TDS, PT cap and ESI, so entering or
+    // correcting them moves an already-built run - for the year it withholds for only.
+    {
+      label: "Pay and tax before HRMS",
+      table: schema.payrollOpenings,
+      employee: schema.payrollOpenings.employeeId,
+      window: sql`${schema.payrollOpenings.financialYear} = ${runFy}`,
+    },
     // The `settings` table is one row per KEY, so an unnarrowed probe made every unrelated org preference - the
     // holiday feed, an asset-tag option, a board default - an input to payroll. These are the keys the build
     // actually reads (directly, and through loadTaxConfig / orgToday).
     {
       label: "Pay-run settings (CTC / tax / overtime / PT)",
       table: schema.settings,
-      window: sql`${schema.settings.key} in ('attendance', 'ctc', 'loan-perquisite', 'organization', 'overtime', 'payslip', 'professional-tax', 'tax-config')`,
+      window: sql`${schema.settings.key} in ('attendance', 'ctc', 'loan-perquisite', 'organization', 'overtime', 'payslip', 'professional-tax', 'punctuality', 'tax-config')`,
     },
     // Holidays shift the working-days denominator that prorates mid-period joiners/leavers, so they move the
     // money even with LOP off - but only the ones falling INSIDE the period do.
@@ -1780,8 +1880,20 @@ async function changedInputsSince(
       employee: schema.attendanceSessions.employeeId,
       window: inPeriod(schema.attendanceSessions.clockIn),
     });
+    // An approved late arrival or early departure can credit its gap and excuse a mark (domain/punctuality.ts),
+    // and a pending one being decided is exactly what moves it - but only while the policy touches pay at all,
+    // the same gate the build reads them behind. A policy switched on since the build is itself a change to the
+    // `punctuality` settings row, which the probe above reports.
+    if (punctualityTouchesPay(await punctualityPolicy(deps))) {
+      sources.push({
+        label: "Late arrival / early departure requests (loss-of-pay)",
+        table: schema.lateEarlyRequests,
+        employee: schema.lateEarlyRequests.employeeId,
+        window: inPeriod(schema.lateEarlyRequests.date),
+      });
+    }
   }
-  // All fourteen questions in ONE statement, as fourteen correlated EXISTS columns. Asked one at a time this was
+  // Every question in ONE statement, as correlated EXISTS columns. Asked one at a time this was
   // a dozen-plus round trips on every read of an editable run - i.e. on the run page's own refresh - for what is
   // a single row of booleans. Each subquery still stops at its first newer row (the LIMIT rides inside EXISTS).
   // Bound as epoch millis, not as a Date: these columns are `timestamp_ms`, and outside a column-aware
@@ -1791,7 +1903,7 @@ async function changedInputsSince(
     // A row this very run marked paid is the build's own write, whatever its stamp says.
     const notOurs = s.ownRun ? sql` and (${s.ownRun as never} is null or ${s.ownRun as never} <> ${run.uuid})` : sql``;
     // One bound parameter (the run id), whatever the headcount - an `IN` list of the run's employee ids would
-    // be past D1's bound-parameter cap on any real payroll, and this statement carries fourteen of these.
+    // be past D1's bound-parameter cap on any real payroll, and this statement carries one of these per source.
     const mine = s.employee
       ? sql` and ${s.employee as never} in (select ${schema.payrollRunItems.employeeId} from ${schema.payrollRunItems} where ${schema.payrollRunItems.runId} = ${run.uuid})`
       : sql``;
@@ -2129,12 +2241,9 @@ async function payslipDataForItem(deps: Deps, ctx: PayslipRunContext, it: typeof
     const empEndYmd = emp.endDate ? utcDay(+new Date(emp.endDate)) : null;
     const wStart = empStartYmd && empStartYmd > lop.startYmd ? empStartYmd : lop.startYmd;
     const wEnd = empEndYmd && empEndYmd < lop.endYmd ? empEndYmd : lop.endYmd;
-    const lopDays = lopDayUnits({
-      startYmd: wStart, endYmd: wEnd, workDays: att.work_days, holidays: lop.holidays,
-      leaveRanges: lop.leaveByEmp.get(emp.uuid) ?? [], workedByDay: lop.workedByEmp.get(emp.uuid) ?? new Map<string, number>(),
-      marksByDay: lop.marksByEmp.get(emp.uuid),
-      fullDayMinutes: att.full_day_minutes ?? 480, halfDayMinutes: att.half_day_minutes ?? 240,
-    });
+    // The same reading the LOP line was priced by, late and early marks included, so the strip's LOP days and
+    // payable days agree with the money on the slip.
+    const lopDays = employeeLop(lop, att, emp.uuid, wStart, wEnd, emp.trackedFrom).units;
     const workingDays = workingDaysInRange(wStart, wEnd, att.work_days, lop.holidays);
     const payable = round2(workingDays - lopDays);
     attendance = { workingDays, lopDays, actualDays: payable, daysPayable: payable };
@@ -2264,7 +2373,7 @@ export async function recomputeLopUnits(deps: Deps, employeeId: string, payPerio
   const period = (await deps.db.select().from(schema.payPeriods).where(eq(schema.payPeriods.uuid, payPeriodId)).limit(1))[0];
   if (!period) return null;
   const emp = (await deps.db
-    .select({ uuid: schema.employees.uuid, startDate: schema.employees.startDate, endDate: schema.employees.endDate })
+    .select({ uuid: schema.employees.uuid, startDate: schema.employees.startDate, endDate: schema.employees.endDate, trackedFrom: schema.employees.trackedFrom })
     .from(schema.employees)
     .where(eq(schema.employees.uuid, employeeId))
     .limit(1))[0];
@@ -2277,17 +2386,8 @@ export async function recomputeLopUnits(deps: Deps, employeeId: string, payPerio
   const empEndYmd = emp.endDate ? utcDay(+new Date(emp.endDate)) : null;
   const startYmd = empStartYmd && empStartYmd > lop.startYmd ? empStartYmd : lop.startYmd;
   const endYmd = empEndYmd && empEndYmd < lop.endYmd ? empEndYmd : lop.endYmd;
-  return lopDayUnits({
-    startYmd,
-    endYmd,
-    workDays: att.work_days,
-    holidays: lop.holidays,
-    leaveRanges: lop.leaveByEmp.get(employeeId) ?? [],
-    workedByDay: lop.workedByEmp.get(employeeId) ?? new Map<string, number>(),
-    marksByDay: lop.marksByEmp.get(employeeId),
-    fullDayMinutes: att.full_day_minutes ?? 480,
-    halfDayMinutes: att.half_day_minutes ?? 240,
-  });
+  // The build's own reading (employeeLop), so a restatement is priced against the same answer the run gave.
+  return employeeLop(lop, att, employeeId, startYmd, endYmd, emp.trackedFrom).units;
 }
 
 /**

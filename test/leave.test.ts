@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeAccrual, leaveDays, roundToIncrement, ymOf } from "../src/domain/leave";
+import { computeAccrual, creditedBeforeFloor, hrmsPricingStartMs, leaveDays, roundToIncrement, ymOf } from "../src/domain/leave";
 
 const ms = (d: string) => Date.parse(d + "T00:00:00Z");
 // 12 days/year -> exactly 1.0 day per full month, keeps the arithmetic easy to read.
@@ -560,5 +560,98 @@ describe("roundToIncrement", () => {
   });
   it("0 increment = exact (2dp)", () => {
     expect(roundToIncrement(2.414, 0)).toBe(2.41);
+  });
+});
+
+// BEFORE HRMS RECORDS START (`floorMs`, from employees.tracked_from). Somebody who joined in March 2021 and
+// whose records start on 24 September 2026: the first nightly run credited 67 months in one go with nothing
+// taken off for the leave they used in those years. Those months belong to the opening balance, so the walk
+// must leave them exactly where they are - neither re-pricing them nor taking them back on its own - and say
+// precisely what they hold, which is the figure the opening replaces.
+describe("accrual before HRMS records start", () => {
+  const base = {
+    accrualDaysPerYear: ANNUAL,
+    probationAccrualDaysPerYear: ANNUAL,
+    startMs: ms("2021-03-01"),
+    endMs: null,
+    probationEndMs: null,
+  };
+  const FLOOR = ms("2026-09-24");
+  // The row the first nightly run after go-live left: every month through September, priced from the start.
+  const firstNight = computeAccrual({ ...base, lastAccrualYm: null, currentMs: ms("2026-09-25") });
+  const row = { lastAccrualYm: firstNight.newLastYm, pricedStartMs: firstNight.pricedStartMs, pricedEndMs: firstNight.pricedEndMs };
+
+  it("reads the backlog the first night credited as what it is", () => {
+    expect(firstNight.add).toBe(67); // March 2021 .. September 2026
+    expect(creditedBeforeFloor({ ...base, ...row, currentMs: ms("2026-09-26"), floorMs: FLOOR })).toBe(67);
+    // Without a floor there is nothing before it.
+    expect(creditedBeforeFloor({ ...base, ...row, currentMs: ms("2026-09-26") })).toBe(0);
+  });
+
+  it("takes nothing back when the date is set, and credits HRMS's own months after it", () => {
+    const sameMonth = computeAccrual({ ...base, ...row, currentMs: ms("2026-09-26"), floorMs: FLOOR });
+    expect(sameMonth.add).toBe(0);
+    const october = computeAccrual({ ...base, ...row, currentMs: ms("2026-10-02"), floorMs: FLOOR });
+    expect(october.add).toBe(1);
+    expect(october.newLastYm).toBe("2026-10");
+    // The window those 67 months were priced against is kept, so the figure the opening reads does not move.
+    expect(october.pricedStartMs).toBe(ms("2021-03-01"));
+    expect(creditedBeforeFloor({ ...base, lastAccrualYm: october.newLastYm, pricedStartMs: october.pricedStartMs, pricedEndMs: october.pricedEndMs, currentMs: ms("2026-10-03"), floorMs: FLOOR })).toBe(67);
+  });
+
+  it("does not credit months nobody here saw when the start date is corrected years back", () => {
+    const corrected = { ...base, startMs: ms("2020-01-01") };
+    // Without the floor, the correction credits January 2020 .. February 2021: fourteen months.
+    expect(computeAccrual({ ...corrected, ...row, currentMs: ms("2026-09-26") }).add).toBe(14);
+    const r = computeAccrual({ ...corrected, ...row, currentMs: ms("2026-09-26"), floorMs: FLOOR });
+    expect(r.add).toBe(0);
+    expect(r.pricedStartMs).toBe(ms("2021-03-01"));
+    expect(creditedBeforeFloor({ ...corrected, ...row, currentMs: ms("2026-09-26"), floorMs: FLOOR })).toBe(67);
+  });
+
+  it("starts a balance HRMS has not credited yet at the floor, with nothing to replace", () => {
+    const r = computeAccrual({ ...base, lastAccrualYm: null, currentMs: ms("2026-10-05"), floorMs: FLOOR });
+    expect(r.add).toBe(1); // October alone
+    expect(r.pricedStartMs).toBe(ms("2026-10-01"));
+    expect(creditedBeforeFloor({ ...base, lastAccrualYm: r.newLastYm, pricedStartMs: r.pricedStartMs, pricedEndMs: r.pricedEndMs, currentMs: ms("2026-10-06"), floorMs: FLOOR })).toBe(0);
+    // ...and keeps walking from there on later nights without re-reading the months before it.
+    const nov = computeAccrual({ ...base, lastAccrualYm: r.newLastYm, pricedStartMs: r.pricedStartMs, pricedEndMs: r.pricedEndMs, currentMs: ms("2026-11-02"), floorMs: FLOOR });
+    expect(nov.add).toBe(1);
+    expect(nov.pricedStartMs).toBe(ms("2026-10-01"));
+  });
+
+  it("gives the whole joining month to the opening for someone who joined in the go-live month", () => {
+    const joinedSept = { ...base, startMs: ms("2026-09-05") };
+    const r = computeAccrual({ ...joinedSept, lastAccrualYm: null, currentMs: ms("2026-10-05"), floorMs: FLOOR });
+    expect(r.add).toBe(1); // October; September is before the floor
+  });
+
+  it("does nothing when records start on or before the start date", () => {
+    const joinedLate = { ...base, startMs: ms("2026-09-10") };
+    const withFloor = computeAccrual({ ...joinedLate, lastAccrualYm: null, currentMs: ms("2026-09-26"), floorMs: ms("2026-09-01") });
+    const without = computeAccrual({ ...joinedLate, lastAccrualYm: null, currentMs: ms("2026-09-26") });
+    expect(withFloor).toEqual(without);
+  });
+
+  it("does the same on half-month periods", () => {
+    const semi = { ...base, frequency: "semi_monthly" as const };
+    const night = computeAccrual({ ...semi, lastAccrualYm: null, currentMs: ms("2026-09-17") });
+    const semiRow = { lastAccrualYm: night.newLastYm, pricedStartMs: night.pricedStartMs, pricedEndMs: night.pricedEndMs };
+    // Records start on the 16th, so the second half of September is HRMS's and everything before it is not:
+    // March 2021 H1 .. September 2026 H1 = 133 halves at half a day each.
+    const floor16 = ms("2026-09-16");
+    expect(creditedBeforeFloor({ ...semi, ...semiRow, currentMs: ms("2026-09-18"), floorMs: floor16 })).toBe(66.5);
+    const r = computeAccrual({ ...semi, ...semiRow, currentMs: ms("2026-10-02"), floorMs: floor16 });
+    expect(r.add).toBe(0.5); // October H1
+    expect(r.pricedStartMs).toBe(ms("2021-03-01"));
+  });
+
+  it("names the first day HRMS prices", () => {
+    expect(hrmsPricingStartMs({ startMs: ms("2021-03-01"), floorMs: FLOOR })).toBe(ms("2026-10-01"));
+    expect(hrmsPricingStartMs({ startMs: ms("2021-03-01"), floorMs: ms("2026-10-01") })).toBe(ms("2026-10-01"));
+    expect(hrmsPricingStartMs({ startMs: ms("2021-03-01"), floorMs: ms("2026-09-20"), frequency: "semi_monthly" })).toBe(ms("2026-10-01"));
+    expect(hrmsPricingStartMs({ startMs: ms("2021-03-01"), floorMs: ms("2026-09-16"), frequency: "semi_monthly" })).toBe(ms("2026-09-16"));
+    expect(hrmsPricingStartMs({ startMs: ms("2021-03-01"), floorMs: null })).toBeNull();
+    expect(hrmsPricingStartMs({ startMs: ms("2026-09-10"), floorMs: ms("2026-09-01") })).toBeNull();
   });
 });

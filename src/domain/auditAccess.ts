@@ -73,7 +73,7 @@ export function accessAudit(method: string, pathname: string, decision: Decision
 // worth an audit row is the separate, data-driven `sensitive_verbs` question above: a read listed there gets
 // one `.read.sensitive` row from accessAudit; every other read here writes nothing at all.
 export const READ_VERBS = new Set([
-  "employees:getPhoto", "employees:getSignature", "employees:batchGetPhotos", "employees:upcomingCelebrations",
+  "employees:getPhoto", "employees:getSignature", "employees:upcomingCelebrations",
   "employees:downloadIdentityDoc",
   "boards:metrics", // board/flow analytics
   "automations:test", // dry run: evaluates the condition, executes no action

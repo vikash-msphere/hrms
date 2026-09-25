@@ -18,6 +18,7 @@ import { useLetterheads } from "@/lib/letterheads";
 import { LetterheadDesigner } from "@/components/settings/LetterheadDesigner";
 import { RestrictionsEditor } from "@/components/leave/RestrictionsEditor";
 import { storedLeaves } from "../../../src/domain/leaveRestrictions";
+import { NOTIFICATION_CATEGORIES } from "../../../src/domain/notificationConfig";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { useSortable } from "@/hooks/useSortable";
 import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
@@ -77,6 +78,7 @@ const ApiKeysPanel = lazy(() => import("@/components/common/ApiKeysPanel").then(
 const PermissionsPanel = lazy(() => import("@/components/common/PermissionsPanel").then((m) => ({ default: m.PermissionsPanel })));
 const PerformanceFramework = lazy(() => import("@/components/common/PerformanceFramework").then((m) => ({ default: m.PerformanceFramework })));
 const TransitionTemplatesEditor = lazy(() => import("@/components/common/TransitionTemplatesEditor").then((m) => ({ default: m.TransitionTemplatesEditor })));
+const PunctualityPolicyPanel = lazy(() => import("@/settings/PunctualityPolicyPanel").then((m) => ({ default: m.PunctualityPolicyPanel })));
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -172,40 +174,10 @@ const DEFAULT_FIELDS: EmployeeFieldDef[] = [
   { key: "uan", label: "UAN", mandatory: false, sensitive: false },
 ];
 
-// Mirror of src/domain/notificationConfig.ts (kept in sync by hand - small + stable). Drives the config UI.
-const NOTIF_CATEGORIES: { key: string; label: string; defaultPriority: string }[] = [
-  { key: "leave", label: "Leave decisions", defaultPriority: "normal" },
-  { key: "reimbursement", label: "Reimbursements", defaultPriority: "normal" },
-  { key: "loan", label: "Loans & advances", defaultPriority: "normal" },
-  { key: "overtime", label: "Overtime", defaultPriority: "normal" },
-  { key: "remote", label: "Remote work", defaultPriority: "normal" },
-  { key: "regularization", label: "Attendance regularization", defaultPriority: "normal" },
-  { key: "encashment", label: "Leave encashment", defaultPriority: "normal" },
-  { key: "timesheet", label: "Timesheets", defaultPriority: "normal" },
-  { key: "kudos", label: "Kudos", defaultPriority: "normal" },
-  { key: "suggestion", label: "Suggestions", defaultPriority: "normal" },
-  { key: "announcement", label: "Announcements", defaultPriority: "normal" },
-  { key: "document", label: "Documents (review / sign)", defaultPriority: "high" },
-  { key: "payslip", label: "Payslips", defaultPriority: "normal" },
-  { key: "tax", label: "Tax declarations", defaultPriority: "normal" },
-  { key: "transition", label: "Onboarding / offboarding", defaultPriority: "high" },
-  { key: "ticket", label: "Support tickets", defaultPriority: "normal" },
-  { key: "review", label: "Performance reviews", defaultPriority: "normal" },
-  { key: "goal", label: "Goals", defaultPriority: "normal" },
-  { key: "checkin", label: "Check-ins / 1:1s", defaultPriority: "normal" },
-  { key: "compliance", label: "Compliance calendar", defaultPriority: "high" },
-  { key: "referral", label: "Referrals", defaultPriority: "normal" },
-  { key: "bonus", label: "Bonuses", defaultPriority: "normal" },
-  { key: "benefit", label: "Benefits", defaultPriority: "normal" },
-  { key: "board", label: "Boards & cards", defaultPriority: "normal" },
-  { key: "notice", label: "Notice periods", defaultPriority: "high" },
-  { key: "settlement", label: "Final settlement", defaultPriority: "high" },
-  { key: "asset", label: "Assets", defaultPriority: "normal" },
-  { key: "shift", label: "Shifts & roster", defaultPriority: "normal" },
-  { key: "recruiting", label: "Recruiting", defaultPriority: "normal" },
-  { key: "compensation", label: "Compensation", defaultPriority: "high" },
-  { key: "system", label: "System", defaultPriority: "normal" },
-];
+// The server's own category list (src/domain/notificationConfig.ts), imported rather than copied: a copy kept by
+// hand is how the day-mark, weekly-roundup and access categories came to be missing from this panel, so an org
+// could not switch them off while the server went on sending them.
+const NOTIF_CATEGORIES = NOTIFICATION_CATEGORIES;
 const NOTIF_PRIORITIES = ["low", "normal", "high", "urgent"];
 
 type EventCfg = { enabled: boolean; priority: string };
@@ -570,6 +542,7 @@ function pickSettingsPanel(key: string, me: Me, toast: Toast, slot: HTMLDivEleme
     case "leave-policy": return <LeaveCapsTab toast={toast} />;
     case "leave-types": return <LeaveTypes embedded title="Leave types" openId={openId} />;
     case "attendance": return <AttendanceTab toast={toast} />;
+    case "late-early": return <PunctualityPolicyPanel />;
     case "shifts": return <ShiftsAdmin openId={openId} />;
     // Pay & money
     case "pay-components": return <PayComponents embedded openId={openId} />;

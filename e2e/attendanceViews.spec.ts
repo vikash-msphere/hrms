@@ -71,8 +71,9 @@ test.describe("attendance views", () => {
     await expect(form.getByRole("button", { name: "Submit 2 requests" })).toBeVisible();
     await expect(form.getByText("These times are applied to every selected day", { exact: false })).toBeVisible();
     // Nothing is submitted: filing a correction is `attendanceCorrection.spec.ts`, and two more of them per
-    // run would pile up in somebody's queue.
-    await page.keyboard.press("Escape");
+    // run would pile up in somebody's queue. Closed by its own Cancel button, not Escape: the dialog opens with
+    // focus in the "Clock in" time field, whose picker takes the first Escape for itself.
+    await form.getByRole("button", { name: "Cancel", exact: true }).click();
     const discard = page.getByRole("dialog");
     if (await discard.getByRole("button", { name: /Discard|Leave/ }).count()) {
       await discard.getByRole("button", { name: /Discard|Leave/ }).click();
@@ -167,7 +168,7 @@ test.describe("attendance views", () => {
     // It is the same history component the reader gets for themselves - the view switch and the window pager
     // are the proof it is the log and not another summary.
     await expect(sheet.getByRole("group", { name: "History view" })).toBeVisible({ timeout: 30_000 });
-    await expect(sheet.getByRole("button", { name: "Older 30 days" }).or(sheet.getByRole("button", { name: "Previous month" }))).toBeVisible();
+    await expect(sheet.getByRole("button", { name: "Previous month" })).toBeVisible();
     // Read-only: an approver reads somebody else's days, they do not file that person's correction. Nothing
     // in here offers to.
     await expect(sheet.getByRole("button", { name: /Correct/ })).toHaveCount(0);

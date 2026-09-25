@@ -16,7 +16,8 @@ import { useRoutedTab } from "@/lib/routedTabs";
 import { DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
 import { forecastBalance, accrualEntriesThisYear, DEFAULT_CARRY_FORWARD, type CarryForwardMode } from "@/lib/leaveForecast";
 import type { LeaveDraft } from "@/lib/leaveDraft";
-import type { ApprovalDelegation, Employee, Holiday, LeaveBalance, LeaveEncashment, LeaveRequest, LeaveType, Me } from "@/types";
+import type { ApprovalDelegation, Employee, Holiday, LeaveAdjustment, LeaveBalance, LeaveEncashment, LeaveRequest, LeaveType, Me } from "@/types";
+import { AdjustBalanceDialog } from "@/components/leave/AdjustBalanceDialog";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { Chart, ChartCard } from "@/components/common/Chart";
@@ -102,18 +103,21 @@ export default function Leaves({ me }: { me: Me }) {
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   // Two reads, deliberately. The unfiltered one backs the APPROVER view below (a manager's team, HR's org),
   // where a window costs a short table and the page's notice says so.
-  const { rows: balances } = useCollection<LeaveBalance>("leave-balances");
+  const { rows: balances, reload: reloadBalances } = useCollection<LeaveBalance>("leave-balances");
   // This one is the caller's own, narrowed server-side, because the balance CARDS are about this person and
   // their row can be anywhere in an org-scoped collection - one row per employee per leave type, so a
   // 60-person org with five types has 300 of them. Filtering the newest hundred down to yourself finds
   // nothing and the cards then read as a balance of nothing, which a card has nowhere to qualify.
   const mineParams = me.employee_id ? { employee: `employees/${me.employee_id}` } : undefined;
-  const { rows: myBalanceRows } = useCollection<LeaveBalance>("leave-balances", { params: mineParams, enabled: !!mineParams });
+  const { rows: myBalanceRows, reload: reloadMyBalances } = useCollection<LeaveBalance>("leave-balances", { params: mineParams, enabled: !!mineParams });
   const { toast } = useToast();
   const confirm = useConfirm();
   const canDecide = usePermission("leave-requests.approve");
   const canEncash = usePermission("leave-encashments.read");
   const canRequest = usePermission("leave-requests.write");
+  // A correction by hand on a team balance (components/leave/AdjustBalanceDialog.tsx).
+  const canAdjust = usePermission("leave-adjustments.write");
+  const [adjusting, setAdjusting] = useState<LeaveBalance | null>(null);
   const { rows: holidays } = useCollection<Holiday>("holidays", { all: true });
   const { rows: encashments } = useCollection<LeaveEncashment>("leave-encashments", { enabled: canEncash });
   // Delegations are private by default; the hook returns [] (and fires no request) without read access, so
@@ -452,6 +456,24 @@ export default function Leaves({ me }: { me: Me }) {
     }
   }
 
+  // Taking a wrongly imported leave from before HRMS back out. Nothing is credited: it never moved the balance.
+  async function removeImported(lr: LeaveRequest) {
+    const ok = await confirm({
+      title: "Remove this leave from before HRMS?",
+      description: `${formatDate(lr.start_date)} – ${formatDate(lr.end_date)} · ${lr.days} day${lr.days === 1 ? "" : "s"} stops counting toward the leave policy. The balance does not change.`,
+      confirmLabel: "Remove",
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await invoke("leave-requests/" + idOf(lr.path), "cancel", lr.etag);
+      toast({ title: "Imported leave removed", variant: "success" });
+      reloadAll();
+    } catch (e) {
+      toast({ title: "Couldn't remove the leave", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
   // A filed request is immutable by design (the balance is reserved against it), so "changing the dates" is
   // really cancel + file again. Doing both from one action - and carrying the type/dates/reason into the new
   // form - saves retyping the whole request to move it by a day.
@@ -547,6 +569,9 @@ export default function Leaves({ me }: { me: Me }) {
       cell: (lr) => (
         <span className="inline-flex items-center gap-1.5">
           <StatusBadge state={lr.state} />
+          {/* Leave taken before HRMS, brought in as history: it counts toward the leave policy, and it never
+              moved the balance (the opening balance has it taken off). */}
+          {lr.source === "import" && <Badge variant="muted" title="Taken before HRMS; brought in as history">Before HRMS</Badge>}
           {lr.has_document && <Paperclip className="h-3.5 w-3.5 text-muted-foreground" aria-label="Has a supporting document" />}
         </span>
       ) },
@@ -587,7 +612,8 @@ export default function Leaves({ me }: { me: Me }) {
   ];
 
   // Cancellable: a pending request, or an approved leave that hasn't started yet (server restores the balance).
-  const isCancellable = (lr: LeaveRequest) => isPending(lr) || (upper(lr.state) === "APPROVED" && lr.start_date > today);
+  // Never leave brought in from before HRMS - that is HR's to take back out, from the History tab.
+  const isCancellable = (lr: LeaveRequest) => lr.source !== "import" && (isPending(lr) || (upper(lr.state) === "APPROVED" && lr.start_date > today));
   const cancelCol: Column<LeaveRequest> = {
     id: "actions", header: "", sortable: false, filter: "none", align: "right",
     cell: (lr) => (
@@ -619,7 +645,21 @@ export default function Leaves({ me }: { me: Me }) {
   const mineCols = [...baseCols.map((c) => (c.id === "start" ? startWhenCol : c)), ...metaColumns<LeaveRequest>(), cancelCol];
   // Approvers see everyone's settled leave in History, so show whose request it is. (Pending decisions live
   // in the unified Approvals inbox, not a per-page tab.)
-  const activityCol: Column<LeaveRequest> = { id: "activity", header: "", sortable: false, filter: "none", align: "right", cell: (lr) => <RowActivityButton resource={lr.path} /> };
+  // Leave imported from before HRMS is taken back out here, by whoever may cancel it for that person - the
+  // way a wrong import is corrected. The server refuses the person themselves and refunds nothing.
+  const activityCol: Column<LeaveRequest> = {
+    id: "activity", header: "", sortable: false, filter: "none", align: "right",
+    cell: (lr) => (
+      <div className="flex items-center justify-end gap-1">
+        {lr.source === "import" && upper(lr.state) === "APPROVED" && lr.employee && idOf(lr.employee) !== me.employee_id && (
+          <AccessAction collection="leave-requests" objectPath={lr.path} verb="cancel" can={lr.access?.can} label="Remove imported leave">
+            <Button size="sm" variant="ghost" onClick={() => void removeImported(lr)}><Ban className="h-4 w-4" /> Remove</Button>
+          </AccessAction>
+        )}
+        <RowActivityButton resource={lr.path} />
+      </div>
+    ),
+  };
   const historyCols = withNewBadge(canDecide ? [empCol, ...baseCols, ...metaColumns<LeaveRequest>(), activityCol] : [...baseCols, ...metaColumns<LeaveRequest>(), activityCol]);
 
   const requestBtn = (
@@ -642,6 +682,11 @@ export default function Leaves({ me }: { me: Me }) {
   // it says so - an invented history that didn't add up would be worse than none.
   const [ledgerPath, setLedgerPath] = useState<string | null>(null);
   const ledgerBalance = ledgerPath ? myBalances.find((b) => b.path === ledgerPath) : undefined;
+  // The caller's own ledger rows (opening balances, corrections), read only once a history is opened and only
+  // when the caller may see them at all - private by default, so an org decides whether people see why their
+  // own balance moved. Without them the adjustments sit inside the opening figure, and the sheet says so.
+  const canSeeAdjustments = usePermission("leave-adjustments.read");
+  const { rows: myAdjustments } = useCollection<LeaveAdjustment>("leave-adjustments", { params: mineParams, enabled: !!mineParams && canSeeAdjustments && !!ledgerPath });
   const ledger = useMemo(() => {
     if (!ledgerBalance) return null;
     const typeId = ledgerBalance.leave_type ? idOf(ledgerBalance.leave_type) : "";
@@ -649,6 +694,8 @@ export default function Leaves({ me }: { me: Me }) {
     for (const a of accrualEntriesThisYear(typeOf(ledgerBalance.leave_type), meEmployee)) entries.push(a);
     for (const r of myAll) {
       if (!r.leave_type || idOf(r.leave_type) !== typeId) continue;
+      // Leave brought in from before HRMS never moved the balance - the opening has it taken off already.
+      if (r.source === "import") continue;
       const state = upper(r.state);
       // The reserve happens when the request is FILED, so that is the date the balance moved.
       if ((r.create_time ?? "") >= yearStart) {
@@ -667,13 +714,34 @@ export default function Leaves({ me }: { me: Me }) {
         entries.push({ on: (e.update_time ?? "").slice(0, 10), label: "Encashed", days: -(e.days || 0) });
       }
     }
-    entries.sort((a, b) => a.on.localeCompare(b.on));
-    const net = entries.reduce((n, e) => n + e.days, 0);
+    const mine = myAdjustments.filter((a) => a.leave_type && idOf(a.leave_type) === typeId);
+    for (const a of mine) {
+      if (a.kind === "correction" && (a.create_time ?? "") >= yearStart) {
+        entries.push({ on: (a.create_time ?? "").slice(0, 10), label: a.reason ? `Adjusted by HR: ${a.reason}` : "Adjusted by HR", days: a.days ?? 0 });
+      }
+    }
+    // An OPENING this year is where the history starts: the balance brought over from the system before HRMS,
+    // as of the day HRMS records start. Everything before that day is the old system's, so the entries from
+    // then on are what reconciles to today - and the 1 January figure the plain history derives would be the
+    // app's reading of years it never saw, which is exactly what the opening replaced.
+    const opening = mine
+      .filter((a) => a.kind === "opening" && a.as_of && a.as_of >= yearStart.slice(0, 10))
+      .sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? ""))[0];
+    const from = opening?.as_of ?? null;
+    const shown = (from ? entries.filter((e) => e.on >= from) : entries).sort((a, b) => a.on.localeCompare(b.on));
+    const net = shown.reduce((n, e) => n + e.days, 0);
+    if (opening && from) {
+      const start = round2(opening.opening_days ?? 0);
+      // Movements the page has no row for (a comp-off credit, a leave filed before the opening's day) still moved
+      // the balance; say so rather than let the list stop adding up.
+      const other = round2(ledgerBalance.balance_days - start - net);
+      return { openingOn: from, opening: start, openingIsBroughtOver: true, entries: other ? [...shown, { on: todayStr(), label: "Other changes", days: other }] : shown };
+    }
     // `round2` (lib/utils), not an inline `Math.round(n * 100) / 100`: leave days sit under the same rounding
     // rule as money (src/domain/money.ts is the one helper for both), and the inline form multiplies in float,
     // so a half-day balance can round the opposite way from the same figure everywhere else on the page.
-    return { opening: round2(ledgerBalance.balance_days - net), entries };
-  }, [ledgerBalance, myAll, encashments, typeOf, meEmployee, yearStart, me.employee_id]);
+    return { openingOn: null, opening: round2(ledgerBalance.balance_days - net), openingIsBroughtOver: false, entries: shown };
+  }, [ledgerBalance, myAll, encashments, myAdjustments, typeOf, meEmployee, yearStart, me.employee_id]);
 
   // Row detail drawer, addressed by path so it survives a refetch replacing the row objects.
   const [detailPath, setDetailPath] = useState<string | null>(null);
@@ -743,6 +811,18 @@ export default function Leaves({ me }: { me: Me }) {
         return <span className={cn("tabular-nums", over > 0 ? "font-medium text-warning" : "text-muted-foreground")}>{over > 0 ? `+${fmtDays(over)}` : fmtDays(over)}</span>;
       },
     },
+    // A correction by hand (a `leave-adjustments` row). The column exists only for someone who may make one;
+    // the button itself is still the access affordance, so a narrower grant hides it row by row.
+    ...(canAdjust
+      ? [{
+          id: "adjust", header: "", sortable: false, filter: "none" as const, align: "right" as const,
+          cell: (b: LeaveBalance) => (
+            <AccessAction collection="leave-adjustments" create label="Adjust a leave balance">
+              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setAdjusting(b)}>Adjust</Button>
+            </AccessAction>
+          ),
+        }]
+      : []),
   ];
   // A manager's two standing questions about a balance sheet, neither of which a sorted column answers:
   // who has not taken anything, and who has banked more than they earn in a year.
@@ -1125,6 +1205,14 @@ export default function Leaves({ me }: { me: Me }) {
         }}
       />
 
+      <AdjustBalanceDialog
+        balance={adjusting}
+        who={adjusting ? empName(adjusting.employee) : ""}
+        typeName={adjusting ? typeName(adjusting.leave_type) : ""}
+        onClose={() => setAdjusting(null)}
+        onSaved={() => { reloadBalances(); reloadMyBalances(); }}
+      />
+
       {/* Where the balance came from. Derived (see the ledger memo), so the opening figure is labelled as such. */}
       <Sheet open={!!ledgerBalance} onOpenChange={(o) => { if (!o) setLedgerPath(null); }}>
         {ledgerBalance && ledger && (
@@ -1140,8 +1228,12 @@ export default function Leaves({ me }: { me: Me }) {
               <ul className="divide-y text-sm">
                 <li className="flex items-baseline justify-between gap-3 py-2">
                   <span>
-                    Opening balance
-                    <span className="block text-xs text-muted-foreground">1 Jan · derived, so the entries below reconcile</span>
+                    {ledger.openingIsBroughtOver ? "Brought over from before HRMS" : "Opening balance"}
+                    <span className="block text-xs text-muted-foreground">
+                      {ledger.openingIsBroughtOver && ledger.openingOn
+                        ? `${formatDate(ledger.openingOn)} · the balance you had when HRMS records started`
+                        : "1 Jan · derived, so the entries below reconcile"}
+                    </span>
                   </span>
                   <span className="shrink-0 tabular-nums">{fmtDays(ledger.opening)}</span>
                 </li>
@@ -1163,6 +1255,9 @@ export default function Leaves({ me }: { me: Me }) {
               </ul>
               {!canEncash && (
                 <p className="mt-3 text-xs text-muted-foreground">Encashments aren't visible to you, so any cash-out sits inside the opening figure.</p>
+              )}
+              {!canSeeAdjustments && (
+                <p className="mt-1 text-xs text-muted-foreground">Balance adjustments aren't visible to you, so a balance brought over from before HRMS or a correction by HR sits inside the opening figure.</p>
               )}
             </SheetBody>
           </SheetContent>

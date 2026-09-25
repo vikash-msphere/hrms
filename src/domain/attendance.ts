@@ -292,6 +292,33 @@ export function leaveCover(d: string, ranges: LeaveRange[]): number {
 }
 
 /**
+ * Does any approved leave, paid or unpaid, fall on day `d` at all? A range always covers at least one session
+ * of every day from its start to its end, so a day inside one is a day somebody recorded a fact about.
+ *
+ * The question the `trackedFromYmd` rule asks (lopDayUnits below, and the grid's `untracked` status in
+ * web/src/lib/attendance.ts): a day before HRMS records start is left alone only when NOTHING was recorded for
+ * it, and approved leave is a record - unpaid leave on such a day is still docked, paid leave still excuses.
+ */
+export function leaveTouches(d: string, ranges: LeaveRange[]): boolean {
+  return ranges.some((r) => d >= r.start && d <= r.end);
+}
+
+/**
+ * A day before HRMS records start with nothing recorded against it: no punches or event credit, no HR mark, no
+ * approved leave. See `trackedFromYmd` on lopDayUnits. Shared so the loss-of-pay walk and the punctuality
+ * policy's owed-days clamp (domain/punctuality.ts) skip exactly the same days.
+ */
+export function isUntracked(
+  d: string,
+  trackedFromYmd: string | null | undefined,
+  workedByDay: Map<string, number>,
+  marksByDay: Map<string, DayCredit> | undefined,
+  leaveRanges: LeaveRange[],
+): boolean {
+  return !!trackedFromYmd && d < trackedFromYmd && !workedByDay.has(d) && !marksByDay?.has(d) && !leaveTouches(d, leaveRanges);
+}
+
+/**
  * Day-units of approved UNPAID leave over [startYmd, endYmd]: the scheduled, non-holiday working days an
  * unpaid range covers, half-day aware, less any part of the same day paid leave already covers.
  *
@@ -352,17 +379,37 @@ export function lopDayUnits(opts: {
   workedByDay: Map<string, number>; // day -> worked minutes; absent if no entry
   /** HR's decision for a day, which replaces what the punches say it was worth. */
   marksByDay?: Map<string, DayCredit>;
+  /**
+   * Minutes an approved late arrival or early departure adds to a PUNCHED day's worked minutes when the
+   * punctuality policy credits the approved gap (domain/punctuality.ts). Kept beside `workedByDay` rather than
+   * folded into it, so the minutes every other reader shows stay the minutes that were worked.
+   */
+  creditByDay?: Map<string, number>;
+  /** The most a day may be worth (0.5 for a severe unexcused lateness). A day mark is HR's call and wins. */
+  capByDay?: Map<string, number>;
+  /**
+   * The first day HRMS holds records for this person (`employees.tracked_from`). A working day before it with
+   * no punches, no HR mark and no approved leave OWES NOTHING: the person had no way to punch in a system they
+   * were not yet in, so an empty day there is missing history, not an absence. A day that does carry one of
+   * those facts is judged exactly as any other - a correction backfilling go-live week, an unpaid leave taken
+   * then, a mark HR set on purpose.
+   */
+  trackedFromYmd?: string | null;
   fullDayMinutes: number;
   halfDayMinutes: number;
 }): number {
-  const { startYmd, endYmd, workDays, holidays, leaveRanges, workedByDay, marksByDay, fullDayMinutes, halfDayMinutes } = opts;
+  const { startYmd, endYmd, workDays, holidays, leaveRanges, workedByDay, marksByDay, creditByDay, capByDay, trackedFromYmd, fullDayMinutes, halfDayMinutes } = opts;
   let units = 0;
   for (const d of enumerate(startYmd, endYmd)) {
     if (!workDays.includes(weekdayOf(d)) || holidays.has(d)) continue;
+    if (isUntracked(d, trackedFromYmd, workedByDay, marksByDay, leaveRanges)) continue;
     const owed = 1 - leaveCover(d, leaveRanges);
     if (owed <= 0) continue; // whole day on leave
     const mark = marksByDay?.get(d);
-    const credit = mark ? creditUnits(mark) : derivedCredit(workedByDay.get(d), fullDayMinutes, halfDayMinutes);
+    const worked = workedByDay.get(d);
+    const credit = mark
+      ? creditUnits(mark)
+      : Math.min(derivedCredit(worked === undefined ? undefined : worked + (creditByDay?.get(d) ?? 0), fullDayMinutes, halfDayMinutes), capByDay?.get(d) ?? 1);
     units += Math.max(0, owed - credit);
   }
   return Math.round(units * 2) / 2; // stay on the half-day grid

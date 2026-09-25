@@ -29,7 +29,7 @@ import { AttendanceHistory } from "@/components/common/AttendanceHistory";
 import { useAttendanceWindow } from "@/hooks/useAttendanceWindow";
 import { useClock } from "@/lib/clock";
 import { useCanExport } from "@/lib/perm";
-import { localDay } from "@/lib/attendance";
+import { localDay, trackedFromOf } from "@/lib/attendance";
 import { ActivityFeed } from "@/components/common/ActivityFeed";
 import { EmployeeBonuses } from "@/components/common/EmployeeBonuses";
 import { EmployeeAssets } from "@/components/common/EmployeeAssets";
@@ -359,11 +359,11 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
 
   // --- edit: employment dates ---
   const [empOpen, setEmpOpen] = useState(false);
-  const [empForm, setEmpForm] = useState({ start_date: "", probation_end_date: "", epf_enrolled: false, eps_excluded: false });
+  const [empForm, setEmpForm] = useState({ start_date: "", probation_end_date: "", tracked_from: "", epf_enrolled: false, eps_excluded: false });
   // Offer to re-solve pay splits when a change here moves one (EPF enrolment). Silent for everything else.
   const { promptReapply } = useSplitStaleness({ auto: false });
   function openEmp() {
-    setEmpForm({ start_date: emp?.start_date ?? "", probation_end_date: emp?.probation_end_date ?? "", epf_enrolled: !!emp?.epf_enrolled, eps_excluded: !!emp?.eps_excluded });
+    setEmpForm({ start_date: emp?.start_date ?? "", probation_end_date: emp?.probation_end_date ?? "", tracked_from: emp?.tracked_from ?? "", epf_enrolled: !!emp?.epf_enrolled, eps_excluded: !!emp?.eps_excluded });
     setEmpOpen(true);
   }
 
@@ -401,10 +401,14 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
     // value reaches the client exactly as an unset one does - absent - so an editor whose grant does not reach
     // it loads a blank here, and sending that blank back as `null` would erase a date they were never shown.
     const probationEdited = empForm.probation_end_date !== (emp?.probation_end_date ?? "");
+    // Sent only when changed, like the probation date: it moves which days payroll may dock, so a save that
+    // was about something else must not re-send it.
+    const trackedEdited = empForm.tracked_from !== (emp?.tracked_from ?? "");
     await savePatch(
       {
         start_date: empForm.start_date || null,
         ...(probationEdited ? { probation_end_date: empForm.probation_end_date || null } : {}),
+        ...(trackedEdited ? { tracked_from: empForm.tracked_from || null } : {}),
         epf_enrolled: empForm.epf_enrolled,
         eps_excluded: empForm.eps_excluded,
       },
@@ -716,6 +720,12 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                         <dt className="text-muted-foreground">EPF</dt>
                         <dd className="mt-0.5 font-medium">{emp.epf_enrolled ? "Enrolled" : "Not enrolled"}</dd>
                       </div>
+                      {emp.tracked_from && (
+                        <div>
+                          <dt className="text-muted-foreground">HRMS records start</dt>
+                          <dd className="mt-0.5 font-medium">{formatDate(emp.tracked_from)}</dd>
+                        </div>
+                      )}
                     </dl>
                   </CardContent>
                 </Card>
@@ -795,6 +805,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                   <AttendanceHistory
                     employeeId={id}
                     joinedYmd={emp.start_date}
+                    trackedFromYmd={trackedFromOf(emp)}
                     win={attendanceWin}
                     sched={sched}
                     orgToday={orgToday}
@@ -1002,6 +1013,13 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                   <Field label="Start date" hint="Drives leave accrual."><Input type="date" value={empForm.start_date} onChange={(e) => setEmpForm({ ...empForm, start_date: e.target.value })} autoFocus /></Field>
                   <Field label="Probation ends" hint="Leave blank to clear." error={!empDatesOk ? "Probation can't end before the start date." : undefined}><Input type="date" min={empForm.start_date || undefined} value={empForm.probation_end_date} onChange={(e) => setEmpForm({ ...empForm, probation_end_date: e.target.value })} /></Field>
                 </FieldRow>
+                <Field
+                  label="HRMS records start"
+                  field="tracked_from"
+                  hint="For someone who joined before your org started using HRMS. Days before this date with no punches, mark or leave are never counted as absences or docked. Leave blank for anyone hired since."
+                >
+                  <Input type="date" max={orgToday} value={empForm.tracked_from} onChange={(e) => setEmpForm({ ...empForm, tracked_from: e.target.value })} />
+                </Field>
                 <label className="flex items-start gap-2 text-sm">
                   <input type="checkbox" className="mt-0.5 h-4 w-4 rounded border-input" checked={empForm.epf_enrolled} onChange={(e) => setEmpForm({ ...empForm, epf_enrolled: e.target.checked })} />
                   <span>Enrolled in EPF<span className="block text-xs text-muted-foreground">Opt-in. Adds the provident-fund deduction and the employer PF share within CTC.</span></span>

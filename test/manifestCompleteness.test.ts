@@ -21,7 +21,9 @@ const SCHEMA_KEY: Record<string, string> = { users: "user", employees: "employee
 // - role/status/employee - are protected.)
 const SAFE_WRITABLE: Record<string, string[]> = {
   users: [],
-  employees: ["first_name", "last_name", "legal_name", "work_email", "job_title", "start_date", "probation_end_date"],
+  // `tracked_from` sits with `start_date`: both decide which days payroll judges, and both are HR's to set on the
+  // base record (an employee holds no write on their own record, so neither is self-writable).
+  employees: ["first_name", "last_name", "legal_name", "work_email", "job_title", "start_date", "probation_end_date", "tracked_from"],
   // The pay amounts (base_pay/currency_code/pay_grade) are PROTECTED; these are the revision context, set
   // only by payroll/super on create (the whole collection is payroll-gated, so no self mass-assignment).
   compensation: ["employee", "effective_from"],

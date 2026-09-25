@@ -89,7 +89,7 @@ const TONE_OF: Record<string, Tone> = {
   employees: "people", departments: "people", positions: "people", dependents: "people",
   "leave-requests": "time", "leave-encashments": "time", "leave-types": "time", holidays: "time",
   attendance: "time", "attendance-regularizations": "time", "overtime-requests": "time",
-  "remote-work-requests": "time", "approval-delegations": "time", shifts: "time",
+  "remote-work-requests": "time", "late-early-requests": "time", "approval-delegations": "time", shifts: "time",
   "shift-assignments": "time", projects: "time", "time-entries": "time",
   goals: "work", boards: "work", sprints: "work", cards: "work", "review-cycles": "work",
   reviews: "work", "review-feedback": "work", "check-ins": "work",

@@ -24,8 +24,11 @@ export interface EmailSender {
 }
 
 export interface DocumentStore {
-  put(key: string, body: ArrayBuffer | Uint8Array, contentType: string): Promise<void>;
+  /** Store bytes. Encrypted app-side unless the caller opts out - see `opts.encrypt` and lib/docstore.ts. */
+  put(key: string, body: ArrayBuffer | Uint8Array, contentType: string, opts?: { encrypt?: boolean }): Promise<void>;
   get(key: string): Promise<ArrayBuffer | null>;
+  /** The object as a STREAM, for a response that hands bytes straight to the caller. Null when absent. */
+  open(key: string): Promise<{ body: ReadableStream; size: number } | null>;
   delete(key: string): Promise<void>;
 }
 

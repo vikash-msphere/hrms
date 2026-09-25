@@ -7,7 +7,8 @@ import { applyStructure, ctcLines, splitCtc, pfWagesOf, employerCostLines, ONE_O
 import { esiEmployeeContribution, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { round2 } from "../domain/money";
 import { structureLinesById } from "./salaryStructures";
-import { monthlyRecurringGross } from "./taxProjection";
+import { monthlyRecurringGross, openingMonths } from "./taxProjection";
+import { fyOfLabel } from "./payrollOpenings";
 import { getSettingValue, orgCurrency } from "./settings";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -117,6 +118,54 @@ async function publishedRegularMonthsPaid(deps: Deps, employeeId: string, fromMs
   periods_.sort((a, b) => a.label.localeCompare(b.label));
   return { months: round2(months), periods: periods_ };
 }
+
+/**
+ * Month-equivalents paid at the old rate BEFORE HRMS ran payroll, inside [fromMs, toMs): the months a payroll
+ * opening says the system before HRMS paid (services/payrollOpenings.ts). No HRMS run exists for them, so the
+ * published-run count above cannot see them - and an appraisal effective 1 April entered after an autumn
+ * go-live would otherwise owe arrears for the HRMS months only, with April to go-live paid at the old rate and
+ * never made good.
+ *
+ * Each covered month counts in full, clamped to the employment window and to the share of the month on or
+ * after the effective date. What the old system docked in those months (loss of pay, a part month it
+ * prorated) is not known here, so a month it docked is credited as fully paid; that is corrected by hand with a
+ * one-off, and the runbook (docs/opening-balances.md) says so. An opening never reaches a month an HRMS run
+ * paid (payrollOpenings refuses it and the build refuses the reverse), so the two counts never overlap.
+ */
+async function beforeHrmsMonthsPaid(deps: Deps, employeeId: string, fromMs: number, toMs: number): Promise<{ months: number; periods: ArrearsPeriod[] }> {
+  const none = { months: 0, periods: [] as ArrearsPeriod[] };
+  const openings = await deps.db
+    .select({ financialYear: schema.payrollOpenings.financialYear, paidThrough: schema.payrollOpenings.paidThrough })
+    .from(schema.payrollOpenings)
+    .where(and(eq(schema.payrollOpenings.employeeId, employeeId), isNull(schema.payrollOpenings.deleteTime)));
+  if (!openings.length) return none;
+  const emp = (await deps.db.select({ startDate: schema.employees.startDate, endDate: schema.employees.endDate }).from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
+  const joinedMs = emp?.startDate ? +new Date(emp.startDate) : -Infinity;
+  const leftMs = emp?.endDate ? +new Date(emp.endDate) : Infinity;
+  const DAY = 86_400_000;
+  let months = 0;
+  const out: ArrearsPeriod[] = [];
+  for (const o of openings) {
+    const fy = fyOfLabel(o.financialYear);
+    if (!fy) continue;
+    for (const key of openingMonths(fy, o.paidThrough)) {
+      const [y, m] = key.split("-").map(Number) as [number, number];
+      const ms = Date.UTC(y, m - 1, 1);
+      const me = Date.UTC(y, m, 0);
+      const lo = Math.max(ms, fromMs, joinedMs);
+      const hi = Math.min(me, toMs - 1, leftMs);
+      if (hi < lo) continue;
+      const monthDays = Math.round((me - ms) / DAY) + 1;
+      const coveredDays = Math.max(0, Math.round((hi - lo) / DAY) + 1);
+      const credited = Math.min(1, coveredDays / monthDays);
+      if (credited <= 0) continue;
+      months += credited;
+      const label = new Date(ms).toLocaleDateString("en-GB", { month: "short", year: "numeric", timeZone: "UTC" });
+      out.push({ label: `${label} (before HRMS)`, months: round2(credited) });
+    }
+  }
+  return { months: round2(months), periods: out };
+}
 export type CompensationInput = {
   employee?: string | null;
   annual_ctc?: number; // the authoritative figure; the server derives the monthly basic + Special Allowance
@@ -193,7 +242,10 @@ async function priceRevision(
   const newGross = monthlyRecurringGross(basePay, effective, specialAllowance);
   // Month-EQUIVALENTS already paid at the old rate, not a period count: a part-month or docked period owes only
   // the delta on the wage it actually paid.
-  const paid = prev ? await publishedRegularMonthsPaid(deps, employeeId, fromMs, untilMs, oldGross) : { months: 0, periods: [] };
+  // Months the system before HRMS paid come first (they are the older ones), then the published HRMS runs.
+  const hrms = prev ? await publishedRegularMonthsPaid(deps, employeeId, fromMs, untilMs, oldGross) : { months: 0, periods: [] };
+  const before = prev && oldGross > 0 ? await beforeHrmsMonthsPaid(deps, employeeId, fromMs, untilMs) : { months: 0, periods: [] };
+  const paid = { months: round2(before.months + hrms.months), periods: [...before.periods, ...hrms.periods] };
   const paidMonths = paid.months;
   // The PF-wage slice of those arrears: the rise in BASIC (plus, under the "basic_plus" wage basis, the same
   // allowances PF counts) over the same months. PF is due on arrears of basic wages while ESI is due on the whole

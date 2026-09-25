@@ -53,6 +53,9 @@ import { timeEntries } from "./routes/timeEntries";
 import { loans } from "./routes/loans";
 import { taxDeclarations } from "./routes/taxDeclarations";
 import { leaveBalances } from "./routes/leaveBalances";
+import { leaveAdjustments, leaveAdjustmentImport } from "./routes/leaveAdjustments";
+import { payrollOpenings, payrollOpeningImport } from "./routes/payrollOpenings";
+import { leaveHistoryImport } from "./routes/leaveHistoryImport";
 import { payrollRuns } from "./routes/payrollRuns";
 import { payrollBudgets } from "./routes/payrollBudgets";
 import { operations } from "./routes/operations";
@@ -94,7 +97,7 @@ import { interviews } from "./routes/interviews";
 import { interviewFeedback } from "./routes/interviewFeedback";
 import { offers } from "./routes/offers";
 import { celebrations } from "./routes/celebrations";
-import { employeePhotosBatch } from "./routes/employeePhotosBatch";
+import { employeeTrackedFrom } from "./routes/employeeTrackedFrom";
 import { batch } from "./routes/batch";
 import { search } from "./routes/search";
 import { activityCountsRoute } from "./routes/activityCounts";
@@ -131,6 +134,7 @@ import { attendanceRegularizations } from "./routes/attendanceRegularizations";
 import { attendanceDayMarks } from "./routes/attendanceDayMarks";
 import { overtimeRequests } from "./routes/overtimeRequests";
 import { remoteWorkRequests } from "./routes/remoteWorkRequests";
+import { lateEarlyRequests } from "./routes/lateEarlyRequests";
 import { approvalDelegations } from "./routes/approvalDelegations";
 import { noticePeriods } from "./routes/noticePeriods";
 import { suggestions } from "./routes/suggestions";
@@ -279,9 +283,10 @@ app.route("/v1/card-transactions", cardTransactions); // corporate card charges,
 app.route("/v1/activity-counts", activityCountsRoute); // "new since I last looked" counts: same gating as search, no rows
 app.route("/v1/changes", changes); // which collections were written to since a moment: lets a client trust its stored copies
 app.route("/v1/employees:upcomingCelebrations", celebrations); // collection custom method, before the employees mount
-app.route("/v1/employees:batchGetPhotos", employeePhotosBatch); // batched photo fetch (per-id scope in the service)
+app.route("/v1/employees:setTrackedFrom", employeeTrackedFrom); // the day HRMS records start, for everyone who joined before it
 app.route("/v1/employees", employees);
 app.route("/v1/departments", departments);
+app.route("/v1/leave-requests:importHistory", leaveHistoryImport); // leave taken before HRMS, before the collection mount
 app.route("/v1/leave-requests", leaveRequests);
 app.route("/v1/goals", goals);
 app.route("/v1/goal-templates", goalTemplates); // goal blueprints HR curates; :apply stamps them onto people
@@ -310,6 +315,10 @@ app.route("/v1/time-entries", timeEntries);
 app.route("/v1/loans", loans);
 app.route("/v1/tax-declarations", taxDeclarations);
 app.route("/v1/leave-balances", leaveBalances);
+app.route("/v1/leave-adjustments:importOpenings", leaveAdjustmentImport); // opening balances from before HRMS, before the collection mount
+app.route("/v1/leave-adjustments", leaveAdjustments);
+app.route("/v1/payroll-openings:importOpenings", payrollOpeningImport); // pay and tax from before HRMS, before the collection mount
+app.route("/v1/payroll-openings", payrollOpenings);
 app.route("/v1/payroll-runs", payrollRuns);
 app.route("/v1/payroll-budgets", payrollBudgets);
 app.route("/v1/operations", operations);
@@ -380,6 +389,7 @@ app.route("/v1/attendance-regularizations", attendanceRegularizations);
 app.route("/v1/attendance-day-marks", attendanceDayMarks);
 app.route("/v1/overtime-requests", overtimeRequests);
 app.route("/v1/remote-work-requests", remoteWorkRequests);
+app.route("/v1/late-early-requests", lateEarlyRequests);
 app.route("/v1/approval-delegations", approvalDelegations);
 app.route("/v1/notice-periods", noticePeriods);
 app.route("/v1/suggestions", suggestions);

@@ -27,7 +27,7 @@ import { queryFlag, queryParam } from "./query";
 import { crudService, type CrudService, type CrudSpec, type CrudTable } from "../services/crud";
 import type { PurgeCascade } from "../services/softDelete";
 import { isInternalId } from "../lib/idCodec";
-import { invalidArgument } from "../lib/errors";
+import { invalidArgument, notFound } from "../lib/errors";
 
 /**
  * One custom method. The common shape is `{schema?, run}`: the factory parses the body, calls `run`, then
@@ -45,6 +45,13 @@ export type VerbEntry =
       raw: (c: Context<AppEnv>, id: string) => Promise<Response>;
       run?: never;
       schema?: never;
+      /**
+       * Also answer this verb on GET, so a browser can reach it without JavaScript - an `<img src>`, a link, a
+       * calendar subscription. Only for a `raw` verb that READS: the authorization key is identical either way
+       * (domain/permissions.ts splits the `:verb` off before it looks at the method), but a GET carries no CSRF
+       * header (middleware/csrf.ts checks mutations only), so a verb that writes must never be reachable by one.
+       */
+      get?: boolean;
     };
 
 /**
@@ -249,7 +256,17 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
     );
   });
 
-  app.get(`/:${param}`, async (c) => item(c, await svc.get(c.get("deps"), c.get("user"), itemId(c))));
+  app.get(`/:${param}`, async (c) => {
+    // A READ-ONLY custom method that asked to be reachable by GET (`verbs.<name>.get`) is answered here, off
+    // the same param this route already binds: Hono will not bind a param followed by a literal `:verb`, which
+    // is why the POST lane parses the last segment itself (http/customMethod.ts) and why this one does too.
+    // Without the opt-in the path falls through exactly as before - to a `get` for an id that ends in `:verb`,
+    // which finds nothing.
+    const { id, verb } = customMethod(c);
+    const own = verb ? spec.verbs?.[verb] : undefined;
+    if (own?.raw && own.get) return own.raw(c, id);
+    return item(c, await svc.get(c.get("deps"), c.get("user"), itemId(c)));
+  });
 
   // No `insert` means the collection is not created through its own endpoint (an acknowledgement is written by
   // org-documents :acknowledge), and no `patch` means it is read-only history. Mounting nothing is the honest
@@ -297,6 +314,11 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
     const { id, verb } = customMethod(c);
     const own = spec.verbs?.[verb];
     if (own) {
+      // A verb that declared `get` is a READ addressed by a URL - the contract specifies it as a GET and the
+      // app reaches it as one (an `<img src>`). Answering the same thing on POST as well would be a second
+      // spelling of one operation, so it is not offered: the method that is documented is the method that
+      // works. Not a refusal worth its own status - as far as this route is concerned there is no such POST.
+      if (own.raw && own.get) throw notFound("no such method");
       if (own.raw) return own.raw(c, id);
       // A verb body is optional on the wire (`:unblock` carries none), so a missing/!JSON body parses as {}.
       // Read through jsonBody, not c.req.json(): the latter parses whatever bytes arrived whatever the declared

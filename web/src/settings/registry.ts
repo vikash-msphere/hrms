@@ -1,7 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Building2, Landmark, SlidersHorizontal, Hash, Network, Fingerprint, Trophy,
-  CalendarRange, Palmtree, Clock, CalendarClock,
+  CalendarRange, Palmtree, Clock, CalendarClock, AlarmClock,
   Coins, Layers, ListOrdered, Percent, Receipt, Wallet, FileSpreadsheet, FolderKanban,
   UserSearch, UserPlus, Target, ClipboardList, HeartPulse,
   FileText, PenLine, FileSignature, Bell, BellRing, LifeBuoy, ListTodo,
@@ -62,6 +62,7 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   { key: "leave-policy", title: "Leave policy", desc: "Carry-forward and encashment caps, accrual rounding, back-dating, and the org-wide leave restrictions.", group: "Time & leave", icon: CalendarRange, keywords: ["carry forward", "encash", "accrual", "backdated", "notice", "sandwich", "blackout", "quota", "restriction", "notice period", "joining"], target: { collection: "settings", objectPath: "settings/leave_caps", label: "Leave policy" } },
   { key: "leave-types", title: "Leave types", desc: "Casual, sick, earned - quotas, accrual, carry-forward, encashment and restrictions per type.", group: "Time & leave", icon: Palmtree, perm: "leave-types.write", keywords: ["vacation", "sick", "casual", "earned", "quota", "notice", "sandwich", "blackout", "restriction"], target: { collection: "leave-types", label: "Leave types" } },
   { key: "attendance", title: "Attendance schedule", desc: "Shift window, grace, working days, week start, flexible hours and loss-of-pay rules.", group: "Time & leave", icon: Clock, keywords: ["late", "grace", "working days", "week start", "lop", "timezone", "punch"], target: { collection: "settings", objectPath: "settings/attendance", label: "Attendance schedule" } },
+  { key: "late-early", title: "Late & early policy", desc: "Who may ask to arrive late or leave early and when, what an approval does to the day, and what unexcused lateness costs in pay.", group: "Time & leave", icon: AlarmClock, keywords: ["late arrival", "early departure", "late coming", "early going", "permission", "short leave", "late mark", "penalty", "punctuality", "allowance", "auto approve"], target: { collection: "settings", objectPath: "settings/punctuality", label: "Late & early policy" } },
   { key: "shifts", title: "Shift patterns", desc: "Named shifts (morning, night…) assignable on the team roster.", group: "Time & leave", icon: CalendarClock, perm: "shifts.write", keywords: ["roster", "schedule"], target: { collection: "shifts", label: "Shifts" } },
 
   // Pay & money
@@ -141,14 +142,17 @@ export const HOST_SETTINGS: Record<string, string[]> = {
   // The calendar also reads the work schedule (working days, which weekday a grid starts on), so its gear
   // reaches that too - otherwise "why does my week start on Sunday" is a hunt through Settings.
   "leave-calendar": ["leave-policy", "leave-types", "attendance"],
-  attendance: ["attendance"],
+  attendance: ["attendance", "late-early"],
+  // The requests are judged against the shift the schedule sets, so the page that files them reaches both.
+  "late-early": ["late-early", "attendance"],
   // The holiday page's breaks are computed from the working week, and its optional-pick allowance lives in
   // Defaults - both are reachable from its gear so neither is a hunt through Settings.
   holidays: ["defaults", "attendance"],
   schedule: ["shifts"],
   timesheets: ["projects"],
   // Pay & money
-  "payroll-runs": ["pay-components", "payroll-policy", "payslip-design", "pay-grades", "salary-structures", "bank-formats"],
+  // `late-early` because its penalties are charged as loss of pay on the run.
+  "payroll-runs": ["pay-components", "payroll-policy", "payslip-design", "pay-grades", "salary-structures", "bank-formats", "late-early"],
   payslips: ["payslip-design", "pay-components", "payroll-policy", "pay-grades", "salary-structures", "bank-formats"],
   reimbursements: ["reimbursements"],
   expenses: ["expenses"],

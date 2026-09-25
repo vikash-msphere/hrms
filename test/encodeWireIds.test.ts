@@ -35,6 +35,22 @@ describe("encodeWireIds", () => {
     expect(await codec.decode("announcements", token!)).toEqual(EVE);
   });
 
+  // THE REGRESSION THAT SHIPPED, and the fixture that would have caught it. The photo marker grew a version
+  // (`?v=<photo_at>`, http/serialize.ts) and the anchored ref pattern stopped matching it - so the row's
+  // `photo` carried the employee's INTERNAL primary key to every client, while `signature` next to it, same
+  // shape without a query, left as a token. The case above passes either way, which is precisely why nothing
+  // said anything for as long as it did.
+  it("encodes a ref that carries a query string, and keeps the query", async () => {
+    const out = await encodeWireIds(codec, {
+      photo: `employees/${EVE}:getPhoto?v=1758000000000`,
+      link: `announcements/${EVE}/view?tab=replies`,
+    });
+    expect(out.photo).toMatch(/^employees\/.{26}:getPhoto\?v=1758000000000$/);
+    expect(out.photo).not.toContain(EVE);
+    expect(await codec.decode("employees", out.photo.slice("employees/".length, "employees/".length + 26))).toEqual(EVE);
+    expect(out.link).toMatch(/^announcements\/.{26}\/view\?tab=replies$/);
+  });
+
   it("walks lists and leaves the pagination cursor untouched", async () => {
     const cursor = Buffer.from(`1700000000000|tok`).toString("base64url");
     const out = await encodeWireIds(codec, {

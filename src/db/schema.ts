@@ -321,6 +321,12 @@ export const employees = sqliteTable("employees", {
   startDate: integer("start_date", { mode: "timestamp_ms" }),
   endDate: integer("end_date", { mode: "timestamp_ms" }),
   probationEndDate: integer("probation_end_date", { mode: "timestamp_ms" }),
+  // The first day this system holds records for the person (DATE-ONLY, UTC midnight). Someone who joined before
+  // the org started using the app has history that happened elsewhere, so a day before this is not inferred as
+  // an absence (domain/attendance.ts lopDayUnits), and an accrual period that starts before it belongs to the
+  // opening balance rather than to the walk (domain/leave.ts `floorMs`, `leaveAdjustments`). Null = records
+  // start on `startDate`, which is the case for everyone hired after go-live.
+  trackedFrom: integer("tracked_from", { mode: "timestamp_ms" }),
   epfEnrolled: integer("epf_enrolled", { mode: "boolean" }).notNull().default(false), // EPF is opt-in per employee; default off (no PF deduction / employer share)
   // EPS (Employees' Pension Scheme) exclusion. A member whose pay already exceeded the pension wage ceiling
   // when they first joined EPF is excluded from EPS, and the WHOLE employer share stays in EPF instead of
@@ -432,6 +438,39 @@ export const leaveBalances = sqliteTable("leave_balances", {
   // reserve/release. A duplicate insert now fails loudly instead of silently corrupting the balance.
 }, (t) => ({ pageIdx: index("leave_balances_page_idx").on(t.createdAt, t.uuid), empIdx: index("bal_emp_idx").on(t.employeeId, t.createdAt, t.uuid), empTypeUniq: uniqueIndex("bal_emp_type_idx").on(t.employeeId, t.leaveTypeId) }));
 
+// A change to a leave balance that no accrual, request or encashment explains, kept as a LEDGER: each row is
+// the signed number of days it moved the balance by, and no row is ever edited - a mistake is corrected by
+// another row (services/leaveAdjustments.ts). Two kinds:
+//   - `opening`: the balance somebody had when HRMS records started for them (`employees.trackedFrom`), from
+//     the system before it. The first one also REMOVES what HRMS had credited for the periods before that day
+//     (`removedDays`, domain/leave.ts creditedBeforeFloor); a re-import moves the balance by the difference
+//     from the last opening only. `openingSeq` numbers them per (employee, type), and the unique index on it is
+//     the lock: two imports of the same opening racing each other make the second one fail and roll back,
+//     rather than both applying.
+//   - `correction`: HR moving a balance by hand, with the reason on the row.
+// Employee-owned and code-scoped like the balance it moves; private by default.
+export const leaveAdjustments = sqliteTable("leave_adjustments", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  leaveTypeId: text("leave_type_id").notNull().references(() => leaveTypes.uuid),
+  kind: text("kind", { enum: ["opening", "correction"] }).notNull(),
+  days: real("days").notNull(), // the signed change this row made to the balance
+  openingDays: real("opening_days"), // opening: the balance entered, as of `asOf`
+  removedDays: real("removed_days"), // opening: what HRMS had credited before `asOf`, taken off by the first one
+  encashedDays: real("encashed_days"), // opening: days already encashed this leave year before HRMS
+  asOf: integer("as_of", { mode: "timestamp_ms" }), // opening: the employee's tracked_from it was measured against
+  openingSeq: integer("opening_seq"), // opening: 1 for the first, then one more per re-import
+  reason: text("reason"),
+  createdBy: text("created_by").references(() => users.uuid),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  pageIdx: index("leave_adjustments_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("ladj_emp_idx").on(t.employeeId, t.createdAt, t.uuid),
+  openingUniq: uniqueIndex("ladj_opening_idx").on(t.employeeId, t.leaveTypeId, t.openingSeq).where(sql`${t.kind} = 'opening'`),
+}));
+
 export const leaveRequests = sqliteTable("leave_requests", {
   uuid: pk(),
   code: codeCol(),
@@ -447,6 +486,10 @@ export const leaveRequests = sqliteTable("leave_requests", {
   startSession: integer("start_session").notNull().default(1),
   endSession: integer("end_session").notNull().default(2),
   state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED"] }).notNull().default("PENDING"),
+  // `import`: leave taken BEFORE HRMS, brought in as history (services/leaveHistoryImport.ts). It is APPROVED
+  // and counts toward the leave policy (quotas, lifetime limits, the probation cap) like any other, but it never
+  // moved the balance - the opening balance already has it taken off - so cancelling it refunds nothing.
+  source: text("source", { enum: ["app", "import"] }).notNull().default("app"),
   reason: text("reason"),
   decidedBy: text("decided_by").references(() => users.uuid),
   // Policy rules this request broke that the org has chosen to WARN on rather than refuse (`soft_rules` in
@@ -2688,6 +2731,36 @@ export const payrollRunItems = sqliteTable("payroll_run_items", {
   updatedAt: updated(),
 }, (t) => ({ runIdx: index("rri_run_idx").on(t.runId), runEmpUniq: uniqueIndex("rri_run_emp_idx").on(t.runId, t.employeeId) }));
 
+// Pay and tax an employee had ALREADY been paid this financial year before HRMS ran their payroll, from the
+// system before it (services/payrollOpenings.ts). One live row per (employee, financial year), covering the
+// months from the start of the year through `paidThrough`. services/taxProjection.ts#finalizedTotals folds it in
+// beside the finalized runs, so the year's TDS, the PT annual cap, the settlement and Form 16 all count it, and
+// the months it covers are neither re-priced nor collected in again.
+export const payrollOpenings = sqliteTable("payroll_openings", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  financialYear: text("financial_year").notNull(), // "2026-27", as fyWindow labels it
+  paidThrough: text("paid_through").notNull(), // "YYYY-MM": the last month whose salary the figures include
+  gross: real("gross").notNull(),
+  taxableGross: real("taxable_gross").notNull(),
+  tds: real("tds").notNull().default(0),
+  pt: real("pt").notNull().default(0),
+  // Whether ESI was being deducted in `paidThrough`: once in, an employee stays in for the rest of that
+  // contribution period whatever their wage does (domain/statutory.ts), and a run that cannot see the months
+  // before HRMS would otherwise re-test the ceiling and stop the deduction.
+  esiContributing: integer("esi_contributing", { mode: "boolean" }).notNull().default(false),
+  note: text("note"),
+  createdBy: text("created_by").references(() => users.uuid),
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  pageIdx: index("payroll_openings_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("popen_emp_idx").on(t.employeeId, t.createdAt, t.uuid),
+  empFyUniq: uniqueIndex("popen_emp_fy_idx").on(t.employeeId, t.financialYear).where(sql`${t.deleteTime} is null`),
+}));
+
 export const payslips = sqliteTable("payslips", {
   uuid: pk(),
   code: codeCol(),
@@ -3160,6 +3233,43 @@ export const remoteWorkRequests = sqliteTable("remote_work_requests", {
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ pageIdx: index("remote_work_requests_page_idx").on(t.createdAt, t.uuid), empIdx: index("rwr_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("rwr_state_idx").on(t.state) }));
+
+// Late arrival / early departure request: an employee asks to come in late, or leave early, on one day.
+// Employee-owned + code-scoped (own/dept/all, like overtime-requests): the employee files, a manager (own dept)
+// or HR approves or rejects, the owner cancels while pending. The row records only that it was asked and how it
+// was answered; what an approved one does to the day and to pay is the org's policy (settings/punctuality, read
+// through domain/punctuality.ts), so changing the policy changes every day it covers without rewriting a row.
+export const lateEarlyRequests = sqliteTable("late_early_requests", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  date: integer("date", { mode: "timestamp_ms" }).notNull(), // the org-local day it is about (UTC midnight)
+  kind: text("kind", { enum: ["late_arrival", "early_departure"] }).notNull(),
+  // Wall-clock "HH:MM" in the org timezone: when they will arrive (a late arrival) or leave (an early departure).
+  at: text("at").notNull(),
+  // How far `at` is from the shift edge it moves, fixed when filed: the monthly allowance is counted in these, so
+  // a later change to the shift does not re-price requests already made.
+  minutes: integer("minutes").notNull(),
+  reason: text("reason"),
+  state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED"] }).notNull().default("PENDING"),
+  // Filed past the monthly allowance while the policy accepts such requests; shown to whoever decides it.
+  overLimit: integer("over_limit", { mode: "boolean" }).notNull().default(false),
+  // Approved on filing by the policy's auto-approval threshold, so `decidedBy` is empty by design.
+  autoApproved: integer("auto_approved", { mode: "boolean" }).notNull().default(false),
+  decidedBy: text("decided_by").references(() => users.uuid),
+  decisionNote: text("decision_note"),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  pageIdx: index("late_early_requests_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("ler_emp_idx").on(t.employeeId, t.date),
+  // The payroll build and the attendance windows read APPROVED rows over a range of days.
+  stateDateIdx: index("ler_state_date_idx").on(t.state, t.date),
+  // ONE LIVE REQUEST PER PERSON, DAY AND KIND. Two approved late arrivals on one day is not a state the day can be
+  // judged by, and the filing check reads-then-inserts, so two presses at once would both pass it. Rejected and
+  // cancelled rows are outside the predicate, so a day can be asked about again after a refusal.
+  liveUniq: uniqueIndex("ler_live_idx").on(t.employeeId, t.date, t.kind).where(sql`${t.state} in ('PENDING', 'APPROVED')`),
+}));
 
 // A request for kit: "I need a laptop". Employee-owned + code-scoped (own/dept/all, like leave-requests): the
 // employee files it naming a CATEGORY (not a specific machine - which one they get is inventory's call), a

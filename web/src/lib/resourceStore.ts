@@ -794,6 +794,8 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   "overtime-requests:reject": ["overtime-requests", "notifications"],
   "remote-work-requests:approve": ["remote-work-requests", "notifications"],
   "remote-work-requests:reject": ["remote-work-requests", "notifications"],
+  "late-early-requests:approve": ["late-early-requests", "notifications"],
+  "late-early-requests:reject": ["late-early-requests", "notifications"],
   "asset-requests:approve": ["asset-requests", "notifications"],
   "asset-requests:reject": ["asset-requests", "notifications"],
   "asset-requests:cancel": ["asset-requests", "notifications"],
@@ -819,6 +821,11 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   // price for a check that cannot be argued with about which branch ran.
   "attendance-regularizations:reject": ["attendance-regularizations", "attendance", "notifications"],
   "attendance-regularizations:cancel": ["attendance-regularizations", "attendance", "notifications"],
+  // An opening moves the balance it describes, and tells each person once that theirs was brought over.
+  "leave-adjustments:importOpenings": ["leave-adjustments", "leave-balances", "notifications"],
+  "payroll-openings:importOpenings": ["payroll-openings"],
+  // Lands as approved requests and notifies nobody. History moves no balance; booked leave takes its days off.
+  "leave-requests:importHistory": ["leave-requests", "leave-balances"],
   "leave-encashments:approve": ["leave-encashments", "leave-balances", "notifications"],
   "leave-encashments:reject": ["leave-encashments", "notifications"],
   // Cancelling gives the days back, so the balance moves here exactly as it does on approval.

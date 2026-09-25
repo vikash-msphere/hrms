@@ -51,6 +51,8 @@ const WITHHELD_COLLECTIONS: Record<string, string> = {
   "tax-verifications": "the prior-employer verification queue rides the `tax` capability, decided per employee sub-resource",
   moderation: "the flagged-post queue quotes public posts in full and is deliberately NOT narrowed per holder (moderating is an org-wide job), so the capability is the whole access decision - granted to a named moderator through the ACL, never seeded to a role",
   users: "the login directory (role and status per account). Changing who can sign in and as what is super's act; delegated through the ACL, never seeded",
+  "leave-adjustments": "the leave balance ledger: every write moves an encashable balance by hand, and the opening import does it for a whole workforce at once. Private by default (a new collection is granted through the ACL, not by a seed), including the self-scoped read that lets people see why their own balance moved",
+  "payroll-openings": "pay and tax from before HRMS, per person: salary figures entered by hand for a one-time import, read by the payroll engine rather than by people. Private by default like `payroll-debit-accounts`, opened to payroll through the ACL",
 };
 
 /** Employee sub-resources deliberately unreachable by every seeded role. */

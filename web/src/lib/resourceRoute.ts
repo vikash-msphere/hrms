@@ -33,6 +33,7 @@ const PAGE_OF: Record<string, string> = {
   "pay-periods": "pay-periods", bonuses: "payroll-runs", notifications: "notifications",
   "overtime-requests": "overtime",
   "remote-work-requests": "remote-work",
+  "late-early-requests": "late-early",
   // An asset request has no list page of its own: the requester sees theirs on their profile's Assets tab, and
   // everyone else meets it as a decision, so the inbox is where a link to one belongs.
   "asset-requests": "approvals",

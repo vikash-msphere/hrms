@@ -104,17 +104,19 @@ vi.mock("@/api", () => ({
 
 const { freshnessMs, setResourceStoreUser, getSnapshot, invalidateCollections, subscribe, entryCount, ensureFetch, storedCopiesTrusted, persistable, collectionHasMore } =
   await import("@/lib/resourceStore");
-const { flushNow, put } = await import("@/lib/clientStore");
+const { flushNow, put, SCHEMA } = await import("@/lib/clientStore");
 
 // A record as a previous page life would have left it. The composite key is clientStore's: schema version,
 // identity, class, then the store's own entry key - "<collection>?<opts>" as keyOf builds it. `m` is the page
 // size the store actually asks for, which is the server's own cap (clampPageSize).
 const entryKey = (collection: string, opts = "d=0&m=100&q=&p=") => `${collection}?${opts}`;
-const recordKey = (user: string, collection: string, opts?: string) => `1|${user}|rows|${entryKey(collection, opts)}`;
+// The schema version is READ from the store rather than spelled here: a bump deletes records of another
+// version by design, so a hardcoded one turns the next bump into a suite that reports a broken cache.
+const recordKey = (user: string, collection: string, opts?: string) => `${SCHEMA}|${user}|rows|${entryKey(collection, opts)}`;
 function seed(user: string, collection: string, rows: unknown[], ageMs = 0, opts?: string) {
   const k = recordKey(user, collection, opts);
   const ts = Date.now() - ageMs;
-  idb.meta.set(k, { k, ver: 1, id: user, cls: "rows", key: entryKey(collection, opts), collection, ts, bytes: 1 });
+  idb.meta.set(k, { k, ver: SCHEMA, id: user, cls: "rows", key: entryKey(collection, opts), collection, ts, bytes: 1 });
   idb.data.set(k, { k, v: JSON.stringify({ rows, ts }) });
 }
 

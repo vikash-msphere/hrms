@@ -11,7 +11,8 @@ import type { AppUser } from "../env";
 import { audit, createdMeta, fieldDiff } from "../lib/audit";
 import { emitEvent } from "./eventBus";
 import { notify, notifyMany } from "./notifications";
-import { invalidArgument, notFound, aborted, isCodeCollision, isEmployeeNumberCollision } from "../lib/errors";
+import { invalidArgument, failedPrecondition, notFound, aborted, isCodeCollision, isEmployeeNumberCollision } from "../lib/errors";
+import { hasOpening } from "./leaveAdjustments";
 import { moveEmployee } from "./codeCascade";
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
@@ -20,6 +21,7 @@ import { getSettingValue } from "./settings";
 import { DEFAULT_EMPLOYEE_NUMBER_CONFIG, formatEmployeeNumber, nextSeq } from "../domain/employeeNumber";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 import { softDeleteRow } from "./softDelete";
+import { orgToday } from "./orgDay";
 
 // Wire input is snake_case (matches the OpenAPI schema). national_id/bank_details are write-only.
 export type EmployeeInput = {
@@ -33,6 +35,7 @@ export type EmployeeInput = {
   manager?: string | null; // employees/{id}
   start_date?: string | null; // YYYY-MM-DD
   probation_end_date?: string | null; // YYYY-MM-DD
+  tracked_from?: string | null; // YYYY-MM-DD - the day HRMS records start (db/schema.ts employees.trackedFrom)
   epf_enrolled?: boolean;
   eps_excluded?: boolean;
   national_id?: string | null;
@@ -61,6 +64,16 @@ async function assertNumberFree(deps: Deps, number: string, exceptId?: string): 
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dateMs = (s?: string | null) => (s ? new Date(s + "T00:00:00Z") : null);
+// `tracked_from` decides which days payroll may dock, so a value that is not a calendar day is refused rather
+// than stored as an Invalid Date the way the looser `dateMs` would - and so is a FUTURE day, which would leave
+// every no-show between now and then undocked (services/trackedFrom.ts refuses one for the same reason).
+async function parseTrackedFrom(deps: Deps, s?: string | null): Promise<Date | null> {
+  if (!s) return null;
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(s + "T00:00:00Z") : null;
+  if (!d || Number.isNaN(+d) || d.toISOString().slice(0, 10) !== s) throw invalidArgument("tracked_from must be a calendar date (YYYY-MM-DD)");
+  if (s > (await orgToday(deps))) throw invalidArgument("tracked_from can't be in the future");
+  return d;
+}
 const addMonths = (ms: number, months: number) => {
   const d = new Date(ms);
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, d.getUTCDate()));
@@ -162,6 +175,7 @@ export async function createEmployee(deps: Deps, actor: AppUser, input: Employee
   const override = input.employee_number?.trim();
   if (override) await assertNumberFree(deps, override);
   const startDate = dateMs(input.start_date);
+  const trackedFrom = await parseTrackedFrom(deps, input.tracked_from);
   // Default probation end to start_date + the org default probation period when not given explicitly.
   let probationEndDate = dateMs(input.probation_end_date);
   if (!probationEndDate && startDate) {
@@ -196,6 +210,7 @@ export async function createEmployee(deps: Deps, actor: AppUser, input: Employee
       managerId: idFromPath(input.manager),
       startDate,
       probationEndDate,
+      trackedFrom,
       nationalIdEnc,
     })
         .returning(),
@@ -385,6 +400,16 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
   }
   if (has("start_date")) set.startDate = dateMs(patch.start_date);
   if (has("probation_end_date")) set.probationEndDate = dateMs(patch.probation_end_date);
+  if (has("tracked_from")) {
+    const next = await parseTrackedFrom(deps, patch.tracked_from);
+    // An opening balance was measured against this day (services/leaveAdjustments.ts): what HRMS credited
+    // before it was taken off and the old system's figure put on. Moving the day now would leave that
+    // arithmetic describing a different day, so it stays; a balance that needs changing gets an adjustment.
+    if (+(next ?? 0) !== +(row.trackedFrom ?? 0) && (await hasOpening(deps, id))) {
+      throw failedPrecondition("leave opening balances were entered as of this day, so it can't move now - adjust the balance instead");
+    }
+    set.trackedFrom = next;
+  }
   if (has("epf_enrolled")) set.epfEnrolled = !!patch.epf_enrolled;
   if (has("eps_excluded")) set.epsExcluded = !!patch.eps_excluded;
   if (has("national_id")) set.nationalIdEnc = patch.national_id ? await deps.encryptor.encrypt(patch.national_id) : null;

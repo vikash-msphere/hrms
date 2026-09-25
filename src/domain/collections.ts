@@ -15,9 +15,15 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   "holiday-selections", "org-documents", "personal-documents", "announcements", "pay-components", "pay-grades", "salary-structures",
   "pay-periods", "payroll-runs", "payroll-budgets", "payslips", "operations", "users", "compensation", "positions", "bonuses", "assets", "asset-categories", "asset-requests", "stocktakes", "settlements", "goal-templates",
   "leave-encashments", "reimbursements", "reimbursement-categories",
+  // the leave balance ledger: opening balances from before HRMS + hand corrections; employee-owned, private-by-default
+  "leave-adjustments",
+  // pay and tax already paid this financial year before HRMS ran payroll; employee-owned, private-by-default
+  "payroll-openings",
   // operational/company expenses: employee-owned expense (submitter-scoped) + flat vendor/category masters + finance budgets
   "expenses", "expense-categories", "vendors", "expense-budgets", "card-transactions",
   "attendance", "attendance-regularizations", "attendance-day-marks", "overtime-requests", "remote-work-requests", "approval-delegations", "notice-periods", "suggestions", "notifications",
+  // late arrival / early departure requests; employee-owned (code-scoped own/dept/all), manager or HR decides
+  "late-early-requests",
   // compliance: per-employee acknowledgement (e-signature) of an org-document version; employee-owned, private-by-default
   "document-acknowledgements",
   // statutory compliance calendar (PF/ESI/TDS/GST/PT/returns); flat company-wide, HR-managed

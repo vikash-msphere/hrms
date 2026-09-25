@@ -11,12 +11,13 @@ import { exportTable } from "@/lib/exportTable";
 import { cn, idOf, formatDate } from "@/lib/utils";
 import {
   summarizeByDay, buildAttendanceRows, statsOf, fmtDay, fmtHM, fmtHM24, fmtDuration, fmtDurationShort,
-  localDay, localMinutes, zonedInstant, weekdayOf, hhmmToMin, signedDuration, STATUS_UI, leaveRangeOf, unpaidLeaveTypes,
+  localDay, trackedFromOf, localMinutes, zonedInstant, weekdayOf, hhmmToMin, signedDuration, STATUS_UI, leaveRangeOf, unpaidLeaveTypes,
   type DayStatus, type AttendanceRow, type AttendanceSchedule, type LeaveRange, type WindowStats,
 } from "@/lib/attendance";
 import { useAttendanceWindow } from "@/hooks/useAttendanceWindow";
 import { AttendanceHistory } from "@/components/common/AttendanceHistory";
-import type { AttendanceSession, AttendanceRegularization, Department, Employee, Holiday, LeaveRequest, LeaveType, Me } from "@/types";
+import { excusalsByEmployee, usePunctualityPolicy, type DayExcusal, type LateEarlyKind } from "@/lib/lateEarly";
+import type { AttendanceSession, AttendanceRegularization, Department, Employee, Holiday, LateEarlyRequest, LeaveRequest, LeaveType, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { ExportButton } from "@/components/common/ExportButton";
@@ -62,6 +63,8 @@ export default function Attendance({ me }: { me: Me }) {
   const canApprove = me.capabilities.includes("attendance-regularizations.approve");
   const canExport = useCanExport("attendance");
   const canLogOvertime = usePermission("overtime-requests.write");
+  const canRequestLateEarly = usePermission("late-early-requests.write");
+  const punctuality = usePunctualityPolicy();
   // Re-valuing a day, for the teammate logs this page opens from the roster. A roster spans everybody, so
   // there is no one subject to ask about: the caller-level question ("is there anybody but me whose day I
   // could mark") is the honest one here, and the server still refuses any row the grant does not reach.
@@ -116,6 +119,7 @@ export default function Attendance({ me }: { me: Me }) {
   // The caller's join date: days before it aren't their attendance, so they're never flagged absent.
   const meEmployee = useMemo(() => employees.find((e) => idOf(e.path) === me.employee_id), [employees, me.employee_id]);
   const joinedYmd = meEmployee?.start_date;
+  const trackedFromYmd = trackedFromOf(meEmployee);
   // The device's zone, when it differs from the org's: every time on this page is org-local, so say so once.
   const deviceTz = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone, []);
 
@@ -142,6 +146,14 @@ export default function Attendance({ me }: { me: Me }) {
     return { from: lo[0]!, to: hi[hi.length - 1]! };
   }, [prevWindow.from, prevWindow.to, fromYmd, toYmd, orgToday]);
   const { rows: leaves } = useCollection<LeaveRequest>("leave-requests", { all: true, params: { from: leaveWindow.from, to: leaveWindow.to } });
+  // Approved late arrivals / early departures over the same span, for everyone the caller may see: each moves
+  // its day's start or end, so today's row, the team table and my own history are all judged against the moved
+  // window. One read, handed to the history below rather than read again there.
+  const { rows: lateEarly } = useCollection<LateEarlyRequest>("late-early-requests", {
+    all: true,
+    params: { from: leaveWindow.from, to: leaveWindow.to, state: "APPROVED" },
+  });
+  const excusalsByEmp = useMemo(() => excusalsByEmployee(lateEarly), [lateEarly]);
 
   // Shared inputs for building per-day rows (holidays + approved leave).
   const holidayByDay = useMemo(() => {
@@ -166,19 +178,21 @@ export default function Attendance({ me }: { me: Me }) {
   // One way to turn a set of punches into per-day rows, reused for today's row and every teammate's window
   // (each with their own leave + join date).
   const buildRows = useCallback(
-    (sessions: AttendanceSession[], opts: { from: string; to: string; leaves: LeaveRange[]; joined?: string }) =>
+    (sessions: AttendanceSession[], opts: { from: string; to: string; leaves: LeaveRange[]; joined?: string; tracked?: string; excusals?: Map<string, DayExcusal> }) =>
       buildAttendanceRows({
         fromYmd: opts.from, toYmd: opts.to, todayYmd: orgToday, sched,
-        summaries: summarizeByDay(sessions, sched), holidays: holidaySet, leaveRanges: opts.leaves, joinedYmd: opts.joined,
+        summaries: summarizeByDay(sessions, sched, { excusals: opts.excusals, policy: punctuality.attendance, leaveRanges: opts.leaves }),
+        holidays: holidaySet, leaveRanges: opts.leaves, joinedYmd: opts.joined, trackedFromYmd: opts.tracked,
       }),
-    [orgToday, sched, holidaySet],
+    [orgToday, sched, holidaySet, punctuality],
   );
+  const myExcusals = me.employee_id ? excusalsByEmp.get(me.employee_id) : undefined;
 
   // Today's row (always today, independent of which history page the table shows) - built from a small recent
   // fetch so the My-clock punch log and the cumulative total stay put while you page through history.
   const todayRow = useMemo(
-    () => buildRows(recentSessions.filter((s) => mine(s.employee)), { from: orgToday, to: orgToday, leaves: leaveRanges, joined: joinedYmd })[0],
-    [recentSessions, buildRows, leaveRanges, joinedYmd, mine, orgToday],
+    () => buildRows(recentSessions.filter((s) => mine(s.employee)), { from: orgToday, to: orgToday, leaves: leaveRanges, joined: joinedYmd, tracked: trackedFromYmd, excusals: myExcusals })[0],
+    [recentSessions, buildRows, leaveRanges, joinedYmd, trackedFromYmd, mine, orgToday, myExcusals],
   );
 
   const myOpen = clock.mine;
@@ -307,6 +321,14 @@ export default function Attendance({ me }: { me: Me }) {
     return failure && done ? `Filed ${done} of ${days.length}. ${failure}` : failure;
   }
 
+  // Ask for the late arrival / early departure that would have excused a flagged day, prefilled with the day and
+  // the time the punches actually show - the same hand-off "Log overtime" makes, for the same reason.
+  function requestLateEarly(row: AttendanceRow, kind: LateEarlyKind) {
+    const at = kind === "late_arrival" ? row.summary?.arrival : row.summary?.departure;
+    navigate("late-early");
+    fireIntent("new-late-early", { date: row.day, kind, at: at ? fmtHM24(at, tz) : undefined });
+  }
+
   // Log the part of a long day that ran past the shift end as overtime, prefilled into the Overtime form -
   // the hours are already recorded here, so nobody should have to read them off and retype them.
   function logOvertime(row: AttendanceRow) {
@@ -326,9 +348,12 @@ export default function Attendance({ me }: { me: Me }) {
     () => employees.filter((e) => !e.delete_time && (!e.start_date || e.start_date.slice(0, 10) <= orgToday)),
     [employees, orgToday],
   );
-  // Anybody's join date, for the per-person log the team table opens.
+  // Anybody's join date and the day HRMS records start for them, for the per-person log the team table opens.
   const joinedOf = useCallback(
-    (id: string) => employees.find((e) => idOf(e.path) === id)?.start_date,
+    (id: string) => {
+      const e = employees.find((x) => idOf(x.path) === id);
+      return { joined: e?.start_date, tracked: trackedFromOf(e) };
+    },
     [employees],
   );
   const approvedLeaveByEmp = useMemo(() => {
@@ -354,7 +379,14 @@ export default function Attendance({ me }: { me: Me }) {
       const arr = todayBy.get(k);
       if (arr) arr.push(s); else todayBy.set(k, [s]);
     }
-    const lateAfter = hhmmToMin(sched.shift_start) + sched.grace_minutes;
+    const startMin = hhmmToMin(sched.shift_start);
+    const lateAfter = startMin + sched.grace_minutes;
+    // Somebody approved to come in at 10:30 is not late at 10:00: their own day starts at the approved time
+    // (plus grace, unless the policy makes the approved time exact).
+    const lateAfterFor = (id: string) => {
+      const until = excusalsByEmp.get(id)?.get(orgToday)?.lateUntil;
+      return until != null && until > startMin ? until + (punctuality.attendance.grace_on_top ? sched.grace_minutes : 0) : lateAfter;
+    };
     const nowMin = localMinutes(new Date(now).toISOString(), tz);
     const out: TeamEntry[] = [];
     for (const e of roster) {
@@ -373,11 +405,11 @@ export default function Attendance({ me }: { me: Me }) {
       } else if (onLeave) {
         out.push({ id, name, dept, photo: e.photo, group: "leave", worked: 0 });
       } else {
-        out.push({ id, name, dept, photo: e.photo, group: "not_in", late: nowMin > lateAfter, worked: 0 });
+        out.push({ id, name, dept, photo: e.photo, group: "not_in", late: nowMin > lateAfterFor(id), worked: 0 });
       }
     }
     return out.sort((a, b) => a.name.localeCompare(b.name));
-  }, [canApprove, roster, clock.openSessions, recentSessions, approvedLeaveByEmp, sched, tz, orgToday, now]);
+  }, [canApprove, roster, clock.openSessions, recentSessions, approvedLeaveByEmp, excusalsByEmp, punctuality, sched, tz, orgToday, now]);
 
   // Manager/HR: how the team did across the SAME window the history shows. Built from `pageSessions`, which is
   // already everyone's punches for that window - so the period view costs nothing beyond what's loaded.
@@ -393,7 +425,7 @@ export default function Attendance({ me }: { me: Me }) {
     return roster
       .map((e) => {
         const id = idOf(e.path);
-        const empRows = buildRows(byEmp.get(id) ?? [], { from: fromYmd, to: toYmd, leaves: approvedLeaveByEmp.get(id) ?? [], joined: e.start_date });
+        const empRows = buildRows(byEmp.get(id) ?? [], { from: fromYmd, to: toYmd, leaves: approvedLeaveByEmp.get(id) ?? [], joined: e.start_date, tracked: trackedFromOf(e), excusals: excusalsByEmp.get(id) });
         return {
           id,
           name: `${e.first_name} ${e.last_name}`,
@@ -404,7 +436,7 @@ export default function Attendance({ me }: { me: Me }) {
       })
       // Worst first: absences, then lateness - the rows a manager has to act on lead.
       .sort((a, b) => b.stats.absent - a.stats.absent || b.stats.late - a.stats.late || a.name.localeCompare(b.name));
-  }, [canApprove, roster, pageSessions, buildRows, approvedLeaveByEmp, fromYmd, toYmd, tz, sched.full_day_minutes, orgToday]);
+  }, [canApprove, roster, pageSessions, buildRows, approvedLeaveByEmp, excusalsByEmp, fromYmd, toYmd, tz, sched.full_day_minutes, orgToday]);
 
   return (
     <div>
@@ -473,7 +505,7 @@ export default function Attendance({ me }: { me: Me }) {
                     // The day the forgotten punch belongs to, built from the recent fetch rather than read off
                     // the history: the history may be paged back to a window that does not contain it.
                     const day = localDay(staleOpen.clock_in, tz);
-                    const [row] = buildRows(recentSessions.filter((s) => mine(s.employee)), { from: day, to: day, leaves: leaveRanges, joined: joinedYmd });
+                    const [row] = buildRows(recentSessions.filter((s) => mine(s.employee)), { from: day, to: day, leaves: leaveRanges, joined: joinedYmd, tracked: trackedFromYmd, excusals: myExcusals });
                     setCorrecting([row ?? { day, status: "absent" as DayStatus }]);
                   }}
                 >
@@ -516,6 +548,7 @@ export default function Attendance({ me }: { me: Me }) {
           <AttendanceHistory
             employeeId={me.employee_id}
             joinedYmd={joinedYmd}
+            trackedFromYmd={trackedFromYmd}
             win={win}
             sched={sched}
             orgToday={orgToday}
@@ -530,9 +563,11 @@ export default function Attendance({ me }: { me: Me }) {
             sessions={pageSessions}
             loading={pageLoading}
             leave={myLeave}
+            lateEarly={lateEarly}
             liveMinutes={openMin}
             onCorrect={setCorrecting}
             onLogOvertime={canLogOvertime ? logOvertime : undefined}
+            onRequestLateEarly={canRequestLateEarly ? requestLateEarly : undefined}
             emptyText="No attendance yet. Clock in above to record your first day."
           />
         )}
@@ -734,8 +769,8 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
   truncated: boolean;
   sched: AttendanceSchedule;
   orgToday: string;
-  /** That person's join date, so their log doesn't flag the days before they started. */
-  joinedOf: (employeeId: string) => string | undefined;
+  /** That person's join date and the day HRMS records start for them, so their log doesn't flag the days before either. */
+  joinedOf: (employeeId: string) => { joined?: string; tracked?: string };
 }) {
   const [tab, setTab] = useState<"today" | "period">("today");
   const [dept, setDept] = useState("all");
@@ -943,7 +978,8 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
               <PersonAttendance
                 employeeId={opened.id}
                 name={opened.name}
-                joinedYmd={joinedOf(opened.id)}
+                joinedYmd={joinedOf(opened.id).joined}
+                trackedFromYmd={joinedOf(opened.id).tracked}
                 sched={sched}
                 orgToday={orgToday}
                 now={now}
@@ -966,10 +1002,11 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
 // One teammate's attendance, in the sheet the period table opens. Its own window (`useAttendanceWindow` keyed
 // on the person, so the view choice is remembered per record) and its own punches - see the note at the call
 // site for why it does not borrow the page's.
-function PersonAttendance({ employeeId, name, joinedYmd, sched, orgToday, now, canExport, canMark }: {
+function PersonAttendance({ employeeId, name, joinedYmd, trackedFromYmd, sched, orgToday, now, canExport, canMark }: {
   employeeId: string;
   name: string;
   joinedYmd?: string;
+  trackedFromYmd?: string;
   sched: AttendanceSchedule;
   orgToday: string;
   now: number;
@@ -982,6 +1019,7 @@ function PersonAttendance({ employeeId, name, joinedYmd, sched, orgToday, now, c
     <AttendanceHistory
       employeeId={employeeId}
       joinedYmd={joinedYmd}
+      trackedFromYmd={trackedFromYmd}
       win={win}
       sched={sched}
       orgToday={orgToday}

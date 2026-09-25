@@ -11,6 +11,7 @@ import { parsePayslipTemplate } from "../domain/payslipTemplate";
 import { DOCUMENT_KINDS } from "../services/letterheads";
 import { validateStateMachine, type StateMachine } from "../domain/stateMachines";
 import { validateRestrictions } from "../domain/leaveRestrictions";
+import { validatePunctuality } from "../domain/punctuality";
 import { AI_FEATURES, CARD_DUPLICATE_SENSITIVITIES, MODERATION_FALLBACKS } from "../domain/aiPolicy";
 import { MODERATABLE, MODERATION_WALL_SCOPES, isModeratable } from "../domain/moderation";
 import { EXTRACTABLE_FIELDS } from "../domain/resumeFields";
@@ -766,6 +767,10 @@ const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
   // leave type. The read side is deliberately lenient, which is what makes the gap silent: a mistyped rule
   // here would simply never be enforced, on a screen that had said it saved.
   ["leave_restrictions", (v) => void validateRestrictions(v)],
+  // The late arrival / early departure policy. Its leaves decide who may file what, how a day is judged and what
+  // unexcused lateness docks - and the reader (domain/punctuality.ts#punctualityPolicyOf) falls back to the
+  // default for anything it does not recognise, so a typo stored here would be a rule that silently never ran.
+  ["punctuality", (v) => void validatePunctuality(v)],
   // The keys whose LEAVES feed arithmetic. See the note above `numericLeaves` for why a cleared field is the
   // value that matters here and why none of these can be caught anywhere downstream.
   ["overtime", validateOvertime],

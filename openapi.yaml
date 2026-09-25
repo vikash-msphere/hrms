@@ -554,9 +554,10 @@ components:
         manager: { type: string, description: "Resource path: employees/{employee_id}" }
         start_date: { type: string, format: date, description: First working day. Drives leave accrual and probation. }
         probation_end_date: { type: string, format: date, description: Last day of probation. Defaults from start_date plus the org probation period. }
+        tracked_from: { type: string, format: date, description: "The first day HRMS holds records for this employee. Set for someone who joined before the org started using HRMS: a working day before it with no punches, no mark and no leave is not an absence and is never docked as loss of pay. Absent = records start on start_date. Not in the future." }
         epf_enrolled: { type: boolean, description: "EPF is opt-in per employee. When false (default) the PF deduction and employer-share CTC line are skipped." }
         eps_excluded: { type: boolean, description: "EPS (Employees' Pension Scheme) exclusion, HR-declared. True for a member whose pay already exceeded the pension wage ceiling when they first joined EPF: the whole employer PF share stays in EPF instead of 8.33% being diverted to the pension fund. Affects the statutory register and the PF challan split only." }
-        photo: { type: string, readOnly: true, description: "Present when the employee has a profile photo (fetch via :getPhoto). The `v=` query parameter is the photo's own version, so a client cache keyed on this marker misses when the picture is replaced." }
+        photo: { type: string, readOnly: true, description: "Present when the employee has a profile photo. The value is the image's own API path - prefix it with `/v1/` and it is an `<img src>`. The `v=` query parameter is the photo's own version, so the URL changes when the picture is replaced and the answer may be cached until it does." }
         signature: { type: string, readOnly: true, description: "Owner-private. Present (and fetchable via :getSignature) ONLY for the employee themselves; omitted for all other viewers." }
         profile_completeness:
           type: object
@@ -708,6 +709,9 @@ components:
         remaining_months: { type: integer, readOnly: true }
         employed_months: { type: integer, readOnly: true }
         monthly_tds: { type: number, readOnly: true }
+        before_hrms_gross: { type: number, readOnly: true, description: "Taxable pay this employer paid this FY before HRMS ran payroll (a payroll opening). Already inside annual_gross." }
+        before_hrms_tds: { type: number, readOnly: true, description: "TDS deducted with before_hrms_gross. Already inside deducted_so_far." }
+        before_hrms_paid_through: { type: string, readOnly: true, description: "YYYY-MM: the last month the pay before HRMS covers." }
         prior_employer_income: { type: number, readOnly: true, description: Declared prior-employer income (this FY). }
         prior_employer_tds: { type: number, readOnly: true, description: Declared prior-employer TDS (this FY). }
         prior_employer_income_effective: { type: number, readOnly: true, description: Verified prior-employer income actually fed into the projection (0 unless verified). }
@@ -736,7 +740,7 @@ components:
       properties:
         employee: { type: string, readOnly: true, description: Employee resource reference. }
         name: { type: string, readOnly: true }
-        photo: { type: string, readOnly: true, description: "Photo custom-method reference, present when the employee has a photo. Identical to `employee.photo`, `v=` version and all - a client cache keyed on this marker misses when the picture is replaced." }
+        photo: { type: string, readOnly: true, description: "The photo's API path, present when the employee has one. Identical to `employee.photo`, `v=` version and all - prefix with `/v1/` for an `<img src>`." }
         kind: { type: string, enum: [birthday, anniversary], readOnly: true }
         month: { type: integer, readOnly: true, description: Month of the occurrence (1-12). }
         day: { type: integer, readOnly: true, description: Day of the occurrence (1-31). }
@@ -2060,6 +2064,39 @@ components:
         plural: remote-work-requests
         patterns: ['remote-work-requests/{remote_work_request_id}']
         type: hrms.example.com/remote-work-request
+    late-early-request:
+      type: object
+      description: >-
+        An employee's request to arrive late or leave early on one working day. A manager (own dept) or HR
+        approves or rejects it, and the owner can cancel it while it is pending. An approved request moves that
+        day's shift start (late arrival) or end (early departure) to the requested time; what else it does to the
+        day and to pay is the org's policy in settings/punctuality.
+      required: [path, create_time, update_time, etag, minutes, state, over_limit, auto_approved]
+      properties:
+        path: { type: string, readOnly: true }
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        employee: { type: string, description: "Resource path: employees/{employee_id}. Defaults to the caller." }
+        date: { type: string, format: date, description: "The org-local working day the request is about." }
+        kind: { type: string, enum: [late_arrival, early_departure] }
+        at:
+          type: string
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          description: "Wall-clock HH:MM in the org timezone - the time they will arrive (late_arrival) or leave (early_departure)."
+        minutes: { type: integer, readOnly: true, description: "How far `at` is from the shift start or end, fixed when the request was filed." }
+        reason: { type: string }
+        state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
+        over_limit: { type: boolean, readOnly: true, description: "Filed past the monthly allowance, which the policy accepts with a flag for the approver." }
+        auto_approved: { type: boolean, readOnly: true, description: "Approved on filing by the policy's auto-approval threshold rather than by a person." }
+        decided_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who approved or rejected the request." }
+        decision_note: { type: string, readOnly: true }
+        access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
+      x-aep-resource:
+        singular: late-early-request
+        plural: late-early-requests
+        patterns: ['late-early-requests/{late_early_request_id}']
+        type: hrms.example.com/late-early-request
     asset-request:
       type: object
       description: >-
@@ -2207,6 +2244,7 @@ components:
         end_session: { type: integer, enum: [1, 2], description: "Session the leave ends on the end date: 1 = first half (morning), 2 = second half (afternoon). Default 2." }
         days: { type: number, readOnly: true }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
+        source: { type: string, readOnly: true, enum: [app, import], description: "app for leave filed in HRMS; import for leave taken before HRMS and brought in as history (leave-requests:importHistory). Imported leave counts toward the leave policy but never moved the balance, so cancelling it refunds nothing." }
         reason: { type: string }
         has_document: { type: boolean, readOnly: true, description: "Whether a supporting file (sick note, travel document) is attached to this request." }
         policy_warnings:
@@ -4192,6 +4230,67 @@ components:
         patterns:
           - 'leave-balances/{leave_balance_id}'
         type: hrms.example.com/leave-balance
+    leave-adjustment:
+      type: object
+      description: "One change to a leave balance that no accrual, request or encashment explains, as a ledger row: an OPENING balance brought in from before HRMS (created only by :importOpenings), or a hand CORRECTION with its reason (the create method). Never edited or deleted; a mistake is corrected by another row."
+      required: [path, create_time, update_time, etag]
+      properties:
+        path:
+          type: string
+          readOnly: true
+          description: The server-assigned path of the resource, unique within the service.
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        employee: { type: string, description: "Resource path: employees/{employee_id}. Whose balance moved." }
+        leave_type: { type: string, description: "Resource path: leave-types/{leave_type_id}" }
+        kind: { type: string, readOnly: true, enum: [opening, correction] }
+        days: { type: number, description: "The signed change to the balance. On create, the days to add (positive) or take off (negative); not zero, and never taking the balance below zero." }
+        opening_days: { type: number, readOnly: true, description: "Opening only: the balance entered, as of `as_of`." }
+        removed_days: { type: number, readOnly: true, description: "Opening only: what HRMS had credited for the accrual periods before `as_of`, taken off by the first opening for this balance (0 on a re-import, which moves the balance by the difference from the previous opening)." }
+        encashed_days: { type: number, readOnly: true, description: "Opening only: days already encashed that leave year before HRMS, counted against the annual encashment cap." }
+        as_of: { type: string, format: date, readOnly: true, description: "Opening only: the employee's tracked_from the opening was measured against." }
+        reason: { type: string, description: "Why the balance moved. Required on create." }
+        access:
+          readOnly: true
+          $ref: '#/components/schemas/access_hint'
+      x-aep-resource:
+        singular: leave-adjustment
+        plural: leave-adjustments
+        patterns:
+          - 'leave-adjustments/{leave_adjustment_id}'
+        type: hrms.example.com/leave-adjustment
+    payroll-opening:
+      type: object
+      description: "Pay and tax an employee was already paid this financial year before HRMS ran their payroll, from the system before it. One live entry per employee per financial year. The year's TDS, the PT annual cap, the ESI rule, the full and final settlement and Form 16 all count it, and the months it covers are not priced or collected in again."
+      required: [path, create_time, update_time, etag]
+      properties:
+        path:
+          type: string
+          readOnly: true
+          description: The server-assigned path of the resource, unique within the service.
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        delete_time: { type: string, format: date-time, readOnly: true }
+        employee: { type: string, description: "Resource path: employees/{employee_id}. Can't change after create." }
+        financial_year: { type: string, description: "Like 2026-27." }
+        paid_through: { type: string, description: "YYYY-MM: the last month whose salary these figures include. Inside the financial year, not after the current month, and before the first month a finalized HRMS run paid this employee in that year." }
+        gross: { type: number, description: "Gross pay from the start of the financial year through paid_through." }
+        taxable_gross: { type: number, description: "The part of gross that counts toward income tax. Defaults to gross on create." }
+        tds: { type: number, description: "Income tax deducted at source over the same months. Not more than taxable_gross." }
+        pt: { type: number, description: "Professional tax deducted over the same months." }
+        esi_contributing: { type: boolean, description: "Whether ESI was being deducted in paid_through. Keeps it deducted for the rest of that ESI contribution period." }
+        note: { type: string }
+        access:
+          readOnly: true
+          $ref: '#/components/schemas/access_hint'
+      x-aep-resource:
+        singular: payroll-opening
+        plural: payroll-openings
+        patterns:
+          - 'payroll-openings/{payroll_opening_id}'
+        type: hrms.example.com/payroll-opening
     org-document:
       type: object
       required: [path, create_time, update_time, etag]
@@ -11799,6 +11898,122 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/remote-work-request' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/late-early-requests:
+    get:
+      description: List method for late-early-request.
+      operationId: ListLateEarlyRequests
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: state, schema: { type: string } }
+        - in: query
+          name: employee
+          schema: { type: string }
+          description: "Resource path employees/{employee_id}: one person's requests. Narrows the caller's scope; it never widens it."
+        - { in: query, name: from, schema: { type: string, format: date }, description: "First day (YYYY-MM-DD) of the window, inclusive." }
+        - { in: query, name: to, schema: { type: string, format: date }, description: "Last day (YYYY-MM-DD) of the window, inclusive." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/late-early-request' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: Create method for late-early-request. The org's policy decides whether it may be filed, whether it is past the monthly allowance, and whether it is approved on filing.
+      operationId: CreateLateEarlyRequest
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/late-early-request' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/late-early-request' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/late-early-requests/{late_early_request_id}:
+    parameters: [ { in: path, name: late_early_request_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for late-early-request.
+      operationId: GetLateEarlyRequest
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/late-early-request' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/late-early-requests/{late_early_request_id}:approve:
+    post:
+      description: "Custom method approve for late-early-request."
+      operationId: ":ApproveLateEarlyRequest"
+      parameters: [ { in: path, name: late_early_request_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: string, description: "Optional note relayed to the requester with the decision." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/late-early-request' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/late-early-requests/{late_early_request_id}:reject:
+    post:
+      description: "Custom method reject for late-early-request."
+      operationId: ":RejectLateEarlyRequest"
+      parameters: [ { in: path, name: late_early_request_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: string, description: "Why it was rejected; relayed to the requester with the decision." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/late-early-request' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/late-early-requests/{late_early_request_id}:cancel:
+    post:
+      description: "Custom method cancel for late-early-request."
+      operationId: ":CancelLateEarlyRequest"
+      parameters: [ { in: path, name: late_early_request_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/late-early-request' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/asset-requests:
     get:
       description: List method for asset-request.
@@ -12394,7 +12609,7 @@ paths:
         '500': { $ref: '#/components/responses/Problem' }
   /v1/leave-requests/{leave_request_id}:cancel:
     post:
-      description: "Custom method cancel for leave-request."
+      description: "Custom method cancel for leave-request. Leave imported from before HRMS (source: import) is cancelled only by somebody other than the person it belongs to, at any time, and refunds nothing - it never moved the balance."
       operationId: ":CancelLeaveRequest"
       parameters: [ { in: path, name: leave_request_id, required: true, schema: { type: string } } ]
       responses:
@@ -12404,6 +12619,83 @@ paths:
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/leave-request' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/leave-requests:importHistory:
+    post:
+      description: >-
+        Custom method importHistory: bring in leave from the system before HRMS. The employee's HRMS records start
+        (`employees.tracked_from`, which must be set) decides what each item is. HISTORY - leave that ends before
+        that day - lands as approved leave with source import: it counts toward quotas, lifetime limits and the
+        probation cap, and moves no balance (the opening balance already has it taken off). BOOKED - leave the old
+        system had approved for dates from that day on - lands as an ordinary approved request that takes its
+        days off the balance once (so the opening is the balance before the old system deducted it), refused
+        when a paid type's balance cannot hold it. An item that runs across the day is refused: split it there.
+        Items must start on or after the employee's start date and may not overlap leave already in HRMS or
+        another item in the same call. `days` comes from the item when given, and is otherwise counted the way a
+        request filed now would be. Nobody is notified and no event is emitted. Re-importing a leave already here
+        is reported as unchanged. By default (and whenever `dry_run` is not false) this reports what would be
+        written and writes nothing. Up to 100 items per call.
+      operationId: ":ImportLeaveHistory"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                dry_run: { type: boolean, description: "Omitted or true previews and writes nothing. Only an explicit false applies." }
+                items:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [employee, leave_type, start_date, end_date]
+                    properties:
+                      employee: { type: string, description: "Resource path: employees/{employee_id}" }
+                      leave_type: { type: string, description: "Resource path: leave-types/{leave_type_id}" }
+                      start_date: { type: string, format: date }
+                      end_date: { type: string, format: date }
+                      start_session: { type: integer, enum: [1, 2] }
+                      end_session: { type: integer, enum: [1, 2] }
+                      days: { type: number, nullable: true, description: "Days the leave cost, as the system before counted them. Counted here when absent." }
+                      reason: { type: string, nullable: true }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dry_run: { type: boolean }
+                  counts:
+                    type: object
+                    properties:
+                      created: { type: integer }
+                      unchanged: { type: integer }
+                      error: { type: integer }
+                  results:
+                    type: array
+                    description: One entry per item, in the order sent.
+                    items:
+                      type: object
+                      properties:
+                        employee: { type: string }
+                        leave_type: { type: string }
+                        start_date: { type: string, format: date }
+                        end_date: { type: string, format: date }
+                        days: { type: number }
+                        days_from: { type: string, enum: [file, counted] }
+                        kind: { type: string, enum: [history, booked], description: "history: taken before the records start, moves no balance. booked: from the records start on, takes its days off the balance." }
+                        outcome: { type: string, enum: [created, unchanged, error] }
+                        error: { type: string }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/asset-categories:
@@ -15145,6 +15437,309 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/leave-balance' } } } }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/leave-adjustments:
+    get:
+      description: List leave balance adjustments (the ledger), optionally for one employee or one leave type. Access-scoped; private by default.
+      operationId: ListLeaveAdjustments
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: employee, schema: { type: string }, description: "Filter to one employee (resource path)." }
+        - { in: query, name: leave_type, schema: { type: string }, description: "Filter to one leave type (resource path)." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/leave-adjustment' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: "Correct a leave balance by hand: moves it by `days` (signed) and records why, in one atomic write. Refused when it would take the balance below zero."
+      operationId: CreateLeaveAdjustment
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/leave-adjustment' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/leave-adjustment' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/leave-adjustments/{leave_adjustment_id}:
+    parameters: [ { in: path, name: leave_adjustment_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for leave-adjustment.
+      operationId: GetLeaveAdjustment
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/leave-adjustment' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/leave-adjustments:importOpenings:
+    post:
+      description: >-
+        Custom method importOpenings: bring in opening leave balances from before HRMS - for each employee and
+        leave type, the balance they had when their HRMS records started (`employees.tracked_from`, which must be
+        set). A first opening takes off what HRMS credited for the accrual periods before that day and puts on the
+        balance given; a re-import moves the balance by the difference from the previous opening only, so
+        applying the same file twice changes nothing. Everything that happened in HRMS since stays where it is.
+        By default (and whenever `dry_run` is not false) this reports what each balance would become and writes
+        nothing. Each item stands alone: one that cannot be applied is reported with its reason and the rest go
+        ahead. Up to 100 items per call.
+      operationId: ":ImportLeaveOpenings"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                dry_run: { type: boolean, description: "Omitted or true previews and writes nothing. Only an explicit false applies." }
+                items:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [employee, leave_type, opening_days]
+                    properties:
+                      employee: { type: string, description: "Resource path: employees/{employee_id}" }
+                      leave_type: { type: string, description: "Resource path: leave-types/{leave_type_id}" }
+                      opening_days: { type: number, description: "The balance on the day HRMS records start, as the system before had it: what they had earned under your leave policy up to then, less what they had used." }
+                      encashed_days: { type: number, nullable: true, description: "Days already encashed that leave year before HRMS, so the annual encashment cap counts them." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dry_run: { type: boolean }
+                  counts:
+                    type: object
+                    properties:
+                      applied: { type: integer, description: "Balances that change (or would, on a dry run)." }
+                      unchanged: { type: integer, description: "Re-imports that match the opening already entered." }
+                      error: { type: integer }
+                  results:
+                    type: array
+                    description: One entry per item, in the order sent.
+                    items:
+                      type: object
+                      properties:
+                        employee: { type: string }
+                        leave_type: { type: string }
+                        as_of: { type: string, format: date }
+                        current: { type: number, description: "The balance now." }
+                        removed: { type: number, description: "What HRMS credited before `as_of`, taken off by a first opening." }
+                        previous_opening: { type: number, description: "The last opening entered for this balance, on a re-import." }
+                        opening: { type: number }
+                        change: { type: number, description: "The signed change to the balance." }
+                        result: { type: number, description: "The balance after." }
+                        outcome: { type: string, enum: [applied, unchanged, error] }
+                        error: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-openings:
+    get:
+      description: List pay and tax entered from before HRMS ran payroll, optionally for one employee or one financial year. Access-scoped; private by default.
+      operationId: ListPayrollOpenings
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: employee, schema: { type: string }, description: "Filter to one employee (resource path)." }
+        - { in: query, name: financial_year, schema: { type: string }, description: "Filter to one financial year, like 2026-27." }
+        - { in: query, name: show_deleted, schema: { type: boolean } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/payroll-opening' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: "Enter pay and tax from before HRMS for one employee and financial year. Refused when the employee already has an entry for that year (edit it instead), or when `paid_through` reaches a month a finalized HRMS run already paid them for."
+      operationId: CreatePayrollOpening
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-opening' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-opening' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-openings/{payroll_opening_id}:
+    parameters: [ { in: path, name: payroll_opening_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for payroll-opening.
+      operationId: GetPayrollOpening
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-opening' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: Update method for payroll-opening. The figures are checked again as a whole; the employee can't change.
+      operationId: UpdatePayrollOpening
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/payroll-opening' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-opening' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: Delete method for payroll-opening.
+      operationId: DeletePayrollOpening
+      parameters:
+        - { in: query, name: force, schema: { type: boolean } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-openings/{payroll_opening_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete. Refused when the employee has another entry for that financial year since."
+      operationId: ":RestorePayrollOpening"
+      parameters: [ { in: path, name: payroll_opening_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-opening' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/payroll-openings:importOpenings:
+    post:
+      description: >-
+        Custom method importOpenings: bring in pay and tax already paid this financial year before HRMS ran
+        payroll, one item per employee and financial year. An item for somebody who already has an entry for
+        that year replaces its figures, so applying the same file twice changes nothing. By default (and whenever
+        `dry_run` is not false) this reports what would be written and writes nothing. Each item stands alone:
+        one that cannot be applied is reported with its reason and the rest go ahead. Up to 100 items per call.
+      operationId: ":ImportPayrollOpenings"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                dry_run: { type: boolean, description: "Omitted or true previews and writes nothing. Only an explicit false applies." }
+                items:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [employee, financial_year, paid_through, gross]
+                    properties:
+                      employee: { type: string, description: "Resource path: employees/{employee_id}" }
+                      financial_year: { type: string, description: "Like 2026-27." }
+                      paid_through: { type: string, description: "YYYY-MM: the last month whose salary the figures include." }
+                      gross: { type: number }
+                      taxable_gross: { type: number, description: "Defaults to gross." }
+                      tds: { type: number }
+                      pt: { type: number }
+                      esi_contributing: { type: boolean }
+                      note: { type: string, nullable: true }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dry_run: { type: boolean }
+                  counts:
+                    type: object
+                    properties:
+                      created: { type: integer }
+                      updated: { type: integer }
+                      unchanged: { type: integer }
+                      error: { type: integer }
+                  results:
+                    type: array
+                    description: One entry per item, in the order sent.
+                    items:
+                      type: object
+                      properties:
+                        employee: { type: string }
+                        financial_year: { type: string }
+                        paid_through: { type: string }
+                        gross: { type: number }
+                        taxable_gross: { type: number }
+                        tds: { type: number }
+                        pt: { type: number }
+                        esi_contributing: { type: boolean }
+                        previous:
+                          type: object
+                          description: "The figures this replaces, on an update."
+                          properties:
+                            paid_through: { type: string }
+                            gross: { type: number }
+                            taxable_gross: { type: number }
+                            tds: { type: number }
+                            pt: { type: number }
+                            esi_contributing: { type: boolean }
+                        outcome: { type: string, enum: [created, updated, unchanged, error] }
+                        error: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/org-documents:
     get:
       description: List method for org-document.
@@ -16992,17 +17587,26 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/notification-prefs' } } } }
         '400': { $ref: '#/components/responses/Problem' }
   /v1/employees/{employee_id}:getPhoto:
-    post:
-      description: "Custom method getPhoto for employee. Returns the profile photo bytes."
+    get:
+      description: "The employee's profile photo as an image, for an `<img>`. GET rather than POST because a browser has to be able to address it; `v` is the photo's own version (the `?v=` on the `photo` marker), so the URL changes when the picture does and the answer may be cached privately for a week. Visible to whoever may read the employee's record. Supports If-None-Match."
       operationId: ":GetEmployeePhoto"
-      parameters: [ { in: path, name: employee_id, required: true, schema: { type: string } } ]
+      parameters:
+        - { in: path, name: employee_id, required: true, schema: { type: string } }
+        - { in: query, name: v, schema: { type: string }, description: "The photo version from the `photo` marker. Ignored by the server; it is what makes a replaced photo a different URL." }
+        - { in: header, name: If-None-Match, schema: { type: string } }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
         '409': { $ref: '#/components/responses/Conflict' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
-        '200': { description: The photo bytes., content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+        '200':
+          description: The photo.
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string } }
+          content: { image/jpeg: { schema: { type: string, format: binary } } }
+        '304': { description: Unchanged since the caller's ETag. }
         '404': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/employees/{employee_id}:uploadPhoto:
@@ -17170,6 +17774,61 @@ paths:
                 type: object
                 properties:
                   results: { type: array, items: { $ref: '#/components/schemas/celebration' } }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/employees:setTrackedFrom:
+    post:
+      description: >-
+        Custom method setTrackedFrom: date when HRMS records start (`tracked_from`) for everybody who joined before
+        the org started using HRMS. Each person gets the LATER of `date` and the org-local day their record was
+        created. People who joined on or after `date` are left alone, and so is anybody who already has a
+        `tracked_from`, so a second call changes nothing. By default (and whenever `dry_run` is not false) this
+        reports who would get which date and writes nothing; only an explicit `dry_run: false` applies it. Each
+        change is audited on the employee's own record.
+      operationId: ":SetTrackedFrom"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date]
+              properties:
+                date: { type: string, format: date, description: "The go-live date. Not in the future." }
+                dry_run: { type: boolean, description: "Omitted or true reports the plan and writes nothing. Only an explicit false applies it." }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  date: { type: string, format: date }
+                  dry_run: { type: boolean }
+                  counts:
+                    type: object
+                    properties:
+                      set: { type: integer, description: "People given a date (or who would be, on a dry run)." }
+                      already_set: { type: integer, description: "People who already had a date, left as they were." }
+                      joined_after: { type: integer, description: "People whose start date is on or after `date`: their records start on their start date." }
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        employee: { type: string, description: "Resource path: employees/{employee_id}" }
+                        name: { type: string }
+                        employee_number: { type: string }
+                        start_date: { type: string, format: date }
+                        created_day: { type: string, format: date, description: "The org-local day the employee's record was created." }
+                        tracked_from: { type: string, format: date, description: "The date they have (already_set) or get (set). Absent for joined_after, and for a record somebody else dated while this call was running." }
+                        outcome: { type: string, enum: [set, already_set, joined_after] }
+        '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/export:record:
     post:
@@ -17979,39 +18638,6 @@ paths:
                   patterns:
                     - 'expense-close'
                   type: hrms.example.com/expense-close
-        '500': { $ref: '#/components/responses/Problem' }
-  /v1/employees:batchGetPhotos:
-    post:
-      description: "Custom method batchGetPhotos: fetch many employees' profile photos in one request (replaces the per-avatar :getPhoto N+1). Each id is gated by the caller's employee visibility; ids the caller can't see are omitted."
-      operationId: ":BatchGetPhotos"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                employees: { type: array, items: { type: string, description: "Resource path: employees/{employee_id}." } }
-      responses:
-        '401': { $ref: '#/components/responses/Unauthenticated' }
-        '403': { $ref: '#/components/responses/PermissionDenied' }
-        '409': { $ref: '#/components/responses/Conflict' }
-        '413': { $ref: '#/components/responses/PayloadTooLarge' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
-        '200':
-          description: Successful response
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  photos:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        employee: { type: string, description: "Resource path: employees/{employee_id}." }
-                        data_uri: { type: string, description: "data:image/jpeg;base64 photo." }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/bank-formats:
     get:

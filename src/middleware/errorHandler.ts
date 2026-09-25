@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { ZodError } from "zod";
 import {
   AppError, aborted, alreadyExists, errorChainText, forbidden, invalidArgument, isAssetTagCollision,
-  isCardSeqCollision, isCodeCollision, isEmployeeNumberCollision, isReviewDuplicate, isShiftAssignmentDuplicate,
+  isCardSeqCollision, isCodeCollision, isEmployeeNumberCollision, isPayrollOpeningDuplicate, isReviewDuplicate, isShiftAssignmentDuplicate,
   notFound, publicPath, resourceExhausted, unauthenticated,
 } from "../lib/errors";
 
@@ -130,6 +130,10 @@ export const errorHandler = (err: Error, c: Context) => {
           // active cycle - so the invariant answers 409 rather than SQLite's constraint text as a 500.
           : isReviewDuplicate(err)
             ? alreadyExists("someone in that list already has a review in this cycle; re-read the cycle and try again").toProblem(instance)
+          // One live row of pay before HRMS per person per financial year (`popen_emp_fy_idx`): a restore onto
+          // a year entered again since, or two imports racing past the service's own check.
+          : isPayrollOpeningDuplicate(err)
+            ? alreadyExists("that employee already has pay before HRMS for that financial year; edit that entry instead").toProblem(instance)
             : { type: "/errors/internal", title: "Internal Server Error", status: 500 };
   // Log any unexpected (non-AppError, non-Zod) failure server-side. The client body stays generic, but with
   // [observability] on this is the only trace of a 500 - without it a production 500 is undebuggable.

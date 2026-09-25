@@ -132,7 +132,8 @@ which only works together with `ALLOW_DEV_AUTH=true`.
 `docs/deploy.md` is the runbook: provision D1/R2, choose the auth mode, set secrets, seed
 `bootstrap/bootstrap.sql` (never the demo seed), deploy, grant the break-glass super admin.
 `docs/deploy-security.md` is the security checklist that goes with it. Open items before a first production
-deploy are tracked in `production-readiness.md`.
+deploy are tracked in `production-readiness.md`. Going live with people who joined before HRMS existed is
+`docs/opening-balances.md`: when records start, leave balances, leave history, and pay and tax so far.
 
 > Scope guard: this system computes compensation, statutory deductions and payslips for a **single
 > jurisdiction (India)** and a single currency. It does not move money or file with authorities. See

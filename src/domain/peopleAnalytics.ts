@@ -7,6 +7,7 @@
 // tasks, goals, reviews, 1:1s, timesheets, overtime, remote work, recognition, support. A measure whose
 // collection the caller may not list is absent from the answer - so an employee sees their own row, a manager
 // their team's, and neither sees a column they could not have read the rows behind.
+import { DEFAULT_PUNCTUALITY, judgeDay, type DayExcusal, type PunctualityPolicy } from "./punctuality";
 
 /** How a measure rolls up to the team line under the table. */
 export type MetricAgg = "sum" | "avg";
@@ -109,7 +110,7 @@ export const METRIC_GROUPS: { key: string; label: string }[] = [
 export const METRICS: readonly MetricDef[] = [
   // ---- Attendance & punctuality (derived from the raw punches + the org schedule) ----
   { key: "days_present", label: "Days present", short: "Present", group: "attendance", collection: "attendance", unit: "days", agg: "sum", direction: "none", hint: "Days with at least one clock-in inside the window." },
-  { key: "days_absent", label: "Days absent", short: "Absent", group: "attendance", collection: "attendance", needs: ["leave-requests"], unit: "days", agg: "sum", direction: "lower", hint: "Scheduled working days in the window with no punch, no approved leave and no holiday (clamped to their employment)." },
+  { key: "days_absent", label: "Days absent", short: "Absent", group: "attendance", collection: "attendance", needs: ["leave-requests"], unit: "days", agg: "sum", direction: "lower", hint: "Scheduled working days in the window with no punch, no approved leave and no holiday (clamped to their employment and to when their HRMS records start)." },
   { key: "days_late", label: "Late arrivals", short: "Late", group: "attendance", collection: "attendance", unit: "days", agg: "sum", direction: "lower", hint: "Days the first punch landed after the shift start plus the grace allowance." },
   { key: "days_left_early", label: "Early departures", short: "Left early", group: "attendance", collection: "attendance", unit: "days", agg: "sum", direction: "lower", hint: "Days the last punch-out landed before the shift end minus the grace allowance." },
   { key: "punctuality_pct", label: "Punctuality", short: "Punctual", group: "attendance", collection: "attendance", unit: "percent", agg: "avg", direction: "higher", hint: "Share of present days that were neither late nor an early departure." },
@@ -118,6 +119,10 @@ export const METRICS: readonly MetricDef[] = [
   { key: "days_short", label: "Under-hours days", short: "Short", group: "attendance", collection: "attendance", unit: "days", agg: "sum", direction: "lower", hint: "Present days that did not reach the configured full day of worked minutes." },
   { key: "avg_worked_minutes", label: "Average day length", short: "Day length", group: "attendance", collection: "attendance", unit: "minutes", agg: "avg", direction: "none", hint: "Mean worked minutes across present days (open sessions excluded)." },
   { key: "corrections_filed", label: "Corrections filed", short: "Corrections", group: "attendance", collection: "attendance-regularizations", unit: "count", agg: "sum", direction: "none", hint: "Attendance regularizations filed for a day inside the window." },
+  // Its own collection gates it, and the same rows are what the punctuality measures above judge a day by: an
+  // approved late arrival moves that day's start. A caller who may not list the requests gets neither the
+  // count nor the moved windows - the org's own shift is then all the report can honestly apply.
+  { key: "late_early_approved", label: "Late & early approved", short: "Approved", group: "attendance", collection: "late-early-requests", unit: "count", agg: "sum", direction: "none", hint: "Approved late arrival and early departure requests for days inside the window. Late arrivals, early departures and punctuality judge those days against the approved time." },
 
   // ---- Money ----
   // Company spend this person put through, gated on `expenses` like any other measure. Safe per person: an
@@ -245,8 +250,17 @@ export function localMinutes(ms: number, tz: string): number {
  * early when the last punch-out is before shift end minus it, and neither when the schedule is flexible. A
  * grace exception widens the day's allowance for everyone, or waives the judgement entirely when it names no
  * extra minutes - so a transit strike does not read as forty people being late.
+ *
+ * `excusals` are the person's approved late arrivals / early departures by day: each moves that day's start or
+ * end, and the day is judged against the moved window by the rule payroll uses (domain/punctuality.ts#judgeDay),
+ * so "minutes late" on a day somebody was approved to start at 10:30 counts from 10:30.
  */
-export function summarizeAttendance(days: AttendanceDay[], sched: PunctualitySchedule): AttendanceStats {
+export function summarizeAttendance(
+  days: AttendanceDay[],
+  sched: PunctualitySchedule,
+  excusals?: Map<string, DayExcusal>,
+  policy: PunctualityPolicy["attendance"] = DEFAULT_PUNCTUALITY.attendance,
+): AttendanceStats {
   const startMin = hhmmToMin(sched.shift_start);
   const endMin = hhmmToMin(sched.shift_end);
   const exceptions = new Map((sched.grace_exceptions ?? []).map((e) => [e.date, e]));
@@ -263,9 +277,17 @@ export function summarizeAttendance(days: AttendanceDay[], sched: PunctualitySch
       workedSum += d.workedMinutes;
       closed++;
     }
-    if (sched.flexible_hours) continue; // judged by minutes worked only
-    if (arrMin > startMin + grace) { late++; lateMinutes += arrMin - startMin; }
-    if (!d.open && d.lastOut !== null && localMinutes(d.lastOut, sched.timezone) < endMin - grace) early++;
+    const j = judgeDay({
+      arrMin,
+      depMin: d.lastOut !== null ? localMinutes(d.lastOut, sched.timezone) : null,
+      open: d.open,
+      startMin, endMin, grace,
+      flexible: sched.flexible_hours, // judged by minutes worked only
+      excusal: excusals?.get(d.day),
+      policy,
+    });
+    if (j.late) { late++; lateMinutes += j.lateByMin; }
+    if (j.leftEarly) early++;
   }
   const present = days.length;
   return {

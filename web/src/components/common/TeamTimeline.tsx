@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, ChevronUp, Cake, PartyPopper, UserPlus, ShieldCheck, CalendarRange, Clock, CalendarDays, Info, Users, type LucideIcon } from "lucide-react";
-import type { Employee, LeaveRequest, LeaveType, Holiday, Celebration, AttendanceSession, Event, Me } from "@/types";
+import type { Employee, LeaveRequest, LeaveType, Holiday, Celebration, AttendanceSession, Event, LateEarlyRequest, Me } from "@/types";
 import { cn, idOf } from "@/lib/utils";
+import { useCollection } from "@/hooks/useCollection";
+import { excusalsByEmployee, usePunctualityPolicy } from "@/lib/lateEarly";
+import { hhmmOf } from "../../../../src/domain/punctuality";
 import { todayStr } from "@/lib/orgDay";
 import { listAllSessionsPaged } from "@/lib/clock";
 import { leaveColor } from "@/lib/leaveColors";
@@ -9,7 +12,7 @@ import { usePermission } from "@/lib/perm";
 import { navigate } from "@/router";
 import type { LeaveDraft } from "@/lib/leaveDraft";
 import { RequestLeaveDialog } from "@/components/common/RequestLeaveDialog";
-import { summarizeByDay, buildAttendanceRows, fmtHM, fmtDuration, localDay, localMinutes, enumerateDays, weekdayOf, DEFAULT_SCHEDULE, leaveRangeOf, unpaidLeaveTypes, type AttendanceSchedule, type DayStatus, type AttendanceRow } from "@/lib/attendance";
+import { summarizeByDay, buildAttendanceRows, trackedFromOf, fmtHM, fmtDuration, localDay, localMinutes, enumerateDays, weekdayOf, DEFAULT_SCHEDULE, leaveRangeOf, unpaidLeaveTypes, type AttendanceSchedule, type DayStatus, type AttendanceRow } from "@/lib/attendance";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -111,6 +114,7 @@ const STATUS_DOT: Record<DayStatus, string | null> = {
   worked_off_day: "bg-violet-400",
   on_leave: null,
   holiday: null,
+  untracked: null, // before their record existed: nothing to report either way
 };
 const STATUS_LABEL: Record<DayStatus, string> = {
   present: "Full day",
@@ -125,6 +129,7 @@ const STATUS_LABEL: Record<DayStatus, string> = {
   worked_off_day: "Worked - not a working day",
   on_leave: "On leave",
   holiday: "Holiday",
+  untracked: "Before HRMS",
 };
 // The single neutral leave colour shown to viewers without the leave-type breakdown affordance (everyone but
 // HR/super). A muted slate grey - distinct from the event indigo, holiday violet, and the attendance dots.
@@ -143,6 +148,7 @@ const STATUS_TEXT: Record<DayStatus, string> = {
   worked_off_day: "text-violet-600 dark:text-violet-400",
   on_leave: "text-brand-neutral-500 dark:text-brand-neutral-400",
   holiday: "text-violet-600 dark:text-violet-400",
+  untracked: "text-muted-foreground",
 };
 const upper = (s?: string) => (s ?? "").toUpperCase();
 const parseYmd = (s: string) => Date.parse(s.slice(0, 10) + "T00:00:00Z");
@@ -257,6 +263,16 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     return () => { live = false; };
   }, [startMs, endMs, refreshKey]);
 
+  // Approved late arrivals / early departures in the window: each moves its day's start or end, so a dot for a
+  // day somebody was approved to start late does not say "late" about the approved part. Gated like every
+  // collection read - a caller who cannot see these requests fires nothing and sees the org's window.
+  const { rows: lateEarly } = useCollection<LateEarlyRequest>("late-early-requests", {
+    all: true,
+    params: { from: new Date(startMs).toISOString().slice(0, 10), to: new Date(endMs).toISOString().slice(0, 10), state: "APPROVED" },
+  });
+  const excusalsByEmp = useMemo(() => excusalsByEmployee(lateEarly), [lateEarly]);
+  const punctuality = usePunctualityPolicy();
+
   // Org policy: when back-dating is disallowed, past columns are non-selectable for self-service (mirrors the
   // server gate in createLeaveRequest).
   const [allowBackdated, setAllowBackdated] = useState(true);
@@ -364,12 +380,12 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       // Don't flag days before the employee joined as a missing log.
       const empFrom = e.start_date && e.start_date.slice(0, 10) > fromYmd ? e.start_date.slice(0, 10) : fromYmd;
       if (empFrom > toYmd) continue;
-      const summaries = summarizeByDay(byEmp.get(eid) ?? [], schedule);
-      const punchedDays = new Set(summaries.map((s) => s.day)); // days the employee actually clocked in
       // The session flags come along, so a half-day leave reads as half a day here too rather than as a day
       // fully excused (see lib/attendance.ts `leaveRanges`) - and so does whether the leave is paid, so unpaid
       // leave reads here the way payroll docks it.
       const leaveRanges = (leavesByEmp.get(eid) ?? []).map((l) => leaveRangeOf({ ...l, start_date: l.start_date.slice(0, 10), end_date: l.end_date.slice(0, 10) }, unpaidTypes));
+      const summaries = summarizeByDay(byEmp.get(eid) ?? [], schedule, { excusals: excusalsByEmp.get(eid), policy: punctuality.attendance, leaveRanges });
+      const punchedDays = new Set(summaries.map((s) => s.day)); // days the employee actually clocked in
       const onLeaveDay = (day: string) => leaveRanges.some((r) => r.start <= day && day <= r.end);
       // Split the employee's events: count-as-work events credit per-day worked minutes; the rest just mark
       // Only count_as_work events touch attendance, and only as credited minutes: an event that doesn't count
@@ -400,7 +416,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
           workMinutesByDay.set(day, (workMinutesByDay.get(day) ?? 0) + m);
         }
       }
-      const rows = buildAttendanceRows({ fromYmd: empFrom, toYmd, todayYmd, sched: schedule, summaries, holidays: holSet, leaveRanges, workMinutesByDay });
+      const rows = buildAttendanceRows({ fromYmd: empFrom, toYmd, todayYmd, sched: schedule, summaries, holidays: holSet, leaveRanges, workMinutesByDay, trackedFromYmd: trackedFromOf(e) });
       // A gap this widget did not load is not an absence. When the session walk stopped on its page ceiling,
       // the `absent` days are dropped rather than drawn: a blank cell says "nothing to show", the red "No
       // log" dot says "this person did not come in", and only one of those is knowable here.
@@ -408,7 +424,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       out.set(eid, new Map(shown.map((r) => [r.day, r] as const)));
     }
     return out;
-  }, [sessions, sessionsTruncated, employees, leavesByEmp, eventsByEmp, holidays, schedule, startMs, endMs, workDays, unpaidTypes]);
+  }, [sessions, sessionsTruncated, employees, leavesByEmp, eventsByEmp, excusalsByEmp, punctuality, holidays, schedule, startMs, endMs, workDays, unpaidTypes]);
 
   // Styled tooltip card for an attendance day: a colored status header, the punch times / hours worked, and
   // late-arrival / early-departure chips (kept even when flexible hours count the day as full).
@@ -425,6 +441,11 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       <TipCard {...head}>
         <TipRow icon={Clock}>{fmtHM(s.arrival, tz)} – {s.departure ? fmtHM(s.departure, tz) : "-"}</TipRow>
         <TipRow>{fmtDuration(s.workedMinutes)} worked</TipRow>
+        {(s.approvedLateUntil != null || s.approvedEarlyFrom != null) && (
+          <TipRow icon={Clock}>
+            Approved {[s.approvedLateUntil != null ? `in by ${hhmmOf(s.approvedLateUntil)}` : null, s.approvedEarlyFrom != null ? `out at ${hhmmOf(s.approvedEarlyFrom)}` : null].filter(Boolean).join(", ")}
+          </TipRow>
+        )}
         {(s.late || s.leftEarly) && (
           <TipChips>
             {s.late && <TipChip tone="bg-amber-500/15 text-amber-700 dark:text-amber-300">{fmtDuration(s.lateByMin)} late</TipChip>}

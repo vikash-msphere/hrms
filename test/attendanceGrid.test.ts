@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  buildAttendanceRows, statsOf, summarizeByDay, DEFAULT_SCHEDULE,
+  buildAttendanceRows, statsOf, summarizeByDay, trackedFromOf, DEFAULT_SCHEDULE,
   type AttendanceSchedule, type DayCredit,
 } from "../web/src/lib/attendance";
 import type { AttendanceSession } from "../web/src/types";
@@ -106,5 +106,62 @@ describe("the absence count says what payroll will dock", () => {
     const marked = statsOf(build({ sessions: [punch(MON, 3)], marks: new Map([[MON, "full"]]) }), TZ, sched.full_day_minutes, TODAY);
     expect(marked.worked).toBe(1);
     expect(marked.minutes).toBe(180);
+  });
+});
+
+describe("days before HRMS records start are not absences", () => {
+  // Joined years ago, HRMS records start on Tuesday: Monday had no way to be punched.
+  const tracked = (opts: { sessions?: AttendanceSession[]; marks?: Map<string, DayCredit>; holidays?: Set<string>; leaveRanges?: { start: string; end: string; startSession?: number; endSession?: number; paid?: boolean }[] } = {}) =>
+    buildAttendanceRows({
+      fromYmd: MON, toYmd: TUE, todayYmd: TODAY, sched,
+      summaries: summarizeByDay(opts.sessions ?? [], sched),
+      holidays: opts.holidays ?? new Set<string>(),
+      leaveRanges: opts.leaveRanges ?? [],
+      marksByDay: opts.marks,
+      joinedYmd: "2020-01-06",
+      trackedFromYmd: TUE,
+    });
+
+  it("reads an empty working day before it as untracked, and still flags one on it", () => {
+    const rows = tracked();
+    expect(rows.find((r) => r.day === MON)?.status).toBe("untracked");
+    expect(rows.find((r) => r.day === TUE)?.status).toBe("absent");
+    const stats = statsOf(rows, TZ, sched.full_day_minutes, TODAY);
+    expect(stats.absent).toBe(1);
+    expect(stats.workingDays).toBe(1); // the untracked day owes nothing
+  });
+
+  it("keeps the untracked day a row, so a correction or a mark can be filed against it", () => {
+    // A day with no row is an inert cell in the month grid: it cannot be ticked, opened or marked.
+    expect(tracked().some((r) => r.day === MON)).toBe(true);
+  });
+
+  it("judges a day somebody backfilled with punches as usual", () => {
+    expect(tracked({ sessions: [punch(MON, 9)] }).find((r) => r.day === MON)?.summary?.workedMinutes).toBe(540);
+  });
+
+  it("lets HR's mark give an untracked day its value", () => {
+    const marked = (credit: DayCredit) => statsOf(tracked({ marks: new Map([[MON, credit]]) }), TZ, sched.full_day_minutes, TODAY);
+    expect(marked("absent").absent).toBe(2);
+    expect(marked("full").absent).toBe(1);
+  });
+
+  it("keeps a holiday before it, which is the org's fact, not the employee's", () => {
+    expect(tracked({ holidays: new Set([MON]) }).find((r) => r.day === MON)?.status).toBe("holiday");
+  });
+
+  // Leave is a record, so a day it falls on is judged the way payroll judges it (domain/attendance.ts
+  // isUntracked): unpaid leave is still an unworked day, half a day of paid leave still leaves half owed.
+  it("judges a day before it that approved leave falls on, as payroll does", () => {
+    const day = (leaveRanges: NonNullable<Parameters<typeof tracked>[0]>["leaveRanges"]) => tracked({ leaveRanges }).find((r) => r.day === MON)?.status;
+    expect(day([{ start: MON, end: MON }])).toBe("on_leave");
+    expect(day([{ start: MON, end: MON, paid: false }])).toBe("absent");
+    expect(day([{ start: MON, end: MON, endSession: 1 }])).toBe("half_day_leave");
+  });
+
+  it("reads the date off the employee record", () => {
+    expect(trackedFromOf({ tracked_from: "2026-09-24" })).toBe("2026-09-24");
+    expect(trackedFromOf({})).toBeUndefined();
+    expect(trackedFromOf(undefined)).toBeUndefined();
   });
 });

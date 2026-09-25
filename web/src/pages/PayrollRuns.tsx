@@ -276,12 +276,15 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
    * mismatch". Re-reading is what makes the second press a different request, and the message says that is
    * what happened rather than naming the header.
    *
-   * A build that lost its payables past `buildRun`'s retries is re-read too (the undo moved the run), but it is
-   * not "somebody else changed this run", so it keeps the server's own sentence.
+   * Only a lost update (`/errors/aborted`, the version check) is "somebody else changed this run". Every other
+   * 409 is re-read too but keeps the server's own sentence, because it is the reason the reader has to act on:
+   * a build that lost its payables past `buildRun`'s retries (the undo moved the run), or a precondition the
+   * run cannot meet - "pay before HRMS already covers 2026-08 for ...", a compensation in the wrong currency -
+   * which no amount of re-reading fixes.
    */
   function staleToast(e: unknown, fallback: string) {
     const conflict = e instanceof ApiError && e.status === 409;
-    const stale = conflict && !e.problem?.type?.endsWith("/payables-raced");
+    const stale = conflict && !!e.problem?.type?.endsWith("/aborted");
     if (conflict) reload();
     toast({
       title: stale ? "Somebody else changed this run" : fallback,

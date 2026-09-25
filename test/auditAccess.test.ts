@@ -167,7 +167,7 @@ describe("mutationAudit", () => {
   });
   it("returns null for read-only custom methods (no state change) — a read is never logged as a write", () => {
     for (const p of [
-      "/v1/employees/e1:getPhoto", "/v1/employees/e1:getSignature", "/v1/employees:batchGetPhotos",
+      "/v1/employees/e1:getPhoto", "/v1/employees/e1:getSignature",
       "/v1/employees:upcomingCelebrations", "/v1/employees/e1:downloadIdentityDoc",
       "/v1/boards/b1:metrics", "/v1/automations/a1:test", "/v1/batch:run",
       "/v1/payslips:previewTemplate", "/v1/payslips/ps1:preview", "/v1/payslips/ps1:download",

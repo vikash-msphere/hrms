@@ -399,3 +399,38 @@ describe("unpaid leave", () => {
     expect(unpaidLeaveDayUnits("2026-06-01", "2026-06-07", WORK, new Set(["2026-06-02"]), ranges)).toBe(1.5);
   });
 });
+
+// BEFORE HRMS RECORDS START (`employees.tracked_from`). Somebody who joined years before the org used the app
+// had no way to punch before it: an empty working day there is missing history, not an absence, and docking it
+// would take pay for days they worked. A day that DOES carry a fact is still judged - that is somebody's
+// deliberate record, and ignoring it would be the opposite mistake.
+describe("days before HRMS records start", () => {
+  // Mon 1 .. Fri 5 June 2026; records start Thursday the 4th.
+  const base = {
+    startYmd: "2026-06-01", endYmd: "2026-06-05", workDays: WORK, holidays: new Set<string>(), leaveRanges: [] as { start: string; end: string; paid?: boolean; startSession?: number; endSession?: number }[],
+    workedByDay: new Map<string, number>(), fullDayMinutes: FULL, halfDayMinutes: HALF, trackedFromYmd: "2026-06-04",
+  };
+
+  it("owes nothing on an empty day before it, and docks an empty day from it on", () => {
+    expect(lopDayUnits(base)).toBe(2); // Thu + Fri; Mon-Wed were before HRMS
+    expect(lopDayUnits({ ...base, trackedFromYmd: null })).toBe(5); // without it, every empty day is an absence
+  });
+
+  it("judges a day before it that has punches, exactly as any other day", () => {
+    // A correction backfilled Tuesday with three hours: too short for a half day, so it is an absence.
+    expect(lopDayUnits({ ...base, workedByDay: new Map([["2026-06-02", 180]]) })).toBe(3);
+    expect(lopDayUnits({ ...base, workedByDay: new Map([["2026-06-02", 480]]) })).toBe(2);
+  });
+
+  it("honours an HR mark on a day before it", () => {
+    const marksByDay = new Map<string, DayCredit>([["2026-06-01", "absent"], ["2026-06-02", "half"]]);
+    expect(lopDayUnits({ ...base, marksByDay })).toBe(3.5); // Mon absent 1 + Tue half 0.5 + Thu + Fri
+  });
+
+  it("still docks unpaid leave taken before it, and still excuses paid leave", () => {
+    expect(lopDayUnits({ ...base, leaveRanges: [{ start: "2026-06-01", end: "2026-06-01", paid: false }] })).toBe(3);
+    expect(lopDayUnits({ ...base, leaveRanges: [{ start: "2026-06-01", end: "2026-06-01" }] })).toBe(2);
+    // Half a day of paid leave on Monday leaves the other half owed, the same as on any tracked day.
+    expect(lopDayUnits({ ...base, leaveRanges: [{ start: "2026-06-01", end: "2026-06-01", endSession: 1 }] })).toBe(2.5);
+  });
+});

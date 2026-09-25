@@ -4,10 +4,14 @@ import { dateFormat } from "./intl";
 // src/" premise does not hold - lib/leaveForecast.ts, lib/eventRepeat.ts, lib/assetTagsPdf.ts and several pages
 // already do it - and a copy of this particular rule is what let the grid and the payroll build disagree about
 // which days leave excuses.
-import { leaveCover, type LeaveRange, type DayCredit } from "../../../src/domain/attendance";
+import { leaveCover, leaveTouches, type LeaveRange, type DayCredit } from "../../../src/domain/attendance";
+// And the server's rule for whether a day was late or left early, for the same reason: an approved late arrival
+// or early departure moves the day's window, and the payroll build judges the day against the moved window with
+// this exact function (domain/punctuality.ts#judgeDay).
+import { DEFAULT_PUNCTUALITY, judgeDay, leaveHalves, type DayExcusal, type PunctualityPolicy } from "../../../src/domain/punctuality";
 // Every attendance surface describes the same window of days, so the range type travels with the rule that
 // reads it rather than being restated per page.
-export type { LeaveRange, DayCredit };
+export type { LeaveRange, DayCredit, DayExcusal };
 
 /** The paths of the leave types that are not paid (`paid: false`, e.g. "Loss of Pay"). */
 export function unpaidLeaveTypes(types: readonly { path: string; paid?: boolean | null }[]): Set<string> {
@@ -112,6 +116,10 @@ export function localDay(iso: string, tz: string): string {
   return dateFormat("en-CA", YMD(tz)).format(new Date(iso));
 }
 
+// The day HRMS records start for an employee: the `trackedFromYmd` floor of buildAttendanceRows. A date-only
+// field, so it is used as the day it names.
+export const trackedFromOf = (e: { tracked_from?: string } | undefined): string | undefined => e?.tracked_from?.slice(0, 10) || undefined;
+
 // Inverse of localDay+wall-clock: the ISO instant for a wall-clock "HH:MM" on calendar day "YYYY-MM-DD" read
 // in the org timezone. Guesses the instant as if UTC, then corrects by the zone's offset at that moment (so
 // 09:00 on 2026-07-14 in Asia/Kolkata -> 03:30Z). Used to turn correction-dialog times back into punches.
@@ -151,32 +159,59 @@ export type DaySummary = {
   open: boolean; // any session still open
   late: boolean;
   leftEarly: boolean;
-  lateByMin: number;
+  lateByMin: number; // measured from the day's own start: the approved time, where a late arrival was approved
   earlyByMin: number;
+  // What an approved late arrival / early departure did to the day (domain/punctuality.ts#judgeDay). Optional
+  // because a summary built for an event-only day carries no punches for any of it to apply to.
+  excusedLate?: boolean; // the approval covered lateness the org's own window would have flagged
+  excusedEarly?: boolean;
+  creditMinutes?: number; // approved gap counted toward the full/half-day ladder, when the policy says so
+  approvedLateUntil?: number; // minutes since midnight: the approved arrival time
+  approvedEarlyFrom?: number; // minutes since midnight: the approved departure time
 };
 
 // The shift window a single day is judged against. `grace` is that day's effective lateness allowance -
 // widened by a grace exception, or Infinity when the exception waives lateness entirely.
 type ShiftWindow = { tz: string; startMin: number; endMin: number; grace: number };
 
-// One day's punches -> its summary. Late / left-early are judged against that day's own shift window.
-function summarizeDay(day: string, ss: AttendanceSession[], shift: ShiftWindow): DaySummary {
+/**
+ * What else decides whether a day was late or left early, beyond its punches and the org's shift:
+ * - `excusals`: approved late arrivals / early departures by day, which move that day's start or end;
+ * - `policy`: whether grace still applies after an approved time, and whether the approved gap counts as worked;
+ * - `leaveRanges`: approved leave, since a morning on leave is not a late arrival and an afternoon on leave is
+ *   not an early departure.
+ * Every field is optional, and a caller passing none gets the org's plain shift window.
+ */
+export type SummarizeOpts = {
+  excusals?: Map<string, DayExcusal>;
+  policy?: PunctualityPolicy["attendance"];
+  leaveRanges?: readonly LeaveRange[];
+};
+
+// One day's punches -> its summary. Late / left-early are judged against that day's own shift window, by the
+// rule the payroll build uses (judgeDay). NOT WHILE A SESSION IS STILL OPEN for leaving early: `departure` is the
+// last CLOSED punch, so somebody who clocked out for lunch and back in has a "departure" mid-day, and a day that
+// has not finished cannot be left early - judgeDay holds that line for every reader, the CSV export's "early by"
+// column included.
+function summarizeDay(day: string, ss: AttendanceSession[], shift: ShiftWindow, opts: SummarizeOpts): DaySummary {
   const sorted = [...ss].sort((a, b) => +new Date(a.clock_in) - +new Date(b.clock_in));
   const arrival = sorted[0]?.clock_in;
   const closed = sorted.filter((s) => s.clock_out);
   const open = sorted.some((s) => !s.clock_out);
   const departure = closed.length ? closed[closed.length - 1]!.clock_out : undefined;
   const workedMinutes = closed.reduce((sum, s) => sum + Math.max(0, Math.round((+new Date(s.clock_out!) - +new Date(s.clock_in)) / 60000)), 0);
-  const arrMin = arrival ? localMinutes(arrival, shift.tz) : 0;
-  const depMin = departure ? localMinutes(departure, shift.tz) : 0;
-  const late = !!arrival && arrMin > shift.startMin + shift.grace;
-  // NOT WHILE A SESSION IS STILL OPEN. `departure` is the last CLOSED punch, so somebody who clocked out for
-  // lunch and back in again has a "departure" in the middle of their day - and judging it against the shift
-  // end called a person sitting at their desk "left 4h 30m early". Every consumer happens to check `open`
-  // first today (the status ladder returns "open" before it reaches punctuality, the timeline returns early),
-  // so nothing on screen shows it; the CSV export's "early by" column does, and the next reader of this field
-  // would have to know to check. A day that has not finished cannot be left early.
-  const leftEarly = !open && !!departure && depMin < shift.endMin - shift.grace;
+  const excusal = opts.excusals?.get(day);
+  const j = judgeDay({
+    arrMin: arrival ? localMinutes(arrival, shift.tz) : null,
+    depMin: departure ? localMinutes(departure, shift.tz) : null,
+    open,
+    startMin: shift.startMin,
+    endMin: shift.endMin,
+    grace: shift.grace,
+    excusal,
+    halves: opts.leaveRanges ? leaveHalves(day, opts.leaveRanges) : undefined,
+    policy: opts.policy ?? DEFAULT_PUNCTUALITY.attendance,
+  });
   return {
     day,
     sessions: sorted,
@@ -184,15 +219,22 @@ function summarizeDay(day: string, ss: AttendanceSession[], shift: ShiftWindow):
     departure,
     workedMinutes,
     open,
-    late,
-    leftEarly,
-    lateByMin: late ? arrMin - shift.startMin : 0,
-    earlyByMin: leftEarly ? shift.endMin - depMin : 0,
+    late: j.late,
+    leftEarly: j.leftEarly,
+    lateByMin: j.lateByMin,
+    earlyByMin: j.earlyByMin,
+    excusedLate: j.excusedLate,
+    excusedEarly: j.excusedEarly,
+    creditMinutes: j.creditMinutes,
+    approvedLateUntil: excusal?.lateUntil,
+    approvedEarlyFrom: excusal?.earlyFrom,
   };
 }
 
 // Group a flat session list into per-day summaries with derived late/early flags. Sorted newest day first.
-export function summarizeByDay(sessions: AttendanceSession[], sched: AttendanceSchedule): DaySummary[] {
+// The flags are computed under flexible hours too: there they are information (the timeline's chips), and the
+// status ladder is what declines to call such a day late (`dayStatus`).
+export function summarizeByDay(sessions: AttendanceSession[], sched: AttendanceSchedule, opts: SummarizeOpts = {}): DaySummary[] {
   const byDay = new Map<string, AttendanceSession[]>();
   for (const s of sessions) {
     const d = localDay(s.clock_in, sched.timezone);
@@ -206,7 +248,7 @@ export function summarizeByDay(sessions: AttendanceSession[], sched: AttendanceS
     // On an exception day widen grace: add extra minutes, or waive lateness/early departure entirely.
     const ex = exceptions.get(day);
     const grace = ex ? (ex.extra_grace_minutes == null ? Infinity : sched.grace_minutes + ex.extra_grace_minutes) : sched.grace_minutes;
-    out.push(summarizeDay(day, ss, { tz: sched.timezone, startMin, endMin, grace }));
+    out.push(summarizeDay(day, ss, { tz: sched.timezone, startMin, endMin, grace }, opts));
   }
   return out.sort((a, b) => b.day.localeCompare(a.day));
 }
@@ -233,7 +275,10 @@ export function enumerateDays(fromYmd: string, toYmd: string): string[] {
 // first line - so judging one against the weekday shift window called voluntary Saturday work "Under hours",
 // "Half day" or "Late", which is a violation reported for work that earns nothing but goodwill. The minutes
 // still count; the day is simply not owed.
-export type DayStatus = "open" | "present" | "late" | "left_early" | "late_early" | "half_day" | "insufficient" | "on_leave" | "half_day_leave" | "holiday" | "worked_off_day" | "absent";
+// `untracked` = an empty working day after the employee joined but before HRMS records start for them
+// (`trackedFromYmd`). It is not an absence, but it is still a row, so a correction or a day mark can be filed
+// against it from the grid.
+export type DayStatus = "open" | "present" | "late" | "left_early" | "late_early" | "half_day" | "insufficient" | "on_leave" | "half_day_leave" | "holiday" | "worked_off_day" | "absent" | "untracked";
 /**
  * `status` is what the PUNCHES say the day was; `mark` is what HR decided it COUNTS as, where they have
  * decided. Both are kept, and the UI shows both, because a marked day is exactly the day somebody will later
@@ -273,8 +318,14 @@ export function buildAttendanceRows(opts: {
   workMinutesByDay?: Map<string, number>; // count_as_work events: minutes credited toward the day's worked total
   marksByDay?: Map<string, DayCredit>; // HR's decision for a day, carried onto the row beside its derived status
   joinedYmd?: string; // employee start date; days before it aren't their attendance, so they're omitted (no absent)
+  // The day HRMS records start for this person (`employees.tracked_from`, read by `trackedFromOf`). Someone who
+  // joined before the org started using the app had no way to punch before it, so an empty working day before
+  // it reads `untracked`, not absent. A day with punches, a mark or any approved leave is judged as usual,
+  // which is exactly the day payroll judges (domain/attendance.ts isUntracked): a correction backfilling
+  // go-live week, an unpaid leave taken then.
+  trackedFromYmd?: string;
 }): AttendanceRow[] {
-  const { fromYmd, toYmd, todayYmd, sched, summaries, holidays, leaveRanges, workMinutesByDay = new Map(), marksByDay, joinedYmd } = opts;
+  const { fromYmd, toYmd, todayYmd, sched, summaries, holidays, leaveRanges, workMinutesByDay = new Map(), marksByDay, joinedYmd, trackedFromYmd } = opts;
   const byDay = new Map(summaries.map((s) => [s.day, s]));
   // The SERVER'S rule, imported rather than restated - see the note on `leaveRanges` above and on
   // `leaveCover` in src/domain/attendance.ts. 1 = the whole day is excused, 0.5 = one session is.
@@ -291,7 +342,10 @@ export function buildAttendanceRows(opts: {
     if (s || credit > 0) {
       // Event credit adds to clocked minutes for the day's total; late/early flags come from real punches only.
       const total = (s?.workedMinutes ?? 0) + credit;
-      const status = s?.open ? "open" : offDay ? "worked_off_day" : dayStatus(s, total, sched);
+      // An approved late arrival / early departure's gap counts toward the full/half-day ladder when the
+      // punctuality policy credits it (`creditMinutes`, 0 otherwise) - the reading payroll docks by - but it is
+      // not WORK, so it stays out of the minutes the row reports as worked.
+      const status = s?.open ? "open" : offDay ? "worked_off_day" : dayStatus(s, total + (s?.creditMinutes ?? 0), sched);
       const summary: DaySummary = s
         ? { ...s, workedMinutes: total }
         : { day, sessions: [], workedMinutes: total, open: false, late: false, leftEarly: false, lateByMin: 0, earlyByMin: 0 };
@@ -303,6 +357,8 @@ export function buildAttendanceRows(opts: {
       rows.push({ day, status: "holiday" });
     } else if (excusedOn(day) >= 1) {
       rows.push({ day, status: "on_leave" });
+    } else if (trackedFromYmd && day < trackedFromYmd && !leaveTouches(day, leaveRanges)) {
+      rows.push({ day, status: "untracked" }); // before HRMS records start: no punch was possible
     } else if (excusedOn(day) > 0 && day < todayYmd) {
       // Half the day is excused and the other half was never worked. That is neither "On leave" (it isn't, and
       // payroll charges 0.5 days for it) nor a plain absence (half of it is spoken for), so it gets its own
@@ -402,7 +458,8 @@ export function statsOf(rows: AttendanceRow[], tz: string, fullDayMinutes: numbe
     // work - so coming in on a Saturday moved the "done vs expected" bar backwards - and put that day's
     // arrival into the punctuality score for a shift window that did not apply to it. The minutes it earned
     // still count below; the day was simply not owed. (`workingDaysInRange` on the server skips it too.)
-    const counts = r.status !== "holiday" && r.status !== "on_leave" && r.status !== "worked_off_day";
+    // An `untracked` day owes nothing either, until HR marks it: a mark is the one way such a day gets a value.
+    const counts = r.status !== "holiday" && r.status !== "on_leave" && r.status !== "worked_off_day" && (r.status !== "untracked" || !!r.mark);
     if (counts) workingDays++;
     if (counts && r.day < todayYmd) expectedDays++;
     const s = r.summary;
@@ -476,4 +533,6 @@ export const STATUS_UI: Record<DayStatus, StatusUi> = {
   // that is the kind of day it is.
   worked_off_day: { label: "Worked - not a working day", badge: "secondary", dot: "bg-violet-500", cell: "bg-violet-50 dark:bg-violet-950/40" },
   absent: { label: "Absent", badge: "destructive", dot: "bg-rose-500", cell: "bg-rose-50 dark:bg-rose-950/40" },
+  // Neutral: nobody could have punched, so the day is neither kept nor missed.
+  untracked: { label: "Before HRMS", badge: "muted", dot: "bg-muted-foreground/40", cell: "bg-muted/40" },
 };

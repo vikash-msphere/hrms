@@ -202,6 +202,8 @@ export const OWNER_REFS: Record<string, Record<string, OwnerRef>> = {
   "attendance-day-marks": { employee: { collection: "employees" } },
   "overtime-requests": { employee: { collection: "employees" } },
   "remote-work-requests": { employee: { collection: "employees" } },
+  // Carried onto the live manifest by migration 0002, because production reads this from the `policy` row.
+  "late-early-requests": { employee: { collection: "employees" } },
   "asset-requests": { employee: { collection: "employees" } },
   "notice-periods": { employee: { collection: "employees" } },
   // The board author owns their row: kudos are author(giver)-owned, and a generic post's author owns it too, so
@@ -245,6 +247,11 @@ export const OWNER_REFS: Record<string, Record<string, OwnerRef>> = {
   bonuses: { employee: { collection: "employees" } },
   settlements: { employee: { collection: "employees" } },
   "leave-encashments": { employee: { collection: "employees" } },
+  // A ledger row moves the balance of the employee it names, so naming somebody is exactly the thing a narrow
+  // grant must not reach past. Carried onto the live manifest by migration 0005.
+  "leave-adjustments": { employee: { collection: "employees" } },
+  // Pay and tax paid before HRMS, about the employee it names. Carried onto the live manifest by migration 0006.
+  "payroll-openings": { employee: { collection: "employees" } },
   // A delegation says whose approvals somebody else is covering, and `delegator` is the owner: the row is
   // scoped by `delegator_id` (lib/authzResolve.ts) and `activeDelegatesFor` reads it to decide who gets a copy
   // of that person's approval nudges (services/notifications.ts). Undeclared, the field was accepted as given -
@@ -314,6 +321,10 @@ export const SUPPORTED_SCOPES: Record<string, ScopeTier[]> = {
   assets: ["self", "reports", "org", "dept", "all"],
   "leave-balances": ["self", "reports", "org", "dept", "all"],
   "leave-encashments": ["self", "reports", "org", "dept", "all"],
+  // "self" for READING, like the day marks below: an adjustment explains your own balance, so an org may let
+  // you see it. A self-WRITE rule would be a grant to move your own balance.
+  "leave-adjustments": ["self", "reports", "org", "dept", "all"],
+  "payroll-openings": ["self", "reports", "org", "dept", "all"],
   attendance: ["self", "reports", "org", "dept", "all"],
   "attendance-regularizations": ["self", "reports", "org", "dept", "all"],
   // "self" is here for READING: a mark decides what one of your days is worth, so you are owed the sight of
@@ -322,6 +333,7 @@ export const SUPPORTED_SCOPES: Record<string, ScopeTier[]> = {
   "attendance-day-marks": ["self", "reports", "org", "dept", "all"],
   "overtime-requests": ["self", "reports", "org", "dept", "all"],
   "remote-work-requests": ["self", "reports", "org", "dept", "all"],
+  "late-early-requests": ["self", "reports", "org", "dept", "all"],
   "asset-requests": ["self", "reports", "org", "dept", "all"],
   "notice-periods": ["self", "reports", "org", "dept", "all"],
   announcements: ["self", "reports", "org", "dept", "all"], // author-owned (giver for kudos); self = own posts/kudos
@@ -445,7 +457,7 @@ export const AUDIT: AuditPolicy = {
   // an org-level catalog (salary-structures = reusable component templates), a membership row (benefit-
   // enrollments = which plan), or a document's metadata (personal-documents = name/type/status; its BYTES
   // are audited via `personal-documents:download`) is not that, and auditing it is pure volume.
-  sensitive_collections: ["compensation", "payslips", "settlements", "background-checks", "offers"],
+  sensitive_collections: ["compensation", "payslips", "settlements", "background-checks", "offers", "payroll-openings"],
   // Custom methods that stream sensitive bytes, keyed `<collection>:<verb>` — a bare verb name is ambiguous
   // (`payslips:download` is a person's pay, `org-documents:download` is the handbook everyone may read).
   // Only reads belong here. A write is already logged as a write (`personal-documents:generateForm16` files a

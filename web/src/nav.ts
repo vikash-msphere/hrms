@@ -17,6 +17,7 @@ import {
   ScrollText,
   ReceiptText,
   Table2,
+  History,
   type LucideIcon,
 } from "lucide-react";
 import { RupeeCircle } from "./components/icons/RupeeCircle";
@@ -90,6 +91,7 @@ export const APPROVAL_CAPS = [
   "reimbursements.approve",
   "overtime-requests.approve",
   "remote-work-requests.approve",
+  "late-early-requests.approve",
   "asset-requests.approve",
   "attendance-regularizations.approve",
   "leave-encashments.approve",
@@ -191,6 +193,7 @@ export const NAV: NavGroup[] = [
           { key: "attendance", label: "Attendance", collection: "attendance" },
           { key: "schedule", label: "Schedule", perm: "shift-assignments.read", collection: "shift-assignments" },
           { key: "timesheets", label: "Timesheets", perm: "time-entries.read", collection: "time-entries" },
+          { key: "late-early", label: "Late & Early", perm: "late-early-requests.read", collection: "late-early-requests" },
           { key: "overtime", label: "Overtime", perm: "overtime-requests.read", collection: "overtime-requests" },
           { key: "remote-work", label: "Remote Work", perm: "remote-work-requests.read", collection: "remote-work-requests" },
           { key: "delegations", label: "Delegation", perm: "approval-delegations.read", collection: "approval-delegations" },
@@ -257,6 +260,8 @@ export const NAV: NavGroup[] = [
       // somebody an admin has granted it to.
       { key: "tables", label: "Tables", icon: Table2, perm: "table-views.read" },
       { key: "workflows", label: "Workflows", icon: Workflow, perm: "automations.read" },
+      // Go-live setup: what happened before the org used HRMS. Shown to whoever may run any of its steps.
+      { key: "opening-balances", label: "Opening balances", icon: History, anyPerm: ["employees.setTrackedFrom", "leave-adjustments.importOpenings", "leave-requests.importHistory", "payroll-openings.importOpenings"] },
       { key: "activity", label: "Activity", icon: ScrollText, perm: "audit.read" },
       { key: "settings", label: "Settings", icon: Settings, perm: "settings.write" },
     ],

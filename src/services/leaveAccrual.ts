@@ -88,6 +88,8 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
       startDate: schema.employees.startDate,
       endDate: schema.employees.endDate,
       probationEndDate: schema.employees.probationEndDate,
+      // Where HRMS pricing starts for somebody who joined before go-live (domain/leave.ts `floorMs`).
+      trackedFrom: schema.employees.trackedFrom,
     })
     .from(schema.employees)
     .where(
@@ -154,6 +156,7 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
     const startMs = +new Date(emp.startDate);
     const endMs = emp.endDate ? +new Date(emp.endDate) : null;
     const probationEndMs = emp.probationEndDate ? +new Date(emp.probationEndDate) : null;
+    const floorMs = emp.trackedFrom ? +new Date(emp.trackedFrom) : null;
     for (const lt of leaveTypes) {
       if (!lt.accrualDaysPerYear || lt.deleteTime || lt.disabled) continue;
       const existing = balByKey.get(`${emp.uuid}|${lt.uuid}`);
@@ -169,6 +172,7 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
         joiningRule: rulesByType.get(lt.uuid)?.accrual.joining_rule ?? null,
         pricedStartMs: existing?.accrualPricedStart ? +new Date(existing.accrualPricedStart) : null,
         pricedEndMs: existing?.accrualPricedEnd ? +new Date(existing.accrualPricedEnd) : null,
+        floorMs,
       });
       if (existing) {
         // Round the resulting balance to the configured increment; also re-rounds (normalizes) an existing

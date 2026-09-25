@@ -168,6 +168,8 @@ const employee: Grant = {
     "overtime-requests.me.**": "write",
     "remote-work-requests": "write",
     "remote-work-requests.me.**": "write",
+    "late-early-requests": "write", // ask to come in late / leave early (the org's punctuality policy decides the rest)
+    "late-early-requests.me.**": "write",
     "asset-requests": "write", // ask for kit (a laptop, a monitor); the category catalog is readable above
     "asset-requests.me.**": "write",
     "time-entries": "write", // log own timesheet rows against the project catalog
@@ -211,6 +213,7 @@ const employee: Grant = {
     ...OWN_WORK_ALLOW,
     "overtime-requests.me.cancel",
     "remote-work-requests.me.cancel",
+    "late-early-requests.me.cancel",
     "asset-requests.me.cancel",
     "time-entries.me.submit",
     "goals.me.updateProgress",
@@ -258,7 +261,6 @@ const employee: Grant = {
     "reviews.me.pdf", // record copy of own finished review
     "review-feedback.me.submitFeedback", // answer (or decline) a 360 nomination
     "review-feedback.me.decline",
-    "employees.me.getPhoto",
     "employees.me.uploadPhoto",
     "employees.me.clearPhoto",
     "employees.me.getSignature", // read own e-signature (service hard-enforces owner-only)
@@ -286,7 +288,11 @@ const employee: Grant = {
     "payslips.me.download",
     "personal-documents.me.download",
     "employees.upcomingCelebrations", // company-wide birthdays + work anniversaries feed (day+month only)
-    "employees.batchGetPhotos", // batched photo fetch (transport only; the service re-applies per-id employee scope)
+    // Everybody's face, because everybody's name is already in the directory. Transport only: the service
+    // decides visibility by asking whether this caller may READ that employee's record, which is the same
+    // verdict the row itself gets (services/employeePhoto.ts#photoRef). Granting the verb broadly is what lets
+    // that one rule be the whole rule, instead of a second scope written in policy that has to be kept in step.
+    "employees.*.getPhoto",
     "batch.run", // multi-read batch transport (each sub-request is independently gated)
   ],
 };
@@ -315,6 +321,7 @@ const manager: Grant = {
     "attendance-day-marks.my-dept.**": "read", // marks on the dept's days
     "overtime-requests.my-dept.**": "read", // dept's overtime requests (to review)
     "remote-work-requests.my-dept.**": "read", // dept's remote-work requests (to review)
+    "late-early-requests.my-dept.**": "read", // dept's late arrival / early departure requests (to review)
     "asset-requests.my-dept.**": "read", // dept's asset requests (to review; handing the kit over is HR/IT's step)
     "time-entries.my-dept.**": "read", // dept's timesheets (to review)
     "goals.my-dept.**": "write", // set + edit the team's goals
@@ -345,6 +352,8 @@ const manager: Grant = {
     "overtime-requests.my-dept.reject",
     "remote-work-requests.my-dept.approve",
     "remote-work-requests.my-dept.reject",
+    "late-early-requests.my-dept.approve",
+    "late-early-requests.my-dept.reject",
     "asset-requests.my-dept.approve",
     "asset-requests.my-dept.reject",
     "time-entries.my-dept.approve",
@@ -447,6 +456,7 @@ const hr_admin: Grant = {
     "attendance-day-marks.**": "write", // HR decides what a day counts as, org-wide (and withdraws its own marks)
     "overtime-requests.**": "read", // HR reviews + decides these org-wide (verbs below)
     "remote-work-requests.**": "read",
+    "late-early-requests.**": "read", // HR decides these org-wide (verbs below)
     "asset-requests.**": "read", // HR decides these org-wide and hands the kit over (verbs below)
     "time-entries.**": "read", // org-wide timesheet visibility (approval stays the manager's)
     // Recruiting (ATS): HR runs the whole pipeline.
@@ -511,6 +521,8 @@ const hr_admin: Grant = {
     "overtime-requests.*.reject",
     "remote-work-requests.*.approve",
     "remote-work-requests.*.reject",
+    "late-early-requests.*.approve",
+    "late-early-requests.*.reject",
     "asset-requests.*.approve",
     "asset-requests.*.reject",
     "asset-requests.*.issue", // hand over the actual asset, which is what closes the request
@@ -614,6 +626,7 @@ const payroll_admin: Grant = {
     "leave-encashments.**": "read", // encashments pay out through the run (HR creates/decides them)
     "bonuses.**": "read", // bonuses pay out through the run (HR awards them)
     "overtime-requests.**": "read", // approved overtime pays out through the run
+    "late-early-requests.**": "read", // an approved one can change a day's loss of pay under the punctuality policy
     "personal-documents": "read", // may list (rows scoped to own)
     "personal-documents.me.**": "read", // own personal docs (self-service, like every employee)
     "announcements.me.**": "write", // edit + soft-delete own board posts / kudos (like every employee)
@@ -659,7 +672,7 @@ const payroll_admin: Grant = {
     "tax-declarations.**", // verify/reject + proof upload/download
     "personal-documents.me.download",
     "employees.upcomingCelebrations",
-    "employees.batchGetPhotos",
+    "employees.*.getPhoto",
     "batch.run",
     ...OWN_ATTENDANCE_ALLOW,
     ...OWN_SELF_SERVICE_ALLOW,

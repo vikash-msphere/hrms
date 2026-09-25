@@ -17,6 +17,8 @@ export type NoticePeriod = Wire<"notice-period">;
 
 export type RemoteWorkRequest = Wire<"remote-work-request">;
 
+export type LateEarlyRequest = Wire<"late-early-request">;
+
 export type Reimbursement = Wire<"reimbursement">;
 
 export type Expense = Wire<"expense">;
@@ -170,6 +172,8 @@ export type LeaveType = Wire<"leave-type">;
 export type LeaveEncashment = Wire<"leave-encashment">;
 
 export type LeaveBalance = Wire<"leave-balance">;
+export type LeaveAdjustment = Wire<"leave-adjustment">;
+export type PayrollOpening = Wire<"payroll-opening">;
 
 // Where a board card's sticker sits, once the author has moved/resized/faded it. Everything is a fraction of the
 // card's own width, so the placement holds at any card size - see components/common/CardSticker.tsx.

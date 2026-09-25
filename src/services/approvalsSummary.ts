@@ -39,6 +39,8 @@ function builders(deps: Deps, exclude: string | null): Record<string, (scope: Li
       db.select({ value: count }).from(t.overtimeRequests).where(conds(applyScope(s, t.overtimeRequests.code, t.overtimeRequests.employeeId), eq(t.overtimeRequests.state, a as "PENDING"), notMine(t.overtimeRequests.employeeId))),
     "remote-work-requests": (s, a) =>
       db.select({ value: count }).from(t.remoteWorkRequests).where(conds(applyScope(s, t.remoteWorkRequests.code, t.remoteWorkRequests.employeeId), eq(t.remoteWorkRequests.state, a as "PENDING"), notMine(t.remoteWorkRequests.employeeId))),
+    "late-early-requests": (s, a) =>
+      db.select({ value: count }).from(t.lateEarlyRequests).where(conds(applyScope(s, t.lateEarlyRequests.code, t.lateEarlyRequests.employeeId), eq(t.lateEarlyRequests.state, a as "PENDING"), notMine(t.lateEarlyRequests.employeeId))),
     "attendance-regularizations": (s, a) =>
       db.select({ value: count }).from(t.attendanceRegularizations).where(conds(applyScope(s, t.attendanceRegularizations.code, t.attendanceRegularizations.employeeId), eq(t.attendanceRegularizations.state, a as "PENDING"), notMine(t.attendanceRegularizations.employeeId))),
     "leave-encashments": (s, a) =>

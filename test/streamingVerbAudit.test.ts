@@ -11,8 +11,12 @@ import { READ_VERBS } from "../src/domain/auditAccess";
 //   READ_VERBS (a structural fact)      - does this handler change state? Absent means the write backstop in
 //                                         middleware/authz.ts fires and files the call as a MUTATION.
 //
-// Every custom method is delivered as a POST (http/collectionRoute.ts mounts them all on `app.post("/:id")`),
-// so a read-shaped verb missing from READ_VERBS is recorded as a write. That is not a missing trail, it is the
+// A custom method is delivered as a POST (http/collectionRoute.ts mounts them all on `app.post("/:id")`) - or,
+// where a READ has to be addressable by a browser, as a GET on the same path (`verbs.<name>.get`, which
+// `employees:getPhoto` uses so an avatar can be an `<img src>`). Either way it is one custom method, resolved
+// to one key, so both operations are read here.
+//
+// A read-shaped verb missing from READ_VERBS is recorded as a write. That is not a missing trail, it is the
 // wrong TYPE of trail: somebody asking "who opened this person's medical document" filters the feed by Viewed
 // and gets nothing back, while the rows that exist sit under Other. `leave-requests:download` (the sick note
 // behind a leave request) and `tickets:attachment` were in NEITHER registry, and so were `offers:letter`,
@@ -25,13 +29,13 @@ import { READ_VERBS } from "../src/domain/auditAccess";
 // mounted routes (test/openapiRoutesDrift.ts), so nothing can stream bytes without appearing here.
 const rawSpec = import.meta.glob("../openapi.yaml", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 type Operation = { responses?: Record<string, { content?: Record<string, unknown> }> };
-const paths = (load(Object.values(rawSpec)[0]!) as { paths: Record<string, { post?: Operation }> }).paths;
+const paths = (load(Object.values(rawSpec)[0]!) as { paths: Record<string, { post?: Operation; get?: Operation }> }).paths;
 
 /** `<collection>:<verb>` for every custom method whose SUCCESS response is something other than JSON. */
 const streaming = Object.entries(paths)
   .filter(([p]) => p.includes(":"))
   .filter(([, item]) => {
-    const ok = Object.entries(item.post?.responses ?? {}).filter(([status]) => status.startsWith("2"));
+    const ok = [item.post, item.get].flatMap((op) => Object.entries(op?.responses ?? {})).filter(([status]) => status.startsWith("2"));
     return ok.some(([, res]) => Object.keys(res?.content ?? {}).some((media) => media !== "application/json"));
   })
   .map(([p]) => {

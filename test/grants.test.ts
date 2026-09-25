@@ -271,6 +271,16 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
     // covers recording a single award; this collection-level verb is left to the ACL for now, deliberately,
     // because it writes money for a whole population at once.
     "bonuses:award",
+    // Opening leave balances for everybody in a file at once (services/leaveAdjustments.ts). The collection is
+    // private by default - nothing seeds `leave-adjustments` - and this is the bulk half of it, which moves
+    // encashable balances for a whole population; left to the ACL on the same terms as `bonuses:award`.
+    "leave-adjustments:importOpenings",
+    // Pay and tax from before HRMS for everybody in a file at once (services/payrollOpenings.ts): private by
+    // default like the collection itself, and it moves the year's TDS for a whole population.
+    "payroll-openings:importOpenings",
+    // Leave from before HRMS for everybody in a file at once (services/leaveHistoryImport.ts): approved rows
+    // written straight past the request flow, so it is the ACL's to hand out rather than a seeded role's.
+    "leave-requests:importHistory",
     // Super-only on purpose, each documented at the point it is withheld (src/domain/grants.ts): the bank
     // file and the statutory report expose the employer debit account and every account number, payroll
     // approval is deliberately not the run operator's own act, and previewPayslip renders another employee's

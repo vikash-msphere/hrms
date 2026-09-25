@@ -295,6 +295,23 @@ export type AccrualInputs = {
    */
   pricedStartMs?: number | null;
   pricedEndMs?: number | null;
+  /**
+   * THE DAY HRMS RECORDS START for this person (`employees.tracked_from`), or null. Somebody who joined before
+   * the org used the app has entitlement that was earned - and partly spent - somewhere else, and the app has
+   * no record of the spending. So a period that STARTS before this day is not the walk's to price: its
+   * entitlement belongs to the opening balance (services/leaveAdjustments.ts), which is entered as a figure
+   * rather than accrued.
+   *
+   * Such a period is left alone in BOTH directions. The forward walk never credits it, and the window
+   * correction never re-prices it - so setting the date takes nothing back on its own (the opening balance
+   * does that, explicitly, with `creditedBeforeFloor`), and a start date corrected years back afterwards
+   * does not credit months nobody here ever saw. The recorded window keeps describing what the balance holds
+   * for those periods for the same reason: it is what `creditedBeforeFloor` reads.
+   *
+   * No effect unless it is after the start date: records that start on or before the day somebody joined
+   * leave nothing to open.
+   */
+  floorMs?: number | null;
 };
 
 /** `pricedStart`/`pricedEnd` come back so the caller can store the window these periods were priced against. */
@@ -307,6 +324,140 @@ export function computeAccrual(i: AccrualInputs): AccrualResult {
     return { add: 0, newLastYm: i.lastAccrualYm, pricedStartMs: i.pricedStartMs ?? null, pricedEndMs: i.pricedEndMs ?? null };
   }
   return i.frequency === "semi_monthly" ? computeSemiMonthly(i) : computeMonthly(i);
+}
+
+// ---- Where HRMS pricing starts (`floorMs`) -----------------------------------------------------------------
+//
+// The first period HRMS prices for somebody whose records start after they joined: the first period that
+// STARTS on or after the floor day, and never one inside the month they joined in. The second half is what
+// keeps the joining-date rule entirely on the opening side: a period HRMS prices is never a joining period,
+// so the rule never has to be re-read against a window that only exists because of the floor.
+// Null when there is no floor, or it is not after the start date.
+
+function floorMonthIdx(i: AccrualInputs): number | null {
+  if (i.floorMs == null || !i.startMs || i.floorMs <= i.startMs) return null;
+  const d = new Date(i.floorMs);
+  const idx = d.getUTCFullYear() * 12 + d.getUTCMonth();
+  return Math.max(d.getUTCDate() === 1 ? idx : idx + 1, ymIndex(ymOf(i.startMs)) + 1);
+}
+
+function floorHalfIdx(i: AccrualInputs): number | null {
+  if (i.floorMs == null || !i.startMs || i.floorMs <= i.startMs) return null;
+  const day = new Date(i.floorMs).getUTCDate();
+  const h = halfIndexOf(i.floorMs);
+  return Math.max(day === 1 || day === 16 ? h : h + 1, (monthIndex0(i.startMs) + 1) * 2);
+}
+
+/**
+ * The first day of the first period HRMS prices for this person (see floorMs), or null when their records
+ * start on their start date. For a reader listing what accrual did - a period before it is the opening
+ * balance's, whatever an earlier tick happened to credit for it.
+ */
+export function hrmsPricingStartMs(i: Pick<AccrualInputs, "startMs" | "floorMs" | "frequency">): number | null {
+  const probe = i as AccrualInputs;
+  if (i.frequency === "semi_monthly") {
+    const h = floorHalfIdx(probe);
+    if (h === null) return null;
+    const m = Math.floor(h / 2);
+    return Date.UTC(Math.floor(m / 12), m % 12, h % 2 === 0 ? 1 : 16);
+  }
+  const idx = floorMonthIdx(probe);
+  return idx === null ? null : Date.UTC(Math.floor(idx / 12), idx % 12, 1);
+}
+
+/**
+ * What a balance holds for the periods before the floor: the credits the walk made for them, priced against
+ * the window it recorded (or the marker's own fallback where none was recorded - see `pricedStartMs`). This is
+ * the figure an opening balance REPLACES (services/leaveAdjustments.ts): the app's reading of years it never
+ * saw, credited in one go by the first nightly run with nothing deducted for leave used before go-live.
+ *
+ * Exact because of what the walk does under a floor: it never re-prices those periods, and it keeps the
+ * window they were priced against (computeMonthly / computeSemiMonthly). A balance that HRMS first credited
+ * after the floor was set recorded the floor's own period as its start, so it answers zero.
+ *
+ * `rateAt` is the current rate, the same approximation `windowCorrection` makes: a rate edited after these
+ * periods were credited makes the figure differ by the edit. The opening preview shows it for that reason.
+ */
+export function creditedBeforeFloor(i: AccrualInputs): number {
+  if (!i.startMs || !i.lastAccrualYm || (!i.accrualDaysPerYear && !i.probationAccrualDaysPerYear)) return 0;
+  return i.frequency === "semi_monthly" ? semiMonthlyCreditedBeforeFloor(i) : monthlyCreditedBeforeFloor(i);
+}
+
+/**
+ * The marker a balance should carry once its opening is applied, when the walk has not yet reached the last
+ * period before the floor. From the opening on, every period before the floor is the opening's, so one the
+ * walk had not credited yet must never be credited after it - marking it processed is what guarantees that.
+ * Null when the marker needs no move: no floor, no marker (the walk then starts at the floor on its own), a
+ * marker already at or past the floor, or a leaver's final mark (which says the window is closed).
+ */
+export function openingMarker(i: AccrualInputs): string | null {
+  if (!i.startMs || !i.lastAccrualYm || isFinalMarker(i.lastAccrualYm)) return null;
+  if (i.frequency === "semi_monthly") {
+    const floorIdx = floorHalfIdx(i);
+    if (floorIdx === null || halfMarkerToIndex(i.lastAccrualYm) >= floorIdx - 1) return null;
+    return halfMarker(floorIdx - 1);
+  }
+  const floorIdx = floorMonthIdx(i);
+  if (floorIdx === null || ymIndex(i.lastAccrualYm) >= floorIdx - 1) return null;
+  return ymFromIndex(floorIdx - 1);
+}
+
+// The recorded window the pre-floor periods were priced against, with the marker's fallback for a balance
+// that recorded none (see computeMonthly's correction for the same reading).
+function wasWindow(i: AccrualInputs): { startMs: number; endMs: number | null } {
+  const startMs = i.pricedStartMs ?? i.startMs!;
+  const endMs = i.pricedStartMs != null ? i.pricedEndMs ?? null : isFinalMarker(i.lastAccrualYm) ? i.endMs : null;
+  return { startMs, endMs };
+}
+
+// A recorded start that is only a floor's own first day was never a joining period (the walk starts there
+// under a floor and prices it as an ordinary one). A real start date that happens to fall on the 1st or 16th
+// AND has since been edited is read the same way - the one case this approximates, and only on a semi-monthly
+// type with a joining-date rule.
+const isPeriodStartDay = (ms: number) => { const d = new Date(ms).getUTCDate(); return d === 1 || d === 16; };
+
+function monthlyCreditedBeforeFloor(i: AccrualInputs): number {
+  const floorIdx = floorMonthIdx(i);
+  if (floorIdx === null) return 0;
+  const was = wasWindow(i);
+  const wasStartIdx = ymIndex(ymOf(was.startMs));
+  const wasEndIdx = was.endMs != null ? ymIndex(ymOf(was.endMs)) : null;
+  const last = Math.min(ymIndex(i.lastAccrualYm!), floorIdx - 1, wasEndIdx ?? Number.POSITIVE_INFINITY);
+  const probationEndIdx = i.probationEndMs ? ymIndex(ymOf(i.probationEndMs)) : null;
+  const rateAt = (idx: number) => (probationEndIdx !== null && idx < probationEndIdx ? i.probationAccrualDaysPerYear : i.accrualDaysPerYear) / 12;
+  const realStart = was.startMs === i.startMs || !isPeriodStartDay(was.startMs);
+  const fullOrWorked = (idx: number) => {
+    const capped = monthFraction(idx, Date.UTC(Math.floor(idx / 12), idx % 12, 1), was.endMs);
+    return capped < 1 ? monthFraction(idx, was.startMs, was.endMs) : 1;
+  };
+  let sum = 0;
+  for (let idx = wasStartIdx; idx <= last; idx++) {
+    sum += rateAt(idx) * applyJoiningRule(monthFraction(idx, was.startMs, was.endMs), realStart && idx === wasStartIdx, was.startMs, i.joiningRule, () => fullOrWorked(idx));
+  }
+  return round2(sum);
+}
+
+function semiMonthlyCreditedBeforeFloor(i: AccrualInputs): number {
+  const floorIdx = floorHalfIdx(i);
+  if (floorIdx === null) return 0;
+  const was = wasWindow(i);
+  const wasStartIdx = halfIndexOf(was.startMs);
+  const wasEndIdx = was.endMs != null ? halfIndexOf(was.endMs) : null;
+  const last = Math.min(halfMarkerToIndex(i.lastAccrualYm!), floorIdx - 1, wasEndIdx ?? Number.POSITIVE_INFINITY);
+  const probationEndIdx = i.probationEndMs ? halfIndexOf(i.probationEndMs) : null;
+  const rateAt = (idx: number) => (probationEndIdx !== null && idx < probationEndIdx ? i.probationAccrualDaysPerYear : i.accrualDaysPerYear) / 24;
+  const joiningMonth = Math.floor(wasStartIdx / 2);
+  const realStart = was.startMs === i.startMs || !isPeriodStartDay(was.startMs);
+  const monthStartOfHalf = (hIdx: number) => { const m = Math.floor(hIdx / 2); return Date.UTC(Math.floor(m / 12), m % 12, 1); };
+  const fullOrWorked = (idx: number) => {
+    const capped = halfFraction(idx, monthStartOfHalf(idx), was.endMs);
+    return capped < 1 ? halfFraction(idx, was.startMs, was.endMs) : 1;
+  };
+  let sum = 0;
+  for (let idx = wasStartIdx; idx <= last; idx++) {
+    sum += rateAt(idx) * applyJoiningRule(halfFraction(idx, was.startMs, was.endMs), realStart && Math.floor(idx / 2) === joiningMonth, was.startMs, i.joiningRule, () => fullOrWorked(idx));
+  }
+  return round2(sum);
 }
 
 /**
@@ -356,6 +507,12 @@ function computeMonthly(i: AccrualInputs): AccrualResult {
 
   let fromIdx = i.lastAccrualYm ? ymIndex(i.lastAccrualYm) + 1 : startIdx;
   if (fromIdx < startIdx) fromIdx = startIdx;
+  // UNDER A FLOOR (see floorMs), a balance HRMS has not credited yet starts at the floor's month: the months
+  // before it are the opening balance's. One it HAS credited keeps walking from its marker - any month it
+  // covers before the floor is a credit `creditedBeforeFloor` counts and the opening then replaces, so the
+  // walk never has to leave a hole in the marker that nothing could account for.
+  const floorIdx = floorMonthIdx(i);
+  if (floorIdx !== null && !i.lastAccrualYm && fromIdx < floorIdx) fromIdx = floorIdx;
 
   const rateAt = (idx: number) => (probationEndIdx !== null && idx < probationEndIdx ? monthlyProbation : monthly);
   // The joining month's fraction, once the joining-date rule has had its say (see applyJoiningRule). The
@@ -412,11 +569,13 @@ function computeMonthly(i: AccrualInputs): AccrualResult {
     };
     add += windowCorrection({
       // From whichever window starts earlier: a start corrected EARLIER has months the old walk never reached,
-      // and they are the ones nothing else will ever credit.
-      fromIdx: Math.min(startIdx, wasStartIdx),
+      // and they are the ones nothing else will ever credit. Never from before the floor: those months are the
+      // opening balance's, in both directions (see floorMs).
+      fromIdx: floorIdx === null ? Math.min(startIdx, wasStartIdx) : Math.max(Math.min(startIdx, wasStartIdx), floorIdx),
       markerIdx,
       rateAt,
-      wasFractionAt: (idx) => applyJoiningRule(monthFraction(idx, wasStartMs, wasEndMs), wasJoining(idx), wasStartMs, i.joiningRule, () => wasFullOrWorked(idx)),
+      // Under a floor no month it reaches is a joining month (floorMonthIdx), on either side.
+      wasFractionAt: (idx) => applyJoiningRule(monthFraction(idx, wasStartMs, wasEndMs), floorIdx === null && wasJoining(idx), wasStartMs, i.joiningRule, () => wasFullOrWorked(idx)),
       nowFractionAt: fractionAt,
       wasCovers: (idx) => idx >= wasStartIdx && (wasEndIdx == null || idx <= wasEndIdx),
       nowCovers: (idx) => idx >= startIdx && (i.endMs == null || idx <= endIdx),
@@ -444,7 +603,24 @@ function computeMonthly(i: AccrualInputs): AccrualResult {
   // earned. A month entirely after the exit reconciles to zero, which is the backdated-exit case. It runs at
   // most once - the final mark is what says so - and never against a month already priced with the end date
   // known, because that month carries the mark already.
-  return { add: round2(add), newLastYm: credited, pricedStartMs: i.startMs!, pricedEndMs: i.endMs ?? null };
+  return { add: round2(add), newLastYm: credited, pricedStartMs: pricedStartUnder(i, floorIdx, (ms) => ymIndex(ymOf(ms)), monthStartOf), pricedEndMs: i.endMs ?? null };
+}
+
+/**
+ * The window START to record after a walk. Without a floor it is the start date, as it has always been. Under
+ * one it describes what the balance holds for the periods before the floor, because that is what
+ * `creditedBeforeFloor` reads and nothing re-prices them any more:
+ *   - a start recorded before the floor stays exactly as it was, so a start date corrected afterwards (still
+ *     before the floor) cannot make those periods look differently credited;
+ *   - otherwise HRMS priced this balance from the floor's own period, and that is its start - for a balance
+ *     credited for the first time under the floor, and for one whose floor moved earlier.
+ * A balance credited before windows were recorded (no recorded start, but a marker) was priced from the start
+ * date, which is what the correction's own fallback assumes too.
+ */
+function pricedStartUnder(i: AccrualInputs, floorIdx: number | null, idxOf: (ms: number) => number, periodStart: (idx: number) => number): number {
+  if (floorIdx === null) return i.startMs!;
+  const recorded = i.pricedStartMs ?? (i.lastAccrualYm ? i.startMs! : null);
+  return recorded != null && idxOf(recorded) < floorIdx ? recorded : periodStart(floorIdx);
 }
 
 // ---- Semi-monthly accrual ----
@@ -489,6 +665,9 @@ function computeSemiMonthly(i: AccrualInputs): AccrualResult {
 
   let fromIdx = i.lastAccrualYm ? halfMarkerToIndex(i.lastAccrualYm) + 1 : startIdx;
   if (fromIdx < startIdx) fromIdx = startIdx;
+  // Under a floor, an uncredited balance starts at the floor's half-period - see the monthly twin.
+  const floorIdx = floorHalfIdx(i);
+  if (floorIdx !== null && !i.lastAccrualYm && fromIdx < floorIdx) fromIdx = floorIdx;
 
   const rateAt = (idx: number) => (probationEndIdx !== null && idx < probationEndIdx ? halfProbation : half);
   // The joining-date rule, on half-periods. It is a rule about the MONTH somebody joined, so it covers both
@@ -531,10 +710,11 @@ function computeSemiMonthly(i: AccrualInputs): AccrualResult {
       return capped < 1 ? halfFraction(idx, wasStartMs, wasEndMs) : 1;
     };
     add += windowCorrection({
-      fromIdx: Math.min(startIdx, wasStartIdx),
+      // Never from before the floor, and no joining month past it - see the monthly twin.
+      fromIdx: floorIdx === null ? Math.min(startIdx, wasStartIdx) : Math.max(Math.min(startIdx, wasStartIdx), floorIdx),
       markerIdx,
       rateAt,
-      wasFractionAt: (idx) => applyJoiningRule(halfFraction(idx, wasStartMs, wasEndMs), wasJoining(idx), wasStartMs, i.joiningRule, () => wasFullOrWorked(idx)),
+      wasFractionAt: (idx) => applyJoiningRule(halfFraction(idx, wasStartMs, wasEndMs), floorIdx === null && wasJoining(idx), wasStartMs, i.joiningRule, () => wasFullOrWorked(idx)),
       nowFractionAt: fractionAt,
       wasCovers: (idx) => idx >= wasStartIdx && (wasEndIdx == null || idx <= wasEndIdx),
       nowCovers: (idx) => idx >= startIdx && (i.endMs == null || idx <= endIdx),
@@ -543,5 +723,6 @@ function computeSemiMonthly(i: AccrualInputs): AccrualResult {
     const coveredIdx = i.endMs != null ? Math.min(reached, endIdx) : reached;
     if (coveredIdx >= startIdx) credited = halfMarker(coveredIdx) + (i.endMs != null && coveredIdx >= endIdx ? FINAL_MARK : "");
   }
-  return { add: round2(add), newLastYm: credited, pricedStartMs: i.startMs!, pricedEndMs: i.endMs ?? null };
+  const halfStartOf = (hIdx: number) => { const m = Math.floor(hIdx / 2); return Date.UTC(Math.floor(m / 12), m % 12, hIdx % 2 === 0 ? 1 : 16); };
+  return { add: round2(add), newLastYm: credited, pricedStartMs: pricedStartUnder(i, floorIdx, halfIndexOf, halfStartOf), pricedEndMs: i.endMs ?? null };
 }

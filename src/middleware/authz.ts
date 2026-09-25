@@ -6,9 +6,9 @@ import type { Context, MiddlewareHandler } from "hono";
 import type { AppEnv, AppUser } from "../env";
 import type { Deps } from "../deps";
 import { forbidden } from "../lib/errors";
-import { resolveRequest, decide, denyingPattern, withOwnerResource, deptOf, type Decision, type Grant } from "../domain/permissions";
+import { resolveRequest, decide, denyingPattern, withOwnerResource, deptOf, type Decision, type Grant, type SelfContext } from "../domain/permissions";
 import { scopeFor, verbScopeFor, stateReadAllowed, type ListScope } from "../domain/access";
-import { buildCodedPath, uuidToCode, resolveItemState, RESOURCE_COLLECTIONS, LIST_OWNER_COLUMNS, OWNER_COLUMN_COLLECTIONS } from "../lib/authzResolve";
+import { buildCodedPath, uuidToCode, primeCodes, resolveItemState, RESOURCE_COLLECTIONS, LIST_OWNER_COLUMNS, OWNER_COLUMN_COLLECTIONS } from "../lib/authzResolve";
 import { loadObjectRulesForRequest, loadObjectExceptionCodes, loadObjectExceptionCodesFor } from "../lib/policyLoad";
 import { SEARCHABLE_COLLECTIONS } from "../domain/searchIndex";
 import { DASHBOARD_SUMMARY_COLLECTIONS } from "../domain/dashboardSummary";
@@ -217,6 +217,13 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
   // number stays as the explicit bound on what one request may make this gate do.
   if (Array.isArray(body.items)) {
     if (body.items.length > BULK_ITEMS_MAX) return { allow: false, reason: `bulk body carries more than ${BULK_ITEMS_MAX} items` };
+    // Every ref the items carry, resolved in one read per referenced collection first, so the per-item gate
+    // below reads from the cache instead of querying once per row (lib/authzResolve.ts primeCodes).
+    const recs = body.items.filter((i): i is Record<string, unknown> => !!i && typeof i === "object" && !Array.isArray(i));
+    for (const [field, spec] of [...Object.entries(refs), ...Object.entries(ownerRefs)]) {
+      const ids = recs.map((r) => r[field]).filter((v): v is string => typeof v === "string" && v.length > 0).map((v) => v.split("/").pop()!);
+      await primeCodes(deps, spec.collection, ids);
+    }
     for (const item of body.items) {
       if (!item || typeof item !== "object" || Array.isArray(item)) continue;
       const itemDenied = await gateRecord(item as Record<string, unknown>);
@@ -293,6 +300,23 @@ export const SCOPE_READING_VERBS = new Map<string, string>([
   ["cards:flow", "cards"], // the board's other cards, as the distribution one card is read against (services/cardFlow.ts)
   ["review-cycles:variablePay", "reviews"], // every review in the cycle, priced (services/variablePay.ts)
   ["review-cycles:award", "reviews"], // the same lines, then paid
+]);
+
+/**
+ * Item verbs that hand back PART OF THE RECORD, so the record's own READ decides them as well.
+ *
+ * A custom method is authorized by its own key (`employees.<code>.getPhoto`), which is the right shape for an
+ * ACT on a record - approving it, printing it, deleting its photo. It is the wrong shape for a piece of the
+ * record itself: a face is not a separate thing to be permitted, it is what the directory row looks like, and
+ * the rule everyone expects is the plain one - if you can see the person, you can see their picture.
+ *
+ * Expressing that as a second grant would mean two rules that have to agree, and they would drift: an org that
+ * narrows who can see whom would narrow the directory and keep handing out the faces. So the verb grant is
+ * broad (transport: "you may ask for a photo this way"), and the READ on the row is what decides whether there
+ * is an answer - both asked in `gate` below, in this middleware, so no service re-derives visibility.
+ */
+const READ_GATED_VERBS = new Set<string>([
+  "employees:getPhoto", // the avatar behind every `<img>` in the app (routes/employees.ts)
 ]);
 
 /**
@@ -618,8 +642,21 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // grant can be asked the identical question - which is what the containment check below does. Per-object
       // exceptions are deliberately NOT re-loaded for them: a share is authority over one object, and the
       // conservative reading of "may this admin read this" is their own standing grant.
-      decidedAs((g, employeeCode) => decide(g, resolved, { employeeCode }));
-      decision = decide(grant, resolved, self);
+      // TWO-GATE, for a verb whose answer is PART OF THE RECORD rather than an act upon it (READ_GATED_VERBS).
+      // The verb allow is the transport - it says the caller may ask this way at all - and the record's own
+      // READ is what decides whether there is an answer, so the two can never drift: grant `employees:getPhoto`
+      // to everyone and a person still sees exactly the faces of the people they can see. Same shape as the
+      // activity branch above, and for the same reason: one request, two questions, both asked here rather than
+      // one of them re-derived in a service.
+      const gate = (g: Grant, ctx: SelfContext): Decision => {
+        const verdict = decide(g, resolved, ctx);
+        if (!verdict.allow || resolved.kind !== "custom" || !READ_GATED_VERBS.has(`${collection}:${resolved.verb}`)) return verdict;
+        // `resolved.resource` is the item without its verb (domain/permissions.ts), so this is the identical
+        // question the row's own GET asks - owner key included, since `resolved` carries it.
+        return decide(g, { kind: "standard", resource: resolved.resource, level: "read", ownerResource: resolved.ownerResource }, ctx);
+      };
+      decidedAs((g, employeeCode) => gate(g, { employeeCode }));
+      decision = gate(grant, self);
       // The delete axis. A DELETE resolves to the standard `write` level (`domain/permissions.ts` levelFor),
       // so editing a record and destroying it are the SAME key and "may edit but never delete" - the most
       // common request after read-only - could not be said at all. The deny lane supplies the missing axis

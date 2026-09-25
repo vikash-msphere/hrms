@@ -15,6 +15,48 @@
       "when": 1790271277243,
       "tag": "0001_redact_probation_end_date",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790326667926,
+      "tag": "0002_late_early_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1790380800000,
+      "tag": "0003_photo_read_rule",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1790351821115,
+      "tag": "0004_employee_tracked_from",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1790358296875,
+      "tag": "0005_leave_adjustments",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1790360583455,
+      "tag": "0006_payroll_openings",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1790361384459,
+      "tag": "0007_leave_request_source",
+      "breakpoints": true
     }
   ]
 }

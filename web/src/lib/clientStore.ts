@@ -1,6 +1,7 @@
 // The one owner of everything this app keeps in the browser.
 //
 // WHY IT EXISTS. Four caches (collection rows, employee faces, the settings snapshot, the approvals badge) each
+// (faces have since left: a photo is an `<img>` URL the browser caches, so the app keeps no copy of one)
 // grew their own copy of the same three problems - namespace it to an identity, bound it, survive a refusal to
 // write - and each solved them differently and incompletely. The row cache alone was provisioned for 150 entries
 // of up to 96 KiB and the photo cache for 200 of up to 48 KiB, which is around 24 million characters against a
@@ -31,18 +32,25 @@
 
 const DB_NAME = "hrms";
 const DB_VERSION = 1;
-/** Bumped when a stored PAYLOAD shape changes. Records of another version are deleted, not merely ignored. */
-const SCHEMA = 1;
+/** Bumped when a stored PAYLOAD shape changes. Records of another version are deleted, not merely ignored.
+ *
+ *  2: the `faces` class was retired - employee photos are ordinary `<img>` URLs now, cached by the browser
+ *  rather than copied into this store - and a bump is how its records leave the disks they are already on. A
+ *  class that no longer exists would otherwise be hydrated into a budget with no entry for it.
+ *
+ *  EXPORTED for test/resourceStoreCache.test.ts, which seeds records "as a previous page life would have left
+ *  them" and so has to write this number into their keys. It used to spell it `1` by hand, which made a bump
+ *  look like a cache that had stopped working. */
+export const SCHEMA = 2;
 
-/** What kind of thing is stored. Each class has its own budget, so faces can never crowd out rows. */
-export type StoreClass = "rows" | "faces" | "snapshot" | "draft";
+/** What kind of thing is stored. Each class has its own budget, so one can never crowd out another. */
+export type StoreClass = "rows" | "snapshot" | "draft";
 
 // Budgets in characters, which is what a stored string costs. Generous next to what localStorage allowed and
 // still a rounding error against an IndexedDB quota (hundreds of MB in every current browser), so the eviction
 // path below is a bound rather than something the app runs into on an ordinary day.
 const BUDGET: Record<StoreClass, number> = {
   rows: 4_000_000,
-  faces: 8_000_000,
   snapshot: 256_000,
   draft: 1_000_000,
 };
@@ -51,7 +59,6 @@ const BUDGET: Record<StoreClass, number> = {
 // class to make room for one entry that is unlikely to be worth more than the rest of them together.
 const MAX_RECORD: Record<StoreClass, number> = {
   rows: 400_000,
-  faces: 200_000,
   snapshot: 256_000,
   draft: 200_000,
 };
@@ -62,7 +69,6 @@ const MAX_RECORD: Record<StoreClass, number> = {
 // after a week rather than a year.
 const MAX_AGE_MS: Record<StoreClass, number> = {
   rows: 7 * 24 * 60 * 60_000,
-  faces: 7 * 24 * 60 * 60_000,
   snapshot: 24 * 60 * 60_000,
   draft: 7 * 24 * 60 * 60_000,
 };
@@ -175,7 +181,7 @@ const wrap = <T>(req: IDBRequest<T>): Promise<T> =>
 // Held in memory for this identity, so the budget is a running total and eviction sorts a few hundred small
 // objects. Rebuilt from the `meta` store at boot; never read from disk again.
 const index = new Map<string, Meta>();
-const used: Record<StoreClass, number> = { rows: 0, faces: 0, snapshot: 0, draft: 0 };
+const used: Record<StoreClass, number> = { rows: 0, snapshot: 0, draft: 0 };
 
 function track(m: Meta) {
   const prev = index.get(m.k);
@@ -391,7 +397,7 @@ function flush(): Promise<void> {
 async function runOneFlush(): Promise<void> {
   if (!queued.size) return;
   // The namespace this batch belongs to, captured WITH the batch. Opening the database is a real await, and
-  // `openFor` can switch identity across it - writing then would file one person's cached rows and faces under
+  // `openFor` can switch identity across it - writing then would file one person's cached rows under
   // another's namespace, which is the one thing the namespacing exists to prevent.
   const id = identity;
   const batch = [...queued.entries()];
@@ -518,14 +524,14 @@ export function draftCount(): number {
 }
 
 /** The classes `purgeCachedData` removes: everything that is a COPY of a server answer. `draft` is absent. */
-const SERVER_DATA_CLASSES: StoreClass[] = ["rows", "faces", "snapshot"];
+const SERVER_DATA_CLASSES: StoreClass[] = ["rows", "snapshot"];
 
 /**
  * Drop the cached copies of server data, keeping the person's own unsaved writing.
  *
  * Called when the SESSION LAPSES (api.ts `handle401`), which is the ordinary way this app is left - a 12-hour
  * TTL and a browser that gets closed. `purgeAll` above only ran from the sign-out MENU ITEM, so every other
- * exit left the whole cache on disk: up to 4 MB of collection rows and 8 MB of colleagues' faces, for the seven
+ * exit left the whole cache on disk: up to 4 MB of collection rows, for the seven
  * days `MAX_AGE_MS` allows, on what may well be a shared computer. That is precisely the case the sign-out
  * purge was written for, reached by the door most people actually use.
  *

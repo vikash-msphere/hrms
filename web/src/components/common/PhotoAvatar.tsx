@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Camera, Upload } from "lucide-react";
 import { api } from "@/api";
-import { requestPhoto, subscribePhoto, invalidatePhoto } from "@/lib/photoCache";
 import { colorFromString, initials } from "@/lib/utils";
-import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
@@ -49,15 +48,16 @@ export function PhotoAvatar({
   // True once a NEW image has been chosen in this session - the only state worth protecting on close, since
   // the crop of an already-saved photo can be redone in a second.
   const [picked, setPicked] = useState(false);
-  // The photo bytes come from the shared session cache, which batches every avatar mounted in the same tick
-  // into one `employees:batchGetPhotos` request (no per-avatar fetch). `src` is a data URI or null.
-  // The `photo` marker is passed through rather than reduced to a boolean: it carries the photo's own version,
-  // which is what keys the cache, so replacing a photo is a cache MISS in every browser rather than something
-  // only the uploading tab finds out about.
-  const src = useSyncExternalStore(
-    (cb) => subscribePhoto(employeeId, photo, cb),
-    () => requestPhoto(employeeId, photo),
-  );
+  // THE MARKER IS THE URL. `photo` is what the server serves on the row (http/serialize.ts#photoMarker):
+  // `employees/<id>:getPhoto?v=<version>`, an API path whose `?v=` is the picture's own version. So the face is
+  // an ordinary `<img>` the browser fetches, caches for a week and lazy-loads when it scrolls into view, and a
+  // replaced photo is simply a different URL - nothing has to be told anything, in this tab or any other. The
+  // app used to carry a cache of its own (batched fetches, base64 payloads, a disk layer) to do that job.
+  const src = photo ? `/v1/${photo}` : null;
+  // A photo that will not load - deleted underneath us, a refused request - falls back to initials rather than
+  // leaving the browser's broken-image glyph in a circle. Reset per URL, so a new photo gets its own chance.
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [src]);
 
   // crop state
   const [imgSrc, setImgSrc] = useState<string | null>(null);
@@ -165,7 +165,8 @@ export function PhotoAvatar({
       toast({ title: "Photo updated", variant: "success" });
       setOpen(false);
       reset();
-      invalidatePhoto(employeeId); // drop the stale cached photo + refetch
+      // Nothing to invalidate: the row's `photo` marker now carries a new version, so re-reading the record is
+      // what puts the new picture on screen - here and in every other tab and browser showing this person.
       onChanged?.();
     } catch (e) {
       setErr((e as Error).message);
@@ -181,7 +182,6 @@ export function PhotoAvatar({
     try {
       await api(`/employees/${employeeId}:clearPhoto`, { method: "POST" });
       toast({ title: "Photo removed", variant: "success" });
-      invalidatePhoto(employeeId);
       setOpen(false);
       reset();
       onChanged?.();
@@ -196,7 +196,24 @@ export function PhotoAvatar({
     <>
       <div className="relative">
         <Avatar className={className}>
-          {src && <AvatarImage src={src} alt={name} />}
+          {/* A plain `<img>`, NOT Radix's AvatarImage: that one tracks its load state through `new Image()`,
+              which fetches eagerly and would defeat `loading="lazy"` - and a directory is the one screen where
+              only the rows on screen should be fetched. The initials sit underneath and show through until
+              (or unless) the picture paints over them. */}
+          {src && !broken && (
+            <img
+              src={src}
+              alt={name}
+              loading="lazy"
+              decoding="async"
+              onError={() => setBroken(true)}
+              // NO z-index. Absolute already lifts it over the initials underneath, and the "Change photo"
+              // overlay is a later sibling of this Avatar, so it paints above the picture on its own. A `z-10`
+              // here put the image over that button instead: with a photo set, the one affordance for
+              // replacing it stopped taking clicks.
+              className="absolute inset-0 aspect-square h-full w-full object-cover"
+            />
+          )}
           <AvatarFallback className="text-lg" style={{ backgroundColor: colorFromString(name) }}>{initials(name)}</AvatarFallback>
         </Avatar>
         {editable && (

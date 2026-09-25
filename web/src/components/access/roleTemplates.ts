@@ -106,6 +106,10 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
       // hold shows counts with no explanation of why HR scored a day the way they did, and re-valuing a day
       // stays a pay decision, which is not this bundle's.
       list("attendance-day-marks"), { collection: "attendance-day-marks", scope: "dept", level: "read" },
+      // A report asking to come in late or leave early is the team lead's call, like their leave.
+      list("late-early-requests"), { collection: "late-early-requests", scope: "dept", level: "read" },
+      { collection: "late-early-requests", scope: "dept", verb: "approve" },
+      { collection: "late-early-requests", scope: "dept", verb: "reject" },
       list("time-entries"), { collection: "time-entries", scope: "dept", level: "read" },
       { collection: "time-entries", scope: "dept", verb: "approve" },
       { collection: "time-entries", scope: "dept", verb: "reject" },

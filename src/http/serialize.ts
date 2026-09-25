@@ -188,6 +188,7 @@ export function toEmployeeResource(r: any): Wire<"employee"> {
     manager: ref("employees", r.managerId),
     start_date: r.startDate ? iso(r.startDate).slice(0, 10) : undefined,
     probation_end_date: r.probationEndDate ? iso(r.probationEndDate).slice(0, 10) : undefined,
+    tracked_from: r.trackedFrom ? iso(r.trackedFrom).slice(0, 10) : undefined,
     epf_enrolled: !!r.epfEnrolled,
     eps_excluded: !!r.epsExcluded,
     photo: photoMarker(r),
@@ -1081,6 +1082,7 @@ export function toLeaveRequestResource(r: any): Wire<"leave-request"> {
     start_session: r.startSession ?? 1,
     end_session: r.endSession ?? 2,
     state: r.state,
+    source: r.source ?? "app",
     reason: r.reason ?? undefined,
     has_document: !!r.hasDocument, // set by the route when a supporting file is attached to this request
     // Policy rules the org waives rather than enforces, recorded when this was filed. The approver sees them
@@ -1382,6 +1384,23 @@ export function toRemoteWorkRequestResource(r: any): Wire<"remote-work-request">
     location: r.location ?? undefined,
     reason: r.reason ?? undefined,
     state: r.state,
+    decided_by: ref("users", r.decidedBy),
+    decision_note: r.decisionNote ?? undefined,
+  };
+}
+
+export function toLateEarlyRequestResource(r: any): Wire<"late-early-request"> {
+  return {
+    ...baseResource(r, "late-early-requests"),
+    employee: ref("employees", r.employeeId),
+    date: iso(r.date).slice(0, 10),
+    kind: r.kind,
+    at: r.at,
+    minutes: r.minutes,
+    reason: r.reason ?? undefined,
+    state: r.state,
+    over_limit: !!r.overLimit,
+    auto_approved: !!r.autoApproved,
     decided_by: ref("users", r.decidedBy),
     decision_note: r.decisionNote ?? undefined,
   };
@@ -1917,6 +1936,37 @@ export function toLeaveBalanceResource(r: any): Wire<"leave-balance"> {
     employee: ref("employees", r.employeeId),
     leave_type: ref("leave-types", r.leaveTypeId),
     balance_days: round2(r.balanceDays ?? 0),
+  };
+}
+
+export function toLeaveAdjustmentResource(r: any): Wire<"leave-adjustment"> {
+  const opt = (v: number | null | undefined) => (v == null ? undefined : round2(v));
+  return {
+    ...baseResource(r, "leave-adjustments"),
+    employee: ref("employees", r.employeeId),
+    leave_type: ref("leave-types", r.leaveTypeId),
+    kind: r.kind,
+    days: round2(r.days ?? 0),
+    opening_days: opt(r.openingDays),
+    removed_days: opt(r.removedDays),
+    encashed_days: opt(r.encashedDays),
+    as_of: r.asOf ? iso(r.asOf).slice(0, 10) : undefined,
+    reason: r.reason ?? undefined,
+  };
+}
+
+export function toPayrollOpeningResource(r: any): Wire<"payroll-opening"> {
+  return {
+    ...baseResource(r, "payroll-openings"),
+    employee: ref("employees", r.employeeId),
+    financial_year: r.financialYear,
+    paid_through: r.paidThrough,
+    gross: round2(r.gross ?? 0),
+    taxable_gross: round2(r.taxableGross ?? 0),
+    tds: round2(r.tds ?? 0),
+    pt: round2(r.pt ?? 0),
+    esi_contributing: !!r.esiContributing,
+    note: r.note ?? undefined,
   };
 }
 

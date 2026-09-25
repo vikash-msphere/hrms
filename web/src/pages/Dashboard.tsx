@@ -93,7 +93,7 @@ const CAT_ACCENT: Record<KpiCategory, string> = {
 
 // Collections whose :reject verb accepts an optional `note` in the body (relayed to the requester). Mirrors
 // the Approvals inbox.
-const REJECT_NOTE = new Set(["overtime-requests", "remote-work-requests"]);
+const REJECT_NOTE = new Set(["overtime-requests", "remote-work-requests", "late-early-requests"]);
 
 // The dashboard's movable sections, in default order. The viewer drags them into order, or hides them, in the
 // "Customize layout" popover (hero row); the choice persists per user via preferences/dashboard. Rendering uses CSS
@@ -563,6 +563,7 @@ export default function Dashboard({ me }: { me: Me }) {
       ...approvals.reimbs.map((r) => item("reimbursements", "Reimbursement")(r, money(r.amount))),
       ...approvals.overtimes.map((r) => item("overtime-requests", "Overtime")(r, `${formatDate(r.date)} · ${Math.round(r.minutes / 6) / 10}h`)),
       ...approvals.remotes.map((r) => item("remote-work-requests", "Remote work")(r, `${formatDate(r.start_date)} to ${formatDate(r.end_date)}`)),
+      ...approvals.lateEarlies.map((r) => item("late-early-requests", r.kind === "early_departure" ? "Early departure" : "Late arrival")(r, `${formatDate(r.date)} · ${r.kind === "early_departure" ? "leave at" : "in by"} ${r.at}${r.over_limit ? " · past the allowance" : ""}`)),
       ...approvals.regularizations.map((r) => item("attendance-regularizations", "Attendance")(r, formatDate(r.date))),
       ...approvals.encashments.map((r) => item("leave-encashments", "Encashment")(r, `${r.days} day${r.days === 1 ? "" : "s"}`)),
       ...approvals.loans.map((r) => item("loans", r.kind === "advance" ? "Advance" : "Loan")(r, money(r.principal))),

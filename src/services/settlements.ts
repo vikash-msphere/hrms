@@ -9,13 +9,15 @@ import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { payablesRaced, invalidArgument, notFound } from "../lib/errors";
 import {
-  currentComp, compAsOf, monthlyRecurringGross, tdsComponent, loadTaxConfig, fyWindow, finalizedTotals,
+  currentComp, compAsOf, monthlyRecurringGross, tdsComponent, loadTaxConfig, fyWindow, finalizedTotals, payrollOpeningsFor, esiOpeningInPeriod,
   assembleProjection, readDeclarations, verifiedDeductions, employedMonthsInFy, EMPTY_FINALIZED_TOTALS,
 } from "./taxProjection";
 import { encashmentRateConfig } from "./leaveEncashments";
 import { orgToday, dayStartMs } from "./orgDay";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, lopDayUnits, eventCreditByDay, sessionWorkedMinutes, unpaidLeaveDayUnits } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, eventCreditByDay, sessionWorkedMinutes, unpaidLeaveDayUnits } from "../domain/attendance";
 import { marksForPeriod } from "./attendanceDayMarks";
+import { periodLop, punchDays, punctualityTouchesPay, shiftScheduleOf } from "../domain/punctuality";
+import { approvedExcusals, punctualityPolicy } from "./lateEarlyRequests";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidReimbursements, markReimbursementsSettledStmt, releaseReimbursementsSettledStmt } from "./reimbursements";
 import { unpaidBonuses, markBonusesSettledStmt, releaseBonusesSettledStmt } from "./bonuses";
@@ -179,8 +181,17 @@ async function finalMonthUnpaidLeaveDays(deps: Deps, employeeId: string, fromMs:
 
 // Unexcused absence day-units inside the final month's employed window, from exactly the facts a payroll run
 // uses (holidays, approved leave, attendance punches) so the exit month is docked the same way every other
-// month is. Scoped to one employee and one month, so it stays a handful of reads.
-async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number, untilMs: number, endYmd: string, att: AttendanceConfig): Promise<number> {
+// month is. Scoped to one employee and one month, so it stays a handful of reads. `trackedFrom` is the
+// employee's `tracked_from`, read the way the run build reads it (services/payroll.ts employeeLop).
+async function finalMonthLopDays(
+  deps: Deps,
+  employeeId: string,
+  fromMs: number,
+  untilMs: number,
+  endYmd: string,
+  att: AttendanceConfig,
+  trackedFrom: Date | number | null | undefined,
+): Promise<number> {
   const tz = att.timezone || "Asia/Kolkata";
   // THE DATA WINDOW HAS TO COVER EVERY DAY THE WALK ENUMERATES, and `untilMs` on its own does not.
   //
@@ -233,6 +244,7 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
     // excuses nothing (domain/attendance.ts LeaveRange), exactly as the run build reads it.
     .map((l) => ({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)), startSession: l.startSession, endSession: l.endSession, ...(unpaidTypes.has(l.leaveTypeId) ? { paid: false } : {}) }));
   const workedByDay = new Map<string, number>();
+  const sessions: { clockInMs: number; clockOutMs: number | null }[] = [];
   for (const s of await deps.db
     .select()
     .from(schema.attendanceSessions)
@@ -252,6 +264,7 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
     // correct it (domain/attendance.ts#sessionWorkedMinutes).
     const minutes = sessionWorkedMinutes(ms, s.clockOut ? +new Date(s.clockOut) : null, +deps.clock.now(), tz);
     workedByDay.set(day, (workedByDay.get(day) ?? 0) + minutes);
+    sessions.push({ clockInMs: ms, clockOutMs: s.clockOut ? +new Date(s.clockOut) : null });
   }
   // Same event credit the payroll build applies, so a leaver's final settlement doesn't dock days they spent
   // at a count_as_work event (see assembleLop in services/payroll.ts).
@@ -286,11 +299,25 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
   // likely to be sitting, so leaving them out here would have the settlement and the payslip disagree.
   const marksByDay = (await marksForPeriod(deps, fromMs, toMs)).get(employeeId);
 
-  return lopDayUnits({
+  // And the punctuality policy's say in it, read exactly as the payroll build reads it (services/payroll.ts
+  // #assembleLop): approved late arrivals and early departures, and what unexcused lateness docks.
+  const policy = await punctualityPolicy(deps);
+  const punctuality = punctualityTouchesPay(policy)
+    ? {
+      sched: shiftScheduleOf(att as unknown as Record<string, unknown>),
+      policy,
+      punches: punchDays(sessions, (ms) => localDay(ms, tz)),
+      excusals: (await approvedExcusals(deps, fromMs, toMs, [employeeId])).get(employeeId),
+    }
+    : undefined;
+
+  return periodLop({
     startYmd, endYmd, workDays: att.work_days, holidays, leaveRanges, workedByDay, marksByDay,
+    trackedFromYmd: trackedFrom ? utcDay(+new Date(trackedFrom)) : null,
     fullDayMinutes: att.full_day_minutes ?? 480,
     halfDayMinutes: att.half_day_minutes ?? 240,
-  });
+    punctuality,
+  }).units;
 }
 
 // Average monthly basic over the ten months ending with the exit month, priced off the compensation timeline
@@ -315,6 +342,9 @@ async function averageMonthlyBasic(deps: Deps, employeeId: string, asOf: Date): 
 // re-tested the bare ceiling and silently stopped withholding in the leaver's final month.
 async function esiContributingAtExit(deps: Deps, employeeId: string, exitDate: Date): Promise<boolean> {
   const cp = esiContributionPeriod(exitDate);
+  // The system before HRMS deducting it in this period counts too (a payroll opening flagged as contributing).
+  const openings = await payrollOpeningsFor(deps, fyWindow(exitDate).financialYear, employeeId);
+  if (openings.some((o) => o.esiContributing && esiOpeningInPeriod(o.paidThrough, cp))) return true;
   const periods = new Map((await refPayPeriods(deps)).map((p) => [p.uuid, p]));
   // COMMITTED runs only, in SQL. This read the whole `payroll_runs` table and threw away the drafts in JS,
   // which is every run the org has ever built to answer a question about one contribution period.
@@ -530,7 +560,7 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   const lopDaysInFinalMonth = coverage.finalPaid || lopUntilMs < startedThisMonth
     ? 0
     : att.lop_enabled
-      ? await finalMonthLopDays(deps, employeeId, startedThisMonth, lopUntilMs, lopEndYmd, att)
+      ? await finalMonthLopDays(deps, employeeId, startedThisMonth, lopUntilMs, lopEndYmd, att, emp.trackedFrom)
       : await finalMonthUnpaidLeaveDays(deps, employeeId, startedThisMonth, lopUntilMs, lopEndYmd, att);
 
   // ---- Exit benefits --------------------------------------------------------------------------------------

@@ -21,6 +21,7 @@ import { structureLinesById } from "./salaryStructures";
 import { encashmentRatePerDay, encashmentAmount, encashmentEligibilityError, type RateBasis } from "../domain/encashment";
 import { type CarryForwardExcess } from "../domain/carryForward";
 import { orgYear, type OrgYear } from "./orgDay";
+import { openingEncashments } from "./leaveAdjustments";
 
 // Org-wide leave caps config (data, configurable in Settings). Picks per-type vs cumulative caps for both
 // encashment and carry-forward, and what happens to carry-forward excess (auto-encash up to the cap, or
@@ -122,7 +123,11 @@ export async function encashedDaysThisYear(deps: Deps, employeeId: string, year:
   ];
   if (leaveTypeId) conds.push(eq(schema.leaveEncashments.leaveTypeId, leaveTypeId));
   const rows = await deps.db.select().from(schema.leaveEncashments).where(and(...conds));
-  return round2(rows.filter((r) => r.createdAt && year.covers(r.createdAt)).reduce((s, r) => s + r.days, 0));
+  const here = rows.filter((r) => r.createdAt && year.covers(r.createdAt)).reduce((s, r) => s + r.days, 0);
+  // Plus what the system before HRMS paid out this year, from the opening balance (services/leaveAdjustments.ts).
+  let before = 0;
+  for (const [k, days] of await openingEncashments(deps, year, employeeId)) if (!leaveTypeId || k.endsWith(`|${leaveTypeId}`)) before += days;
+  return round2(here + before);
 }
 
 /**
@@ -158,6 +163,14 @@ export async function encashedDaysThisYearAll(
     byEmp.set(r.employeeId, (byEmp.get(r.employeeId) ?? 0) + r.days);
     const k = `${r.employeeId}${r.leaveTypeId}`;
     byEmpType.set(k, (byEmpType.get(k) ?? 0) + r.days);
+  }
+  // And what the system before HRMS paid out this year, as the single reader counts it. Keyed with the same
+  // unit separator as the loop above.
+  for (const [key, days] of await openingEncashments(deps, year)) {
+    const [employeeId, leaveTypeId] = key.split("|") as [string, string];
+    byEmp.set(employeeId, (byEmp.get(employeeId) ?? 0) + days);
+    const k = `${employeeId}${String.fromCharCode(31)}${leaveTypeId}`;
+    byEmpType.set(k, (byEmpType.get(k) ?? 0) + days);
   }
   return {
     total: (employeeId) => round2(byEmp.get(employeeId) ?? 0),

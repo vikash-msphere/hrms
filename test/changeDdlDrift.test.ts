@@ -1,17 +1,18 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
 import { getTableConfig, SQLiteTable } from "drizzle-orm/sqlite-core";
-import { renderChangeDdl, CHANGE_DDL_MARKER, EXTRA_STAMPS, SIDE_STAMPS, UNSTAMPED_TABLES, stampSlug } from "../src/db/changeDdl";
+import { renderChangeDdl, CHANGE_DDL_MARKER, EXTRA_STAMPS, SIDE_STAMPS, UNSTAMPED_TABLES, stampSlug, appliedChangeTriggers, changeDdlDelta, changeTriggersIn } from "../src/db/changeDdl";
 import * as dbSchema from "../src/db/schema";
 import { TABLES } from "../src/lib/authzResolve";
 import { CATALOG_COLLECTIONS, persistable } from "../web/src/lib/resourceStore";
 
 // The change stamps and their triggers are GENERATED from the authz collection->table registry (drizzle-kit
-// emits no triggers), and the block lives in migration 0000, which is applied to the live database and never
-// rewritten - `npm run db:generate` only checks it (scripts/genChangeDdl.ts). Nothing at runtime would fail
-// if the two fell out of step, which is the danger: a collection whose trigger was never generated is reported
-// as "unchanged" forever, so every client keeps serving whatever it had stored. That is a silent wrong answer,
-// so it gets a gate.
+// emits no triggers). The generated block lives in migration 0000, which is applied to the live database and
+// never rewritten, and a table added since carries its triggers in the migration that creates it - so what is
+// checked is the triggers ALL the migrations leave in place, applied in order (`npm run db:generate` checks the
+// same thing, scripts/genChangeDdl.ts). Nothing at runtime would fail if the two fell out of step, which is the
+// danger: a collection whose trigger was never created is reported as "unchanged" forever, so every client keeps
+// serving whatever it had stored. That is a silent wrong answer, so it gets a gate.
 /** Every table `db/schema.ts` declares, by its SQL name. The module also exports enums and relations, hence
  *  the `unknown[]` widening - `Object.values` over it is a union that no type predicate narrows cleanly. */
 function schemaTableNames(): string[] {
@@ -29,11 +30,27 @@ const paths = Object.keys(files).sort();
 const holders = paths.filter((p) => files[p]!.includes(CHANGE_DDL_MARKER));
 const migration = holders.length === 1 ? files[holders[0]!]! : "";
 
-describe("generated change-stamp DDL matches the migration", () => {
-  it("has the generated block, byte-identical to the generator's output", () => {
-    const cut = migration.indexOf(CHANGE_DDL_MARKER);
-    expect(cut, "no generated change DDL in migration - run `npm run db:generate`").toBeGreaterThan(0);
-    expect(migration.slice(cut).trim(), "change DDL stale - run `npm run db:generate`").toBe(renderChangeDdl().trim());
+describe("generated change-stamp DDL matches the migrations", () => {
+  it("keeps the generated block in exactly one migration", () => {
+    expect(holders.length, `change DDL found in: ${holders.join(", ") || "no migration"}`).toBe(1);
+    expect(migration.indexOf(CHANGE_DDL_MARKER), "no generated change DDL in the migration").toBeGreaterThan(0);
+  });
+
+  it("leaves exactly the generator's triggers in place once every migration has applied", () => {
+    const delta = changeDdlDelta(appliedChangeTriggers(paths.map((p) => files[p]!)));
+    expect(delta, "the migrations' stamp triggers differ from the registry - `npm run db:generate` prints what the newest migration has to carry").toEqual([]);
+  });
+
+  it("reads a later DROP + CREATE as replacing the trigger, and a CREATE alone as adding one", () => {
+    // The mechanism the check above rests on, on synthetic SQL so it holds whatever the real files say.
+    const create = (name: string, body: string) => `CREATE TRIGGER "${name}" AFTER INSERT ON "t" BEGIN\n  ${body};\nEND`;
+    const applied = appliedChangeTriggers([
+      `${create("chg_i_a", "old")};\n--> statement-breakpoint\n${create("chg_i_b", "kept")};`,
+      `DROP TRIGGER IF EXISTS "chg_i_a";\n--> statement-breakpoint\n${create("chg_i_a", "new")};\n--> statement-breakpoint\n${create("chg_i_c", "added")};`,
+    ]);
+    expect([...applied.keys()].sort()).toEqual(["chg_i_a", "chg_i_b", "chg_i_c"]);
+    expect(applied.get("chg_i_a")).toContain("new");
+    expect(changeTriggersIn(renderChangeDdl()).size).toBe((Object.keys(TABLES).length + EXTRA_STAMPS.length + SIDE_STAMPS.length + 1) * 3);
   });
 
   it("stamps EVERY collection authz knows about, on insert, update and delete", () => {

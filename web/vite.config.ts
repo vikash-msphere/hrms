@@ -255,7 +255,7 @@ const PAGE_GROUPS: Record<string, readonly string[]> = {
   "ws-progress": ["Boards", "Goals", "Reviews", "CheckIns"],
   "ws-connect": ["Announcements", "Suggestions", "Events", "Moderation"],
   "ws-hiring": ["Pipeline", "Requisitions", "Candidates", "CandidateProfile", "Interviews", "Offers", "Referrals", "RecruitingAnalytics"],
-  "ws-time": ["Attendance", "Schedule", "Timesheets", "Overtime", "RemoteWork", "Delegations"],
+  "ws-time": ["Attendance", "Schedule", "Timesheets", "LateEarly", "Overtime", "RemoteWork", "Delegations"],
   "ws-leave": ["Leaves", "LeaveCalendar", "Holidays"],
   "ws-pay": ["Payslips", "Reimbursements", "Loans", "TaxDeclarations", "Benefits", "PayrollRuns"],
   "ws-expenses": ["Expenses", "Vendors", "ExpenseBudgets", "CardTransactions"],

@@ -55,6 +55,7 @@ export const TABLES: Record<string, any> = {
   "background-checks": schema.backgroundChecks,
   "overtime-requests": schema.overtimeRequests,
   "remote-work-requests": schema.remoteWorkRequests,
+  "late-early-requests": schema.lateEarlyRequests,
   "approval-delegations": schema.approvalDelegations,
   "notice-periods": schema.noticePeriods,
   suggestions: schema.suggestions,
@@ -96,6 +97,8 @@ export const TABLES: Record<string, any> = {
   stocktakes: schema.stocktakes, // inventory counts (walk-throughs); flat, HR/asset-admin managed
   settlements: schema.settlements,
   "leave-encashments": schema.leaveEncashments,
+  "leave-adjustments": schema.leaveAdjustments, // opening balances + hand corrections, as a ledger (employee-owned)
+  "payroll-openings": schema.payrollOpenings, // pay and tax already paid this FY before HRMS (employee-owned)
   attendance: schema.attendanceSessions,
   "attendance-regularizations": schema.attendanceRegularizations,
   "attendance-day-marks": schema.attendanceDayMarks,
@@ -162,6 +165,8 @@ export const LIST_OWNER_COLUMNS: Record<string, string> = {
   "interview-feedback": "authorId",
   interviews: "code",
   "job-requisitions": "code",
+  "late-early-requests": "employeeId",
+  "leave-adjustments": "employeeId",
   "leave-balances": "employeeId",
   "leave-encashments": "employeeId",
   "leave-requests": "employeeId",
@@ -173,6 +178,7 @@ export const LIST_OWNER_COLUMNS: Record<string, string> = {
   "org-documents": "code",
   "personal-documents": "employeeId",
   "overtime-requests": "employeeId",
+  "payroll-openings": "employeeId",
   "payroll-runs": "code",
   payslips: "employeeId",
   positions: "employeeId",
@@ -244,6 +250,30 @@ const CODE_CACHE_TTL_MS = 10 * 60 * 1000;
 // acting isolate never serves a stale code; other isolates self-heal via the TTL.
 export function invalidateCodeCache(): void {
   codeCache.clear();
+}
+
+/**
+ * Resolve MANY ids of one collection into the cache above, in one chunked read, so the `uuidToCode` calls that
+ * follow are cache hits. For the bulk envelope (`{ items: [...] }`): its gate asks per item, and a hundred-row
+ * import naming a hundred people was a hundred D1 queries spent in authorization before the handler ran - on a
+ * per-invocation subrequest budget the handler also needs. Nothing is decided here; an id with no row is
+ * simply not cached, and the per-item call then answers null exactly as before.
+ */
+export async function primeCodes(deps: Deps, collection: string, ids: string[]): Promise<void> {
+  const t = TABLES[collection];
+  if (!t) return;
+  const now = Date.now();
+  const missing = [...new Set(ids)].filter((id) => {
+    const hit = codeCache.get(`${collection}:${id}`);
+    return !hit || hit.exp <= now;
+  });
+  if (missing.length < 2) return; // one id costs one read either way
+  const rows = (await byIdChunks(missing, (group) => deps.db.select({ uuid: t.uuid, code: t.code }).from(t).where(inArray(t.uuid, group)))) as { uuid: string; code: string | null }[];
+  for (const r of rows) {
+    if (!r.code) continue;
+    if (codeCache.size >= CODE_CACHE_MAX) codeCache.delete(codeCache.keys().next().value!);
+    codeCache.set(`${collection}:${r.uuid}`, { code: r.code, exp: now + CODE_CACHE_TTL_MS });
+  }
 }
 
 export async function uuidToCode(deps: Deps, collection: string, id: string): Promise<string | null> {
