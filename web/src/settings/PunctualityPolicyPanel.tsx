@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Field, FieldRow } from "@/components/common/Field";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 import { useToast } from "@/components/ui/use-toast";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
 import { getSetting, saveSetting } from "@/lib/settingsStore";
@@ -73,6 +74,10 @@ export function PunctualityPolicyPanel() {
   const example = useMemo(() => [3, 6, 10].map((marks) => ({ marks, days: penaltyUnitsFor(marks, { ...pen, enabled: true }) })), [pen]);
   const summary = policySummary(policy);
   const neither = r.enabled && !r.late_arrival && !r.early_departure;
+
+  // Nothing editable until the stored policy is in. The fields start on DEFAULT_PUNCTUALITY, and a value typed
+  // in that window was overwritten when the stored blob landed - so Save then wrote the stored value back.
+  if (!ready) return <PanelSkeleton />;
 
   return (
     <Card>

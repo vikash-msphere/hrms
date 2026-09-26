@@ -26,8 +26,10 @@ test("a chunk that will not load draws the out-of-date panel rather than a blank
   let blocking = true;
   await page.route("**/src/pages/Settings.tsx*", (route) => (blocking ? route.abort() : route.fallback()));
 
+  // Attendance hosts several settings, so its gear is a menu and the row is what opens the panel.
   await gotoRoute(page, "attendance", "Attendance");
-  await page.getByRole("button", { name: "Attendance schedule" }).click();
+  await page.getByRole("main").getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("menu").getByRole("menuitem", { name: "Attendance schedule" }).click();
 
   // The boundary caught it, and said the useful thing: a tab that has been open across a deploy is told to
   // reload rather than told a mystery.

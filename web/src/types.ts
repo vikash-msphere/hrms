@@ -237,8 +237,9 @@ export type Activity = {
 export type ActivityPage = { results: Activity[]; next_page_token?: string };
 
 // One cross-collection hit from global search (GET /v1/search?q=). `name` is the wire ref `<collection>/<token>`
-// of the matched record; `collection` names its type so the palette can label and colour it.
-export type SearchHit = { name: string; collection: string; title: string | null; subtitle: string | null };
+// of the matched record; `collection` names its type so the palette can label and colour it. `related` marks a
+// hit found by meaning rather than by the typed words; the server sends those after every keyword hit.
+export type SearchHit = { name: string; collection: string; title: string | null; subtitle: string | null; related?: boolean };
 export type SearchPage = { results: SearchHit[] };
 
 export type WipScope = "column" | "assignee";

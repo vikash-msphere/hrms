@@ -193,6 +193,13 @@ Six settings on the same screen are worth a decision rather than a default:
   tick - sized so a whole day of ticks stays inside the unattended share of the allowance - so a large
   database takes several days. This is designed, not a fault: the alternative spends the org's whole day by
   mid-morning, every morning, and with `moderation` on that means every post held until UTC midnight.
+- **Semantic hits appear under "Related", after every keyword hit, and often there are none.** A row is shown
+  only when it is close to the query in absolute terms and nearly as close as the best row the person may
+  see, at most five (`src/domain/semanticSearch.ts`). Short or filler-only queries (`ka`, `the`) are not
+  embedded at all. Nothing related is the right answer for most queries the keyword index already answered.
+- **Changing what is embedded re-embeds the whole index.** The drain compares a hash of `embedText`'s output,
+  so a deploy that changes it (a new collection noun, say) re-queues every affected row at the same 14 per
+  tick; until the sweep reaches a row, its old vector keeps answering for it.
 - **Ticket triage correctly suggests nothing** until there are resolved tickets to learn from, and board task
   triage the same until cards have been delivered. Both vote from finished work only.
 - **The nightly duplicate sweep examines 60 open cards a tick**, least-recently-swept first, so a large
@@ -393,10 +400,10 @@ kudos does, and one billed call does not say what the long ones cost.
 
 | Role | Model | Notes |
 |---|---|---|
-| embed | `@cf/baai/bge-small-en-v1.5` | 384 dimensions. Changing it means a new index AND new duplicate thresholds. |
+| embed | `@cf/baai/bge-small-en-v1.5` | 384 dimensions. Changing it means a new index, new duplicate thresholds AND a new ⌘K score floor (`scripts/searchBench.ts` measures it). |
 | generate | `@cf/google/gemma-4-26b-a4b-it` | Reasoning is switched off per call in `src/lib/ai.ts`; with it on, short answers come back empty. |
 | moderate | `@cf/meta/llama-guard-3-8b` | The only safety classifier in the catalogue. |
-| rerank | `@cf/baai/bge-reranker-base` | The only reranker in the catalogue. |
+| rerank | `@cf/baai/bge-reranker-base` | The only reranker in the catalogue. Measured for ⌘K and not used there: on short titles it added nothing over the score floor. |
 
 All four are available on the Workers Free plan. Some newer catalogue models are not (they refuse with error
 5035), so check the plan before trying one.

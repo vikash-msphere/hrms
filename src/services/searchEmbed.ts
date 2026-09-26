@@ -25,6 +25,7 @@ import { BUDGET, INDEXABLE, MODELS, isIndexable } from "../domain/aiPolicy";
 import { aiEmbed, aiFeatureOn } from "./ai";
 import { chunk, ID_CHUNK } from "../lib/dbBatch";
 import { vectorIdOf } from "../lib/vector";
+import { embedText } from "../domain/semanticSearch";
 
 export type EmbedDrainResult = { embedded: number; removed: number; pending: number; skipped?: string };
 
@@ -100,12 +101,13 @@ async function embedPending(deps: Deps, collections: string[]): Promise<{ embedd
       inArray(docs.collection, collections),
       eq(docs.deleted, false),
       eq(docs.restricted, false),
-      // Rows with no label at all are excluded HERE rather than skipped in the loop below, and that is not a
+      // Rows with no title are excluded HERE rather than skipped in the loop below, and that is not a
       // tidying. They are never-embedded, so they sort to the front of every window, and skipping them in JS
-      // left them occupying the window forever: a collection with enough unlabelled rows would fill the tick
+      // left them occupying the window forever: a collection with enough untitled rows would fill the tick
       // with work that can never complete and starve everything behind it. Same failure as the missing
-      // ORDER BY, reached a different way.
-      sql`coalesce(nullif(trim(coalesce(${docs.title}, '')), ''), nullif(trim(coalesce(${docs.subtitle}, '')), '')) is not null`,
+      // ORDER BY, reached a different way. The TITLE, not title-or-subtitle: `embedText` embeds nothing for a
+      // row without one, so this is that same rule said in SQL.
+      sql`trim(coalesce(${docs.title}, '')) <> ''`,
     ))
     // Never-embedded first, then longest-unchecked. No `nulls first` clause: the case expression already puts
     // the un-joined rows ahead of everything, and NULLS FIRST is a newer SQLite grammar than this needs.
@@ -115,7 +117,7 @@ async function embedPending(deps: Deps, collections: string[]): Promise<{ embedd
   const stale: { collection: string; recordId: string; text: string; hash: string; vectorId: string | null }[] = [];
   const examined: string[] = []; // bookkeeping ids to stamp as checked, so the rotation advances
   for (const r of window) {
-    const text = embedText(r.title, r.subtitle);
+    const text = embedText(r.collection, r.title, r.subtitle);
     if (!text) continue; // nothing to embed; a row with no label is not findable by meaning either
     const hash = await sha256Hex(text);
     if (r.knownHash === hash && r.knownModel === MODELS.embed) {
@@ -177,11 +179,15 @@ async function embedPending(deps: Deps, collections: string[]): Promise<{ embedd
 }
 
 /**
- * Entries whose row is gone, or whose collection is no longer indexable.
+ * Entries whose row is gone, whose row has lost its title, or whose collection is no longer indexable.
  *
- * The second half is the one that is easy to forget and matters most: taking a collection OUT of `INDEXABLE`
- * is a privacy decision, and it has to actually remove what is already in the index rather than only stopping
- * new writes. Without this, revoking a collection would leave its text embedded indefinitely.
+ * The last is the one that is easy to forget and matters most: taking a collection OUT of `INDEXABLE` is a
+ * privacy decision, and it has to actually remove what is already in the index rather than only stopping new
+ * writes. Without this, revoking a collection would leave its text embedded indefinitely.
+ *
+ * A row with no title is one `embedText` no longer embeds, so a vector still held for it (written before
+ * that rule, or before the title was cleared) is an orphan too - the embed pass skips it and would never
+ * replace it.
  */
 async function removeOrphans(deps: Deps, collections: string[]): Promise<number> {
   const docs = schema.searchDocs;
@@ -192,7 +198,7 @@ async function removeOrphans(deps: Deps, collections: string[]): Promise<number>
     .from(vecs)
     .leftJoin(docs, and(eq(docs.collection, vecs.collection), eq(docs.recordId, vecs.recordId)))
     .where(
-      sql`${isNull(docs.recordId)} or ${docs.deleted} = 1 or ${docs.restricted} = 1 or ${notInArray(vecs.collection, collections)}`,
+      sql`${isNull(docs.recordId)} or ${docs.deleted} = 1 or ${docs.restricted} = 1 or trim(coalesce(${docs.title}, '')) = '' or ${notInArray(vecs.collection, collections)}`,
     )
     .limit(BUDGET.embedsPerDrain);
 
@@ -211,11 +217,8 @@ async function removeOrphans(deps: Deps, collections: string[]): Promise<number>
   return gone.length;
 }
 
-/** What gets embedded: the same title and subtitle the search result renders. Nothing else - see the argument
- *  in domain/aiPolicy.ts for why the embed source is deliberately text already on screen. */
-export function embedText(title: string | null, subtitle: string | null): string {
-  return [title, subtitle].map((s) => (s ?? "").trim()).filter(Boolean).join(" - ");
-}
+/** What gets embedded for a row - defined in domain/semanticSearch.ts, re-exported for this module's callers. */
+export { embedText };
 
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));

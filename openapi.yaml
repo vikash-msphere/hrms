@@ -18095,6 +18095,7 @@ paths:
                         collection: { type: string, description: "Wire collection the hit belongs to." }
                         title: { type: [string, 'null'] }
                         subtitle: { type: [string, 'null'] }
+                        related: { type: boolean, description: "Present and true when the hit was found by meaning (the semantic index) rather than by the typed words. Related hits follow every keyword hit." }
                 x-aep-resource:
                   singular: search-result-set
                   plural: search-result-sets

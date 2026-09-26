@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
-import { SEARCH_INDEX } from "../src/domain/searchIndex";
+import { SEARCH_INDEX, TEXT_PINNED } from "../src/domain/searchIndex";
+import { INDEXABLE } from "../src/domain/aiPolicy";
 import { LIST_OWNER_COLUMNS, TABLES } from "../src/lib/authzResolve";
 
 // The gate `domain/searchIndex.ts` names in its own header, and did not have.
@@ -82,5 +83,26 @@ describe("search index scoping mirrors the list services", () => {
   it("every exemption names a collection that is actually in the index", () => {
     const stale = Object.keys(EXEMPT).filter((c) => !SEARCH_INDEX.some((e) => e.collection === c));
     expect(stale).toEqual([]);
+  });
+});
+
+// What the semantic index embeds. A noun on every indexable collection, because a bare title says nothing of
+// what the row is - EXCEPT the text-pinned ones, whose stored vectors other features compare to each other
+// against thresholds tuned on the bare text (see TEXT_PINNED). Adding a noun to one of those is a re-tuning of
+// four duplicate thresholds, not a search tweak.
+describe("search index embed text", () => {
+  it("every indexable collection has a noun, and no text-pinned one does", () => {
+    const bad: string[] = [];
+    for (const collection of INDEXABLE) {
+      const entry = SEARCH_INDEX.find((e) => e.collection === collection);
+      if (!entry) bad.push(`${collection}: indexable but not in SEARCH_INDEX`);
+      else if (TEXT_PINNED.has(collection) && (entry.noun || entry.embedSubtitle === false)) bad.push(`${collection}: text-pinned but changes its embed text`);
+      else if (!TEXT_PINNED.has(collection) && !entry.noun) bad.push(`${collection}: no noun`);
+    }
+    expect(bad).toEqual([]);
+  });
+
+  it("every text-pinned collection is indexable", () => {
+    expect([...TEXT_PINNED].filter((c) => !INDEXABLE.has(c))).toEqual([]);
   });
 });

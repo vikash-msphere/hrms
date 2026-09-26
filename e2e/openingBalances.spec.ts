@@ -314,7 +314,8 @@ test("the Tax page counts the pay before HRMS, and payroll will not pay a month 
     // The server's own reason, not "somebody else changed this run": re-reading cannot fix this one.
     // Case-insensitive: the page prints the server's detail as a sentence ("Pay before HRMS ...").
     await expect(toast(page, /pay before HRMS already covers/i)).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByText(new RegExp(`already covers ${fy.april} for .*${person.name.split(" ").pop()}`))).toBeVisible();
+    // On the toast itself, not page-wide: Radix's screen-reader announcer repeats the same sentence for a moment.
+    await expect(toast(page, new RegExp(`already covers ${fy.april} for .*${person.name.split(" ").pop()}`))).toBeVisible();
 
     const items = (await (await page.request.get(`/v1/${runPath}/items`)).json()) as { results?: unknown[] };
     expect(items.results ?? [], "a refused build must write nothing").toHaveLength(0);

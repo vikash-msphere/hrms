@@ -28,6 +28,16 @@ export type SearchEntry = {
   title?: string[]; // first non-empty renders the hit's title; joined with a space when `joinTitle`
   joinTitle?: boolean; // employees: "first last" rather than "first non-empty of"
   subtitle?: string[]; // first non-empty renders the muted second line
+  // The semantic index only (services/searchEmbed.ts `embedText`); the keyword index ignores both.
+  //   - `noun` says what the row IS, so "laptop" lands on `Asset: MacBook Pro` and not on whatever other
+  //     two-word title happens to sit nearby. A bare title carries no kind at all.
+  //   - `embedSubtitle: false` where the subtitle is only a status word (`fixed`, `kudos`). In a vector built
+  //     from a handful of words, a status is a large share of the meaning, and it is the same few words across
+  //     many rows, so it pulls them all toward each other and away from the query.
+  // Set on every collection in domain/aiPolicy.ts INDEXABLE EXCEPT `TEXT_PINNED`, which test/searchIndex.test.ts
+  // holds.
+  noun?: string;
+  embedSubtitle?: false;
 };
 
 const scoped = (owner: string): SearchScoping => ({ kind: "scoped", owner });
@@ -37,8 +47,8 @@ export const SEARCH_INDEX: SearchEntry[] = [
   // ---- People + org ---------------------------------------------------------------------------------------
   { collection: "employees", table: schema.employees, scoping: scoped("uuid"),
     match: ["firstName", "lastName", "legalName", "workEmail", "jobTitle", "employeeNumber"],
-    title: ["firstName", "lastName"], joinTitle: true, subtitle: ["jobTitle", "workEmail"] },
-  { collection: "departments", table: schema.departments, scoping: scoped("code"), match: ["name"], title: ["name"] },
+    title: ["firstName", "lastName"], joinTitle: true, subtitle: ["jobTitle", "workEmail"], noun: "Person" },
+  { collection: "departments", table: schema.departments, scoping: scoped("code"), match: ["name"], title: ["name"], noun: "Department" },
   { collection: "positions", table: schema.positions, scoping: scoped("employeeId"),
     match: ["jobTitle", "location", "note"], title: ["jobTitle"], subtitle: ["location", "note"] },
 
@@ -47,8 +57,9 @@ export const SEARCH_INDEX: SearchEntry[] = [
     match: ["reason", "state"], title: ["reason"], subtitle: ["state"] },
   { collection: "leave-encashments", table: schema.leaveEncashments, scoping: scoped("employeeId"),
     match: ["state"], subtitle: ["state"] },
-  { collection: "leave-types", table: schema.leaveTypes, scoping: flat, match: ["name"], title: ["name"] },
-  { collection: "holidays", table: schema.holidays, scoping: flat, match: ["name", "kind"], title: ["name"], subtitle: ["kind"] },
+  { collection: "leave-types", table: schema.leaveTypes, scoping: flat, match: ["name"], title: ["name"], noun: "Leave type" },
+  { collection: "holidays", table: schema.holidays, scoping: flat, match: ["name", "kind"], title: ["name"], subtitle: ["kind"],
+    noun: "Holiday", embedSubtitle: false },
   { collection: "attendance", table: schema.attendanceSessions, scoping: scoped("employeeId"),
     match: ["note", "source"], title: ["note"], subtitle: ["source"] },
   { collection: "attendance-regularizations", table: schema.attendanceRegularizations, scoping: scoped("employeeId"),
@@ -61,10 +72,10 @@ export const SEARCH_INDEX: SearchEntry[] = [
     match: ["justification", "state"], title: ["justification"], subtitle: ["state"] },
   { collection: "approval-delegations", table: schema.approvalDelegations, scoping: scoped("delegatorId"),
     match: ["reason"], title: ["reason"] },
-  { collection: "shifts", table: schema.shifts, scoping: flat, match: ["name"], title: ["name"] },
+  { collection: "shifts", table: schema.shifts, scoping: flat, match: ["name"], title: ["name"], noun: "Shift" },
   { collection: "shift-assignments", table: schema.shiftAssignments, scoping: scoped("employeeId"), match: ["note"], title: ["note"] },
   { collection: "projects", table: schema.projects, scoping: flat,
-    match: ["name", "client", "projectCode"], title: ["name"], subtitle: ["client", "projectCode"] },
+    match: ["name", "client", "projectCode"], title: ["name"], subtitle: ["client", "projectCode"], noun: "Project" },
   { collection: "time-entries", table: schema.timeEntries, scoping: scoped("employeeId"),
     match: ["description", "status"], title: ["description"], subtitle: ["status"] },
 
@@ -72,9 +83,9 @@ export const SEARCH_INDEX: SearchEntry[] = [
   { collection: "goals", table: schema.goals, scoping: scoped("employeeId"),
     match: ["title", "description", "status"], title: ["title"], subtitle: ["status"] },
   { collection: "boards", table: schema.boards, scoping: flat,
-    match: ["name", "description", "taskPrefix"], title: ["name"], subtitle: ["description"] },
+    match: ["name", "description", "taskPrefix"], title: ["name"], subtitle: ["description"], noun: "Board" },
   { collection: "sprints", table: schema.sprints, scoping: flat,
-    match: ["name", "goal", "state"], title: ["name"], subtitle: ["goal", "state"] },
+    match: ["name", "goal", "state"], title: ["name"], subtitle: ["goal", "state"], noun: "Sprint" },
   { collection: "cards", table: schema.cards, scoping: scoped("employeeId"),
     match: ["title", "description", "keyPrefix", "columnKey", "priority"], title: ["title"], subtitle: ["columnKey"] },
   { collection: "review-cycles", table: schema.reviewCycles, scoping: flat, match: ["name", "state"], title: ["name"], subtitle: ["state"] },
@@ -113,11 +124,11 @@ export const SEARCH_INDEX: SearchEntry[] = [
 
   // ---- Documents + announcements --------------------------------------------------------------------------
   { collection: "org-documents", table: schema.orgDocuments, scoping: scoped("code"),
-    match: ["title", "fileName", "documentType"], title: ["title", "fileName"], subtitle: ["documentType"] },
+    match: ["title", "fileName", "documentType"], title: ["title", "fileName"], subtitle: ["documentType"], noun: "Company document" },
   { collection: "personal-documents", table: schema.personalDocuments, scoping: scoped("employeeId"),
     match: ["title", "fileName", "documentType", "financialYear"], title: ["title", "fileName"], subtitle: ["documentType"] },
   { collection: "letter-templates", table: schema.letterTemplates, scoping: flat,
-    match: ["label", "category", "filename"], title: ["label"], subtitle: ["category"] },
+    match: ["label", "category", "filename"], title: ["label"], subtitle: ["category"], noun: "Letter template" },
   // SCOPED BY AUTHOR, matching `services/announcements.ts#visibleWhere`, which binds the author column. Held
   // as `flat` this was the one entry that disagreed with its own list service: an `own`-breadth caller's board
   // shows only the posts they wrote, while search applied no row filter at all - so ⌘K would return the title
@@ -125,21 +136,23 @@ export const SEARCH_INDEX: SearchEntry[] = [
   // policy (every role holds `announcements.**`, so both sides answer "all"), and live the moment an admin
   // narrows announcements through the ACL, which is the entire purpose of the ACL.
   { collection: "announcements", table: schema.announcements, scoping: scoped("authorEmployeeId"),
-    match: ["title", "bodyText", "category", "kind"], title: ["title"], subtitle: ["kind"] },
+    match: ["title", "bodyText", "category", "kind"], title: ["title"], subtitle: ["kind"], noun: "Announcement", embedSubtitle: false },
   { collection: "events", table: schema.events, scoping: scoped("code"),
-    match: ["title", "description"], title: ["title"], subtitle: ["description"] },
+    match: ["title", "description"], title: ["title"], subtitle: ["description"], noun: "Event" },
 
   // ---- Money: pay, claims, expenses ------------------------------------------------------------------------
   { collection: "reimbursements", table: schema.reimbursements, scoping: scoped("employeeId"),
     match: ["description", "state"], title: ["description"], subtitle: ["state"] },
-  { collection: "reimbursement-categories", table: schema.reimbursementCategories, scoping: flat, match: ["name"], title: ["name"] },
+  { collection: "reimbursement-categories", table: schema.reimbursementCategories, scoping: flat, match: ["name"], title: ["name"],
+    noun: "Reimbursement category" },
   { collection: "expenses", table: schema.expenses, scoping: scoped("employeeId"),
     match: ["description", "invoiceNumber", "paymentRef", "state"], title: ["description", "invoiceNumber"], subtitle: ["state"] },
-  { collection: "expense-categories", table: schema.expenseCategories, scoping: flat, match: ["name", "glCode"], title: ["name"], subtitle: ["glCode"] },
+  { collection: "expense-categories", table: schema.expenseCategories, scoping: flat, match: ["name", "glCode"], title: ["name"], subtitle: ["glCode"],
+    noun: "Expense category" },
   { collection: "expense-budgets", table: schema.expenseBudgets, scoping: flat, match: ["periodKey", "periodType"], title: ["periodKey"], subtitle: ["periodType"] },
   { collection: "payroll-budgets", table: schema.payrollBudgets, scoping: flat, match: ["periodKey", "periodType"], title: ["periodKey"], subtitle: ["periodType"] },
   { collection: "vendors", table: schema.vendors, scoping: flat,
-    match: ["name", "contactEmail", "taxId", "notes"], title: ["name"], subtitle: ["contactEmail"] },
+    match: ["name", "contactEmail", "taxId", "notes"], title: ["name"], subtitle: ["contactEmail"], noun: "Vendor" },
   { collection: "loans", table: schema.loans, scoping: scoped("employeeId"),
     match: ["kind", "reason", "status"], title: ["reason", "kind"], subtitle: ["status"] },
   { collection: "bonuses", table: schema.bonuses, scoping: scoped("employeeId"),
@@ -156,7 +169,7 @@ export const SEARCH_INDEX: SearchEntry[] = [
 
   // ---- Benefits ---------------------------------------------------------------------------------------------
   { collection: "benefit-plans", table: schema.benefitPlans, scoping: flat,
-    match: ["name", "category", "description", "provider"], title: ["name"], subtitle: ["provider", "category"] },
+    match: ["name", "category", "description", "provider"], title: ["name"], subtitle: ["provider", "category"], noun: "Benefit plan" },
   { collection: "dependents", table: schema.dependents, scoping: scoped("employeeId"),
     match: ["name", "relationship"], title: ["name"], subtitle: ["relationship"] },
   { collection: "benefit-enrollments", table: schema.benefitEnrollments, scoping: scoped("employeeId"),
@@ -164,7 +177,8 @@ export const SEARCH_INDEX: SearchEntry[] = [
 
   // ---- Recruiting ---------------------------------------------------------------------------------------------
   { collection: "job-requisitions", table: schema.jobRequisitions, scoping: scoped("code"),
-    match: ["title", "description", "location", "employmentType", "status"], title: ["title"], subtitle: ["location", "status"] },
+    match: ["title", "description", "location", "employmentType", "status"], title: ["title"], subtitle: ["location", "status"],
+    noun: "Job opening" },
   { collection: "candidates", table: schema.candidates, scoping: scoped("code"),
     match: ["name", "email", "phone", "source", "tags", "notes"], title: ["name"], subtitle: ["email", "source"] },
   { collection: "applications", table: schema.applications, scoping: scoped("code"),
@@ -181,12 +195,13 @@ export const SEARCH_INDEX: SearchEntry[] = [
   // ---- Support + engagement ------------------------------------------------------------------------------------
   { collection: "tickets", table: schema.tickets, scoping: scoped("employeeId"),
     match: ["subject", "description", "category", "state", "priority"], title: ["subject"], subtitle: ["category", "state"] },
-  { collection: "ticket-checklists", table: schema.ticketChecklists, scoping: flat, match: ["name"], title: ["name"] },
+  { collection: "ticket-checklists", table: schema.ticketChecklists, scoping: flat, match: ["name"], title: ["name"], noun: "Ticket checklist" },
   { collection: "suggestions", table: schema.suggestions, scoping: scoped("submitterId"),
     match: ["title", "body", "category", "response", "status"], title: ["title"], subtitle: ["category", "status"] },
   { collection: "assets", table: schema.assets, scoping: scoped("assignedTo"),
-    match: ["name", "assetTag", "serialNumber", "notes", "status"], title: ["name"], subtitle: ["assetTag", "status"] },
-  { collection: "asset-categories", table: schema.assetCategories, scoping: flat, match: ["name", "tagCode"], title: ["name"], subtitle: ["tagCode"] },
+    match: ["name", "assetTag", "serialNumber", "notes", "status"], title: ["name"], subtitle: ["assetTag", "status"], noun: "Asset" },
+  { collection: "asset-categories", table: schema.assetCategories, scoping: flat, match: ["name", "tagCode"], title: ["name"], subtitle: ["tagCode"],
+    noun: "Asset category" },
   // Inventory counts: "Q3 count" is a thing people go looking for months later, and the label is the only
   // handle they remember.
   { collection: "stocktakes", table: schema.stocktakes, scoping: flat, match: ["label", "notes", "status"], title: ["label"], subtitle: ["status"] },
@@ -202,3 +217,15 @@ export const SEARCH_INDEX: SearchEntry[] = [
 ];
 
 export const SEARCHABLE_COLLECTIONS = SEARCH_INDEX.map((e) => e.collection);
+
+/**
+ * Indexable collections whose embed text must stay `<title> - <subtitle>`, with no `noun` and every subtitle.
+ *
+ * Their stored vectors are compared to EACH OTHER, not only to a query: ticket triage, card triage and the
+ * duplicate sweep, goal similarity and suggestion similarity all fetch a record's own vector and ask the index
+ * for its neighbours, against cosine thresholds (0.78-0.88) tuned on exactly this text. A shared prefix like
+ * `Helpdesk ticket: ` on both sides of every pair raises every pair's similarity, so the thresholds would start
+ * calling unrelated work a duplicate. Search measured no worse without it on these four (2026-09-26,
+ * scripts/searchBench.ts), so they keep the text the thresholds were set on.
+ */
+export const TEXT_PINNED: ReadonlySet<string> = new Set(["tickets", "cards", "goals", "suggestions"]);

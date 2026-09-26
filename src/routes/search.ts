@@ -15,6 +15,12 @@ import { redactionGateFor } from "../http/fieldAccess";
 export const search = new Hono<AppEnv>().get("/", async (c) => {
   const hits = await globalSearch(c.get("deps"), c.get("user")!, c.get("searchScopes") ?? new Map(), c.req.query("q") ?? "", redactionGateFor(c.get("user")!));
   return c.json({
-    results: hits.map((h) => ({ name: `${h.collection}/${h.id}`, collection: h.collection, title: h.title, subtitle: h.subtitle })),
+    results: hits.map((h) => ({
+      name: `${h.collection}/${h.id}`,
+      collection: h.collection,
+      title: h.title,
+      subtitle: h.subtitle,
+      ...(h.related ? { related: true } : {}),
+    })),
   });
 });

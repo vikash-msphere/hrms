@@ -24,6 +24,7 @@ const ACTIONS: Action[] = [
   { id: "request-leave", route: "leave-requests" },
   { id: "new-overtime", route: "overtime" },
   { id: "new-remote", route: "remote-work" },
+  { id: "new-late-early", route: "late-early" },
   { id: "new-asset-request", route: "profile" },
   { id: "new-reimbursement", route: "reimbursements" },
   { id: "new-expense", route: "expenses" },

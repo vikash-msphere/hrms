@@ -30,6 +30,7 @@ const PAGES: PageCase[] = [
   { route: "employees", heading: "Directory" },
   { route: "org-chart", heading: "Org Chart" },
   { route: "attendance", heading: "Attendance" },
+  { route: "late-early", heading: "Late arrival & early departure" },
   { route: "leave-requests", heading: "Leaves" },
   { route: "leave-calendar", heading: "Leave calendar" },
   { route: "goals", heading: "Goals" },
@@ -81,6 +82,7 @@ const PAGES: PageCase[] = [
   { route: "tables", heading: "Tables" },
   { route: "workflows", heading: "Workflows" },
   { route: "activity", heading: "Activity" },
+  { route: "opening-balances", heading: "Opening balances" },
   { route: "settings", heading: "Settings" },
   // The routes that survive as deep links into a Settings panel: their heading is the panel's, not the
   // page's, which is exactly what would break if one of them stopped resolving.

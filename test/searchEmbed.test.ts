@@ -54,13 +54,15 @@ function fakeIndex(): VectorIndex & { store: Map<string, { values: number[]; col
   return f;
 }
 
-function fakeModel(): TextModel & { calls: number; fail: boolean } {
+function fakeModel(): TextModel & { calls: number; fail: boolean; texts: string[] } {
   const f = {
     calls: 0,
     fail: false,
+    texts: [] as string[], // every text sent to the model, in order
     async embed(texts: string[]) {
       f.calls++;
       if (f.fail) throw new Error("model down");
+      f.texts.push(...texts);
       return texts.map((t) => [t.length, [...t].reduce((n, c) => n + c.charCodeAt(0), 0) % 97, 0.5]);
     },
     async generate() { return ""; },
@@ -170,19 +172,22 @@ describe("embedding what changed", () => {
     expect(index().get(vectorIdOf("tickets", row.recordId))!.values).not.toEqual(first);
   });
 
-  it("skips a row with no title or subtitle", async () => {
+  it("skips a row with no title, whatever its subtitle says", async () => {
+    // The seeded kudos posts: no title, subtitle `kudos`. Embedded, every one of them got the same one-word
+    // vector, and that cluster sat near almost any short query.
+    await deps.db.insert(schema.searchDocs).values(doc({ collection: "announcements", title: null, subtitle: "kudos" }));
     await deps.db.insert(schema.searchDocs).values(doc({ title: null, subtitle: null }));
     const out = await drainSearchEmbeddings(deps);
     expect(out.embedded).toBe(0);
     expect(index().size).toBe(0);
   });
 
-  it("unlabelled rows do not starve the window", async () => {
+  it("untitled rows do not starve the window", async () => {
     // They are never-embedded, so they sort to the front of every tick. Skipped in JS rather than excluded in
-    // SQL, enough of them would fill the window with work that can never complete and the labelled rows
-    // behind them would never be reached.
+    // SQL, enough of them would fill the window with work that can never complete and the titled rows behind
+    // them would never be reached.
     for (let i = 0; i < BUDGET.embedsPerDrain; i++) {
-      await deps.db.insert(schema.searchDocs).values(doc({ title: null, subtitle: null }));
+      await deps.db.insert(schema.searchDocs).values(doc({ title: null, subtitle: "kudos" }));
     }
     const real = doc({ title: "A ticket with an actual subject" });
     await deps.db.insert(schema.searchDocs).values(real);
@@ -190,6 +195,20 @@ describe("embedding what changed", () => {
     const out = await drainSearchEmbeddings(deps);
     expect(out.embedded).toBe(1);
     expect(index().has(vectorIdOf("tickets", real.recordId))).toBe(true);
+  });
+
+  it("embeds the collection's noun, except for the collections whose vectors are compared to each other", async () => {
+    const asset = doc({ collection: "assets", title: "MacBook Pro 14", subtitle: "LAP-0012" });
+    const holiday = doc({ collection: "holidays", title: "Diwali", subtitle: "fixed" });
+    const ticket = doc();
+    for (const r of [asset, holiday, ticket]) await deps.db.insert(schema.searchDocs).values(r);
+
+    await drainSearchEmbeddings(deps);
+    expect(model().texts.sort()).toEqual([
+      "Asset: MacBook Pro 14 - LAP-0012",
+      "Holiday: Diwali", // a holiday's subtitle is only its kind
+      "Laptop overheating - Reported from the Bangalore office", // tickets keep the text triage was tuned on
+    ]);
   });
 
   it("never embeds a collection that is not opted in", async () => {
@@ -283,6 +302,20 @@ describe("removal", () => {
     expect(index().size).toBe(0);
   });
 
+  it("drops a row that lost its title", async () => {
+    // Vectors written before untitled rows stopped being embedded are exactly this case: the embed pass
+    // skips them now, so nothing would ever replace or remove them.
+    const row = doc();
+    await deps.db.insert(schema.searchDocs).values(row);
+    await drainSearchEmbeddings(deps);
+    expect(index().size).toBe(1);
+
+    await deps.db.update(schema.searchDocs).set({ title: null }).where(eq(schema.searchDocs.recordId, row.recordId));
+    const out = await drainSearchEmbeddings(deps);
+    expect(out.removed).toBe(1);
+    expect(index().size).toBe(0);
+  });
+
   it("drops an entry whose row is gone entirely", async () => {
     const row = doc();
     await deps.db.insert(schema.searchDocs).values(row);
@@ -337,11 +370,23 @@ describe("failure leaves the index retryable", () => {
 });
 
 describe("embedText", () => {
-  it("joins the two label fields and tolerates either being absent", () => {
-    expect(embedText("Title", "Sub")).toBe("Title - Sub");
-    expect(embedText("Title", null)).toBe("Title");
-    expect(embedText(null, "Sub")).toBe("Sub");
-    expect(embedText(null, null)).toBe("");
-    expect(embedText("  ", null)).toBe("");
+  it("prefixes the collection's noun and joins the label fields", () => {
+    expect(embedText("vendors", "WeWork", "ops@wework.example")).toBe("Vendor: WeWork - ops@wework.example");
+    expect(embedText("leave-types", "Sick Leave", null)).toBe("Leave type: Sick Leave");
+  });
+
+  it("drops a subtitle that is only a status", () => {
+    expect(embedText("announcements", "Q2 All-Hands", "announcement")).toBe("Announcement: Q2 All-Hands");
+  });
+
+  it("keeps the bare text for a collection whose vectors are compared to each other", () => {
+    expect(embedText("tickets", "Title", "Sub")).toBe("Title - Sub");
+    expect(embedText("cards", "Title", "done")).toBe("Title - done");
+  });
+
+  it("is empty without a title, whatever the subtitle", () => {
+    expect(embedText("announcements", null, "kudos")).toBe("");
+    expect(embedText("tickets", "  ", "Sub")).toBe("");
+    expect(embedText("tickets", null, null)).toBe("");
   });
 });

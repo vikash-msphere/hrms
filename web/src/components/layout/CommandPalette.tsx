@@ -191,12 +191,15 @@ export function CommandPalette({
   // are about not sending pointless requests rather than about cost:
   //   1. debounce + a 2-character floor, matching the server's minimum (pages, actions and cached people
   //      still match from the first character, with no request at all),
-  //   2. a per-session result cache, so backspacing to a query already run re-renders instead of refetching,
-  //   3. a dead-prefix skip: search matches token prefixes, so if "abc" found nothing, no extension of it can.
+  //   2. a per-session result cache, so backspacing to a query already run re-renders instead of refetching.
   // Responses are sequence-guarded, so a slow reply can never overwrite a newer one.
+  //
+  // NO DEAD-PREFIX SKIP. Keyword matching is by token prefix, so "abc" finding nothing once meant no extension
+  // of it could find anything, and those requests were skipped. The semantic half broke that: "vacat" can find
+  // nothing while "vacation" finds Earned Leave, and the skip meant the second request was never sent. A miss
+  // on the keyword index reads no rows, so the skip was saving very little.
   const seq = useRef(0);
   const cache = useRef(new Map<string, SearchHit[]>());
-  const empties = useRef<string[]>([]);
   useEffect(() => {
     if (!open) return;
     const q = query.trim();
@@ -212,14 +215,6 @@ export function CommandPalette({
       setSearching(false);
       return;
     }
-    // Prefix matching is monotone: if no indexed token starts with "abc", none starts with "abcd" either. So
-    // a query extending one already known to match nothing is answered locally, with no request.
-    if (empties.current.some((dead) => q.startsWith(dead))) {
-      seq.current++;
-      setHits([]);
-      setSearching(false);
-      return;
-    }
     const mine = ++seq.current;
     setSearching(true);
     const timer = setTimeout(() => {
@@ -227,7 +222,6 @@ export function CommandPalette({
         .then((r) => {
           const results = r.results ?? [];
           cache.current.set(q, results);
-          if (results.length === 0) empties.current.push(q);
           if (seq.current === mine) setHits(results);
         })
         .catch(() => {
@@ -240,13 +234,10 @@ export function CommandPalette({
     return () => clearTimeout(timer);
   }, [query, open]);
 
-  // Drop the caches when the palette closes: a write made between two openings must not be masked by a stale
+  // Drop the cache when the palette closes: a write made between two openings must not be masked by a stale
   // "no results" from the previous session.
   useEffect(() => {
-    if (!open) {
-      cache.current.clear();
-      empties.current = [];
-    }
+    if (!open) cache.current.clear();
   }, [open]);
 
   // Re-read frecency each time the palette opens (another tab may have bumped it since).
@@ -286,9 +277,12 @@ export function CommandPalette({
         route: `employees/${idOf(e.path)}`,
       }));
 
-    // Records from the server, grouped by collection so a list of 40 mixed rows stays scannable.
+    // Records from the server, grouped by collection so a list of 40 mixed rows stays scannable. Related hits
+    // (found by meaning, not by the typed words) are kept out of those groups and shown last, under their own
+    // heading: mixed in, a suggestion read as a match, and a loose one read as the search being broken.
     const seen = new Set(people.map((p) => p.route));
     const byCollection = new Map<string, Item[]>();
+    const related: Item[] = [];
     for (const h of hits) {
       const route = resourceRoute(h.collection, h.name);
       if (!route || seen.has(route)) continue;
@@ -302,6 +296,10 @@ export function CommandPalette({
         icon: h.collection === "employees" ? User : iconOf(h.collection),
         route,
       };
+      if (h.related) {
+        related.push(item);
+        continue;
+      }
       const bucket = byCollection.get(h.collection);
       if (bucket) bucket.push(item);
       else byCollection.set(h.collection, [item]);
@@ -316,6 +314,7 @@ export function CommandPalette({
     if (pages.length) out.push({ label: "Go to", items: pages });
     if (settings.length) out.push({ label: "Settings", items: settings });
     for (const [collection, items] of byCollection) out.push({ label: entityLabel(collection), items });
+    if (related.length) out.push({ label: "Related", items: related });
     return out;
   }, [local, employees, hits, query, frecent]);
 

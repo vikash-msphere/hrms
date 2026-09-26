@@ -12,6 +12,7 @@ import { genId } from "../src/lib/idCodec";
 import { DEFAULT_POLICY } from "../src/domain/manifests";
 import type { Grant } from "../src/domain/permissions";
 import { globalSearch } from "../src/services/globalSearch";
+import { MODELS } from "../src/domain/aiPolicy";
 import { SEARCH_INDEX, SEARCHABLE_COLLECTIONS } from "../src/domain/searchIndex";
 import { searchScopesFor } from "../src/middleware/authz";
 import { redactionGateFor } from "../src/http/fieldAccess";
@@ -545,6 +546,130 @@ describe("semantic search obeys the same scope as the keyword half", () => {
       // An outage in an optional feature must not cost the caller the search they would have had anyway.
       const hits = await search(alice, "canal");
       expect(hits.length).toBe(1);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// Which neighbours count as related.
+//
+// The defect these pin: nearest-neighbour search always answers, and every neighbour was shown, so a query
+// the keyword index missed filled the palette with whatever happened to be least far away. The tuned numbers
+// live in services/globalSearch.ts; these hold the RULE (floor for the tuned model, window from the best
+// visible row, a cap, a query gate, and related hits kept apart from keyword ones).
+// ---------------------------------------------------------------------------------------------------------
+
+/** An index that answers with the given ids at the given scores, best first as Vectorize does, and counts
+ *  how often it was asked. */
+function scoredIndex(matches: () => [string, number][]) {
+  const index = {
+    calls: 0,
+    async upsert() {},
+    async query() {
+      index.calls++;
+      return matches().map(([id, score]) => ({ id, score })).sort((a, b) => b.score - a.score);
+    },
+    async fetch() { return new Map<string, number[]>(); },
+    async remove() {},
+  };
+  return index;
+}
+
+/** The production model's name, so the tuned floor applies. */
+const tunedModel = { ...constantModel, embedModel: MODELS.embed };
+
+/** Alice's leave requests, as `search_docs` rows keyed by their code. */
+async function aliceLeaves(alice: AppUser, reasons: string[]) {
+  for (const [i, reason] of reasons.entries()) await leaveFor(alice, `04-a01-l${i}`, reason);
+  const docs = await deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.collection, "leave-requests"));
+  return (i: number) => `leave-requests:${docs.find((d) => d.code === `04-a01-l${i}`)!.recordId}`;
+}
+
+describe("semantic search keeps only what is related", () => {
+  it("drops a neighbour under the floor when the model is the one the floor was tuned on", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["root canal"]);
+
+    await withSemanticOn(async () => {
+      deps.ai = tunedModel;
+      // bge-small puts unrelated short texts around 0.5-0.6; this is the "nearest of nothing" case.
+      deps.vectors = scoredIndex(() => [[id(0), 0.55]]);
+      expect(await search(alice, "dentist")).toEqual([]);
+
+      deps.vectors = scoredIndex(() => [[id(0), 0.72]]);
+      expect((await search(alice, "dentist")).map((h) => h.related)).toEqual([true]);
+    });
+  });
+
+  it("does not apply that floor to a different model, whose scores are on another scale", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["root canal"]);
+
+    await withSemanticOn(async () => {
+      deps.ai = { ...constantModel, embedModel: "all-minilm:latest" };
+      deps.vectors = scoredIndex(() => [[id(0), 0.3]]);
+      expect((await search(alice, "dentist")).length).toBe(1);
+    });
+  });
+
+  it("keeps rows close to the best one, and at most five", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["a1", "a2", "a3", "a4", "a5", "a6", "a7"]);
+
+    await withSemanticOn(async () => {
+      deps.ai = tunedModel;
+      // Six within 0.05 of the best, one well behind it.
+      deps.vectors = scoredIndex(() => [[id(0), 0.9], [id(1), 0.89], [id(2), 0.88], [id(3), 0.87], [id(4), 0.86], [id(5), 0.85], [id(6), 0.7]]);
+      const hits = await search(alice, "dentist");
+      expect(hits.length).toBe(5);
+      expect(hits.some((h) => `leave-requests:${h.id}` === id(6))).toBe(false);
+    });
+  });
+
+  it("measures the window from the best row the caller may see, not the index's best", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const bhavna = await seedPerson("07-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["root canal"]);
+    await leaveFor(bhavna, "07-b01-l1", "dental surgery");
+    const theirs = (await deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.code, "07-b01-l1")))[0]!;
+
+    await withSemanticOn(async () => {
+      deps.ai = tunedModel;
+      // Bhavna's row is far closer, and Alice may not list it. Measured from it, Alice's own row would sit
+      // outside the window and she would be told nothing is related to a query her own row answers.
+      deps.vectors = scoredIndex(() => [[`leave-requests:${theirs.recordId}`, 0.95], [id(0), 0.8]]);
+      const hits = await search(alice, "dentist");
+      expect(hits.map((h) => `leave-requests:${h.id}`)).toEqual([id(0)]);
+    });
+  });
+
+  it("is not asked at all for a query with no meaning yet", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["root canal"]);
+
+    await withSemanticOn(async () => {
+      deps.ai = tunedModel;
+      const index = scoredIndex(() => [[id(0), 0.9]]);
+      deps.vectors = index;
+      // Mid-word type-ahead, and filler only. Embedding either costs a neuron and answers with noise.
+      for (const q of ["den", "the", "how and"]) expect(await search(alice, q)).toEqual([]);
+      expect(index.calls).toBe(0);
+
+      expect((await search(alice, "dentist")).length).toBe(1);
+      expect(index.calls).toBe(1);
+    });
+  });
+
+  it("puts related hits after the keyword hits, and a row found both ways is a keyword hit", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["root canal", "dental surgery"]);
+
+    await withSemanticOn(async () => {
+      deps.ai = tunedModel;
+      // The index ranks the row WITHOUT the typed word first. It must not overtake the one that has it.
+      deps.vectors = scoredIndex(() => [[id(1), 0.9], [id(0), 0.88]]);
+      const hits = await search(alice, "canal");
+      expect(hits.map((h) => [`leave-requests:${h.id}`, h.related ?? false])).toEqual([[id(0), false], [id(1), true]]);
     });
   });
 });

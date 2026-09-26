@@ -39,6 +39,7 @@ export function makeTextModel(binding: Ai, gatewayId?: string): TextModel {
   }
 
   return {
+    embedModel: MODELS.embed,
     async embed(texts) {
       if (texts.length === 0) return [];
       const out = await run<{ data: number[][] }>(MODELS.embed, { text: texts });
