@@ -43,7 +43,7 @@ beforeAll(async () => {
 const TABLES = [schema.notifications, schema.auditLog, schema.eventLog, schema.employees, schema.departments, schema.users, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
-  await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee" }).onConflictDoNothing();
+  await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee", provisioned: true }).onConflictDoNothing();
 });
 
 const actor: AppUser = { uuid: "u-actor", email: "hr@test.example", role: "super_admin", status: "active", employeeId: null, employeeCode: null } as unknown as AppUser;

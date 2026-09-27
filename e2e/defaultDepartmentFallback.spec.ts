@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, patchOrgSettings, purge, test, expect, toast } from "./fixtures";
+import { apiPost, gotoRoute, patchOrgSettings, purge, test, expect, toast } from "./fixtures";
 
 // The org-wide default department (web/src/pages/Settings.tsx's "Company details" tab) - never touched
 // through the UI before this, even though the fallback it drives (src/services/settings.ts's
@@ -12,10 +12,8 @@ test("the org default department is saved from the settings form and a card with
   const stamp = Date.now() % 100000;
   const deptLabel = `E2E Default Dept ${stamp}`;
 
-  const madeDept = await page.request.post("/v1/departments", {
-    headers: SPA_HEADERS,
-    data: { display_name: deptLabel },
-  });
+  // Fixtures through `apiPost`, which re-sends a POST the dev runtime dropped (it once took out the board below).
+  const madeDept = await apiPost(page, "departments", { display_name: deptLabel });
   expect(madeDept.status(), await madeDept.text()).toBe(200);
   const dept = (await madeDept.json()) as { path: string };
 
@@ -33,7 +31,7 @@ test("the org default department is saved from the settings form and a card with
     // `.last()` resolves to whichever nested div is deepest - the bare label, or the hint under it - and the
     // click then waits out its timeout for a combobox that was never inside what was picked.
     const field = () => page.locator("div").filter({ hasText: "Default department" }).filter({ has: page.getByRole("combobox") }).last();
-    const boardRes = await page.request.post("/v1/boards", { headers: SPA_HEADERS, data: { name: `E2E default dept board ${stamp}` } });
+    const boardRes = await apiPost(page, "boards", { name: `E2E default dept board ${stamp}` });
     expect(boardRes.status(), await boardRes.text()).toBe(200);
     const board = (await boardRes.json()) as { path: string };
     boardId = board.path.split("/")[1]!;
@@ -58,10 +56,7 @@ test("the org default department is saved from the settings form and a card with
       await expect(field().getByRole("combobox")).toContainText(deptLabel, { timeout: 5_000 });
 
       // The downstream half: a card made with no department of its own picks up what the form just saved.
-      const cardRes = await page.request.post("/v1/cards", {
-        headers: SPA_HEADERS,
-        data: { board: board.path, title: `E2E default dept card ${stamp}`, column_key: "backlog" },
-      });
+      const cardRes = await apiPost(page, "cards", { board: board.path, title: `E2E default dept card ${stamp}`, column_key: "backlog" });
       expect(cardRes.status(), await cardRes.text()).toBe(200);
       const card = (await cardRes.json()) as { path: string; department?: string };
       if (card.department !== dept.path) await purge(page, card.path); // a stale-default card, dropped before retrying

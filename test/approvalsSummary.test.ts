@@ -8,12 +8,13 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
+import { seedManifest } from "./seedManifest";
 import { genId } from "../src/lib/idCodec";
 import type { ListScope } from "../src/domain/access";
 import { approvalsSummary } from "../src/services/approvalsSummary";
 import { approvalScopesFor } from "../src/middleware/authz";
-import { grantFor } from "../src/domain/grants";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { grantFor } from "../bootstrap/authz/grants";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import { app } from "../src/index";
 
 // The approvals badge's contract: each queue's count equals what the caller would have counted from that
@@ -31,6 +32,7 @@ beforeAll(async () => {
     const s = stmt.trim();
     if (s) await b.DB.prepare(s).run();
   }
+  await seedManifest(b.DB);
   deps = makeDeps(b);
 });
 
@@ -143,9 +145,10 @@ describe("approvals summary gating (middleware)", () => {
   it("scopes exactly the queues a role may approve in, at that role's breadth", async () => {
     const mgr = await approvalScopesFor(deps, actor("manager", "04-001-001"));
     expect([...mgr.keys()].sort()).toEqual(
-      ["asset-requests", "attendance-regularizations", "expenses", "leave-requests", "overtime-requests", "remote-work-requests", "time-entries"],
+      ["asset-requests", "attendance-regularizations", "expenses", "late-early-requests", "leave-requests", "overtime-requests", "remote-work-requests", "time-entries"],
     );
     expect(mgr.get("leave-requests")!.breadth).toBe("dept");
+    expect(mgr.get("late-early-requests")!.breadth).toBe("dept");
     const hr = await approvalScopesFor(deps, actor("hr_admin", "07-001-001"));
     expect(hr.get("leave-requests")!.breadth).toBe("all");
     expect(hr.has("loans")).toBe(false); // hr doesn't decide money advances; payroll does

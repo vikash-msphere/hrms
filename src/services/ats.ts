@@ -56,12 +56,15 @@ export type RequisitionInput = {
   closed_date?: string | null;
 };
 
-export async function listRequisitions(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false, deletedOnly = false) {
+export async function listRequisitions(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, statusFilter?: string, showDeleted = false, deletedOnly = false, q?: string) {
   const conds = [];
   if (statusFilter) conds.push(eq(schema.jobRequisitions.status, statusFilter as RequisitionStatus));
   conds.push(deleteStateFilter(schema.jobRequisitions.deleteTime, showDeleted, deletedOnly));
   const scoped = applyScope(scope, schema.jobRequisitions.code, schema.jobRequisitions.code);
   if (scoped) conds.push(scoped);
+  // The Jobs page's search box, over every opening rather than the page on screen (services/searchFilter.ts).
+  const text = await searchFilter(deps, "job-requisitions", q, schema.jobRequisitions.uuid);
+  if (text) conds.push(text);
   return keysetPage(deps, schema.jobRequisitions, "job-requisitions", conds.length ? and(...conds) : undefined, { max: maxPageSize, pageToken });
 }
 

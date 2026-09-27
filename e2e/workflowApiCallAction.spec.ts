@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, gotoRoute, landedResponse, purge, test, expect } from "./fixtures";
 import { addTicketCategory, dropTicketCategories } from "./ticketCategories";
 
 // "Create / update a record" - the most powerful action kind the builder offers (a rule that writes to any
@@ -49,7 +49,7 @@ test("a rule with an apiCall action writes to the triggering record itself", asy
 
   await expect(form.getByText(/^When /).first()).toBeVisible({ timeout: 30_000 });
   const [saved] = await Promise.all([
-    page.waitForResponse((r) => r.url().includes("/v1/automations") && r.request().method() === "POST", { timeout: 30_000 }),
+    landedResponse(page, (r) => r.url().includes("/v1/automations") && r.request().method() === "POST"),
     form.getByRole("button", { name: "Create rule" }).click(),
   ]);
   expect(saved.status(), await saved.text()).toBe(200);

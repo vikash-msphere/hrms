@@ -14,8 +14,8 @@ import {
 } from "../src/services/expenses";
 import type { ListScope } from "../src/domain/access";
 import { approvedUnpaidReimbursements } from "../src/services/reimbursements";
-import { grantFor } from "../src/domain/grants";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { grantFor } from "../bootstrap/authz/grants";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 let deps: Deps;

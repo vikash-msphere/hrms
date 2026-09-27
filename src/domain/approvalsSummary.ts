@@ -12,6 +12,7 @@ export const APPROVAL_QUEUES = [
   { collection: "reimbursements", awaiting: "PENDING" },
   { collection: "overtime-requests", awaiting: "PENDING" },
   { collection: "remote-work-requests", awaiting: "PENDING" },
+  { collection: "late-early-requests", awaiting: "PENDING" },
   { collection: "attendance-regularizations", awaiting: "PENDING" },
   { collection: "leave-encashments", awaiting: "PENDING" },
   { collection: "loans", awaiting: "PENDING" },

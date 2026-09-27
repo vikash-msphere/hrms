@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide, withOwnerResource } from "../src/domain/permissions";
-import { OWNER_REFS, isPublicState } from "../src/domain/manifests";
+import { isPublicState } from "../src/domain/manifests";
+import { OWNER_REFS } from "../bootstrap/authz/policy";
 import { guardAllows, parseCondition, parseFromIp, type GuardIndex } from "../src/domain/ruleCondition";
 
 // DoD #3 acceptance suite: free of BOLA. Every owner-scoped item decision resolves the object's code and
@@ -250,7 +251,8 @@ describe("BOLA - employee: own only, never another employee", () => {
   });
   it("cannot reach a dept peer's or another dept's objects", () => {
     for (const victim of [PEER, OTHER]) {
-      expect(d("employee", "GET", `/v1/employees/${victim}`)).toBe(false);
+      // The colleague's BASE record is the directory, which every employee reads; nothing past it is.
+      expect(d("employee", "GET", `/v1/employees/${victim}`)).toBe(true);
       expect(d("employee", "PATCH", `/v1/employees/${victim}`)).toBe(false);
       expect(d("employee", "GET", `/v1/employees/${victim}/bank-account`)).toBe(false);
       expect(d("employee", "PATCH", `/v1/employees/${victim}/bio`)).toBe(false); // never another's bio
@@ -298,7 +300,12 @@ describe("BOLA - manager: own dept subtree, never cross-dept, never PII", () => 
     expect(d("manager", "POST", `/v1/leave-requests/${owned(PEER)}:approve`)).toBe(true); // dept approve (P3a fix)
   });
   it("cannot reach another department", () => {
-    expect(d("manager", "GET", `/v1/employees/${OTHER}`)).toBe(false);
+    // Another department's people are in the directory like everyone's (the base record only)...
+    expect(d("manager", "GET", `/v1/employees/${OTHER}`)).toBe(true);
+    // ...but none of what the manager holds for their own department reaches them.
+    expect(d("manager", "GET", `/v1/employees/${OTHER}/probation_end_date`)).toBe(false);
+    expect(d("manager", "GET", `/v1/employees/${OTHER}/employee_number`)).toBe(false);
+    expect(d("manager", "GET", `/v1/employees/${OTHER}/presence`)).toBe(false);
     expect(d("manager", "GET", `/v1/leave-requests/${owned(OTHER)}`)).toBe(false);
     expect(d("manager", "POST", `/v1/leave-requests/${owned(OTHER)}:approve`)).toBe(false); // cross-dept approve denied
   });

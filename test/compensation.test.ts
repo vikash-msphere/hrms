@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 
 // Compensation (base pay + revisions/increments) is payroll_admin + super only - it's sensitive and not

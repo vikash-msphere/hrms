@@ -12,8 +12,8 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { PanelSkeleton } from "@/components/common/Skeletons";
 import type { AccessTargetRef } from "@/components/access/AccessModeProvider";
-import { settingsEntry, hostSettings, entryScope, type SettingsEntry, type SettingsScope } from "@/settings/registry";
-import { hasCapability, useCapabilities, usePermission } from "@/lib/perm";
+import { settingsEntry, hostSettings, entryScope, settingsEntryVisible, type SettingsEntry, type SettingsScope } from "@/settings/registry";
+import { useCapabilities } from "@/lib/perm";
 import { useRoute, setQueryParam, setQueryParams, navigate } from "@/router";
 import { useToast } from "@/components/ui/use-toast";
 import { lazyPage } from "@/lib/lazyPage";
@@ -34,16 +34,14 @@ export type SettingsItem = { key: string; objectPath?: string; can?: string[] };
 type Resolved = { entry: SettingsEntry; scope: SettingsScope; objectPath?: string; can?: string[] };
 
 // Who may open a setting, per scope:
-//   org    - a singleton (leave policy, pay components). settings.write + entry.perm.
+//   org    - a singleton (leave policy, pay components): write on what the panel edits (registry.ts
+//            settingsEntryVisible - the same rule the Settings hub uses).
 //   object - one instance's config (a board's columns/swimlanes). The instance's own verb, and a path.
 //   user   - the caller's own preferences (notification mutes). Everyone.
-function canOpenSetting(
-  r: Resolved,
-  { writable, caps }: { writable: boolean; caps: ReturnType<typeof useCapabilities> },
-): boolean {
+function canOpenSetting(r: Resolved, caps: ReturnType<typeof useCapabilities>): boolean {
   if (r.scope === "user") return true;
   if (r.scope === "object") return !!r.objectPath && !!r.can?.includes(r.entry.target?.verb ?? "configure");
-  return writable && (!r.entry.perm || hasCapability(caps, r.entry.perm));
+  return settingsEntryVisible(caps, r.entry);
 }
 
 // The group heading a scope gets in the menu. Headings only render when a menu mixes scopes.
@@ -58,7 +56,6 @@ const SCOPE_ORDER: SettingsScope[] = ["object", "org", "user"];
 // away. Open state is deep-linked via `?setting=<key>` (+ `?settingObj=<objectPath>` for object scope) on the
 // page hash, so it is shareable and the back button closes it.
 export function SettingsMenu({ me, items }: { me: Me; items: SettingsItem[] }) {
-  const writable = usePermission("settings.write");
   const caps = useCapabilities();
   const route = useRoute();
   // Set when a menu row opened a sheet, so the menu doesn't pull focus back to its trigger out from under it.
@@ -69,7 +66,7 @@ export function SettingsMenu({ me, items }: { me: Me; items: SettingsItem[] }) {
     const entry = settingsEntry(it.key);
     if (!entry) continue;
     const r: Resolved = { entry, scope: entryScope(entry), objectPath: it.objectPath, can: it.can };
-    if (canOpenSetting(r, { writable, caps })) visible.push(r);
+    if (canOpenSetting(r, caps)) visible.push(r);
   }
   if (visible.length === 0) return null;
 

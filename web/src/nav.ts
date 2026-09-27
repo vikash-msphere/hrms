@@ -17,10 +17,11 @@ import {
   ScrollText,
   ReceiptText,
   Table2,
+  History,
   type LucideIcon,
 } from "lucide-react";
 import { RupeeCircle } from "./components/icons/RupeeCircle";
-import { SETTINGS_REGISTRY } from "./settings/registry";
+import { SETTINGS_REGISTRY, SETTINGS_NAV_PERMS } from "./settings/registry";
 // A workspace tab: a route key that renders inside a sibling workspace instead of as its own nav entry.
 export type NavTab = {
   key: string; // route page key + collection segment
@@ -90,6 +91,7 @@ export const APPROVAL_CAPS = [
   "reimbursements.approve",
   "overtime-requests.approve",
   "remote-work-requests.approve",
+  "late-early-requests.approve",
   "asset-requests.approve",
   "attendance-regularizations.approve",
   "leave-encashments.approve",
@@ -124,7 +126,10 @@ export const NAV: NavGroup[] = [
           // employee grant everybody holds is the bare list capability (rows scoped to own), which strips to
           // the same `employees.read` HR holds org-wide. Gated on that alone, "Analytics" sat in every
           // employee's sidebar over a report about one person - themselves.
-          { key: "team-analytics", label: "Analytics", perm: "employees.read", others: "employees" },
+          // `others: "attendance"`, not "employees": every employee reads the directory, so reach past one's own
+          // row in `employees` no longer means there is anybody's WORK to report on. The report's roster is the
+          // people whose attendance the caller may list (services/peopleAnalytics.ts), so is its tab.
+          { key: "team-analytics", label: "Analytics", perm: "employees.read", others: "attendance" },
           { key: "transitions", label: "Onboarding", perm: "transitions.read", collection: "transitions" },
           { key: "notice-periods", label: "Offboarding", perm: "notice-periods.read", collection: "notice-periods" },
           { key: "background-checks", label: "Background Checks", perm: "background-checks.read", collection: "background-checks" },
@@ -191,6 +196,7 @@ export const NAV: NavGroup[] = [
           { key: "attendance", label: "Attendance", collection: "attendance" },
           { key: "schedule", label: "Schedule", perm: "shift-assignments.read", collection: "shift-assignments" },
           { key: "timesheets", label: "Timesheets", perm: "time-entries.read", collection: "time-entries" },
+          { key: "late-early", label: "Late & Early", perm: "late-early-requests.read", collection: "late-early-requests" },
           { key: "overtime", label: "Overtime", perm: "overtime-requests.read", collection: "overtime-requests" },
           { key: "remote-work", label: "Remote Work", perm: "remote-work-requests.read", collection: "remote-work-requests" },
           { key: "delegations", label: "Delegation", perm: "approval-delegations.read", collection: "approval-delegations" },
@@ -257,8 +263,12 @@ export const NAV: NavGroup[] = [
       // somebody an admin has granted it to.
       { key: "tables", label: "Tables", icon: Table2, perm: "table-views.read" },
       { key: "workflows", label: "Workflows", icon: Workflow, perm: "automations.read" },
+      // Go-live setup: what happened before the org used HRMS. Shown to whoever may run any of its steps.
+      { key: "opening-balances", label: "Opening balances", icon: History, anyPerm: ["employees.setTrackedFrom", "leave-adjustments.importOpenings", "leave-requests.importHistory", "payroll-openings.importOpenings"] },
       { key: "activity", label: "Activity", icon: ScrollText, perm: "audit.read" },
-      { key: "settings", label: "Settings", icon: Settings, perm: "settings.write" },
+      // Settings are owned per key (HR's policies, payroll's pay configuration, super admin's governance
+      // switches), so the entry shows for whoever owns any panel (settings/registry.ts).
+      { key: "settings", label: "Settings", icon: Settings, anyPerm: SETTINGS_NAV_PERMS },
     ],
   },
 ];
@@ -278,11 +288,13 @@ export function workspaceForKey(key: string): NavItem | undefined {
 // sidebar (the top bar's Support entry, the bell). A key absent from both the nav and this map is an
 // identity surface open to every signed-in user (dashboard, profile).
 const ALIAS_GATE: Record<string, { perm?: string; anyPerm?: string[] }> = {
-  departments: { perm: "settings.write" },
-  "leave-types": { perm: "settings.write" },
-  "pay-components": { perm: "settings.write" },
-  users: { perm: "settings.write" },
-  operations: { perm: "settings.write" },
+  // Each panel's own gate (settings/registry.ts), not a blanket settings write: pay components are payroll's,
+  // departments HR's, users and operations super admin's.
+  departments: { perm: "departments.write" },
+  "leave-types": { perm: "leave-types.write" },
+  "pay-components": { perm: "pay-components.write" },
+  users: { perm: "users.write" },
+  operations: { perm: "cron-runs.read" },
   "pay-periods": { perm: "payroll-runs.read" }, // merged into Payroll Runs, which is where it renders
   kudos: { perm: "announcements.read" }, // the board, opened on its kudos filter
   tickets: { perm: "tickets.read" },
@@ -369,8 +381,11 @@ export function navBreadcrumb(key: string, sub?: string): { group: string; label
       } else if (it.key === key) {
         const labels = PAGE_TAB_LABELS[key];
         if (labels) {
-          const tabKey = sub && labels[sub] ? sub : Object.keys(labels)[0];
-          return { group: g.label, label: it.label, sub: labels[tabKey] };
+          // A page whose bare route IS its first tab names that tab. Settings is not one: its bare route is
+          // the hub, and naming the first panel there ("Name & branding") labelled a page the caller had not
+          // opened - and, for a caller who owns no such panel, one they could not open at all.
+          const tabKey = sub && labels[sub] ? sub : key === "settings" ? undefined : Object.keys(labels)[0];
+          return { group: g.label, label: it.label, ...(tabKey ? { sub: labels[tabKey] } : {}) };
         }
         return { group: g.label, label: it.label };
       }

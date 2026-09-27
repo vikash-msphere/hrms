@@ -18,6 +18,7 @@ const BUCKET_QUEUE: Record<string, string> = {
   reimbs: "reimbursements",
   overtimes: "overtime-requests",
   remotes: "remote-work-requests",
+  lateEarlies: "late-early-requests",
   regularizations: "attendance-regularizations",
   encashments: "leave-encashments",
   loans: "loans",

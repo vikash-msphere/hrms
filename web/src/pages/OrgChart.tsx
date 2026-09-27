@@ -474,7 +474,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
               {onLeaveToday.has(id) && <span className="rounded-full bg-amber-500/15 px-1.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">On leave</span>}
             </div>
             {e.job_title && <div className="truncate text-xs text-muted-foreground">{e.job_title}</div>}
-            {e.employee_number && <div className="font-mono text-[11px] text-muted-foreground">{e.employee_number}</div>}
+            {e.employee_number && <div className="sentry-mask font-mono text-[11px] text-muted-foreground">{e.employee_number}</div>}
           </div>
         </div>
         <dl className="space-y-1.5 text-xs">

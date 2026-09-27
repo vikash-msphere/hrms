@@ -4,6 +4,8 @@ import { workspaceForKey, navAdmits, pageVisible } from "@/nav";
 import { hasCapability } from "@/lib/perm";
 import type { Me } from "@/useMe";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { appLockState, lockNow } from "@/lib/appLock";
+import { openAppLockSettings } from "@/components/lock/AppLockSheet";
 
 // g-chord destinations: `g` then a letter jumps to a page. Gated by the same nav visibility rules as the
 // sidebar, so a chord can never take someone to a page the nav would hide from them.
@@ -43,6 +45,19 @@ function canGo(route: string, me: Me): boolean {
 export function ShortcutLayer({ me, page }: { me: Me; page: string }) {
   const [helpOpen, setHelpOpen] = useState(false);
   const armed = useRef(0); // timestamp when `g` was pressed; a chord completes within 1.5s
+
+  // ⇧⌘L / Ctrl+Shift+L locks the app from anywhere, a text field included - somebody typing a review who has to
+  // step away should not have to click out of it first. Without a PIN it opens setup instead.
+  useEffect(() => {
+    const onLock = (e: KeyboardEvent) => {
+      if (!e.shiftKey || e.altKey || !(e.metaKey || e.ctrlKey) || e.code !== "KeyL") return;
+      e.preventDefault();
+      if (appLockState().config?.enabled) void lockNow();
+      else openAppLockSettings({ setup: true });
+    };
+    window.addEventListener("keydown", onLock, { capture: true });
+    return () => window.removeEventListener("keydown", onLock, { capture: true });
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -103,6 +118,7 @@ export function ShortcutLayer({ me, page }: { me: Me; page: string }) {
           <div>
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Everywhere</p>
             <ShortcutRow keys={["⌘", "K"]} label="Search everything" />
+            <ShortcutRow keys={["⇧", "⌘", "L"]} label="Lock the app" />
             <ShortcutRow keys={["["]} label="Previous workspace tab" />
             <ShortcutRow keys={["]"]} label="Next workspace tab" />
             <ShortcutRow keys={["↑", "↓"]} label="Move between table rows" />

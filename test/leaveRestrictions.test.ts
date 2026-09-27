@@ -17,6 +17,7 @@ import {
   type RestrictionFacts,
 } from "../src/domain/leaveRestrictions";
 import { daysByMonth, leaveDays } from "../src/domain/leave";
+import { orgScheduleOf } from "../src/domain/workSchedule";
 
 const ms = (d: string) => Date.parse(d + "T00:00:00Z");
 const DAY = 86_400_000;
@@ -42,7 +43,7 @@ function facts(over: Partial<RestrictionFacts> & { rules: RestrictionFacts["rule
     onBehalf: false,
     hasDocument: null,
     reason: null,
-    workDays: [1, 2, 3, 4, 5],
+    schedOf: orgScheduleOf({ work_days: [1, 2, 3, 4, 5] }),
     holidays: new Set<string>(),
     halfDayHolidays: new Set<string>(),
     neighbours: [],
@@ -480,7 +481,8 @@ describe("historyWindow", () => {
 });
 
 describe("sandwich counting", () => {
-  const workDays = [1, 2, 3, 4, 5];
+  // Mon-Fri as the day-by-day resolver `leaveDays` takes (domain/workSchedule.ts).
+  const workDays = orgScheduleOf({ work_days: [1, 2, 3, 4, 5] });
   it("charges nothing extra by default", () => {
     // Fri 6 + Mon 9, as one request across the weekend.
     expect(leaveDays(ms("2026-03-06"), ms("2026-03-09"), 1, 2, workDays)).toBe(2);

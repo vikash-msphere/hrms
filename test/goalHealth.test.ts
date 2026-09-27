@@ -15,8 +15,8 @@ import { createGoal, updateGoal, updateGoalProgress, setGoalConfidence, proposeG
 import { createReviewCycle } from "../src/services/reviewCycles";
 import { cycleGoals } from "../src/services/reviews";
 import { toGoalResource } from "../src/http/serialize";
-import { grantFor } from "../src/domain/grants";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { grantFor } from "../bootstrap/authz/grants";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import type { ListScope } from "../src/domain/access";
 
 // Goal health: the numbers nobody has to fill in. Pace says where a goal should be by now, silence says how

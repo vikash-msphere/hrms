@@ -15,7 +15,7 @@ import { getTaxDetails, setTaxDetails } from "../services/taxDetails";
 import { getNotificationPrefs, setNotificationPrefs } from "../services/notificationPrefs";
 import { getPresence } from "../services/presence";
 import { computeProfileCompleteness } from "../services/profileCompleteness";
-import { uploadPhoto, clearPhoto, getPhoto, uploadSignature, clearSignature, getSignature } from "../services/employeePhoto";
+import { uploadPhoto, clearPhoto, photoRef, openPhoto, uploadSignature, clearSignature, getSignature } from "../services/employeePhoto";
 import { putAttachment, downloadAttachment, deleteAttachment, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { identityDocSlot } from "../services/identityDetails";
@@ -41,6 +41,7 @@ const writeSchema = z
     manager: z.string().nullable().optional(),
     start_date: z.string().nullable().optional(),
     probation_end_date: z.string().nullable().optional(),
+    tracked_from: z.string().nullable().optional(),
     epf_enrolled: z.boolean().optional(),
     eps_excluded: z.boolean().optional(),
     national_id: z.string().nullable().optional(),
@@ -57,6 +58,19 @@ const bankSchema = z
     currency_code: z.string().nullable().optional(),
   })
   .strict();
+
+/**
+ * How long a browser may keep a face without asking again.
+ *
+ * `private` because the answer is one caller's - the whole app is `private, no-store` for that reason
+ * (middleware/securityHeaders.ts), and this is the one response that opts out of the second half.
+ *
+ * A WEEK is not a freshness window: the URL carries the photo's version, so a replaced picture is a different
+ * URL and nothing cached can ever be stale. It is the only thing it can be - the time somebody whose access to
+ * a colleague was withdrawn goes on being able to re-open the copy their browser already holds. Signing out
+ * clears it outright (`Clear-Site-Data: "cache"`, routes/authRoutes.ts).
+ */
+const PHOTO_CACHE_CONTROL = "private, max-age=604800";
 
 // The signature image is owner-private (see employeePhoto.assertOwner). Strip even its existence marker from
 // any employee serialized for someone other than the owner, so it never leaks through a list/get/edit.
@@ -111,7 +125,31 @@ const records = collectionRoutes<EmployeeWrite, typeof schema.employees>({
   list: (c, page) => listEmployees(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q"), page.deletedOnly),
   verbs: {
     // Profile photo: media + clear (no standard equivalent for a binary upload/download).
-    getPhoto: { raw: async (c, id) => c.body(await getPhoto(c.get("deps"), c.get("user"), id), 200, { "Content-Type": "application/octet-stream" }) },
+    // The profile photo, answered as an IMAGE the browser can cache - every avatar in the app is an `<img>`
+    // pointed at this (web/src/components/common/PhotoAvatar.tsx), which is why it takes GET as well as POST.
+    //
+    // `?v=` is the photo's own version, so a replaced picture is a different URL and a cached one can never be
+    // stale: the freshness directives below only bound how long a viewer whose access was revoked keeps a face
+    // they already had. Set here rather than left to the defaults - securityHeaders fills, never overwrites -
+    // and only on the answer that carries bytes, so a refusal is never cached.
+    //
+    // `image/jpeg`, not octet-stream: the app sends `X-Content-Type-Options: nosniff`, so a body typed as
+    // "bytes" is a body the browser will not paint.
+    getPhoto: {
+      get: true,
+      raw: async (c, id) => {
+        const deps = c.get("deps");
+        // Visibility was decided by the middleware, on the record's own read (authz.ts READ_GATED_VERBS).
+        const { key, version } = await photoRef(deps, id);
+        const etag = `W/"${version}"`;
+        const headers = { ETag: etag, "Cache-Control": PHOTO_CACHE_CONTROL };
+        // Answered from the row the access check already read, before R2 is touched: a revalidation costs the
+        // check (which is the point of revalidating) and nothing else.
+        if (c.req.header("If-None-Match") === etag) return c.body(null, 304, headers);
+        const { body, size } = await openPhoto(deps, key);
+        return new Response(body, { headers: { ...headers, "Content-Type": "image/jpeg", "Content-Length": String(size) } });
+      },
+    },
     uploadPhoto: { run: async (deps, user, id, _b, c) => uploadPhoto(deps, user, id, await requireCappedBody(c.req.raw)) },
     clearPhoto: { run: (deps, user, id) => clearPhoto(deps, user, id) },
     // Signature image (the employee's e-signature): owner-private (the service enforces owner-only).

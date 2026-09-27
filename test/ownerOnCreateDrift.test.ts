@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
-import { OWNER_REFS } from "../src/domain/manifests";
+import { OWNER_REFS } from "../bootstrap/authz/policy";
 import { LIST_OWNER_COLUMNS } from "../src/lib/authzResolve";
 
 // OWNER-ON-CREATE, HELD AGAINST THE CREATE SCHEMAS.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { GRANTS } from "../src/domain/grants";
+import { GRANTS } from "../bootstrap/authz/grants";
 import { holdsCapability, holdsForAnyone, holdsVerbForAnyone } from "../src/services/capabilityHolders";
 
 // WHO gets told, pinned against the real seeded grants.
@@ -17,7 +17,9 @@ import { holdsCapability, holdsForAnyone, holdsVerbForAnyone } from "../src/serv
 describe("recipient predicates: who handles this", () => {
   it("tax verification alerts go to the roles that may write ANYONE's tax, and to nobody else", () => {
     const verifies = holdsForAnyone("employees.*.tax", "write");
-    expect(verifies(GRANTS.hr_admin)).toBe(true);
+    // Payroll, not HR: everyone's TDS projection is payroll's work, and a projection reveals pay HR does not
+    // otherwise see (bootstrap/authz/roles/hr_admin.json excludes it).
+    expect(verifies(GRANTS.hr_admin)).toBe(false);
     expect(verifies(GRANTS.payroll_admin)).toBe(true);
     expect(verifies(GRANTS.super_admin)).toBe(true);
     // THE ONE THAT MATTERS. `employees.me.tax.**: write` is in OWN_PII, so every employee in the org can write

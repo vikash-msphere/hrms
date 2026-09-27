@@ -218,6 +218,12 @@ export function compGrossPricer<T extends CompRow>(components: PayComp[], linesB
 // while leaving the real unpaid one out).
 // `pt` is the year's professional tax already withheld - the state annual cap is measured against it, and it
 // comes from the same rows, so the build never pays for a second scan of the items table.
+//
+// PAY BEFORE HRMS is part of the year too (`payroll_openings`, services/payrollOpenings.ts): the months from the
+// start of the year through `paidThrough` that the system before HRMS paid. finalizedTotals folds it into every
+// figure and both month sets - it was EARNED and COLLECTED then, so those months are neither re-priced nor
+// collected in again - and also returns it on its own as `opening`, for the lines that say how much of the
+// year's total was paid before HRMS.
 export type FinalizedTotals = {
   gross: number;
   taxableGross: number;
@@ -226,6 +232,7 @@ export type FinalizedTotals = {
   months: number;
   paidMonths: Set<string>;
   earnedMonths: Set<string>;
+  opening?: { gross: number; taxableGross: number; tax: number; pt: number; paidThrough: string; esiContributing: boolean };
 };
 export const EMPTY_FINALIZED_TOTALS = (): FinalizedTotals => ({ gross: 0, taxableGross: 0, tax: 0, pt: 0, months: 0, paidMonths: new Set<string>(), earnedMonths: new Set<string>() });
 
@@ -242,7 +249,60 @@ function ptOf(linesJson: string | null): number {
   }
 }
 
+/** The "YYYY-MM" months a payroll opening covers: the start of the financial year through `paidThrough`. */
+export function openingMonths(fy: { start: Date; end: Date }, paidThrough: string): string[] {
+  const out: string[] = [];
+  const last = paidThrough > monthKey(fy.end) ? monthKey(fy.end) : paidThrough;
+  for (let cur = firstOfMonthUTC(fy.start); monthKey(cur) <= last; cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1))) {
+    out.push(monthKey(cur));
+  }
+  return out;
+}
+
+/**
+ * Whether a payroll opening's last month falls in an ESI contribution period (domain/statutory.ts
+ * esiContributionPeriod): an opening flagged as contributing then keeps the deduction going for the rest of that
+ * period, the way a finalized run carrying an ESI line does.
+ */
+export function esiOpeningInPeriod(paidThrough: string, cp: { start: number; end: number }): boolean {
+  const ms = Date.parse(`${paidThrough}-01T00:00:00Z`);
+  return ms >= cp.start && ms < cp.end;
+}
+
+/** The live payroll openings for a financial year - one employee's, or everyone's. */
+export async function payrollOpeningsFor(deps: Deps, financialYear: string, employeeId?: string) {
+  const conds = [eq(schema.payrollOpenings.financialYear, financialYear), isNull(schema.payrollOpenings.deleteTime)];
+  if (employeeId) conds.push(eq(schema.payrollOpenings.employeeId, employeeId));
+  return deps.db.select().from(schema.payrollOpenings).where(and(...conds));
+}
+
 export async function finalizedTotals(
+  deps: Deps,
+  fy: { start: Date; end: Date; financialYear: string },
+  excludeRunId?: string,
+  employeeId?: string,
+): Promise<Map<string, FinalizedTotals>> {
+  const out = await finalizedRunTotals(deps, fy, excludeRunId, employeeId);
+  for (const o of await payrollOpeningsFor(deps, fy.financialYear, employeeId)) {
+    const cur = out.get(o.employeeId) ?? EMPTY_FINALIZED_TOTALS();
+    cur.gross += o.gross;
+    cur.taxableGross += o.taxableGross;
+    cur.tax += o.tds;
+    cur.pt += o.pt;
+    const covered = openingMonths(fy, o.paidThrough);
+    cur.months += covered.length;
+    for (const m of covered) {
+      cur.paidMonths.add(m);
+      cur.earnedMonths.add(m);
+    }
+    cur.opening = { gross: o.gross, taxableGross: o.taxableGross, tax: o.tds, pt: o.pt, paidThrough: o.paidThrough, esiContributing: o.esiContributing };
+    out.set(o.employeeId, cur);
+  }
+  return out;
+}
+
+/** finalizedTotals over the finalized HRMS runs ALONE - what HRMS itself has paid, without the pay before it. */
+export async function finalizedRunTotals(
   deps: Deps,
   fy: { start: Date; end: Date },
   excludeRunId?: string,
@@ -350,6 +410,8 @@ export type TaxProjection = {
   deductions: DeductionRow[];
   /** Capped sections with room left. The half of item 9 that is useful BEFORE the window shuts. */
   deductionHeadroom: DeductionHeadroom[];
+  /** The part of `annualGross` and `deductedToDate` paid before HRMS ran payroll (a payroll opening). */
+  beforeHrms?: { taxableGross: number; tax: number; paidThrough: string };
 };
 
 // The pure assembler: combine the loaded numbers into the year's tax + the per-month TDS. `currentRunGross`
@@ -498,10 +560,13 @@ export async function getEmployeeTaxProjection(deps: Deps, employee: typeof sche
   // A leaver's exit payout is salary income too, and it is settled outside any run: fold the FnF's taxable
   // earnings and the tax it withheld into the year, else the page understates both.
   const settled = await settlementTotals(deps, fy, employee.uuid);
-  return assembleProjection({
+  const projection = assembleProjection({
     cfg, fy, regime, tdsConfigured: !!tds, employedMonths,
     paidGross: t.taxableGross + settled.taxableGross, paidTax: t.tax + settled.tax,
     collectMonths, projectedGross: projected, decl,
     declaredDeductions: await verifiedDeductions(deps, employee.uuid, fy.financialYear),
   });
+  return t.opening
+    ? { ...projection, beforeHrms: { taxableGross: Math.round(t.opening.taxableGross), tax: Math.round(t.opening.tax), paidThrough: t.opening.paidThrough } }
+    : projection;
 }

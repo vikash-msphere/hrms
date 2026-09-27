@@ -26,9 +26,12 @@ import { CapabilitiesContext, ScopesContext, hasCapability } from "./lib/perm";
 import { OrgProvider } from "./lib/org";
 import { setTablePrefsUser } from "./lib/tablePrefs";
 import { setResourceStoreUser } from "./lib/resourceStore";
-import { whenReady, gc } from "./lib/clientStore";
+import { whenReady, gc, setClientKey } from "./lib/clientStore";
+import { useAppLock, configureLock } from "./lib/appLock";
+import { LockScreen } from "./components/lock/LockScreen";
+import { AutoLockBanner } from "./components/lock/AutoLockBanner";
+import { AppLockSheet } from "./components/lock/AppLockSheet";
 import { sweepSeenTickets } from "./lib/ticketsSeen";
-import { setPhotoCacheUser } from "./lib/photoCache";
 import { setSettingsUser } from "./lib/settingsStore";
 import { hydrateOrgTimezone } from "./lib/orgDay";
 import { syncThemeFromServer } from "./lib/theme";
@@ -60,6 +63,7 @@ const ROUTE_SCOPE: Record<string, string | null> = {
   timesheets: "time-entries",
   overtime: "overtime-requests",
   "remote-work": "remote-work-requests",
+  "late-early": "late-early-requests",
   delegations: "approval-delegations",
   kudos: "announcements",
   pipeline: "applications",
@@ -85,7 +89,7 @@ const QUEUES_BY_ROUTE: Record<string, readonly string[]> = {
   approvals: ALL_QUEUES, // the inbox itself: every queue, plus the decided-history tab built from the same rows
   // The "waiting on you" card approves inline, across the personal-request queues it lists. Company expenses
   // and asset requests are decided on their own pages, so the dashboard doesn't read (or fetch) them.
-  dashboard: ["leave-requests", "reimbursements", "overtime-requests", "remote-work-requests", "attendance-regularizations", "leave-encashments", "loans", "time-entries"],
+  dashboard: ["leave-requests", "reimbursements", "overtime-requests", "remote-work-requests", "late-early-requests", "attendance-regularizations", "leave-encashments", "loans", "time-entries"],
   attendance: ["attendance-regularizations"],
   "leave-requests": ["leave-requests"],
   "leave-calendar": ["leave-requests"],
@@ -141,6 +145,7 @@ const Compliance = lazy(() => import("./pages/Compliance"));
 const BackgroundChecks = lazy(() => import("./pages/BackgroundChecks"));
 const Overtime = lazy(() => import("./pages/Overtime"));
 const RemoteWork = lazy(() => import("./pages/RemoteWork"));
+const LateEarly = lazy(() => import("./pages/LateEarly"));
 const Delegations = lazy(() => import("./pages/Delegations"));
 const NoticePeriods = lazy(() => import("./pages/NoticePeriods"));
 const Suggestions = lazy(() => import("./pages/Suggestions"));
@@ -167,6 +172,7 @@ const PayrollRuns = lazy(() => import("./pages/PayrollRuns"));
 const Settings = lazy(() => import("./pages/Settings"));
 const Workflows = lazy(() => import("./pages/Workflows"));
 const Activity = lazy(() => import("./pages/Activity"));
+const OpeningBalances = lazy(() => import("./pages/OpeningBalances"));
 const Moderation = lazy(() => import("./pages/Moderation"));
 
 // Route-key -> the page's code-chunk loader. React.lazy only starts a chunk download when the page first
@@ -190,6 +196,7 @@ const PAGE_CHUNK: Record<string, () => Promise<unknown>> = {
   events: () => import("./pages/Events"), documents: () => import("./pages/Documents"),
   compliance: () => import("./pages/Compliance"), "background-checks": () => import("./pages/BackgroundChecks"),
   overtime: () => import("./pages/Overtime"), "remote-work": () => import("./pages/RemoteWork"),
+  "late-early": () => import("./pages/LateEarly"),
   delegations: () => import("./pages/Delegations"),
   "notice-periods": () => import("./pages/NoticePeriods"), suggestions: () => import("./pages/Suggestions"),
   payslips: () => import("./pages/Payslips"), reimbursements: () => import("./pages/Reimbursements"),
@@ -313,6 +320,7 @@ function FullScreen({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  const lock = useAppLock();
   const { me, loaded, error, retry } = useMe();
   const route = useRoute();
   const { toast } = useToast();
@@ -350,8 +358,10 @@ export default function App() {
   // records `openFor` deletes rather than reads. Absent on a session-less lane (API key, Access JWT, dev
   // bypass), where the key falls back to the email alone and behaves as it always did.
   const cacheUser = me ? `${me.email}${me.session_id ? `#${me.session_id}` : ""}${viewAs ? `~${viewAs.subject}` : ""}` : undefined;
+  // The key the stored copies are encrypted under (lib/clientStore.ts), handed over BEFORE the identity so
+  // hydration waits for it rather than racing it. Only an unlocked browser is ever given one.
+  setClientKey(me?.client_key);
   void setResourceStoreUser(cacheUser);
-  setPhotoCacheUser(cacheUser); // faces are cached on disk too, under the same identity key
   setSettingsUser(cacheUser); // and the org settings snapshot, which gates other reads (see lib/settingsStore.ts)
 
   // The stored copies live in IndexedDB, which is asynchronous, so they are loaded into memory ONCE before the
@@ -402,6 +412,11 @@ export default function App() {
       void syncThemeFromServer();
       void syncTabSeenFromServer();
     }
+  }, [me]);
+
+  // The person's app lock (lib/appLock.ts): with a PIN set, this arms auto-lock, the keepalive and the shade.
+  useEffect(() => {
+    if (me) configureLock(me.app_lock);
   }, [me]);
 
   // With a signed-in shell on screen there is work worth preserving: a mid-session 401 overlays the
@@ -469,6 +484,10 @@ export default function App() {
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.page, route.id]);
+
+  // A locked browser renders the lock screen and nothing else: no shell, no providers, no reads. The server
+  // refuses them anyway (401 /errors/app-locked); this is what the page shows instead of a sign-in.
+  if (lock.locked) return <LockScreen />;
 
   if (!loaded) {
     return (
@@ -614,6 +633,8 @@ export default function App() {
         return <Overtime me={gme} />;
       case "remote-work":
         return <RemoteWork me={gme} />;
+      case "late-early":
+        return <LateEarly me={gme} />;
       case "delegations":
         return <Delegations me={gme} />;
       case "notice-periods":
@@ -680,6 +701,8 @@ export default function App() {
         return <Workflows me={gme} openId={route.id ?? undefined} />;
       case "activity":
         return <Activity me={gme} />;
+      case "opening-balances":
+        return <OpeningBalances me={gme} />;
       case "moderation":
         return <Moderation />;
       case "users": // legacy deep link -> Settings Access → Roles & permissions
@@ -789,6 +812,9 @@ export default function App() {
         <Toaster />
         <CommandPalette me={gme} open={paletteOpen} onOpenChange={setPaletteOpen} />
         <ShortcutLayer me={gme} page={route.page} />
+        {/* The 30-second warning before an auto-lock, and the person's own app lock settings. */}
+        <AutoLockBanner />
+        <AppLockSheet />
         <SessionExpiredDialog
           open={sessionExpired}
           onSignedIn={() => {

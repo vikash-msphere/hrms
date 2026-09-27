@@ -35,5 +35,6 @@ export const events = collectionRoutes({
       page.pageToken,
       page.showDeleted,
       page.deletedOnly,
+      c.req.query("q"),
     ),
 });

@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 import type { Role } from "../src/env";
 
@@ -40,17 +40,19 @@ const ok = (role: Role, method: string, path: string) => decide(grantFor(role), 
 const WITHHELD_COLLECTIONS: Record<string, string> = {
   "api-keys": "machine credentials: a key acts as its owner, so minting one is an administrative act (super/ACL only)",
   "cron-runs": "the ops console - scheduler internals, not a product surface",
+  "search-insights": "⌘K usage counters, including the text of queries that found nothing - tuning data for whoever runs the app, opened through the ACL",
   "access-rules": "the access system itself: granting access is super's act, and the ACL is where it is delegated",
   policy: "the policy manifest (protected fields, owner refs, state visibility) is the authz configuration itself",
   roles: "the role catalogue, same reason as `policy`",
-  letterheads: "issuing stationery per legal entity; opened through the ACL rather than seeded to a role",
   referrals: "private + ACL by design (see the referrals module notes) - the whole collection is per-object",
   "payroll-debit-accounts": "the employer's own bank account, which the bank file is drawn on: super-only, grantable through the ACL",
-  "card-transactions": "imported corporate card statements: every row is a named person's spending on a company card, so the collection is super-only and opened to finance through the ACL rather than seeded to a role",
-  "payroll-budgets": "salary cost caps per cost centre. A cap read beside its spend states a department's whole pay bill, which is a closer thing to individual salaries the smaller the team - a two-person team's budget line is very nearly their pay. Finance-only in the same way `payroll-debit-accounts` is: super-only, opened to named people through the ACL rather than seeded to a role",
   "tax-verifications": "the prior-employer verification queue rides the `tax` capability, decided per employee sub-resource",
   moderation: "the flagged-post queue quotes public posts in full and is deliberately NOT narrowed per holder (moderating is an org-wide job), so the capability is the whole access decision - granted to a named moderator through the ACL, never seeded to a role",
   users: "the login directory (role and status per account). Changing who can sign in and as what is super's act; delegated through the ACL, never seeded",
+  // letterheads (HR), leave-adjustments (HR, and each person's own read), payroll-openings, payroll-budgets and
+  // card-transactions (payroll) were here until the least-privilege review of the role files: each is the named
+  // role's own job, and the stated risk (salary figures, named people's spending) is data that role already
+  // reads. The reasons for each grant are in bootstrap/authz/roles/.
 };
 
 /** Employee sub-resources deliberately unreachable by every seeded role. */

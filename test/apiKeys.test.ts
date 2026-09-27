@@ -8,6 +8,7 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
+import { seedManifest } from "./seedManifest";
 import { genId } from "../src/lib/idCodec";
 import { app } from "../src/index";
 import { scopeToWire, type KeyScope } from "../src/domain/keyScope";
@@ -31,6 +32,7 @@ beforeAll(async () => {
     const s = stmt.trim();
     if (s) await b.DB.prepare(s).run();
   }
+  await seedManifest(b.DB);
   deps = makeDeps(b);
 });
 

@@ -34,21 +34,26 @@ const updated = () =>
     .$defaultFn(() => new Date())
     .$onUpdateFn(() => new Date());
 
-// Seed role set (the typed default). NOT the runtime source of truth - the `roles` table is. Kept only to
-// seed that table and as the key set for DEFAULT_GRANTS. Roles are data: add/remove via a row, not an edit.
-export const ROLES = ["employee", "manager", "hr_admin", "payroll_admin", "super_admin"] as const;
-
 // Policy store (all access-control policy is data). `roles` = the role set + lock-override rank; `grants`
 // = one JSON blob per role (rides the auth read); `policy` = global manifest (protected fields, refs).
-export const roles = sqliteTable("roles", {
-  name: text("name").primaryKey(),
-  label: text("label").notNull(),
-  // Core roles cannot be deleted via the management API (lockout guard, P2). Data, not code: a non-core
-  // role added later defaults to deletable.
-  protected: integer("protected", { mode: "boolean" }).notNull().default(false),
-  createdAt: created(),
-  updatedAt: updated(),
-});
+// The day-one rows come from bootstrap/authz/roles.ts.
+export const roles = sqliteTable(
+  "roles",
+  {
+    name: text("name").primaryKey(),
+    label: text("label").notNull(),
+    // Core roles cannot be deleted via the management API (lockout guard, P2). Data, not code: a non-core
+    // role added later defaults to deletable.
+    protected: integer("protected", { mode: "boolean" }).notNull().default(false),
+    // The role a new account is given on hire and at first sign-in (services/roles.ts provisionedRole). At
+    // most one row carries it - the partial unique index below - so "which role do new people get" always
+    // has one answer, and none means new accounts are refused rather than guessed at.
+    provisioned: integer("provisioned", { mode: "boolean" }).notNull().default(false),
+    createdAt: created(),
+    updatedAt: updated(),
+  },
+  (t) => [uniqueIndex("roles_one_provisioned").on(t.provisioned).where(sql`${t.provisioned} = 1`)],
+);
 
 export const users = sqliteTable("users", {
   uuid: pk(),
@@ -91,6 +96,40 @@ export const users = sqliteTable("users", {
   // (a break-glass identity, a service owner) is unconstrained, and there may be many.
   employeeUniq: uniqueIndex("users_employee_idx").on(t.employeeId),
 }));
+
+/**
+ * The app lock (app-lock-plan.md): one row per account that has ever set a PIN.
+ *
+ * ITS OWN TABLE, not columns on `users`, because every write to `users` fires `chg_u_users` - the change feed
+ * stamp that every client's cached lists and every list etag key on. Unlocking, locking and a wrong PIN are
+ * writes, and none of them changes anything a client has cached. Not a collection either: nothing reads it
+ * but the auth middleware (joined into the read it already makes per request) and the /auth/lock routes.
+ *
+ * The row outlives turning the lock off (`pin_hash` goes NULL) because `key_epoch` must never go backwards:
+ * reusing an old epoch would make ciphertext written under it readable again.
+ */
+export const appLocks = sqliteTable("app_locks", {
+  userId: text("user_id").primaryKey().references(() => users.uuid, { onDelete: "cascade" }),
+  // HMAC under a key outside the database (lib/appLock.ts hashPin). NULL = no PIN, the browser is never locked.
+  pinHash: text("pin_hash"),
+  pinLength: integer("pin_length"),
+  pinSetAt: integer("pin_set_at", { mode: "timestamp_ms" }),
+  // The person's own auto-lock time in minutes; 0 = only when they lock.
+  idleMinutes: integer("idle_minutes").notNull().default(15),
+  // CONSECUTIVE wrong PINs. Counted before each comparison (services/appLock.ts reserveAttempt) and reset only
+  // by a correct PIN or an admin reset, never by time.
+  failures: integer("failures").notNull().default(0),
+  blockedUntil: integer("blocked_until", { mode: "timestamp_ms" }),
+  lastFailedAt: integer("last_failed_at", { mode: "timestamp_ms" }),
+  // Unlock proofs issued before this are dead: "lock all my devices", a PIN change, an admin reset.
+  unlocksValidFrom: integer("unlocks_valid_from", { mode: "timestamp_ms" }),
+  // Proofs revoked one device at a time, [{i, exp}], each dropped once it would have expired anyway.
+  revokedJson: text("revoked_json").notNull().default("[]"),
+  // Which client-store key the person's browsers encrypt under (lib/appLock.ts clientKeyFor).
+  keyEpoch: integer("key_epoch").notNull().default(0),
+  createdAt: created(),
+  updatedAt: updated(),
+});
 
 /**
  * The SECONDARY roles a user holds, beyond `users.role`.
@@ -321,6 +360,12 @@ export const employees = sqliteTable("employees", {
   startDate: integer("start_date", { mode: "timestamp_ms" }),
   endDate: integer("end_date", { mode: "timestamp_ms" }),
   probationEndDate: integer("probation_end_date", { mode: "timestamp_ms" }),
+  // The first day this system holds records for the person (DATE-ONLY, UTC midnight). Someone who joined before
+  // the org started using the app has history that happened elsewhere, so a day before this is not inferred as
+  // an absence (domain/attendance.ts lopDayUnits), and an accrual period that starts before it belongs to the
+  // opening balance rather than to the walk (domain/leave.ts `floorMs`, `leaveAdjustments`). Null = records
+  // start on `startDate`, which is the case for everyone hired after go-live.
+  trackedFrom: integer("tracked_from", { mode: "timestamp_ms" }),
   epfEnrolled: integer("epf_enrolled", { mode: "boolean" }).notNull().default(false), // EPF is opt-in per employee; default off (no PF deduction / employer share)
   // EPS (Employees' Pension Scheme) exclusion. A member whose pay already exceeded the pension wage ceiling
   // when they first joined EPF is excluded from EPS, and the WHOLE employer share stays in EPF instead of
@@ -432,6 +477,39 @@ export const leaveBalances = sqliteTable("leave_balances", {
   // reserve/release. A duplicate insert now fails loudly instead of silently corrupting the balance.
 }, (t) => ({ pageIdx: index("leave_balances_page_idx").on(t.createdAt, t.uuid), empIdx: index("bal_emp_idx").on(t.employeeId, t.createdAt, t.uuid), empTypeUniq: uniqueIndex("bal_emp_type_idx").on(t.employeeId, t.leaveTypeId) }));
 
+// A change to a leave balance that no accrual, request or encashment explains, kept as a LEDGER: each row is
+// the signed number of days it moved the balance by, and no row is ever edited - a mistake is corrected by
+// another row (services/leaveAdjustments.ts). Two kinds:
+//   - `opening`: the balance somebody had when HRMS records started for them (`employees.trackedFrom`), from
+//     the system before it. The first one also REMOVES what HRMS had credited for the periods before that day
+//     (`removedDays`, domain/leave.ts creditedBeforeFloor); a re-import moves the balance by the difference
+//     from the last opening only. `openingSeq` numbers them per (employee, type), and the unique index on it is
+//     the lock: two imports of the same opening racing each other make the second one fail and roll back,
+//     rather than both applying.
+//   - `correction`: HR moving a balance by hand, with the reason on the row.
+// Employee-owned and code-scoped like the balance it moves; private by default.
+export const leaveAdjustments = sqliteTable("leave_adjustments", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  leaveTypeId: text("leave_type_id").notNull().references(() => leaveTypes.uuid),
+  kind: text("kind", { enum: ["opening", "correction"] }).notNull(),
+  days: real("days").notNull(), // the signed change this row made to the balance
+  openingDays: real("opening_days"), // opening: the balance entered, as of `asOf`
+  removedDays: real("removed_days"), // opening: what HRMS had credited before `asOf`, taken off by the first one
+  encashedDays: real("encashed_days"), // opening: days already encashed this leave year before HRMS
+  asOf: integer("as_of", { mode: "timestamp_ms" }), // opening: the employee's tracked_from it was measured against
+  openingSeq: integer("opening_seq"), // opening: 1 for the first, then one more per re-import
+  reason: text("reason"),
+  createdBy: text("created_by").references(() => users.uuid),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  pageIdx: index("leave_adjustments_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("ladj_emp_idx").on(t.employeeId, t.createdAt, t.uuid),
+  openingUniq: uniqueIndex("ladj_opening_idx").on(t.employeeId, t.leaveTypeId, t.openingSeq).where(sql`${t.kind} = 'opening'`),
+}));
+
 export const leaveRequests = sqliteTable("leave_requests", {
   uuid: pk(),
   code: codeCol(),
@@ -447,6 +525,10 @@ export const leaveRequests = sqliteTable("leave_requests", {
   startSession: integer("start_session").notNull().default(1),
   endSession: integer("end_session").notNull().default(2),
   state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED"] }).notNull().default("PENDING"),
+  // `import`: leave taken BEFORE HRMS, brought in as history (services/leaveHistoryImport.ts). It is APPROVED
+  // and counts toward the leave policy (quotas, lifetime limits, the probation cap) like any other, but it never
+  // moved the balance - the opening balance already has it taken off - so cancelling it refunds nothing.
+  source: text("source", { enum: ["app", "import"] }).notNull().default("app"),
   reason: text("reason"),
   decidedBy: text("decided_by").references(() => users.uuid),
   // Policy rules this request broke that the org has chosen to WARN on rather than refuse (`soft_rules` in
@@ -1493,7 +1575,9 @@ export const benefitEnrollments = sqliteTable("benefit_enrollments", {
 
 // ---- Shift scheduling ----
 // An HR-defined shift pattern (flat-coded catalog like leave-types). Times are wall-clock "HH:MM" in the org
-// timezone; a roster assignment puts a shift on a date for an employee.
+// timezone; a roster assignment puts a shift on a date for an employee, and a work pattern hands it out on a
+// repeating cycle. `end_time` at or before `start_time` is a NIGHT SHIFT: it runs past midnight, and the day
+// it belongs to is the day it starts on (domain/workSchedule.ts).
 export const shifts = sqliteTable("shifts", {
   uuid: pk(),
   code: codeCol(),
@@ -1501,19 +1585,40 @@ export const shifts = sqliteTable("shifts", {
   startTime: text("start_time").notNull().default("09:00"),
   endTime: text("end_time").notNull().default("18:00"),
   breakMinutes: integer("break_minutes").notNull().default(0),
+  // What a day ON THIS SHIFT is worth, for the full/half-day ladder loss of pay is scored on
+  // (domain/attendance.ts derivedCredit). Null on each is the derivation, which is what a shift almost always
+  // wants: a full day is the shift itself (span less break) and half a day is half of that. Without them the
+  // org's single `full_day_minutes` applied to every shift, so every day of a four-hour shift read as under
+  // hours and was docked half a day. Set one only where the shift is genuinely not its own span - a nine-hour
+  // window whose full day is eight.
+  fullDayMinutes: integer("full_day_minutes"),
+  halfDayMinutes: integer("half_day_minutes"),
+  // Null = the org's own (`settings/attendance`). A shift with its own lateness allowance, or one judged on
+  // minutes worked alone, says so here rather than forcing the org's answer onto everybody who works it.
+  graceMinutes: integer("grace_minutes"),
+  flexibleHours: integer("flexible_hours", { mode: "boolean" }),
   color: text("color"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
 });
 
-// A roster entry: an employee works a shift on a date. Employee-owned + code-scoped like leave-requests
-// (own/dept/all), so an employee sees their own roster, a manager their team's, HR all. References a shift.
+// A roster entry: an employee works a shift on a date, or is explicitly off that day. Employee-owned +
+// code-scoped like leave-requests (own/dept/all), so an employee sees their own roster, a manager their
+// team's, HR all.
+//
+// THE MOST SPECIFIC LAYER of a resolved day (domain/workSchedule.ts): an entry here beats the work pattern the
+// person is on, which beats the org's own week. That is what a roster edit IS - cover on a day off, a swapped
+// day, a one-off late shift - so it has to be able to say "off" as well as "this shift", or the only
+// expressible exception is adding work.
 export const shiftAssignments = sqliteTable("shift_assignments", {
   uuid: pk(),
   code: codeCol(),
   employeeId: text("employee_id").notNull().references(() => employees.uuid),
-  shiftId: text("shift_id").notNull().references(() => shifts.uuid),
+  // Null exactly when `kind` is "off" - a rest day names no shift. Required otherwise
+  // (services/shiftAssignments.ts refuses a "shift" entry without one).
+  shiftId: text("shift_id").references(() => shifts.uuid),
+  kind: text("kind", { enum: ["shift", "off"] }).notNull().default("shift"),
   date: integer("date", { mode: "timestamp_ms" }).notNull(),
   note: text("note"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
@@ -1530,6 +1635,60 @@ export const shiftAssignments = sqliteTable("shift_assignments", {
   // many. Partial, on the live rows only (like comp_open_idx): a soft-deleted entry must not block rostering
   // that person again on that day.
   empDayUniq: uniqueIndex("sa_emp_day_idx").on(t.employeeId, t.date).where(sql`${t.deleteTime} is null`),
+}));
+
+// A WORK PATTERN: the repeating shape of somebody's week, and the thing "a schedule" means to HR. A flat-coded
+// catalog like `shifts` and `leave_types`.
+//
+// `days` is the cycle, as JSON: `cycle_weeks * 7` entries indexed `weekIndex * 7 + weekday` with weekday
+// 0=Sun..6=Sat, each holding a shift uuid or null for a REST DAY. One `cycle_weeks` covers "Mon-Fri days" and
+// "Mon/Wed/Fri mornings"; two or three cover a rotation. A rest day being a null entry rather than a separate
+// working-day list is what keeps "which days does this person work" a single answer - the org's `work_days`
+// and a per-person day list would be two, and they would drift.
+//
+// ONE JSON COLUMN rather than a child table because the cycle is at most 56 entries and every read wants all
+// of it: a pattern costs one row read, not a join over a page of them (D1 bills rows read).
+export const workPatterns = sqliteTable("work_patterns", {
+  uuid: pk(),
+  code: codeCol(),
+  name: text("name").notNull(),
+  cycleWeeks: integer("cycle_weeks").notNull().default(1),
+  daysJson: text("days_json").notNull().default("[]"),
+  color: text("color"),
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({ pageIdx: index("work_patterns_page_idx").on(t.createdAt, t.uuid) }));
+
+// One employee on one work pattern over a window - the MIDDLE layer of a resolved day. Employee-owned +
+// code-scoped exactly like `shift_assignments`.
+//
+// DATE-RANGED rather than a single current pattern on the employee row, because payroll restates closed
+// periods (services/payroll.ts recomputeLopUnits): somebody who moved to the night rotation in April must have
+// their March loss of pay recomputed against the pattern they were on in March. `end_date` null is open ended.
+//
+// `anchor_date` is the date the cycle counts from, snapped to its own week, so two teams on the same
+// three-week rotation offset by a week differ in this and nothing else. Null = `start_date`.
+//
+// Live assignments for one employee NEVER OVERLAP (checked in services/workPatternAssignments.ts - SQLite
+// cannot express range overlap as an index), so a day resolves to at most one pattern.
+export const workPatternAssignments = sqliteTable("work_pattern_assignments", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  patternId: text("pattern_id").notNull().references(() => workPatterns.uuid),
+  startDate: integer("start_date", { mode: "timestamp_ms" }).notNull(),
+  endDate: integer("end_date", { mode: "timestamp_ms" }),
+  anchorDate: integer("anchor_date", { mode: "timestamp_ms" }),
+  note: text("note"),
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({ pageIdx: index("work_pattern_assignments_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("wpa_emp_idx").on(t.employeeId, t.createdAt, t.uuid),
+  patternIdx: index("wpa_pattern_idx").on(t.patternId),
+  // The window read: every assignment overlapping a period, for the employees a payroll build is pricing.
+  startIdx: index("wpa_start_idx").on(t.startDate),
 }));
 
 // ---- Timesheets / project time tracking ----
@@ -2688,6 +2847,36 @@ export const payrollRunItems = sqliteTable("payroll_run_items", {
   updatedAt: updated(),
 }, (t) => ({ runIdx: index("rri_run_idx").on(t.runId), runEmpUniq: uniqueIndex("rri_run_emp_idx").on(t.runId, t.employeeId) }));
 
+// Pay and tax an employee had ALREADY been paid this financial year before HRMS ran their payroll, from the
+// system before it (services/payrollOpenings.ts). One live row per (employee, financial year), covering the
+// months from the start of the year through `paidThrough`. services/taxProjection.ts#finalizedTotals folds it in
+// beside the finalized runs, so the year's TDS, the PT annual cap, the settlement and Form 16 all count it, and
+// the months it covers are neither re-priced nor collected in again.
+export const payrollOpenings = sqliteTable("payroll_openings", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  financialYear: text("financial_year").notNull(), // "2026-27", as fyWindow labels it
+  paidThrough: text("paid_through").notNull(), // "YYYY-MM": the last month whose salary the figures include
+  gross: real("gross").notNull(),
+  taxableGross: real("taxable_gross").notNull(),
+  tds: real("tds").notNull().default(0),
+  pt: real("pt").notNull().default(0),
+  // Whether ESI was being deducted in `paidThrough`: once in, an employee stays in for the rest of that
+  // contribution period whatever their wage does (domain/statutory.ts), and a run that cannot see the months
+  // before HRMS would otherwise re-test the ceiling and stop the deduction.
+  esiContributing: integer("esi_contributing", { mode: "boolean" }).notNull().default(false),
+  note: text("note"),
+  createdBy: text("created_by").references(() => users.uuid),
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  pageIdx: index("payroll_openings_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("popen_emp_idx").on(t.employeeId, t.createdAt, t.uuid),
+  empFyUniq: uniqueIndex("popen_emp_fy_idx").on(t.employeeId, t.financialYear).where(sql`${t.deleteTime} is null`),
+}));
+
 export const payslips = sqliteTable("payslips", {
   uuid: pk(),
   code: codeCol(),
@@ -3161,6 +3350,43 @@ export const remoteWorkRequests = sqliteTable("remote_work_requests", {
   updatedAt: updated(),
 }, (t) => ({ pageIdx: index("remote_work_requests_page_idx").on(t.createdAt, t.uuid), empIdx: index("rwr_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("rwr_state_idx").on(t.state) }));
 
+// Late arrival / early departure request: an employee asks to come in late, or leave early, on one day.
+// Employee-owned + code-scoped (own/dept/all, like overtime-requests): the employee files, a manager (own dept)
+// or HR approves or rejects, the owner cancels while pending. The row records only that it was asked and how it
+// was answered; what an approved one does to the day and to pay is the org's policy (settings/punctuality, read
+// through domain/punctuality.ts), so changing the policy changes every day it covers without rewriting a row.
+export const lateEarlyRequests = sqliteTable("late_early_requests", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  date: integer("date", { mode: "timestamp_ms" }).notNull(), // the org-local day it is about (UTC midnight)
+  kind: text("kind", { enum: ["late_arrival", "early_departure"] }).notNull(),
+  // Wall-clock "HH:MM" in the org timezone: when they will arrive (a late arrival) or leave (an early departure).
+  at: text("at").notNull(),
+  // How far `at` is from the shift edge it moves, fixed when filed: the monthly allowance is counted in these, so
+  // a later change to the shift does not re-price requests already made.
+  minutes: integer("minutes").notNull(),
+  reason: text("reason"),
+  state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED"] }).notNull().default("PENDING"),
+  // Filed past the monthly allowance while the policy accepts such requests; shown to whoever decides it.
+  overLimit: integer("over_limit", { mode: "boolean" }).notNull().default(false),
+  // Approved on filing by the policy's auto-approval threshold, so `decidedBy` is empty by design.
+  autoApproved: integer("auto_approved", { mode: "boolean" }).notNull().default(false),
+  decidedBy: text("decided_by").references(() => users.uuid),
+  decisionNote: text("decision_note"),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  pageIdx: index("late_early_requests_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("ler_emp_idx").on(t.employeeId, t.date),
+  // The payroll build and the attendance windows read APPROVED rows over a range of days.
+  stateDateIdx: index("ler_state_date_idx").on(t.state, t.date),
+  // ONE LIVE REQUEST PER PERSON, DAY AND KIND. Two approved late arrivals on one day is not a state the day can be
+  // judged by, and the filing check reads-then-inserts, so two presses at once would both pass it. Rejected and
+  // cancelled rows are outside the predicate, so a day can be asked about again after a refusal.
+  liveUniq: uniqueIndex("ler_live_idx").on(t.employeeId, t.date, t.kind).where(sql`${t.state} in ('PENDING', 'APPROVED')`),
+}));
+
 // A request for kit: "I need a laptop". Employee-owned + code-scoped (own/dept/all, like leave-requests): the
 // employee files it naming a CATEGORY (not a specific machine - which one they get is inventory's call), a
 // manager or HR decides, the owner cancels while pending.
@@ -3566,6 +3792,30 @@ export const searchDocs = sqliteTable("search_docs", {
 }, (t) => ({
   recordIdx: uniqueIndex("search_docs_record_idx").on(t.collection, t.recordId),
   createdIdx: index("search_docs_created_idx").on(t.createdAt),
+}));
+
+// How ⌘K is used, as DAILY COUNTERS - never a log of who searched for what. One row per (day, kind, label),
+// incremented in place, so the table holds at most a few hundred rows a day however busy the palette is, and
+// nothing in it names a person. services/searchInsights.ts is the only writer.
+//
+//   kind "zero"  label = a query that found nothing at all, normalised; what synonyms and nouns are missing.
+//                Only queries that carry no identifier (lib scrubIdentifiers) are kept, and only short ones.
+//   kind "open"  label = which result was opened: `<keyword|related|local>:<position bucket>`.
+//   kind "ask"   label = what an Ask came back with: "answered" or "empty".
+//
+// Kept 30 days (cron.ts prunes it). Read through the `search-insights` collection, which no role is granted.
+export const searchInsights = sqliteTable("search_insights", {
+  uuid: pk(),
+  code: codeCol(),
+  day: text("day").notNull(), // UTC YYYY-MM-DD
+  kind: text("kind", { enum: ["zero", "open", "ask"] }).notNull(),
+  label: text("label").notNull(),
+  count: integer("count").notNull().default(0),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  keyIdx: uniqueIndex("search_insights_key_idx").on(t.day, t.kind, t.label),
+  pageIdx: index("search_insights_page_idx").on(t.createdAt, t.uuid),
 }));
 
 // A saved custom grid: which collection one row IS, which fields are its columns, and how it is filtered and

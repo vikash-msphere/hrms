@@ -12,6 +12,7 @@ import { useMedia } from "@/hooks/useMedia";
 import { fmtDuration } from "@/lib/attendance";
 import { NotificationBell } from "@/components/layout/NotificationBell";
 import { UserMenu } from "@/components/layout/UserMenu";
+import { LockButton } from "@/components/lock/LockButton";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import type { Me } from "@/types";
 
@@ -205,6 +206,10 @@ export function TopBar({
         )}
 
         <NotificationBell />
+
+        {/* The app lock (lib/appLock.ts), at every width: a phone left on a table needs it as much as a laptop
+            left open. Next to the bell, with the other controls that are about the person rather than the page. */}
+        <LockButton mac={isMac} />
 
         {/* Theme is not here at any width: a preference belongs with the person, so it is the segmented
             Appearance control inside UserMenu. */}

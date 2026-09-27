@@ -2,6 +2,7 @@ import { allocFlatCode, allocFlatCodes, withFreshCode } from "./codeAlloc";
 import { and, eq, gte, inArray, lt, ne, or, type SQL } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
+import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
@@ -242,9 +243,11 @@ const dayMs = (s?: string | null) => (s ? new Date(Date.parse(s + "T00:00:00Z"))
 // page the rest of the API promises (so nothing downstream could tell it was looking at a window). Newest-first,
 // like every other list: on an inventory larger than a page, the assets someone is looking for are the ones just
 // bought, not the ones bought first. The presentation sort below puts one page back in tag order.
-export async function listAssets(deps: Deps, scope: ListScope, opts: { employeeId?: string; status?: AssetStatus; maxPageSize: number; pageToken?: string }) {
+export async function listAssets(deps: Deps, scope: ListScope, opts: { employeeId?: string; status?: AssetStatus; maxPageSize: number; pageToken?: string; q?: string }) {
   const conds = [applyScope(scope, schema.assets.code, schema.assets.assignedTo)];
   if (opts.employeeId) conds.push(eq(schema.assets.assignedTo, opts.employeeId));
+  // The register's search box, over the whole register rather than the page on screen (services/searchFilter.ts).
+  conds.push(await searchFilter(deps, "assets", opts.q, schema.assets.uuid));
   // Narrowed HERE rather than in the browser. "What is in stock" is the question the assign-a-device picker
   // asks, and filtering a page client-side answers it with "whichever of the 50 newest assets are in stock" -
   // which, since recently-added kit is the kit most likely to have been handed out, routinely reads as

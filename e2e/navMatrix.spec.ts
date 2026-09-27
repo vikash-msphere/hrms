@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { hasCapability } from "../web/src/lib/perm";
+import { SETTINGS_NAV_PERMS } from "../web/src/settings/registry";
 import { ROLES, capabilitiesOf, gotoRoute, test, expect, type Role } from "./fixtures";
 
 // The sidebar, for everybody, against the capabilities the server actually handed out.
@@ -51,6 +52,8 @@ function navEntries(): NavEntry[] {
     // instead of spelling its gate out.
     for (const m of block.matchAll(/collection: "([^"]+)"/g)) needs.add(`${m[1]!}.read`);
     if (/anyPerm: APPROVAL_CAPS/.test(block)) for (const c of approvalCaps()) needs.add(c);
+    // Computed from the settings registry, so it is imported rather than parsed.
+    if (/anyPerm: SETTINGS_NAV_PERMS/.test(block)) for (const c of SETTINGS_NAV_PERMS) needs.add(c);
     for (const list of block.matchAll(/anyPerm: \[([^\]]*)\]/g)) {
       for (const m of list[1]!.matchAll(/"([^"]+)"/g)) needs.add(m[1]!);
     }

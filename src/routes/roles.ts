@@ -7,7 +7,7 @@ import { toRoleResource } from "../http/serialize";
 import { clampPageSize } from "../http/pagination";
 
 const createSchema = z.object({ name: z.string().optional(), label: z.string().optional(), protected: z.boolean().optional() }).strict();
-const patchSchema = z.object({ name: z.string().optional(), label: z.string().optional(), protected: z.boolean().optional() }).strict();
+const patchSchema = z.object({ name: z.string().optional(), label: z.string().optional(), protected: z.boolean().optional(), provisioned: z.boolean().optional() }).strict();
 
 // Role catalog. Super-only by default (the middleware gates `roles.**`); grantable to others purely by data.
 export const roles = new Hono<AppEnv>()

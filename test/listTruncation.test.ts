@@ -6,7 +6,7 @@ const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query:
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
 import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import type { ListScope } from "../src/domain/access";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";

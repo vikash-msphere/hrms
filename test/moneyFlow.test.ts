@@ -77,7 +77,7 @@ async function seedEmployee(over: Partial<typeof schema.employees.$inferInsert> 
   return uuid;
 }
 async function seedActor(employeeId: string): Promise<AppUser> {
-  await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee" }).onConflictDoNothing();
+  await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee", provisioned: true }).onConflictDoNothing();
   const uuid = genId();
   const email = `${uuid}@test.example`;
   await deps.db.insert(schema.users).values({ uuid, code: short("u"), email, role: "employee", employeeId });

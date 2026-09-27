@@ -15,9 +15,15 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   "holiday-selections", "org-documents", "personal-documents", "announcements", "pay-components", "pay-grades", "salary-structures",
   "pay-periods", "payroll-runs", "payroll-budgets", "payslips", "operations", "users", "compensation", "positions", "bonuses", "assets", "asset-categories", "asset-requests", "stocktakes", "settlements", "goal-templates",
   "leave-encashments", "reimbursements", "reimbursement-categories",
+  // the leave balance ledger: opening balances from before HRMS + hand corrections; employee-owned, private-by-default
+  "leave-adjustments",
+  // pay and tax already paid this financial year before HRMS ran payroll; employee-owned, private-by-default
+  "payroll-openings",
   // operational/company expenses: employee-owned expense (submitter-scoped) + flat vendor/category masters + finance budgets
   "expenses", "expense-categories", "vendors", "expense-budgets", "card-transactions",
   "attendance", "attendance-regularizations", "attendance-day-marks", "overtime-requests", "remote-work-requests", "approval-delegations", "notice-periods", "suggestions", "notifications",
+  // late arrival / early departure requests; employee-owned (code-scoped own/dept/all), manager or HR decides
+  "late-early-requests",
   // compliance: per-employee acknowledgement (e-signature) of an org-document version; employee-owned, private-by-default
   "document-acknowledgements",
   // statutory compliance calendar (PF/ESI/TDS/GST/PT/returns); flat company-wide, HR-managed
@@ -39,7 +45,7 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   // benefits: HR-authored plan catalog + employee-owned dependents & enrollments
   "benefit-plans", "dependents", "benefit-enrollments",
   // shift scheduling: HR shift catalog + employee-owned roster assignments (manager rosters the dept)
-  "shifts", "shift-assignments",
+  "shifts", "shift-assignments", "work-patterns", "work-pattern-assignments",
   // timesheets: project catalog + employee-owned time entries (manager approves the dept's)
   "projects", "time-entries",
   // loans / salary advances; employee-owned request, payroll decides/disburses
@@ -63,6 +69,8 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   // recorded cron ticks; private-by-default (no grant names it, so super-only via **) but still a real
   // code-bearing resource, so it must be registered here.
   "cron-runs",
+  // daily ⌘K usage counters (services/searchInsights.ts); private-by-default, read-only, same reasoning.
+  "search-insights",
   // workflow & automation engine: rules (HR-authored) + the event log + run observability. Authoring is the
   // privileged act (actions run with system authority), so writes are HR/super only; event-log/automation-runs
   // are read-only admin observability.

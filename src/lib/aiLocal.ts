@@ -123,6 +123,8 @@ export function makeLocalTextModel(baseUrl: string, models: LocalModels): TextMo
   }
 
   return {
+    // The Ollama name, not `MODELS.embed`, so a threshold tuned on the production model is not applied to it.
+    embedModel: models.embed,
     async embed(texts) {
       if (texts.length === 0) return [];
       return embedAll(texts);

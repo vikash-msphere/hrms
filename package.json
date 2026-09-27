@@ -14,6 +14,7 @@
     "deploy": "npm run preflight && npm run verify && npm run build && wrangler deploy",
     "deploy:staging": "npm run preflight -- --config wrangler.staging.toml && npm run verify && npm run build && wrangler deploy --config wrangler.staging.toml",
     "db:generate": "drizzle-kit generate && node --import ./scripts/tsResolve.mjs scripts/genSearchDdl.ts && node --import ./scripts/tsResolve.mjs scripts/genChangeDdl.ts",
+    "bootstrap:authz": "node --import ./scripts/tsResolve.mjs bootstrap/genAuthz.ts",
     "db:migrate:local": "wrangler d1 migrations apply hrms --local",
     "db:migrate:remote": "wrangler d1 migrations apply hrms --remote",
     "db:migrate:staging": "wrangler d1 migrations apply hrms-staging --remote --config wrangler.staging.toml",

@@ -13,6 +13,7 @@
 // rule", and an org that configures nothing behaves exactly as it did before this file existed.
 import { invalidArgument } from "../lib/errors";
 import { daysByMonth, leaveDays, type JoiningRule, type SandwichMode, type SandwichRule } from "./leave";
+import type { DayScheduleOf } from "./workSchedule";
 
 const DAY_MS = 86_400_000;
 const ymdUtc = (ms: number) => new Date(ms).toISOString().slice(0, 10);
@@ -746,7 +747,9 @@ export type RestrictionFacts = {
    *  has to exist before bytes can hang off it, so the document rule is checked on approval instead. */
   hasDocument: boolean | null;
   reason: string | null;
-  workDays: readonly number[];
+  /** This employee's schedule, day by day (domain/workSchedule.ts): which days they were scheduled on, and so
+   *  which days a rule has anything to say about. A rest day in their rotation is a day off, like a weekend. */
+  schedOf: DayScheduleOf;
   holidays: ReadonlySet<string>;
   halfDayHolidays: ReadonlySet<string>;
   neighbours: readonly LeaveNeighbour[]; // live leave inside historyWindow(); [] when no rule needed it
@@ -771,7 +774,7 @@ export function checkLeaveRestrictions(f: RestrictionFacts): Violation[] {
   const plural = (n: number, one = "day", many = "days") => `${fmt(n)} ${n === 1 ? one : many}`;
   const sandwich = sandwichOf(r);
   const chargeable = (startMs: number, endMs: number, ss: number, es: number) =>
-    leaveDays(startMs, endMs, ss, es, f.workDays, f.holidays, f.halfDayHolidays, sandwich);
+    leaveDays(startMs, endMs, ss, es, f.schedOf, f.holidays, f.halfDayHolidays, sandwich);
   const sameType = f.neighbours.filter((n) => n.leaveTypeId === f.leaveTypeId);
   // Walked once each, not once per rule that wants them: three rules read the charged days and two read the
   // neighbours' monthly totals, and each walk is a day-by-day pass over the request (or over every neighbour
@@ -875,7 +878,7 @@ export function checkLeaveRestrictions(f: RestrictionFacts): Violation[] {
   // ---- quota ----
   const basis = r.quota.year_basis ?? "calendar";
   const fyStart = r.quota.fiscal_year_start_month ?? 4;
-  const mineByMonth = daysByMonth(f.startMs, f.endMs, f.startSession, f.endSession, f.workDays, f.holidays, f.halfDayHolidays, sandwich);
+  const mineByMonth = daysByMonth(f.startMs, f.endMs, f.startSession, f.endSession, f.schedOf, f.holidays, f.halfDayHolidays, sandwich);
   if (r.quota.max_days_per_month !== null) {
     const used = usedByMonth();
     for (const [ym, mine] of Object.entries(mineByMonth)) {
@@ -990,7 +993,7 @@ function chargedDays(f: RestrictionFacts): number[] {
   const out: number[] = [];
   for (let d = f.startMs; d <= f.endMs; d += DAY_MS) {
     const ymd = ymdUtc(d);
-    if (!f.workDays.includes(new Date(d).getUTCDay()) || f.holidays.has(ymd)) continue;
+    if (f.schedOf(ymd).off || f.holidays.has(ymd)) continue;
     out.push(d);
   }
   return out;
@@ -1004,7 +1007,7 @@ function workingGap(f: RestrictionFacts, n: { startMs: number; endMs: number }):
   let gap = 0;
   for (let d = earlierEnd + DAY_MS; d < laterStart; d += DAY_MS) {
     const ymd = ymdUtc(d);
-    if (f.workDays.includes(new Date(d).getUTCDay()) && !f.holidays.has(ymd)) gap++;
+    if (!f.schedOf(ymd).off && !f.holidays.has(ymd)) gap++;
   }
   return gap;
 }
@@ -1035,7 +1038,7 @@ function mergedRun(f: RestrictionFacts, sameType: readonly LeaveNeighbour[]) {
 function monthTotals(f: RestrictionFacts, sameType: readonly LeaveNeighbour[], sandwich: SandwichRule): Record<string, number> {
   const out: Record<string, number> = {};
   for (const n of sameType) {
-    for (const [ym, v] of Object.entries(daysByMonth(n.startMs, n.endMs, n.startSession, n.endSession, f.workDays, f.holidays, f.halfDayHolidays, sandwich))) {
+    for (const [ym, v] of Object.entries(daysByMonth(n.startMs, n.endMs, n.startSession, n.endSession, f.schedOf, f.holidays, f.halfDayHolidays, sandwich))) {
       out[ym] = (out[ym] ?? 0) + v;
     }
   }

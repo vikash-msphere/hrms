@@ -62,13 +62,16 @@ test("a policy is published for signature, signed in place, and hidden from thos
 
   // The signer's side: what is waiting on their signature is put in front of them rather than filed
   // somewhere they have to find.
-  await hr.reload();
-  await expect(hr.getByRole("main")).toBeVisible();
+  // No reload here, on purpose. The upload re-reads the list itself, and a reload straight after a dialog
+  // closes races the app's own history step: closing drops the dialog's entry with an async `history.back()`
+  // (lib/dialogHistory.ts), and a reload issued before that traversal lands lets it arrive on the NEW page -
+  // as a pop nothing there asked for, which closed the signing dialog the moment it opened.
+  //
   // On the row, by its exact name: the table's own "Acknowledgement" column header is a button too (that is
   // how DataTable sorts), and a loose /Acknowledge/ matches the header first - which sorts the table and
   // opens nothing.
   const sign = hr.locator("tbody tr").filter({ hasText: title }).getByRole("button", { name: "Sign", exact: true });
-  await expect(sign).toBeVisible();
+  await expect(sign).toBeVisible({ timeout: 30_000 });
   await sign.click();
 
   const dialog = hr.getByRole("dialog");

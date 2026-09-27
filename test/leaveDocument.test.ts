@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 
 // A leave request can carry a supporting document (sick note, travel paperwork) through the generic attachment

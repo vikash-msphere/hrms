@@ -26,8 +26,11 @@
 # Neither is redundant: the path alone would kill a live suite's workers, and PPID alone would be one wrangler
 # restart away from mattering.
 #
-# Wired to `posttest` / `posttest:gate` in package.json, so an ordinary run cleans up after itself and nobody
-# has to remember. Safe to run by hand at any time - with nothing to reap it says so and exits 0.
+# Wired to `posttest` / `posttest:gate` in package.json, but npm runs a post-hook only when the main script
+# succeeds, so the runs that actually leave orphans (failed, interrupted, killed) skip it. What covers those
+# is scripts/workerdWatchdog.mjs, a vitest globalSetup that reaps the pool's workerd once vitest is gone. This
+# script remains the by-hand sweep, and the one that also catches an orphaned `wrangler dev` runtime. Safe to
+# run at any time - with nothing to reap it says so and exits 0.
 set -euo pipefail
 
 # BOTH copies of the binary: vitest's pool runs miniflare's, `wrangler dev` runs wrangler's own. PPID 1 is
@@ -40,10 +43,21 @@ set -euo pipefail
 # reads as the app ignoring your changes.
 PATTERN="node_modules/(miniflare|wrangler)/node_modules/@cloudflare/workerd"
 
+# `pgrep -P 1` does the PPID filter itself; macOS and procps both take `-P` and both read the pattern as an
+# extended regex without a flag. NOT `-E`: macOS pgrep has no such option, and with stderr discarded that
+# made this script report "no orphaned workerd processes" on every Mac while hundreds sat there. So pgrep's
+# stderr stays visible and only its no-match status (1) counts as nothing to do.
+status=0
+found=$(pgrep -P 1 -f "$PATTERN") || status=$?
+if [ "$status" -gt 1 ]; then
+  echo "→ [cleanup] pgrep failed (exit $status), nothing reaped" >&2
+  exit "$status"
+fi
+
 orphans=()
-while read -r pid ppid; do
-  [ "$ppid" = "1" ] && orphans+=("$pid")
-done < <(pgrep -fE "$PATTERN" 2>/dev/null | xargs -r ps -o pid=,ppid= -p 2>/dev/null || true)
+while read -r pid; do
+  [ -n "$pid" ] && orphans+=("$pid")
+done <<< "$found"
 
 if [ ${#orphans[@]} -eq 0 ]; then
   echo "→ [cleanup] no orphaned workerd processes"

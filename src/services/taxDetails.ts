@@ -100,6 +100,11 @@ function toView(p: TaxProjection, decl: TaxDeclarations): Omit<Wire<"tax">, "pat
     remaining_months: p.remainingMonths,
     employed_months: p.employedMonths,
     monthly_tds: p.monthlyTds,
+    // Pay and tax the system before HRMS paid this year: already inside annual_gross and deducted_so_far,
+    // stated apart so the page can say how much of each came from before HRMS.
+    ...(p.beforeHrms
+      ? { before_hrms_gross: p.beforeHrms.taxableGross, before_hrms_tds: p.beforeHrms.tax, before_hrms_paid_through: p.beforeHrms.paidThrough }
+      : {}),
   };
 }
 

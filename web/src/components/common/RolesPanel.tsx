@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { ShieldAlert, Pencil, MoreHorizontal, KeyRound } from "lucide-react";
-import { patch } from "@/api";
+import { ShieldAlert, Pencil, MoreHorizontal, KeyRound, LockKeyhole } from "lucide-react";
+import { patch, invoke, type AepResource } from "@/api";
+import { AccessAction } from "@/components/access/AccessAction";
+import { useConfirm } from "@/components/common/confirm";
 import { useCollection } from "@/hooks/useCollection";
 import { roleLabel, registerRoleLabels, EVERYONE_ROLE } from "@/lib/roles";
 import { CopyEmail } from "@/components/common/CopyEmail";
@@ -29,7 +31,6 @@ import { useToast } from "@/components/ui/use-toast";
 const DORMANT_DAYS = 90;
 
 const NONE = "__none__";
-const roleVariant = (role: string) => (role === "super_admin" ? "default" : role === "employee" ? "muted" : "secondary");
 
 /** User role/status/employee-link management. Restricted to super_admin (the `admin` capability). */
 export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLElement | null }) {
@@ -45,13 +46,19 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
   // offers these and nothing else: a user's role is a foreign key to a roles row, so a name that is not in the
   // table cannot be saved, and a role the org created has to be offered or it cannot be given to anyone.
   // `everyone` is a rule subject every caller already holds, never a role a person is assigned.
-  const { rows: roleRows, state: rolesState } = useCollection<{ path: string; name: string; label?: string }>("roles", { all: true });
+  const { rows: roleRows, state: rolesState } = useCollection<{ path: string; name: string; label?: string; provisioned?: boolean }>("roles", { all: true });
   useEffect(() => registerRoleLabels(roleRows), [roleRows]);
   const roleOptions = useMemo(() => roleRows.map((r) => r.name).filter((n) => n !== EVERYONE_ROLE), [roleRows]);
+  // The role new accounts are given (the org sets it on the Roles tab). "Privileged" below means anything above
+  // it: that is the baseline every hire gets, so holding more is what an access review asks about.
+  const provisioned = roleRows.find((r) => r.provisioned)?.name;
+  const isPrivileged = (role: string | undefined) => !!role && !!provisioned && role !== provisioned;
+  const roleVariant = (role: string) => (isPrivileged(role) ? "secondary" : "muted");
   const { toast } = useToast();
+  const confirm = useConfirm();
 
   const [editing, setEditing] = useState<User | null>(null);
-  const [form, setForm] = useState({ role: "employee", status: "active", employee: NONE, roles: [] as string[] });
+  const [form, setForm] = useState({ role: "", status: "active", employee: NONE, roles: [] as string[] });
   const [permUser, setPermUser] = useState<User | null>(null);
 
   const empName = useMemo(() => {
@@ -82,6 +89,25 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
   function openEdit(u: User) {
     setEditing(u);
     setForm({ role: u.role, status: u.status, employee: u.employee ? `employees/${idOf(u.employee)}` : NONE, roles: [...(u.roles ?? [])].sort() });
+  }
+
+  // Consequential and not undoable from the same button: it signs the person out everywhere and makes whatever
+  // their browsers stored unreadable. Harmless on an account that never set a PIN, which is why it is offered
+  // on every row rather than only where a PIN exists (nothing here knows which accounts have one).
+  async function resetPin(u: User) {
+    const ok = await confirm({
+      title: `Reset the app PIN for ${u.email}?`,
+      description: "Their PIN is cleared and they are signed out on every device. They can set a new PIN after signing in again. They'll be told it was reset.",
+      confirmLabel: "Reset PIN",
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await invoke("users/" + idOf(u.path), "resetPin");
+      toast({ title: "App PIN reset", description: `${u.email} is signed out everywhere.`, variant: "success" });
+    } catch (e) {
+      toast({ title: "Couldn't reset the PIN", description: e instanceof Error ? e.message : "Try again.", variant: "destructive" });
+    }
   }
 
   const isSelf = editing?.email === me.email;
@@ -127,23 +153,24 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
     }
     // Active, privileged, and nobody has signed in for a quarter. The account most worth asking about in a
     // review: it still opens every door it ever did, and nothing is using it.
-    const dormant = us.filter((u) => u.status === "active" && u.role && u.role !== "employee" && (daysSince(u.last_seen_time ?? u.create_time) ?? 0) >= DORMANT_DAYS);
+    const dormant = us.filter((u) => u.status === "active" && isPrivileged(u.role) && (daysSince(u.last_seen_time ?? u.create_time) ?? 0) >= DORMANT_DAYS);
+    const baseline = provisioned ? roleLabel(provisioned) : "the role new accounts get";
     if (dormant.length > 0) {
       out.push({
         id: "dormant",
         label: `${dormant.length} privileged and dormant`,
         tone: "warning",
-        hint: `Above employee, still enabled, and unused for ${DORMANT_DAYS} days or never signed in.`,
+        hint: `Above ${baseline}, still enabled, and unused for ${DORMANT_DAYS} days or never signed in.`,
         filters: { dormant_days: `>=${DORMANT_DAYS}`, status: "Active" },
         sort: "dormant_days.desc",
       });
     }
-    const disabledPrivileged = us.filter((u) => u.status !== "active" && u.role && u.role !== "employee");
+    const disabledPrivileged = us.filter((u) => u.status !== "active" && isPrivileged(u.role));
     if (disabledPrivileged.length > 0) {
       out.push({
         id: "disabled-privileged",
         label: `${disabledPrivileged.length} disabled but still privileged`,
-        hint: "Disabled accounts that keep a role above employee. Re-enabling one hands the access straight back.",
+        hint: `Disabled accounts that keep a role above ${baseline}. Re-enabling one hands the access straight back.`,
         filters: { status: "Disabled" },
       });
     }
@@ -205,6 +232,10 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
           <DropdownMenuContent align="end">
             <DropdownMenuItem onClick={() => openEdit(u)}><Pencil className="h-4 w-4" /> Edit</DropdownMenuItem>
             {canManagePerms && <DropdownMenuItem onClick={() => setPermUser(u)}><KeyRound className="h-4 w-4" /> Manage permissions</DropdownMenuItem>}
+            {/* The only way back from a forgotten app PIN (services/appLock.ts resetPin). */}
+            <AccessAction verb="resetPin" collection="users" objectPath={`users/${idOf(u.path)}`} can={(u as User & AepResource).access?.can}>
+              <DropdownMenuItem onClick={() => void resetPin(u)}><LockKeyhole className="h-4 w-4" /> Reset app PIN</DropdownMenuItem>
+            </AccessAction>
           </DropdownMenuContent>
         </DropdownMenu>
       ),

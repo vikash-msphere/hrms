@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { get, create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
+import { useScheduleView } from "@/hooks/useScheduleView";
 import { useMedia } from "@/hooks/useMedia";
 import { listAllSessions } from "@/lib/clock";
 import { cn, idOf, formatDate } from "@/lib/utils";
@@ -15,7 +16,9 @@ import {
   type AttendanceRow, type AttendanceSchedule, type DayCredit, type DayStatus, type LeaveRange, type WeekGroup, type WindowStats,
 } from "@/lib/attendance";
 import type { AttendanceWindow } from "@/hooks/useAttendanceWindow";
-import type { AttendanceDayMark, AttendanceSession, Holiday, LeaveRequest, LeaveType } from "@/types";
+import type { AttendanceDayMark, AttendanceSession, Holiday, LateEarlyRequest, LeaveRequest, LeaveType } from "@/types";
+import { excusalsFor, usePunctualityPolicy, type LateEarlyKind } from "@/lib/lateEarly";
+import { hhmmOf } from "../../../../src/domain/punctuality";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Field } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -58,8 +61,8 @@ export type AttendanceLeaveContext = {
 };
 
 export function AttendanceHistory({
-  employeeId, joinedYmd, win, sched, orgToday, now: givenNow, title, canExport, exportName, canMark,
-  sessions: givenSessions, loading: givenLoading, leave: givenLeave, onCorrect, onLogOvertime, emptyText, refreshKey,
+  employeeId, joinedYmd, trackedFromYmd, win, sched, orgToday, now: givenNow, title, canExport, exportName, canMark,
+  sessions: givenSessions, loading: givenLoading, leave: givenLeave, lateEarly: givenLateEarly, onCorrect, onLogOvertime, onRequestLateEarly, emptyText, refreshKey,
   liveMinutes = 0,
 }: {
   employeeId: string;
@@ -77,6 +80,8 @@ export function AttendanceHistory({
   canMark: boolean;
   /** The person's join date: days before it aren't their attendance, so they're never flagged absent. */
   joinedYmd?: string;
+  /** The day HRMS records start for them (`trackedFromOf`): an empty day before it is not an absence. */
+  trackedFromYmd?: string;
   win: AttendanceWindow;
   sched: AttendanceSchedule;
   orgToday: string;
@@ -90,9 +95,15 @@ export function AttendanceHistory({
   sessions?: AttendanceSession[];
   loading?: boolean;
   leave?: AttendanceLeaveContext;
+  /** Approved late arrival / early departure requests the host already holds (they may be everyone's; this
+   *  keeps the employee's). Omitted, the history reads its own window of them. */
+  lateEarly?: LateEarlyRequest[];
   /** Omitted on somebody else's record - see the note above. */
   onCorrect?: (rows: AttendanceRow[]) => void;
   onLogOvertime?: (row: AttendanceRow) => void;
+  /** Ask for a late arrival / early departure to be approved for a day the punches flagged. Omitted wherever
+   *  the reader may not file one for this person - the same rule as `onCorrect`. */
+  onRequestLateEarly?: (row: AttendanceRow, kind: LateEarlyKind) => void;
   emptyText?: string;
   /** Bumped by the owner to re-read the window (after a correction is filed, say). Ignored when `sessions`
    *  are supplied, because then the owner owns the fetch. */
@@ -176,6 +187,16 @@ export function AttendanceHistory({
   );
   const markRowByDay = useMemo(() => new Map(dayMarks.filter((m) => m.date).map((m) => [m.date!, m])), [dayMarks]);
   const [marking, setMarking] = useState<AttendanceRow | null>(null);
+  // Approved late arrivals / early departures over the same window (the comparison's too, for the reason given
+  // on the marks above): each moves its day's start or end, and the day is judged against the moved window.
+  // Gated like the marks - a caller who cannot read these requests fires no request and sees the org's window.
+  const { rows: ownLateEarly } = useCollection<LateEarlyRequest>("late-early-requests", {
+    enabled: !givenLateEarly,
+    all: true,
+    params: { employee: `employees/${employeeId}`, from: prevWindow.from, to: toYmd, state: "APPROVED" },
+  });
+  const excusals = useMemo(() => excusalsFor(givenLateEarly ?? ownLateEarly, employeeId), [givenLateEarly, ownLateEarly, employeeId]);
+  const punctuality = usePunctualityPolicy();
 
   const ownApproved = useMemo(
     () => (givenLeave ? [] : ownLeaves.filter((l) => (l.state ?? "").toUpperCase() === "APPROVED")),
@@ -202,13 +223,20 @@ export function AttendanceHistory({
     return (ref?: string) => (ref ? m.get(idOf(ref)) : undefined);
   }, [leaveTypes]);
 
+  // This person's own days. WIDENED BACK TO THE COMPARISON WINDOW, because the same `buildRows` is used for
+  // it: resolved against the visible window alone, the previous period would fall back to the org's week and
+  // the two halves of the comparison would be counted on different calendars.
+  const schedView = useScheduleView(sched, prevWindow.from < fromYmd ? prevWindow.from : fromYmd, toYmd, employeeId);
+  const schedOf = useMemo(() => schedView.of(employeeId), [schedView, employeeId]);
+
   const buildRows = useCallback(
     (src: AttendanceSession[], opts: { from: string; to: string }) =>
       buildAttendanceRows({
-        fromYmd: opts.from, toYmd: opts.to, todayYmd: orgToday, sched,
-        summaries: summarizeByDay(src, sched), holidays: holidaySet, leaveRanges, marksByDay, joinedYmd,
+        fromYmd: opts.from, toYmd: opts.to, todayYmd: orgToday, schedOf,
+        summaries: summarizeByDay(src, sched, { excusals, policy: punctuality.attendance, leaveRanges }),
+        holidays: holidaySet, leaveRanges, marksByDay, joinedYmd, trackedFromYmd,
       }),
-    [orgToday, sched, holidaySet, leaveRanges, marksByDay, joinedYmd],
+    [orgToday, sched, schedOf, holidaySet, leaveRanges, marksByDay, joinedYmd, trackedFromYmd, excusals, punctuality],
   );
 
   const rows = useMemo(() => buildRows(sessions, { from: fromYmd, to: toYmd }), [sessions, buildRows, fromYmd, toYmd]);
@@ -243,7 +271,7 @@ export function AttendanceHistory({
   const listRows = useMemo(() => kf.apply(rows), [rows, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
   const weeks = useMemo<WeekGroup[]>(() => groupWeeks(listRows), [listRows]);
 
-  const stats = useMemo(() => statsOf(rows, tz, sched.full_day_minutes, orgToday), [rows, tz, sched.full_day_minutes, orgToday]);
+  const stats = useMemo(() => statsOf(rows, tz, schedOf, orgToday), [rows, tz, schedOf, orgToday]);
   // Absent days in the visible window, surfaced above the table so a missed punch is one click from a fix.
   const absentRows = useMemo(() => rows.filter((r) => r.status === "absent"), [rows]);
   const shortDays = useMemo(() => rows.filter(isShortRow).length, [rows, sched.full_day_minutes]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -261,13 +289,13 @@ export function AttendanceHistory({
           `attendance?employee=employees/${employeeId}&from=${encodeURIComponent(`${prevWindow.from}T00:00:00.000Z`)}&to=${encodeURIComponent(`${prevWindow.to}T23:59:59.999Z`)}`,
         );
         if (!live) return;
-        setPrevStats(statsOf(buildRows(prev, { from: prevWindow.from, to: prevWindow.to }), tz, sched.full_day_minutes, orgToday));
+        setPrevStats(statsOf(buildRows(prev, { from: prevWindow.from, to: prevWindow.to }), tz, schedOf, orgToday));
       } catch {
         if (live) setPrevStats(null);
       }
     })();
     return () => { live = false; };
-  }, [compare, prevWindow, buildRows, employeeId, tz, sched.full_day_minutes, orgToday]);
+  }, [compare, prevWindow, buildRows, employeeId, tz, schedOf, orgToday]);
 
   // The grid opens on the day you're most likely to be looking for: today, else the newest day with a record.
   useEffect(() => {
@@ -283,9 +311,8 @@ export function AttendanceHistory({
     });
   }, []);
   // Pressing a bar in the hours chart opens that day, in whichever shape the view has for a day: the month
-  // grid's detail panel on the calendar, the unfolded punch row in the history list. Not a view switch - the
-  // two views are different WINDOWS (a calendar month against the last thirty days), so a day picked in one
-  // of them is not always in the other.
+  // grid's detail panel on the calendar, the unfolded punch row in the history list. Not a view switch: the
+  // reader chose the view, and pressing a bar is a request to see a day, not to change how days are shown.
   const pickDay = useCallback((day: string) => {
     if (view === "calendar") { setSelectedDay(day); return; }
     setExpanded((prev) => new Set(prev).add(day));
@@ -312,6 +339,13 @@ export function AttendanceHistory({
     // who may file one), so it stays a real signal rather than a button on every row.
     onLogOvertime: onLogOvertime && overtimeMinutes(r) >= 30 ? () => onLogOvertime(r) : undefined,
     overtimeMinutes: overtimeMinutes(r),
+    // A late or left-early day offers the request that would excuse it: only where the reader may file one,
+    // only for a kind the org's policy offers, and not where one is already approved (a day holds one live
+    // request of each kind, so a second would only be refused).
+    onRequestLate: onRequestLateEarly && r.summary?.late && r.summary.approvedLateUntil == null && punctuality.requests.enabled && punctuality.requests.late_arrival
+      ? () => onRequestLateEarly(r, "late_arrival") : undefined,
+    onRequestEarly: onRequestLateEarly && r.summary?.leftEarly && r.summary.approvedEarlyFrom == null && punctuality.requests.enabled && punctuality.requests.early_departure
+      ? () => onRequestLateEarly(r, "early_departure") : undefined,
   });
 
   function exportWindow(format: "csv" | "xlsx") {
@@ -319,7 +353,9 @@ export function AttendanceHistory({
     // question about their pay, and a sheet that showed only the derived status would state the opposite of
     // what was paid on every marked day - while one that showed only the mark would hide that a decision had
     // been made at all. The reason comes too: a decision without its reason is the thing being disputed.
-    const headers = ["Date", "Day", "Status", "Counted as", "Reason", "First in", "Last out", "Worked", "Worked minutes", "Late by (min)", "Left early by (min)"];
+    // "Approved" is the moved window a late or early day was judged against - without it, "Late by 20" on a
+    // day somebody was approved to start two hours late reads as twenty minutes past nine.
+    const headers = ["Date", "Day", "Status", "Counted as", "Reason", "Approved", "First in", "Last out", "Worked", "Worked minutes", "Late by (min)", "Left early by (min)"];
     const data = [...rows].reverse().map((r) => {
       const s = r.summary;
       return [
@@ -328,6 +364,7 @@ export function AttendanceHistory({
         STATUS_UI[r.status].label,
         r.mark ? CREDIT_LABEL[r.mark] : "",
         (r.mark && markRowByDay.get(r.day)?.reason) || "",
+        approvedLabel(s) ?? "",
         s?.arrival ? fmtHM(s.arrival, tz) : "",
         s?.departure ? fmtHM(s.departure, tz) : "",
         s ? fmtDuration(s.workedMinutes) : "",
@@ -459,9 +496,9 @@ export function AttendanceHistory({
               drops to something that still fits a line of its own on the narrowest screen. */}
           <div className="flex flex-wrap items-center gap-1.5">
             <ExportButton canExport={canExport} label={`Export ${rows.length} day${rows.length === 1 ? "" : "s"}`} onExport={exportWindow} disabled={rows.length === 0} />
-            <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => goPage(page + 1)} aria-label={view === "calendar" ? "Previous month" : "Older 30 days"}><ChevronLeft className="h-4 w-4" /></Button>
+            <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => goPage(page + 1)} aria-label="Previous month"><ChevronLeft className="h-4 w-4" /></Button>
             <span className="min-w-[7rem] text-center text-xs tabular-nums text-muted-foreground sm:min-w-[11rem]">{windowLabel}</span>
-            <Button variant="outline" size="icon" className="h-7 w-7" disabled={page === 0} onClick={() => goPage(Math.max(0, page - 1))} aria-label={view === "calendar" ? "Next month" : "Newer 30 days"}><ChevronRight className="h-4 w-4" /></Button>
+            <Button variant="outline" size="icon" className="h-7 w-7" disabled={page === 0} onClick={() => goPage(Math.max(0, page - 1))} aria-label="Next month"><ChevronRight className="h-4 w-4" /></Button>
             {page > 0 && <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => goPage(0)}>Today</Button>}
           </div>
         </CardHeader>
@@ -511,6 +548,7 @@ export function AttendanceHistory({
                       <span className="font-medium">{fmtDayLong(selectedRow.day)}</span>
                       {selectedRow.day === orgToday && <Badge variant="info">Today</Badge>}
                       <StatusPill status={selectedRow.status} lateBy={selectedRow.summary?.lateByMin} earlyBy={selectedRow.summary?.earlyByMin} />
+                      <ApprovedBadge summary={selectedRow.summary} />
                       {selectedRow.mark && <MarkBadge credit={selectedRow.mark} />}
                     </div>
                     <div className="flex items-center gap-2">
@@ -601,6 +639,7 @@ export function AttendanceHistory({
                               <td className="py-1.5">
                                 <span className="flex flex-wrap items-center gap-1.5">
                                   <StatusPill status={r.status} lateBy={d?.lateByMin} earlyBy={d?.earlyByMin} />
+                                  <ApprovedBadge summary={d} />
                                   {r.mark && <MarkBadge credit={r.mark} />}
                                 </span>
                               </td>
@@ -1068,6 +1107,7 @@ function DayCards({ weeks, orgToday, tz, expanded, onToggle, detail }: {
                   </span>
                   <span className="flex shrink-0 flex-col items-end gap-0.5">
                     <StatusPill status={r.status} lateBy={d?.lateByMin} earlyBy={d?.earlyByMin} />
+                    <ApprovedBadge summary={d} />
                     {r.mark && <MarkBadge credit={r.mark} />}
                   </span>
                   <ChevronRight className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", isOpen && "rotate-90")} aria-hidden />
@@ -1095,6 +1135,27 @@ function MarkBadge({ credit }: { credit: DayCredit }) {
   );
 }
 
+/** The approved window a day was judged against, as words: "In by 10:30 approved", "Out at 16:00 approved". */
+function approvedLabel(s?: { approvedLateUntil?: number; approvedEarlyFrom?: number }): string | undefined {
+  const parts = [
+    s?.approvedLateUntil != null ? `In by ${hhmmOf(s.approvedLateUntil)}` : null,
+    s?.approvedEarlyFrom != null ? `out at ${hhmmOf(s.approvedEarlyFrom)}` : null,
+  ].filter(Boolean) as string[];
+  if (!parts.length) return undefined;
+  const text = parts.join(", ");
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)} approved`;
+}
+
+/**
+ * An approved late arrival or early departure, shown BESIDE the status the moved window earned rather than
+ * instead of it - so "On time" on a day that started at 10:30 says why, and "Late 20m" on the same day says
+ * from when.
+ */
+function ApprovedBadge({ summary }: { summary?: { approvedLateUntil?: number; approvedEarlyFrom?: number } }) {
+  const label = approvedLabel(summary);
+  return label ? <Badge variant="info">{label}</Badge> : null;
+}
+
 export function StatusPill({ status, lateBy, earlyBy }: { status: DayStatus; lateBy?: number; earlyBy?: number }) {
   const ui = STATUS_UI[status];
   const label =
@@ -1107,7 +1168,7 @@ export function StatusPill({ status, lateBy, earlyBy }: { status: DayStatus; lat
 
 // The unfolded detail for a day: its punch log when there are clock-ins, otherwise why there are none
 // (the leave taken + its reason, the holiday's name, or a plain absent note).
-function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect, onLogOvertime, overtimeMinutes = 0 }: {
+function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect, onLogOvertime, overtimeMinutes = 0, onRequestLate, onRequestEarly }: {
   row: AttendanceRow;
   punches: AttendanceSession[];
   now: number;
@@ -1118,6 +1179,8 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
   onCorrect?: () => void;
   onLogOvertime?: () => void;
   overtimeMinutes?: number;
+  onRequestLate?: () => void;
+  onRequestEarly?: () => void;
 }) {
   if (punches.length > 0) {
     return (
@@ -1175,6 +1238,16 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
               <Zap className="h-3 w-3" /> Log {fmtDurationShort(overtimeMinutes)} past the shift as overtime
             </Button>
           )}
+          {onRequestLate && (
+            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={onRequestLate}>
+              <AlarmClock className="h-3 w-3" /> Request a late arrival for this day
+            </Button>
+          )}
+          {onRequestEarly && (
+            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={onRequestEarly}>
+              <Clock className="h-3 w-3" /> Request an early departure for this day
+            </Button>
+          )}
         </div>
       </div>
     );
@@ -1225,6 +1298,15 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
       <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
         <span>No punches recorded, and no approved leave or holiday on record for this day.</span>
         {onCorrect && <Button variant="outline" size="sm" onClick={onCorrect}><Pencil className="h-3 w-3" /> Request correction</Button>}
+      </div>
+    );
+  }
+
+  if (row.status === "untracked") {
+    return (
+      <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+        <span>Before HRMS records start for this person, so no punches were expected. Not counted as an absence.</span>
+        {onCorrect && <Button variant="outline" size="sm" onClick={onCorrect}><Pencil className="h-3 w-3" /> Add times</Button>}
       </div>
     );
   }

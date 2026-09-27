@@ -1,8 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
 import { addMonths, monthEndOf, monthStartOf, monthLabel } from "@/lib/attendance";
-import { formatDate } from "@/lib/utils";
-
-const DAY_MS = 86400000;
 
 // How the history is shown: a list of days (with weekly subtotals) or a month grid. Attendance is
 // calendar-shaped, so the grid is the pattern view; the list is the detail view. Remembered per reader, and
@@ -40,30 +37,22 @@ export function useAttendanceWindow(key: string, orgToday: string): AttendanceWi
   const [view, setView] = useState<AttendanceView>(() => loadView(key));
   const [page, setPage] = useState(0);
 
-  // The visible window (YYYY-MM-DD). The list pages by 30 days from today; the grid pages by calendar month,
-  // so the month it draws is exactly the month it fetched.
+  // The visible window (YYYY-MM-DD): one calendar month, in BOTH views. The list and the grid are two shapes of
+  // the same days, and every figure around them (the hours chart, the stat row, the team period table) reads
+  // this window, so a month in one view is the same month in the other.
   const { fromYmd, toYmd } = useMemo(() => {
-    if (view === "calendar") {
-      const month = addMonths(monthStartOf(orgToday), -page);
-      return { fromYmd: month, toYmd: monthEndOf(month) };
-    }
-    const toMs = Date.parse(orgToday + "T00:00:00Z") - page * 30 * DAY_MS;
-    return { fromYmd: new Date(toMs - 29 * DAY_MS).toISOString().slice(0, 10), toYmd: new Date(toMs).toISOString().slice(0, 10) };
-  }, [view, page, orgToday]);
+    const month = addMonths(monthStartOf(orgToday), -page);
+    return { fromYmd: month, toYmd: monthEndOf(month) };
+  }, [page, orgToday]);
 
   const prevWindow = useMemo(() => {
-    if (view === "calendar") {
-      const month = addMonths(fromYmd, -1);
-      return { from: month, to: monthEndOf(month) };
-    }
-    const to = new Date(Date.parse(fromYmd + "T00:00:00Z") - DAY_MS);
-    return { from: new Date(+to - 29 * DAY_MS).toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
-  }, [view, fromYmd]);
+    const month = addMonths(fromYmd, -1);
+    return { from: month, to: monthEndOf(month) };
+  }, [fromYmd]);
 
-  // Switching view re-bases the window (30 days vs a calendar month), so start again at the current one.
+  // The window does not depend on the view, so switching keeps the month the reader paged to.
   const switchView = useCallback((v: AttendanceView) => {
     setView(v);
-    setPage(0);
     try { localStorage.setItem(storageKey(key), v); } catch { /* private mode - the toggle just won't stick */ }
   }, [key]);
 
@@ -71,8 +60,8 @@ export function useAttendanceWindow(key: string, orgToday: string): AttendanceWi
 
   return {
     view, page, fromYmd, toYmd, prevWindow,
-    windowLabel: view === "calendar" ? monthLabel(fromYmd) : `${formatDate(fromYmd)} – ${formatDate(toYmd)}`,
-    prevLabel: view === "calendar" ? "last month" : "the previous 30 days",
+    windowLabel: monthLabel(fromYmd),
+    prevLabel: "last month",
     switchView, goPage,
   };
 }

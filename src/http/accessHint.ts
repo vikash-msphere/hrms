@@ -30,17 +30,22 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   // parts company the moment an org grants one without the other, offering an editor that 403s or hiding one
   // that would work. A verb the hint does not list cannot be asked about, which is why they belong here.
   // (The signature verbs deliberately do NOT: they are owner-only at the service level, not grantable.)
-  employees: ["update", "delete", "enrollDefaultBenefits", "uploadPhoto", "clearPhoto"],
+  // `setTrackedFrom` is collection-level (it dates everybody who joined before go-live at once); it is listed so
+  // the ACL modal can grant it by name, the way `assets` lists `batchCreate`.
+  employees: ["update", "delete", "enrollDefaultBenefits", "uploadPhoto", "clearPhoto", "setTrackedFrom"],
   departments: ["update", "delete"],
   attendance: ["clockIn", "clockOut"],
   "attendance-regularizations": ["approve", "reject", "cancel"],
   "overtime-requests": ["approve", "reject", "cancel"],
   "remote-work-requests": ["approve", "reject", "cancel"],
+  "late-early-requests": ["approve", "reject", "cancel"],
   // `issue` is the hand-over: an approved request is closed by giving the person an actual asset.
   "asset-requests": ["approve", "reject", "cancel", "issue"],
   operations: ["run"],
   "cron-runs": ["run"],
-  "leave-requests": ["update", "delete", "approve", "reject", "cancel", "upload", "download"],
+  // `importHistory` is collection-level (leave from before HRMS, for many people at once); listed so the ACL
+  // modal can grant it by name.
+  "leave-requests": ["update", "delete", "approve", "reject", "cancel", "upload", "download", "importHistory"],
   goals: ["update", "delete", "updateProgress", "comment", "setContributors", "watch", "unwatch", "similar", "suggestMeasure"],
   boards: ["update", "delete", "configure", "metrics", "duplicates", "narrate"],
   cards: ["update", "delete", "move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo", "promoteTodo", "watch", "unwatch", "triage", "flow", "suggestGoal", "suggestSteps"],
@@ -55,6 +60,9 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   "transition-tasks": ["complete", "reopen", "upload"],
   announcements: ["update", "delete", "post", "giveKudos", "markRead", "markAllRead", "react", "reply", "vote", "publish", "unpublish", "disable", "enable", "lock", "unlock", "pin", "unpin"],
   "api-keys": ["delete", "revoke"], // no update: a credential's scope is fixed at mint time, so there is no PATCH
+  // `resetPin` clears somebody's forgotten app PIN and signs them out everywhere (services/appLock.ts). Listed so
+  // the ACL modal can grant it by name; nothing seeds it, so out of the box it is super admin's alone.
+  users: ["update", "resetPin"],
   holidays: ["update", "delete"],
   // `respond` is the attendee's RSVP: a verb an ordinary employee holds on an event aimed at them, without any
   // write access to the event itself.
@@ -68,6 +76,9 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   "payroll-runs": ["delete", "submit", "approve", "publish", "build", "bankFile", "statutoryReport", "previewPayslip", "paymentResult"],
   reimbursements: ["update", "delete", "approve", "reject", "cancel", "pay", "upload", "download"],
   "leave-encashments": ["approve", "reject", "cancel"],
+  // Collection-level, listed so the ACL modal can grant it by name (like `assets` lists `batchCreate`).
+  "leave-adjustments": ["importOpenings"],
+  "payroll-openings": ["update", "delete", "importOpenings"],
   "reimbursement-categories": ["update", "delete"],
   "ticket-checklists": ["update", "delete"],
   // Asset custody: `verify` counts one into stock, `acknowledge` is its holder confirming receipt, and
@@ -123,6 +134,7 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "update", "delete", // standard
   "enable", "disable", "lock", "unlock", "publish", "unpublish", "restore", // shared lifecycle
   "revoke", // kill an API key without deleting it (api-keys), so the audit trail can still resolve it
+  "resetPin", // clear a forgotten app PIN and sign the person out everywhere (users)
   "post", // create a generic board post (announcements)
   "giveKudos", // give a kudo (a board post about a recipient; announcements, kind="kudos")
   "markRead", // record the caller's read receipt on a board post (announcements)
@@ -190,6 +202,9 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "letter", // ATS: render an offer's own letter as a PDF, inline, nothing persisted (offers)
   "enrollDefaultBenefits", // auto-enrol a new hire in default benefit plans (employees; wired via automation)
   "uploadPhoto", "clearPhoto", // the profile avatar (employees) - own via `employees.me.*`, org-wide for HR
+  "setTrackedFrom", // collection-level: the day HRMS records start, for everyone who joined before it (employees)
+  "importOpenings", // collection-level: figures from before HRMS - leave balances (leave-adjustments), pay and tax so far (payroll-openings)
+  "importHistory", // collection-level: leave taken before HRMS, as approved history (leave-requests)
   "test", // dry-run an automation rule against a sample event (automations)
   "requestAccess", // ask access admins for a missing grant (access-rules)
   "clone", // copy every rule one subject holds onto another, as one act (access-rules)

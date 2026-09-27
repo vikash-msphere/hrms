@@ -147,6 +147,10 @@ export const UNSTAMPED_TABLES: Record<string, string> = {
   idempotency_keys: "internal replay store; the write it answers for is stamped",
   // The digest worker's queue. Its OUTPUT is a notification, and `notifications` is a stamped collection.
   notification_digest_queue: "internal queue; the notification it produces is stamped",
+  // The app lock (services/appLock.ts): PIN hashes, wrong-PIN counts, revoked unlock proofs. Read only by the auth
+  // middleware and /auth/lock, never cached by a client, and kept off `users` precisely so a lock or an unlock
+  // stales nothing anybody holds.
+  app_locks: "sign-in state read only by the auth middleware; never cached as a collection",
   // Loss-of-pay corrections waiting for a run to pay them. Not its own wire collection, and - the reason it
   // is here rather than a SIDE_TABLE - raising one makes nothing a client already holds stale. The closed
   // run it corrects is history and does not change; the correction only becomes visible when the NEXT run is
@@ -228,3 +232,51 @@ export function renderChangeDdl(): string {
 
 /** Marker the generator writes before the block, so re-running replaces it rather than appending twice. */
 export const CHANGE_DDL_MARKER = "-- Collection change stamps. GENERATED from the authz collection->table registry";
+
+// ---- The block across migrations ------------------------------------------------------------------------------
+//
+// The generated block lives in 0000, which production has applied and which is never rewritten (migrations are
+// append-only). A table added later gets its stamp triggers from the migration that creates it, written there by
+// hand, and a trigger whose body changes is replaced there with DROP TRIGGER + CREATE TRIGGER. So "does the
+// database carry the triggers the registry describes" is a question about ALL the migrations applied in order,
+// not about one block - these three functions answer it, for scripts/genChangeDdl.ts and the drift test alike.
+
+const TRIGGER_STATEMENT = /DROP TRIGGER (?:IF EXISTS )?"(chg_[A-Za-z0-9_]+)"|CREATE TRIGGER "(chg_[A-Za-z0-9_]+)" AFTER (?:INSERT|UPDATE|DELETE) ON "[^"]+" BEGIN\n[\s\S]*?\nEND/g;
+
+/** Every stamp trigger a piece of SQL creates, by name, as its CREATE statement (without the `;`). */
+export function changeTriggersIn(sql: string): Map<string, string> {
+  return applyTriggerStatements(new Map(), sql);
+}
+
+function applyTriggerStatements(into: Map<string, string>, sql: string): Map<string, string> {
+  for (const m of sql.matchAll(TRIGGER_STATEMENT)) {
+    if (m[1]) into.delete(m[1]);
+    else into.set(m[2]!, m[0]);
+  }
+  return into;
+}
+
+/** The stamp triggers the migrations leave in place, applied in file order (DROP removes, CREATE sets). */
+export function appliedChangeTriggers(migrationsInOrder: readonly string[]): Map<string, string> {
+  const applied = new Map<string, string>();
+  for (const sql of migrationsInOrder) applyTriggerStatements(applied, sql);
+  return applied;
+}
+
+/**
+ * What a new migration has to carry so the applied triggers match the generator: a CREATE for each missing one,
+ * DROP + CREATE for each whose body changed, and a DROP for each the registry no longer describes. Empty when
+ * they already match. Each entry is one statement, ready to join with a statement breakpoint.
+ */
+export function changeDdlDelta(applied: ReadonlyMap<string, string>): string[] {
+  const wanted = changeTriggersIn(renderChangeDdl());
+  const out: string[] = [];
+  for (const [name, create] of wanted) {
+    const have = applied.get(name);
+    if (have === create) continue;
+    if (have !== undefined) out.push(`DROP TRIGGER IF EXISTS "${name}";`);
+    out.push(`${create};`);
+  }
+  for (const name of applied.keys()) if (!wanted.has(name)) out.push(`DROP TRIGGER IF EXISTS "${name}";`);
+  return out;
+}

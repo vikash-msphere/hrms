@@ -13,8 +13,12 @@ import { applyGoalTemplate } from "../src/services/goalTemplates";
 import { orgDayFromToday } from "../src/services/orgDay";
 import { createGoal } from "../src/services/goals";
 import { createReviewCycle } from "../src/services/reviewCycles";
-import { grantFor } from "../src/domain/grants";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { grantFor, EVERYONE_GRANT } from "../bootstrap/authz/grants";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
+import { compileGrant } from "../src/domain/compileGrants";
+import { insertBatches, runBatch } from "../src/lib/dbBatch";
+import { seedManifest } from "./seedManifest";
+import { app } from "../src/index";
 
 // Goal templates: a blueprint, and the press that stamps it onto people. The interesting parts are that an
 // applied goal is an ORDINARY goal (same code, audit, notification, stage) and that applying twice is a no-op
@@ -30,6 +34,7 @@ beforeAll(async () => {
     const s = stmt.trim();
     if (s) await b.DB.prepare(s).run();
   }
+  await seedManifest(b.DB);
   deps = makeDeps(b);
 });
 
@@ -228,5 +233,68 @@ describe("applying a goal template", () => {
     await expect(applyGoalTemplate(deps, actor, tpl, [])).rejects.toThrow(/at least one employee/);
     await deps.db.update(schema.goalTemplates).set({ deleteTime: new Date() }).where(eq(schema.goalTemplates.uuid, tpl));
     await expect(applyGoalTemplate(deps, actor, tpl, ["employees/x"])).rejects.toThrow(/not found/);
+  });
+});
+
+// The `apply` verb only says the caller may USE the blueprint. The goals it creates belong to the people named
+// in the body, past the middleware's owner-on-create gate, so the service asks for each of them what that gate
+// asks of a goal created on someone's behalf: write on `goals.<their code>`. Unchecked, a holder of `apply`
+// stamped goals onto anybody in the company.
+// The `apply` grant says the caller may use a blueprint, not whose goals it lands in; the authz middleware asks
+// write on `goals.<code>` of every person the body names (middleware/authz.ts BODY_TARGET_VERBS). Asked through
+// the app, with the seeded role's compiled rules in `access_rules`, because that gate is the thing under test.
+describe("who apply may stamp goals for", () => {
+  const DEV_EMAIL = "dev@example.com"; // the ambient dev-auth caller (vitest.config.ts DEV_FAKE_EMAIL)
+  const apply = (tpl: string, employees: string[]) =>
+    app.request(`/v1/goal-templates/${tpl}:apply`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Requested-By": "hrms-spa" },
+      body: JSON.stringify({ employees }),
+    }, b as unknown as Record<string, unknown>);
+
+  async function employee(managerId: string | null = null) {
+    const uuid = genId();
+    await deps.db.insert(schema.employees).values({ uuid, code: nextCode(), firstName: "Report", lastName: "Tester", workEmail: `${uuid}@test.example`, status: "active", managerId });
+    return uuid;
+  }
+  // The caller: an employee record, a user on DEV_EMAIL holding `role`, and that role's seeded rules.
+  async function signInAs(role: "team_lead" | "hr_admin") {
+    await deps.db.insert(schema.roles).values({ name: role, label: role }).onConflictDoNothing();
+    await deps.db.delete(schema.accessRules);
+    const rows = [
+      ...compileGrant(grantFor(role)).map((r) => ({ ...r, subject: role })),
+      ...compileGrant(EVERYONE_GRANT).map((r) => ({ ...r, subject: "everyone" })),
+    ].map((r) => ({ ...r, uuid: genId(), subjectKind: "role" as const }));
+    await runBatch(deps.db, insertBatches(rows, (group) => deps.db.insert(schema.accessRules).values(group)));
+    const employeeId = await employee();
+    await deps.db.insert(schema.users).values({ uuid: genId(), code: `u-${genId().slice(0, 4)}`, email: DEV_EMAIL, role, employeeId });
+    return employeeId;
+  }
+
+  it("a team lead sets goals for their own reports and nobody else, and a refusal writes nothing", async () => {
+    const lead = await signInAs("team_lead");
+    const report = await employee(lead);
+    const stranger = await employee();
+    const tpl = await seedTemplate();
+
+    const ok = await apply(tpl, [`employees/${report}`]);
+    expect(ok.status, await ok.clone().text()).toBe(200);
+    // All or nothing: one person outside the lead's reach refuses the whole press, report included.
+    expect((await apply(tpl, [`employees/${stranger}`, `employees/${report}`])).status).toBe(403);
+    expect((await deps.db.select().from(schema.goals)).map((g) => g.employeeId)).toEqual([report]);
+  });
+
+  it("HR, which reads goals and writes none, applies to nobody", async () => {
+    await signInAs("hr_admin");
+    const someone = await employee();
+    const tpl = await seedTemplate();
+    expect((await apply(tpl, [`employees/${someone}`])).status).toBe(403);
+    expect(await deps.db.select().from(schema.goals)).toHaveLength(0);
+  });
+
+  it("a name that is no employee is refused, not skipped", async () => {
+    await signInAs("team_lead");
+    const tpl = await seedTemplate();
+    expect((await apply(tpl, [`employees/${genId()}`])).status).toBe(403);
   });
 });

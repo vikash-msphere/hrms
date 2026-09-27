@@ -188,6 +188,7 @@ export function toEmployeeResource(r: any): Wire<"employee"> {
     manager: ref("employees", r.managerId),
     start_date: r.startDate ? iso(r.startDate).slice(0, 10) : undefined,
     probation_end_date: r.probationEndDate ? iso(r.probationEndDate).slice(0, 10) : undefined,
+    tracked_from: r.trackedFrom ? iso(r.trackedFrom).slice(0, 10) : undefined,
     epf_enrolled: !!r.epfEnrolled,
     eps_excluded: !!r.epsExcluded,
     photo: photoMarker(r),
@@ -355,6 +356,7 @@ export function toRoleResource(r: any): Wire<"role"> {
     name: r.name,
     label: r.label,
     protected: !!r.protected,
+    provisioned: !!r.provisioned,
   };
 }
 
@@ -995,6 +997,13 @@ export function toShiftResource(r: any): Wire<"shift"> {
     start: r.startTime,
     end: r.endTime,
     break_minutes: r.breakMinutes ?? 0,
+    // Null means "derive it" (domain/workSchedule.ts#shiftDay), which is not the same as zero - the field is
+    // omitted rather than defaulted, so the editor can show the derived figure as a placeholder instead of
+    // printing a number nobody chose.
+    full_day_minutes: r.fullDayMinutes ?? undefined,
+    half_day_minutes: r.halfDayMinutes ?? undefined,
+    grace_minutes: r.graceMinutes ?? undefined,
+    flexible_hours: r.flexibleHours == null ? undefined : !!r.flexibleHours,
     color: r.color ?? undefined,
   };
 }
@@ -1004,7 +1013,35 @@ export function toShiftAssignmentResource(r: any): Wire<"shift-assignment"> {
     ...baseResource(r, "shift-assignments"),
     employee: ref("employees", r.employeeId),
     shift: ref("shifts", r.shiftId),
+    // "off" is a rest day and carries no shift; "shift" is the ordinary entry and every existing row is one.
+    kind: r.kind ?? "shift",
     date: r.date ? iso(r.date).slice(0, 10) : undefined,
+    note: r.note ?? undefined,
+  };
+}
+
+export function toWorkPatternResource(r: any): Wire<"work-pattern"> {
+  return {
+    ...baseResource(r, "work-patterns"),
+    name: r.name,
+    cycle_weeks: r.cycleWeeks ?? 1,
+    // The cycle, as refs: `cycle_weeks * 7` entries indexed `weekIndex * 7 + weekday` (0=Sun), each a shift or
+    // null for a rest day. Null survives the mapping because it is a VALUE here - the day somebody is off -
+    // rather than a missing one, so the array stays the length the cycle claims.
+    days: jsonOr<(string | null)[]>(r.daysJson, []).map((id) => (id ? ref("shifts", id) ?? null : null)),
+    color: r.color ?? undefined,
+  };
+}
+
+export function toWorkPatternAssignmentResource(r: any): Wire<"work-pattern-assignment"> {
+  return {
+    ...baseResource(r, "work-pattern-assignments"),
+    employee: ref("employees", r.employeeId),
+    pattern: ref("work-patterns", r.patternId),
+    start_date: r.startDate ? iso(r.startDate).slice(0, 10) : undefined,
+    end_date: r.endDate ? iso(r.endDate).slice(0, 10) : undefined,
+    // Absent means the cycle counts from `start_date`, which is what it does when nobody offsets it.
+    anchor_date: r.anchorDate ? iso(r.anchorDate).slice(0, 10) : undefined,
     note: r.note ?? undefined,
   };
 }
@@ -1081,6 +1118,7 @@ export function toLeaveRequestResource(r: any): Wire<"leave-request"> {
     start_session: r.startSession ?? 1,
     end_session: r.endSession ?? 2,
     state: r.state,
+    source: r.source ?? "app",
     reason: r.reason ?? undefined,
     has_document: !!r.hasDocument, // set by the route when a supporting file is attached to this request
     // Policy rules the org waives rather than enforces, recorded when this was filed. The approver sees them
@@ -1382,6 +1420,23 @@ export function toRemoteWorkRequestResource(r: any): Wire<"remote-work-request">
     location: r.location ?? undefined,
     reason: r.reason ?? undefined,
     state: r.state,
+    decided_by: ref("users", r.decidedBy),
+    decision_note: r.decisionNote ?? undefined,
+  };
+}
+
+export function toLateEarlyRequestResource(r: any): Wire<"late-early-request"> {
+  return {
+    ...baseResource(r, "late-early-requests"),
+    employee: ref("employees", r.employeeId),
+    date: iso(r.date).slice(0, 10),
+    kind: r.kind,
+    at: r.at,
+    minutes: r.minutes,
+    reason: r.reason ?? undefined,
+    state: r.state,
+    over_limit: !!r.overLimit,
+    auto_approved: !!r.autoApproved,
     decided_by: ref("users", r.decidedBy),
     decision_note: r.decisionNote ?? undefined,
   };
@@ -1920,6 +1975,37 @@ export function toLeaveBalanceResource(r: any): Wire<"leave-balance"> {
   };
 }
 
+export function toLeaveAdjustmentResource(r: any): Wire<"leave-adjustment"> {
+  const opt = (v: number | null | undefined) => (v == null ? undefined : round2(v));
+  return {
+    ...baseResource(r, "leave-adjustments"),
+    employee: ref("employees", r.employeeId),
+    leave_type: ref("leave-types", r.leaveTypeId),
+    kind: r.kind,
+    days: round2(r.days ?? 0),
+    opening_days: opt(r.openingDays),
+    removed_days: opt(r.removedDays),
+    encashed_days: opt(r.encashedDays),
+    as_of: r.asOf ? iso(r.asOf).slice(0, 10) : undefined,
+    reason: r.reason ?? undefined,
+  };
+}
+
+export function toPayrollOpeningResource(r: any): Wire<"payroll-opening"> {
+  return {
+    ...baseResource(r, "payroll-openings"),
+    employee: ref("employees", r.employeeId),
+    financial_year: r.financialYear,
+    paid_through: r.paidThrough,
+    gross: round2(r.gross ?? 0),
+    taxable_gross: round2(r.taxableGross ?? 0),
+    tds: round2(r.tds ?? 0),
+    pt: round2(r.pt ?? 0),
+    esi_contributing: !!r.esiContributing,
+    note: r.note ?? undefined,
+  };
+}
+
 // Shared document fields (both resources). No `visibility` - audience is grant policy, not data.
 // Fields common to both document collections. Typed against the contract so the two schemas' `required`
 // lists stay honest - this helper is spread into both serializers, where a bare object would hide it.
@@ -2256,6 +2342,28 @@ export function toCronRunResource(r: {
     ...(r.durationMs != null ? { duration_ms: r.durationMs } : {}),
     ...(r.error ? { error: r.error } : {}),
     ...(r.summaryJson ? { summary: jsonOr<Wire<"cron_run">["summary"]>(r.summaryJson, {}) } : {}),
+  };
+}
+
+// A daily ⌘K usage counter (services/searchInsights.ts). Counts only - nothing here names a person.
+export function toSearchInsightResource(r: {
+  uuid: string;
+  day: string;
+  kind: "zero" | "open" | "ask";
+  label: string;
+  count: number;
+  createdAt: Date | number;
+  updatedAt: Date | number;
+}): Wire<"search_insight"> {
+  return {
+    path: `search-insights/${r.uuid}`,
+    create_time: iso(r.createdAt),
+    update_time: iso(r.updatedAt),
+    etag: etagOf(+new Date(r.updatedAt)),
+    day: r.day,
+    kind: r.kind,
+    label: r.label,
+    count: r.count,
   };
 }
 

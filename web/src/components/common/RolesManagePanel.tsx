@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Trash2, Pencil, MoreHorizontal, KeyRound } from "lucide-react";
+import { Plus, Trash2, Pencil, MoreHorizontal, KeyRound, UserPlus } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { registerRoleLabels } from "@/lib/roles";
+import { registerRoleLabels, EVERYONE_ROLE } from "@/lib/roles";
 import { usePermission } from "@/lib/perm";
 import type { User } from "@/types";
 import { Card, CardContent } from "@/components/ui/card";
@@ -23,7 +23,7 @@ import { SubjectPermissionsDialog } from "@/components/access/SubjectPermissions
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 
-type Role = { path: string; name: string; label: string; protected: boolean; etag?: string };
+type Role = { path: string; name: string; label: string; protected: boolean; provisioned?: boolean; etag?: string };
 const NAME_RE = /^[a-z][a-z0-9_]{1,40}$/; // mirrors the server (lower_snake, 2-41 chars)
 // "Finance Lead" -> "finance_lead": the identifier nearly always is the display name, so it is derived
 // rather than asked for twice, and stops being derived the moment somebody types one by hand.
@@ -97,7 +97,13 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   const columns: Column<Role>[] = [
     {
       id: "role", header: "Role", filter: "text", accessor: (r) => r.label,
-      cell: (r) => <span className="font-medium">{r.label}{r.protected && <Badge variant="muted" className="ml-2 px-1 py-0 text-[10px]">core</Badge>}</span>,
+      cell: (r) => (
+        <span className="font-medium">
+          {r.label}
+          {r.protected && <Badge variant="muted" className="ml-2 px-1 py-0 text-[10px]">core</Badge>}
+          {r.provisioned && <Badge variant="secondary" className="ml-2 px-1 py-0 text-[10px]">new accounts</Badge>}
+        </span>
+      ),
     },
     { id: "name", header: "Identifier", filter: "text", accessor: (r) => r.name, cell: (r) => <span className="font-mono text-xs text-muted-foreground">{r.name}</span> },
     // "=0" here is every role nobody holds, which is the list to prune.
@@ -115,7 +121,10 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
             <DropdownMenuContent align="end">
               {canWrite && <DropdownMenuItem onClick={() => openEdit(r)}><Pencil className="h-4 w-4" /> Edit</DropdownMenuItem>}
               {canManagePerms && <DropdownMenuItem onClick={() => setPermRole(r)}><KeyRound className="h-4 w-4" /> Manage permissions</DropdownMenuItem>}
-              {canWrite && !r.protected && (
+              {canWrite && !r.provisioned && r.name !== EVERYONE_ROLE && (
+                <DropdownMenuItem onClick={() => makeProvisioned(r)}><UserPlus className="h-4 w-4" /> Give to new accounts</DropdownMenuItem>
+              )}
+              {canWrite && !r.protected && !r.provisioned && (
                 <>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => del(r)}><Trash2 className="h-4 w-4" /> Delete</DropdownMenuItem>
@@ -149,6 +158,25 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
       if (canManagePerms) setPermRole({ path: "roles/" + name, name, label, protected: form.protected });
     }
     reload();
+  }
+
+  // Moves the flag: exactly one role is what every new hire and first sign-in gets, so choosing this one takes
+  // it off the current holder. Existing accounts keep the role they have.
+  async function makeProvisioned(r: Role) {
+    const current = roles.find((x) => x.provisioned);
+    const ok = await confirm({
+      title: `Give "${r.label}" to new accounts?`,
+      description: `Everyone hired or signing in for the first time from now on gets ${r.label}${current ? ` instead of ${current.label}` : ""}. People who already have an account keep their role.`,
+      confirmLabel: "Give to new accounts",
+    });
+    if (!ok) return;
+    try {
+      await patch("roles/" + r.name, { provisioned: true }, r.etag);
+      toast({ title: `New accounts get ${r.label}`, variant: "success" });
+      reload();
+    } catch (e) {
+      toast({ title: "Couldn't change it", description: (e as Error).message, variant: "destructive" });
+    }
   }
 
   async function del(r: Role) {

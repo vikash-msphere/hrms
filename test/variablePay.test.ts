@@ -13,8 +13,8 @@ import { variablePayRun, awardVariablePay, VARIABLE_PAY_KIND } from "../src/serv
 import { createReviewCycle, launchReviewCycle } from "../src/services/reviewCycles";
 import { listReviews, submitSelf, submitManager } from "../src/services/reviews";
 import { createGoal } from "../src/services/goals";
-import { grantFor } from "../src/domain/grants";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { grantFor } from "../bootstrap/authz/grants";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import type { ListScope } from "../src/domain/access";
 
 // Attainment -> money. The arithmetic is simple; what matters is that nothing is paid twice, nothing is paid

@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { Building2, Plus, TriangleAlert } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
+import { useServerSearch } from "@/hooks/useServerSearch";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
@@ -35,7 +36,9 @@ import { useToast } from "@/components/ui/use-toast";
 const EMPTY = { name: "", contact_email: "", contact_phone: "", tax_id: "", payment_terms_days: "", bank_details: "", default_category: "", notes: "" };
 
 export default function Vendors({ openId }: { me?: Me; openId?: string }) {
-  const { rows, state, error, reload } = useCollection<Vendor>("vendors", { showDeleted: true });
+  const { rows, state, error, reload, loadMore, hasMore } = useCollection<Vendor>("vendors", { showDeleted: true });
+  // The register's search box asks the server over every vendor, not the hundred this page holds.
+  const srv = useServerSearch<Vendor>("vendors", { rows, loadMore, hasMore }, "Search all vendors…", { showDeleted: true });
   const { rows: categories } = useCollection<ExpenseCategory>("expense-categories", { all: true });
   useDeepOpen(openId, rows, openEdit);
   const { toast } = useToast();
@@ -217,7 +220,10 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
           <DataTable
             columns={columns}
             tableId="vendors"
-            rows={rows}
+            rows={srv.rows}
+            search={srv.search}
+            hasMore={srv.hasMore}
+            onLoadMore={srv.onLoadMore}
             insights={vendorInsights}
             getRowId={(v) => v.path}
             rowClassName={(v) => (v.delete_time ? "opacity-60" : undefined)}

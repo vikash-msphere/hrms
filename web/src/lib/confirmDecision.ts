@@ -11,7 +11,7 @@ import type { ConfirmFn } from "@/components/common/confirm";
 // reversible view state (pin, hide, mark read), and reads (preview, download, export). Friction on those is
 // noise, and noise is what teaches people to click through the dialogs that matter.
 
-export type Decision = "approve" | "reject" | "cancel" | "pay" | "disburse" | "submit" | "award" | "revoke" | "publish" | "unpublish" | "disable" | "hide" | "release" | "unhide" | "unhidePublish" | "handBack" | "deletePost" | "removeSuggestion" | "pin" | "pinReplacing" | "route" | "advance" | "decline" | "rescind" | "complete" | "reopen";
+export type Decision = "approve" | "reject" | "cancel" | "pay" | "disburse" | "submit" | "award" | "revoke" | "publish" | "unpublish" | "disable" | "hide" | "release" | "unhide" | "unhidePublish" | "handBack" | "deletePost" | "removeSuggestion" | "pin" | "pinReplacing" | "route" | "advance" | "decline" | "rescind" | "complete" | "reopen" | "setTrackedFrom" | "applyOpenings" | "applyPayOpenings" | "applyLeaveHistory";
 
 type Copy = { title: string; description: string; confirmLabel: string; destructive?: boolean };
 
@@ -84,6 +84,34 @@ const COPY: Record<Decision, (subject: string, other?: string) => Copy> = {
   rescind: (s) => ({ title: "Rescind this offer?", description: `${s} is withdrawn from the candidate. This is visible to them and cannot be undone.`, confirmLabel: "Rescind", destructive: true }),
   complete: (s) => ({ title: "Mark this complete?", description: `${s} is closed out, and anything waiting on it moves on.`, confirmLabel: "Complete" }),
   reopen: (s) => ({ title: "Reopen this?", description: `${s} goes back to being open, and the people responsible for it are notified again.`, confirmLabel: "Reopen" }),
+  // One act over the whole workforce, and it moves pay: from the next build, a working day before the date
+  // with nothing recorded stops being docked. Nothing on the page undoes it in bulk, so it asks.
+  setTrackedFrom: (s) => ({
+    title: "Set when HRMS records start?",
+    description: `${s}. From then on a working day before their date with no punches, mark or leave is not an absence and is never docked as loss of pay. Anyone who already has a date keeps it.`,
+    confirmLabel: "Set the date",
+  }),
+  // Moves many encashable balances at once, and tells each person. A re-import only moves the difference, so
+  // it is repeatable, but nothing on the page takes it back in one go.
+  applyOpenings: (s) => ({
+    title: "Apply these opening balances?",
+    description: `${s}. Each balance moves by the change shown, and each person is told their balances were brought over from before HRMS.`,
+    confirmLabel: "Apply",
+  }),
+  // Approved leave written past the request flow for many people at once. Each row can be removed again from
+  // the leave History tab, but nothing on the page takes the batch back in one go.
+  applyLeaveHistory: (s) => ({
+    title: "Bring in this leave?",
+    description: `${s}. Each lands as approved leave and notifies nobody. History (before the records start) counts toward quotas and limits and changes no balance; booked leave takes its days off the balance.`,
+    confirmLabel: "Bring it in",
+  }),
+  // Moves the year's income tax for everybody in the file from the next payroll build. Re-applying replaces
+  // the figures, so it is repeatable, but a draft run built before it has to be rebuilt.
+  applyPayOpenings: (s) => ({
+    title: "Apply this pay and tax?",
+    description: `${s}. The next payroll works out the year's TDS, professional tax cap and ESI with these figures included. A draft run built before now will ask to be rebuilt.`,
+    confirmLabel: "Apply",
+  }),
 };
 
 /** Ask before a decision verb. Returns false when the person backs out - callers just `return`.

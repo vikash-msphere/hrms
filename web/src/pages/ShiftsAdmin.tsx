@@ -22,7 +22,10 @@ import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 
 const COLORS = ["#6366f1", "#3b82f6", "#0ea5e9", "#14b8a6", "#22c55e", "#f59e0b", "#f97316", "#ef4444", "#ec4899", "#a855f7", "#64748b"];
-const EMPTY = { name: "", start: "09:00", end: "18:00", break_minutes: "0", color: COLORS[1] };
+// `full_day_minutes` and `half_day_minutes` are BLANK by default, and blank means derive: a full day is the
+// shift itself (span less break) and half a day is half of that (src/domain/workSchedule.ts#shiftDay). They
+// are here for the shift that genuinely is not its own span - a nine-hour window whose full day is eight.
+const EMPTY = { name: "", start: "09:00", end: "18:00", break_minutes: "0", full_day_minutes: "", half_day_minutes: "", color: COLORS[1] };
 
 // The four patterns nearly every roster starts from. A preset fills the times (and the name, while it is still
 // untouched), so the common case is one click instead of two time pickers.
@@ -68,7 +71,13 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
   // Two shifts with the same name are indistinguishable everywhere they matter (roster cell, legend, filter),
   // so the clash is caught here rather than discovered on the grid.
   const duplicateName = !!form.name.trim() && rows.some((s) => s.path !== editing?.path && s.name.trim().toLowerCase() === form.name.trim().toLowerCase());
-  const canSave = !!form.name.trim() && !sameTime && !breakTooLong && !duplicateName;
+  // The full day this shift will actually be scored on: what the form states, or the shift's own paid length.
+  const derivedFull = form.full_day_minutes.trim() === "" ? Math.max(0, paidMin) : Number(form.full_day_minutes) || 0;
+  // A half day worth more than a full one makes the half-day step unreachable, so every short day is charged
+  // as a whole absence (src/domain/attendance.ts#derivedCredit). The server refuses the pair; this says so
+  // before Save rather than after.
+  const ladderInverted = form.half_day_minutes.trim() !== "" && Number(form.half_day_minutes) > derivedFull;
+  const canSave = !!form.name.trim() && !sameTime && !breakTooLong && !duplicateName && !ladderInverted;
 
   // A preset also names the shift while the name is still untouched (or matches another preset), so it never
   // overwrites something typed by hand.
@@ -86,13 +95,36 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
   }
   function openEdit(s: Shift) {
     setEditing(s);
-    setForm({ name: s.name, start: s.start, end: s.end, break_minutes: String(s.break_minutes ?? 0), color: s.color ?? COLORS[0] });
+    setForm({
+      name: s.name, start: s.start, end: s.end, break_minutes: String(s.break_minutes ?? 0),
+      // Absent stays BLANK rather than becoming the derived number: typing the derived figure in would pin it,
+      // so editing the times later would no longer move the day's length with them.
+      full_day_minutes: s.full_day_minutes == null ? "" : String(s.full_day_minutes),
+      half_day_minutes: s.half_day_minutes == null ? "" : String(s.half_day_minutes),
+      color: s.color ?? COLORS[0],
+    });
     setOpen(true);
   }
   async function save() {
-    const body = { name: form.name.trim(), start: form.start, end: form.end, break_minutes: Number(form.break_minutes) || 0, color: form.color };
-    if (editing) await patch(`shifts/${idOf(editing.path)}`, body, editing.etag);
-    else await create("shifts", body);
+    const base = { name: form.name.trim(), start: form.start, end: form.end, break_minutes: Number(form.break_minutes) || 0, color: form.color };
+    const num = (v: string) => (v.trim() === "" ? null : Number(v));
+    const full = num(form.full_day_minutes);
+    const half = num(form.half_day_minutes);
+    if (editing) {
+      // ON A PATCH the cleared field is `null`, not absent: absent leaves the stored override alone, and
+      // clearing one is how an admin goes back to the derived figure. The contract marks both nullable for
+      // exactly this, so the merge-patch can express "no override" rather than only "some other number".
+      await patch(`shifts/${idOf(editing.path)}`, { ...base, full_day_minutes: full, half_day_minutes: half }, editing.etag);
+    } else {
+      // ON A CREATE a blank field is OMITTED. There is no stored value to clear, so absent and null would mean
+      // the same thing - and a create body carries values, never nulls (see the note in web/src/api.ts: the
+      // dev server's contract proxy refuses one with a 422 the worker never sees).
+      await create("shifts", {
+        ...base,
+        ...(full == null ? {} : { full_day_minutes: full }),
+        ...(half == null ? {} : { half_day_minutes: half }),
+      });
+    }
     toast({ title: editing ? "Shift updated" : "Shift added", variant: "success" });
     reload();
   }
@@ -177,7 +209,7 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
         submitLabel={editing ? "Save changes" : "Create"}
         canSubmit={canSave}
         whyNot={
-          !form.name.trim() ? "Give the shift a name." : duplicateName ? "Another shift already has that name." : sameTime ? "The start and end times are the same." : breakTooLong ? "The break is longer than the shift." : undefined
+          !form.name.trim() ? "Give the shift a name." : duplicateName ? "Another shift already has that name." : sameTime ? "The start and end times are the same." : breakTooLong ? "The break is longer than the shift." : ladderInverted ? "A half day cannot be worth more than a full one." : undefined
         }
         onSubmit={save}
         addAnother={editing ? undefined : nextBlank}
@@ -223,6 +255,20 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
               </p>
               {overnight && <p className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400"><Moon className="h-3 w-3" /> ends next day</p>}
             </div>
+          </div>
+          {/* WHAT A DAY ON THIS SHIFT IS WORTH. Left blank, a full day is the shift itself and half a day is
+              half of that - which is the answer a four-hour shift needs, and the one the org's single
+              full-day figure could not give it. The placeholders show the derived numbers, so an admin can
+              see what blank means without typing anything into it. */}
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="Counts as a full day at" hint="minutes worked" error={ladderInverted ? "Below the half day." : undefined} eager>
+              <Input type="number" min={0} max={1440} step={15} placeholder={String(Math.max(0, paidMin))}
+                value={form.full_day_minutes} onChange={(e) => setForm({ ...form, full_day_minutes: e.target.value })} />
+            </Field>
+            <Field label="Half a day at" hint="minutes worked">
+              <Input type="number" min={0} max={1440} step={15} placeholder={String(Math.round(derivedFull / 2))}
+                value={form.half_day_minutes} onChange={(e) => setForm({ ...form, half_day_minutes: e.target.value })} />
+            </Field>
           </div>
           <Field label="Color" hint="Colour is how the shift reads at a glance on the roster grid.">
             <div className="flex flex-wrap gap-2">

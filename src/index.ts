@@ -48,15 +48,21 @@ import { dependents } from "./routes/dependents";
 import { benefitEnrollments } from "./routes/benefitEnrollments";
 import { shifts } from "./routes/shifts";
 import { shiftAssignments } from "./routes/shiftAssignments";
+import { workPatterns } from "./routes/workPatterns";
+import { workPatternAssignments } from "./routes/workPatternAssignments";
 import { projects } from "./routes/projects";
 import { timeEntries } from "./routes/timeEntries";
 import { loans } from "./routes/loans";
 import { taxDeclarations } from "./routes/taxDeclarations";
 import { leaveBalances } from "./routes/leaveBalances";
+import { leaveAdjustments, leaveAdjustmentImport } from "./routes/leaveAdjustments";
+import { payrollOpenings, payrollOpeningImport } from "./routes/payrollOpenings";
+import { leaveHistoryImport } from "./routes/leaveHistoryImport";
 import { payrollRuns } from "./routes/payrollRuns";
 import { payrollBudgets } from "./routes/payrollBudgets";
 import { operations } from "./routes/operations";
 import { cronRuns } from "./routes/cronRuns";
+import { searchInsights } from "./routes/searchInsights";
 import { cronTrigger } from "./routes/cronTrigger";
 import { holidays } from "./routes/holidays";
 import { holidaySelections } from "./routes/holidaySelections";
@@ -94,9 +100,9 @@ import { interviews } from "./routes/interviews";
 import { interviewFeedback } from "./routes/interviewFeedback";
 import { offers } from "./routes/offers";
 import { celebrations } from "./routes/celebrations";
-import { employeePhotosBatch } from "./routes/employeePhotosBatch";
+import { employeeTrackedFrom } from "./routes/employeeTrackedFrom";
 import { batch } from "./routes/batch";
-import { search } from "./routes/search";
+import { search, searchAsk, searchFeedback } from "./routes/search";
 import { activityCountsRoute } from "./routes/activityCounts";
 import { changes } from "./routes/changes";
 import { dashboardSummaryRoute } from "./routes/dashboardSummary";
@@ -131,6 +137,7 @@ import { attendanceRegularizations } from "./routes/attendanceRegularizations";
 import { attendanceDayMarks } from "./routes/attendanceDayMarks";
 import { overtimeRequests } from "./routes/overtimeRequests";
 import { remoteWorkRequests } from "./routes/remoteWorkRequests";
+import { lateEarlyRequests } from "./routes/lateEarlyRequests";
 import { approvalDelegations } from "./routes/approvalDelegations";
 import { noticePeriods } from "./routes/noticePeriods";
 import { suggestions } from "./routes/suggestions";
@@ -147,6 +154,7 @@ import { esignProviders } from "./routes/esignProviders";
 import { tableViews } from "./routes/tableViews";
 import { tableFields, tableDescribe } from "./routes/tableFields";
 import { authRoutes } from "./routes/authRoutes";
+import { appLockRoutes, lockCsrf } from "./routes/appLockRoutes";
 import { WORKER_OWNED_PREFIXES } from "./http/assetPaths";
 import { serveStaticSite } from "./http/staticSite";
 
@@ -211,6 +219,15 @@ app.get("/readyz", async (c) => {
 // and callback are by nature unauthenticated, and they touch no DB (provisioning happens on the first /v1
 // request through the auth middleware). Security headers still apply.
 app.use("/auth/*", securityHeaders);
+// The app lock's own door (routes/appLockRoutes.ts): what a LOCKED browser may still ask - its status, unlock,
+// lock. Beside sign-out, outside /v1, because the /v1 auth middleware is exactly what refuses a locked browser.
+// Deps and the CSRF check are registered on both paths explicitly, so neither depends on how a wildcard treats
+// the bare mount path.
+for (const p of ["/auth/lock", "/auth/lock/*"]) {
+  app.use(p, dbContext);
+  app.use(p, lockCsrf);
+}
+app.route("/auth/lock", appLockRoutes);
 app.route("/auth", authRoutes);
 
 // Public lost-and-found page for printed asset tags (opt-in via settings/asset-tags found_page; the QR on a
@@ -267,6 +284,8 @@ app.route("/v1/access-rules:review", accessReviewRoute); // unused + over-broad 
 app.route("/v1/access-rules:scopeCounts", accessScopeCountsRoute); // how many RECORDS a scope chip reaches (bounded count)
 app.route("/v1/access-rules", accessRules);
 app.route("/v1/batch:run", batch); // multi-read batch: re-dispatches GET sub-requests through the full chain
+app.route("/v1/search:feedback", searchFeedback); // which result was opened, counted (services/searchInsights.ts)
+app.route("/v1/search:ask", searchAsk); // a question routed to where in the app it is answered (services/searchAsk.ts)
 app.route("/v1/search", search); // cross-collection search: per-collection list decision + scope inside the service
 app.route("/v1/dashboard-summary", dashboardSummaryRoute); // aggregated KPI counts: same per-collection gating as search
 app.route("/v1/attention", attentionRoute); // "what needs me": derived trouble across goals/cards/reviews, same gating
@@ -279,9 +298,10 @@ app.route("/v1/card-transactions", cardTransactions); // corporate card charges,
 app.route("/v1/activity-counts", activityCountsRoute); // "new since I last looked" counts: same gating as search, no rows
 app.route("/v1/changes", changes); // which collections were written to since a moment: lets a client trust its stored copies
 app.route("/v1/employees:upcomingCelebrations", celebrations); // collection custom method, before the employees mount
-app.route("/v1/employees:batchGetPhotos", employeePhotosBatch); // batched photo fetch (per-id scope in the service)
+app.route("/v1/employees:setTrackedFrom", employeeTrackedFrom); // the day HRMS records start, for everyone who joined before it
 app.route("/v1/employees", employees);
 app.route("/v1/departments", departments);
+app.route("/v1/leave-requests:importHistory", leaveHistoryImport); // leave taken before HRMS, before the collection mount
 app.route("/v1/leave-requests", leaveRequests);
 app.route("/v1/goals", goals);
 app.route("/v1/goal-templates", goalTemplates); // goal blueprints HR curates; :apply stamps them onto people
@@ -305,16 +325,23 @@ app.route("/v1/dependents", dependents);
 app.route("/v1/benefit-enrollments", benefitEnrollments);
 app.route("/v1/shifts", shifts);
 app.route("/v1/shift-assignments", shiftAssignments);
+app.route("/v1/work-patterns", workPatterns);
+app.route("/v1/work-pattern-assignments", workPatternAssignments);
 app.route("/v1/projects", projects);
 app.route("/v1/time-entries", timeEntries);
 app.route("/v1/loans", loans);
 app.route("/v1/tax-declarations", taxDeclarations);
 app.route("/v1/leave-balances", leaveBalances);
+app.route("/v1/leave-adjustments:importOpenings", leaveAdjustmentImport); // opening balances from before HRMS, before the collection mount
+app.route("/v1/leave-adjustments", leaveAdjustments);
+app.route("/v1/payroll-openings:importOpenings", payrollOpeningImport); // pay and tax from before HRMS, before the collection mount
+app.route("/v1/payroll-openings", payrollOpenings);
 app.route("/v1/payroll-runs", payrollRuns);
 app.route("/v1/payroll-budgets", payrollBudgets);
 app.route("/v1/operations", operations);
 app.route("/v1/cron-runs:run", cronTrigger); // collection custom method, before the cron-runs mount
 app.route("/v1/cron-runs", cronRuns);
+app.route("/v1/search-insights", searchInsights); // ⌘K usage counters, read-only, private by default
 app.route("/v1/holidays", holidays);
 app.route("/v1/holiday-selections", holidaySelections);
 app.route("/v1/compliance-events", complianceEvents);
@@ -380,6 +407,7 @@ app.route("/v1/attendance-regularizations", attendanceRegularizations);
 app.route("/v1/attendance-day-marks", attendanceDayMarks);
 app.route("/v1/overtime-requests", overtimeRequests);
 app.route("/v1/remote-work-requests", remoteWorkRequests);
+app.route("/v1/late-early-requests", lateEarlyRequests);
 app.route("/v1/approval-delegations", approvalDelegations);
 app.route("/v1/notice-periods", noticePeriods);
 app.route("/v1/suggestions", suggestions);

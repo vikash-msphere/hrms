@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
-  buildAttendanceRows, statsOf, summarizeByDay, DEFAULT_SCHEDULE,
+  buildAttendanceRows, statsOf, summarizeByDay, trackedFromOf, DEFAULT_SCHEDULE,
   type AttendanceSchedule, type DayCredit,
 } from "../web/src/lib/attendance";
+import { orgScheduleOf } from "../src/domain/workSchedule";
 import type { AttendanceSession } from "../web/src/types";
 
 // The grid the browser draws, where a day mark has to agree with what the server settles.
@@ -14,6 +15,9 @@ import type { AttendanceSession } from "../web/src/types";
 
 const TZ = "Asia/Kolkata";
 const sched: AttendanceSchedule = { ...DEFAULT_SCHEDULE, timezone: TZ, work_days: [1, 2, 3, 4, 5], full_day_minutes: 480, half_day_minutes: 240 };
+// The same schedule as the day-by-day resolver the grid reads (src/domain/workSchedule.ts). Nobody here is on
+// a roster entry or a work pattern, so every day is the org's own and these figures are what they always were.
+const schedOf = orgScheduleOf(sched);
 
 // 2026-06-01 is a Monday; 06-06 a Saturday.
 const MON = "2026-06-01";
@@ -28,14 +32,14 @@ const punch = (day: string, hours: number): AttendanceSession => ({
 
 const build = (opts: { sessions?: AttendanceSession[]; marks?: Map<string, DayCredit>; holidays?: Set<string>; leaveRanges?: { start: string; end: string; startSession?: number; endSession?: number }[] } = {}) =>
   buildAttendanceRows({
-    fromYmd: MON, toYmd: TUE, todayYmd: TODAY, sched,
+    fromYmd: MON, toYmd: TUE, todayYmd: TODAY, schedOf,
     summaries: summarizeByDay(opts.sessions ?? [], sched),
     holidays: opts.holidays ?? new Set<string>(),
     leaveRanges: opts.leaveRanges ?? [],
     marksByDay: opts.marks,
   });
 
-const absences = (rows: ReturnType<typeof build>) => statsOf(rows, TZ, sched.full_day_minutes, TODAY).absent;
+const absences = (rows: ReturnType<typeof build>) => statsOf(rows, TZ, schedOf, TODAY).absent;
 
 describe("a day mark rides on the row beside what the punches earned", () => {
   it("keeps both facts, because a marked day is the one somebody asks about later", () => {
@@ -84,7 +88,7 @@ describe("the absence count says what payroll will dock", () => {
     const onTimeTue = { ...punch(TUE, 9), clock_in: `${TUE}T03:00:00.000Z` } as AttendanceSession;
     const late = build({ sessions: [punch(MON, 9), onTimeTue], marks: new Map([[MON, "absent"]]) });
     expect(late.find((r) => r.day === MON)!.status).toBe("late");
-    const stats = statsOf(late, TZ, sched.full_day_minutes, TODAY);
+    const stats = statsOf(late, TZ, schedOf, TODAY);
     expect(stats.late).toBe(1); // still late - the mark does not claim the punches were wrong
     expect(stats.absent).toBe(1); // and still docked
   });
@@ -103,8 +107,65 @@ describe("the absence count says what payroll will dock", () => {
   it("leaves every other figure reading the punches", () => {
     // A mark does not claim the punches were wrong - that is a regularization's job - so days worked, hours
     // and lateness stay observations.
-    const marked = statsOf(build({ sessions: [punch(MON, 3)], marks: new Map([[MON, "full"]]) }), TZ, sched.full_day_minutes, TODAY);
+    const marked = statsOf(build({ sessions: [punch(MON, 3)], marks: new Map([[MON, "full"]]) }), TZ, schedOf, TODAY);
     expect(marked.worked).toBe(1);
     expect(marked.minutes).toBe(180);
+  });
+});
+
+describe("days before HRMS records start are not absences", () => {
+  // Joined years ago, HRMS records start on Tuesday: Monday had no way to be punched.
+  const tracked = (opts: { sessions?: AttendanceSession[]; marks?: Map<string, DayCredit>; holidays?: Set<string>; leaveRanges?: { start: string; end: string; startSession?: number; endSession?: number; paid?: boolean }[] } = {}) =>
+    buildAttendanceRows({
+      fromYmd: MON, toYmd: TUE, todayYmd: TODAY, schedOf,
+      summaries: summarizeByDay(opts.sessions ?? [], sched),
+      holidays: opts.holidays ?? new Set<string>(),
+      leaveRanges: opts.leaveRanges ?? [],
+      marksByDay: opts.marks,
+      joinedYmd: "2020-01-06",
+      trackedFromYmd: TUE,
+    });
+
+  it("reads an empty working day before it as untracked, and still flags one on it", () => {
+    const rows = tracked();
+    expect(rows.find((r) => r.day === MON)?.status).toBe("untracked");
+    expect(rows.find((r) => r.day === TUE)?.status).toBe("absent");
+    const stats = statsOf(rows, TZ, schedOf, TODAY);
+    expect(stats.absent).toBe(1);
+    expect(stats.workingDays).toBe(1); // the untracked day owes nothing
+  });
+
+  it("keeps the untracked day a row, so a correction or a mark can be filed against it", () => {
+    // A day with no row is an inert cell in the month grid: it cannot be ticked, opened or marked.
+    expect(tracked().some((r) => r.day === MON)).toBe(true);
+  });
+
+  it("judges a day somebody backfilled with punches as usual", () => {
+    expect(tracked({ sessions: [punch(MON, 9)] }).find((r) => r.day === MON)?.summary?.workedMinutes).toBe(540);
+  });
+
+  it("lets HR's mark give an untracked day its value", () => {
+    const marked = (credit: DayCredit) => statsOf(tracked({ marks: new Map([[MON, credit]]) }), TZ, schedOf, TODAY);
+    expect(marked("absent").absent).toBe(2);
+    expect(marked("full").absent).toBe(1);
+  });
+
+  it("keeps a holiday before it, which is the org's fact, not the employee's", () => {
+    expect(tracked({ holidays: new Set([MON]) }).find((r) => r.day === MON)?.status).toBe("holiday");
+  });
+
+  // Leave is a record, so a day it falls on is judged the way payroll judges it (domain/attendance.ts
+  // isUntracked): unpaid leave is still an unworked day, half a day of paid leave still leaves half owed.
+  it("judges a day before it that approved leave falls on, as payroll does", () => {
+    const day = (leaveRanges: NonNullable<Parameters<typeof tracked>[0]>["leaveRanges"]) => tracked({ leaveRanges }).find((r) => r.day === MON)?.status;
+    expect(day([{ start: MON, end: MON }])).toBe("on_leave");
+    expect(day([{ start: MON, end: MON, paid: false }])).toBe("absent");
+    expect(day([{ start: MON, end: MON, endSession: 1 }])).toBe("half_day_leave");
+  });
+
+  it("reads the date off the employee record", () => {
+    expect(trackedFromOf({ tracked_from: "2026-09-24" })).toBe("2026-09-24");
+    expect(trackedFromOf({})).toBeUndefined();
+    expect(trackedFromOf(undefined)).toBeUndefined();
   });
 });

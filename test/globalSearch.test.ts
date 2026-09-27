@@ -9,9 +9,10 @@ import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import type { Grant } from "../src/domain/permissions";
 import { globalSearch } from "../src/services/globalSearch";
+import { MODELS } from "../src/domain/aiPolicy";
 import { SEARCH_INDEX, SEARCHABLE_COLLECTIONS } from "../src/domain/searchIndex";
 import { searchScopesFor } from "../src/middleware/authz";
 import { redactionGateFor } from "../src/http/fieldAccess";
@@ -32,7 +33,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.accessRules, schema.reviews, schema.reviewCycles, schema.leaveRequests, schema.leaveTypes, schema.holidays, schema.announcements, schema.tickets, schema.users, schema.employees, schema.roles];
+const TABLES = [schema.cards, schema.boards, schema.assets, schema.accessRules, schema.reviews, schema.reviewCycles, schema.leaveRequests, schema.leaveTypes, schema.holidays, schema.announcements, schema.tickets, schema.users, schema.employees, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t); // the delete triggers clear the index with them
 });
@@ -155,6 +156,18 @@ describe("global search", () => {
     // so it must NOT return the two records a real OR would.
     expect(await search(alice, "ski OR kapoor")).toEqual([]);
     expect(await search(alice, "%%")).toEqual([]);
+  });
+
+  it("runs a synonym group beside other words, on either side, against the real index", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    await leaveFor(alice, "04-a01-l1", "Vacation in Goa");
+    // Each of these once built `"a"* ("b"* OR ...)`, which FTS5 refuses as a syntax error.
+    for (const q of ["log overtime", "overtime log", "request remote work", "pto request"]) {
+      await expect(search(alice, q)).resolves.toBeInstanceOf(Array);
+    }
+    // And the group still does its job next to a plain word: "pto" reaches a leave that says "Vacation".
+    expect((await search(alice, "goa pto")).length).toBeGreaterThan(0);
+    expect((await search(alice, "pto goa")).length).toBeGreaterThan(0);
   });
 
   it("keeps the index in step with writes, via the triggers", async () => {
@@ -546,5 +559,290 @@ describe("semantic search obeys the same scope as the keyword half", () => {
       const hits = await search(alice, "canal");
       expect(hits.length).toBe(1);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// Which neighbours count as related.
+//
+// The defect these pin: nearest-neighbour search always answers, and every neighbour was shown, so a query
+// the keyword index missed filled the palette with whatever happened to be least far away. The tuned numbers
+// live in services/globalSearch.ts; these hold the RULE (floor for the tuned model, window from the best
+// visible row, a cap, a query gate, and related hits kept apart from keyword ones).
+// ---------------------------------------------------------------------------------------------------------
+
+/** An index that answers with the given ids at the given scores, best first as Vectorize does, and counts
+ *  how often it was asked. */
+function scoredIndex(matches: () => [string, number][]) {
+  const index = {
+    calls: 0,
+    async upsert() {},
+    async query() {
+      index.calls++;
+      return matches().map(([id, score]) => ({ id, score })).sort((a, b) => b.score - a.score);
+    },
+    async fetch() { return new Map<string, number[]>(); },
+    async remove() {},
+  };
+  return index;
+}
+
+/** The production model's name, so the tuned floor applies. */
+const tunedModel = { ...constantModel, embedModel: MODELS.embed };
+
+/** Alice's leave requests, as `search_docs` rows keyed by their code. */
+async function aliceLeaves(alice: AppUser, reasons: string[]) {
+  for (const [i, reason] of reasons.entries()) await leaveFor(alice, `04-a01-l${i}`, reason);
+  const docs = await deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.collection, "leave-requests"));
+  return (i: number) => `leave-requests:${docs.find((d) => d.code === `04-a01-l${i}`)!.recordId}`;
+}
+
+describe("semantic search keeps only what is related", () => {
+  it("drops a neighbour under the floor when the model is the one the floor was tuned on", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["root canal"]);
+
+    await withSemanticOn(async () => {
+      deps.ai = tunedModel;
+      // bge-small puts unrelated short texts around 0.5-0.6; this is the "nearest of nothing" case.
+      deps.vectors = scoredIndex(() => [[id(0), 0.55]]);
+      expect(await search(alice, "dentist")).toEqual([]);
+
+      deps.vectors = scoredIndex(() => [[id(0), 0.72]]);
+      expect((await search(alice, "dentist")).map((h) => h.related)).toEqual([true]);
+    });
+  });
+
+  it("does not apply that floor to a different model, whose scores are on another scale", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["root canal"]);
+
+    await withSemanticOn(async () => {
+      deps.ai = { ...constantModel, embedModel: "all-minilm:latest" };
+      deps.vectors = scoredIndex(() => [[id(0), 0.3]]);
+      expect((await search(alice, "dentist")).length).toBe(1);
+    });
+  });
+
+  it("keeps rows close to the best one, and at most five", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["a1", "a2", "a3", "a4", "a5", "a6", "a7"]);
+
+    await withSemanticOn(async () => {
+      deps.ai = tunedModel;
+      // Six within 0.05 of the best, one well behind it.
+      deps.vectors = scoredIndex(() => [[id(0), 0.9], [id(1), 0.89], [id(2), 0.88], [id(3), 0.87], [id(4), 0.86], [id(5), 0.85], [id(6), 0.7]]);
+      const hits = await search(alice, "dentist");
+      expect(hits.length).toBe(5);
+      expect(hits.some((h) => `leave-requests:${h.id}` === id(6))).toBe(false);
+    });
+  });
+
+  it("measures the window from the best row the caller may see, not the index's best", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const bhavna = await seedPerson("07-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["root canal"]);
+    await leaveFor(bhavna, "07-b01-l1", "dental surgery");
+    const theirs = (await deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.code, "07-b01-l1")))[0]!;
+
+    await withSemanticOn(async () => {
+      deps.ai = tunedModel;
+      // Bhavna's row is far closer, and Alice may not list it. Measured from it, Alice's own row would sit
+      // outside the window and she would be told nothing is related to a query her own row answers.
+      deps.vectors = scoredIndex(() => [[`leave-requests:${theirs.recordId}`, 0.95], [id(0), 0.8]]);
+      const hits = await search(alice, "dentist");
+      expect(hits.map((h) => `leave-requests:${h.id}`)).toEqual([id(0)]);
+    });
+  });
+
+  it("is not asked at all for a query with no meaning yet", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["root canal"]);
+
+    await withSemanticOn(async () => {
+      deps.ai = tunedModel;
+      const index = scoredIndex(() => [[id(0), 0.9]]);
+      deps.vectors = index;
+      // Mid-word type-ahead, and filler only. Embedding either costs a neuron and answers with noise.
+      for (const q of ["den", "the", "how and"]) expect(await search(alice, q)).toEqual([]);
+      expect(index.calls).toBe(0);
+
+      expect((await search(alice, "dentist")).length).toBe(1);
+      expect(index.calls).toBe(1);
+    });
+  });
+
+  it("puts related hits after the keyword hits, and a row found both ways is a keyword hit", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const id = await aliceLeaves(alice, ["root canal", "dental surgery"]);
+
+    await withSemanticOn(async () => {
+      deps.ai = tunedModel;
+      // The index ranks the row WITHOUT the typed word first. It must not overtake the one that has it.
+      deps.vectors = scoredIndex(() => [[id(1), 0.9], [id(0), 0.88]]);
+      const hits = await search(alice, "canal");
+      expect(hits.map((h) => [`leave-requests:${h.id}`, h.related ?? false])).toEqual([[id(0), false], [id(1), true]]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// Ranking, synonyms and narrowing (domain/searchQuery.ts + the ORDER BY in services/globalSearch.ts).
+// ---------------------------------------------------------------------------------------------------------
+
+const ticketFor = (emp: AppUser, code: string, subject: string, description = "") =>
+  deps.db.insert(schema.tickets).values({ uuid: genId(), code, employeeId: emp.employeeId!, subject, description } as never);
+
+describe("ranking and query understanding", () => {
+  it("finds a record by a synonym of the word typed", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await deps.db.insert(schema.leaveTypes).values({ uuid: genId(), code: "lt-el", name: "Earned Leave" });
+    // "pto" appears nowhere on the row; the synonym group is what connects them.
+    expect((await search(admin, "pto")).map((h) => h.title)).toContain("Earned Leave");
+  });
+
+  it("finds a record by the org's own synonym, from the search-synonyms setting", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await deps.db.insert(schema.leaveTypes).values({ uuid: genId(), code: "lt-cl", name: "Casual Leave" });
+    expect(await search(admin, "zeusday")).toEqual([]); // no built-in group knows the word
+    await deps.db.insert(schema.settings).values({ key: "search-synonyms", value: JSON.stringify({ groups: [["zeusday", "casual leave"]] }) });
+    try {
+      expect((await search(admin, "zeusday")).map((h) => h.title)).toContain("Casual Leave");
+    } finally {
+      await deps.db.delete(schema.settings).where(eq(schema.settings.key, "search-synonyms"));
+    }
+  });
+
+  it("ranks a word in the title above the same word in the body", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    // Body-only match inserted first, so insertion order would put it on top.
+    await ticketFor(admin, "04-z01-t1", "Printer jammed", "the monitor cable is loose as well");
+    await ticketFor(admin, "04-z01-t2", "Monitor flickers");
+    const hits = (await search(admin, "monitor")).filter((h) => h.collection === "tickets");
+    expect(hits.map((h) => h.title)).toEqual(["Monitor flickers", "Printer jammed"]);
+  });
+
+  it("ranks the caller's own record above someone else's equal match", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    const other = await seedPerson("04-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    await ticketFor(other, "04-b01-t1", "Keyboard missing keys");
+    await ticketFor(admin, "04-z01-t1", "Keyboard missing keys");
+    const hits = (await search(admin, "keyboard")).filter((h) => h.collection === "tickets");
+    expect(hits).toHaveLength(2);
+    const mine = (await deps.db.select().from(schema.tickets).where(eq(schema.tickets.code, "04-z01-t1")))[0]!;
+    expect(hits[0]!.id).toBe(mine.uuid);
+  });
+
+  it("narrows to the collections asked for, and never beyond the caller's own", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await ticketFor(admin, "04-z01-t1", "Diwali lights for the office");
+    await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-diwali", name: "Diwali", date: new Date("2026-11-08") } as never);
+    const scopes = await searchScopesFor(deps, admin);
+    const only = await globalSearch(deps, admin, scopes, "diwali", redactionGateFor(admin), { collections: ["holidays"] });
+    expect(kinds(only)).toEqual(["holidays"]);
+
+    // A collection the caller may not list stays out however it is asked for.
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", { levels: { "employees.**": "read" }, allow: [] });
+    const aliceScopes = await searchScopesFor(deps, alice);
+    expect(await globalSearch(deps, alice, aliceScopes, "diwali", redactionGateFor(alice), { collections: ["tickets"] })).toEqual([]);
+  });
+
+  it("narrows to one owner's records, dropping catalogues that belong to nobody", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    const other = await seedPerson("04-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    await ticketFor(admin, "04-z01-t1", "Parking pass renewal");
+    await ticketFor(other, "04-b01-t1", "Parking pass lost");
+    await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-park", name: "Parking day", date: new Date("2026-09-01") } as never);
+    const scopes = await searchScopesFor(deps, admin);
+    const hits = await globalSearch(deps, admin, scopes, "parking", redactionGateFor(admin), { ownerId: other.employeeId! });
+    expect(hits.map((h) => h.title)).toEqual(["Parking pass lost"]);
+  });
+
+  it("does not answer an owner question about a row whose owner the caller may not read", async () => {
+    // Only a REDACTABLE field can be withheld (policy.redacted_fields); a ticket's requester is not one by
+    // default, so this org has made it one - the case the check exists for.
+    const seeded = await seedPerson("04-z01", "Root", "Admin",
+      { levels: { "**": "admin" }, allow: ["**"], deny: ["tickets.*.employee_id.**"] } as Grant, "super_admin");
+    const admin = {
+      ...seeded,
+      policy: { ...DEFAULT_POLICY, redacted_fields: { ...DEFAULT_POLICY.redacted_fields, tickets: [...(DEFAULT_POLICY.redacted_fields.tickets ?? []), "employee_id"] } },
+    } as AppUser;
+    const other = await seedPerson("04-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    await ticketFor(other, "04-b01-t1", "Parking pass lost");
+    const scopes = await searchScopesFor(deps, admin);
+    // The row is listable, so a plain search still finds it...
+    expect((await globalSearch(deps, admin, scopes, "parking", redactionGateFor(admin))).length).toBe(1);
+    // ...but asking "is it Bhavna's?" must not be answerable by whether it comes back.
+    expect(await globalSearch(deps, admin, scopes, "parking", redactionGateFor(admin), { ownerId: other.employeeId! })).toEqual([]);
+  });
+});
+
+describe("finding a record by its human id", () => {
+  async function card(owner: AppUser, prefix: string, seq: number, title: string) {
+    const boardId = genId();
+    await deps.db.insert(schema.boards).values({ uuid: boardId, code: `b-${boardId.slice(0, 5)}`, name: `${prefix} board`, taskPrefix: prefix } as never);
+    const uuid = genId();
+    await deps.db.insert(schema.cards).values({ uuid, code: `${owner.employeeCode}-c${seq}`, boardId, employeeId: owner.employeeId!, columnKey: "todo", title, seq, keyPrefix: prefix } as never);
+    return uuid;
+  }
+
+  it("finds a board task by its key, which its words do not contain", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    const id = await card(admin, "MS", 12, "Rotate the D1 credentials");
+    const hits = await search(admin, "ms-12");
+    expect(hits[0]).toMatchObject({ collection: "cards", id, title: "Rotate the D1 credentials" });
+    expect((await search(admin, "MS-13")).some((h) => h.collection === "cards")).toBe(false);
+  });
+
+  it("does not find a task by its key for somebody who may not list tasks", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    await card(admin, "MS", 12, "Rotate the D1 credentials");
+    expect(await search(alice, "MS-12")).toEqual([]);
+  });
+
+  it("finds an asset by its tag and a person by their employee number through the ordinary index", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await deps.db.insert(schema.assets).values({ uuid: genId(), code: "as-1", name: "MacBook Pro 14", assetTag: "LAP-0012", status: "in_stock" } as never);
+    await deps.db.update(schema.employees).set({ employeeNumber: "EMP-0042" }).where(eq(schema.employees.uuid, admin.employeeId!));
+    expect((await search(admin, "LAP-0012")).map((h) => h.title)).toContain("MacBook Pro 14");
+    expect((await search(admin, "EMP-0042")).map((h) => h.title)).toContain("Root Admin");
+  });
+});
+
+describe("date and status filters", () => {
+  const run = async (user: AppUser, q: string, narrowing: Parameters<typeof globalSearch>[5]) =>
+    globalSearch(deps, user, await searchScopesFor(deps, user), q, redactionGateFor(user), narrowing);
+
+  it("narrows to rows created inside the window", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await deps.db.insert(schema.tickets).values([
+      { uuid: genId(), code: "04-z01-t1", employeeId: admin.employeeId!, subject: "Printer jam in January", createdAt: new Date("2026-01-10") },
+      { uuid: genId(), code: "04-z01-t2", employeeId: admin.employeeId!, subject: "Printer jam in March", createdAt: new Date("2026-03-10") },
+    ] as never);
+    const titles = async (n: Parameters<typeof globalSearch>[5]) => (await run(admin, "printer", n)).map((h) => h.title);
+    expect(await titles({ after: Date.UTC(2026, 1, 1) })).toEqual(["Printer jam in March"]);
+    expect(await titles({ before: Date.UTC(2026, 1, 1) })).toEqual(["Printer jam in January"]);
+    expect((await titles({ after: Date.UTC(2026, 0, 1), before: Date.UTC(2026, 3, 1) })).sort()).toEqual(["Printer jam in January", "Printer jam in March"]);
+  });
+
+  it("narrows to rows whose own status holds the value, and drops collections with no status", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await leaveFor(admin, "04-z01-l1", "Dentist appointment");
+    await leaveFor(admin, "04-z01-l2", "Dentist follow up");
+    await deps.db.update(schema.leaveRequests).set({ state: "APPROVED" }).where(eq(schema.leaveRequests.code, "04-z01-l2"));
+    await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-d", name: "Dentist day", date: new Date("2026-09-01") } as never);
+    const hits = await run(admin, "dentist", { status: "Pending" });
+    expect(hits.map((h) => h.title)).toEqual(["Dentist appointment"]);
+    // A value that is not status-shaped answers nothing rather than being ignored.
+    expect(await run(admin, "dentist", { status: "x'; drop table" })).toEqual([]);
+  });
+
+  it("keeps the caller's scope around a status filter", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const bhavna = await seedPerson("04-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    await leaveFor(alice, "04-a01-l1", "Dentist appointment");
+    await leaveFor(bhavna, "04-b01-l1", "Dentist visit");
+    expect((await run(alice, "dentist", { status: "pending" })).map((h) => h.title)).toEqual(["Dentist appointment"]);
   });
 });

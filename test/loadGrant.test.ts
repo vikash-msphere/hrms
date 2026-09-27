@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { GRANTS, grantFor } from "../src/domain/grants";
+import { GRANTS, grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 import { compileGrant, rulesToGrant } from "../src/domain/compileGrants";
 
@@ -34,7 +34,7 @@ function loaded(role: string) {
 describe("loadRoleGrant - reconstructed grant decides identically to the blob", () => {
   for (const role of ROLES) {
     it(`${role}`, () => {
-      const blob = grantFor(role);
+      const blob = GRANTS[role as keyof typeof GRANTS]; // the role's own rules, as one subject's rows hold them
       const fromRules = loaded(role);
       for (const self of SELVES) {
         const ctx = { employeeCode: self };

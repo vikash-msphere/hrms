@@ -49,6 +49,7 @@ const COLLECTION_ALLOW: Record<string, string> = {
   interviews: "narrowed to one application (the pipeline drawer)",
   offers: "narrowed to one application (the pipeline drawer)",
   "shift-assignments": "narrowed to the week on screen",
+  "work-pattern-assignments": "narrowed to the window on screen, and read in the same round trip as the roster entries it resolves days with",
   "time-entries": "narrowed to one employee/status for the timesheet being edited",
   "leave-requests": "conflict check for one interview slot, narrowed to approved leave inside the search window",
   events: "conflict check for one interview slot",

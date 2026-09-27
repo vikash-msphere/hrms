@@ -73,6 +73,25 @@ export const oneOf = <T extends string>(v: unknown, allowed: readonly T[], detai
 };
 
 export const unauthenticated = (d?: string) => new AppError(401, "/errors/unauthenticated", "Unauthenticated", d);
+
+/** What a locked browser's lock screen shows, carried on the refusal so it needs no request of its own. */
+export type LockHint = { pin_length: number; first_name?: string };
+/**
+ * The browser is signed in but LOCKED (app-lock-plan.md): it holds no valid unlock proof for a person who has
+ * a PIN. 401 because that is the standard shape for "authenticated, but a step-up is required" (RFC 9470), and
+ * because every operation in openapi.yaml already declares it; the SPA tells it apart from an expired session
+ * by the TYPE, and answers with the lock screen rather than a sign-in.
+ */
+export class AppLockedError extends AppError {
+  readonly lock: LockHint;
+  constructor(lock: LockHint) {
+    super(401, "/errors/app-locked", "App Locked", "this browser is locked; unlock it with your PIN");
+    this.lock = lock;
+  }
+  override toProblem(instance?: string): Problem & { lock: LockHint } {
+    return { ...super.toProblem(instance), lock: this.lock };
+  }
+}
 export const forbidden = (d?: string) => new AppError(403, "/errors/permission-denied", "Permission Denied", d);
 // A 403 with its own problem TYPE, because the client does more than print it: an off-network punch is the
 // one denial with a way out (file a remote-work request), and the web clock offers that instead of a
@@ -94,6 +113,11 @@ export const payablesRaced = (d?: string) => new AppError(409, "/errors/payables
 // client should RETRY this one, and the `Retry-After` the middleware attaches tells it when.
 export const resourceExhausted = (d?: string) => new AppError(429, "/errors/resource-exhausted", "Too Many Requests", d);
 export const unimplemented = (d?: string) => new AppError(501, "/errors/unimplemented", "Not Implemented", d);
+// Configuration the app reads from the database is missing or unreadable - the policy manifest, a setting. The
+// app has no copy of its own to fall back to (the database is the only source of configuration), so it refuses
+// rather than guessing, and says which piece is missing. 503 because nothing about the REQUEST is wrong: the
+// same call succeeds once an admin (or the bootstrap) has put the row there.
+export const notConfigured = (d?: string) => new AppError(503, "/errors/not-configured", "Not Configured", d);
 // A third party we call out to failed - the mail vendor, an e-sign provider. NOT a 500: nothing here
 // malfunctioned, the hop did, and the two want different reactions (retry the send vs. read a stack trace).
 // Emitting it as a 500 also buries a vendor outage under "unhandled error" in the log, which is where an
@@ -256,6 +280,15 @@ export function isOpenAttendanceCollision(err: unknown): boolean {
  *  `:addReviewees` calls; D1 rolls the whole insert batch back, so nothing half-lands and the caller re-reads. */
 export function isReviewDuplicate(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\breviews\.(cycle_id|employee_id)\b/i.test(errorChainText(err));
+}
+
+/** That person already has pay before HRMS recorded for that financial year (`popen_emp_fy_idx`).
+ *
+ *  The services check for the live row first and say so in words (services/payrollOpenings.ts); this catches
+ *  what gets past the check - two imports racing, or a restore of a deleted row onto a year that has been
+ *  entered again since. Two live rows would count the same months' pay and tax twice in the year's TDS. */
+export function isPayrollOpeningDuplicate(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\bpayroll_openings\.(employee_id|financial_year)\b/i.test(errorChainText(err));
 }
 
 /** Two concurrent writes to one employee's effective-dated timeline both tried to leave it with an open row.

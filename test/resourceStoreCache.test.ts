@@ -104,18 +104,26 @@ vi.mock("@/api", () => ({
 
 const { freshnessMs, setResourceStoreUser, getSnapshot, invalidateCollections, subscribe, entryCount, ensureFetch, storedCopiesTrusted, persistable, collectionHasMore } =
   await import("@/lib/resourceStore");
-const { flushNow, put } = await import("@/lib/clientStore");
+const { flushNow, put, SCHEMA, setClientKey, sealRecord, storeKeyFrom } = await import("@/lib/clientStore");
+
+// The key /users/me would hand an unlocked browser (`client_key`). Records are ciphertext under it, and with no
+// key at all the store stays off the disk entirely - see the note at the top of lib/clientStore.ts.
+const CLIENT_KEY = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
+const storeKey = await storeKeyFrom(CLIENT_KEY);
+setClientKey(CLIENT_KEY);
 
 // A record as a previous page life would have left it. The composite key is clientStore's: schema version,
 // identity, class, then the store's own entry key - "<collection>?<opts>" as keyOf builds it. `m` is the page
 // size the store actually asks for, which is the server's own cap (clampPageSize).
 const entryKey = (collection: string, opts = "d=0&m=100&q=&p=") => `${collection}?${opts}`;
-const recordKey = (user: string, collection: string, opts?: string) => `1|${user}|rows|${entryKey(collection, opts)}`;
-function seed(user: string, collection: string, rows: unknown[], ageMs = 0, opts?: string) {
+// The schema version is READ from the store rather than spelled here: a bump deletes records of another
+// version by design, so a hardcoded one turns the next bump into a suite that reports a broken cache.
+const recordKey = (user: string, collection: string, opts?: string) => `${SCHEMA}|${user}|rows|${entryKey(collection, opts)}`;
+async function seed(user: string, collection: string, rows: unknown[], ageMs = 0, opts?: string) {
   const k = recordKey(user, collection, opts);
   const ts = Date.now() - ageMs;
-  idb.meta.set(k, { k, ver: 1, id: user, cls: "rows", key: entryKey(collection, opts), collection, ts, bytes: 1 });
-  idb.data.set(k, { k, v: JSON.stringify({ rows, ts }) });
+  idb.meta.set(k, { k, ver: SCHEMA, id: user, cls: "rows", key: entryKey(collection, opts), collection, ts, bytes: 1 });
+  idb.data.set(k, { k, c: await sealRecord(storeKey, k, JSON.stringify({ rows, ts })) });
 }
 
 // The reconciliation point a previous page life would have left behind: with one, stored copies are trusted
@@ -151,7 +159,7 @@ describe("resource store freshness tiers", () => {
 
 describe("resource store disk cache", () => {
   it("adopts a stored copy on first touch, so a reload costs no request", async () => {
-    seed("a@x.test", "departments", [{ path: "departments/1", display_name: "Ops" }]);
+    await seed("a@x.test", "departments", [{ path: "departments/1", display_name: "Ops" }]);
     await setResourceStoreUser("a@x.test");
     const snap = getSnapshot("departments", {});
     expect(snap.state).toBe("ready");
@@ -159,7 +167,7 @@ describe("resource store disk cache", () => {
   });
 
   it("never adopts another identity's rows", async () => {
-    seed("other@x.test", "departments", [{ path: "departments/1" }], 0, "d=0&m=7&q=&p=");
+    await seed("other@x.test", "departments", [{ path: "departments/1" }], 0, "d=0&m=7&q=&p=");
     await setResourceStoreUser("a@x.test");
     const snap = getSnapshot("departments", { max: 7 });
     expect(snap.rows).toEqual([]);
@@ -169,8 +177,8 @@ describe("resource store disk cache", () => {
     expect(idb.data.has(recordKey("other@x.test", "departments", "d=0&m=7&q=&p="))).toBe(false);
   });
 
-  it("stores nothing under a caller who has not been set (a simulation switching identity mid-flight)", () => {
-    seed("a@x.test", "holidays", [{ path: "holidays/1" }]);
+  it("stores nothing under a caller who has not been set (a simulation switching identity mid-flight)", async () => {
+    await seed("a@x.test", "holidays", [{ path: "holidays/1" }]);
     const snap = getSnapshot("holidays", {});
     expect(snap.rows).toEqual([]); // disk is off until setResourceStoreUser names the caller
   });
@@ -192,7 +200,7 @@ describe("resource store disk cache", () => {
   });
 
   it("forgets the stored copy of a collection that was just written", async () => {
-    seed("a@x.test", "vendors", [{ path: "vendors/1" }], 0, "d=0&m=9&q=&p=");
+    await seed("a@x.test", "vendors", [{ path: "vendors/1" }], 0, "d=0&m=9&q=&p=");
     await setResourceStoreUser("a@x.test");
     invalidateCollections(["vendors"]);
     await flushNow();
@@ -291,7 +299,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
 
   it("serves a stored copy without reading it when nothing has changed", async () => {
     changesAnswer = { now: Date.now(), collections: [], authz_version: "v1" };
-    seed("t1@x.test", "leave-requests", [{ path: "leave-requests/1" }], 10 * 60_000); // long past its 20s tier
+    await seed("t1@x.test", "leave-requests", [{ path: "leave-requests/1" }], 10 * 60_000); // long past its 20s tier
     await identity("t1@x.test");
     expect(storedCopiesTrusted()).toBe(true);
     expect(getSnapshot("leave-requests", {}).rows).toHaveLength(1);
@@ -301,8 +309,8 @@ describe("resource store: trusting stored copies against the change feed", () =>
 
   it("re-reads exactly the collections the feed named, and no others", async () => {
     changesAnswer = { now: Date.now(), collections: ["holidays"], authz_version: "v1" };
-    seed("t2@x.test", "holidays", [{ path: "holidays/1" }], 10 * 60_000);
-    seed("t2@x.test", "departments", [{ path: "departments/1" }], 10 * 60_000);
+    await seed("t2@x.test", "holidays", [{ path: "holidays/1" }], 10 * 60_000);
+    await seed("t2@x.test", "departments", [{ path: "departments/1" }], 10 * 60_000);
     await identity("t2@x.test");
     subscribe("holidays", {}, () => {}); // a mounted view of the changed collection refetches immediately
     subscribe("departments", {}, () => {});
@@ -314,7 +322,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
   });
 
   it("does not trust anything on a first-ever visit, when there is no reconciliation point", async () => {
-    seed("t3@x.test", "vendors", [{ path: "vendors/1" }], 10 * 60_000);
+    await seed("t3@x.test", "vendors", [{ path: "vendors/1" }], 10 * 60_000);
     await setResourceStoreUser("t3@x.test"); // no sync record seeded
     expect(storedCopiesTrusted()).toBe(false);
     await ensureFetch("vendors", {});
@@ -323,7 +331,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
 
   it("gives up its stored copies when the feed cannot speak for the gap", async () => {
     changesAnswer = { now: Date.now(), unknown_window: true };
-    seed("t4@x.test", "tickets", [{ path: "tickets/1" }], 10 * 60_000);
+    await seed("t4@x.test", "tickets", [{ path: "tickets/1" }], 10 * 60_000);
     await identity("t4@x.test");
     expect(getSnapshot("tickets", {}).rows).toHaveLength(1); // painted from disk...
     await new Promise((r) => setTimeout(r, 0));
@@ -334,7 +342,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
 
   it("gives them up when the reconciliation itself fails", async () => {
     changesAnswer = new Error("offline");
-    seed("t5@x.test", "goals", [{ path: "goals/1" }], 10 * 60_000);
+    await seed("t5@x.test", "goals", [{ path: "goals/1" }], 10 * 60_000);
     await identity("t5@x.test");
     getSnapshot("goals", {}); // adopted while the answer is in flight
     await new Promise((r) => setTimeout(r, 0));
@@ -350,7 +358,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
   // unknown answer belongs on the same side as "changed": give the cache up and pay for one round of reads.
   it("gives up every stored copy when the feed carries no access version at all", async () => {
     changesAnswer = { now: Date.now(), collections: [] }; // no authz_version
-    seed("t6b@x.test", "shifts", [{ path: "shifts/1" }], 10 * 60_000);
+    await seed("t6b@x.test", "shifts", [{ path: "shifts/1" }], 10 * 60_000);
     seedSync("t6b@x.test", 60_000, "v1");
     await setResourceStoreUser("t6b@x.test");
     await new Promise((r) => setTimeout(r, 0));
@@ -365,8 +373,8 @@ describe("resource store: trusting stored copies against the change feed", () =>
   // it could never be named. Hence: a different access version gives up everything.
   it("gives up every stored copy when the caller's own access has changed", async () => {
     changesAnswer = { now: Date.now(), collections: [], authz_version: "v2" };
-    seed("t6@x.test", "shifts", [{ path: "shifts/1" }], 10 * 60_000);
-    seed("t6@x.test", "projects", [{ path: "projects/1" }], 10 * 60_000);
+    await seed("t6@x.test", "shifts", [{ path: "shifts/1" }], 10 * 60_000);
+    await seed("t6@x.test", "projects", [{ path: "projects/1" }], 10 * 60_000);
     seedSync("t6@x.test", 60_000, "v1"); // what their access looked like last time
     await setResourceStoreUser("t6@x.test");
     await new Promise((r) => setTimeout(r, 0));
@@ -385,7 +393,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
   // open revalidates several times a minute, and re-reading a hundred rows to be told nothing changed was the
   // largest remaining source of D1 reads. With a validator the server answers in one indexed row.
   it("revalidates a lapsed copy with its validator, and keeps the rows when nothing changed", async () => {
-    seed("t8@x.test", "departments", [{ path: "departments/1" }], 10 * 60_000); // past its 5-minute tier
+    await seed("t8@x.test", "departments", [{ path: "departments/1" }], 10 * 60_000); // past its 5-minute tier
     seedSync("t8@x.test", 60_000, "v1");
     await setResourceStoreUser("t8@x.test");
     await new Promise((r) => setTimeout(r, 0));
@@ -401,7 +409,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
 
   it("keeps them when the access version is unchanged", async () => {
     changesAnswer = { now: Date.now(), collections: [], authz_version: "v1" };
-    seed("t7@x.test", "departments", [{ path: "departments/1" }], 10 * 60_000);
+    await seed("t7@x.test", "departments", [{ path: "departments/1" }], 10 * 60_000);
     seedSync("t7@x.test", 60_000, "v1");
     await setResourceStoreUser("t7@x.test");
     await new Promise((r) => setTimeout(r, 0));

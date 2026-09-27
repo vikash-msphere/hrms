@@ -10,7 +10,8 @@ import { notify } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { getSettingValue } from "./settings";
 import { refHolidays } from "../lib/refData";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig, type DayCredit, utcDay, weekdayOf } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type DayCredit, utcDay } from "../domain/attendance";
+import { scheduleCtxWith } from "./workSchedule";
 import { invalidArgument, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { softDeleteRow } from "./softDelete";
@@ -55,11 +56,14 @@ export function assertSomebodyElse(actor: AppUser, employeeId: string) {
   }
 }
 
-async function assertOwedDay(deps: Deps, dateMs: number) {
+// A mark decides what a day is PAID as, so there has to be something owed on it to re-value. Judged against
+// THAT PERSON'S schedule (services/workSchedule.ts): a rest day in their rotation owes nothing exactly as a
+// Sunday does, and a Sunday they are rostered onto owes a day and can be marked.
+async function assertOwedDay(deps: Deps, employeeId: string, dateMs: number) {
   const att = (await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE)) ?? DEFAULT_ATTENDANCE;
-  const workDays = att.work_days ?? DEFAULT_ATTENDANCE.work_days;
   const ymd = utcDay(dateMs);
-  if (!workDays.includes(weekdayOf(ymd))) throw invalidArgument("that day is not a working day, so nothing is owed on it to mark");
+  const sched = (await scheduleCtxWith(deps, att, ymd, ymd, [employeeId]))(employeeId);
+  if (sched(ymd).off) throw invalidArgument("that day is not a working day, so nothing is owed on it to mark");
   const holiday = (await refHolidays(deps)).find((h) => !h.deleteTime && !h.disabled && utcDay(+new Date(h.date)) === ymd);
   if (holiday) throw invalidArgument("that day is a holiday, so nothing is owed on it to mark");
 }
@@ -131,7 +135,7 @@ export async function createDayMark(deps: Deps, actor: AppUser, input: DayMarkIn
   const employeeId = idFromPath(input.employee);
   if (!employeeId) throw invalidArgument("employee is required");
   assertSomebodyElse(actor, employeeId);
-  await assertOwedDay(deps, date);
+  await assertOwedDay(deps, employeeId, date);
   // Checked here for the message, enforced by `attmark_live_day_idx` for the race: two marks on one day is a
   // question payroll cannot answer, so the index is what actually holds and this only says so in words.
   const existing = (await deps.db

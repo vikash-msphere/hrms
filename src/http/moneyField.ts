@@ -39,3 +39,9 @@ export const signedMoney = () => z.number().finite().min(-MAX_MONEY).max(MAX_MON
 
 /** A count of days that must be strictly positive (leave encashed, notice served). */
 export const positiveDays = () => z.number().finite().positive().max(MAX_DAYS);
+
+/** A count of days that may be zero (an opening leave balance, days already encashed). */
+export const nonNegativeDays = () => z.number().finite().nonnegative().max(MAX_DAYS);
+
+/** A SIGNED change in days (a leave balance correction: positive adds, negative takes off). */
+export const signedDays = () => z.number().finite().min(-MAX_DAYS).max(MAX_DAYS);

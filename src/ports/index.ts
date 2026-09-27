@@ -24,8 +24,11 @@ export interface EmailSender {
 }
 
 export interface DocumentStore {
-  put(key: string, body: ArrayBuffer | Uint8Array, contentType: string): Promise<void>;
+  /** Store bytes. Encrypted app-side unless the caller opts out - see `opts.encrypt` and lib/docstore.ts. */
+  put(key: string, body: ArrayBuffer | Uint8Array, contentType: string, opts?: { encrypt?: boolean }): Promise<void>;
   get(key: string): Promise<ArrayBuffer | null>;
+  /** The object as a STREAM, for a response that hands bytes straight to the caller. Null when absent. */
+  open(key: string): Promise<{ body: ReadableStream; size: number } | null>;
   delete(key: string): Promise<void>;
 }
 
@@ -58,6 +61,12 @@ export const GENERATIVE_ROLES = ["generate", "moderate"] as const;
 export type GenerativeRole = (typeof GENERATIVE_ROLES)[number];
 
 export interface TextModel {
+  /**
+   * Which model `embed` runs. Score thresholds are properties of ONE model's cosine range, so a caller that
+   * applies a tuned threshold checks this first: the local transport embeds with whatever Ollama has, and a
+   * bge-small threshold applied to it is a number from a different scale. Absent = unknown (test fakes).
+   */
+  readonly embedModel?: string;
   embed(texts: string[]): Promise<number[][]>;
   /**
    * `role` names WHICH generative model answers, defaulting to the general instruct one.

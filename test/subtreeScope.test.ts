@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { actorSubtrees, scopeFor, verbScopeFor, actorScope } from "../src/domain/access";
 import { decide, resolveRequest, type Grant } from "../src/domain/permissions";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 
 // A subtree grant - `<collection>.<code>-*.**`, the compiled form of "this department and everything under
 // it" - used to decide ITEMS correctly and contribute NOTHING to a list. `actorScope` answers with one of

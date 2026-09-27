@@ -21,7 +21,11 @@ const SETTINGS: Array<[string, unknown]> = [
   ["ctc", DEFAULT_CTC_CONFIG],
   ["tax-config", DEFAULT_TAX_CONFIG],
   ["professional-tax", DEFAULT_PT_CONFIG],
-  ["attendance", DEFAULT_ATTENDANCE],
+  // A FRESH org starts on resolved schedules, unlike an existing one. The "org" default in
+  // DEFAULT_ATTENDANCE exists so that an org already keeping a roster as a planning grid does not find those
+  // entries deciding pay the day schedules ship - a new database has no such roster to reinterpret, and
+  // making it opt in would leave part-time weeks and rotations silently inert.
+  ["attendance", { ...DEFAULT_ATTENDANCE, schedule_source: "resolved" }],
   ["overtime", DEFAULT_OVERTIME_CONFIG],
   // Statutory gratuity at exit (15 days' wages per completed year after 5 years, exempt to ₹20L). Enabled: the
   // entitlement is statutory. An org that settles gratuity through an LIC/trust policy instead sets enabled
@@ -56,9 +60,15 @@ const SETTINGS: Array<[string, unknown]> = [
   // and the fallback cannot disagree. Assignees, members and servicing departments stay unset: they are refs
   // to people and departments this database does not have yet, and HR fills them in from Settings.
   ["ticket-categories", DEFAULT_TICKET_CATEGORIES],
+  // How many days ahead a birthday or work anniversary starts to show on the dashboard, the team timeline and
+  // the sidebar's company-anniversary banner (0 = only on the day). A week, so a celebration is news in the
+  // week it happens rather than a month before. Migration 0015 writes the same row into existing databases.
+  ["celebrations", { lead_days: 7 }],
 ];
 
+// OR IGNORE because a migration may already have written a row (0015 writes `celebrations` into every
+// database, fresh ones included), and the bootstrap runs after the migrations.
 export function settings(): string {
-  return "INSERT INTO settings (key,value,updated_at) VALUES\n" +
+  return "INSERT OR IGNORE INTO settings (key,value,updated_at) VALUES\n" +
     SETTINGS.map(([key, value]) => ` (${q(key)},${j(value)},${T0})`).join(",\n") + ";";
 }

@@ -71,6 +71,31 @@ const PER_COLLECTION: Record<string, Record<string, VerbInfo>> = {
     enrollDefaultBenefits: { label: "Enrol default benefits", description: "Put a new hire into the default benefit plans." },
     uploadPhoto: { label: "Set profile photo", description: "Upload or replace the photo on somebody's record. Everyone holds it for their own; granting it here means doing it for other people." },
     clearPhoto: { label: "Remove profile photo", description: "Take the photo off somebody's record. Paired with setting one - a moderation action when granted beyond your own." },
+    setTrackedFrom: {
+      label: "Set when HRMS records start",
+      description: "Date the records of everybody who joined before the org started using HRMS, in one act. Days before that date with nothing recorded are never counted as absences or docked as loss of pay.",
+      caution: "This re-dates the attendance and pay reading of the whole workforce at once.",
+    },
+  },
+  "leave-adjustments": {
+    importOpenings: {
+      label: "Bring in opening leave balances",
+      description: "Replace what HRMS credited for the years before go-live with each person's balance from the system before, from a spreadsheet, after a preview.",
+      caution: "This moves the leave balances of everybody in the file at once, and leave balances are encashed for money.",
+    },
+  },
+  "leave-requests": {
+    importHistory: {
+      label: "Bring in leave from before HRMS",
+      description: "Record leave people took before the org used HRMS, from a spreadsheet, after a preview. It counts toward quotas and limits and leaves balances alone.",
+    },
+  },
+  "payroll-openings": {
+    importOpenings: {
+      label: "Bring in pay and tax so far",
+      description: "Enter what each person was paid and had deducted this financial year before HRMS ran payroll, from a spreadsheet, after a preview.",
+      caution: "This changes the income tax the next payroll deducts for everybody in the file.",
+    },
   },
   announcements: {
     post: { label: "Post", description: "Publish a new board post." },

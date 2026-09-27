@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { evalCondition, validateAutomation, resolveField, type Automation, type Condition, type EvalContext } from "../src/domain/automations";
 import { EVENT_TYPES, eventTypeDef, isKnownEventType, fieldsForEventType } from "../src/domain/events";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 
 // ---- Condition evaluator (pure predicate tree; no eval) ----

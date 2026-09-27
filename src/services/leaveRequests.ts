@@ -31,7 +31,8 @@ import {
 import { holidayApplies } from "./holidays";
 import { getSettingValue } from "./settings";
 import { orgToday } from "./orgDay";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, utcDay, type AttendanceConfig } from "../domain/attendance";
+import { scheduleCtxWith } from "./workSchedule";
 import { refHolidays, refLeaveTypes } from "../lib/refData";
 import { getAttachment } from "./attachments";
 import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
@@ -41,7 +42,7 @@ import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 // holidays of any kind, minus the location-scoped ones that aren't this employee's (a Mumbai-only holiday must
 // not quietly stop a Delhi employee's leave being charged). Half-day holidays come back separately: they cost
 // half a leave day, not none.
-async function holidaysInRange(
+export async function holidaysInRange(
   deps: Deps,
   startMs: number,
   endMs: number,
@@ -85,7 +86,7 @@ const dayMs = (s?: string) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
 // A day maps to two half-day slots, so an overlap test can distinguish "ends the morning of the 3rd" from
 // "starts the afternoon of the 3rd" - which is what lets those two abut rather than collide.
-const slotOf = (ms: number, session: number) => Math.round(ms / 86_400_000) * 2 + (session === 2 ? 1 : 0);
+export const slotOf = (ms: number, session: number) => Math.round(ms / 86_400_000) * 2 + (session === 2 ? 1 : 0);
 
 /**
  * The employee's LIVE leave (pending or approved) that could touch `[startMs, endMs]`, at day granularity.
@@ -117,7 +118,7 @@ function liveLeaveInWindow(deps: Deps, employeeId: string, startMs: number, endM
 type LeaveRow = typeof schema.leaveRequests.$inferSelect;
 
 /** The first of `rows` that really overlaps `[startSlot, endSlot]` once half-day sessions are honoured. */
-const overlapping = (rows: LeaveRow[], startSlot: number, endSlot: number) =>
+export const overlapping = (rows: LeaveRow[], startSlot: number, endSlot: number) =>
   rows.filter((r) => startSlot <= slotOf(+new Date(r.endDate), r.endSession) && slotOf(+new Date(r.startDate), r.startSession) <= endSlot);
 
 /**
@@ -127,7 +128,7 @@ const overlapping = (rows: LeaveRow[], startSlot: number, endSlot: number) =>
  * writer's re-check ran before the other had even inserted, the one that saw nothing kept its row AND the one
  * that saw it could still "win" the comparison and keep its own. Both survived, which is the bug.
  */
-const arrivedFirst = (a: LeaveRow, b: LeaveRow) =>
+export const arrivedFirst = (a: LeaveRow, b: LeaveRow) =>
   +new Date(a.createdAt) !== +new Date(b.createdAt) ? +new Date(a.createdAt) < +new Date(b.createdAt) : a.uuid < b.uuid;
 
 // Org leave-request policy (generic settings key "leave-requests"). Default preserves the prior behaviour
@@ -419,7 +420,11 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   const holidayFrom = Math.min(start, policyWindow?.fromMs ?? start) - 8 * 86_400_000;
   const holidayTo = Math.max(end, policyWindow?.toMs ?? end) + 8 * 86_400_000;
   const holidays = await holidaysInRange(deps, holidayFrom, holidayTo, await employeeLocation(deps, employeeId));
-  const days = leaveDays(start, end, startSession, endSession, att.work_days, holidays.full, holidays.half, sandwichOf(rules));
+  // Whose working days these are (services/workSchedule.ts): a week of leave costs a Mon/Wed/Fri part-timer
+  // three days, not the five an org-wide weekday set would charge them. Resolved over the POLICY window, not
+  // just the requested range, because the restriction rules below walk the neighbours too.
+  const schedOf = (await scheduleCtxWith(deps, att, utcDay(holidayFrom), utcDay(holidayTo), [employeeId]))(employeeId);
+  const days = leaveDays(start, end, startSession, endSession, schedOf, holidays.full, holidays.half, sandwichOf(rules));
   if (days <= 0) throw invalidArgument("no working days in the selected range (weekends and holidays aren't counted) - pick a working day");
 
   // Balance check: a paid (entitlement-tracked) leave type can't be drawn below zero. The balance is reserved
@@ -496,7 +501,7 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
       // can actually be checked: on approval, below.
       hasDocument: null,
       reason: input.reason ?? null,
-      workDays: att.work_days,
+      schedOf,
       holidays: holidays.full,
       halfDayHolidays: holidays.half,
       ...facts,
@@ -624,7 +629,17 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   // Who may approve/reject/cancel is gated by the verb's grant (middleware). Here only the instance state +
   // dates matter. Approve/reject act on a PENDING request; cancel also works on an APPROVED leave that
   // hasn't started yet (so an employee can call off an upcoming approved leave and get the balance back).
-  if (to === "CANCELLED") {
+  // Leave brought in from before HRMS (`source: import`) is a record of what happened, not a plan: it is
+  // cancelled only to take a wrong import back out, which is HR's act on somebody else's record - never the
+  // person's own, who could otherwise erase leave that counts against their quota. It started long ago by
+  // definition, so the "already started" rule below does not apply to it.
+  const imported = row.source === "import";
+  if (to === "CANCELLED" && imported) {
+    if (row.state !== "APPROVED") throw failedPrecondition("only approved leave can be cancelled");
+    if (actor.employeeId && actor.employeeId === row.employeeId) {
+      throw failedPrecondition("leave from before HRMS is removed by HR, not by the person it belongs to");
+    }
+  } else if (to === "CANCELLED") {
     if (row.state !== "PENDING" && row.state !== "APPROVED") throw failedPrecondition("only pending or approved leave can be cancelled");
     // "Has already started" is a question about CALENDAR DAYS, and both sides have to be the same kind of
     // thing. `start_date` is date-only, anchored at UTC midnight; comparing it against the raw instant asked
@@ -682,7 +697,9 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   // the days are back, or neither happened and the caller may try again. The refund goes FIRST and carries the
   // same `state = from` precondition, so a lost race writes neither half (a batch reports a short count, it
   // does not roll one statement back).
-  const refund = to === "REJECTED" || to === "CANCELLED" ? await leaveRefundStmts(deps, id, from, row.employeeId, row.leaveTypeId, row.days) : [];
+  // Imported leave never reserved anything (the opening balance already has it taken off), so there is
+  // nothing to give back.
+  const refund = (to === "REJECTED" || to === "CANCELLED") && !imported ? await leaveRefundStmts(deps, id, from, row.employeeId, row.leaveTypeId, row.days) : [];
   const drifted = await runBatchChecked(deps.db, [...refund, flip]);
   if (drifted.length) throw failedPrecondition("request was already decided");
   const updated = (await deps.db.select().from(schema.leaveRequests).where(eq(schema.leaveRequests.uuid, id)).limit(1))[0]!;
@@ -690,11 +707,15 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   if (to === "APPROVED" || to === "REJECTED") {
     await notify(deps, { recipient: row.employeeId, type: `leave.${to.toLowerCase()}`, title: `Leave ${to.toLowerCase()}`, body: `Your leave request was ${to.toLowerCase()}.`, link: "leave-requests/history", subject: `leave-requests/${id}`, actorId: actor.employeeId });
   }
-  await emitEvent(deps, actor, `leave.${to.toLowerCase()}`, {
-    subject: `leave-requests/${id}`,
-    employeeId: row.employeeId,
-    payload: { leaveTypeId: row.leaveTypeId, days: row.days, from: new Date(row.startDate).toISOString(), to: new Date(row.endDate).toISOString() },
-  });
+  // No event for taking an import back out: it is a correction to history, and an automation keyed on
+  // "leave cancelled" (a cover arrangement, a calendar entry) has nothing to act on for leave years ago.
+  if (!imported) {
+    await emitEvent(deps, actor, `leave.${to.toLowerCase()}`, {
+      subject: `leave-requests/${id}`,
+      employeeId: row.employeeId,
+      payload: { leaveTypeId: row.leaveTypeId, days: row.days, from: new Date(row.startDate).toISOString(), to: new Date(row.endDate).toISOString() },
+    });
+  }
   // Approved leave EXCUSES an absence, and cancelling approved leave un-excuses it, so both directions can
   // change what a period should have docked. A request spanning a month boundary touches two periods, which
   // is why this is the range form. Only periods with a committed run do anything; an open one is re-read by

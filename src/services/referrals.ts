@@ -38,8 +38,8 @@ const etagOf = (ms: number) => `"${ms}"`;
 // The actor for cron-issued awards; HR awards pass the real actor. `systemActor()` (lib/systemActor.ts) rather
 // than a locally cast `{ email: "…" } as unknown as AppUser`: that cast asserted "nothing down this call tree
 // reads any other field" from a file that cannot see the call tree, and left `actor_role` null on every row
-// the milestone sweep wrote. Same identity the automation engine and internal dispatch act as.
-const SYSTEM_ACTOR = systemActor();
+// the milestone sweep wrote. Same identity the automation engine and internal dispatch act as. Built per sweep
+// (it carries the stored policy manifest), not once at module load.
 
 const cfgOf = (deps: Deps) => getSettingValue<ReferralsConfig>(deps, "referrals", DEFAULT_REFERRALS_CONFIG);
 
@@ -169,6 +169,7 @@ export async function awardReferralBonusNow(deps: Deps, actor: AppUser, id: stri
 // eligible referrals whose bonus a payroll run has since paid. Returns the number of state changes made.
 export async function awardReferralBonuses(deps: Deps): Promise<number> {
   const cfg = await cfgOf(deps);
+  const SYSTEM_ACTOR = await systemActor(deps);
   let changed = 0;
 
   // (1) Eligibility.

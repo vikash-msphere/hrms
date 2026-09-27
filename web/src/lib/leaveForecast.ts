@@ -1,4 +1,4 @@
-import { computeAccrual, ymOf, type AccrualFrequency } from "../../../src/domain/leave";
+import { computeAccrual, hrmsPricingStartMs, ymOf, type AccrualFrequency } from "../../../src/domain/leave";
 import { splitCarryForward } from "../../../src/domain/carryForward";
 import type { Employee, LeaveBalance, LeaveType } from "@/types";
 import { todayStr } from "@/lib/orgDay";
@@ -53,6 +53,10 @@ export function accrualEntriesThisYear(
   const frequency: AccrualFrequency = type!.accrual_frequency === "semi_monthly" ? "semi_monthly" : "monthly";
   const startMs = employee?.start_date ? Date.parse(employee.start_date + "T00:00:00Z") : null;
   const probationEndMs = employee?.probation_end_date ? Date.parse(employee.probation_end_date + "T00:00:00Z") : null;
+  const floorMs = employee?.tracked_from ? Date.parse(employee.tracked_from + "T00:00:00Z") : null;
+  // A period before HRMS records start is the opening balance's (domain/leave.ts floorMs), so it is not listed
+  // as an accrual here - the opening entry is what stands for it.
+  const pricedFrom = hrmsPricingStartMs({ startMs, floorMs, frequency });
   const year = now.getUTCFullYear();
   const out: { on: string; days: number; label: string }[] = [];
   // Walk the year's credit dates up to today, asking the real accrual what each one added (the previous
@@ -65,6 +69,7 @@ export function accrualEntriesThisYear(
   }
   for (const at of dates) {
     if (+at > +now) break;
+    if (pricedFrom !== null && +at < pricedFrom) continue;
     const prev = new Date(+at - 86_400_000);
     const lastAccrualYm = frequency === "semi_monthly" ? `${ymOf(+prev)}-H${prev.getUTCDate() >= 16 ? 2 : 1}` : ymOf(+prev);
     const { add } = computeAccrual({
@@ -76,6 +81,7 @@ export function accrualEntriesThisYear(
       lastAccrualYm,
       currentMs: +at,
       frequency,
+      floorMs,
     });
     if (add > 0) out.push({ on: ymd(at), days: add, label: "Accrued" });
   }
@@ -95,6 +101,7 @@ export function forecastBalance(
   const frequency: AccrualFrequency = type.accrual_frequency === "semi_monthly" ? "semi_monthly" : "monthly";
   const startMs = employee?.start_date ? Date.parse(employee.start_date + "T00:00:00Z") : null;
   const probationEndMs = employee?.probation_end_date ? Date.parse(employee.probation_end_date + "T00:00:00Z") : null;
+  const floorMs = employee?.tracked_from ? Date.parse(employee.tracked_from + "T00:00:00Z") : null;
 
   // Credits still to come this calendar year: run the real accrual from "everything up to now is credited"
   // through 31 Dec. Marking the CURRENT period as credited is what keeps the projection forward-looking.
@@ -109,6 +116,7 @@ export function forecastBalance(
         lastAccrualYm: frequency === "semi_monthly" ? `${ymOf(+now)}-H${now.getUTCDate() >= 16 ? 2 : 1}` : ymOf(+now),
         currentMs: yearEndMs,
         frequency,
+        floorMs,
       }).add
     : 0;
 
@@ -124,6 +132,7 @@ export function forecastBalance(
         lastAccrualYm: frequency === "semi_monthly" ? `${ymOf(+now)}-H${now.getUTCDate() >= 16 ? 2 : 1}` : ymOf(+now),
         currentMs: Date.parse(nextOn + "T00:00:00Z"),
         frequency,
+        floorMs,
       }).add
     : 0;
 

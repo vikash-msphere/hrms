@@ -26,7 +26,7 @@ import { confirmDecision } from "@/lib/confirmDecision";
 export type Approvable = { path: string; etag?: string; create_time?: string; update_time?: string; access?: { can?: string[] } };
 
 // Collections whose :reject verb accepts an optional `note` in the body (relayed to the requester).
-export const REJECT_NOTE = new Set(["overtime-requests", "remote-work-requests", "asset-requests", "expenses"]);
+export const REJECT_NOTE = new Set(["overtime-requests", "remote-work-requests", "late-early-requests", "asset-requests", "expenses"]);
 
 // How long a request has been sitting in the inbox, from its create time.
 export const waitingDays = (t?: string) => (t ? Math.max(0, Math.floor((Date.now() - +new Date(t)) / 86_400_000)) : 0);

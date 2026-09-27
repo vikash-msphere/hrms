@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { ruleWithinAuthority } from "../src/domain/access";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import type { Grant } from "../src/domain/permissions";
 
 // An access admin may hand out only authority they hold themselves. Without this bound, delegating the ACL was

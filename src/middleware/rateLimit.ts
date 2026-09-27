@@ -169,7 +169,7 @@ const BUDGETS: Budget[] = [
     name: "fan-out",
     limit: 120,
     matches: (_m, p) =>
-      p === "/v1/search" || p === "/v1/people-analytics" || p === "/v1/cron-runs:run" ||
+      p === "/v1/search" || p === "/v1/search:ask" || p === "/v1/people-analytics" || p === "/v1/cron-runs:run" ||
       (p.startsWith("/v1/table-views/") && verbIs(p, "run")),
     rate: keyedCounter(120),
   },

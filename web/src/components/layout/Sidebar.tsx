@@ -7,8 +7,10 @@ import { useApprovals } from "@/lib/approvals";
 import { useNotifications } from "@/lib/notifications";
 import { cn } from "@/lib/utils";
 import { AccessTarget } from "@/components/access/AccessTarget";
-import { useOrg, orgAnniversary, orgNameFontStack, orgNameWeight, orgNameSizePx, CELEBRATION_WEEK_DAYS } from "@/lib/org";
+import { useOrg, orgAnniversary, orgNameFontStack, orgNameWeight, orgNameSizePx } from "@/lib/org";
 import { useMedia } from "@/hooks/useMedia";
+import { useCelebrationLeadDays } from "@/hooks/useCelebrations";
+import { AnniversaryOrbit, AnniversaryCaption } from "@/components/layout/AnniversaryOrbit";
 import { useTheme } from "@/lib/theme";
 import { lockPageScroll } from "@/lib/scrollLock";
 import { readLocal, writeLocal } from "@/lib/localPref";
@@ -43,55 +45,6 @@ const railKey = (email: string) => `nav:rail:${email}`;
 const loadRail = (email: string) => readLocal(railKey(email)) === "1";
 const saveRail = (email: string, on: boolean) => writeLocal(railKey(email), on ? "1" : "0");
 
-// A festive balloon-and-ribbon overlay shown during the company anniversary week (matches the balloon+ribbon
-// reference): big glossy teardrop balloons cluster up-and-right (overlapping only the logo's right edge),
-// their strings trailing into a curved constant-width red banner along the bottom carrying "<n> YRS".
-function AnniversaryBanner({ className, years }: { className?: string; years?: number }) {
-  // Balloon: a broad rounded dome up top, widest in the upper third, then tapering down to the tie point
-  // (cx, cy+ry) - the natural pear/egg balloon shape, not a perfect circle or a thin teardrop.
-  const balloonPath = (cx: number, cy: number, rx: number, ry: number) =>
-    `M${cx} ${cy - ry} C ${cx + rx * 0.78} ${cy - ry} ${cx + rx} ${cy - ry * 0.62} ${cx + rx} ${cy - ry * 0.22} C ${cx + rx} ${cy + ry * 0.3} ${cx + rx * 0.32} ${cy + ry * 0.78} ${cx} ${cy + ry} C ${cx - rx * 0.32} ${cy + ry * 0.78} ${cx - rx} ${cy + ry * 0.3} ${cx - rx} ${cy - ry * 0.22} C ${cx - rx} ${cy - ry * 0.62} ${cx - rx * 0.78} ${cy - ry} ${cx} ${cy - ry} Z`;
-  // Gather point on the ribbon where the balloon strings meet - off to the right, not the center.
-  const gx = 156, gy = 150;
-  const balloons = [
-    { cx: 178, cy: 18, rx: 46, ry: 56, t: 12, g: "annivRed" },
-    { cx: 224, cy: 40, rx: 39, ry: 48, t: 16, g: "annivGreen" },
-    { cx: 192, cy: 58, rx: 39, ry: 48, t: 14, g: "annivGold" },
-  ];
-  const label = years != null ? `${years} ${years === 1 ? "YR" : "YRS"}` : "";
-  return (
-    <svg viewBox="0 0 200 224" className={className} aria-hidden="true">
-      <defs>
-        <radialGradient id="annivRed" cx="36%" cy="28%" r="78%"><stop offset="0%" stopColor="#ff8585" /><stop offset="55%" stopColor="#e23b3b" /><stop offset="100%" stopColor="#a81818" /></radialGradient>
-        <radialGradient id="annivGreen" cx="36%" cy="28%" r="78%"><stop offset="0%" stopColor="#bdec92" /><stop offset="55%" stopColor="#7cb342" /><stop offset="100%" stopColor="#4f8a2c" /></radialGradient>
-        <radialGradient id="annivGold" cx="36%" cy="28%" r="78%"><stop offset="0%" stopColor="#ffe9a8" /><stop offset="55%" stopColor="#f6b73c" /><stop offset="100%" stopColor="#d6890c" /></radialGradient>
-        <linearGradient id="annivRibbon" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#e63b3b" /><stop offset="100%" stopColor="#9e1414" /></linearGradient>
-        <linearGradient id="annivRibbonFold" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8e1515" /><stop offset="100%" stopColor="#6a0f0f" /></linearGradient>
-      </defs>
-      {/* balloon strings (behind the balloons), gathering at the ribbon */}
-      {balloons.map((b, i) => <path key={`s${i}`} d={`M${b.cx} ${b.cy + b.ry} Q ${(b.cx + gx) / 2} ${(b.cy + gy) / 2 + 10} ${gx} ${gy}`} fill="none" stroke="#9aa0a6" strokeWidth="1" />)}
-      {/* glossy teardrop balloons with a highlight (the teardrop's lower point is the tie - no extra knot) */}
-      {balloons.map((b, i) => (
-        <g key={i} transform={`rotate(${b.t} ${b.cx} ${b.cy + b.ry})`}>
-          <path d={balloonPath(b.cx, b.cy, b.rx, b.ry)} fill={`url(#${b.g})`} />
-          <ellipse cx={b.cx - b.rx * 0.32} cy={b.cy - b.ry * 0.36} rx={b.rx * 0.24} ry={b.ry * 0.3} fill="#ffffff" opacity="0.5" />
-        </g>
-      ))}
-      {/* red banner (the ribbon.png shape): swallowtail tails behind, an arched band whose ends fold down over
-          them, with the darker underside showing at each fold. */}
-      <path d="M44 160 20 160 23 214 33 203 43 214Z" fill="url(#annivRibbon)" stroke="#7a1010" strokeWidth="1" strokeLinejoin="round" />
-      <path d="M156 160 180 160 177 214 167 203 157 214Z" fill="url(#annivRibbon)" stroke="#7a1010" strokeWidth="1" strokeLinejoin="round" />
-      <path d="M30 150 Q100 116 170 150 L170 190 Q100 156 30 190 Z" fill="url(#annivRibbon)" stroke="#7a1010" strokeWidth="1.1" strokeLinejoin="round" />
-      <path d="M30 189 C38 195 39 205 33 211 28 203 27 195 30 189 Z" fill="url(#annivRibbonFold)" />
-      <path d="M170 189 C162 195 161 205 167 211 172 203 173 195 170 189 Z" fill="url(#annivRibbonFold)" />
-      {/* "<n> YRS" centered on the band, in a festive script */}
-      {label && (
-        <text x="100" y="153" textAnchor="middle" dominantBaseline="central" fontSize="27" fontWeight="800" letterSpacing="0.5" fill="#ffffff" stroke="#7a1010" strokeWidth="0.3" style={{ fontFamily: '"Arial Rounded MT Bold", "Marker Felt", "Trebuchet MS", system-ui, sans-serif' }}>{label}</text>
-      )}
-    </svg>
-  );
-}
-
 function Brand({ collapsed }: { collapsed?: boolean }) {
   const { org } = useOrg();
   // Dark-theme logo variant, when the org uploaded one. Picked here rather than with CSS because the logo is an
@@ -102,39 +55,41 @@ function Brand({ collapsed }: { collapsed?: boolean }) {
   // A wordmark (logo + name drawn as one wide image) replaces the square-mark-plus-text pair and spans the
   // sidebar's width. It can't shrink into the w-16 icon rail, so the rail keeps using the square mark.
   const wordmark = (resolved === "dark" ? org.wordmark_dark : undefined) || org.wordmark;
-  // Drape a celebration banner across the logo while the incorporation anniversary is in the dashboard's
-  // "this week" window - i.e. exactly when it's counted in the Celebrations StatCard.
+  // While the incorporation anniversary is inside the org's celebration lead time - i.e. exactly when it's
+  // counted in the Celebrations StatCard - the mark goes into orbit (AnniversaryOrbit.tsx). The mark itself
+  // stays the org's upload; the orbit and caption are drawn round it.
+  const leadDays = useCelebrationLeadDays();
   const anniv = orgAnniversary(org.incorporation_date);
-  const celebrating = anniv != null && anniv.in_days <= CELEBRATION_WEEK_DAYS;
+  const celebrating = anniv != null && typeof leadDays === "number" && anniv.in_days <= leadDays;
   const annivTitle = celebrating ? `${anniv!.years}-year company anniversary` : undefined;
+  const caption = celebrating && org.incorporation_date ? <AnniversaryCaption years={anniv!.years} incorporationDate={org.incorporation_date} /> : null;
   if (wordmark && !collapsed) {
     return (
-      <div className="min-w-0 flex-1 px-4 py-4">
-        <div className="relative" title={annivTitle}>
+      <div className="relative min-w-0 flex-1 px-4 py-4">
+        {/* `isolate`: the orbit's comet swaps z-index to pass behind the image, inside this one context. */}
+        <div className="relative isolate" title={annivTitle}>
           {/* w-full + object-contain: fills the sidebar width, height capped, never distorted whatever the
               uploaded aspect ratio is. The wordmark carries the org name, so it takes the name as alt text. */}
-          <img src={wordmark} alt={org.logo_text?.trim() || org.name} className="max-h-11 w-full object-contain object-left" />
-          {celebrating && (
-            <AnniversaryBanner years={anniv!.years} className="pointer-events-none absolute -top-[10px] -left-[5px] h-[52px] w-[46px] overflow-visible drop-shadow-md" />
-          )}
+          <img src={wordmark} alt={org.logo_text?.trim() || org.name} className="relative z-[1] max-h-11 w-full object-contain object-left" />
+          {celebrating && <AnniversaryOrbit />}
         </div>
+        {caption}
       </div>
     );
   }
   return (
-    <div className={cn("flex items-center gap-2.5 py-4", collapsed ? "justify-center px-0" : "min-w-0 flex-1 px-4")}>
-      <div className="relative shrink-0" title={annivTitle}>
+    <div className={cn("relative flex items-center gap-2.5 py-4", collapsed ? "justify-center px-0" : "min-w-0 flex-1 px-4")}>
+      <div className="relative isolate shrink-0" title={annivTitle}>
         {logo ? (
-          <img src={logo} alt="" className="h-9 w-9 rounded-lg object-cover" />
+          <img src={logo} alt="" className="relative z-[1] h-9 w-9 rounded-lg object-cover" />
         ) : (
-          <div className="brand-gradient flex h-9 w-9 items-center justify-center rounded-lg text-white shadow-sm">
+          <div className="brand-gradient relative z-[1] flex h-9 w-9 items-center justify-center rounded-lg text-white shadow-sm">
             <Building className="h-5 w-5" />
           </div>
         )}
-        {celebrating && (
-          <AnniversaryBanner years={anniv!.years} className="pointer-events-none absolute -top-[6px] -left-[5px] h-[52px] w-[46px] overflow-visible drop-shadow-md" />
-        )}
+        {celebrating && <AnniversaryOrbit />}
       </div>
+      {!collapsed && caption}
       {!collapsed && (
         <div className="leading-tight">
           <div className="truncate text-foreground" style={{ fontFamily: orgNameFontStack(org.name_font), fontWeight: orgNameWeight(org.name_weight), fontSize: orgNameSizePx(org.name_size) }}>{org.logo_text?.trim() || org.name}</div>

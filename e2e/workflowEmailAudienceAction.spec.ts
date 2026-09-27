@@ -1,4 +1,4 @@
-import { SPA_HEADERS, ROLES, gotoRoute, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, ROLES, gotoRoute, landedResponse, purge, test, expect } from "./fixtures";
 import { addTicketCategory, dropTicketCategories } from "./ticketCategories";
 
 // "Email an audience" - the email twin of notifyAudience (src/services/automationEngine.ts's emailAudience
@@ -57,7 +57,7 @@ test("a rule with an emailAudience department action sends to that department an
 
   await expect(form.getByText(/^When /).first()).toBeVisible({ timeout: 30_000 });
   const [saved] = await Promise.all([
-    page.waitForResponse((r) => r.url().includes("/v1/automations") && r.request().method() === "POST", { timeout: 30_000 }),
+    landedResponse(page, (r) => r.url().includes("/v1/automations") && r.request().method() === "POST"),
     form.getByRole("button", { name: "Create rule" }).click(),
   ]);
   expect(saved.status(), await saved.text()).toBe(200);

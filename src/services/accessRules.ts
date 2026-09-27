@@ -693,7 +693,7 @@ export async function reviewStandingAccess(deps: Deps): Promise<number> {
 
   // Record the run whether or not there is anything to say, so an org with nothing outstanding does not get
   // asked again tomorrow.
-  await upsertSetting(deps, systemActor(), "access-review", { ...cfg, last_run: new Date(+now).toISOString() });
+  await upsertSetting(deps, await systemActor(deps), "access-review", { ...cfg, last_run: new Date(+now).toISOString() });
   if (!standing.length) return 0;
 
   const empIds = await accessAdminEmployeeIds(deps);

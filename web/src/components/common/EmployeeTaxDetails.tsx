@@ -3,7 +3,7 @@ import { CalendarClock, Landmark, Pencil, ShieldCheck } from "lucide-react";
 import { get, patch } from "@/api";
 import { describeError, isConflict } from "@/lib/formError";
 import type { TaxDetails } from "@/types";
-import { cn } from "@/lib/utils";
+import { cn, formatMonthYear } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -129,6 +129,9 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
   const priorTdsCounted = d.prior_employer_tds_effective ?? 0;
   const priorIncomeCounted = d.prior_employer_income_effective ?? 0;
   const collected = d.deducted_so_far + priorTdsCounted;
+  const beforeHrmsGross = d.before_hrms_gross ?? 0;
+  const beforeHrmsTds = d.before_hrms_tds ?? 0;
+  const beforeHrmsThrough = d.before_hrms_paid_through ? ` (through ${formatMonthYear(`${d.before_hrms_paid_through}-01`)})` : "";
   const pct = d.total_tax > 0 ? Math.min(100, Math.round((collected / d.total_tax) * 100)) : 0;
   const yearDone = d.total_tax > 0 && collected >= d.total_tax;
 
@@ -192,6 +195,9 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
             <dl className="space-y-1.5 text-sm">
               <Row label="Projected income for the year" value={inr(d.annual_gross)} />
               {priorIncomeCounted ? <Row label={`Includes ${inr(priorIncomeCounted)} from a previous employer`} value="" muted /> : null}
+              {/* Pay this employer made before its payroll ran in HRMS (a payroll opening): already inside the
+                  year's income, named so the total adds up for someone who only has HRMS payslips. */}
+              {beforeHrmsGross ? <Row label={`Includes ${inr(beforeHrmsGross)} paid before HRMS${beforeHrmsThrough}`} value="" muted /> : null}
               <Row label="Standard deduction" value={`− ${inr(d.standard_deduction)}`} muted />
               {/* Chapter VI-A from VERIFIED investment declarations. A section this regime disallows is shown at
                   zero rather than hidden, so the answer to "why didn't my 80C help?" is on the page. */}
@@ -243,6 +249,7 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
               <Row label="Total tax for the year" value={inr(d.total_tax)} />
               {priorTdsCounted ? <Row label="Deducted at a previous employer" value={`− ${inr(priorTdsCounted)}`} muted /> : null}
               <Row label={`Deducted so far at ${org.name}`} value={`− ${inr(d.deducted_so_far)}`} muted />
+              {beforeHrmsTds ? <Row label={`Includes ${inr(beforeHrmsTds)} deducted before HRMS`} value="" muted /> : null}
               <Row label="Still to collect" value={inr(Math.max(0, d.total_tax - collected))} strong />
               <div className="my-2 border-t" />
               <Row label={`Months left in the financial year`} value={String(d.remaining_months)} />

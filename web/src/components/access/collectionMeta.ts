@@ -147,6 +147,12 @@ export const COLLECTION_META: Record<string, CollectionMeta> = {
     plural: "scheduled runs",
     note: "The history of scheduled background ticks. The run method fires a tick on demand.",
   },
+  "search-insights": {
+    label: "Search insights",
+    singular: "search insight",
+    plural: "search insights",
+    note: "Daily counters of how ⌘K is used: queries that found nothing, which results get opened, how Ask answers. No names.",
+  },
   users: {
     label: "Users",
     singular: "user account",
@@ -161,12 +167,42 @@ export const COLLECTION_META: Record<string, CollectionMeta> = {
     plural: "day marks",
     note: "What one person's day COUNTS AS - a full day, half a day, or absent - decided by HR instead of derived from their punches. A mark changes what the payroll run treats as unpaid absence, so write is a pay decision: the seeded grants give managers read (they see why a report's short day was counted the way it was) and leave the writing with HR. Self-scoped read is the employee's own: they are the person the decision is about.",
   },
+  "late-early-requests": {
+    label: "Late & early requests",
+    singular: "late arrival or early departure request",
+    plural: "late arrival and early departure requests",
+    note: "An employee asking to come in late or leave early on one day. Approving one moves that day's shift start or end to the requested time; under the org's punctuality policy it can also change the day's loss of pay, so approve is a pay decision as well as an attendance one. Self-scoped write is filing and cancelling your own.",
+  },
+  "work-patterns": {
+    label: "Schedules",
+    singular: "schedule",
+    plural: "schedules",
+    note: "The org's catalog of working patterns - a repeating week, or a rotation of up to eight. A pattern decides which days the people on it are expected in, which shift each day is, and how many worked minutes earn a full or half day, so what it says feeds loss of pay. The catalog is HR's; a manager picks from it rather than inventing one.",
+  },
+  "work-pattern-assignments": {
+    label: "Schedule assignments",
+    singular: "schedule assignment",
+    plural: "schedule assignments",
+    note: "Which schedule one person is on, and from when. It decides which days they are owed, so putting somebody on a shorter pattern changes what a day of absence costs them - write is a pay decision as much as a rota one. Self-scoped read is the employee's own: they are the person the schedule is about.",
+  },
   compensation: { label: "Compensation", singular: "compensation record", plural: "compensation records" },
   "leave-balances": {
     label: "Leave balances",
     singular: "leave balance",
     plural: "leave balances",
-    note: "Balances are maintained by the system (accruals, approvals, encashments). Write allows manual adjustment.",
+    note: "Balances are maintained by the system (accruals, approvals, encashments) and are read-only here. A change by hand is a Leave adjustment.",
+  },
+  "leave-adjustments": {
+    label: "Leave adjustments",
+    singular: "leave adjustment",
+    plural: "leave adjustments",
+    note: "The ledger of changes to a leave balance that nothing else explains: opening balances brought in from before HRMS, and corrections made by hand with a reason. Write moves somebody's balance, which is encashable, so it is a pay decision. Self-scoped read lets people see why their own balance moved.",
+  },
+  "payroll-openings": {
+    label: "Pay before HRMS",
+    singular: "pay before HRMS entry",
+    plural: "pay before HRMS entries",
+    note: "What each person was paid and had deducted this financial year before HRMS ran payroll, from the system before. It counts toward the year's income tax, professional tax and ESI, so write is a pay decision.",
   },
   announcements: {
     label: "Announcements",

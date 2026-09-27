@@ -6,11 +6,11 @@ import { gotoRoute, inDays, purge, toast, expect, test } from "./fixtures";
 // count it changes, which then has to read back. An invitation nobody can answer, or one that forgets the
 // answer, is the whole feature broken, and neither shows up in a server test where the verb works fine.
 //
-// Who may answer is policy, not UI: everyone reads the calendar (`events.**: read` in the base grants), but
-// `respond` is a custom method and the seeded policy hands the events verbs to HR and super. So HR answers
-// here, and the employee's side asserts the other half of hide-never-disable: they can see the event and are
-// NOT offered an answer they would be refused.
-test("an event is created, HR answers it, and the count moves", async ({ as }) => {
+// Who may answer is policy, not UI: everyone reads the calendar (`events.**: read` in the base grants), and
+// the seeded employee role holds `events.*.respond`. An event with no attendee list is company-wide, so the
+// service lets anyone who can see it answer (services/events.ts#respondToEvent). HR answers first, then the
+// employee answers from their own session and the organiser's count reads both.
+test("an event is created, HR and an employee answer it, and the count moves", async ({ as }) => {
   const organiser = await as("hr");
   const employee = await as("employee");
   const title = `E2E event ${Date.now()}`;
@@ -32,11 +32,17 @@ test("an event is created, HR answers it, and the count moves", async ({ as }) =
   await expect(toast(organiser, "You're going")).toBeVisible();
   await expect(row).toContainText("1 going");
 
-  // The employee sees the event on the shared calendar, and is offered no answer to give.
+  // The employee sees the company-wide event on the shared calendar and answers it themselves.
   await gotoRoute(employee, "events", "Events");
   const theirRow = employee.locator("tbody tr").filter({ hasText: title });
   await expect(theirRow).toHaveCount(1);
-  await expect(theirRow.getByRole("button", { name: "Going", exact: true })).toHaveCount(0);
+  await theirRow.getByRole("button", { name: "Maybe", exact: true }).click();
+  await expect(toast(employee, "Marked as maybe")).toBeVisible();
+  await expect(theirRow).toContainText("1 going · 1 maybe");
+
+  // And the organiser's view reads the employee's answer back.
+  await organiser.reload();
+  await expect(row).toContainText("1 going · 1 maybe", { timeout: 30_000 });
 
   await purge(organiser, await eventPath(organiser, title));
 });

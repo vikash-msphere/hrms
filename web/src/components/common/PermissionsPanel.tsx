@@ -4,7 +4,8 @@ import { Download, Upload, GitCompareArrows, KeyRound, Sparkles } from "lucide-r
 import { listAll, create, remove, get, invoke } from "@/api";
 import { ruleSentence, expiryLabel } from "@/components/access/ruleLogic";
 import { Checkbox } from "@/components/ui/checkbox";
-import { usePermission } from "@/lib/perm";
+import { useCapabilities, usePermission } from "@/lib/perm";
+import { mayWriteSetting } from "@/settings/registry";
 import { roleLabel, registerRoleLabels, EVERYONE_ROLE } from "@/lib/roles";
 import { CopyEmail } from "@/components/common/CopyEmail";
 import { ruleScopeFor, ruleMatchesTarget } from "@/components/access/accessRuleScope";
@@ -60,7 +61,10 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // Four-eyes on permission changes (settings key `access-approval`). Read here so the switch and the queue
   // below live in the same place the changes are made.
   const [fourEyes, setFourEyes] = React.useState<boolean | null>(null);
-  const canWriteSettings = usePermission("settings.write");
+  // Each switch is its own setting key, owned by whoever administers access (super admin by default).
+  const caps = useCapabilities();
+  const canWriteFourEyes = mayWriteSetting(caps, "access-approval");
+  const canWriteReview = mayWriteSetting(caps, "access-review");
   React.useEffect(() => {
     getSetting<{ enabled?: boolean }>("access-approval")
       .then((s) => setFourEyes(s.value?.enabled === true))
@@ -329,7 +333,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
       ) : (
         // line-clamp-none + flex: the default value slot is a -webkit-box, which breaks the dot+label row.
         <Select value={v} onValueChange={(nv) => setCell(kind, subject, collection, nv, label)} disabled={busy}>
-          <SelectTrigger className="h-8 w-28 shrink-0 [&>span]:flex [&>span]:items-center [&>span]:line-clamp-none"><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label={`${label} · ${labelOf(collection)}`} className="h-8 w-28 shrink-0 [&>span]:flex [&>span]:items-center [&>span]:line-clamp-none"><SelectValue /></SelectTrigger>
           <SelectContent>{CELL.map((l) => <SelectItem key={l} value={l}><CellOption value={l} /></SelectItem>)}</SelectContent>
         </Select>
       );
@@ -720,12 +724,12 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
             </p>
           </div>
           <div className="flex flex-col gap-1.5">
-            {fourEyes !== null && canWriteSettings && (
+            {fourEyes !== null && canWriteFourEyes && (
               <label className="flex items-center gap-2 text-sm">
                 <Checkbox checked={fourEyes} onCheckedChange={(v) => void setFourEyesEnabled(v === true)} /> Require a second approver
               </label>
             )}
-            {review !== null && canWriteSettings && (
+            {review !== null && canWriteReview && (
               <label className="flex items-center gap-2 text-sm" title="Every 90 days, remind the access admins to confirm or remove the permanent rules that grant write access or a custom method.">
                 <Checkbox checked={review} onCheckedChange={(v) => void setReviewEnabled(v === true)} /> Review standing access quarterly
               </label>

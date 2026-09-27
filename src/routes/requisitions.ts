@@ -42,5 +42,5 @@ export const requisitions = collectionRoutes<RequisitionInput, typeof schema.job
     create: (deps, actor, input, id) => createRequisition(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateRequisition(deps, actor, id, patch, ifMatch),
   },
-  list: (c, page) => listRequisitions(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted, page.deletedOnly),
+  list: (c, page) => listRequisitions(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted, page.deletedOnly, c.req.query("q")),
 });

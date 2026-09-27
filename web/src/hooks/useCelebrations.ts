@@ -1,6 +1,35 @@
 import { useEffect, useState } from "react";
 import { getConditional } from "@/api";
+import { readSetting } from "@/lib/settingsStore";
+import { subscribeInvalidations } from "@/lib/resourceStore";
 import type { Celebration } from "@/types";
+
+/**
+ * How many days ahead of the day itself a birthday or anniversary shows (settings/celebrations `lead_days`;
+ * 0 = only on the day). The dashboard card, its KPI, the team timeline and the sidebar's company-anniversary
+ * banner all take their window from this, so a celebration appears on every one of them on the same morning.
+ *
+ * `undefined` while the settings snapshot loads; `null` when the org has no usable value, which the callers
+ * show as "not configured" rather than inventing a window. Re-read when any settings row is written, so a save
+ * in Settings reaches the sidebar without a reload.
+ */
+export function useCelebrationLeadDays(): number | null | undefined {
+  const [days, setDays] = useState<number | null | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    const read = () =>
+      void readSetting<{ lead_days?: unknown }>("celebrations")
+        .then((v) => {
+          const n = v?.lead_days;
+          if (live) setDays(typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : null);
+        })
+        .catch(() => { if (live) setDays(null); });
+    read();
+    const off = subscribeInvalidations((collections) => { if (collections.includes("settings")) read(); });
+    return () => { live = false; off(); };
+  }, []);
+  return days;
+}
 
 /**
  * Birthdays and work anniversaries, read ONCE PER TAB and revalidated rather than re-fetched.

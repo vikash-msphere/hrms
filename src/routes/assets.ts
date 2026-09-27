@@ -130,6 +130,7 @@ export const assets = collectionRoutes<AssetInput, typeof schema.assets>({
       status: status && (ASSET_STATUSES as readonly string[]).includes(status) ? (status as AssetStatus) : undefined,
       maxPageSize: page.maxPageSize,
       pageToken: page.pageToken,
+      q: c.req.query("q"),
     });
   },
   verbs: {

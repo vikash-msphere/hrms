@@ -24,6 +24,7 @@ export const NOTIFICATION_CATEGORIES: { key: string; label: string; defaultPrior
   // Its own category rather than folded into `regularization`: a mark is not a correction, and somebody
   // muting "attendance regularization" has not asked to stop hearing that a day of their pay was re-valued.
   { key: "dayMark", label: "Attendance day marks", defaultPriority: "normal" },
+  { key: "lateEarly", label: "Late arrival & early departure", defaultPriority: "normal" },
   { key: "encashment", label: "Leave encashment", defaultPriority: "normal" },
   { key: "timesheet", label: "Timesheets", defaultPriority: "normal" },
   { key: "kudos", label: "Kudos", defaultPriority: "normal" },
@@ -56,6 +57,9 @@ export const NOTIFICATION_CATEGORIES: { key: string; label: string; defaultPrior
   // Access: someone asking for a grant, someone gaining one, and (with four-eyes on) a permission change
   // waiting for a second approver. High - a change nobody sees is a change nobody reviews.
   { key: "access", label: "Access & permissions", defaultPriority: "high" },
+  // The app lock (services/appLock.ts): wrong PINs entered on one of your browsers, and an admin resetting your
+  // PIN. Urgent - the only useful moment to hear either is straight away.
+  { key: "security", label: "Security (app lock)", defaultPriority: "urgent" },
   { key: "system", label: "System", defaultPriority: "normal" },
 ];
 

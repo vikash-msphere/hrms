@@ -36,7 +36,7 @@ beforeAll(async () => {
 const TABLES = [schema.notifications, schema.goals, schema.leaveRequests, schema.accessRules, schema.auditLog, schema.eventLog, schema.jobs, schema.employees, schema.departments, schema.users, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
-  await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee" }).onConflictDoNothing();
+  await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee", provisioned: true }).onConflictDoNothing();
 });
 
 const actor: AppUser = { uuid: "u-actor", email: "hr@test.example", role: "super_admin", status: "active", employeeId: null, employeeCode: null } as unknown as AppUser;
@@ -142,7 +142,7 @@ describe("re-parenting: coverage tripwire", () => {
     // and must be rewritten, but it has no wire collection, so no access rule can name it.
     for (const c of named) expect(RESOURCE_COLLECTIONS).toContain(c);
     // Tripwire: bump this when a new employee-owned (allocOwnedCode) collection is added AND wired into the cascade.
-    expect(cols.length).toBe(47);
+    expect(cols.length).toBe(51);
   });
 
   // The OWNER KEY's registry, kept honest from the other side. `OWNER_COLUMN_COLLECTIONS` (lib/authzResolve.ts)

@@ -11,6 +11,7 @@ import { applyScope } from "./listScope";
 import { deleteStateFilter } from "./softDelete";
 import type { ListScope } from "../domain/access";
 import { keysetPage } from "./keysetPage";
+import { searchFilter } from "./searchFilter";
 import { has, type CrudSpec, type SetOf } from "./crud";
 
 export type EventInput = {
@@ -42,11 +43,15 @@ function parseTime(s: string | undefined, allDay: boolean): number {
 }
 
 // Scope-filtered in SQL (an event can be shared to a department), then paged like any other collection.
-export async function listEvents(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, deletedOnly = false) {
+export async function listEvents(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, deletedOnly = false, q?: string) {
   // Paged in SQL (services/keysetPage.ts), soft-delete filter included, rather than reading the whole
   // calendar into the isolate to slice one page out of it: the events table only grows, and D1 bills the rows
-  // a query reads.
-  const conds = [applyScope(scope, schema.events.code, schema.events.code), deleteStateFilter(schema.events.deleteTime, showDeleted, deletedOnly)];
+  // a query reads. The search box narrows the same way, over the whole calendar (services/searchFilter.ts).
+  const conds = [
+    applyScope(scope, schema.events.code, schema.events.code),
+    deleteStateFilter(schema.events.deleteTime, showDeleted, deletedOnly),
+    await searchFilter(deps, "events", q, schema.events.uuid),
+  ];
   return keysetPage<typeof schema.events.$inferSelect>(deps, schema.events, "events", and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
 }
 

@@ -51,6 +51,11 @@ const ALLOW: Record<string, string> = {
   // /auth is not /v1. The client is a /v1 client - it prefixes the path, speaks Problem+JSON and carries the
   // view-as header, none of which apply to the sign-out endpoint, which answers with a provider redirect.
   "components/layout/UserMenu.tsx": "/auth/logout is outside the /v1 surface the client speaks",
+  // The app lock's door (src/routes/appLockRoutes.ts) is /auth/lock, outside /v1 for the same reason, and it is
+  // the one surface a LOCKED browser can reach: routed through api(), a locked answer would re-enter the lock
+  // flow that is asking the question - the session-expired probe's problem, for the lock.
+  "lib/appLock.ts": "/auth/lock is outside /v1, and must not re-enter api()'s lock handling while locked",
+  "components/lock/LockScreen.tsx": "/auth/logout from the lock screen, outside the /v1 surface the client speaks",
 };
 
 describe("the SPA reaches the Worker only through web/src/api.ts", () => {

@@ -919,3 +919,178 @@
 .chart-drillable .chart-container.chart-container .day:hover {
   opacity: 0.75;
 }
+
+/* THE APP LOCK (web/src/lib/appLock.ts). While the tab is hidden, nothing of the app is painted, so a tab
+   thumbnail, a phone's app switcher and the first frame on coming back show nothing. Invisible to the person:
+   they cannot see a hidden tab. */
+html[data-lock-shade] #root {
+  visibility: hidden;
+}
+/* A wrong PIN: the dots shake. The global reduced-motion rule above collapses it to nothing. */
+@keyframes lock-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-10px); }
+  40%, 80% { transform: translateX(10px); }
+}
+.lock-shake {
+  animation: lock-shake 0.4s ease-in-out;
+}
+/* The lock screen's backdrop: brand light, never a picture of the app. */
+.lock-aurora {
+  background:
+    radial-gradient(60rem 40rem at 15% -10%, hsl(var(--primary) / 0.18), transparent 60%),
+    radial-gradient(50rem 35rem at 110% 110%, hsl(var(--primary) / 0.12), transparent 60%);
+}
+
+/* THE COMPANY ANNIVERSARY ORBIT (components/layout/AnniversaryOrbit.tsx; the design is anniversary.html).
+   A tilted orbit round the sidebar mark, with a comet that passes behind the mark on the far side, a slow
+   halo, and a caption that rolls between the years and the launch date.
+
+   The comet's track (`offset-path`) and each dot's size, opacity and delay are set inline by the component,
+   which derives them from the ellipse. What is here is the colour, the stacking and the motion.
+
+   STACKING. The mark image is z 1. The far half of the ring and the halo are z 0, the near half z 2, and the
+   comet flips between z 3 (near half) and z 0 (far half) at the moment its path crosses over. That only
+   works if all of them share ONE stacking context with the image, which is why `.org-anniv__orbit` is
+   positioned but carries no z-index, opacity or transform of its own: any of those would give it a context
+   of its own, and the comet could no longer pass behind the image. */
+.org-anniv {
+  --anniv-bold: var(--blue-700);
+  --anniv-acc: var(--blue-600);
+  --anniv-ring: var(--blue-600);
+  --anniv-tail: var(--cyan-700);
+  --anniv-glow: var(--cyan-500);
+  --anniv-head: var(--cyan-500);
+  --anniv-halo: 0.2;
+}
+.dark .org-anniv {
+  --anniv-bold: var(--foreground);
+  --anniv-acc: var(--cyan-500);
+  --anniv-ring: var(--cyan-500);
+  --anniv-tail: var(--cyan-500);
+  --anniv-glow: var(--cyan-500);
+  --anniv-head: var(--cyan-200);
+  --anniv-halo: 0.26;
+}
+/* The design's 68x68 box, laid over the mark: the mark's top-left sits 16px in from the box's. */
+.org-anniv__orbit {
+  position: absolute;
+  left: -16px;
+  top: -16px;
+  width: 68px;
+  height: 68px;
+  pointer-events: none;
+}
+.org-anniv__halo {
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  z-index: 0;
+  background: radial-gradient(circle, hsl(var(--anniv-glow) / var(--anniv-halo)) 0%, hsl(var(--anniv-glow) / 0) 68%);
+  animation: org-anniv-halo 8s ease-in-out infinite;
+}
+.org-anniv__ring {
+  position: absolute;
+  inset: 0;
+  width: 68px;
+  height: 68px;
+  overflow: visible;
+  fill: none;
+  stroke-linecap: round;
+}
+.org-anniv__ring--far {
+  z-index: 0;
+}
+.org-anniv__ring--near {
+  z-index: 2;
+}
+.org-anniv__dot {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 50%;
+  z-index: 3;
+  background: hsl(var(--anniv-tail));
+  offset-rotate: 0deg;
+  animation: org-anniv-orbit 8s linear infinite, org-anniv-side 8s step-end infinite;
+}
+.org-anniv__dot--head {
+  background: radial-gradient(circle, hsl(var(--cyan-50)) 0 30%, hsl(var(--anniv-head)) 68%);
+  box-shadow: 0 0 5px 1px hsl(var(--anniv-glow) / 0.9);
+}
+.org-anniv__cap {
+  position: absolute;
+  right: 15px;
+  top: 53px;
+  width: 150px;
+  height: 11px;
+  overflow: hidden;
+  z-index: 2;
+  pointer-events: none;
+  font-size: 8px;
+  line-height: 11px;
+  letter-spacing: 0.16em;
+}
+.org-anniv__row {
+  position: absolute;
+  right: 0;
+  top: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+  animation: 10s cubic-bezier(0.6, 0, 0.3, 1) 2s infinite backwards;
+}
+.org-anniv__row b {
+  font-weight: 800;
+  color: hsl(var(--anniv-bold));
+}
+.org-anniv__row span {
+  font-weight: 600;
+  color: hsl(var(--anniv-acc));
+}
+.org-anniv__row--a {
+  animation-name: org-anniv-roll-a;
+}
+.org-anniv__row--b {
+  animation-name: org-anniv-roll-b;
+}
+@keyframes org-anniv-orbit {
+  from { offset-distance: 0%; }
+  to { offset-distance: 100%; }
+}
+/* First half of the track is the near side (in front of the mark), second half the far side. */
+@keyframes org-anniv-side {
+  0% { z-index: 3; opacity: 1; }
+  50%, 100% { z-index: 0; opacity: 0.55; }
+}
+@keyframes org-anniv-halo {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+@keyframes org-anniv-roll-a {
+  0%, 44% { transform: translateY(0); opacity: 1; }
+  50%, 94% { transform: translateY(-9px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+@keyframes org-anniv-roll-b {
+  0%, 44% { transform: translateY(9px); opacity: 0; }
+  50%, 94% { transform: translateY(0); opacity: 1; }
+  100% { transform: translateY(-9px); opacity: 0; }
+}
+/* Reduced motion: a still picture rather than the global rule's single collapsed frame, which would leave the
+   comet parked at the start of its track and the caption on whichever row the last frame showed. */
+@media (prefers-reduced-motion: reduce) {
+  .org-anniv * {
+    animation: none !important;
+  }
+  .org-anniv__dot {
+    offset-distance: 30%;
+  }
+  .org-anniv__row--b {
+    opacity: 0;
+  }
+}

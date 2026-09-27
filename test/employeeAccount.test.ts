@@ -10,7 +10,7 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { eq } from "drizzle-orm";
 import { createEmployee, updateEmployee } from "../src/services/employees";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 
 // An access rule names a `users/{id}` subject (domain/policyValidate.ts), so a person with no account row can
 // neither be granted access nor be offered by the access modal's people picker. That is why the account is
@@ -33,8 +33,9 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   for (const t of [schema.notifications, schema.auditLog, schema.accessRules, schema.userRoles, schema.users, schema.employees, schema.codeSequences, schema.roles]) await deps.db.delete(t);
-  // `users.role` is a FK to the roles catalog (roles are data), and the provisioned account is an `employee`.
-  await deps.db.insert(schema.roles).values([{ name: "employee", label: "Employee" }, { name: "hr_admin", label: "HR admin" }, { name: "super_admin", label: "Super admin" }]).onConflictDoNothing();
+  // `users.role` is a FK to the roles catalog (roles are data), and the provisioned account gets the role marked
+  // `provisioned` - `employee` here, as in a seeded database.
+  await deps.db.insert(schema.roles).values([{ name: "employee", label: "Employee", provisioned: true }, { name: "hr_admin", label: "HR admin" }, { name: "super_admin", label: "Super admin" }]).onConflictDoNothing();
 });
 
 const accountFor = async (employeeId: string) =>

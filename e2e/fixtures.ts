@@ -88,6 +88,28 @@ const IGNORED_CONSOLE = [
   //
   // Scoped to the endpoint, not to the status: a 404 anywhere else is still a spec failure.
   /status of 404\b.*\/v1\/letterheads\/[^/]+:image/i,
+  // A profile photo taken off while a page that had read the person's row was still drawing their avatar.
+  //
+  // `employeePhoto.spec.ts` sets the seeded employee's photo and removes it again - it has to be that person,
+  // since the self-service grant is what it proves. Every other page showing them (search results, the
+  // directory, an approval queue) keys its `<img>` on the row's `photo` marker, and a row read inside that
+  // window names a picture the server has already dropped: `:getPhoto` answers 404, `PhotoAvatar` falls back
+  // to initials, and the console line is the only trace. Seen 2026-09-26: it failed `entityKindLabel.spec.ts`
+  // straight after the second `:clearPhoto` in the worker log.
+  //
+  // Scoped to the endpoint, not to the status: a 404 anywhere else is still a spec failure.
+  /status of 404\b.*\/v1\/employees\/[^/]+:getPhoto/i,
+  // The next policy in a signer's queue, purged by the spec that made it before the dialog reached it.
+  //
+  // `SignDocumentDialog` walks every policy awaiting the caller's signature and moves on to the next one after
+  // each signature, fetching its PDF. Several specs publish ack-required policies org-wide and purge them when
+  // they finish (`esignProvider`, `documentRemind`, `documentRemindBulkAndCopyEmails`), so HR's queue in
+  // `documentAck` holds theirs too, and the one it advances to can be gone by then: `:download` answers 404 and
+  // the dialog says the document was removed. Seen 2026-09-26: `esignProvider`'s force purge landed between
+  // `documentAck`'s signature and the dialog's fetch of the next document.
+  //
+  // Scoped to the endpoint, not to the status: a 404 anywhere else is still a spec failure.
+  /status of 404\b.*\/v1\/org-documents\/[^/]+:download/i,
   // A read receipt for a board post another spec deleted while this page had it on screen.
   //
   // The feed is org-wide and a dozen specs post to it and delete their posts again. A card that stays in view
@@ -150,10 +172,24 @@ export function allowConsoleErrors(page: Page, pattern: RegExp) {
  * retry it (`discard`), and it retries a 500 only when that 500 is not its own - its own is never cancelled,
  * so it is always readable here.
  */
-export async function notTheApps500(res: import("@playwright/test").Response): Promise<boolean> {
+export async function notTheApps500(res: Pick<import("@playwright/test").Response, "headers" | "text">): Promise<boolean> {
   if (!(res.headers()["content-type"] ?? "").includes("problem+json")) return true;
   const body = await res.text().catch(() => null);
   return body === null || !/"type"\s*:\s*"\/errors\//.test(body);
+}
+
+/**
+ * The answer to a write the page is about to send, for a spec that asserts on it: the first response that is
+ * not a copy the dev runtime dropped.
+ *
+ * A dropped connection reaches the browser as a 500 that is not the app's (`notTheApps500`), and the app then
+ * re-sends the same write under its Idempotency-Key (web/src/api.ts) - so the FIRST matching response is the
+ * dead copy and the rule was saved by the second. `waitForResponse` on the first one failed two workflow specs
+ * on 2026-09-27 over a `POST /v1/automations` the page had already recovered. An app 500 is still returned,
+ * so a real failure still fails the spec.
+ */
+export function landedResponse(page: Page, match: (r: import("@playwright/test").Response) => boolean, timeout = 30_000) {
+  return page.waitForResponse(async (r) => match(r) && !(r.status() === 500 && (await notTheApps500(r))), { timeout });
 }
 
 export async function enableTelemetry(page: Page) {
@@ -278,10 +314,16 @@ export async function purge(page: Page, path: string) {
  * and the spec dies on its scaffolding rather than on its claim. Re-sent only on that answer: any other
  * status is the server's real verdict and comes straight back for the caller to assert on.
  */
+//
+// The same for a connection the dev ProxyWorker drops on the way to the Worker, which arrives as a 500 that is
+// NOT the app's (`notTheApps500`: Prism's "Request/Response not valid" over a plain-text body). The write may or
+// may not have landed, so every copy carries one `Idempotency-Key` - the server hands a repeat the first copy's
+// stored answer instead of creating the row twice, exactly as `web/src/api.ts` does for the SPA's own writes.
 export async function apiPost(page: Page, path: string, data: unknown): Promise<APIResponse> {
-  let res = await page.request.post(`/v1/${path}`, { headers: SPA_HEADERS, data });
-  for (let attempt = 0; attempt < 3 && res.status() === 503; attempt++) {
-    res = await page.request.post(`/v1/${path}`, { headers: SPA_HEADERS, data });
+  const headers = { ...SPA_HEADERS, "Idempotency-Key": crypto.randomUUID() };
+  let res = await page.request.post(`/v1/${path}`, { headers, data });
+  for (let attempt = 0; attempt < 3 && (res.status() === 503 || (res.status() === 500 && (await notTheApps500(res)))); attempt++) {
+    res = await page.request.post(`/v1/${path}`, { headers, data });
   }
   return res;
 }

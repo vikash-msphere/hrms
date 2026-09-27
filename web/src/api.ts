@@ -3,6 +3,7 @@ import { publishToAll, subscribeTopic } from "@/lib/crossTabBus";
 import { getViewAs, stopViewAs } from "@/lib/viewAsStore";
 import { problemText } from "@/lib/problemText";
 import { purgeCachedData } from "@/lib/clientStore";
+import { serverSaysLocked } from "@/lib/appLock";
 
 // `message` is the HUMAN sentence for this failure, translated once here from the problem details (see
 // lib/problemText). Every toast, pinned form error and stray `(e as Error).message` in the app therefore reads
@@ -56,7 +57,14 @@ let lapseProbe: Promise<boolean> | null = null;
 export function sessionLapsed(): Promise<boolean> {
   lapseProbe ??= fetch("/v1/users/me", { credentials: "include", headers: { "X-Requested-By": "hrms-spa" } })
     .then(
-      (res) => res.status === 401,
+      async (res) => {
+        if (res.status !== 401) return false;
+        // A LOCKED browser is signed in: it takes the lock path, and is not a lapse to wait out.
+        const problem = await res.json().catch(() => null);
+        if (!isAppLocked(problem)) return true;
+        unauthorized(problem);
+        return false;
+      },
       () => false
     )
     .finally(() => {
@@ -119,6 +127,26 @@ export function sessionDead(): ApiError {
 }
 function handle401(): never {
   throw sessionDead();
+}
+
+/** Whether a 401's problem is the app lock rather than a lapsed session (src/lib/errors.ts AppLockedError). */
+export const isAppLocked = (p: unknown): p is Problem & { lock?: { pin_length?: number; first_name?: string } } =>
+  !!p && typeof p === "object" && (p as Problem).type === "/errors/app-locked";
+
+/**
+ * A 401, whichever it is. The app lock is NOT a lapsed session - the person is signed in and their browser is
+ * locked - so it takes the lock path (lib/appLock.ts) and never the sign-in one: signing in again would not
+ * open a locked browser anyway. Returns the error the pending call should fail with.
+ */
+export function unauthorized(problem: unknown): ApiError {
+  if (isAppLocked(problem)) {
+    serverSaysLocked(problem.lock);
+    return new ApiError("locked", 401, problem);
+  }
+  return sessionDead();
+}
+async function on401(res: Response): Promise<never> {
+  throw unauthorized(await res.json().catch(() => null));
 }
 // The cached copies of server data come OFF THE DISK when the session dies, not only when somebody chooses
 // "Sign out" from the menu. That menu item was the sole caller of a purge, so the ordinary exits - a 12-hour
@@ -395,7 +423,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     await discard(res);
     return undefined as T;
   }
-  if (res.status === 401) handle401();
+  if (res.status === 401) await on401(res);
   if (!res.ok) {
     // Only user ACTIONS get the request-access offer: background reads legitimately 403 while the UI is
     // settling (and gated reads shouldn't fire at all) - a toast for those would nag constantly.
@@ -794,7 +822,7 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<{ blob: Blob;
     await discard(res);
     await settle(attempt);
   }
-  if (res.status === 401) handle401();
+  if (res.status === 401) await on401(res);
   if (!res.ok) {
     const problem = (await res.json().catch(() => null)) as Problem | null;
     bailOnBrokenSimulation(res.status, problem);

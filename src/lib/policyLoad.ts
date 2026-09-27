@@ -13,7 +13,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { Grant } from "../domain/permissions";
 import type { Policy } from "../domain/manifests";
-import { DEFAULT_POLICY } from "../domain/manifests";
+import { notConfigured } from "./errors";
 import { EMPTY_GRANT, EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
 import { rulesToGrant, mergeGrants, guardsOf, mergeGuards, type CompiledRule } from "../domain/compileGrants";
 import type { GuardIndex } from "../domain/ruleCondition";
@@ -124,19 +124,16 @@ async function objectRulesFor(deps: Deps, userUuid: string, roles: string[]): Pr
 
 const TTL_MS = 5000; // ~5s: read-mostly authority; an edit reflects within this window (accepted lag).
 
-// Parse the global body-AC manifest. Falls back to the typed seed default if the row is missing/corrupt
-// (identical values) - body-AC keeps working; it is NEVER weakened to empty (which would fail OPEN).
-export function parsePolicy(json: string | null | undefined): Policy {
-  if (!json) return DEFAULT_POLICY;
+// Parse the global body-AC manifest, or null when the row is missing, is not JSON, or lacks a section. There is
+// no fallback: the app keeps no copy of the policy (bootstrap/authz/policy.ts only seeds the row), and it is
+// NEVER weakened to empty either, which would fail OPEN. The caller refuses the request instead.
+export function parsePolicy(json: string | null | undefined): Policy | null {
+  if (!json) return null;
   try {
     const p = JSON.parse(json) as Policy;
-    // supported_scopes is the newest section; a manifest row written before it existed simply falls back to
-    // the typed default (additive, never weakens body-AC), so the ACL scope chips keep working.
-    return p && typeof p === "object" && p.protected_fields && p.references && p.owner_refs && p.state_visibility && p.audit
-      ? { ...p, supported_scopes: p.supported_scopes ?? DEFAULT_POLICY.supported_scopes }
-      : DEFAULT_POLICY;
+    return p && typeof p === "object" && p.protected_fields && p.references && p.owner_refs && p.state_visibility && p.audit && p.supported_scopes ? p : null;
   } catch {
-    return DEFAULT_POLICY;
+    return null;
   }
 }
 
@@ -350,10 +347,13 @@ export async function loadReportCodes(deps: Deps, managerEmployeeId: string, tra
   });
 }
 
-// The global manifest (one row, key 'manifest'), cached. Falls back to DEFAULT_POLICY (never empty).
+// The global manifest (one row, key 'manifest'), cached. A missing or unreadable row refuses (503) - thrown
+// inside the loader, so the refusal is never cached and the request after the row is repaired succeeds.
 export function loadManifest(deps: Deps): Promise<Policy> {
   return cached("manifest", TTL_MS, async () => {
     const row = (await deps.db.select({ v: schema.policy.valueJson }).from(schema.policy).where(eq(schema.policy.key, "manifest")).limit(1))[0];
-    return parsePolicy(row?.v);
+    const policy = parsePolicy(row?.v);
+    if (!policy) throw notConfigured("the access policy manifest is missing or unreadable - seed it from bootstrap/ or restore the `policy` row");
+    return policy;
   });
 }

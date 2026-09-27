@@ -10,6 +10,7 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
+import { seedManifest } from "./seedManifest";
 import { emitEvent } from "../src/services/eventBus";
 import { invalidateAutomationCache, MAX_TOTAL_DISPATCHES } from "../src/services/automationEngine";
 import { AUTOMATIONS } from "../bootstrap/collections/automations";
@@ -41,6 +42,7 @@ beforeAll(async () => {
     const s = stmt.trim();
     if (s) await b.DB.prepare(s).run();
   }
+  await seedManifest(b.DB);
   deps = makeDeps(b);
 });
 

@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
-import { REDACTED_FIELDS } from "../src/domain/manifests";
+import { REDACTED_FIELDS } from "../bootstrap/authz/policy";
 
 // REPLAY MASKING, DERIVED RATHER THAN REMEMBERED.
 //
@@ -186,6 +186,8 @@ const fieldSurfaces = () => {
 
 /** Keyed `<file> <collection>.<field>`, so an exemption covers one field on one surface and not a whole page. */
 const FIELD_EXEMPT: Record<string, string> = {
+  "web/src/pages/Settings.tsx employees.legal_name":
+    "the `legal_name` read in Settings.tsx is the ORGANISATION's registered name (the `organization` settings blob), not an employee's - the Organization panel hydrates it into its own form field",
   "web/src/pages/LeaveCalendar.tsx leave-requests.reason":
     "copies `reason` onto the calendar entry and never renders it - the only other mention in the file is the .ics exporter deliberately leaving it out (LeaveCalendar.tsx:369)",
   "web/src/pages/Attendance.tsx leave-requests.reason":

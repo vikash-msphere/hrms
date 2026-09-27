@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env";
-import { upcomingCelebrations } from "../services/celebrations";
+import { upcomingCelebrations, MAX_CELEBRATION_LEAD_DAYS } from "../services/celebrations";
 import { lastWriteAt, listEtag, etagMatches } from "../http/listEtag";
 
 // Collection-level custom method `employees:upcomingCelebrations` (mounted at the full path in index.ts, as
@@ -18,8 +18,15 @@ import { lastWriteAt, listEtag, etagMatches } from "../http/listEtag";
 // safe for an answer that moves with the calendar as this one does. The stamp is read BEFORE the work, so a
 // write that lands mid-request can only cause the next revalidation to miss and re-read, never a 304 over a
 // payload the write invalidated.
+//
+// `within` (0-90 days) asks for an explicit window, which the leave calendar uses to place a whole quarter.
+// Without it the window is the org's lead time (settings/celebrations), the same one the dashboard shows. The
+// etag carries the URL but not that setting - it does not need to, because a settings write stamps
+// `collection_versions` like any other and so moves `lastWriteAt`.
 export const celebrations = new Hono<AppEnv>().get("/", async (c) => {
-  const within = Math.min(Math.max(Number(c.req.query("within")) || 30, 1), 90);
+  const raw = c.req.query("within");
+  const asked = raw === undefined || raw.trim() === "" ? undefined : Number(raw);
+  const within = asked === undefined || !Number.isFinite(asked) ? undefined : Math.min(Math.max(Math.round(asked), 0), MAX_CELEBRATION_LEAD_DAYS);
   const now = Date.now();
   const etag = listEtag(await lastWriteAt(c.get("deps"), now), c.get("user"), c.req.url, now);
   // A match means the table is never read and nothing is decrypted, which is the whole saving.

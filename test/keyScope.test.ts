@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { GRANTS } from "../src/domain/grants";
+import { GRANTS } from "../bootstrap/authz/grants";
 import { resolveRequest, decide, type Grant } from "../src/domain/permissions";
 import { narrowGrant, inScope, parseScope, scopeToWire, FULL_SCOPE, type KeyScope } from "../src/domain/keyScope";
 

@@ -5,7 +5,7 @@ import { subscribeInvalidations, storedCopiesTrusted, storedIdentity, subscribeP
 import { registerHydrator, put, del } from "@/lib/clientStore";
 import { readSetting } from "@/lib/settingsStore";
 import { idOf } from "@/lib/utils";
-import type { LeaveRequest, Reimbursement, OvertimeRequest, RemoteWorkRequest, AttendanceRegularization, LeaveEncashment, Loan, TimeEntry, Expense, AssetRequest } from "@/types";
+import type { LeaveRequest, Reimbursement, OvertimeRequest, RemoteWorkRequest, LateEarlyRequest, AttendanceRegularization, LeaveEncashment, Loan, TimeEntry, Expense, AssetRequest } from "@/types";
 
 // A prior-employer tax declaration awaiting HR/payroll verification (GET /v1/tax-verifications). Not a
 // collection row - a bespoke queue assembled server-side from the encrypted per-employee tax blob - so it
@@ -31,6 +31,7 @@ export type ApprovalsBuckets = {
   reimbs: Reimbursement[];
   overtimes: OvertimeRequest[];
   remotes: RemoteWorkRequest[];
+  lateEarlies: LateEarlyRequest[];
   regularizations: AttendanceRegularization[];
   encashments: LeaveEncashment[];
   loans: Loan[];
@@ -58,7 +59,7 @@ type ApprovalsState = ApprovalsBuckets & {
   reload: () => void;
 };
 
-const EMPTY_BUCKETS: ApprovalsBuckets = { leaves: [], reimbs: [], overtimes: [], remotes: [], regularizations: [], encashments: [], loans: [], timeEntries: [], expenses: [], assetRequests: [] };
+const EMPTY_BUCKETS: ApprovalsBuckets = { leaves: [], reimbs: [], overtimes: [], remotes: [], lateEarlies: [], regularizations: [], encashments: [], loans: [], timeEntries: [], expenses: [], assetRequests: [] };
 // `loading: false` outside a provider: nothing is coming, so a consumer of the default renders its zero state.
 const EMPTY: ApprovalsState = { loading: false, error: null, total: 0, counts: {}, ...EMPTY_BUCKETS, history: EMPTY_BUCKETS, taxVerifications: [], reload: () => {} };
 const ApprovalsContext = createContext<ApprovalsState>(EMPTY);
@@ -68,7 +69,7 @@ export const useApprovals = () => useContext(ApprovalsContext);
 // back truncated: the queue filters CACHED rows, so a request sitting past the first page would never appear
 // for approval, and nothing on screen would hint that it exists.
 export const APPROVAL_COLLECTIONS = [
-  "leave-requests", "reimbursements", "overtime-requests", "remote-work-requests",
+  "leave-requests", "reimbursements", "overtime-requests", "remote-work-requests", "late-early-requests",
   "attendance-regularizations", "leave-encashments", "loans", "time-entries", "expenses", "asset-requests",
 ];
 // The tax queue is not a collection, but a page asks for it the same way (see QUEUES_BY_ROUTE in App.tsx).
@@ -209,6 +210,7 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
   const reimb = useCollection<Reimbursement>("reimbursements", { enabled: wanted("reimbursements") });
   const overtime = useCollection<OvertimeRequest>("overtime-requests", { enabled: wanted("overtime-requests") });
   const remote = useCollection<RemoteWorkRequest>("remote-work-requests", { enabled: wanted("remote-work-requests") });
+  const lateEarly = useCollection<LateEarlyRequest>("late-early-requests", { enabled: wanted("late-early-requests") });
   const regular = useCollection<AttendanceRegularization>("attendance-regularizations", { enabled: wanted("attendance-regularizations") });
   const encash = useCollection<LeaveEncashment>("leave-encashments", { enabled: wanted("leave-encashments") });
   const loan = useCollection<Loan>("loans", { enabled: wanted("loans") });
@@ -238,6 +240,7 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
   const reimbs = useMemo(() => pending(reimb.rows, mine), [reimb.rows, mine]);
   const overtimes = useMemo(() => pending(overtime.rows, mine), [overtime.rows, mine]);
   const remotes = useMemo(() => pending(remote.rows, mine), [remote.rows, mine]);
+  const lateEarlies = useMemo(() => pending(lateEarly.rows, mine), [lateEarly.rows, mine]);
   const regularizations = useMemo(() => pending(regular.rows, mine), [regular.rows, mine]);
   const encashments = useMemo(() => pending(encash.rows, mine), [encash.rows, mine]);
   const loans = useMemo(() => awaiting(loan.rows, (r) => r.status, "PENDING", mine), [loan.rows, mine]);
@@ -261,6 +264,7 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
   const { reload: reloadReimb } = reimb;
   const { reload: reloadOvertime } = overtime;
   const { reload: reloadRemote } = remote;
+  const { reload: reloadLateEarly } = lateEarly;
   const { reload: reloadRegular } = regular;
   const { reload: reloadEncash } = encash;
   const { reload: reloadLoan } = loan;
@@ -272,6 +276,7 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
     if (wanted("reimbursements")) reloadReimb();
     if (wanted("overtime-requests")) reloadOvertime();
     if (wanted("remote-work-requests")) reloadRemote();
+    if (wanted("late-early-requests")) reloadLateEarly();
     if (wanted("attendance-regularizations")) reloadRegular();
     if (wanted("leave-encashments")) reloadEncash();
     if (wanted("loans")) reloadLoan();
@@ -280,7 +285,7 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
     if (wanted("asset-requests")) reloadAssetReq();
     void loadTax();
     void loadSummary();
-  }, [wanted, reloadLeave, reloadReimb, reloadOvertime, reloadRemote, reloadRegular, reloadEncash, reloadLoan, reloadTime, reloadExpense, reloadAssetReq, loadTax, loadSummary]);
+  }, [wanted, reloadLeave, reloadReimb, reloadOvertime, reloadRemote, reloadLateEarly, reloadRegular, reloadEncash, reloadLoan, reloadTime, reloadExpense, reloadAssetReq, loadTax, loadSummary]);
 
   const history = useMemo<ApprovalsBuckets>(
     () => ({
@@ -288,6 +293,7 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
       reimbs: decided(reimb.rows, (r) => r.state),
       overtimes: decided(overtime.rows, (r) => r.state),
       remotes: decided(remote.rows, (r) => r.state),
+      lateEarlies: decided(lateEarly.rows, (r) => r.state),
       regularizations: decided(regular.rows, (r) => r.state),
       encashments: decided(encash.rows, (r) => r.state),
       loans: decided(loan.rows, (r) => r.status),
@@ -295,7 +301,7 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
       expenses: decided(expense.rows.filter((r) => !r.recurring), (r) => r.state),
       assetRequests: decided(assetReq.rows, (r) => r.state),
     }),
-    [leave.rows, reimb.rows, overtime.rows, remote.rows, regular.rows, encash.rows, loan.rows, time.rows, expense.rows, assetReq.rows],
+    [leave.rows, reimb.rows, overtime.rows, remote.rows, lateEarly.rows, regular.rows, encash.rows, loan.rows, time.rows, expense.rows, assetReq.rows],
   );
 
   // Only the ENABLED queues count: a disabled collection sits at its initial state forever, so including it
@@ -315,6 +321,7 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
     [wanted("reimbursements"), reimb],
     [wanted("overtime-requests"), overtime],
     [wanted("remote-work-requests"), remote],
+    [wanted("late-early-requests"), lateEarly],
     [wanted("attendance-regularizations"), regular],
     [wanted("leave-encashments"), encash],
     [wanted("loans"), loan],
@@ -336,9 +343,9 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
       error,
       total: summary.total ?? 0,
       counts: summary.counts ?? {},
-      leaves, reimbs, overtimes, remotes, regularizations, encashments, loans, timeEntries, expenses, assetRequests, taxVerifications, history, reload,
+      leaves, reimbs, overtimes, remotes, lateEarlies, regularizations, encashments, loans, timeEntries, expenses, assetRequests, taxVerifications, history, reload,
     }),
-    [loading, error, summary, leaves, reimbs, overtimes, remotes, regularizations, encashments, loans, timeEntries, expenses, assetRequests, taxVerifications, history, reload],
+    [loading, error, summary, leaves, reimbs, overtimes, remotes, lateEarlies, regularizations, encashments, loans, timeEntries, expenses, assetRequests, taxVerifications, history, reload],
   );
   return <ApprovalsContext.Provider value={value}>{children}</ApprovalsContext.Provider>;
 }

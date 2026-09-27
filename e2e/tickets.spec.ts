@@ -1,4 +1,4 @@
-import { gotoRoute, purge, test, expect, toast } from "./fixtures";
+import { apiPost, gotoRoute, purge, test, expect, toast } from "./fixtures";
 
 // A support ticket, raised and worked.
 //
@@ -66,6 +66,13 @@ test("a scope chip narrows the desk, travels in the URL, and clears again", asyn
   test.setTimeout(120_000);
   const page = await as("hr");
   const subject = `E2E scope ${Date.now()}`;
+  // SOMEBODY ELSE'S ROW, so "narrows" is a fact about two named tickets rather than two row counts taken a
+  // moment apart - a dozen specs raise tickets as this same HR login, so "My tickets" read after "All" could
+  // count one more than "All" had. `app` is the category "Report a problem" files under, which always exists.
+  const employee = await as("employee");
+  const theirs = `E2E scope theirs ${Date.now()}`;
+  const raised = await apiPost(employee, "tickets", { subject: theirs, category: "app", description: "Raised by the e2e suite as somebody other than the desk." });
+  expect(raised.status(), await raised.text()).toBe(200);
 
   // OWN THE ROW. An empty desk draws its empty state instead of the table, and a table nobody has raised a
   // ticket on has no chips to press - so this spec raises its own rather than relying on another one's
@@ -87,13 +94,18 @@ test("a scope chip narrows the desk, travels in the URL, and clears again", asyn
   // otherwise), so start from a known place rather than from whichever that was.
   await all.click();
   await expect(all).toHaveAttribute("aria-pressed", "true", { timeout: 30_000 });
-  const everything = await page.locator("tbody tr").count();
+  const ours = page.locator("tbody tr").filter({ hasText: subject });
+  const other = page.locator("tbody tr").filter({ hasText: theirs });
+  await expect(ours).toHaveCount(1, { timeout: 30_000 });
+  await expect(other).toHaveCount(1, { timeout: 30_000 });
 
   await mine.click();
   await expect(mine).toHaveAttribute("aria-pressed", "true", { timeout: 30_000 });
   await expect(all).toHaveAttribute("aria-pressed", "false");
-  // It NARROWS: a scope is a filter, not a label on the same rows.
-  await expect.poll(() => page.locator("tbody tr").count(), { timeout: 30_000 }).toBeLessThanOrEqual(everything);
+  // It NARROWS: a scope is a filter, not a label on the same rows - the reader's own ticket stays, the
+  // colleague's goes.
+  await expect(other).toHaveCount(0, { timeout: 30_000 });
+  await expect(ours).toHaveCount(1);
   // And it rides the table's own URL state, so a narrowed desk can be sent to somebody and survives a reload.
   await expect.poll(() => page.url(), { timeout: 30_000 }).toContain("t.tickets");
   await page.reload();
@@ -106,6 +118,7 @@ test("a scope chip narrows the desk, travels in the URL, and clears again", asyn
   await expect(page.getByRole("button", { name: /^All/ })).toHaveAttribute("aria-pressed", "true");
 
   await purge(page, await ticketPath(page, subject));
+  await purge(page, ((await raised.json()) as { path: string }).path);
 });
 
 /** The wire path of the ticket this spec raised. */

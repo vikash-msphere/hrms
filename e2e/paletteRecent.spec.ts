@@ -36,7 +36,7 @@ test("what the palette is used for comes back at the top of it", async ({ as }) 
   // Use it for something. Clicked rather than Entered: this spec is about what is remembered, so which row
   // was taken has to be beyond doubt.
   await page.getByPlaceholder(PLACEHOLDER).fill("vendors");
-  await palette.getByRole("button").filter({ hasText: "Vendors" }).first().click();
+  await palette.getByRole("option").filter({ hasText: "Vendors" }).first().click();
   await expect(page.getByRole("heading", { level: 1, name: "Vendors" })).toBeVisible({ timeout: 30_000 });
 
   // Opened again on nothing: the destination that was just used leads the list. The query resets on close, so
@@ -44,7 +44,7 @@ test("what the palette is used for comes back at the top of it", async ({ as }) 
   await open();
   const recent = palette.getByText("Recent", { exact: true });
   await expect(recent).toBeVisible({ timeout: 30_000 });
-  await expect(palette.getByRole("button").filter({ hasText: "Vendors" }).first()).toBeVisible();
+  await expect(palette.getByRole("option").filter({ hasText: "Vendors" }).first()).toBeVisible();
 
   // Written down, not held in the page: a reload drops every bit of state the app has in memory, and the
   // palette still knows. That is the half that makes it useful tomorrow morning rather than for ten minutes.

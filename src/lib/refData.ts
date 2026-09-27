@@ -30,7 +30,9 @@ export type RefTable =
   | "pay_periods"
   | "pay_grades"
   | "salary_structures"
-  | "asset_categories";
+  | "asset_categories"
+  | "shifts"
+  | "work_patterns";
 
 /** Create the per-request memo. Called by the request middleware; absent everywhere else. */
 export const makeRefCache = (): Map<string, Promise<unknown>> => new Map();
@@ -68,6 +70,13 @@ export const refSalaryStructures = (deps: Deps) => once(deps, "salary_structures
 // INCLUDED, again for the same reason - an asset still pointing at a retired category is still depreciated on
 // the life that category was given.
 export const refAssetCategories = (deps: Deps) => once(deps, "asset_categories", () => deps.db.select().from(schema.assetCategories));
+// The two schedule catalogs (services/workSchedule.ts). Here for the reason every table above is: resolving a
+// day needs the whole of both, and a payroll build resolves days for every employee in the run while a
+// `batch:run` carrying several attendance sub-requests would otherwise read them once per sub-request.
+// Deleted rows are INCLUDED - a roster entry or a pattern still pointing at a retired shift is still the
+// shift those days were worked on, and dropping it would silently move them onto the org's window.
+export const refShifts = (deps: Deps) => once(deps, "shifts", () => deps.db.select().from(schema.shifts));
+export const refWorkPatterns = (deps: Deps) => once(deps, "work_patterns", () => deps.db.select().from(schema.workPatterns));
 
 /**
  * Drop this request's snapshot of a table, so a later read in the SAME request sees a write it just made.

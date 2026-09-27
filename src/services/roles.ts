@@ -2,13 +2,14 @@
 // data: add/remove a row, not an edit. Lockout guards live here (service-level write invariants, NO authz
 // import - keeps the single-source gate clean): protected core roles undeletable; you cannot delete the
 // role you are using; a role still held by any user cannot be deleted (FK users.role -> roles.name RESTRICT).
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta, removedMeta } from "../lib/audit";
 import { notFound, invalidArgument, failedPrecondition, alreadyExists } from "../lib/errors";
-import { clearCache } from "../lib/cache";
+import { cached, clearCache } from "../lib/cache";
+import { EVERYONE_ROLE } from "../domain/grants";
 import { paginate } from "../http/pagination";
 
 const NAME_RE = /^[a-z][a-z0-9_]{1,40}$/; // lower-snake-case identifier, 2-41 chars
@@ -37,19 +38,61 @@ export async function createRole(deps: Deps, actor: AppUser, body: { name?: stri
   return row!;
 }
 
-export async function updateRole(deps: Deps, actor: AppUser, name: string, body: { label?: string; protected?: boolean }) {
+const PROVISIONED_KEY = "role:provisioned";
+
+/**
+ * The role a new account is given - on hire (services/employees.ts) and at first sign-in (middleware/auth.ts).
+ * Read off the `roles` row that carries `provisioned`, never a name written here: which role new people get is
+ * the org's call, made in Access Management. None marked is refused, not guessed at, so an org that clears it
+ * gets a clear error on the next hire rather than accounts quietly landing in some role.
+ */
+export function provisionedRole(deps: Deps): Promise<string> {
+  // Throws INSIDE the loader, so the refusal is never cached: the moment an admin marks a role, the next hire
+  // sees it rather than waiting out the TTL on a remembered "none".
+  return cached(PROVISIONED_KEY, 5000, async () => {
+    const row = (await deps.db.select({ name: schema.roles.name }).from(schema.roles).where(eq(schema.roles.provisioned, true)).limit(1))[0];
+    if (!row) throw failedPrecondition("no role is set to be given to new accounts - choose one in Access Management > Roles");
+    return row.name;
+  });
+}
+
+/** Display label per role name, for the given names only. Unknown names are left out, never invented. */
+export async function roleLabels(deps: Deps, names: readonly string[]): Promise<Record<string, string>> {
+  const wanted = [...new Set(names)].filter(Boolean);
+  if (!wanted.length) return {};
+  const rows = await deps.db.select({ name: schema.roles.name, label: schema.roles.label }).from(schema.roles).where(inArray(schema.roles.name, wanted));
+  return Object.fromEntries(rows.map((r) => [r.name, r.label]));
+}
+
+export async function updateRole(deps: Deps, actor: AppUser, name: string, body: { label?: string; protected?: boolean; provisioned?: boolean }) {
   const before = await getRole(deps, name); // 404 if absent, and the label/protected this write replaces
   const patch: Record<string, unknown> = { updatedAt: new Date() }; // name is immutable (it is the key + FK target)
   if (body.label !== undefined) patch.label = String(body.label);
   if (body.protected !== undefined) patch.protected = !!body.protected;
-  const [row] = await deps.db.update(schema.roles).set(patch).where(eq(schema.roles.name, name)).returning();
+  // The provisioned flag MOVES, it is never just cleared: one role always answers "what do new people get".
+  // Clearing it here would leave every next hire refused, which is a lockout of hiring by a checkbox.
+  if (body.provisioned === false && before.provisioned) throw failedPrecondition("choose another role to give new accounts instead of clearing this one");
+  if (body.provisioned === true && !before.provisioned) {
+    if (name === EVERYONE_ROLE) throw invalidArgument("everyone is not a role an account can hold");
+    patch.provisioned = true;
+    // Unset the old holder first, in the same batch, so the partial unique index never sees two.
+    await deps.db.batch([
+      deps.db.update(schema.roles).set({ provisioned: false, updatedAt: new Date() }).where(eq(schema.roles.provisioned, true)),
+      deps.db.update(schema.roles).set(patch).where(eq(schema.roles.name, name)),
+    ]);
+    clearCache(PROVISIONED_KEY);
+  } else {
+    await deps.db.update(schema.roles).set(patch).where(eq(schema.roles.name, name));
+  }
+  const row = await getRole(deps, name);
   await audit(deps, actor, "role.update", "roles", name, diffMeta(before, row, patch, "roles"), row);
-  return row!;
+  return row;
 }
 
 export async function deleteRole(deps: Deps, actor: AppUser, name: string) {
   const role = await getRole(deps, name);
   if (role.protected) throw failedPrecondition("protected core role cannot be deleted");
+  if (role.provisioned) throw failedPrecondition("new accounts are given this role - choose another one first");
   if (name === actor.role) throw failedPrecondition("cannot delete the role you are using");
   if ((await deps.db.select({ u: schema.users.uuid }).from(schema.users).where(eq(schema.users.role, name)).limit(1))[0]) {
     throw failedPrecondition("role is in use by one or more users"); // FK ON DELETE RESTRICT also enforces this

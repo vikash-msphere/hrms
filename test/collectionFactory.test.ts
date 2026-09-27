@@ -10,14 +10,15 @@ import { z } from "zod";
 import * as schema from "../src/db/schema";
 import type { AppEnv, AppUser, Bindings } from "../src/env";
 import type { ListScope } from "../src/domain/access";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import { makeDeps, type Deps } from "../src/deps";
+import { seedManifest } from "./seedManifest";
 import { genId } from "../src/lib/idCodec";
 import { app } from "../src/index";
 import { etagOf, toHolidayResource, toEventLogResource } from "../src/http/serialize";
 import { holidaySpec } from "../src/services/holidays";
 import { collectionRoutes, type CollectionRouteSpec } from "../src/http/collectionRoute";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 
 // The generic collection surface (http/collectionRoute.ts + services/crud.ts), end to end through the real
 // app. Every plain-CRUD collection converted to the factory inherits exactly these behaviors, so this suite is
@@ -40,6 +41,7 @@ beforeAll(async () => {
     const s = stmt.trim();
     if (s) await b.DB.prepare(s).run();
   }
+  await seedManifest(b.DB);
   deps = makeDeps(b);
 });
 

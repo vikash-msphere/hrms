@@ -12,6 +12,7 @@ import type { Bindings } from "../src/env";
 import { safeNext } from "../src/routes/authRoutes";
 import { syncGoogleProfile } from "../src/services/googleProfile";
 import { orgToday } from "../src/services/orgDay";
+import { seedManifest } from "./seedManifest";
 
 // Direct Google sign-in mode: the stateless session codec, and the /auth routes' behavior in both auth
 // modes. The Google token exchange itself is not driven here (it needs Google); what IS pinned down is
@@ -220,12 +221,13 @@ describe("Google mode: signing out actually revokes the session", () => {
       const s = stmt.trim();
       if (s) await b.DB.prepare(s).run().catch(() => {}); // tables may already exist from another suite
     }
+    await seedManifest(b.DB);
   });
 
   beforeEach(async () => {
     const deps = makeDeps({ ...googleEnv() } as unknown as Bindings);
     await deps.db.delete(schema.users).where(eq(schema.users.email, EMAIL));
-    await deps.db.insert(schema.roles).values([{ name: "employee", label: "Employee" }]).onConflictDoNothing();
+    await deps.db.insert(schema.roles).values([{ name: "employee", label: "Employee", provisioned: true }]).onConflictDoNothing();
     await deps.db.insert(schema.users).values({ uuid: genId(), code: `u-${genId().slice(0, 5)}`, email: EMAIL, role: "employee", status: "active" });
   });
 
@@ -386,6 +388,7 @@ describe("Google mode: syncing the profile", () => {
       const s = stmt.trim();
       if (s) await b.DB.prepare(s).run().catch(() => {}); // tables may already exist from another suite
     }
+    await seedManifest(b.DB);
   });
 
   beforeEach(async () => {
@@ -395,7 +398,7 @@ describe("Google mode: syncing the profile", () => {
     await d.db.delete(schema.users).where(eq(schema.users.email, EMAIL));
     await d.db.delete(schema.users).where(eq(schema.users.email, NEW_EMAIL));
     await d.db.delete(schema.settings).where(eq(schema.settings.key, "sign-in"));
-    await d.db.insert(schema.roles).values([{ name: "employee", label: "Employee" }]).onConflictDoNothing();
+    await d.db.insert(schema.roles).values([{ name: "employee", label: "Employee", provisioned: true }]).onConflictDoNothing();
     await d.db.insert(schema.employees).values({
       uuid: genId(),
       code: `e-${genId().slice(0, 5)}`,

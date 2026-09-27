@@ -19,6 +19,8 @@ import { refPayComponents } from "../lib/refData";
 import { orgToday, dayStartMs } from "./orgDay";
 
 const r0 = (n: number) => Math.round(n);
+// "2026-08" -> "August 2026".
+const monthLabel = (ym: string) => new Date(`${ym}-01T00:00:00Z`).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
 
 // A financial year for an FY label like "2025-26" (the window helper keys off any date inside the year).
 function fyForLabel(label?: string) {
@@ -63,7 +65,8 @@ export async function assembleForm16(deps: Deps, employeeId: string, financialYe
   const regimeCfg = cfg.regimes[regime] ?? cfg.regimes.new!;
   const fy = fyForLabel(financialYear);
 
-  const totals = (await finalizedTotals(deps, fy, undefined, employeeId)).get(employeeId) ?? { gross: 0, taxableGross: 0, tax: 0, months: 0 };
+  // Includes pay and tax from before HRMS ran payroll this year (a payroll opening), stated below.
+  const totals = (await finalizedTotals(deps, fy, undefined, employeeId)).get(employeeId) ?? { gross: 0, taxableGross: 0, tax: 0, months: 0, opening: undefined };
   const decl = await readDeclarations(deps, emp.taxDetailsEnc);
   const prior = Math.max(0, decl.priorEmployerIncome ?? 0);
   // Bounded by the prior income it was withheld from, the same ceiling the withholding projection applies
@@ -103,6 +106,9 @@ export async function assembleForm16(deps: Deps, employeeId: string, financialYe
     { kind: "para", runs: [`Financial year ${fy.financialYear} · Assessment year ${fy.assessmentYear} · ${regimeCfg.label}.`] },
     { kind: "table", table: { title: "Computation of tax", columns: ["Particulars", "Amount"], rows, total: ["Net tax payable / (refund)", money(net)] } },
   ];
+  if (totals.opening && (totals.opening.taxableGross > 0 || totals.opening.tax > 0)) {
+    blocks.push({ kind: "para", runs: [`Includes ${money(totals.opening.taxableGross)} of salary paid by this employer through ${monthLabel(totals.opening.paidThrough)}, before its payroll moved to this system (TDS ${money(totals.opening.tax)}).`] });
+  }
   if (prior > 0) blocks.push({ kind: "para", runs: [`Includes ${money(prior)} of salary from a previous employer (TDS ${money(priorTds)}).`] });
   if (settled.taxableGross > 0) blocks.push({ kind: "para", runs: [`Includes ${money(settled.taxableGross)} of chargeable full & final settlement pay (TDS ${money(settled.tax)}).`] });
   blocks.push({ kind: "para", runs: [`System-generated Part B summary under the ${regimeCfg.label.toLowerCase()} from finalized payroll and settlements for the year. Please verify against Form 26AS / AIS before filing.`] });

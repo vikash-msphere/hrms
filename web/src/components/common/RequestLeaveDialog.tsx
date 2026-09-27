@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Paperclip, Users, X } from "lucide-react";
-import { create, get, upload } from "@/api";
+import { create, get, getAllPages, upload } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
-import { orgDayFromToday, todayStr } from "@/lib/orgDay";
+import { addDaysYmd, orgDayFromToday, todayStr } from "@/lib/orgDay";
 import { chargeableDays } from "@/lib/leaveDays";
+import { DEFAULT_SCHEDULE } from "@/lib/attendance";
+import { scheduleView } from "@/lib/workSchedule";
+import { orgScheduleOf } from "../../../../src/domain/workSchedule";
 import { bestBridge, breakAround } from "@/lib/holidayBreaks";
 import {
   checkLeaveRestrictions,
@@ -20,7 +23,7 @@ import {
   type LeaveNeighbour,
   type LeaveRestrictions,
 } from "../../../../src/domain/leaveRestrictions";
-import type { ApprovalDelegation, Employee, Holiday, LeaveBalance, LeaveRequest, LeaveType, NoticePeriod, Me } from "@/types";
+import type { ApprovalDelegation, Employee, Holiday, LeaveBalance, LeaveRequest, LeaveType, NoticePeriod, Me, Shift, ShiftAssignment, WorkPattern, WorkPatternAssignment } from "@/types";
 import type { LeaveDraft } from "@/lib/leaveDraft";
 import { DateRangeCalendar, type DayInfo } from "@/components/common/DateRangeCalendar";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -103,14 +106,60 @@ export function RequestLeaveDialog({
 
   const [workDays, setWorkDays] = useState<number[]>([1, 2, 3, 4, 5]);
   const [weekStart, setWeekStart] = useState(0);
+  // Whether a day is resolved through the roster and the schedule the person is on, or from the org blob
+  // alone (src/domain/workSchedule.ts). Read here because it decides whether the two lookups below are worth
+  // making at all: on "org" nobody's days differ, so there is nothing to look up.
+  const [scheduleSource, setScheduleSource] = useState<"org" | "resolved">("org");
   useEffect(() => {
-    getSetting<{ work_days?: number[]; week_start?: number }>("attendance")
+    getSetting<{ work_days?: number[]; week_start?: number; schedule_source?: string }>("attendance")
       .then((s) => {
         if (Array.isArray(s.value?.work_days) && s.value.work_days.length) setWorkDays(s.value.work_days);
         if (typeof s.value?.week_start === "number") setWeekStart(s.value.week_start);
+        if (s.value?.schedule_source === "resolved") setScheduleSource("resolved");
       })
       .catch(() => {});
   }, []);
+
+  // THE REQUESTER'S OWN WORKING DAYS, because that is what the server charges against
+  // (services/leaveRequests.ts). Quoting the org's week here instead is the drift lib/leaveDays.ts exists to
+  // prevent, now with a part-timer on the wrong side of it: a Mon-Fri week of leave costs somebody on a
+  // Mon/Wed/Fri schedule three days, and a form that said five would have them spend a balance they cannot
+  // get back.
+  //
+  // Two narrowed reads, and only while the org resolves days per person. The catalogs they resolve against
+  // are shared collection reads the store already caches.
+  const resolvesPerPerson = scheduleSource === "resolved";
+  const { rows: shiftCatalog } = useCollection<Shift>("shifts", { all: true, enabled: resolvesPerPerson });
+  const { rows: patterns } = useCollection<WorkPattern>("work-patterns", { all: true, enabled: resolvesPerPerson });
+  const [myRoster, setMyRoster] = useState<{ shifts: ShiftAssignment[]; patterns: WorkPatternAssignment[] }>({ shifts: [], patterns: [] });
+  useEffect(() => {
+    if (!resolvesPerPerson || !me.employee_id) return;
+    // The whole window the form can quote, not just the dates picked so far: the range moves as the person
+    // edits it, and refetching per keystroke would be a read per character typed into a date field. Read off
+    // the clock rather than the `todayYmd` below, which is declared after this and is the same value.
+    const today = todayStr();
+    const from = addDaysYmd(today, -370);
+    const to = addDaysYmd(today, 400);
+    const emp = `employees/${me.employee_id}`;
+    let live = true;
+    void Promise.all([
+      getAllPages<ShiftAssignment>(`shift-assignments?employee=${encodeURIComponent(emp)}&from=${from}&to=${to}`, 2000),
+      getAllPages<WorkPatternAssignment>(`work-pattern-assignments?employee=${encodeURIComponent(emp)}&from=${from}&to=${to}`, 500),
+    ])
+      // A failed lookup leaves the org's own week in place rather than blocking the form: the server is what
+      // charges the balance, and it resolves the same day whether or not this read landed.
+      .then(([s, p]) => { if (live) setMyRoster({ shifts: s.results, patterns: p.results }); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [resolvesPerPerson, me.employee_id]);
+
+  // The day-by-day resolver every charging rule below takes (src/domain/workSchedule.ts).
+  const schedOf = useMemo(() => {
+    const org = { ...DEFAULT_SCHEDULE, work_days: workDays };
+    if (!resolvesPerPerson) return orgScheduleOf(org);
+    return scheduleView({ sched: org, shifts: shiftCatalog, patterns, assignments: myRoster.shifts, patternAssignments: myRoster.patterns })
+      .of(me.employee_id ?? "");
+  }, [resolvesPerPerson, workDays, shiftCatalog, patterns, myRoster, me.employee_id]);
   // The holidays that don't charge leave, as the server counts them: `applies === false` is a regional holiday
   // for another location, and a half-day one costs 0.5 rather than nothing.
   const mine = useMemo(() => holidays.filter((h) => !h.disabled && h.applies !== false), [holidays]);
@@ -239,7 +288,7 @@ export function RequestLeaveDialog({
   const selectedType = types.find((t) => form.leave_type && idOf(t.path) === idOf(form.leave_type));
   const selectedRules = rulesFor(selectedType);
 
-  const formDays = chargeableDays(form.start_date, form.end_date, form.startSession, form.endSession, workDays, holidaySet, halfHolidaySet, sandwichOf(selectedRules));
+  const formDays = chargeableDays(form.start_date, form.end_date, form.startSession, form.endSession, schedOf, holidaySet, halfHolidaySet, sandwichOf(selectedRules));
   const rangeInverted = !!form.start_date && !!form.end_date && form.end_date < form.start_date;
   // How many calendar days in the range are weekends/holidays (not charged) - shown so the total isn't a
   // surprise. Counted UNDER THE SELECTED TYPE'S SANDWICH RULE, not against a plain working week: a type that
@@ -249,9 +298,9 @@ export function RequestLeaveDialog({
   const skippedDays = useMemo(() => {
     if (!form.start_date || !form.end_date || rangeInverted) return 0;
     const span = Math.round((Date.parse(form.end_date + "T00:00:00Z") - Date.parse(form.start_date + "T00:00:00Z")) / 86400000) + 1;
-    const charged = chargeableDays(form.start_date, form.end_date, 1, 2, workDays, holidaySet, halfHolidaySet, sandwichOf(selectedRules)) ?? span;
+    const charged = chargeableDays(form.start_date, form.end_date, 1, 2, schedOf, holidaySet, halfHolidaySet, sandwichOf(selectedRules)) ?? span;
     return Math.max(0, span - charged);
-  }, [form.start_date, form.end_date, rangeInverted, workDays, holidaySet, halfHolidaySet, selectedRules]);
+  }, [form.start_date, form.end_date, rangeInverted, schedOf, holidaySet, halfHolidaySet, selectedRules]);
 
   // Is a single day already free (weekend or full holiday)? Used to label the date pickers, so "why did my
   // Saturday cost nothing" is answered before the request is filed rather than after.
@@ -370,9 +419,9 @@ export function RequestLeaveDialog({
     }
     return picks.filter((p) => {
       if (minDate && p.from < minDate) return false;
-      return (chargeableDays(p.from, p.to, p.startSession, p.endSession, workDays, holidaySet, halfHolidaySet) ?? 0) > 0;
+      return (chargeableDays(p.from, p.to, p.startSession, p.endSession, schedOf, holidaySet, halfHolidaySet) ?? 0) > 0;
     });
-  }, [workDays, minDate, holidaySet, halfHolidaySet]);
+  }, [workDays, schedOf, minDate, holidaySet, halfHolidaySet]);
 
   const holidayNameByDay = useMemo(() => {
     const m = new Map<string, string>();
@@ -495,7 +544,7 @@ export function RequestLeaveDialog({
       // request being filed today only to be refused by the approver on Friday.
       hasDocument: !!doc,
       reason: form.reason,
-      workDays,
+      schedOf,
       holidays: holidaySet,
       halfDayHolidays: halfHolidaySet,
       neighbours: neighbours.filter((n) => n.leaveTypeId),
@@ -503,7 +552,7 @@ export function RequestLeaveDialog({
       exitWindow,
       exitDaysUsed,
     });
-  }, [selectedType, selectedRules, rulesFor, form.start_date, form.end_date, form.startSession, form.endSession, form.reason, formDays, myRequests, types, me.employee_id, todayYmd, meEmployee, workDays, holidaySet, halfHolidaySet, doc, noticePeriods]);
+  }, [selectedType, selectedRules, rulesFor, form.start_date, form.end_date, form.startSession, form.endSession, form.reason, formDays, myRequests, types, me.employee_id, todayYmd, meEmployee, schedOf, holidaySet, halfHolidaySet, doc, noticePeriods]);
   /**
    * Why a type can't be taken by this person AT ALL, whatever dates they pick. Only reasons that are true of
    * the PERSON belong here - a type shut for the whole notice period is one; a service requirement is not,

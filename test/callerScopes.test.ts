@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import { callerScopes } from "../src/domain/access";
 import { capabilitiesOf } from "../src/domain/permissions";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import type { Role } from "../src/env";
 
 // WHAT A CAPABILITY STRING CANNOT SAY, and the gate that keeps the profile pages from asking it anyway.

@@ -72,6 +72,8 @@ const MONEY = new Set([
   "payrollRunItems.gross", "payrollRunItems.net", "payrollRunItems.tax",
   "payrollRunItems.taxableGross", "payrollRunItems.totalDeductions",
   "payrollRuns.gross", "payrollRuns.net", // the run's own totals, stored by the build rather than summed on read
+  // Pay and tax paid before HRMS ran payroll, as entered; folded into the year's TDS and PT like a run's items.
+  "payrollOpenings.gross", "payrollOpenings.taxableGross", "payrollOpenings.tds", "payrollOpenings.pt",
   "payslips.gross", "payslips.net", "payslips.tax", "payslips.taxableGross", "payslips.totalDeductions",
   "referrals.bonusAmount", "reimbursements.amount",
   "settlements.net", "settlements.taxableEarnings", "settlements.tds",
@@ -97,6 +99,10 @@ const NOT_MONEY: Record<string, string> = {
   "goals.currentValue": "arbitrary goal metric, unit chosen per goal",
   "goals.targetValue": "arbitrary goal metric, unit chosen per goal",
   "leaveBalances.balanceDays": "leave days; rounded SQL-side where it is incremented",
+  "leaveAdjustments.days": "leave days (the signed change a ledger row made to a balance)",
+  "leaveAdjustments.openingDays": "leave days (an opening balance as entered)",
+  "leaveAdjustments.removedDays": "leave days (what HRMS had credited before the records-start date)",
+  "leaveAdjustments.encashedDays": "leave days (encashed before HRMS that year)",
   "leaveEncashments.days": "leave days",
   "leaveRequests.days": "leave days",
   "leaveTypes.accrualDaysPerYear": "leave policy, in days",

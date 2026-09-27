@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { withAccess } from "../src/http/accessHint";
-import { DEFAULT_POLICY, isFieldScopeTarget } from "../src/domain/manifests";
+import { isFieldScopeTarget } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import type { Grant } from "../src/domain/permissions";
 
 // Per-field READ for base-record fields. Field access used to reach three collections and four PII

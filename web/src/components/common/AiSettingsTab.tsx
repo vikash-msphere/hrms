@@ -63,6 +63,12 @@ const FEATURES: { key: AiFeatureKey; title: string; on: string; off: string }[] 
     off: "Search matches words and prefixes only, exactly as it does today. Nothing is embedded and the index is emptied as records change.",
   },
   {
+    key: "search.ask",
+    title: "Ask in the search box",
+    on: "In ⌘K, a question in plain words (\"how do I claim my internet bill\") can be sent with Enter and is answered with up to three of the pages, settings and actions that person can already open, each with a one-line reason. The model is shown the question and the NAMES of those destinations - no record, no field, no person - so it routes and never answers from data. Nothing is sent while typing.",
+    off: "The search box finds records, pages and settings by their words, as today. Nothing is sent to a model.",
+  },
+  {
     key: "tickets.triage",
     title: "Ticket triage suggestions",
     on: "A new ticket is compared to the resolved tickets nearest it, and the servicing department, category and priority they agree on is offered as a suggestion, with the tickets that voted. Possible duplicates are flagged. No text is generated and nothing is applied automatically.",
@@ -164,6 +170,7 @@ const FEATURES: { key: AiFeatureKey; title: string; on: string; off: string }[] 
  */
 const SUMMARY: Record<AiFeatureKey, string> = {
   "search.semantic": "⌘K also matches by meaning, not just by words.",
+  "search.ask": "Ask ⌘K a question and be pointed to where it is answered.",
   "tickets.triage": "A new ticket is filed the way resolved ones like it were.",
   "cards.triage": "A board task is filed the way comparable delivered work was.",
   "goals.similar": "Goals that are the same work in other words.",
@@ -202,7 +209,7 @@ const GROUPS: { title: string; blurb: string; keys: AiFeatureKey[] }[] = [
   {
     title: "Writing and summarising",
     blurb: "These ask a model for words. Each one lands in a form or beside the figures it describes, and none of them is ever saved on somebody's behalf.",
-    keys: ["drafting", "goals.measure", "tables.describe", "boards.narrate", "analytics.narrate", "budgets.narrate", "attention.summary"],
+    keys: ["drafting", "goals.measure", "search.ask", "tables.describe", "boards.narrate", "analytics.narrate", "budgets.narrate", "attention.summary"],
   },
   {
     title: "Reading documents",

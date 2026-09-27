@@ -1,30 +1,12 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { notFound, invalidArgument, forbidden } from "../lib/errors";
 import { getEmployee } from "./employees";
-import { applyScope } from "./listScope";
-import { scopeFor } from "../domain/access";
-import { isSuperGrant, EVERYONE_ROLE, roleSubjectsOf } from "../domain/grants";
-import { loadObjectExceptionCodes } from "../lib/policyLoad";
-import { selfContextFor } from "../lib/selfContext";
 
 const MAX_BYTES = 3 * 1024 * 1024; // 3 MB
-// Cap ids per batch request. Each photo can be up to MAX_BYTES and is base64-encoded into the response, so the
-// whole batch is held in memory at once: 24 x 3 MB x ~1.33 (base64) stays well under the Worker's ~128 MB.
-// The client (photoCache) chunks larger avatar sets to this same cap.
-const MAX_BATCH = 24;
-
-// base64-encode an ArrayBuffer in fixed chunks (spreading a large Uint8Array into String.fromCharCode blows
-// the call stack).
-function toBase64(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(bin);
-}
 
 // Photo editing is allowed for the employee themselves, HR and super_admin.
 async function loadEmployee(deps: Deps, employeeId: string) {
@@ -38,7 +20,9 @@ export async function uploadPhoto(deps: Deps, actor: AppUser, employeeId: string
   if (!bytes.byteLength) throw invalidArgument("empty photo");
   if (bytes.byteLength > MAX_BYTES) throw invalidArgument("photo too large (max 3 MB)");
   const key = `photos/${emp.uuid}`;
-  await deps.docs.put(key, bytes, "image/jpeg");
+  // NOT ENCRYPTED, unlike everything else in the store (lib/docstore.ts says why): a face is not a payslip, and
+  // plaintext is what lets the read hand R2's own stream to the browser instead of holding the image in memory.
+  await deps.docs.put(key, bytes, "image/jpeg", { encrypt: false });
   // `photoAt` is what every browser's face cache keys on (see serialize.ts), so it moves on every upload - the
   // R2 key does not, because it is derived from the employee id.
   const [updated] = await deps.db.update(schema.employees).set({ photoKey: key, photoAt: new Date(), updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid)).returning();
@@ -56,43 +40,25 @@ export async function clearPhoto(deps: Deps, actor: AppUser, employeeId: string)
   return updated!;
 }
 
-// Viewing follows the normal employee visibility (whoever can see the employee can see the photo).
-export async function getPhoto(deps: Deps, actor: AppUser, employeeId: string) {
-  const emp = await getEmployee(deps, actor, employeeId);
+/**
+ * Where this employee's photo is, and which version of it.
+ *
+ * NO ACCESS DECISION HERE, and deliberately not: "if you can view an employee, you can view their face" is
+ * decided by the middleware, which gates this verb on the record's own READ as well as on the verb grant
+ * (middleware/authz.ts READ_GATED_VERBS). By the time this runs the caller may see the person.
+ */
+export async function photoRef(deps: Deps, employeeId: string): Promise<{ key: string; version: number }> {
+  const emp = await loadEmployee(deps, employeeId);
   if (!emp.photoKey) throw notFound("no photo");
-  const bytes = await deps.docs.get(emp.photoKey);
-  if (!bytes) throw notFound("no photo");
-  return bytes;
+  // `photo_at` is the photo's own version - the ETag and the `?v=` a client asks under (http/serialize.ts).
+  return { key: emp.photoKey, version: emp.photoAt ? +new Date(emp.photoAt) : 0 };
 }
 
-// Batched photo fetch: one request returns the photos for many employees, replacing the per-avatar
-// `:getPhoto` N+1 (a 100-row directory went from 100 requests to 1). Visibility MUST match the employees LIST
-// exactly - role scope (self/dept/all) PLUS per-object shares/denies - because `getPhoto` itself has no
-// service-level check (the middleware allow-grant is its only gate). Ids the caller can't see are silently
-// omitted (never an error), so one hidden row never fails the batch. Returns internal uuids; the route maps
-// them to `employees/<id>` refs so the wire-encode middleware tokenizes them outbound.
-export async function batchGetPhotos(deps: Deps, actor: AppUser, employeeIds: string[]): Promise<{ employeeId: string; dataUri: string }[]> {
-  const wanted = [...new Set(employeeIds)].slice(0, MAX_BATCH);
-  if (!wanted.length) return [];
-  // With the caller's full matcher context (manager chain included), as the list itself is scoped - without it a
-  // manager holding employees through `my-reports` saw their reports in the directory and no faces on them.
-  const scope = scopeFor(actor, "employees", await selfContextFor(deps, actor));
-  const roleSubjects = roleSubjectsOf(actor, actor.grant);
-  const exc = await loadObjectExceptionCodes(deps, actor.uuid, roleSubjects, "employees");
-  scope.shares = exc.shares;
-  scope.denies = exc.denies;
-  const scopeCond = applyScope(scope, schema.employees.code, schema.employees.uuid);
-  const conds = [inArray(schema.employees.uuid, wanted)];
-  if (scopeCond) conds.push(scopeCond);
-  const rows = await deps.db.select().from(schema.employees).where(and(...conds));
-  const out: { employeeId: string; dataUri: string }[] = [];
-  for (const r of rows) {
-    if (r.deleteTime || !r.photoKey) continue;
-    const bytes = await deps.docs.get(r.photoKey);
-    if (!bytes) continue;
-    out.push({ employeeId: r.uuid, dataUri: `data:image/jpeg;base64,${toBase64(bytes)}` });
-  }
-  return out;
+/** The bytes behind a `photoRef`, as a stream: a plaintext object is handed over exactly as R2 produced it. */
+export async function openPhoto(deps: Deps, key: string) {
+  const obj = await deps.docs.open(key);
+  if (!obj) throw notFound("no photo");
+  return obj;
 }
 
 // ---- Signature image (used as the e-signature on document acknowledgements, letters, etc.) ----

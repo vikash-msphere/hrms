@@ -12,9 +12,9 @@ export const ENCODABLE = new Set<string>([
   "api-keys",
   "employees", "departments", "users", "holidays", "holiday-selections", "leave-types",
   "leave-requests", "leave-balances", "org-documents", "personal-documents", "announcements", "pay-components", "pay-periods",
-  "payroll-runs", "payroll-budgets", "payslips", "compensation", "positions", "bonuses", "assets", "asset-categories", "asset-requests", "stocktakes", "settlements", "leave-encashments", "operations", "reimbursements", "reimbursement-categories",
+  "payroll-runs", "payroll-budgets", "payslips", "compensation", "positions", "bonuses", "assets", "asset-categories", "asset-requests", "stocktakes", "settlements", "leave-encashments", "leave-adjustments", "payroll-openings", "operations", "reimbursements", "reimbursement-categories",
   "expenses", "expense-categories", "vendors", "expense-budgets", "card-transactions",
-  "attendance", "attendance-regularizations", "attendance-day-marks", "cron-runs", "tickets", "ticket-checklists", "events", "goals", "goal-templates", "boards", "cards", "sprints", "review-cycles", "reviews", "review-feedback", "transitions", "transition-tasks", "check-ins", "benefit-plans", "dependents", "benefit-enrollments", "shifts", "shift-assignments", "projects", "time-entries", "loans", "tax-declarations", "pay-grades", "salary-structures", "document-acknowledgements", "compliance-events", "compliance-rules", "background-checks", "overtime-requests", "remote-work-requests", "approval-delegations", "notice-periods", "suggestions", "notifications", "referrals", "job-requisitions", "candidates", "applications", "interviews", "interview-feedback", "offers",
+  "attendance", "attendance-regularizations", "attendance-day-marks", "cron-runs", "search-insights", "tickets", "ticket-checklists", "events", "goals", "goal-templates", "boards", "cards", "sprints", "review-cycles", "reviews", "review-feedback", "transitions", "transition-tasks", "check-ins", "benefit-plans", "dependents", "benefit-enrollments", "shifts", "shift-assignments", "work-patterns", "work-pattern-assignments", "projects", "time-entries", "loans", "tax-declarations", "pay-grades", "salary-structures", "document-acknowledgements", "compliance-events", "compliance-rules", "background-checks", "overtime-requests", "remote-work-requests", "late-early-requests", "approval-delegations", "notice-periods", "suggestions", "notifications", "referrals", "job-requisitions", "candidates", "applications", "interviews", "interview-feedback", "offers",
   "letter-templates", "letterheads", "table-views",
   "automations", "event-log", "automation-runs", "workflow-instances",
   // THE TWO THAT ARE NOT IN `TABLES`, and that is exactly why they were missing.
@@ -42,9 +42,19 @@ export const ENCODABLE = new Set<string>([
 ]);
 
 // `<collection>/<13-char base32 id>` with an optional tail: a `:verb` (photo/download style) or one more
-// path segment (a deep link into a web route, e.g. a notification's `announcements/<id>/view`). The tail
-// rides through untouched; only the id segment is rewritten, so a link never carries an internal id out.
-const REF_RE = /^([a-z][a-z-]*)\/([0-9a-hj-km-np-tv-z]{13})(:[a-zA-Z]+|\/[a-z][a-z-]*)?$/;
+// path segment (a deep link into a web route, e.g. a notification's `announcements/<id>/view`), and then an
+// optional query string. The tail rides through untouched; only the id segment is rewritten, so a link never
+// carries an internal id out.
+//
+// THE QUERY HALF IS NOT DECORATION. This pattern is anchored, so a ref with anything after the tail simply did
+// not match - and did not match meant NOT TOKENIZED, which is the one outcome this middleware exists to
+// prevent. `employees/<id>:getPhoto` was rewritten and `employees/<id>:getPhoto?v=1758…` was not, so the day
+// the photo marker grew a version (http/serialize.ts) every employee row with a picture started publishing
+// that employee's internal primary key, while the `signature` marker beside it - same shape, no query - kept
+// leaving as a token. Nothing accepts an internal id inbound any more, so it was disclosure rather than a way
+// in; the fix is the same either way, and it is here rather than at the caller because the next marker to grow
+// a parameter should not have to know any of this.
+const REF_RE = /^([a-z][a-z-]*)\/([0-9a-hj-km-np-tv-z]{13})(:[a-zA-Z]+|\/[a-z][a-z-]*)?(\?[^\s]*)?$/;
 
 const MAX_DEPTH = 40; // bound recursion (responses are server-generated, but stay symmetric with the decoder)
 
@@ -73,7 +83,8 @@ export function rewriteRefs<T>(node: T, map: Map<string, string>, depth = 0): T 
     const m = REF_RE.exec(node);
     if (m && ENCODABLE.has(m[1]!)) {
       const token = map.get(`${m[1]}/${m[2]}`);
-      if (token) return (`${m[1]}/${token}${m[3] ?? ""}` as unknown) as T;
+      // Tail AND query both ride along: the id segment is the only part this rewrites.
+      if (token) return (`${m[1]}/${token}${m[3] ?? ""}${m[4] ?? ""}` as unknown) as T;
     }
     return node;
   }

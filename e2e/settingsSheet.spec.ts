@@ -17,19 +17,20 @@ import { gotoRoute, test, expect } from "./fixtures";
 test.describe("inline settings", () => {
   test("the gear opens the page's own panel, and the URL says so", async ({ as }) => {
     const page = await as("super");
-    await gotoRoute(page, "attendance", "Attendance");
+    // Schedule hosts exactly one setting (HOST_SETTINGS in settings/registry.ts), so its gear is the panel's own
+    // button rather than a menu.
+    await gotoRoute(page, "schedule", "Schedule");
 
     // Untouched, the page carries no panel state - the deep link stays clean until the gear is used.
     expect(page.url()).not.toContain("setting=");
 
-    await page.getByRole("button", { name: "Attendance schedule" }).click();
-    // By the dialog's own accessible name, which Radix takes from the sheet title: the panel BODY also says
-    // "Attendance schedule" on its card, and matching either one would pass without the sheet being right.
-    const sheet = page.getByRole("dialog", { name: "Attendance schedule" });
+    await page.getByRole("button", { name: "Shift patterns" }).click();
+    // By the dialog's own accessible name, which Radix takes from the sheet title.
+    const sheet = page.getByRole("dialog", { name: "Shift patterns" });
     await expect(sheet).toBeVisible();
     // Proof the lazy chunk arrived and rendered, rather than the sheet sitting on its skeleton forever.
-    await expect(sheet.getByText("Shift start")).toBeVisible();
-    await expect.poll(() => page.url()).toContain("setting=attendance");
+    await expect(sheet.getByRole("button", { name: "New shift" }).first()).toBeVisible();
+    await expect.poll(() => page.url()).toContain("setting=shifts");
 
     // Closing puts the URL back, so the next copy of the link is the page and not the panel.
     await sheet.getByRole("button", { name: "Close" }).click();
@@ -87,7 +88,11 @@ test.describe("inline settings", () => {
     const page = await as("employee");
     // Attendance is a page an employee holds (their own punches), so this isolates the GEAR's gate rather
     // than the page's: same page, same route, no affordance for a panel they could not save.
+    // The page hosts two settings, so the gear an admin sees is the "Settings" menu; a single visible panel
+    // would surface as its own titled button instead. Neither may render here.
     await gotoRoute(page, "attendance", "Attendance");
-    await expect(page.getByRole("button", { name: "Attendance schedule" })).toHaveCount(0);
+    const main = page.getByRole("main");
+    await expect(main.getByRole("button", { name: "Settings", exact: true })).toHaveCount(0);
+    await expect(main.getByRole("button", { name: /^(Attendance schedule|Late & early policy)$/ })).toHaveCount(0);
   });
 });

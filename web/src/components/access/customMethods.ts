@@ -4,20 +4,22 @@
 // A custom method is fail-closed: allowed ONLY by an explicit verb-allow grant; a verb-deny always wins.
 export const CUSTOM_METHODS: Record<string, string[]> = {
   "api-keys": ["revoke"],
+  users: ["resetPin"],
   moderation: ["decide", "hide", "unhide"],
   // `uploadPhoto` / `clearPhoto` are grantable verbs like any other (`employees.me.uploadPhoto` for the owner,
   // HR's broad rule for everyone), so the modal offers them by name and the avatar's own gate reads them out
   // of the row's `access.can`. Mirrors src/http/accessHint.ts ACCESS_VERBS (test/customMethodsDrift.test.ts).
-  employees: ["enrollDefaultBenefits", "uploadPhoto", "clearPhoto"],
+  employees: ["enrollDefaultBenefits", "uploadPhoto", "clearPhoto", "setTrackedFrom"],
   departments: [],
   attendance: ["clockIn", "clockOut"],
   "attendance-regularizations": ["approve", "reject", "cancel"],
   "overtime-requests": ["approve", "reject", "cancel"],
   "remote-work-requests": ["approve", "reject", "cancel"],
+  "late-early-requests": ["approve", "reject", "cancel"],
   "asset-requests": ["approve", "reject", "cancel", "issue"],
   operations: ["run"],
   "cron-runs": ["run"],
-  "leave-requests": ["approve", "reject", "cancel", "upload", "download"],
+  "leave-requests": ["approve", "reject", "cancel", "upload", "download", "importHistory"],
   goals: ["updateProgress", "comment", "setContributors", "watch", "unwatch", "similar", "suggestMeasure"],
   boards: ["configure", "metrics", "duplicates", "narrate"],
   cards: ["move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo", "promoteTodo", "watch", "unwatch", "triage", "flow", "suggestGoal", "suggestSteps"],
@@ -42,6 +44,8 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   "payroll-runs": ["submit", "approve", "publish", "build", "bankFile", "statutoryReport", "previewPayslip", "paymentResult"],
   reimbursements: ["approve", "reject", "cancel", "pay", "upload", "download"],
   "leave-encashments": ["approve", "reject", "cancel"],
+  "leave-adjustments": ["importOpenings"],
+  "payroll-openings": ["importOpenings"],
   "reimbursement-categories": [],
   "ticket-checklists": [],
   assets: ["verify", "acknowledge", "printTag", "reissueTag", "batchCreate"],

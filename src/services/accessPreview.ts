@@ -16,6 +16,7 @@ import { loadRoleGrant, loadUserGrant, loadUserRoles, loadObjectRulesForRequest 
 import { uuidToCode, tableFor } from "../lib/authzResolve";
 import { invalidArgument, notFound, forbidden } from "../lib/errors";
 import type { AppUser } from "../env";
+import { provisionedRole } from "./roles";
 
 const NAME_RE = /^[a-z][a-z0-9-]*$/; // collection / field tokens
 const VERB_RE = /^[a-zA-Z]+$/;
@@ -203,6 +204,9 @@ async function resolveSubjects(deps: Deps, refs: string[]): Promise<Subject[]> {
   );
   const byUserId = new Map(userRows.map((u) => [u.uuid, u]));
   const byEmpId = new Map(empRows.map((e) => [e.empUuid, e]));
+  // A person with no account yet is previewed at the role their first sign-in would give them. Read once, and
+  // only when such a person is in the batch.
+  const unprovisioned = empRows.some((e) => !e.userUuid) ? await provisionedRole(deps) : null;
   return parsed.map((p) => {
     if (p.kind === "account") {
       const u = byUserId.get(p.id);
@@ -213,7 +217,7 @@ async function resolveSubjects(deps: Deps, refs: string[]): Promise<Subject[]> {
     if (!e) throw notFound(`subject ${p.ref} not found`);
     return e.userUuid
       ? { ref: p.ref, userUuid: e.userUuid, userCode: e.userCode ?? null, email: e.email!, role: e.role!, status: e.status!, employeeCode: e.empCode, firstName: e.firstName, lastName: e.lastName }
-      : { ref: p.ref, userUuid: null, userCode: null, email: e.workEmail, role: "employee", status: "active", employeeCode: e.empCode, firstName: e.firstName, lastName: e.lastName };
+      : { ref: p.ref, userUuid: null, userCode: null, email: e.workEmail, role: unprovisioned!, status: "active", employeeCode: e.empCode, firstName: e.firstName, lastName: e.lastName };
   });
 }
 

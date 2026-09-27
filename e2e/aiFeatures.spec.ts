@@ -67,7 +67,7 @@ test.describe("with the AI features switched off", () => {
     // The semantic half is skipped entirely with the feature off, so this is the FTS path answering on its
     // own. If the hybrid retrieval had broken the query or thrown, this is where it would show.
     await search.fill("Eve Employee");
-    await expect(page.getByRole("button").filter({ hasText: "Eve Employee" }).first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("option").filter({ hasText: "Eve Employee" }).first()).toBeVisible({ timeout: 30_000 });
 
     await page.keyboard.press("Escape");
     await expect(search).toBeHidden();
@@ -202,11 +202,14 @@ test.describe("with the AI features switched off", () => {
 // keep passing on a machine with no local model. What the model returns is covered against a fake in the unit
 // suite (test/aiDraft.test.ts, test/tableAssist.test.ts) and against a real one in describe 3.
 test.describe("an AI feature switched on", () => {
+  // The AI switch is a governance setting, super admin's (bootstrap/authz/roles/): HR uses the feature, super
+  // admin turns it on.
   test("puts the Draft button on the announcement composer", async ({ as }) => {
     test.setTimeout(180_000);
     const page = await as("hr");
+    const admin = await as("super");
 
-    await patchSettings(page, "ai", on("drafting"));
+    await patchSettings(admin, "ai", on("drafting"));
     try {
       await gotoRoute(page, "announcements", "Feed");
       await page.getByRole("button", { name: "Choose what to post" }).click();
@@ -215,15 +218,16 @@ test.describe("an AI feature switched on", () => {
 
       await expect(composer.getByRole("button", { name: /^Draft$/ })).toBeVisible({ timeout: 30_000 });
     } finally {
-      await patchSettings(page, "ai", off("drafting"));
+      await patchSettings(admin, "ai", off("drafting"));
     }
   });
 
   test("offers it on a poll's description but never on a kudos", async ({ as }) => {
     test.setTimeout(180_000);
     const page = await as("hr");
+    const admin = await as("super");
 
-    await patchSettings(page, "ai", on("drafting"));
+    await patchSettings(admin, "ai", on("drafting"));
     try {
       await gotoRoute(page, "announcements", "Feed");
 
@@ -250,7 +254,7 @@ test.describe("an AI feature switched on", () => {
       await expect(kudos.getByRole("button", { name: "Send kudos" })).toBeVisible({ timeout: 30_000 });
       await expect(kudos.getByRole("button", { name: /Draft|Improve/ })).toHaveCount(0);
     } finally {
-      await patchSettings(page, "ai", off("drafting"));
+      await patchSettings(admin, "ai", off("drafting"));
     }
   });
 
@@ -344,9 +348,10 @@ test.describe("an AI feature with a model behind it", () => {
     // gigabytes - before it generates a word. The others below inherit a warm model and need far less.
     test.setTimeout(360_000);
     const page = await as("hr");
+    const admin = await as("super"); // the AI switch is super admin's; HR uses the feature
     test.skip(!(await aiLocalUp(page)), "no local model on this machine (see docs/04-testing.md)");
 
-    await patchSettings(page, "ai", on("drafting"));
+    await patchSettings(admin, "ai", on("drafting"));
     try {
       await gotoRoute(page, "announcements", "Feed");
       await page.getByRole("button", { name: "Choose what to post" }).click();
@@ -388,7 +393,7 @@ test.describe("an AI feature with a model behind it", () => {
       // and a person decides; a draft that published itself would be the one unacceptable outcome.
       await expect(composer).toBeVisible();
     } finally {
-      await patchSettings(page, "ai", off("drafting"));
+      await patchSettings(admin, "ai", off("drafting"));
     }
   });
 
@@ -484,7 +489,7 @@ test.describe("an AI feature with a model behind it", () => {
     const moderator = await as("super"); // `moderation.read`/`.decide` seed to nobody else
 
     const title = `E2E gated post ${Date.now()}`;
-    await patchSettings(page, "ai", on("moderation"));
+    await patchSettings(moderator, "ai", on("moderation"));
     try {
       await gotoRoute(page, "announcements", "Feed");
       await page.getByRole("button", { name: "Choose what to post" }).click();
@@ -520,7 +525,7 @@ test.describe("an AI feature with a model behind it", () => {
         await expect(card).toBeVisible({ timeout: 60_000 });
       }
     } finally {
-      await patchSettings(page, "ai", off("moderation"));
+      await patchSettings(moderator, "ai", off("moderation"));
     }
   });
 });
@@ -582,7 +587,7 @@ test.describe("the AI features fed by the cron tick", () => {
       // is not "overheating", and FTS5 matches tokens - so the keyword half of the hybrid cannot answer this
       // query at all. A hit here came through the vector index or it did not come.
       await search.fill("my computer gets too hot");
-      await expect(page.getByRole("button").filter({ hasText: title }).first()).toBeVisible({ timeout: 120_000 });
+      await expect(page.getByRole("option").filter({ hasText: title }).first()).toBeVisible({ timeout: 120_000 });
     } finally {
       await patchSettings(page, "ai", off("search.semantic"));
       await purge(page, path);
@@ -633,7 +638,7 @@ test.describe("the AI features fed by the cron tick", () => {
       // Given a moment to be wrong in: an immediate `toHaveCount(0)` would pass before the request had even
       // returned, which is the failure mode of every "asserts nothing appeared" test.
       await page.waitForTimeout(3_000);
-      await expect(page.getByRole("button").filter({ hasText: title })).toHaveCount(0);
+      await expect(page.getByRole("option").filter({ hasText: title })).toHaveCount(0);
     } finally {
       await patchSettings(page, "ai", off("search.semantic"));
       await purge(page, path);

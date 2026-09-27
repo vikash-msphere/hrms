@@ -74,7 +74,7 @@ export function makeDispatch(env: Bindings, deps: Deps): Dispatch {
     // Built from the NORMALISED url, not from the raw string, so the request that runs is the one that was
     // judged above - and any fragment is dropped here rather than being reinterpreted downstream.
     const req = await decodeWireIdsRequest(new Request(ORIGIN + url.pathname + url.search, init), getCodec(env));
-    const sharedEnv = { ...env, __sharedCtx: { deps, user: systemActor() } } as Bindings;
+    const sharedEnv = { ...env, __sharedCtx: { deps, user: await systemActor(deps) } } as Bindings;
     const res = await app.fetch(req, sharedEnv);
     const text = await res.text();
     let parsed: unknown = text || null;
