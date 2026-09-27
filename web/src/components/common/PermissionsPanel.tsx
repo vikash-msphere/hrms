@@ -333,7 +333,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
       ) : (
         // line-clamp-none + flex: the default value slot is a -webkit-box, which breaks the dot+label row.
         <Select value={v} onValueChange={(nv) => setCell(kind, subject, collection, nv, label)} disabled={busy}>
-          <SelectTrigger className="h-8 w-28 shrink-0 [&>span]:flex [&>span]:items-center [&>span]:line-clamp-none"><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label={`${label} · ${labelOf(collection)}`} className="h-8 w-28 shrink-0 [&>span]:flex [&>span]:items-center [&>span]:line-clamp-none"><SelectValue /></SelectTrigger>
           <SelectContent>{CELL.map((l) => <SelectItem key={l} value={l}><CellOption value={l} /></SelectItem>)}</SelectContent>
         </Select>
       );

@@ -26,20 +26,13 @@ test("a level is set from the matrix, reads back, and the cell's key opens that 
     await gotoRoute(page, "settings/permissions", "Permissions");
     await page.getByPlaceholder("Filter collections…").fill("Letter templates");
 
-    // The role's own column, found by its header rather than by counting: the column order is the roles
-    // collection's order, and a seeded joiner would silently shift a hardcoded index onto somebody else.
-    // Polled: the header row renders in a burst as each role's column streams in, and reading it inline
-    // (once, right after typing the filter) can catch it before the new role's own column has arrived.
+    // The role's own cell, found by its accessible name ("<role> · <collection>") rather than by column
+    // index: other specs create and delete roles concurrently, and the grid re-reads the roles after every
+    // write, so an index taken once can land on somebody else's column a moment later.
     await expect(page.getByRole("columnheader", { name: label })).toBeVisible({ timeout: 30_000 });
-    const headers = (await page.locator("thead th").allInnerTexts()).map((t) => t.trim());
-    const column = headers.indexOf(label);
-    expect(column, `the new role has no column in the matrix (headers: ${headers.join(", ")})`).toBeGreaterThan(0);
-
-    const row = page.locator("tbody tr").filter({ hasText: "Letter templates" }).first();
-    await expect(row).toBeVisible({ timeout: 30_000 });
-    const cell = row.locator("td").nth(column);
-    const level = cell.getByRole("combobox");
-    await expect(level).toContainText("none");
+    const level = page.getByRole("combobox", { name: `${label} · Letter templates`, exact: true });
+    const cell = page.locator("td").filter({ has: level });
+    await expect(level).toContainText("none", { timeout: 30_000 });
 
     await level.click();
     await page.getByRole("option", { name: /^read$/i }).click();
@@ -102,13 +95,9 @@ test("a section header sets a level on every collection shown under it, and read
   try {
     await gotoRoute(page, "settings/permissions", "Permissions");
     await page.getByPlaceholder("Filter collections…").fill("letter");
+    // Cells by accessible name, not column index: see the first test.
     await expect(page.getByRole("columnheader", { name: label })).toBeVisible({ timeout: 30_000 });
-    const headers = (await page.locator("thead th").allInnerTexts()).map((t) => t.trim());
-    const column = headers.indexOf(label);
-    expect(column, `the new role has no column in the matrix (headers: ${headers.join(", ")})`).toBeGreaterThan(0);
-
-    const header = page.locator("tbody tr").filter({ hasText: group }).first();
-    const groupLevel = header.locator("td").nth(column).getByRole("combobox");
+    const groupLevel = page.getByRole("combobox", { name: `${label} · all ${group}`, exact: true });
     await expect(groupLevel).toContainText("none", { timeout: 30_000 });
 
     await groupLevel.click();
@@ -128,8 +117,7 @@ test("a section header sets a level on every collection shown under it, and read
     }
 
     // One row moved on its own: the header stops claiming a single level for the section.
-    const row = page.locator("tbody tr").filter({ hasText: "Letterheads" }).first();
-    await row.locator("td").nth(column).getByRole("combobox").click();
+    await page.getByRole("combobox", { name: `${label} · Letterheads`, exact: true }).click();
     await page.getByRole("option", { name: /^write$/i }).click();
     await expect(groupLevel).toContainText("mixed", { timeout: 30_000 });
 
