@@ -101,7 +101,7 @@ test.describe("every quick action", () => {
           const search = page.getByPlaceholder("Search people, records, pages and settings…");
           await expect(search).toBeVisible({ timeout: 15_000 });
           await search.fill(label);
-          const row = palette.getByRole("button").filter({ hasText: label }).first();
+          const row = palette.getByRole("option").filter({ hasText: label }).first();
           await expect(row).toBeVisible({ timeout: 15_000 });
           await row.click();
 

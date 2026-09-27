@@ -1,11 +1,12 @@
 import type { LucideIcon } from "lucide-react";
+import { hasCapability } from "../../../src/domain/capabilityMatch";
 import {
   Building2, Landmark, SlidersHorizontal, Hash, Network, Fingerprint, Trophy,
   CalendarRange, Palmtree, Clock, CalendarClock, AlarmClock,
   Coins, Layers, ListOrdered, Percent, Receipt, Wallet, FileSpreadsheet, FolderKanban,
   UserSearch, UserPlus, Target, ClipboardList, HeartPulse,
   FileText, PenLine, FileSignature, Bell, BellRing, LifeBuoy, ListTodo,
-  Users, Shield, KeyRound, Wrench, Plus, KanbanSquare, Tag, Sparkles, AlertTriangle, LogIn,
+  Users, Shield, KeyRound, Wrench, Plus, KanbanSquare, Tag, Sparkles, AlertTriangle, LogIn, Search,
 } from "lucide-react";
 
 // One flat registry of every settings panel. This is the single source of truth for the Settings hub grid,
@@ -53,10 +54,11 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   { key: "employee-ids", title: "Employee IDs", desc: "The EMP-0042 style scheme new hires are auto-numbered with.", group: "Company", icon: Hash, keywords: ["number", "emp", "id format", "sequence"], target: { collection: "settings", objectPath: "settings/employee-number", label: "Employee IDs" } },
   { key: "departments", title: "Departments", desc: "The org's department tree - used by the directory, org chart and reporting.", group: "Company", icon: Network, perm: "departments.write", target: { collection: "departments", label: "Departments" } },
   { key: "employee-fields", title: "Employee identity fields", desc: "PAN, Aadhaar and other identity details collected per employee.", group: "Company", icon: Fingerprint, keywords: ["pan", "aadhaar", "uan", "custom fields", "sensitive"], target: { collection: "settings", objectPath: "settings/employee_fields", label: "Employee fields" } },
-  { key: "dashboard", title: "Dashboard visibility", desc: "Which roles or people see each KPI card and timeline marker, and the shortcut tiles.", group: "Company", icon: SlidersHorizontal, keywords: ["kpi", "timeline markers", "widgets", "shortcuts", "tiles"], target: { collection: "settings", objectPath: "settings/dashboard", label: "Dashboard" } },
+  { key: "dashboard", title: "Dashboard visibility", desc: "Which roles or people see each KPI card and timeline marker, the shortcut tiles, and how far ahead birthdays and anniversaries show.", group: "Company", icon: SlidersHorizontal, keywords: ["kpi", "timeline markers", "widgets", "shortcuts", "tiles", "celebrations", "birthday", "birthdays", "work anniversary", "anniversaries", "days ahead"], target: { collection: "settings", objectPath: "settings/dashboard", label: "Dashboard" } },
   { key: "kudos", title: "Kudos levels", desc: "The recognition levels and their icons on the praise wall.", group: "Company", icon: Trophy, keywords: ["recognition", "praise", "badges"], target: { collection: "settings", objectPath: "settings/kudos", label: "Kudos levels" } },
   { key: "asset-tags", title: "Asset tags", desc: "The tag pattern, the asset categories and their tag codes, sticker-sheet formats, label content, and whether custody has to be proved by scanning the tag.", group: "Company", icon: Tag, keywords: ["sticker", "label", "qr", "print", "inventory", "a4-65", "tag format", "categories", "category", "tag code", "custody", "scan", "acknowledge", "stocktake", "verify"], target: { collection: "settings", objectPath: "settings/asset-tags", label: "Asset tags" } },
   { key: "quick-actions", title: "Quick create menu", desc: "Which items appear in the top-bar + (New) menu, and their order.", group: "Company", icon: Plus, keywords: ["new menu", "plus menu", "quick create", "shortcuts", "actions", "+ new"], target: org("Quick create menu") },
+  { key: "search-synonyms", title: "Search synonyms", desc: "Words your organisation uses that the records do not, so searching one finds the others.", group: "Company", icon: Search, keywords: ["⌘k", "search", "synonyms", "vocabulary", "abbreviations", "aliases"], target: { collection: "settings", objectPath: "settings/search-synonyms", label: "Search synonyms" } },
 
   // Time & leave
   { key: "leave-policy", title: "Leave policy", desc: "Carry-forward and encashment caps, accrual rounding, back-dating, and the org-wide leave restrictions.", group: "Time & leave", icon: CalendarRange, keywords: ["carry forward", "encash", "accrual", "backdated", "notice", "sandwich", "blackout", "quota", "restriction", "notice period", "joining"], target: { collection: "settings", objectPath: "settings/leave_caps", label: "Leave policy" } },
@@ -64,6 +66,7 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   { key: "attendance", title: "Attendance schedule", desc: "Shift window, grace, working days, week start, flexible hours and loss-of-pay rules.", group: "Time & leave", icon: Clock, keywords: ["late", "grace", "working days", "week start", "lop", "timezone", "punch"], target: { collection: "settings", objectPath: "settings/attendance", label: "Attendance schedule" } },
   { key: "late-early", title: "Late & early policy", desc: "Who may ask to arrive late or leave early and when, what an approval does to the day, and what unexcused lateness costs in pay.", group: "Time & leave", icon: AlarmClock, keywords: ["late arrival", "early departure", "late coming", "early going", "permission", "short leave", "late mark", "penalty", "punctuality", "allowance", "auto approve"], target: { collection: "settings", objectPath: "settings/punctuality", label: "Late & early policy" } },
   { key: "shifts", title: "Shift patterns", desc: "Named shifts (morning, night…) assignable on the team roster.", group: "Time & leave", icon: CalendarClock, perm: "shifts.write", keywords: ["roster", "schedule"], target: { collection: "shifts", label: "Shifts" } },
+  { key: "work-patterns", title: "Schedules", desc: "Repeating weeks and rotations of shifts and rest days, assigned to people on the roster.", group: "Time & leave", icon: CalendarClock, perm: "work-patterns.write", keywords: ["roster", "rotation", "part-time", "working week", "shift pattern"], target: { collection: "work-patterns", label: "Schedules" } },
 
   // Pay & money
   { key: "pay-components", title: "Pay components", desc: "The earning and deduction lines salaries are built from.", group: "Pay & money", icon: Coins, perm: "pay-components.write", keywords: ["basic", "hra", "pf", "esi", "earning", "deduction"], target: { collection: "pay-components", label: "Pay components" } },
@@ -103,6 +106,7 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   { key: "permissions", title: "Permissions", desc: "What each role can see and do, per collection.", group: "Access & security", icon: KeyRound, perm: "users.write", keywords: ["grants", "access rules", "capabilities"], target: { collection: "access-rules", label: "Roles & permissions" } },
   { key: "api-keys", title: "API keys", desc: "Machine credentials for scripts and integrations, scoped below your own access.", group: "Access & security", icon: KeyRound, perm: "api-keys.read", keywords: ["token", "bearer", "integration", "machine", "service account"], target: { collection: "api-keys", label: "API keys" } },
   { key: "operations", title: "System operations", desc: "Cron runs, background jobs and system health.", group: "Access & security", icon: Wrench, perm: "cron-runs.read", keywords: ["cron", "jobs", "maintenance"], target: { collection: "operations", label: "Operations" } },
+  { key: "search-insights", title: "Search insights", desc: "What people search for and do not find, where they find what they open, and how Ask answers. Counts only, no names.", group: "Access & security", icon: Search, perm: "search-insights.read", keywords: ["⌘k", "command palette", "zero results", "synonyms", "ranking", "ask"], target: { collection: "search-insights", label: "Search insights" } },
   // Under Access & security rather than Company, because what this panel decides is which of the org's text a
   // model may read - a data-handling decision, not a preference.
   { key: "ai", title: "AI features", desc: "Which AI-assisted features are switched on, and the daily budget they share. Every feature is off until turned on here, and each one works without AI when it is off.", group: "Access & security", icon: Sparkles, keywords: ["semantic search", "triage", "suggestions", "workers ai", "machine learning", "neurons", "budget", "model"], target: { collection: "settings", objectPath: "settings/ai", label: "AI features" } },
@@ -184,3 +188,52 @@ export const HOST_SETTINGS: Record<string, string[]> = {
 };
 
 export const hostSettings = (host: string): string[] => HOST_SETTINGS[host] ?? [];
+
+// ---- Who may open a settings panel ----------------------------------------------------------------------------
+//
+// PER PANEL, not one app-wide `settings.write`. Settings are owned by different roles - HR's leave and attendance
+// policy, payroll's CTC and tax slabs, super admin's governance switches (four-eyes, sign-in, AI) - and a grant
+// names the setting keys it may write (`settings.<key>`), so "may this caller use Settings at all" has no single
+// answer any more. A panel is offered to whoever can write what it edits; nobody is offered a panel that would
+// 403 on save.
+
+/** May the caller write this one setting key? A broad `settings.**` write answers for every key. */
+export const mayWriteSetting = (caps: string[], key: string): boolean =>
+  hasCapability(caps, "settings.write") || hasCapability(caps, `settings.${key}.write`);
+
+const settingKeyOf = (e: SettingsEntry): string | null =>
+  e.target?.collection === "settings" && e.target.objectPath ? e.target.objectPath.slice("settings/".length) : null;
+
+/**
+ * May the caller open this panel? Per-user panels are everyone's. A per-object panel needs the object's verb
+ * (the gear on the object decides for the instance). An org panel needs its `perm` when it names one, and
+ * write on the setting when it edits one; with neither, write on the collection it manages.
+ */
+export function settingsEntryVisible(caps: string[], e: SettingsEntry): boolean {
+  const scope = entryScope(e);
+  if (scope === "user") return true;
+  if (scope === "object") return !!e.target && hasCapability(caps, `${e.target.collection}.${e.target.verb ?? "configure"}`);
+  const key = settingKeyOf(e);
+  if (e.perm && !hasCapability(caps, e.perm)) return false;
+  if (key) return mayWriteSetting(caps, key);
+  return !!e.perm || (!!e.target && hasCapability(caps, `${e.target.collection}.write`));
+}
+
+/** Does the caller have ANY org settings panel - which is what decides the Settings nav item and page. */
+export const hasAnySettings = (caps: string[]): boolean =>
+  SETTINGS_REGISTRY.some((e) => entryScope(e) === "org" && settingsEntryVisible(caps, e));
+
+/**
+ * The same question as a capability list, for the nav's `anyPerm` (which takes capabilities, not a predicate):
+ * the capability each org panel leads with. Holding any of them means some panel is the caller's; the hub then
+ * filters to exactly which with `settingsEntryVisible`.
+ */
+export const SETTINGS_NAV_PERMS: string[] = [
+  "settings.write",
+  ...new Set(
+    SETTINGS_REGISTRY.filter((e) => entryScope(e) === "org").map((e) => {
+      const key = settingKeyOf(e);
+      return key ? `settings.${key}.write` : e.perm ?? `${e.target?.collection}.write`;
+    }),
+  ),
+];

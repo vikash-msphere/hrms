@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 import { compileGrant, mergeGrants, rulesToGrant, type CompiledRule } from "../src/domain/compileGrants";
 import { ancestorsOf } from "../src/domain/codes";
@@ -83,18 +83,21 @@ describe("M1: exact role-rule object semantics (prefix collision, deny-wins)", (
   const broad = broadGrant("employee");
   const withExact = (rows: RoleRow[], col: string, code: string) => mergeGrants(broad, rulesToGrant(narrowRole(rows, col, code)));
 
+  // `payslips`, not `employees`: the employee role reads every colleague's base directory record, so it no
+  // longer denies an employees object on its own, and a pin on one would prove nothing. Nobody's payslip but
+  // their own is readable to the role.
   it("a role pin reaches exactly that object, not a sibling", () => {
-    const rows = [roleRow("employees", "04-002-002", { level: "read" })];
-    expect(allow(broad, "GET", "/v1/employees/04-002-002")).toBe(false); // employee role alone denies the peer
-    expect(allow(withExact(rows, "employees", "04-002-002"), "GET", "/v1/employees/04-002-002")).toBe(true); // pin grants it
-    expect(allow(withExact(rows, "employees", "04-002-003"), "GET", "/v1/employees/04-002-003")).toBe(false); // sibling untouched
+    const rows = [roleRow("payslips", "04-002-002", { level: "read" })];
+    expect(allow(broad, "GET", "/v1/payslips/04-002-002")).toBe(false); // employee role alone denies the peer
+    expect(allow(withExact(rows, "payslips", "04-002-002"), "GET", "/v1/payslips/04-002-002")).toBe(true); // pin grants it
+    expect(allow(withExact(rows, "payslips", "04-002-003"), "GET", "/v1/payslips/04-002-003")).toBe(false); // sibling untouched
   });
 
   it("a role pin on a shorter code does NOT leak to a prefix-collision code", () => {
-    const rows = [roleRow("employees", "04-002", { level: "read" })];
-    expect(allow(withExact(rows, "employees", "04-002"), "GET", "/v1/employees/04-002")).toBe(true); // exact object ok
-    expect(allow(withExact(rows, "employees", "04-0029"), "GET", "/v1/employees/04-0029")).toBe(false); // 04-0029 NOT under 04-002
-    expect(allow(withExact(rows, "employees", "04-002-005"), "GET", "/v1/employees/04-002-005")).toBe(false); // child = different literal token
+    const rows = [roleRow("payslips", "04-002", { level: "read" })];
+    expect(allow(withExact(rows, "payslips", "04-002"), "GET", "/v1/payslips/04-002")).toBe(true); // exact object ok
+    expect(allow(withExact(rows, "payslips", "04-0029"), "GET", "/v1/payslips/04-0029")).toBe(false); // 04-0029 NOT under 04-002
+    expect(allow(withExact(rows, "payslips", "04-002-005"), "GET", "/v1/payslips/04-002-005")).toBe(false); // child = different literal token
   });
 
   it("a role per-object deny overrides a broader role allow (deny-wins)", () => {

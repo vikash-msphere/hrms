@@ -233,6 +233,23 @@ components:
         plural: cron-runs
         patterns: ['cron-runs/{cron_run}']
         type: hrms.example.com/cron-run
+    search_insight:
+      type: object
+      required: [create_time, update_time, etag, day, kind, label, count]
+      properties:
+        path: { type: string, readOnly: true, description: The server-assigned path of the counter. }
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        day: { type: string, readOnly: true, description: "UTC day the counter covers, YYYY-MM-DD." }
+        kind: { type: string, enum: [zero, open, ask], readOnly: true, description: "zero = a query that found nothing; open = which result was opened; ask = what an Ask came back with." }
+        label: { type: string, readOnly: true, description: "The normalised query (zero), `<keyword|related|local>:<position>` (open), or answered | empty (ask)." }
+        count: { type: integer, readOnly: true }
+      x-aep-resource:
+        singular: search-insight
+        plural: search-insights
+        patterns: ['search-insights/{search_insight}']
+        type: hrms.example.com/search-insight
     automation:
       type: object
       required: [path, create_time, update_time, etag]
@@ -434,8 +451,23 @@ components:
             most once every 15 minutes per account, so it is accurate to the quarter-hour and no finer. ABSENT
             when the account has not been seen since the field existed - which is not the same claim as a date,
             and is why it is omitted rather than sent empty.
+        role_labels:
+          type: object
+          readOnly: true
+          additionalProperties: { type: string }
+          description: "On users/me only: the display label of each role the caller holds, keyed by role name, as the org set them in Access Management. The SPA shows these instead of machine names; a caller who cannot read the roles collection still sees their own role's label."
         holiday_feed_token: { type: string, readOnly: true, description: "On users/me only: the caller's unguessable token for the public holiday calendar feed at /calendar/holidays/{token}. Present only when the org enabled the feed and the caller has an employee record (never for a simulated principal)." }
         session_id: { type: string, readOnly: true, description: "On users/me only: an opaque identifier for the caller's current sitting, stable for the life of their session and different after a new sign-in. The SPA namespaces its on-disk caches to it so cached records can never outlive the session that fetched them. Absent on lanes that carry no session (an API key, the Cloudflare Access JWT, the dev bypass), where the client keeps no disk cache keyed to one." }
+        app_lock:
+          type: object
+          readOnly: true
+          description: "On users/me only, for a browser caller: the app lock of the person at this browser (the real admin during view as). A request only gets here unlocked, so this says how the lock is set up and when this browser's unlock proof lapses. Absent for an API key."
+          properties:
+            enabled: { type: boolean, description: "Whether this person has an app PIN." }
+            pin_length: { type: integer, nullable: true, description: "4 or 6; null without a PIN." }
+            idle_minutes: { type: integer, description: "The person's own auto-lock time in minutes; 0 means only when they lock." }
+            expire_time: { type: string, format: date-time, nullable: true, description: "When this browser's unlock proof lapses unless renewed by use; null without a PIN." }
+        client_key: { type: string, readOnly: true, description: "On users/me only, for a browser caller: the key (base64url, 32 bytes) the SPA encrypts what it stores in the browser under. Handed only to an unlocked browser; a locked one gets the app-locked refusal instead, so what it stored cannot be read. Absent for an API key." }
         caller_access:
           type: object
           readOnly: true
@@ -3143,7 +3175,7 @@ components:
         type: hrms.example.com/benefit-enrollment
     shift:
       type: object
-      description: "A shift pattern in the org's catalog (HR-managed). Times are wall-clock HH:MM."
+      description: "A shift pattern in the org's catalog (HR-managed). Times are wall-clock HH:MM; an end at or before the start is a night shift, which runs past midnight and belongs to the day it starts on."
       required: [path, create_time, update_time, etag]
       properties:
         path:
@@ -3158,6 +3190,10 @@ components:
         start: { type: string, description: "Wall-clock HH:MM." }
         end: { type: string, description: "Wall-clock HH:MM." }
         break_minutes: { type: integer }
+        full_day_minutes: { type: integer, nullable: true, description: "Worked minutes that earn a full day on this shift. Absent or null = the shift's own span less its break." }
+        half_day_minutes: { type: integer, nullable: true, description: "Worked minutes that earn a half day. Absent or null = half the full day." }
+        grace_minutes: { type: integer, nullable: true, description: "Lateness allowance on this shift. Absent or null = the org's." }
+        flexible_hours: { type: boolean, nullable: true, description: "Judge the day on minutes worked alone; never late, never early. Absent or null = the org's setting." }
         color: { type: string }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
@@ -3168,7 +3204,7 @@ components:
         type: hrms.example.com/shift
     shift-assignment:
       type: object
-      description: "A roster entry: an employee works a shift on a date. Employee-owned."
+      description: "A roster entry: an employee works a shift on a date, or is explicitly off it. Employee-owned. The most specific layer of a resolved day - it beats the work pattern the person is on, which beats the org's own working week."
       required: [path, create_time, update_time, etag]
       properties:
         path:
@@ -3180,7 +3216,11 @@ components:
         etag: { type: string, readOnly: true }
         delete_time: { type: string, format: date-time, readOnly: true }
         employee: { type: string, description: "Resource path: employees/{employee_id}. Defaults to the caller." }
-        shift: { type: string, description: "Resource path: shifts/{shift_id}" }
+        shift: { type: string, description: "Resource path: shifts/{shift_id}. Required unless kind is off." }
+        kind:
+          type: string
+          enum: [shift, off]
+          description: "off is a rest day: this person is not working that day, whatever their pattern says. Defaults to shift."
         date: { type: string, format: date }
         note: { type: string }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
@@ -3190,6 +3230,59 @@ components:
         patterns:
           - 'shift-assignments/{assignment_id}'
         type: hrms.example.com/shift-assignment
+    work-pattern:
+      type: object
+      description: "A work pattern: the repeating shape of somebody's week, and what a schedule means to HR. A cycle of cycle_weeks weeks, each day holding a shift or a rest day."
+      required: [path, create_time, update_time, etag]
+      properties:
+        path:
+          type: string
+          readOnly: true
+          description: The server-assigned path of the resource, unique within the service.
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        delete_time: { type: string, format: date-time, readOnly: true }
+        name: { type: string }
+        cycle_weeks: { type: integer, minimum: 1, maximum: 8, description: "How many weeks the cycle runs before repeating. 1 is an ordinary fixed week." }
+        days:
+          type: array
+          description: "The cycle: cycle_weeks * 7 entries indexed weekIndex * 7 + weekday, weekday 0=Sun..6=Sat. Each is a shifts/{shift_id} path, or null for a rest day."
+          items: { type: string, nullable: true }
+        color: { type: string }
+        access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
+      x-aep-resource:
+        singular: work-pattern
+        plural: work-patterns
+        patterns:
+          - 'work-patterns/{pattern_id}'
+        type: hrms.example.com/work-pattern
+    work-pattern-assignment:
+      type: object
+      description: "One employee on one work pattern over a window. Employee-owned. Live assignments for one employee never overlap."
+      required: [path, create_time, update_time, etag]
+      properties:
+        path:
+          type: string
+          readOnly: true
+          description: The server-assigned path of the resource, unique within the service.
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        delete_time: { type: string, format: date-time, readOnly: true }
+        employee: { type: string, description: "Resource path: employees/{employee_id}. Defaults to the caller." }
+        pattern: { type: string, description: "Resource path: work-patterns/{pattern_id}" }
+        start_date: { type: string, format: date }
+        end_date: { type: string, format: date, description: "Absent = open ended: they stay on this pattern until moved off it." }
+        anchor_date: { type: string, format: date, description: "The date the cycle counts from, snapped to its own week. Absent = start_date. Two teams on the same rotation offset by a week differ only here." }
+        note: { type: string }
+        access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
+      x-aep-resource:
+        singular: work-pattern-assignment
+        plural: work-pattern-assignments
+        patterns:
+          - 'work-pattern-assignments/{assignment_id}'
+        type: hrms.example.com/work-pattern-assignment
     project:
       type: object
       description: "A project to log time against (HR/PM-managed catalog)."
@@ -4750,6 +4843,12 @@ components:
         protected:
           type: boolean
           description: Core role - cannot be deleted via the API.
+        provisioned:
+          type: boolean
+          description: >-
+            The role a new account is given on hire and at first sign-in. Exactly one role carries it; setting
+            it true on a role moves it there. It cannot be set false directly (choose another role instead), and
+            the provisioned role cannot be deleted.
       x-aep-resource:
         singular: role
         plural: roles
@@ -4927,7 +5026,9 @@ components:
       description: >-
         No usable credential. The session cookie or Access assertion is missing, expired or was signed out
         (src/middleware/auth.ts), or an `hrms_`-shaped bearer did not resolve to a live API key. Re-authenticate
-        rather than retrying.
+        rather than retrying. A problem of type `/errors/app-locked` is different: the browser is signed in but
+        locked by its owner's app PIN (it carries `lock.pin_length` and `lock.first_name` for the lock screen),
+        and the answer is to unlock at POST /auth/lock/unlock, not to sign in again.
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
     PermissionDenied:
       description: >-
@@ -5119,6 +5220,19 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/user' } } } }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/users/{user_id}:resetPin:
+    post:
+      description: "Custom method resetPin for user. Clears the person's app PIN - the only way back from a forgotten one - signs them out everywhere and moves the key their browsers encrypt stored data under, so nothing those browsers kept can be read again. They are notified. Super admin by default; grantable by name in the ACL."
+      operationId: ":ResetPinUser"
+      parameters: [ { in: path, name: user_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { type: object, required: [reset], properties: { reset: { type: boolean } } } } } }
+        '404': { $ref: '#/components/responses/Problem' }
   /v1/settings:
     get:
       description: List method for setting (org-wide config; readable by all).
@@ -5160,8 +5274,9 @@ paths:
       description: >-
         Update method for setting. Upserts the org value for this key (config.write). A settings value is one
         blob, so a save rewrites all of it: send `If-Match` with the `etag` the value was read at and a save
-        that would overwrite a concurrent one is refused with 409 rather than silently reverting it. Omit the
-        header for last-write-wins.
+        that would overwrite a concurrent one is refused with 409 rather than silently reverting it. A caller
+        that read no value (404) sends `If-None-Match: *` instead, and its save is refused with 409 if the value
+        was created in the meantime. Omit both headers for last-write-wins.
 
 
         `employee_fields` carries one extra rule: removing an identity field is refused while employees still
@@ -5818,6 +5933,42 @@ paths:
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/cron_run' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/search-insights:
+    get:
+      description: "List method for search_insight: daily ⌘K usage counters, newest first. Private by default."
+      operationId: ListSearchInsights
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/search_insight' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+  /v1/search-insights/{search_insight}:
+    parameters: [ { in: path, name: search_insight, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for search_insight.
+      operationId: GetSearchInsight
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/search_insight' } } } }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/cron-runs:run:
     post:
@@ -9948,6 +10099,199 @@ paths:
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/shift-assignment' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+  /v1/work-patterns:
+    get:
+      description: List method for work-pattern.
+      operationId: ListWorkPatterns
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: show_deleted, schema: { type: boolean } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/work-pattern' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: >-
+        Create method for work-pattern. The cycle has to hold exactly cycle_weeks * 7 entries, each a shift path
+        or null.
+      operationId: CreateWorkPattern
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/work-pattern' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/work-pattern' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/work-patterns/{pattern_id}:
+    parameters: [ { in: path, name: pattern_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for work-pattern.
+      operationId: GetWorkPattern
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/work-pattern' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: >-
+        Update method for work-pattern. Changing cycle_weeks without sending a days array of the matching length
+        answers 400.
+      operationId: UpdateWorkPattern
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/work-pattern' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/work-pattern' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: >-
+        Delete method for work-pattern. Answers 409 while live assignments still put people on it.
+      operationId: DeleteWorkPattern
+      parameters:
+        - { in: query, name: force, schema: { type: boolean } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/work-patterns/{pattern_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreWorkPattern"
+      parameters: [ { in: path, name: pattern_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/work-pattern' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+  /v1/work-pattern-assignments:
+    get:
+      description: List method for work-pattern-assignment.
+      operationId: ListWorkPatternAssignments
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: employee, schema: { type: string } }
+        - { in: query, name: from, schema: { type: string } }
+        - { in: query, name: to, schema: { type: string } }
+        - { in: query, name: show_deleted, schema: { type: boolean } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/work-pattern-assignment' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: >-
+        Create method for work-pattern-assignment. Answers 409 when the window overlaps another live assignment
+        for that person, except where it starts inside an open-ended one - that one is closed the day before.
+      operationId: CreateWorkPatternAssignment
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/work-pattern-assignment' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/work-pattern-assignment' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/work-pattern-assignments/{assignment_id}:
+    parameters: [ { in: path, name: assignment_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for work-pattern-assignment.
+      operationId: GetWorkPatternAssignment
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/work-pattern-assignment' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: >-
+        Update method for work-pattern-assignment. Moving the window onto another live assignment answers 409.
+      operationId: UpdateWorkPatternAssignment
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/work-pattern-assignment' } } } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/work-pattern-assignment' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: Delete method for work-pattern-assignment.
+      operationId: DeleteWorkPatternAssignment
+      parameters:
+        - { in: query, name: force, schema: { type: boolean } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/work-pattern-assignments/{assignment_id}:restore:
+    post:
+      description: >-
+        Custom method restore: undo a soft-delete. Answers 409 when the window now overlaps another live
+        assignment for that person.
+      operationId: ":RestoreWorkPatternAssignment"
+      parameters: [ { in: path, name: assignment_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/work-pattern-assignment' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/projects:
@@ -17757,9 +18101,9 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
   /v1/employees:upcomingCelebrations:
     get:
-      description: "Custom method upcomingCelebrations: company-wide upcoming birthdays and work anniversaries within the next N days (default 30)."
+      description: "Custom method upcomingCelebrations: company-wide upcoming birthdays and work anniversaries within the next N days, today included. Without `within`, N is the org's lead time (settings/celebrations `lead_days`); a missing or invalid setting answers 503 not-configured."
       operationId: ":UpcomingCelebrations"
-      parameters: [ { in: query, name: within, schema: { type: integer } } ]
+      parameters: [ { in: query, name: within, description: "Explicit window in days, 0 (today only) to 90.", schema: { type: integer, minimum: 0, maximum: 90 } } ]
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -18063,6 +18407,75 @@ paths:
                         etag: { type: string, description: "The answer's validator. Store it and send it back as the sub-request `etag` to make the next read of this path conditional." }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/search:feedback:
+    post:
+      description: "Custom method feedback: count which ⌘K result was opened - how it was found and where it sat. Counted into daily search-insights, never logged; carries no record id and no query."
+      operationId: ":FeedbackSearch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, position]
+              properties:
+                source: { type: string, enum: [keyword, related, local], description: "keyword = matched the typed words; related = found by meaning; local = a page, setting, action or cached person." }
+                position: { type: integer, minimum: 0, description: Zero-based position of the opened row in the palette list. }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '204': { description: Counted. }
+        '400': { $ref: '#/components/responses/Problem' }
+  /v1/search:ask:
+    post:
+      description: "Custom method ask: route a plain-language question to up to three of the destinations the caller's palette offers, each with a short reason, plus optional search words. One generation, sent on Enter only; needs the search.ask AI feature. Reads no record."
+      operationId: ":AskSearch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question, destinations]
+              properties:
+                question: { type: string, maxLength: 300 }
+                destinations:
+                  type: array
+                  maxItems: 400
+                  description: The pages, settings panels and actions the caller's palette offers. Answers are filtered to these keys.
+                  items:
+                    type: object
+                    required: [key, label]
+                    properties:
+                      key: { type: string }
+                      label: { type: string }
+                      group: { type: [string, 'null'] }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  destinations:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        why: { type: string }
+                  search: { type: [string, 'null'], description: "A few words to search records by, when that would help." }
+                  cached: { type: boolean }
+        '400': { $ref: '#/components/responses/Problem' }
   /v1/search:
     get:
       description: "Global search across every collection the caller may list. Each collection is included only if the caller's list decision for it allows, and its rows are filtered by that collection's own list scope, so a hit is always a row the caller could already have listed."
@@ -18073,6 +18486,36 @@ paths:
           required: false
           schema: { type: string }
           description: "Search text. Absent, or fewer than 2 characters, returns no results."
+        - name: in
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Comma-separated collections to narrow to (at most 12). A collection the caller may not list contributes nothing."
+        - name: owner
+          in: query
+          required: false
+          schema: { type: string }
+          description: "employees/{employee}: narrow to rows belonging to that employee. Catalogues belong to nobody and drop out."
+        - name: mine
+          in: query
+          required: false
+          schema: { type: string, enum: ['1'] }
+          description: "1 = narrow to rows belonging to the caller."
+        - name: after
+          in: query
+          required: false
+          schema: { type: string }
+          description: "YYYY-MM or YYYY-MM-DD: narrow to rows created on or after the start of that month or day (UTC). A value that is not a date answers nothing."
+        - name: before
+          in: query
+          required: false
+          schema: { type: string }
+          description: "YYYY-MM or YYYY-MM-DD: narrow to rows created before the start of that month or day (UTC). A value that is not a date answers nothing."
+        - name: status
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Narrow to rows whose own state or status column holds this value (case-insensitive). Collections with no such column drop out."
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }

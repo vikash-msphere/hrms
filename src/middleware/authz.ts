@@ -29,12 +29,15 @@ import { isModeratable } from "../domain/moderation";
 // before any request is served.
 import { hasForcePurge } from "../http/collectionRoute";
 import { accessAudit, mutationAudit } from "../domain/auditAccess";
-import { DEFAULT_POLICY, subresourceBodyKey } from "../domain/manifests";
+import { subresourceBodyKey, type AuditPolicy } from "../domain/manifests";
 import { audit } from "../lib/audit";
 import { isJsonBody } from "../http/jsonRequest";
 import { queryParam } from "../http/query";
 import { selfContextFor, selfContextOf } from "../lib/selfContext";
 import { guardAllows, conditionFieldsOf, windowFieldsOf, type GuardContext } from "../domain/ruleCondition";
+
+// The audit lists for a request with no caller, which therefore has no manifest loaded (see its use below).
+const NO_SENSITIVE_READS: AuditPolicy = { sensitive_subresources: [], sensitive_collections: [], sensitive_verbs: [] };
 
 // Field-level + reference access control on write bodies (docs/archive/plan.txt 11C). For a POST/PATCH whose
 // resource-level write already passed, each PROTECTED field present in the body needs write on
@@ -48,6 +51,16 @@ import { guardAllows, conditionFieldsOf, windowFieldsOf, type GuardContext } fro
 // caps its own list far below (`ASSET_BATCH_MAX` is 100), and a body over this is denied outright rather than
 // gated in part. Raise it only alongside a route that genuinely needs a longer list.
 const BULK_ITEMS_MAX = 200;
+
+// Verbs whose body names the PEOPLE the call acts on, and what the caller must be allowed to write for each of
+// them. `goal-templates/<id>:apply` creates a goal for every employee in `employees`, yet the path names only the
+// template, so the `apply` grant says the caller may use the blueprint and nothing about whose goals it lands
+// in. Each named person is therefore asked the question the owner-on-create gate asks of one goal created on
+// someone's behalf: write on `goals.<their code>` (`me`, `my-reports`, `my-dept` or wider). This is the verb's
+// wire shape, like MULTI_SCOPE_VERBS below, so it is code; who holds that write is policy data.
+const BODY_TARGET_VERBS = new Map<string, { field: string; resource: string }>([
+  ["goal-templates:apply", { field: "employees", resource: "goals" }],
+]);
 
 // Touched top-level field NAMES from a JSON write body (names only — never values, matching the audit policy).
 // Enriches the write-backstop's generic activity row so the feed can say WHAT changed ("updated · title, status")
@@ -117,7 +130,9 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
   // each body field per `<collection>.<code>.<sub>.<key>` write - the write half of field-level control.
   const sub = segs.length === 3 ? segs[2]!.split(":")[0]! : null;
   const subBodyKey = sub ? subresourceBodyKey(sub) : null;
-  if (fields.length === 0 && Object.keys(refs).length === 0 && Object.keys(ownerRefs).length === 0 && subBodyKey === null) return null;
+  const verb = segs[segs.length - 1]?.split(":")[1];
+  const targets = verb ? BODY_TARGET_VERBS.get(`${collection}:${verb}`) : undefined;
+  if (fields.length === 0 && Object.keys(refs).length === 0 && Object.keys(ownerRefs).length === 0 && subBodyKey === null && !targets) return null;
 
   // A DECLARED REF CARRIED IN THE QUERY STRING IS STILL THAT REF.
   //
@@ -203,6 +218,20 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
   }
   const denied = await gateRecord(body);
   if (denied) return denied;
+  // The people a BODY_TARGET_VERBS call acts on, each decided on its own. Resolved in one read first; a name
+  // that resolves to no employee is refused, as an unresolved owner is.
+  if (targets && Array.isArray(body[targets.field])) {
+    const named = body[targets.field] as unknown[];
+    if (named.length > BULK_ITEMS_MAX) return { allow: false, reason: `"${targets.field}" names more than ${BULK_ITEMS_MAX} people` };
+    const ids = named.filter((v): v is string => typeof v === "string" && v.length > 0).map((v) => v.split("/").pop()!);
+    await primeCodes(deps, "employees", ids);
+    for (const id of new Set(ids)) {
+      const targetCode = await uuidToCode(deps, "employees", id);
+      if (!targetCode) return { allow: false, reason: `unresolved "${targets.field}" entry` };
+      const d = decide(grant, { kind: "standard", resource: `${targets.resource}.${targetCode}`, level: "write" }, self);
+      if (!d.allow) return { allow: false, reason: `"${targets.field}": ${d.reason}` };
+    }
+  }
   // A BULK body (`{ items: [ …one record each… ] }`, as `assets:batchCreate` takes) is many records in one
   // request, so the same gates apply to each of them. Without this, wrapping a record in an envelope would be
   // a way to write a protected field or reference something unreadable - the gates would only ever look at the
@@ -812,7 +841,9 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       auser.authorizedScope = !dec.allow || !ic || !ec ? undefined : isSelf ? "self" : dept && isUnder(dept, ic) ? "dept" : "wider";
     }
     try {
-      const ev = accessAudit(c.req.method, pathname, dec, auser?.policy.audit ?? DEFAULT_POLICY.audit, isSelf);
+      // No caller means no manifest was loaded; every denial is still audited, and an anonymous request has no
+      // allowed read for the sensitive lists to classify.
+      const ev = accessAudit(c.req.method, pathname, dec, auser?.policy.audit ?? NO_SENSITIVE_READS, isSelf);
       // Pass the AppUser (not just its email) so the row records actor_id → the feed resolves it to a name.
       if (ev && adeps) await audit(adeps, auser ?? "anonymous", ev.action, ev.entity, ev.entityId ?? undefined, ev.meta);
     } catch (e) {
@@ -875,7 +906,9 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // access is decided even for a request that spans the whole app.
     // The tab-bar badge counts ask the same question of the same collections ("what may this caller list, and
     // with what breadth"), so they ride the same map rather than a second resolve of the same verdicts.
-    if (collection === "search" || collection === "activity-counts") c.set("searchScopes", await searchScopesFor(c.get("deps"), user));
+    // Only the search ITSELF: `search:feedback` and `search:ask` read no record, so resolving sixty collections'
+    // scopes for them would be an access_rules read spent on nothing.
+    if ((collection === "search" && pathname === "/v1/search") || collection === "activity-counts") c.set("searchScopes", await searchScopesFor(c.get("deps"), user));
     // "What changed since I last looked" answers with collection NAMES, so it needs only the boolean half of
     // that same decision - no scope, and no per-object exception read.
     if (collection === "changes") c.set("listableCollections", listableCollectionsFor(user));

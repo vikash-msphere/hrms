@@ -45,8 +45,12 @@ const flat: SearchScoping = { kind: "flat" };
 
 export const SEARCH_INDEX: SearchEntry[] = [
   // ---- People + org ---------------------------------------------------------------------------------------
+  // NOT `legalName`. It is a redacted field (bootstrap/authz/policy.ts REDACTED_FIELDS): someone's legal name can
+  // differ from the one they go by, and saying so is theirs to do. Matching on it would let anybody who reads
+  // the directory confirm a guess - "whose legal name is X?" - through search, although the field itself is never
+  // shown to them. Migration 0014 dropped it from the live index and re-indexed the rows already in it.
   { collection: "employees", table: schema.employees, scoping: scoped("uuid"),
-    match: ["firstName", "lastName", "legalName", "workEmail", "jobTitle", "employeeNumber"],
+    match: ["firstName", "lastName", "workEmail", "jobTitle", "employeeNumber"],
     title: ["firstName", "lastName"], joinTitle: true, subtitle: ["jobTitle", "workEmail"], noun: "Person" },
   { collection: "departments", table: schema.departments, scoping: scoped("code"), match: ["name"], title: ["name"], noun: "Department" },
   { collection: "positions", table: schema.positions, scoping: scoped("employeeId"),
@@ -74,6 +78,8 @@ export const SEARCH_INDEX: SearchEntry[] = [
     match: ["reason"], title: ["reason"] },
   { collection: "shifts", table: schema.shifts, scoping: flat, match: ["name"], title: ["name"], noun: "Shift" },
   { collection: "shift-assignments", table: schema.shiftAssignments, scoping: scoped("employeeId"), match: ["note"], title: ["note"] },
+  { collection: "work-patterns", table: schema.workPatterns, scoping: flat, match: ["name"], title: ["name"], noun: "Schedule" },
+  { collection: "work-pattern-assignments", table: schema.workPatternAssignments, scoping: scoped("employeeId"), match: ["note"], title: ["note"] },
   { collection: "projects", table: schema.projects, scoping: flat,
     match: ["name", "client", "projectCode"], title: ["name"], subtitle: ["client", "projectCode"], noun: "Project" },
   { collection: "time-entries", table: schema.timeEntries, scoping: scoped("employeeId"),

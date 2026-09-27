@@ -39,21 +39,38 @@ let lastPush = 0;
 let selfPops = 0;
 export const isSelfPop = (): boolean => selfPops > 0;
 
+// One settle per outstanding `back()`, oldest first: each popstate answers exactly one of them.
+const pendingBacks: (() => void)[] = [];
+let listening = false;
+const onPop = () => pendingBacks[0]?.();
+
 /** `history.back()`, announced - see `isSelfPop`. */
 function selfBack(): void {
   selfPops += 1;
   let settled = false;
-  const done = () => {
+  const settle = () => {
     if (settled) return;
     settled = true;
-    selfPops -= 1;
-    window.removeEventListener("popstate", done);
+    clearTimeout(deadline);
+    pendingBacks.splice(pendingBacks.indexOf(settle), 1);
+    // Lowered AFTER the whole dispatch, not inside it. Listeners run in the order they were added, and a
+    // dialog that opened while the traversal was in flight - the rotated key's secret, minted by the press
+    // that closed the confirm - added its listener after this one. Lowering the flag here handed that dialog
+    // an unflagged pop, which it read as the reader pressing back: the new secret dismissed itself behind
+    // "Close without copying the key?". A task runs after every listener has; a microtask would not.
+    setTimeout(() => { selfPops -= 1; }, 0);
   };
-  // Registered last, so every listener that was already waiting (the dialogs') runs while the flag is still up.
-  window.addEventListener("popstate", done);
+  pendingBacks.push(settle);
+  if (!listening) {
+    window.addEventListener("popstate", onPop);
+    listening = true;
+  }
   // A back() with nothing to go back to fires no popstate at all; without this the flag would stay up and a
-  // real back press would stop closing dialogs for the rest of the session.
-  setTimeout(done, 500);
+  // real back press would stop closing dialogs for the rest of the session. Generous, because it is not the
+  // normal path: every caller steps back off an entry `pushDialogEntry` added, so there is always one below
+  // and the pop always comes - but under load it can come late, and a deadline that expires first turns the
+  // app's own back into the reader's.
+  const deadline = setTimeout(settle, 3000);
   window.history.back();
 }
 

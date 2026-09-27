@@ -80,6 +80,7 @@ export const HIERARCHICAL_TABLES: HierTable[] = [
   { table: schema.dependents, collection: "dependents" },
   { table: schema.benefitEnrollments, collection: "benefit-enrollments" },
   { table: schema.shiftAssignments, collection: "shift-assignments" },
+  { table: schema.workPatternAssignments, collection: "work-pattern-assignments" },
   { table: schema.timeEntries, collection: "time-entries" },
   { table: schema.loans, collection: "loans" },
   { table: schema.taxDeclarations, collection: "tax-declarations" },

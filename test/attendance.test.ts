@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 
 // Attendance authz: everyone clocks in/out + files their own regularizations; managers approve their own

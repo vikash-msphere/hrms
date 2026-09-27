@@ -9,6 +9,11 @@ import { leaveCover, leaveTouches, type LeaveRange, type DayCredit } from "../..
 // or early departure moves the day's window, and the payroll build judges the day against the moved window with
 // this exact function (domain/punctuality.ts#judgeDay).
 import { DEFAULT_PUNCTUALITY, judgeDay, leaveHalves, type DayExcusal, type PunctualityPolicy } from "../../../src/domain/punctuality";
+// And the rule for WHOSE day a day is: which days are worked at all, and how many minutes earn a full or half
+// one. The grid drawing a rest day as an absence, or a four-hour shift as "Under hours", is the same drift
+// again - the person is told they missed work the payroll build never asked them for.
+import { orgScheduleOf, type DaySchedule, type DayScheduleOf } from "../../../src/domain/workSchedule";
+export type { DaySchedule, DayScheduleOf };
 // Every attendance surface describes the same window of days, so the range type travels with the rule that
 // reads it rather than being restated per page.
 export type { LeaveRange, DayCredit, DayExcusal };
@@ -66,6 +71,10 @@ export type AttendanceSchedule = {
   lop_basis?: "working_days" | "days_30"; // per-day rate divisor
   lop_wage_basis?: "gross" | "basic"; // the monthly wage that divisor divides: gross (default) or basic only
   proration_basis?: "calendar_days" | "working_days"; // how a mid-period joiner/leaver's earnings are prorated
+  // Whether a day is resolved through the roster and the schedule the person is on, or from this blob alone
+  // (src/domain/workSchedule.ts). "org" is the default and is exactly the behaviour above: an org keeping a
+  // roster as a planning grid must not find those entries deciding pay the moment schedules ship.
+  schedule_source?: "org" | "resolved";
 };
 
 export const DEFAULT_SCHEDULE: AttendanceSchedule = {
@@ -83,6 +92,7 @@ export const DEFAULT_SCHEDULE: AttendanceSchedule = {
   lop_basis: "working_days",
   lop_wage_basis: "gross",
   proration_basis: "calendar_days",
+  schedule_source: "org",
   week_start: 1,
 };
 
@@ -290,11 +300,15 @@ export type AttendanceRow = { day: string; summary?: DaySummary; status: DayStat
 // Status of a day that has punches and/or event work credit. `total` is clocked + event-credited minutes;
 // `s` is absent on an event-only day. Minutes decide first (a day too short to count can't be "late"), then
 // punctuality - which only applies when there are real punches and the schedule isn't flexible.
-function dayStatus(s: DaySummary | undefined, total: number, sched: AttendanceSchedule): DayStatus {
+//
+// `day` is THAT DAY'S OWN schedule (src/domain/workSchedule.ts), so a four-hour shift is a full day at four
+// hours here exactly as it is in the payroll build - the grid calling it "Under hours" while payroll docked
+// nothing is the drift this file's other imports exist to prevent.
+function dayStatus(s: DaySummary | undefined, total: number, day: DaySchedule): DayStatus {
   if (s?.open) return "open";
-  if (total < sched.half_day_minutes) return "insufficient"; // too little (clocked + event) to earn even a half day
-  if (total < sched.full_day_minutes) return "half_day";
-  if (sched.flexible_hours || !s) return "present"; // event-only or flexible: a full day's worth of minutes = present
+  if (total < day.halfDayMinutes) return "insufficient"; // too little (clocked + event) to earn even a half day
+  if (total < day.fullDayMinutes) return "half_day";
+  if (day.flexible || !s) return "present"; // event-only or flexible: a full day's worth of minutes = present
   if (s.late && s.leftEarly) return "late_early";
   if (s.late) return "late";
   if (s.leftEarly) return "left_early";
@@ -307,7 +321,9 @@ export function buildAttendanceRows(opts: {
   fromYmd: string;
   toYmd: string;
   todayYmd: string;
-  sched: AttendanceSchedule;
+  /** WHOSE days these are, day by day (src/domain/workSchedule.ts). A caller with no employee in hand builds
+   *  it from the org's own week with `orgScheduleOf`, which is what this always used to do. */
+  schedOf: DayScheduleOf;
   summaries: DaySummary[];
   holidays: Set<string>;
   // The SESSION FLAGS ride along, and they are not optional decoration. Approved leave can cover half a day
@@ -325,7 +341,7 @@ export function buildAttendanceRows(opts: {
   // go-live week, an unpaid leave taken then.
   trackedFromYmd?: string;
 }): AttendanceRow[] {
-  const { fromYmd, toYmd, todayYmd, sched, summaries, holidays, leaveRanges, workMinutesByDay = new Map(), marksByDay, joinedYmd, trackedFromYmd } = opts;
+  const { fromYmd, toYmd, todayYmd, schedOf, summaries, holidays, leaveRanges, workMinutesByDay = new Map(), marksByDay, joinedYmd, trackedFromYmd } = opts;
   const byDay = new Map(summaries.map((s) => [s.day, s]));
   // The SERVER'S rule, imported rather than restated - see the note on `leaveRanges` above and on
   // `leaveCover` in src/domain/attendance.ts. 1 = the whole day is excused, 0.5 = one session is.
@@ -338,20 +354,21 @@ export function buildAttendanceRows(opts: {
     // THE SCHEDULE DECIDES WHAT KIND OF DAY IT IS; the punches only decide how the day went. Tested the other
     // way round, `work_days` and `holidays` gated the EMPTY days alone, so any day with a punch was judged
     // against shift_start/grace/half_day_minutes whether or not anyone was meant to be working.
-    const offDay = !sched.work_days.includes(weekdayOf(day)) || holidays.has(day);
+    const ds = schedOf(day);
+    const offDay = ds.off || holidays.has(day);
     if (s || credit > 0) {
       // Event credit adds to clocked minutes for the day's total; late/early flags come from real punches only.
       const total = (s?.workedMinutes ?? 0) + credit;
       // An approved late arrival / early departure's gap counts toward the full/half-day ladder when the
       // punctuality policy credits it (`creditMinutes`, 0 otherwise) - the reading payroll docks by - but it is
       // not WORK, so it stays out of the minutes the row reports as worked.
-      const status = s?.open ? "open" : offDay ? "worked_off_day" : dayStatus(s, total + (s?.creditMinutes ?? 0), sched);
+      const status = s?.open ? "open" : offDay ? "worked_off_day" : dayStatus(s, total + (s?.creditMinutes ?? 0), ds);
       const summary: DaySummary = s
         ? { ...s, workedMinutes: total }
         : { day, sessions: [], workedMinutes: total, open: false, late: false, leftEarly: false, lateByMin: 0, earlyByMin: 0 };
       rows.push({ day, summary, status });
-    } else if (!sched.work_days.includes(weekdayOf(day))) {
-      continue; // weekend / non-working day with no punch
+    } else if (ds.off) {
+      continue; // weekend, or a rest day in this person's own schedule, with no punch
     } else if (holidays.has(day)) {
       // (a worked holiday took the `worked_off_day` branch above, so this is the unworked one)
       rows.push({ day, status: "holiday" });
@@ -449,9 +466,12 @@ export type WindowStats = {
   doneMinutes: number; expectedMinutes: number;
 };
 
-export function statsOf(rows: AttendanceRow[], tz: string, fullDayMinutes: number, todayYmd: string): WindowStats {
+export function statsOf(rows: AttendanceRow[], tz: string, schedOf: DayScheduleOf, todayYmd: string): WindowStats {
   let worked = 0, late = 0, absent = 0, minutes = 0, workingDays = 0, judged = 0, punctual = 0;
-  let arrSum = 0, arrN = 0, depSum = 0, depN = 0, doneMinutes = 0, expectedDays = 0;
+  // EXPECTED MINUTES ARE SUMMED PER DAY, not one full-day figure times a count: on a week that mixes a
+  // four-hour shift with an eight-hour one, multiplying either of them across the week is wrong in both
+  // directions, and this is the number the "done vs expected" bar is read against.
+  let arrSum = 0, arrN = 0, depSum = 0, depN = 0, doneMinutes = 0, expectedMinutes = 0;
   for (const r of rows) {
     // A day nobody was rostered on is not a working day, whether it was worked or not: `worked_off_day` joins
     // holiday and on_leave here. Counted, it added a whole `full_day_minutes` of EXPECTATION for voluntary
@@ -461,7 +481,7 @@ export function statsOf(rows: AttendanceRow[], tz: string, fullDayMinutes: numbe
     // An `untracked` day owes nothing either, until HR marks it: a mark is the one way such a day gets a value.
     const counts = r.status !== "holiday" && r.status !== "on_leave" && r.status !== "worked_off_day" && (r.status !== "untracked" || !!r.mark);
     if (counts) workingDays++;
-    if (counts && r.day < todayYmd) expectedDays++;
+    if (counts && r.day < todayYmd) expectedMinutes += schedOf(r.day).fullDayMinutes;
     const s = r.summary;
     if (s) {
       worked++;
@@ -495,7 +515,7 @@ export function statsOf(rows: AttendanceRow[], tz: string, fullDayMinutes: numbe
     avgIn: arrN ? arrSum / arrN : null,
     avgOut: depN ? depSum / depN : null,
     doneMinutes,
-    expectedMinutes: expectedDays * fullDayMinutes,
+    expectedMinutes,
   };
 }
 

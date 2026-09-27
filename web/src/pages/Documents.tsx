@@ -737,6 +737,13 @@ export default function Documents({ me }: { me: Me }) {
     () => topRows.filter((d) => !d.delete_time && d.requires_signature && !d.signed_time && !!d.employee && idOf(d.employee) === me.employee_id),
     [topRows, me.employee_id],
   );
+  // The sign dialogs show the row AS IT IS NOW, not the copy captured when Sign was pressed. An upload writes
+  // the record and then its bytes, and the list re-read that the create set off can land in between - so a
+  // Sign pressed right after uploading held a row with no file: no reader, "No file is attached", and the
+  // read-it-first gate open on a document nobody had been shown. Falls back to the captured row once the
+  // list no longer has it, which is the dialog's own "this document has been removed" case.
+  const liveAckDoc = useMemo(() => (ackDoc ? rows.find((r) => r.path === ackDoc.path) ?? ackDoc : null), [rows, ackDoc]);
+  const liveSignDoc = useMemo(() => (signDoc ? rows.find((r) => r.path === signDoc.path) ?? signDoc : null), [rows, signDoc]);
 
   // A date typed into a bare date field says nothing about what it means; this turns it back into English
   // (and catches the year typo that files a contract as already expired).
@@ -1078,7 +1085,7 @@ export default function Documents({ me }: { me: Me }) {
 
       {/* Acknowledge (e-sign) a policy: read it in the dialog, then sign. */}
       <SignDocumentDialog
-        doc={ackDoc}
+        doc={liveAckDoc}
         mode="acknowledge"
         me={myEmp}
         queue={ackQueue}
@@ -1116,7 +1123,7 @@ export default function Documents({ me }: { me: Me }) {
 
       {/* Sign (e-sign) your own generated letter/contract in place */}
       <SignDocumentDialog
-        doc={signDoc}
+        doc={liveSignDoc}
         mode="sign"
         me={myEmp}
         queue={signQueue}

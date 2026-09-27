@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { computeRunItem, canTransition, isEditable, overtimePay, ctcLines, splitCtc, employerCostLines, pfWagesOf, DEFAULT_CTC_CONFIG, DEFAULT_OVERTIME_CONFIG, type RunState } from "../src/domain/payroll";
 import { monthlyRecurringGross } from "../src/services/taxProjection";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 
 describe("overtime pay (pure)", () => {

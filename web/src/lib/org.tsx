@@ -66,10 +66,8 @@ export function orgNameSizePx(size?: string): number {
 
 // The org's next incorporation anniversary, computed from `incorporation_date` ("YYYY-MM-DD"). Mirrors the
 // server's per-employee celebrations math (UTC midnight; 0 = today) so the dashboard hat and widget line up
-// with the rest of the feed. Returns null when no valid date is set or the org isn't yet 1 year old.
-// "This week" window shared by the dashboard's celebrations StatCard and the sidebar logo hat, so the hat
-// appears exactly when the anniversary starts counting in that card.
-export const CELEBRATION_WEEK_DAYS = 7;
+// with the rest of the feed. Returns null when no valid date is set or the org isn't yet 1 year old. Callers
+// show it inside the org's celebration lead time (hooks/useCelebrations.ts#useCelebrationLeadDays).
 export type OrgAnniversary = { in_days: number; years: number };
 export function orgAnniversary(incorporationDate: string | undefined, now = new Date()): OrgAnniversary | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec((incorporationDate ?? "").trim());

@@ -23,6 +23,7 @@ import "@fontsource/inter/latin-ext-800.css";
 import "./index.css";
 import App from "./App";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
+import { registerAppRoot } from "@/lib/appLock";
 // Dev-only, and off unless a URL asks for it (`?overflow=1`): names whichever box is painting past the
 // viewport, which `html { overflow-x: clip }` otherwise hides by clipping it.
 import { startOverflowProbe } from "@/lib/overflowProbe";
@@ -46,7 +47,10 @@ startOverflowProbe();
 // cheap answer is to gate it the way `startOverflowProbe` gates itself.
 startClippedTitles();
 
-createRoot(document.getElementById("root")!).render(
+const root = createRoot(document.getElementById("root")!);
+// Locking takes the whole app down before it reloads (lib/appLock.ts), so it needs the root.
+registerAppRoot(root);
+root.render(
   <StrictMode>
     <ErrorBoundary>
       <App />

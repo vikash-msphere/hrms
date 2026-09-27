@@ -8,7 +8,7 @@ import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import { whoCanSeeMe } from "../src/services/myViewers";
 import { clearCachePrefix } from "../src/lib/cache";
 import { invalidateCodeCache } from "../src/lib/authzResolve";

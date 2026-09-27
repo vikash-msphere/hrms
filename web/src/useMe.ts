@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError } from "./api";
 import { getViewAs } from "./lib/viewAsStore";
 import { idOf } from "./lib/utils";
+import { registerRoleLabels } from "./lib/roles";
 import type { Me, User } from "./types";
 
 export type { Me };
@@ -10,8 +11,14 @@ export type { Me };
 // loader), so identity never fires more than once - including under StrictMode's double-mount. Memoize the RAW
 // User promise so callers that need different slices (capabilities vs access.scopes) reuse the same request.
 let mePromise: Promise<User | null> | null = null;
+// The caller's own roles' labels ride on users/me, so the shell names the caller's role the way the org does
+// without reading the roles collection (which most callers cannot).
+const learnRoleLabels = (u: User): User => {
+  registerRoleLabels(Object.entries(u.role_labels ?? {}).map(([name, label]) => ({ name, label })));
+  return u;
+};
 export function fetchMeRaw(): Promise<User | null> {
-  return (mePromise ??= api<User>("/users/me").catch((e) => {
+  return (mePromise ??= api<User>("/users/me").then(learnRoleLabels).catch((e) => {
     // A genuine 401 means "not signed in" -> resolve null so the app shows the sign-in screen. Any OTHER
     // failure (500, network, CORS) is NOT an auth state: rethrow so the caller can show a distinct
     // "couldn't reach server" screen, and drop the memo so a retry re-fires instead of caching the failure.
@@ -35,6 +42,15 @@ const toMe = (u: User | null): Me | null =>
         },
         holiday_feed_token: u.holiday_feed_token ?? null,
         session_id: u.session_id ?? null,
+        app_lock: u.app_lock
+          ? {
+              enabled: !!u.app_lock.enabled,
+              pinLength: u.app_lock.pin_length ?? null,
+              idleMinutes: u.app_lock.idle_minutes ?? 15,
+              expireTime: u.app_lock.expire_time ? Date.parse(u.app_lock.expire_time) : null,
+            }
+          : null,
+        client_key: u.client_key ?? null,
       }
     : null;
 

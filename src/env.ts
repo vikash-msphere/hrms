@@ -71,6 +71,11 @@ export type AppUser = {
   // (the trail must distinguish a human from their key), and the rules a key may not perform at all
   // (simulating another user, minting further keys).
   apiKey?: { uuid: string; code: string | null; name: string; prefix: string; scope: import("./domain/keyScope").KeyScope };
+  // The app lock of the person at the BROWSER (services/appLock.ts unlockState), set on the browser lanes only.
+  // A request only gets this far unlocked, so this says how: whether a PIN is set, the auto-lock time, and when
+  // this browser's proof lapses. `keyOwner`/`keyEpoch` pick the key its client store encrypts under. Under
+  // "view as" it stays the REAL admin's - the lock and the storage belong to the browser, not the subject.
+  appLock?: { enabled: boolean; pinLength: number | null; idleMinutes: number; expiresAt: number | null; keyOwner: string; keyEpoch: number };
 };
 
 export type Bindings = {

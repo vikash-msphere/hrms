@@ -126,6 +126,7 @@ export const EXCLUDED_BASES: Record<string, string> = {
   "event-log": "payload is redacted below super",
   "automation-runs": "admin observability over other people's events",
   "cron-runs": "machine history, no subject",
+  "search-insights": "usage counters, no subject",
   "api-keys": "carries a credential prefix; the token is masked in the serializer",
   users: "identity + role escalation surface, super-only by policy",
   roles: "policy data, keyed by name rather than by the uuid lane",

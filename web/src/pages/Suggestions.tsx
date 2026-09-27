@@ -230,7 +230,12 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
     catch (e) { toast({ title: "Couldn't remove", description: (e as Error).message, variant: "destructive" }); }
   }
 
-  useIntent("new-suggestion", () => setOpen(true));
+  // From ⌘K's nothing-found offer the intent carries the words searched for, which start the title.
+  useIntent("new-suggestion", (arg) => {
+    const title = (arg as { title?: unknown } | undefined)?.title;
+    if (typeof title === "string" && title.trim()) setForm((f) => ({ ...f, title: title.trim().slice(0, 200) }));
+    setOpen(true);
+  });
 
   const addBtn = canSubmit && <AccessAction collection="suggestions" create><Button onClick={() => setOpen(true)}><Plus className="h-4 w-4" /> New suggestion</Button></AccessAction>;
 

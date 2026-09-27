@@ -9,6 +9,7 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
+import { seedManifest } from "./seedManifest";
 import { genId } from "../src/lib/idCodec";
 import { errorChainText } from "../src/lib/errors";
 import { app } from "../src/index";
@@ -31,6 +32,7 @@ beforeAll(async () => {
     const s = stmt.trim();
     if (s) await b.DB.prepare(s).run();
   }
+  await seedManifest(b.DB);
   deps = makeDeps(b);
 });
 
@@ -243,7 +245,7 @@ describe("auth: ALLOWED_EMAIL_DOMAINS gates first-login auto-provisioning", () =
   });
 
   it("admits (provisions) a first-login email inside the allow-list", async () => {
-    await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee" }).onConflictDoNothing(); // provisioning assigns this role (FK)
+    await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee", provisioned: true }).onConflictDoNothing(); // provisioning assigns this role (FK)
     setEnv({ ALLOW_DEV_AUTH: "true", ALLOWED_EMAIL_DOMAINS: "example.com", DEV_FAKE_EMAIL: "ada@example.com" });
     try {
       await req(); // authz may 403 (a fresh employee has no seeded grant) — the point is the user row IS created

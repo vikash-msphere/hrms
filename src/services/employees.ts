@@ -22,6 +22,7 @@ import { DEFAULT_EMPLOYEE_NUMBER_CONFIG, formatEmployeeNumber, nextSeq } from ".
 import { checkEtag, updateAtVersion } from "./versionGuard";
 import { softDeleteRow } from "./softDelete";
 import { orgToday } from "./orgDay";
+import { provisionedRole } from "./roles";
 
 // Wire input is snake_case (matches the OpenAPI schema). national_id/bank_details are write-only.
 export type EmployeeInput = {
@@ -135,16 +136,14 @@ async function provisionAccount(deps: Deps, employeeId: string, workEmail: strin
   // LOWERCASED, not the address as typed. This row IS the sign-in identity, and every lane that resolves a
   // caller lowercases first (the Access JWT's `email`, the session cookie's, the dev bypass) - so a work email
   // entered as `Aarav.Sharma@corp.com` was provisioned verbatim and then never found by the login that came
-  // looking for `aarav.sharma@corp.com`. Which minted a SECOND account, at the default `employee` role: the
+  // looking for `aarav.sharma@corp.com`. Which minted a SECOND account, at the provisioned role: the
   // person signs in to no access, while the row HR gave their real role to sits unused beside it, holding the
   // access rules and keys that were meant for them. Exactly what the comment above says this exists to avoid.
+  const role = await provisionedRole(deps);
   await deps.db
     .insert(schema.users)
-    .values({ code: await allocFlatCode(deps, schema.users), email, role: PROVISIONED_ROLE, employeeId });
+    .values({ code: await allocFlatCode(deps, schema.users), email, role, employeeId });
 }
-
-// The role an account is provisioned with on hire - the least any signed-in person holds.
-const PROVISIONED_ROLE = "employee";
 
 /**
  * Does this account hold nothing beyond what hiring gives anybody: the provisioned role as its primary, no
@@ -153,8 +152,9 @@ const PROVISIONED_ROLE = "employee";
  * work-email change only.
  */
 async function isPlainAccount(deps: Deps, account: { uuid: string; role: string }): Promise<boolean> {
-  if (account.role !== PROVISIONED_ROLE) return false;
-  const extraRole = (await deps.db.select({ role: schema.userRoles.role }).from(schema.userRoles).where(eq(schema.userRoles.userId, account.uuid))).some((r) => r.role !== PROVISIONED_ROLE);
+  const provisioned = await provisionedRole(deps);
+  if (account.role !== provisioned) return false;
+  const extraRole = (await deps.db.select({ role: schema.userRoles.role }).from(schema.userRoles).where(eq(schema.userRoles.userId, account.uuid))).some((r) => r.role !== provisioned);
   if (extraRole) return false;
   const ownRule = await deps.db
     .select({ uuid: schema.accessRules.uuid })

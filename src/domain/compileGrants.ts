@@ -62,6 +62,19 @@ export function mergeGuards(a: GuardIndex, b: GuardIndex): GuardIndex {
   return out;
 }
 
+/**
+ * Collections whose items are addressed by NAME, not by a hierarchical code: `/v1/settings/attendance`,
+ * `/v1/roles/manager`, `/v1/bank-formats/<bank>`. None of them is a code-bearing table (lib/authzResolve.ts
+ * TABLES), so an item has no code for the per-object lane to look up.
+ *
+ * For these the token after the collection is the item's NAME, not a code, and a rule naming one is a broad
+ * rule matched by its pattern - `settings.attendance` write reaches `settings.attendance` and nothing else.
+ * Read as a literal code instead, it compiled to an exact per-object row (match_code `attendance`) that the
+ * per-object lane never loads, because nothing ever resolves a settings key to a code: every per-key settings
+ * grant - seeded, or authored in Access Management from a settings panel's own access icon - was silently inert.
+ */
+export const NAME_KEYED_COLLECTIONS: ReadonlySet<string> = new Set(["settings", "roles", "bank-formats", "payroll-debit-accounts"]);
+
 // Derive the narrowing keys from a grant pattern. The id/scope position is token[1] (the token right after
 // the collection); in grant patterns it is always a scope token (`me` / `my-dept` / `*` / `<prefix>-*` /
 // `**`) or absent. `**` as the whole pattern is the super grant (matches every collection) -> namespace '*'.
@@ -71,6 +84,7 @@ export function deriveNarrowing(pattern: string): { namespace: string; scopeKind
   const namespace = toks[0]!;
   const scope = toks[1];
   if (scope === undefined) return { namespace, scopeKind: "all", scopeCode: "" }; // collection-only pattern (e.g. "employees")
+  if (NAME_KEYED_COLLECTIONS.has(namespace)) return { namespace, scopeKind: "all", scopeCode: "" }; // `settings.<key>`: a name, see above
   if (scope === "me") return { namespace, scopeKind: "self", scopeCode: "" };
   if (scope === "my-dept") return { namespace, scopeKind: "dept", scopeCode: "" };
   // The manager chain. Subject-relative like `me`/`my-dept`, so no scope code: the rule means "whoever reports

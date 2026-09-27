@@ -43,8 +43,9 @@ Access control lives in the `authz` middleware, never in the service or the fact
 scoped you supply the *data* the middleware needs:
 1. **Give rows a hierarchical `code`.** Allocate it on create via `allocCode` in the spec (owner-embedded for
    employee-owned rows, flat for org-wide), so the middleware can match `me` / `my-dept` / a code prefix.
-2. **Register the collection in policy (data).** Add per-role grants at the right scope in the `grants`
-   table (seeded from `src/domain/grants.ts`) and any protected-field / owner-ref entries in `policy`
+2. **Register the collection in policy (data).** Add per-role grants at the right scope as `access_rules`
+   rows (a fresh database is seeded from the role files in `bootstrap/authz/roles/`; a live one gets them through Access
+   Management or a migration) and any protected-field / owner-ref entries in `policy`
    (seeded from `src/domain/manifests.ts`). Owner-scoped collections use `me` / `my-dept` - **never bare
    `**`** (that is a BOLA hole). Sensitive sub-resources are opt-in (no broad grant reaches them). After
    editing the defaults, regenerate the seed rows in `scripts/seed.sql`.

@@ -2,7 +2,8 @@
 import { describe, it, expect } from "vitest";
 // @ts-expect-error - untyped module, runtime-only (same pattern as openapiRoutesDrift.test.ts)
 import { load } from "js-yaml";
-import { AUDIT, NON_SENSITIVE_STREAMING_VERBS } from "../src/domain/manifests";
+import { NON_SENSITIVE_STREAMING_VERBS } from "../src/domain/manifests";
+import { AUDIT } from "../bootstrap/authz/policy";
 import { READ_VERBS } from "../src/domain/auditAccess";
 
 // TWO REGISTRIES DECIDE WHAT A CUSTOM METHOD'S AUDIT TRAIL LOOKS LIKE, AND THEY ASK DIFFERENT QUESTIONS.

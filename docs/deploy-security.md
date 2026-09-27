@@ -207,6 +207,31 @@ singled out - the choice is disable that user briefly, or rotate the key and sig
 seconds of work. A revocation list would close it at the cost of a D1 read on every request, which is the
 trade this design deliberately declines.
 
+## 3d. App lock: the PIN, and the last-resort reset
+
+A person can protect HRMS on their devices with a 4 or 6 digit PIN (design: `app-lock-plan.md`). While a browser
+is locked, every `/v1` call from it answers `401 /errors/app-locked`, and a new sign-in starts locked, so
+signing out and back in does not get past it. The server holds the lock: `app_locks` is joined into the auth
+read (`src/middleware/auth.ts`, `src/services/appLock.ts`), and a browser is open only while it carries a valid
+`hrms_unlock` proof cookie.
+
+- The PIN is stored as HMAC-SHA256 under a key derived from `FIELD_ENCRYPTION_KEY`, so the table alone cannot be
+  guessed offline. Rotating `FIELD_ENCRYPTION_KEY` therefore invalidates every PIN (and every browser's
+  encrypted local store) as well as the PII it already protects.
+- Wrong PINs: five free tries, then waits of 30 s, 1 min, 5 min, 15 min and one hour per try. The owner is
+  notified at the third, and each threshold is audited as `user.pinFailed`.
+- A forgotten PIN is reset by an admin: Settings → Users → Reset app PIN (`POST /v1/users/{id}:resetPin`,
+  super admin by default, grantable in the ACL). It signs the person out everywhere and moves the key their
+  browsers encrypt under. There is no self-service reset, because Google sign-in is usually one click on the
+  very machine the lock protects.
+
+**The last super admin forgot their PIN** (nobody left who can reset it in the app):
+
+```bash
+npx wrangler d1 execute hrms --remote \
+  --command "UPDATE app_locks SET pin_hash=NULL, pin_length=NULL, failures=0, blocked_until=NULL, key_epoch=key_epoch+1 WHERE user_id=(SELECT uuid FROM users WHERE email='admin@acme.com');"
+```
+
 ## 4. Demo / seed fixtures — never in production
 
 `scripts/seed.sql` and `bootstrap/demo.sql` create predictable accounts (e.g. `super@example.com` as

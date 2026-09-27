@@ -8,10 +8,11 @@ import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
-import { upcomingCelebrations } from "../src/services/celebrations";
-import { orgToday } from "../src/services/orgDay";
+import { upcomingCelebrations, celebrationLeadDays } from "../src/services/celebrations";
+import { orgToday, orgDayFromToday } from "../src/services/orgDay";
+import { bustRef } from "../src/lib/refData";
 
 // The dashboard celebrations feed is a collection-level custom method on employees. It is company-wide (every
 // signed-in role may read it), so the grant must allow `employees.upcomingCelebrations` for all five roles.
@@ -89,10 +90,12 @@ async function celebrant(over: Partial<typeof schema.employees.$inferInsert> = {
   return uuid;
 }
 
+// Every celebrant above has a birthday TODAY, so a window of 0 is enough to name them; the window itself is
+// pinned below.
 describe("the celebrations feed names people who are still here", () => {
   it("names a live employee whose birthday is today", async () => {
     const live = await celebrant();
-    const feed = await upcomingCelebrations(deps);
+    const feed = await upcomingCelebrations(deps, 0);
     expect(feed.map((c) => c.employee)).toEqual([`employees/${live}`]);
     expect(feed[0]).toMatchObject({ kind: "birthday", in_days: 0 });
   });
@@ -100,20 +103,79 @@ describe("the celebrations feed names people who are still here", () => {
   it("does NOT broadcast a DISABLED employee's birthday - the column that was never checked", async () => {
     const live = await celebrant();
     await celebrant({ disabled: true });
-    expect((await upcomingCelebrations(deps)).map((c) => c.employee)).toEqual([`employees/${live}`]);
+    expect((await upcomingCelebrations(deps, 0)).map((c) => c.employee)).toEqual([`employees/${live}`]);
   });
 
   it("excludes a leaver and a soft-deleted row, in SQL rather than after the read", async () => {
     const live = await celebrant();
     await celebrant({ status: "terminated" });
     await celebrant({ deleteTime: new Date() });
-    expect((await upcomingCelebrations(deps)).map((c) => c.employee)).toEqual([`employees/${live}`]);
+    expect((await upcomingCelebrations(deps, 0)).map((c) => c.employee)).toEqual([`employees/${live}`]);
   });
 
   it("returns the day and month of a birthday and never the year, so no age is exposed", async () => {
     await celebrant();
-    const feed = await upcomingCelebrations(deps);
+    const feed = await upcomingCelebrations(deps, 0);
     expect(Object.keys(feed[0]!)).not.toContain("year");
     expect(JSON.stringify(feed)).not.toContain("1990");
+  });
+});
+
+// ---- How far ahead the feed looks ------------------------------------------------------------------------
+//
+// The dashboard used to show everything in the next 30 days, so a birthday was on screen weeks early. The
+// window is now the org's `settings/celebrations.lead_days`, and a missing row is refused rather than
+// replaced with a window the org never chose.
+async function setLeadDays(value: unknown) {
+  await deps.db.insert(schema.settings).values({ key: "celebrations", value: JSON.stringify(value), updatedAt: new Date() });
+  bustRef(deps, "settings"); // `deps` outlives a request here, so its settings memo has to be dropped by hand
+}
+async function birthdayIn(days: number) {
+  return celebrant({ personalDetailsEnc: await deps.encryptor.encrypt(JSON.stringify({ date_of_birth: `1990-${(await orgDayFromToday(deps, days)).slice(5)}` })) });
+}
+
+describe("the celebrations window is the org's lead time", () => {
+  beforeEach(() => bustRef(deps, "settings"));
+
+  it("shows a birthday inside the lead time and not one beyond it", async () => {
+    await setLeadDays({ lead_days: 7 });
+    const soon = await birthdayIn(7);
+    await birthdayIn(8);
+    expect((await upcomingCelebrations(deps)).map((c) => c.employee)).toEqual([`employees/${soon}`]);
+  });
+
+  it("0 means on the day only", async () => {
+    await setLeadDays({ lead_days: 0 });
+    const today = await birthdayIn(0);
+    await birthdayIn(1);
+    expect((await upcomingCelebrations(deps)).map((c) => c.employee)).toEqual([`employees/${today}`]);
+  });
+
+  it("an explicit window still wins, for the leave calendar's quarter", async () => {
+    await setLeadDays({ lead_days: 0 });
+    await birthdayIn(30);
+    expect(await upcomingCelebrations(deps, 30)).toHaveLength(1);
+  });
+
+  it("refuses to guess when the row is missing or unusable", async () => {
+    await expect(upcomingCelebrations(deps)).rejects.toMatchObject({ httpStatus: 503 });
+    await setLeadDays({ lead_days: "7" });
+    await expect(upcomingCelebrations(deps)).rejects.toMatchObject({ httpStatus: 503 });
+  });
+
+  // Found by what it says, not by which file holds it: unapplied migrations get concatenated before a release,
+  // so the statement's filename is not stable.
+  it("the migration writes a week into an existing database and keeps a value an admin already saved", async () => {
+    const sql = /INSERT OR IGNORE INTO `settings`[^;]*'celebrations'[^;]*;/.exec(migrationSql)?.[0];
+    expect(sql).toBeDefined();
+    await b.DB.prepare(sql!).run();
+    bustRef(deps, "settings");
+    await expect(celebrationLeadDays(deps)).resolves.toBe(7);
+
+    await deps.db.delete(schema.settings);
+    await setLeadDays({ lead_days: 3 });
+    await b.DB.prepare(sql!).run();
+    bustRef(deps, "settings");
+    await expect(celebrationLeadDays(deps)).resolves.toBe(3);
   });
 });

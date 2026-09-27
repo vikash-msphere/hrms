@@ -41,7 +41,7 @@ export const CELL = ["none", "read", "write", "admin", "deny"] as const;
 // data-export affordance on every table (holders export only what they can read).
 export const COLLECTION_GROUPS: { label: string; collections: string[] }[] = [
   { label: "People & org", collections: ["employees", "departments", "compensation", "positions", "dependents", "users"] },
-  { label: "Attendance & scheduling", collections: ["attendance", "attendance-regularizations", "attendance-day-marks", "late-early-requests", "overtime-requests", "remote-work-requests", "shifts", "shift-assignments", "time-entries", "projects"] },
+  { label: "Attendance & scheduling", collections: ["attendance", "attendance-regularizations", "attendance-day-marks", "late-early-requests", "overtime-requests", "remote-work-requests", "shifts", "shift-assignments", "work-patterns", "work-pattern-assignments", "time-entries", "projects"] },
   { label: "Leave", collections: ["leave-requests", "leave-types", "leave-balances", "leave-adjustments", "leave-encashments", "holidays", "holiday-selections"] },
   { label: "Payroll & compensation", collections: ["payroll-runs", "payslips", "pay-components", "pay-grades", "salary-structures", "pay-periods", "bonuses", "settlements", "loans", "tax-declarations", "bank-formats", "payroll-debit-accounts", "payroll-openings"] },
   { label: "Expenses", collections: ["reimbursements", "reimbursement-categories", "expenses", "expense-categories", "expense-budgets", "vendors"] },

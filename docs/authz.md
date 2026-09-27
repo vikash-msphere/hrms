@@ -83,11 +83,20 @@ access_rules(... see section 4 ...)      -- the SOLE authority store for role + 
   engine.
 - `users.role` is a text FK to `roles` (`ON DELETE RESTRICT`). The TypeScript `Role` type is `string`,
   validated at runtime against the table: an unknown role yields no rules, which fails closed.
-- The TS files `src/domain/grants.ts` and `src/domain/manifests.ts` are **typed seed defaults**: they seed
-  `scripts/seed.sql` and act as the fail-closed fallback (`EMPTY_GRANT` / `DEFAULT_POLICY`) if a row is
-  missing or corrupt. Nothing on the hot path imports them as a source.
-- `scripts/seed.sql`'s `access_rules` rows are generated from the typed grants by
-  `scripts/genAccessRulesSeed.ts` and guarded byte-for-byte against drift by `test/seedDrift.test.ts`.
+- The day-one role set and each role's grant are **seed data in `bootstrap/authz/roles/`**: one JSON file per
+  role, every rule carrying its reason, a manager's file `extends` the employee's (format in its README). They
+  are rendered into `roles` + `access_rules` rows by `bootstrap/authz/accessRules.ts` for both
+  `bootstrap/bootstrap.sql` and `scripts/seed.sql`, and guarded byte-for-byte against drift by
+  `test/seedDrift.test.ts`. The running app never reads them (`test/bootstrapBoundary.test.ts`): after the seed,
+  the rows are the policy. `src/domain/grants.ts` holds only engine vocabulary - `EMPTY_GRANT` (the fail-closed
+  grant for a role with no rows), `SUPER_GRANT`, `EVERYONE_ROLE`, `isSuperGrant`, `roleSubjectsOf`.
+- Which role a new account gets is the `roles.provisioned` flag (exactly one row; `services/roles.ts`
+  `provisionedRole`), moved in Access Management > Roles. None marked refuses new accounts rather than guessing.
+- The policy manifest is the `policy` row (key `manifest`), seeded from `bootstrap/authz/policy.ts`.
+  `src/domain/manifests.ts` holds only its shape and the accessors that read a stored one. There is no code
+  fallback: a missing, unreadable or incomplete row refuses every request with 503 `/errors/not-configured`
+  (`lib/policyLoad.ts` `loadManifest`), never a guessed or emptied policy. Migration 0012 wrote into the live
+  row what the old fallback used to supply.
 
 ## 4. The compiled store (`access_rules`)
 
@@ -564,6 +573,17 @@ The index is maintained entirely by **triggers** (generated into the migration f
 `src/db/searchDdl.ts`; see section 12.2), never by a service - so there is no write path that could index a
 row the reader is not allowed to see, and no service to forget.
 
+The palette's narrowing (`?in=`, `?owner=employees/<id>`, `?mine=1`, `?after=`, `?before=`, `?status=` -
+typed as `in:tickets`, `@name`, `is:mine`, `after:2026-01`, `before:...`, `status:pending`) only ever ANDs
+another predicate onto those branches, so it can narrow a caller's answer and never widen it. `?owner` and
+`?status` are the two that ask a question about a column, so a hit whose owner or status column the caller's
+field gate withholds (`policy.redacted_fields`) is dropped from an answer narrowed by it: otherwise "is this
+row Priya's?" would be answerable by whether it comes back. A board task typed by its key (`MS-12`) is looked
+up by board prefix and number and then read under the same cards branch, so the key finds nothing the
+caller's list of tasks would not. The two verbs beside it, `search:feedback` and
+`search:ask`, read no record at all - one bumps a usage counter, the other routes a question among the
+destinations the caller's own palette sent - so the middleware resolves no per-collection scopes for them.
+
 The invariant is therefore unchanged: **a search hit is always a row the caller's list of that collection
 would have returned**, and `test/singleSource.test.ts` still holds - no decision is made outside the
 middleware.
@@ -780,7 +800,8 @@ sibling doc, having no row, stays denied.
 | `src/domain/compileGrants.ts` | compile a Grant <-> `access_rules` rows; `rulesToGrant`, `mergeGrants`, `deriveNarrowing` |
 | `src/domain/collections.ts` | the collection registry (valid grant-pattern namespaces) + drift gate |
 | `src/domain/policyValidate.ts` | write-time `validateAccessRule` / `validateManifest` (reject malformed) |
-| `src/domain/grants.ts` / `manifests.ts` | typed seed defaults + `EMPTY_GRANT` / `DEFAULT_POLICY` fallbacks |
+| `src/domain/grants.ts` | engine vocabulary: `EMPTY_GRANT`, `SUPER_GRANT`, `EVERYONE_ROLE`, `isSuperGrant`, `roleSubjectsOf` |
+| `src/domain/manifests.ts` | the `Policy` shape + accessors over a stored manifest (no data of its own) |
 | `src/domain/access.ts` | `actorScope`, `scopeFor`, `actorVerbScope`, `verbScopeFor`, `ListScope`, `stateReadAllowed` |
 | `src/lib/policyLoad.ts` | load broad role grant + broad user grant + manifest (cached); the caller's per-object rules loaded once and sliced (`loadObjectRulesForRequest` / `loadObjectExceptionCodes` / `…For`) |
 | `src/http/accessHint.ts` | `computeCan` / `withAccess` - the per-object `access.can` UX hint (gates nothing) |
@@ -798,4 +819,4 @@ sibling doc, having no row, stays denied.
 | `src/services/globalSearch.ts` | builds the search query from `ctx.searchScopes`; binds, decides nothing |
 | `src/services/approvalsSummary.ts` | approval-queue COUNTs from `ctx.approvalScopes`; binds, decides nothing |
 | `src/db/schema.ts` | `roles` / `policy` / `access_rules` tables |
-| `scripts/seed.sql` + `scripts/genAccessRulesSeed.ts` | seeded rows; `access_rules` generated + drift-checked |
+| `bootstrap/authz/` (`roles/*.json`, `policy.ts`, `accessRules.ts`) | seed data: the day-one roles, grants and manifest, rendered into both seeds; drift-checked |

@@ -147,6 +147,10 @@ export const UNSTAMPED_TABLES: Record<string, string> = {
   idempotency_keys: "internal replay store; the write it answers for is stamped",
   // The digest worker's queue. Its OUTPUT is a notification, and `notifications` is a stamped collection.
   notification_digest_queue: "internal queue; the notification it produces is stamped",
+  // The app lock (services/appLock.ts): PIN hashes, wrong-PIN counts, revoked unlock proofs. Read only by the auth
+  // middleware and /auth/lock, never cached by a client, and kept off `users` precisely so a lock or an unlock
+  // stales nothing anybody holds.
+  app_locks: "sign-in state read only by the auth middleware; never cached as a collection",
   // Loss-of-pay corrections waiting for a run to pay them. Not its own wire collection, and - the reason it
   // is here rather than a SIDE_TABLE - raising one makes nothing a client already holds stale. The closed
   // run it corrects is history and does not change; the correction only becomes visible when the NEXT run is

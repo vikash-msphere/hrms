@@ -187,11 +187,11 @@ function RecordsStart() {
                       <tr key={r.employee}>
                         <td className="px-3 py-2">
                           {r.name}
-                          {r.employee_number && <span className="block font-mono text-[11px] text-muted-foreground">{r.employee_number}</span>}
+                          {r.employee_number && <span className="sentry-mask block font-mono text-[11px] text-muted-foreground">{r.employee_number}</span>}
                         </td>
                         <td data-label="Started" className="px-3 py-2 tabular-nums">{r.start_date ? formatDate(r.start_date) : "-"}</td>
                         <td data-label="Record created" className="px-3 py-2 tabular-nums">{formatDate(r.created_day)}</td>
-                        <td data-label="Records start" className="px-3 py-2 tabular-nums">{r.tracked_from ? formatDate(r.tracked_from) : "-"}</td>
+                        <td data-label="Records start" className="sentry-mask px-3 py-2 tabular-nums">{r.tracked_from ? formatDate(r.tracked_from) : "-"}</td>
                         <td data-label="Result" className="px-3 py-2"><Badge variant={OUTCOME[r.outcome].variant}>{OUTCOME[r.outcome].label}</Badge></td>
                       </tr>
                     ))}

@@ -1,0 +1,1153 @@
+{
+  "role": "employee",
+  "label": "Employee",
+  "protected": true,
+  "provisioned": true,
+  "description": "Least-privilege baseline for a plain employee: read the org catalogues and colleagues' directory records, act on your own records, work the shared boards. Nothing here reaches another person's PII, pay or HR-only fields.",
+  "relies_on": [
+    "The `everyone` pseudo-role rules (roles/everyone.json): the app shell every account needs (own user record, own preferences, own operations, the batch transport), own notifications (list, read, write, markAllRead) and the assets the caller holds (list, acknowledge). They union into every caller, so they are not repeated here.",
+    "Per-object ACL shares for org documents. This role has no org-documents access; each policy an employee must read and sign arrives as a share on that document."
+  ],
+  "levels": [
+    {
+      "area": "catalog",
+      "pattern": "holidays.**",
+      "level": "read",
+      "why": "Holiday calendar."
+    },
+    {
+      "area": "catalog",
+      "pattern": "leave-types.**",
+      "level": "read",
+      "why": "Leave types to file a request against."
+    },
+    {
+      "area": "catalog",
+      "pattern": "departments.**",
+      "level": "read",
+      "why": "Department names on every record."
+    },
+    {
+      "area": "catalog",
+      "pattern": "announcements.**",
+      "level": "read",
+      "why": "The company board."
+    },
+    {
+      "area": "catalog",
+      "pattern": "pay-periods.**",
+      "level": "read",
+      "why": "Periods named on own payslips."
+    },
+    {
+      "area": "catalog",
+      "pattern": "pay-components.**",
+      "level": "read",
+      "why": "Component names on own payslip and salary breakdown."
+    },
+    {
+      "area": "catalog",
+      "pattern": "reimbursement-categories.**",
+      "level": "read",
+      "why": "Categories to file a claim."
+    },
+    {
+      "area": "catalog",
+      "pattern": "expense-categories.**",
+      "level": "read",
+      "why": "Categories to file an expense."
+    },
+    {
+      "area": "catalog",
+      "pattern": "asset-categories.**",
+      "level": "read",
+      "why": "Kind of asset held or requested."
+    },
+    {
+      "area": "catalog",
+      "pattern": "settings.**",
+      "level": "read",
+      "why": "The SPA reads every setting in one GET /v1/settings list (web/src/lib/settingsStore.ts). The list is not filtered per key, so a per-key pattern would not narrow it. Signature and seal images are redacted server-side (src/http/settingRedact.ts); bank-formats and payroll-debit are never served here."
+    },
+    {
+      "area": "catalog",
+      "pattern": "benefit-plans.**",
+      "level": "read",
+      "why": "Plan catalogue to enrol or waive."
+    },
+    {
+      "area": "catalog",
+      "pattern": "shifts.**",
+      "level": "read",
+      "why": "Shift named on own roster."
+    },
+    {
+      "area": "catalog",
+      "pattern": "projects.**",
+      "level": "read",
+      "why": "Projects to log time against."
+    },
+    {
+      "area": "catalog",
+      "pattern": "events.**",
+      "level": "read",
+      "why": "Org calendar."
+    },
+    {
+      "area": "catalog",
+      "pattern": "review-cycles.**",
+      "level": "read",
+      "why": "Own review names its cycle, due dates and period."
+    },
+    {
+      "area": "catalog",
+      "pattern": "work-patterns",
+      "level": "read",
+      "why": "List the schedule catalogue."
+    },
+    {
+      "area": "catalog",
+      "pattern": "work-patterns.**",
+      "level": "read",
+      "why": "Name of the schedule the caller is on."
+    },
+    {
+      "area": "catalog",
+      "pattern": "table-fields.**",
+      "level": "read",
+      "why": "Field catalogue for own saved grids (virtual, no rows)."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees",
+      "level": "read",
+      "why": "List call only; breadth resolves to own via employees.me."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.*",
+      "level": "read",
+      "why": "Colleagues' base directory record - name, title, department, manager, work email, location, bio, photo - which the directory, org chart, kudos recipient list, 1:1 counterpart picker and board assignee lists all read. A 2-token row grant: it reaches none of the PII sub-resources (bank, identity, personal info, tax) and none of the redacted fields (probation end date, legal name, employee number, EPF/EPS flags, records-start date)."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me",
+      "level": "read",
+      "why": "Own directory record."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.presence.**",
+      "level": "read",
+      "why": "Own presence pill on the profile header."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.bank-account.**",
+      "level": "write",
+      "why": "Own bank details (self-service PII)."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.identity.**",
+      "level": "write",
+      "why": "Own identity numbers (self-service PII)."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.personal-info.**",
+      "level": "write",
+      "why": "Own personal info (self-service PII)."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.tax.**",
+      "level": "write",
+      "why": "Own tax projection and prior-employer figures."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.notification-prefs.**",
+      "level": "write",
+      "why": "Own notification mutes."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.bio.**",
+      "level": "write",
+      "why": "Own about-me line."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.probation_end_date.**",
+      "level": "read",
+      "why": "Own probation end date (redacted field; read only, HR sets it)."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.legal_name.**",
+      "level": "read",
+      "why": "Own legal name: a redacted field (bootstrap/authz/policy.ts REDACTED_FIELDS) that no 2-token row grant reaches. Read only - HR and payroll set it."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.employee_number.**",
+      "level": "read",
+      "why": "Own employee number: a redacted field (bootstrap/authz/policy.ts REDACTED_FIELDS) that no 2-token row grant reaches. Read only - HR and payroll set it."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.epf_enrolled.**",
+      "level": "read",
+      "why": "Own epf enrolled: a redacted field (bootstrap/authz/policy.ts REDACTED_FIELDS) that no 2-token row grant reaches. Read only - HR and payroll set it."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.eps_excluded.**",
+      "level": "read",
+      "why": "Own eps excluded: a redacted field (bootstrap/authz/policy.ts REDACTED_FIELDS) that no 2-token row grant reaches. Read only - HR and payroll set it."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.tracked_from.**",
+      "level": "read",
+      "why": "Own tracked from: a redacted field (bootstrap/authz/policy.ts REDACTED_FIELDS) that no 2-token row grant reaches. Read only - HR and payroll set it."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests",
+      "level": "write",
+      "why": "Create and list own requests."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.me.**",
+      "level": "write",
+      "why": "Own requests."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-balances",
+      "level": "read",
+      "why": "List own balances."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-balances.me.**",
+      "level": "read",
+      "why": "Own balances."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-adjustments",
+      "level": "read",
+      "why": "List the adjustments behind own leave balance (the Leaves page shows them beside it)."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-adjustments.me.**",
+      "level": "read",
+      "why": "Own balance adjustments, read only: a self-write rule would be a grant to move your own balance."
+    },
+    {
+      "area": "leave",
+      "pattern": "holiday-selections",
+      "level": "write",
+      "why": "Pick optional holidays."
+    },
+    {
+      "area": "leave",
+      "pattern": "holiday-selections.me.**",
+      "level": "write",
+      "why": "Own selections."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-encashments",
+      "level": "read",
+      "why": "List own encashments (HR creates and decides them)."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-encashments.me.**",
+      "level": "read",
+      "why": "Own encashments."
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance",
+      "level": "read",
+      "why": "List own sessions."
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance.me.**",
+      "level": "read",
+      "why": "Own sessions."
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-regularizations",
+      "level": "write",
+      "why": "File and list own corrections."
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-regularizations.me.**",
+      "level": "write",
+      "why": "Own corrections."
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-day-marks",
+      "level": "read",
+      "why": "List marks on own days. Read only: writing would re-value own attendance."
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-day-marks.me.**",
+      "level": "read",
+      "why": "Marks on own days."
+    },
+    {
+      "area": "attendance",
+      "pattern": "overtime-requests",
+      "level": "write",
+      "why": "File and list own overtime requests."
+    },
+    {
+      "area": "attendance",
+      "pattern": "overtime-requests.me.**",
+      "level": "write",
+      "why": "Own overtime requests."
+    },
+    {
+      "area": "attendance",
+      "pattern": "remote-work-requests",
+      "level": "write",
+      "why": "File and list own remote-work requests."
+    },
+    {
+      "area": "attendance",
+      "pattern": "remote-work-requests.me.**",
+      "level": "write",
+      "why": "Own remote-work requests."
+    },
+    {
+      "area": "attendance",
+      "pattern": "late-early-requests",
+      "level": "write",
+      "why": "File and list own late/early requests."
+    },
+    {
+      "area": "attendance",
+      "pattern": "late-early-requests.me.**",
+      "level": "write",
+      "why": "Own late/early requests."
+    },
+    {
+      "area": "attendance",
+      "pattern": "shift-assignments",
+      "level": "read",
+      "why": "List own roster."
+    },
+    {
+      "area": "attendance",
+      "pattern": "shift-assignments.me.**",
+      "level": "read",
+      "why": "Own roster."
+    },
+    {
+      "area": "attendance",
+      "pattern": "work-pattern-assignments",
+      "level": "read",
+      "why": "List own schedule assignments."
+    },
+    {
+      "area": "attendance",
+      "pattern": "work-pattern-assignments.me.**",
+      "level": "read",
+      "why": "Which schedule the caller is on, and from when."
+    },
+    {
+      "area": "attendance",
+      "pattern": "time-entries",
+      "level": "write",
+      "why": "Log and list own timesheet rows."
+    },
+    {
+      "area": "attendance",
+      "pattern": "time-entries.me.**",
+      "level": "write",
+      "why": "Own timesheet rows."
+    },
+    {
+      "area": "money",
+      "pattern": "payslips",
+      "level": "read",
+      "why": "List own payslips."
+    },
+    {
+      "area": "money",
+      "pattern": "payslips.me.**",
+      "level": "read",
+      "why": "Own payslips."
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements",
+      "level": "write",
+      "why": "File and list own claims."
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.me.**",
+      "level": "write",
+      "why": "Own claims."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses",
+      "level": "write",
+      "why": "File and list own operational expenses."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.me.**",
+      "level": "write",
+      "why": "Own expenses."
+    },
+    {
+      "area": "money",
+      "pattern": "loans",
+      "level": "write",
+      "why": "Request and list own loans (decisions are payroll's verbs)."
+    },
+    {
+      "area": "money",
+      "pattern": "loans.me.**",
+      "level": "write",
+      "why": "Own loans."
+    },
+    {
+      "area": "money",
+      "pattern": "tax-declarations",
+      "level": "write",
+      "why": "Declare and list own investments (verification is payroll's verb)."
+    },
+    {
+      "area": "money",
+      "pattern": "tax-declarations.me.**",
+      "level": "write",
+      "why": "Own declarations."
+    },
+    {
+      "area": "money",
+      "pattern": "dependents",
+      "level": "write",
+      "why": "Add and list own dependents."
+    },
+    {
+      "area": "money",
+      "pattern": "dependents.me.**",
+      "level": "write",
+      "why": "Own dependents."
+    },
+    {
+      "area": "money",
+      "pattern": "benefit-enrollments",
+      "level": "write",
+      "why": "Enrol in or waive plans."
+    },
+    {
+      "area": "money",
+      "pattern": "benefit-enrollments.me.**",
+      "level": "write",
+      "why": "Own enrolments."
+    },
+    {
+      "area": "documents",
+      "pattern": "personal-documents",
+      "level": "read",
+      "why": "List own personal documents."
+    },
+    {
+      "area": "documents",
+      "pattern": "personal-documents.me.**",
+      "level": "read",
+      "why": "Own personal documents, including signed policy copies."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.me.**",
+      "level": "write",
+      "why": "Edit and soft-delete own posts and kudos."
+    },
+    {
+      "area": "work",
+      "pattern": "boards.**",
+      "level": "read",
+      "why": "Read boards. Shape (columns, WIP, swimlanes) stays with managers and HR."
+    },
+    {
+      "area": "work",
+      "pattern": "sprints.**",
+      "level": "read",
+      "why": "Read sprints."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.**",
+      "level": "write",
+      "why": "Cards are shared work: a board showing only own cards is a to-do list, not a board."
+    },
+    {
+      "area": "work",
+      "pattern": "approval-delegations.**",
+      "level": "read",
+      "why": "See who covers whom (a delegate must see delegations naming them)."
+    },
+    {
+      "area": "work",
+      "pattern": "approval-delegations.me.**",
+      "level": "write",
+      "why": "Delegate own approvals."
+    },
+    {
+      "area": "work",
+      "pattern": "table-views",
+      "level": "write",
+      "why": "Create and list own saved grids."
+    },
+    {
+      "area": "work",
+      "pattern": "table-views.me.**",
+      "level": "write",
+      "why": "Own saved grids."
+    },
+    {
+      "area": "requests",
+      "pattern": "asset-requests",
+      "level": "write",
+      "why": "Ask for kit and list own asks."
+    },
+    {
+      "area": "requests",
+      "pattern": "asset-requests.me.**",
+      "level": "write",
+      "why": "Own asset requests."
+    },
+    {
+      "area": "requests",
+      "pattern": "tickets",
+      "level": "write",
+      "why": "Raise and list own support tickets."
+    },
+    {
+      "area": "requests",
+      "pattern": "tickets.me.**",
+      "level": "write",
+      "why": "Own tickets."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals",
+      "level": "write",
+      "why": "Create and list own goals."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.me.**",
+      "level": "write",
+      "why": "Own goals."
+    },
+    {
+      "area": "performance",
+      "pattern": "check-ins",
+      "level": "write",
+      "why": "Own 1:1 notes and action items."
+    },
+    {
+      "area": "performance",
+      "pattern": "check-ins.me.**",
+      "level": "write",
+      "why": "Own check-ins."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews",
+      "level": "read",
+      "why": "List own reviews (manager assessment redacted until shared)."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.me.**",
+      "level": "read",
+      "why": "Own reviews."
+    },
+    {
+      "area": "performance",
+      "pattern": "review-feedback",
+      "level": "read",
+      "why": "List 360 requests naming the caller as author."
+    },
+    {
+      "area": "performance",
+      "pattern": "review-feedback.me.**",
+      "level": "read",
+      "why": "Own 360 requests."
+    },
+    {
+      "area": "performance",
+      "pattern": "interview-feedback",
+      "level": "write",
+      "why": "Any employee can be an interviewer; the create gate pins the author to self."
+    },
+    {
+      "area": "performance",
+      "pattern": "interview-feedback.me.**",
+      "level": "write",
+      "why": "Own scorecards."
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transitions",
+      "level": "read",
+      "why": "List own onboarding/offboarding checklist."
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transitions.me.**",
+      "level": "read",
+      "why": "Own transition."
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transition-tasks",
+      "level": "read",
+      "why": "List own transition tasks (mutation is verb-only)."
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transition-tasks.me.**",
+      "level": "read",
+      "why": "Own transition tasks."
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "notice-periods",
+      "level": "write",
+      "why": "Resign (self-service)."
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "notice-periods.me.**",
+      "level": "write",
+      "why": "Own notice period."
+    }
+  ],
+  "allow": [
+    {
+      "area": "profile",
+      "pattern": "employees.me.viewers",
+      "why": "Who can see my record and my bank/identity/tax details."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.uploadPhoto",
+      "why": "Own photo."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.clearPhoto",
+      "why": "Own photo."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.*.getPhoto",
+      "why": "Anyone's face. Transport only: the service asks whether the caller may read that employee (services/employeePhoto.ts#photoRef)."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.getSignature",
+      "why": "Own e-signature (service enforces owner-only)."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.uploadSignature",
+      "why": "Own e-signature."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.clearSignature",
+      "why": "Own e-signature."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.uploadIdentityDoc",
+      "why": "Supporting file on own identity field."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.downloadIdentityDoc",
+      "why": "Supporting file on own identity field."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.me.clearIdentityDoc",
+      "why": "Supporting file on own identity field."
+    },
+    {
+      "area": "profile",
+      "pattern": "employees.upcomingCelebrations",
+      "why": "Company birthdays and work anniversaries (day and month only)."
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance.me.clockIn",
+      "why": "Clock in."
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance.me.clockOut",
+      "why": "Clock out."
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-regularizations.me.cancel",
+      "why": "Withdraw own correction."
+    },
+    {
+      "area": "attendance",
+      "pattern": "overtime-requests.me.cancel",
+      "why": "Withdraw own request."
+    },
+    {
+      "area": "attendance",
+      "pattern": "remote-work-requests.me.cancel",
+      "why": "Withdraw own request."
+    },
+    {
+      "area": "attendance",
+      "pattern": "late-early-requests.me.cancel",
+      "why": "Withdraw own request."
+    },
+    {
+      "area": "attendance",
+      "pattern": "time-entries.me.submit",
+      "why": "Submit own timesheet for approval."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.me.cancel",
+      "why": "Withdraw own request."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.me.upload",
+      "why": "Attach a sick note to own request."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.me.download",
+      "why": "Read back own request's document."
+    },
+    {
+      "area": "money",
+      "pattern": "payslips.me.preview",
+      "why": "View own payslip inline."
+    },
+    {
+      "area": "money",
+      "pattern": "payslips.me.download",
+      "why": "Keep a copy of own payslip."
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.me.cancel",
+      "why": "Withdraw own claim."
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.me.upload",
+      "why": "Attach a receipt to own claim."
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.me.download",
+      "why": "Own claim's receipt."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.me.submit",
+      "why": "Submit own expense for approval."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.me.cancel",
+      "why": "Withdraw own expense."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.me.upload",
+      "why": "Attach an invoice to own expense."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.me.download",
+      "why": "Own expense's invoice."
+    },
+    {
+      "area": "money",
+      "pattern": "tax-declarations.me.upload",
+      "why": "Attach investment proofs."
+    },
+    {
+      "area": "money",
+      "pattern": "tax-declarations.me.download",
+      "why": "Own investment proofs."
+    },
+    {
+      "area": "documents",
+      "pattern": "personal-documents.me.download",
+      "why": "Own personal documents."
+    },
+    {
+      "area": "documents",
+      "pattern": "personal-documents.me.sign",
+      "why": "Sign own generated letter or contract. The Documents page offers it on every unsigned letter of yours, and the service refuses anyone but the document's owner (services/letterSign.ts)."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.giveKudos",
+      "why": "Post on the recognition wall."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.markAllRead",
+      "why": "Clear own unread state."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.*.react",
+      "why": "React to any post."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.*.reply",
+      "why": "Reply to any post."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.*.markRead",
+      "why": "Mark a post read (own read receipt)."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.*.vote",
+      "why": "Vote in a poll."
+    },
+    {
+      "area": "board",
+      "pattern": "events.*.respond",
+      "why": "RSVP. The service refuses anyone not on the attendee list (services/events.ts#respondToEvent)."
+    },
+    {
+      "area": "work",
+      "pattern": "boards.*.metrics",
+      "why": "Flow analytics for a board the caller can read."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.move",
+      "why": "Card work on a shared board."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.block",
+      "why": "Card work on a shared board."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.unblock",
+      "why": "Card work on a shared board."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.assign",
+      "why": "Card work on a shared board."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.prioritize",
+      "why": "Card work on a shared board."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.comment",
+      "why": "Card work on a shared board."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.addTodos",
+      "why": "Card checklist."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.toggleTodo",
+      "why": "Card checklist."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.removeTodo",
+      "why": "Card checklist."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.promoteTodo",
+      "why": "Turn a checklist item into its own card."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.watch",
+      "why": "Follow a card."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.unwatch",
+      "why": "Unfollow a card."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.flow",
+      "why": "Cycle-time read over cards the caller can list."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.triage",
+      "why": "Similar/duplicate read over cards the caller can list."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.suggestSteps",
+      "why": "Steps comparable delivered cards took (no model call)."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.*.suggestGoal",
+      "why": "Goal a card likely serves, decided against the caller's goal scope."
+    },
+    {
+      "area": "work",
+      "pattern": "table-views.me.run",
+      "why": "Produce the rows for own saved grid."
+    },
+    {
+      "area": "requests",
+      "pattern": "asset-requests.me.cancel",
+      "why": "Withdraw own asset request."
+    },
+    {
+      "area": "requests",
+      "pattern": "tickets.me.comment",
+      "why": "Talk to the help desk on own ticket."
+    },
+    {
+      "area": "requests",
+      "pattern": "tickets.me.cancel",
+      "why": "Withdraw own ticket."
+    },
+    {
+      "area": "requests",
+      "pattern": "tickets.me.close",
+      "why": "Accept the resolution of own ticket."
+    },
+    {
+      "area": "requests",
+      "pattern": "tickets.me.reopen",
+      "why": "Dispute the resolution of own ticket."
+    },
+    {
+      "area": "requests",
+      "pattern": "tickets.me.attach",
+      "why": "Add a file to own ticket."
+    },
+    {
+      "area": "requests",
+      "pattern": "tickets.me.detach",
+      "why": "Remove a file from own ticket."
+    },
+    {
+      "area": "requests",
+      "pattern": "tickets.me.attachment",
+      "why": "Download a file on own ticket."
+    },
+    {
+      "area": "requests",
+      "pattern": "tickets.me.attachRecording",
+      "why": "Add a session recording to own ticket."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.me.updateProgress",
+      "why": "Report progress on own goal."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.me.setConfidence",
+      "why": "Own on-track / at-risk call."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.me.comment",
+      "why": "Answer coaching on own goal."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.me.propose",
+      "why": "Submit own draft goal to the manager."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.me.watch",
+      "why": "Follow own goal."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.me.unwatch",
+      "why": "Unfollow own goal."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.me.similar",
+      "why": "Overlapping goals, decided against the caller's goal scope."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.me.suggestMeasure",
+      "why": "Suggest unit, start and target for own goal."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.me.submitSelf",
+      "why": "Submit self-assessment."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.me.acknowledge",
+      "why": "Acknowledge own shared review."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.me.pdf",
+      "why": "Record copy of own finished review."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.me.suggestFeedback",
+      "why": "Name people who saw the work (nominating stays the manager's)."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.me.evidence",
+      "why": "What the app recorded about own cycle; each section re-decided per collection."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.me.collaborators",
+      "why": "Who worked with the caller this cycle."
+    },
+    {
+      "area": "performance",
+      "pattern": "review-feedback.me.submitFeedback",
+      "why": "Answer a 360 nomination."
+    },
+    {
+      "area": "performance",
+      "pattern": "review-feedback.me.decline",
+      "why": "Decline a 360 nomination."
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transition-tasks.me.complete",
+      "why": "Tick own onboarding task."
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transition-tasks.me.upload",
+      "why": "Attach proof to own onboarding task."
+    },
+    {
+      "area": "ai",
+      "pattern": "reviews.draft",
+      "why": "Writing help on own self-assessment: the model gets only the instruction and the text already in the box (domain/aiPolicy.ts CONSENTED_PATHS reviews.draft). Sends nothing until the org switches AI drafting on."
+    },
+    {
+      "area": "ai",
+      "pattern": "goals.draft",
+      "why": "Writing help on own goal's description; reads no record. Off until the org switches AI drafting on."
+    },
+    {
+      "area": "ai",
+      "pattern": "cards.draft",
+      "why": "Writing help on a card's description; reads no record. Off until the org switches AI drafting on."
+    }
+  ],
+  "deny": [],
+  "excluded": [
+    {
+      "pattern": "tickets.me.**",
+      "lane": "allow",
+      "why": "Wildcard verb on own tickets let a requester assign, route, prioritize, start, resolve and triage their own ticket; the ticket service does not block the requester from those. Replaced by the requester verbs named above."
+    },
+    {
+      "pattern": "tickets.me.addTodos | toggleTodo | removeTodo",
+      "why": "The ticket checklist is the servicing agent's work list."
+    },
+    {
+      "pattern": "tickets.me.triage | decideTriage",
+      "why": "Routing suggestions are for the help desk, not the requester."
+    },
+    {
+      "pattern": "cards.**",
+      "lane": "allow",
+      "why": "As a verb allow this also grants every card verb added later. The current verbs are named instead, so a new one is withheld until someone grants it."
+    },
+    {
+      "pattern": "org-documents.*.acknowledge",
+      "why": "The acknowledge service does not check the caller can read the document, and signing files a copy of the policy PDF to the signer. A role-wide grant would leak any requires-ack policy by id. It must come with each document's share."
+    },
+    {
+      "pattern": "announcements.post",
+      "why": "Posting to the company board is HR's; employees post only through giveKudos."
+    },
+    {
+      "pattern": "suggestions.*.upvote | downvote | similar | merge",
+      "why": "Suggestion box is opened per org through the ACL (withheld list in test/grants.test.ts)."
+    },
+    {
+      "pattern": "activity.**",
+      "why": "Per-record activity trail is private by default; grant per role or record in the ACL."
+    },
+    {
+      "pattern": "org-documents.**",
+      "why": "Org documents are private by default; each is shared individually."
+    },
+    {
+      "pattern": "employees.*.presence.**",
+      "why": "Colleagues' presence pills are derived from their leave and attendance, which a plain employee does not read. Managers hold it for their department, HR for everyone."
+    },
+    {
+      "pattern": "personal-documents.me.refreshEsign | print",
+      "why": "HR's: reconciling a pending vendor e-sign, and printing a letter on its letterhead. The Documents page offers both only to those who can edit the document."
+    },
+    {
+      "pattern": "suggestions.draft",
+      "why": "The suggestion box is opened per org through the ACL, drafting with it."
+    },
+    {
+      "pattern": "announcements.draft",
+      "why": "An employee posts only kudos, and the composer never offers drafting on a kudos (a thank-you to a named colleague is worse machine-written). Drafting announcements, posts and polls belongs to whoever may post them."
+    }
+  ]
+}

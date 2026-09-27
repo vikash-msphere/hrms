@@ -13,8 +13,8 @@ import { listReviews, submitManager, submitSelf, skipReviewStage, goalsForReview
 import { createGoal, updateGoalProgress, setGoalContributors } from "../src/services/goals";
 import { competencyScore, goalAttainment } from "../src/domain/performance";
 import type { ListScope } from "../src/domain/access";
-import { grantFor } from "../src/domain/grants";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { grantFor } from "../bootstrap/authz/grants";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 
 // Goals inside a review: the cycle link that decides which goals a review scores, the weighted attainment
 // that link produces, and the snapshot that stops a shared review from re-stating itself as the goals move on.

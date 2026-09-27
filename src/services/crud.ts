@@ -26,6 +26,10 @@ import { publicStateFilter } from "./stateFilter";
 import { isHeld, notHeld } from "./withheld";
 import type { ListScope } from "../domain/access";
 import { assertNotLocked } from "./lockGuard";
+import { searchFilter } from "./searchFilter";
+import { SEARCHABLE_COLLECTIONS } from "../domain/searchIndex";
+
+const SEARCHABLE: ReadonlySet<string> = new Set(SEARCHABLE_COLLECTIONS);
 
 // A drizzle table, kept indexable: the generic helpers here reach for the standard columns by name
 // (`table.uuid`, `table.deleteTime`) the way services/softDelete.ts does, while `$inferInsert` still resolves to
@@ -151,7 +155,8 @@ export type CrudService<I> = {
    * columns here and nowhere else. It is required, not optional: an absent scope is a request the middleware
    * did not scope, and `applyScope` answers no rows for it rather than the whole table.
    */
-  list: (deps: Deps, actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted?: boolean, deletedOnly?: boolean) => Promise<{ items: any[]; nextPageToken?: string }>;
+  /** `q`: the list page's search box. Narrows to the collection's text matches in the search index (see list). */
+  list: (deps: Deps, actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted?: boolean, deletedOnly?: boolean, q?: string) => Promise<{ items: any[]; nextPageToken?: string }>;
   get: (deps: Deps, actor: AppUser, id: string) => Promise<any>;
   create: (deps: Deps, actor: AppUser, input: I, id?: string) => Promise<any>;
   update: (deps: Deps, actor: AppUser, id: string, patch: I, ifMatch?: string) => Promise<any>;
@@ -194,8 +199,12 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
     // the middleware DECIDED onto this table's columns and decides nothing itself. A generic-list table is a
     // flat catalog with a `code` and no owner column, so a scoped-to-`own` caller correctly gets nothing -
     // fail closed, rather than the whole table a missing scope check used to hand back.
-    async list(deps, actor, scope, maxPageSize, pageToken, showDeleted = false, deletedOnly = false) {
+    async list(deps, actor, scope, maxPageSize, pageToken, showDeleted = false, deletedOnly = false, q) {
       const conds = [applyScope(scope, table.code, undefined)];
+      // The search box, for every factory catalogue at once: a page lists 100 rows and filters what it holds,
+      // so without this a search on a large catalogue looked through a window. Only NARROWS - the scope above
+      // is still bound - and only for collections the search index covers; anything else ignores `q`.
+      if (q && SEARCHABLE.has(collection)) conds.push(await searchFilter(deps, collection, q, table.uuid));
       // State-gated visibility, bound the same way the breadth is: the middleware already decided whether this
       // caller may see restricted rows (`scope.seeRestricted`), and this maps that onto the collection's own
       // columns. Undefined for the collections with no state rule, which is almost all of them.

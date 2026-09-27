@@ -34,6 +34,7 @@ import { round2 } from "../domain/money";
 import { leaveDays } from "../domain/leave";
 import { sandwichOf } from "../domain/leaveRestrictions";
 import { DEFAULT_ATTENDANCE, utcDay, type AttendanceConfig } from "../domain/attendance";
+import { scheduleCtxWith } from "./workSchedule";
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string) => (s && /^\d{4}-\d{2}-\d{2}$/.test(s) ? Date.parse(`${s}T00:00:00Z`) : NaN);
@@ -183,7 +184,10 @@ export async function importLeaveHistory(deps: Deps, actor: AppUser, items: Hist
       if (!Number.isFinite(days) || days <= 0 || days > MAX_DAYS) { fail(`days must be more than 0 and at most ${MAX_DAYS}`); continue; }
     } else {
       const holidays = await holidaysInRange(deps, start - 8 * DAY, end + 8 * DAY, locationOf.get(emp.uuid) ?? null);
-      days = leaveDays(start, end, startSession, endSession, att.work_days, holidays.full, holidays.half, sandwichOf(await effectiveLeaveRules(deps, lt)));
+      // The importer prices history the way the app prices a request: against the schedule THAT person was on
+      // over those dates (services/workSchedule.ts).
+      const schedOf = (await scheduleCtxWith(deps, att, utcDay(start), utcDay(end), [emp.uuid]))(emp.uuid);
+      days = leaveDays(start, end, startSession, endSession, schedOf, holidays.full, holidays.half, sandwichOf(await effectiveLeaveRules(deps, lt)));
       days_from = "counted";
       if (days <= 0) { fail("no working days in that range - give the days in the file if the leave really was taken"); continue; }
     }

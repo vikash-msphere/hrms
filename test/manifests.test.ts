@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { REFERENCES, PROTECTED_FIELDS, referencesOf, protectedFieldsOf, isFieldScopeTarget, subresourceBodyKey, DEFAULT_POLICY } from "../src/domain/manifests";
-import { GRANTS } from "../src/domain/grants";
+import { isFieldScopeTarget, subresourceBodyKey } from "../src/domain/manifests";
+import { REFERENCES, PROTECTED_FIELDS, referencesOf, protectedFieldsOf, DEFAULT_POLICY } from "../bootstrap/authz/policy";
+import { GRANTS } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 
 const SELF = { employeeCode: "04-1c-0a9" };

@@ -4,7 +4,7 @@ import { describe, it, expect } from "vitest";
 // no types here; the suppression self-cleans if @types/js-yaml is ever added.
 // @ts-expect-error - untyped module, runtime-only
 import { load } from "js-yaml";
-import { PROTECTED_FIELDS } from "../src/domain/manifests";
+import { PROTECTED_FIELDS } from "../bootstrap/authz/policy";
 
 // Deferred guard (plan §11R): no SENSITIVE resource may have an UNCLASSIFIED writable field, so adding a
 // column later cannot silently open mass-assignment. For each resource with protected fields, every

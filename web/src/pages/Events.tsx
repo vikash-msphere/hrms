@@ -4,6 +4,7 @@ import { create, patch, get, invoke } from "@/api";
 import { isConflict } from "@/lib/formError";
 import { upcomingOccurrences, type EventRepeat } from "@/lib/eventRepeat";
 import { useCollection } from "@/hooks/useCollection";
+import { useServerSearch } from "@/hooks/useServerSearch";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf } from "@/lib/utils";
@@ -93,8 +94,18 @@ const orgMonthStart = () => new Date(`${todayStr().slice(0, 7)}-01T00:00:00Z`);
 const startMs = (e: Event) => (e.all_day ? Date.parse(e.start_time.slice(0, 10)) : +new Date(e.start_time));
 const endMs = (e: Event) => (e.all_day ? Date.parse(e.end_time.slice(0, 10)) + DAY_MS - 1 : +new Date(e.end_time));
 
+// Upcoming first (soonest at the top), then past events newest-first, then the deleted ones.
+function orderEvents(rows: Event[]) {
+  const now = Date.now();
+  const live = rows.filter((e) => !e.delete_time);
+  const upcoming = live.filter((e) => endMs(e) >= now).sort((a, b) => startMs(a) - startMs(b));
+  const past = live.filter((e) => endMs(e) < now).sort((a, b) => startMs(b) - startMs(a));
+  const deleted = rows.filter((e) => e.delete_time);
+  return { sorted: [...upcoming, ...past, ...deleted], upcoming };
+}
+
 export default function Events({ me, openId }: { me: Me; openId?: string }) {
-  const { rows, state, error, reload } = useCollection<Event>("events", { showDeleted: true });
+  const { rows, state, error, reload, loadMore, hasMore } = useCollection<Event>("events", { showDeleted: true });
   useDeepOpen(openId, rows, openEdit);
   // COMPLETE: the attendee picker invites from this list, so a window makes people un-invitable.
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
@@ -130,15 +141,11 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
   // The version an edit writes against; refreshed from the server when a save loses a race.
   const [etag, setEtag] = useState<string | undefined>(undefined);
 
-  // Upcoming first (soonest at the top), then past events newest-first.
-  const { sorted, upcoming } = useMemo(() => {
-    const now = Date.now();
-    const live = rows.filter((e) => !e.delete_time);
-    const upcoming = live.filter((e) => endMs(e) >= now).sort((a, b) => startMs(a) - startMs(b));
-    const past = live.filter((e) => endMs(e) < now).sort((a, b) => startMs(b) - startMs(a));
-    const deleted = rows.filter((e) => e.delete_time);
-    return { sorted: [...upcoming, ...past, ...deleted], upcoming };
-  }, [rows]);
+  const { sorted, upcoming } = useMemo(() => orderEvents(rows), [rows]);
+  // The table's search box asks the server over every event, not the hundred this page holds; its answer is
+  // ordered the same way the calendar is.
+  const srv = useServerSearch<Event>("events", { rows, loadMore, hasMore }, "Search all events…", { showDeleted: true });
+  const tableRows = useMemo(() => (srv.searching ? orderEvents(srv.rows).sorted : sorted), [srv.searching, srv.rows, sorted]);
   const next = upcoming[0];
   const happeningNow = useMemo(() => {
     const now = Date.now();
@@ -471,7 +478,10 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
           <DataTable
             tableId="events"
             columns={cols}
-            rows={kf.apply(sorted)}
+            rows={kf.apply(tableRows)}
+            search={srv.search}
+            hasMore={srv.hasMore}
+            onLoadMore={srv.onLoadMore}
             insights={eventInsights}
             getRowId={(e) => e.path}
             rowClassName={(e) => (e.delete_time || endMs(e) < Date.now() ? "opacity-60" : undefined)}

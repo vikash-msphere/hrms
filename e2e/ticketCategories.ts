@@ -39,15 +39,15 @@ async function mutate(page: Page, change: (categories: Category[]) => Category[]
     const { categories, etag } = await readCategories(page);
     const next = change(categories);
     if (!next) return;
+    // A read that answered 404 has no version to hold, so the save says "only if it still does not exist"
+    // instead (`If-None-Match: *`): two specs that both saw "no row" used to write UNGUARDED, and the second
+    // one's update took the first one's category away with it - a 200 each and one category gone, AFTER the
+    // first had already read its own change back. Now the second is refused 409 and re-applies on top.
     const res = await page.request.patch("/v1/settings/ticket-categories", {
-      headers: { ...SPA_HEADERS, ...(etag ? { "If-Match": etag } : {}) },
+      headers: { ...SPA_HEADERS, ...(etag ? { "If-Match": etag } : { "If-None-Match": "*" }) },
       data: { value: { categories: next } },
     });
-    // A 200 is not yet proof, and this is the one case If-Match cannot cover: a read that answered 404 has no
-    // version to hold, so both specs that saw "no row" write UNGUARDED, the row exists by the time the second
-    // one lands, and its blind update takes the first one's category away with it - a 200 each and one
-    // category gone. So the write is CONFIRMED by re-reading: once the change reads back as already applied
-    // there is a version to hold, and every later save in this loop is guarded by it.
+    // Still confirmed by re-reading, which costs one GET and proves the list carries the change.
     if (res.ok()) {
       const { categories: after } = await readCategories(page);
       if (!change(after)) return;

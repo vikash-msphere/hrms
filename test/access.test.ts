@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { actorCan, hasCapability, actorScope, actorVerbScope, stateReadAllowed, deptOf } from "../src/domain/access";
-import { grantFor } from "../src/domain/grants";
-import { STATE_VISIBILITY } from "../src/domain/manifests";
+import { grantFor } from "../bootstrap/authz/grants";
+import { STATE_VISIBILITY } from "../bootstrap/authz/policy";
 
 // actorCan/actorScope read the grant off the actor (loaded at auth in prod). Here we attach the seed grant
 // per role - identical to what the DB serves (seed.sql is generated from the same source).
@@ -24,9 +24,10 @@ describe("access.actorCan", () => {
   });
 
   it("actorScope derives list breadth from the grant (manager = dept, not all)", () => {
-    // employees: employee own, manager dept, hr/payroll/super all
-    expect(actorScope(a("employee", "04-002"), "employees")).toBe("own");
-    expect(actorScope(a("manager", "04-001"), "employees")).toBe("dept");
+    // employees: every role reads the directory (the base record only - PII sub-resources and the redacted
+    // fields are gated separately, see test/grants.test.ts), so the list breadth is all for everyone
+    expect(actorScope(a("employee", "04-002"), "employees")).toBe("all");
+    expect(actorScope(a("manager", "04-001"), "employees")).toBe("all");
     expect(actorScope(a("hr_admin", "07-001"), "employees")).toBe("all");
     expect(actorScope(a("payroll_admin", "07-002"), "employees")).toBe("all");
     expect(actorScope(a("super_admin", null), "employees")).toBe("all");

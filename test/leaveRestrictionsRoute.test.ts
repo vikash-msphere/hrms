@@ -10,8 +10,8 @@ import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { bustRef } from "../src/lib/refData";
-import { grantFor } from "../src/domain/grants";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { grantFor } from "../bootstrap/authz/grants";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import { createLeaveRequest, approveLeaveRequest } from "../src/services/leaveRequests";
 import { accrueLeave } from "../src/services/leaveAccrual";
 

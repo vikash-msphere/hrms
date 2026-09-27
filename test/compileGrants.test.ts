@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { GRANTS, grantFor } from "../src/domain/grants";
+import { GRANTS, grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide, type Decision } from "../src/domain/permissions";
 import { compileGrant, rulesToGrant, deriveNarrowing } from "../src/domain/compileGrants";
 
@@ -158,5 +158,37 @@ describe("rulesToGrant - a repeated pattern takes the highest level, whatever or
     const grant = rulesToGrant(rows(["read", "write"]));
     const write = decide(grant, resolveRequest("POST", "/v1/leave-requests/04-002-001"), { employeeCode: "04-002-001" });
     expect(write.allow).toBe(true);
+  });
+});
+
+// A collection addressed by NAME (`/v1/settings/attendance`) has no object code, so the token after it is a name
+// and a rule naming one must be BROAD. Compiled as a literal code it became an exact per-object row the runtime
+// never loads (nothing resolves a settings key to a code), which silently voided every per-key settings grant:
+// HR's `settings.attendance` write 403'd on the live server while an in-memory `decide` over the same Grant said
+// yes. This pins the whole path the server takes - compile, keep only the broad rows the role loader reads,
+// reconstruct, decide.
+describe("compileGrants - name-keyed collections compile broad", () => {
+  const liveGrant = (levels: Record<string, "read" | "write">) =>
+    rulesToGrant(compileGrant({ levels, allow: [] }).filter((r) => r.matchCode === null));
+
+  it("a per-key settings rule reaches that key through the broad lane, and no other key", () => {
+    const g = liveGrant({ "settings.**": "read", "settings.attendance": "write" });
+    const self = { employeeCode: "04-002-001" };
+    expect(decide(g, resolveRequest("PATCH", "/v1/settings/attendance"), self).allow).toBe(true);
+    expect(decide(g, resolveRequest("PATCH", "/v1/settings/ai"), self).allow).toBe(false);
+    expect(decide(g, resolveRequest("GET", "/v1/settings/ai"), self).allow).toBe(true);
+  });
+
+  it("every name-keyed collection narrows to all, whatever its second token", () => {
+    for (const p of ["settings.attendance", "roles.manager", "bank-formats.IDFC FIRST Bank", "payroll-debit-accounts.HDFC"]) {
+      expect(deriveNarrowing(p).scopeKind, p).toBe("all");
+    }
+    expect(deriveNarrowing("employees.04-1c-0a9").scopeKind).toBe("exact"); // a code-bearing collection is unchanged
+  });
+
+  it("every seeded per-key settings rule is on the broad lane", () => {
+    for (const [role, g] of Object.entries(GRANTS)) {
+      for (const r of compileGrant(g)) if (r.namespace === "settings") expect(r.matchCode, `${role} ${r.pattern}`).toBeNull();
+    }
   });
 });

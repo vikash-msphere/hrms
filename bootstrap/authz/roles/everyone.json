@@ -1,0 +1,88 @@
+{
+  "role": "everyone",
+  "label": "Everyone",
+  "protected": true,
+  "provisioned": false,
+  "description": "The reserved rule subject unioned into every caller except super admin (src/domain/grants.ts EVERYONE_ROLE). Never assignable to a user. Holds only what EVERY signed-in account needs whatever its role: the app shell (who am I, my preferences, my exports, the batch transport), my notifications, and the assets I hold. Every rule reaches the caller's own rows or is refused in the service for anyone else, so a role an admin builds in Access Management starts from a working app and nothing about anybody else.",
+  "levels": [
+    {
+      "area": "account",
+      "pattern": "users.me.**",
+      "level": "read",
+      "why": "Own user record (users/me): identity, capabilities and the grantable scope tiers the SPA gates everything on. Without it the app cannot start, so it cannot depend on which role an account holds."
+    },
+    {
+      "area": "account",
+      "pattern": "preferences.**",
+      "level": "write",
+      "why": "Own UI preferences (theme, tab badges). Every preferences route is caller-scoped in the service (routes/preferences.ts), so no path id reaches another user's row."
+    },
+    {
+      "area": "account",
+      "pattern": "operations",
+      "level": "read",
+      "why": "List own long-running operations (exports). A bare collection pattern is the list call only; the `me` rule beside it decides the rows."
+    },
+    {
+      "area": "account",
+      "pattern": "operations.me.**",
+      "level": "read",
+      "why": "Poll own operations. An export any role is granted finishes as an operation, so polling it cannot depend on the role."
+    },
+    {
+      "area": "notifications",
+      "pattern": "notifications",
+      "level": "read",
+      "why": "List own in-app notifications. A bare collection pattern is the list call only; which rows come back is decided by the `me` rule beside it."
+    },
+    {
+      "area": "notifications",
+      "pattern": "notifications.me.**",
+      "level": "write",
+      "why": "Read, mark read, snooze and dismiss own notifications, and nobody else's. Write is the least level PATCH needs; the collection mounts no create and no delete (the server emits rows, and the table has no delete_time), so write reaches nothing else."
+    },
+    {
+      "area": "assets",
+      "pattern": "assets",
+      "level": "read",
+      "why": "List the assets you are holding. Says nothing about which rows come back: actorScope finds no broad item read and resolves the breadth to own, bound as `assigned_to = me`."
+    }
+  ],
+  "allow": [
+    {
+      "area": "transport",
+      "pattern": "batch.run",
+      "why": "The SPA's multi-read transport. GET sub-requests only, and each re-enters the whole auth and authz chain (routes/batch.ts), so it grants no read of its own."
+    },
+    {
+      "area": "notifications",
+      "pattern": "notifications.markAllRead",
+      "why": "Clear own unread state in one call; the service updates only rows whose recipient is the caller. A collection-level verb, which compileGrant encodes broad (scope all, no match code) so it is reachable at all."
+    },
+    {
+      "area": "assets",
+      "pattern": "assets.**.acknowledge",
+      "why": "Confirm receipt by scanning the tag on an asset handed to you. Scoped `**` because an asset's code is flat and custody moves, so no scope token can say 'held by me'; holder-only is enforced in the service (acknowledgeAsset refuses anyone but `assigned_to`)."
+    }
+  ],
+  "deny": [],
+  "excluded": [
+    {
+      "pattern": "employees.me.**",
+      "why": "Own HR record and self-service (profile, leave, pay, claims) belong to the employee role. An account can exist with no employee record (an external auditor), and a role without HR self-service is a legitimate thing for an admin to build."
+    },
+    {
+      "pattern": "assets.**",
+      "lane": "levels",
+      "why": "Item reads of any asset: a flat code carries no owner, so any item read here would be every asset in the company. The held-assets list is enough to see what you hold."
+    },
+    {
+      "pattern": "notifications.**",
+      "why": "Anyone's notifications. Own only, through `me`."
+    },
+    {
+      "pattern": "search | dashboard-summary | activity",
+      "why": "Fan-out reads decided per collection from each caller's own grants; granting them here would add nothing and could only widen."
+    }
+  ]
+}

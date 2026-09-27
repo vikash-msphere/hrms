@@ -2,7 +2,7 @@ import {
   Bell, CalendarDays, Receipt, Landmark, Clock, Laptop, CalendarCheck, Coins, Timer, Heart, Lightbulb,
   Megaphone, FileSignature, Wallet, Percent, DoorOpen, LifeBuoy, ClipboardCheck, Target, MessagesSquare,
   ShieldCheck, UserPlus, Gift, ShieldPlus, Columns3, CalendarClock, Banknote, Package, CalendarRange,
-  Briefcase, TrendingUp, KeyRound, AlarmClock, type LucideIcon,
+  Briefcase, TrendingUp, KeyRound, AlarmClock, LockKeyhole, type LucideIcon,
 } from "lucide-react";
 
 // Per-category presentation for a notification: a glyph + a theme-aware tint. The category is the first
@@ -51,6 +51,7 @@ export const CATEGORY_META: Record<string, CategoryMeta> = {
   recruiting: M("Recruiting", Briefcase, "indigo"),
   compensation: M("Compensation", TrendingUp, "green"),
   access: M("Access & permissions", KeyRound, "amber"),
+  security: M("Security", LockKeyhole, "red"),
   system: M("System", Bell, "slate"),
 };
 

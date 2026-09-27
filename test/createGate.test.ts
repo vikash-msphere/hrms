@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { resolveRequest, decide } from "../src/domain/permissions";
 import { rulesToGrant, deriveNarrowing, type CompiledRule } from "../src/domain/compileGrants";
 import { validateAccessRule } from "../src/domain/policyValidate";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import { toAccessRuleResource } from "../src/http/serialize";
 
 // The "New X" buttons grant the CREATE gate: the 1-token `<collection>` write pattern, which gates the

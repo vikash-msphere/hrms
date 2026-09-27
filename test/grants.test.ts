@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { GRANTS, grantFor } from "../src/domain/grants";
+import { GRANTS, grantFor } from "../bootstrap/authz/grants";
 import { ACCESS_VERBS } from "../src/http/accessHint";
-import { ROLES } from "../src/db/schema";
+import { ROLES } from "../bootstrap/authz/roles";
+import { EVERYONE_ROLE } from "../src/domain/grants";
 import { resolveRequest, decide, capabilitiesOf } from "../src/domain/permissions";
 import type { Role } from "../src/env";
 
@@ -10,8 +11,15 @@ const SELF = { employeeCode: "04-1c-0a9" }; // dept 04-1c
 const ok = (role: Role, m: string, p: string, force = false) => decide(grantFor(role), resolveRequest(m, p, force), SELF).allow;
 
 describe("GRANTS - policy integrity", () => {
-  it("covers exactly the ROLES list (no missing or extra role)", () => {
-    expect(Object.keys(GRANTS).sort()).toEqual([...ROLES].sort());
+  it("covers exactly the assignable seeded roles (no missing or extra role)", () => {
+    const assignable = ROLES.map((r) => r.name).filter((n) => n !== EVERYONE_ROLE);
+    expect(Object.keys(GRANTS).sort()).toEqual(assignable.sort());
+  });
+
+  it("seeds exactly one provisioned role, and it is assignable", () => {
+    const provisioned = ROLES.filter((r) => r.provisioned);
+    expect(provisioned).toHaveLength(1);
+    expect(provisioned[0]!.name).not.toBe(EVERYONE_ROLE);
   });
 
   it("PII sub-resources are super-only by default; everyone keeps OWN PII; base record still readable", () => {
@@ -60,8 +68,17 @@ describe("GRANTS - employee (self-service only)", () => {
     expect(ok("employee", "POST", "/v1/preferences")).toBe(true);
     expect(ok("employee", "POST", "/v1/leave-requests")).toBe(true);
     expect(ok("employee", "GET", "/v1/payslips/04-1c-0a9-0")).toBe(true); // own
-    expect(ok("employee", "GET", "/v1/employees")).toBe(true); // may LIST the directory (rows scoped in service)
-    expect(ok("employee", "GET", "/v1/employees/07-2a-0b1")).toBe(false); // but cannot GET another's record
+    expect(ok("employee", "GET", "/v1/employees")).toBe(true); // may LIST the directory
+    expect(ok("employee", "GET", "/v1/employees/07-2a-0b1")).toBe(true); // a colleague's base (directory) record
+    // ...but none of the HR/payroll fields on it, which are redacted: own yes, a colleague's no.
+    for (const f of ["probation_end_date", "legal_name", "employee_number", "epf_enrolled", "eps_excluded", "tracked_from"]) {
+      expect(ok("employee", "GET", `/v1/employees/04-1c-0a9/${f}`), `own ${f}`).toBe(true);
+      expect(ok("employee", "GET", `/v1/employees/07-2a-0b1/${f}`), `colleague's ${f}`).toBe(false);
+    }
+    // ...and none of a colleague's PII sub-resources or presence.
+    for (const sub of ["bank-account", "identity", "personal-info", "tax", "presence"]) {
+      expect(ok("employee", "GET", `/v1/employees/07-2a-0b1/${sub}`), `colleague's ${sub}`).toBe(false);
+    }
     expect(ok("employee", "PATCH", "/v1/employees/04-1c-0a9/bank-account")).toBe(true); // own
     expect(ok("employee", "PATCH", "/v1/employees/07-2a-0b1")).toBe(false); // someone else's record
     expect(ok("employee", "POST", "/v1/holidays")).toBe(false); // config.write
@@ -254,13 +271,13 @@ describe("capabilitiesOf (scope-stripped tier-1 set)", () => {
 describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purpose", () => {
   const WITHHELD = [
     // ACL-only collections: the ops console, keys, and the access system itself. Kanban is NOT here any more -
-    // boards, cards and sprints ship with seeded grants (OWN_WORK in src/domain/grants.ts), because a module
-    // whose every verb reaches only super_admin renders as if it did not exist under "hide, never disable".
+    // boards, cards and sprints ship with seeded grants (bootstrap/authz/roles/), because a module whose every
+    // verb reaches only super_admin renders as if it did not exist under "hide, never disable". Nor are
+    // letterheads (HR's) or the go-live imports (HR's leave openings and history, payroll's pay openings): the
+    // least-privilege review of the role files gave each to the role whose job it is.
     "access-rules:approve", "access-rules:clone", "access-rules:preview", "access-rules:reject",
     "access-rules:requestAccess", "access-rules:review", "access-rules:scopeCounts", "api-keys:revoke",
     "cron-runs:run", "operations:run",
-    "letterheads:deleteImage", "letterheads:duplicate", "letterheads:image", "letterheads:preview",
-    "letterheads:uploadImage",
     "referrals:award", "suggestions:downvote", "suggestions:merge", "suggestions:upvote",
     // `similar` exists to serve `merge` - it shows which suggestions are the same ask so they can be folded
     // together. Merging is already ACL-only (right above), so the thing that tells somebody what to merge is
@@ -271,17 +288,7 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
     // covers recording a single award; this collection-level verb is left to the ACL for now, deliberately,
     // because it writes money for a whole population at once.
     "bonuses:award",
-    // Opening leave balances for everybody in a file at once (services/leaveAdjustments.ts). The collection is
-    // private by default - nothing seeds `leave-adjustments` - and this is the bulk half of it, which moves
-    // encashable balances for a whole population; left to the ACL on the same terms as `bonuses:award`.
-    "leave-adjustments:importOpenings",
-    // Pay and tax from before HRMS for everybody in a file at once (services/payrollOpenings.ts): private by
-    // default like the collection itself, and it moves the year's TDS for a whole population.
-    "payroll-openings:importOpenings",
-    // Leave from before HRMS for everybody in a file at once (services/leaveHistoryImport.ts): approved rows
-    // written straight past the request flow, so it is the ACL's to hand out rather than a seeded role's.
-    "leave-requests:importHistory",
-    // Super-only on purpose, each documented at the point it is withheld (src/domain/grants.ts): the bank
+    // Super-only on purpose, each documented at the point it is withheld (bootstrap/authz/roles/): the bank
     // file and the statutory report expose the employer debit account and every account number, payroll
     // approval is deliberately not the run operator's own act, and previewPayslip renders another employee's
     // full pay breakdown before the run is published.
@@ -306,6 +313,9 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
     // may well want undoing held narrowly, and that is a choice it makes in the ACL rather than one
     // inherited from a seed.
     "moderation:unhide",
+    // Clearing somebody's app PIN (services/appLock.ts): the one way back from a forgotten PIN, and a way past
+    // somebody else's lock, so it is the ACL's to hand out and nothing seeds it.
+    "users:resetPin",
   ];
   const NON_SUPER = ["employee", "manager", "hr_admin", "payroll_admin"] as const;
   // Three object codes: own, a dept member's, and a flat-coded row - so a `me` / `my-dept` / `*` rule all get
@@ -318,7 +328,11 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
       for (const verb of verbs) {
         // Standard levels ride the level ladder, not `allow`; only custom methods need naming.
         if (["update", "delete", "upload", "download"].includes(verb)) continue;
-        const reachable = NON_SUPER.some((role) => CODES.some((code) => ok(role, "POST", `/v1/${collection}/${code}:${verb}`)));
+        // Item verbs are addressed on an object, collection verbs (`leave-adjustments:importOpenings`) on the
+        // collection itself - a named 2-token grant reaches only the second, so both shapes are asked.
+        const reachable = NON_SUPER.some(
+          (role) => ok(role, "POST", `/v1/${collection}:${verb}`) || CODES.some((code) => ok(role, "POST", `/v1/${collection}/${code}:${verb}`)),
+        );
         if (!reachable) unreachable.push(`${collection}:${verb}`);
       }
     }

@@ -21,6 +21,12 @@ export type AttendanceConfig = {
   lop_basis?: LopBasis; // the DIVISOR: scheduled working days in the period, or a fixed 30
   lop_wage_basis?: LopWageBasis; // the WAGE the divisor divides (see LopWageBasis)
   proration_basis?: ProrationBasis; // basis for prorating a mid-period joiner/leaver's regular earnings
+  /**
+   * Whether a day is resolved through the roster and work patterns, or from this blob alone
+   * (domain/workSchedule.ts `ScheduleSource`). "org" is the default and is exactly the behaviour above: an org
+   * that keeps a roster as a planning grid must not find those entries deciding pay the moment schedules ship.
+   */
+  schedule_source?: "org" | "resolved";
 };
 
 export const DEFAULT_ATTENDANCE: AttendanceConfig = {
@@ -32,20 +38,26 @@ export const DEFAULT_ATTENDANCE: AttendanceConfig = {
   lop_basis: "working_days",
   lop_wage_basis: "gross",
   proration_basis: "calendar_days",
+  schedule_source: "org",
 };
 
 // Fraction (0..1) of the pay period the employee is actually employed for, by the chosen basis - the multiplier
 // for their regular earnings so a mid-period joiner/leaver isn't paid (or docked) a full month. 1.0 when
 // employed for the whole period (the common case, a no-op). The employment window is the period clamped to the
 // employee's start/end dates. LOP for in-window absences is applied separately, at the full daily rate.
+//
+// `schedOf` is THIS EMPLOYEE'S schedule (domain/workSchedule.ts), so the `working_days` basis prorates a
+// part-timer against their own scheduled days rather than against the org's five-day week - which would
+// otherwise pay a Mon/Wed/Fri joiner a fraction built from Tuesdays they were never going to work.
 import { round2 } from "./money";
+import type { DayScheduleOf } from "./workSchedule";
 
 export function employmentFraction(opts: {
   periodStartYmd: string;
   periodEndYmd: string;
   empStartYmd?: string | null;
   empEndYmd?: string | null;
-  workDays: number[];
+  schedOf: DayScheduleOf;
   holidays: Set<string>;
   basis: ProrationBasis;
 }): number {
@@ -53,9 +65,9 @@ export function employmentFraction(opts: {
   const to = opts.empEndYmd && opts.empEndYmd < opts.periodEndYmd ? opts.empEndYmd : opts.periodEndYmd;
   if (from > to) return 0; // not employed at all within the period
   if (opts.basis === "working_days") {
-    const total = workingDaysInRange(opts.periodStartYmd, opts.periodEndYmd, opts.workDays, opts.holidays);
+    const total = workingDaysInRange(opts.periodStartYmd, opts.periodEndYmd, opts.schedOf, opts.holidays);
     if (total <= 0) return 1;
-    return Math.min(1, workingDaysInRange(from, to, opts.workDays, opts.holidays) / total);
+    return Math.min(1, workingDaysInRange(from, to, opts.schedOf, opts.holidays) / total);
   }
   const calDays = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000) + 1;
   const total = calDays(opts.periodStartYmd, opts.periodEndYmd);
@@ -149,8 +161,11 @@ function enumerate(startYmd: string, endYmd: string): string[] {
 }
 
 // Scheduled working days in [startYmd, endYmd] (inclusive) minus holidays - the LOP divisor base.
-export function workingDaysInRange(startYmd: string, endYmd: string, workDays: number[], holidays: Set<string>): number {
-  return enumerate(startYmd, endYmd).filter((d) => workDays.includes(weekdayOf(d)) && !holidays.has(d)).length;
+//
+// PER EMPLOYEE, because `schedOf` is: the divisor a day's loss of pay is priced from is that person's own
+// scheduled days, so a part-timer's absent day costs a third of their week rather than a fifth of it.
+export function workingDaysInRange(startYmd: string, endYmd: string, schedOf: DayScheduleOf, holidays: Set<string>): number {
+  return enumerate(startYmd, endYmd).filter((d) => !schedOf(d).off && !holidays.has(d)).length;
 }
 
 // Wall-clock minutes since midnight of an instant, read in the org timezone.
@@ -210,34 +225,38 @@ export type WorkEvent = { startMs: number; endMs: number; allDay: boolean; requi
 // on an on-leave day, and - when the event requires it - only on a day the employee actually punched. Each
 // event credits at most one full day per day; an event crediting less than the half-day minimum leaves the
 // day short, exactly as a brief punch would.
+//
+// A DAY'S FULL DAY IS ITS OWN. An all-day event credits whatever that day was scheduled for, and the per-day
+// cap is the same figure - so an off-site day on a four-hour shift credits four hours, not the eight a
+// full-timer's day would have.
 export function eventCreditByDay(opts: {
   events: WorkEvent[];
   tz: string;
-  workDays: number[];
-  fullDayMinutes: number;
+  schedOf: DayScheduleOf;
   todayYmd: string;
   nowMs: number;
   punchedDays: Set<string>;
   onLeave: (day: string) => boolean;
 }): Map<string, number> {
-  const { events, tz, workDays, fullDayMinutes, todayYmd, nowMs, punchedDays, onLeave } = opts;
+  const { events, tz, schedOf, todayYmd, nowMs, punchedDays, onLeave } = opts;
   const out = new Map<string, number>();
   for (const ev of events) {
     if (!ev.allDay && ev.endMs >= nowMs) continue; // timed event still running / upcoming
     const sDay = ev.allDay ? utcDay(ev.startMs) : localDay(ev.startMs, tz);
     const eDay = ev.allDay ? utcDay(ev.endMs) : localDay(ev.endMs, tz);
     for (const day of enumerate(sDay, eDay)) {
-      if (!workDays.includes(weekdayOf(day))) continue; // credit scheduled working days only
+      const ds = schedOf(day);
+      if (ds.off) continue; // credit scheduled working days only
       if (ev.allDay && day >= todayYmd) continue; // all-day: only days that have fully ended
       if (ev.requiresClockIn && !punchedDays.has(day)) continue; // credit only those actually at work
       if (onLeave(day)) continue; // never credit an on-leave attendee
       let m: number;
-      if (ev.allDay) m = fullDayMinutes;
+      if (ev.allDay) m = ds.fullDayMinutes;
       else if (sDay === eDay) m = localMinutes(ev.endMs, tz) - localMinutes(ev.startMs, tz);
       else if (day === sDay) m = 1440 - localMinutes(ev.startMs, tz);
       else if (day === eDay) m = localMinutes(ev.endMs, tz);
       else m = 1440;
-      out.set(day, (out.get(day) ?? 0) + Math.min(fullDayMinutes, Math.max(0, m)));
+      out.set(day, (out.get(day) ?? 0) + Math.min(ds.fullDayMinutes, Math.max(0, m)));
     }
   }
   return out;
@@ -326,12 +345,12 @@ export function isUntracked(
  * is already inside `lopDayUnits` - an unpaid day is owed and unworked like any absence - so the two are never
  * added together.
  */
-export function unpaidLeaveDayUnits(startYmd: string, endYmd: string, workDays: number[], holidays: Set<string>, ranges: LeaveRange[]): number {
+export function unpaidLeaveDayUnits(startYmd: string, endYmd: string, schedOf: DayScheduleOf, holidays: Set<string>, ranges: LeaveRange[]): number {
   const unpaid = ranges.filter((r) => !isPaid(r));
   if (!unpaid.length) return 0;
   let units = 0;
   for (const d of enumerate(startYmd, endYmd)) {
-    if (!workDays.includes(weekdayOf(d)) || holidays.has(d)) continue;
+    if (schedOf(d).off || holidays.has(d)) continue;
     units += Math.max(0, Math.min(sessionCover(d, unpaid), 1 - leaveCover(d, ranges)));
   }
   return Math.round(units * 2) / 2;
@@ -373,7 +392,12 @@ function derivedCredit(worked: number | undefined, fullDayMinutes: number, halfD
 export function lopDayUnits(opts: {
   startYmd: string;
   endYmd: string;
-  workDays: number[];
+  /**
+   * This employee's schedule, day by day (domain/workSchedule.ts). It answers all three of the questions this
+   * walk used to take as org constants: whether the day is owed at all, and the two minute thresholds the day
+   * is scored on - so a rest day in a rotation owes nothing and a four-hour shift is a full day at four hours.
+   */
+  schedOf: DayScheduleOf;
   holidays: Set<string>;
   leaveRanges: LeaveRange[];
   workedByDay: Map<string, number>; // day -> worked minutes; absent if no entry
@@ -395,13 +419,12 @@ export function lopDayUnits(opts: {
    * then, a mark HR set on purpose.
    */
   trackedFromYmd?: string | null;
-  fullDayMinutes: number;
-  halfDayMinutes: number;
 }): number {
-  const { startYmd, endYmd, workDays, holidays, leaveRanges, workedByDay, marksByDay, creditByDay, capByDay, trackedFromYmd, fullDayMinutes, halfDayMinutes } = opts;
+  const { startYmd, endYmd, schedOf, holidays, leaveRanges, workedByDay, marksByDay, creditByDay, capByDay, trackedFromYmd } = opts;
   let units = 0;
   for (const d of enumerate(startYmd, endYmd)) {
-    if (!workDays.includes(weekdayOf(d)) || holidays.has(d)) continue;
+    const ds = schedOf(d);
+    if (ds.off || holidays.has(d)) continue;
     if (isUntracked(d, trackedFromYmd, workedByDay, marksByDay, leaveRanges)) continue;
     const owed = 1 - leaveCover(d, leaveRanges);
     if (owed <= 0) continue; // whole day on leave
@@ -409,7 +432,7 @@ export function lopDayUnits(opts: {
     const worked = workedByDay.get(d);
     const credit = mark
       ? creditUnits(mark)
-      : Math.min(derivedCredit(worked === undefined ? undefined : worked + (creditByDay?.get(d) ?? 0), fullDayMinutes, halfDayMinutes), capByDay?.get(d) ?? 1);
+      : Math.min(derivedCredit(worked === undefined ? undefined : worked + (creditByDay?.get(d) ?? 0), ds.fullDayMinutes, ds.halfDayMinutes), capByDay?.get(d) ?? 1);
     units += Math.max(0, owed - credit);
   }
   return Math.round(units * 2) / 2; // stay on the half-day grid

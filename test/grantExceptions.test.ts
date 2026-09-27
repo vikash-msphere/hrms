@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 import { mergeGrants, rulesToGrant, type CompiledRule } from "../src/domain/compileGrants";
 import { ancestorsOf } from "../src/domain/codes";
@@ -63,18 +63,21 @@ describe("grant-exceptions exact-object semantics", () => {
   const role = grantFor("employee");
   const withExc = (rows: UserRow[], col: string, code: string) => mergeGrants(role, rulesToGrant(narrow(rows, col, code)));
 
+  // `payslips`, not `employees`: an employee reads every colleague's base directory record, so the role alone
+  // no longer denies an employees object, and a share on one would prove nothing. Nobody's payslip but their
+  // own is readable to the role, which is the property these need.
   it("a read share reaches exactly that object, not a sibling or a prefix neighbour", () => {
-    const rows = [exc("employees", "04-002-002", { level: "read" })];
-    expect(allow(role, "GET", "/v1/employees/04-002-002")).toBe(false); // role alone denies the peer
-    expect(allow(withExc(rows, "employees", "04-002-002"), "GET", "/v1/employees/04-002-002")).toBe(true); // share grants it
-    expect(allow(withExc(rows, "employees", "04-002-003"), "GET", "/v1/employees/04-002-003")).toBe(false); // sibling untouched
+    const rows = [exc("payslips", "04-002-002", { level: "read" })];
+    expect(allow(role, "GET", "/v1/payslips/04-002-002")).toBe(false); // role alone denies the peer
+    expect(allow(withExc(rows, "payslips", "04-002-002"), "GET", "/v1/payslips/04-002-002")).toBe(true); // share grants it
+    expect(allow(withExc(rows, "payslips", "04-002-003"), "GET", "/v1/payslips/04-002-003")).toBe(false); // sibling untouched
   });
 
   it("a share on a shorter code does NOT leak to a longer prefix-collision code", () => {
-    const rows = [exc("employees", "04-002", { level: "read" })]; // shared code "04-002"
-    expect(allow(withExc(rows, "employees", "04-002"), "GET", "/v1/employees/04-002")).toBe(true); // exact object ok
-    expect(allow(withExc(rows, "employees", "04-0029"), "GET", "/v1/employees/04-0029")).toBe(false); // "04-0029" is NOT under "04-002"
-    expect(allow(withExc(rows, "employees", "04-002-005"), "GET", "/v1/employees/04-002-005")).toBe(false); // a child (not self) is a different literal token
+    const rows = [exc("payslips", "04-002", { level: "read" })]; // shared code "04-002"
+    expect(allow(withExc(rows, "payslips", "04-002"), "GET", "/v1/payslips/04-002")).toBe(true); // exact object ok
+    expect(allow(withExc(rows, "payslips", "04-0029"), "GET", "/v1/payslips/04-0029")).toBe(false); // "04-0029" is NOT under "04-002"
+    expect(allow(withExc(rows, "payslips", "04-002-005"), "GET", "/v1/payslips/04-002-005")).toBe(false); // a child (not self) is a different literal token
   });
 
   it("a deny exception overrides a role grant (deny-wins)", () => {

@@ -7,6 +7,7 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
+import { seedManifest } from "./seedManifest";
 import { app } from "../src/index";
 
 // A bulk export is the highest-risk thing a person can do in an HR system - three hundred salaries onto a
@@ -26,6 +27,7 @@ describe("export audit: the act is recorded, the rows never are", () => {
       const t = stmt.trim();
       if (t) await b.DB.prepare(t).run();
     }
+    await seedManifest(b.DB);
     deps = makeDeps(b);
     await deps.db.insert(schema.roles).values({ name: "super_admin", label: "Super" }).onConflictDoNothing();
     await deps.db.insert(schema.users).values({ uuid: "usr1234567890", code: "u-1", email: "super@test.example", role: "super_admin" });

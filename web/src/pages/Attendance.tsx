@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Clock, LogIn, LogOut, CircleDot, Pencil, AlertTriangle, Plus, Trash2, Users, Check, X, ChevronRight, Coffee } from "lucide-react";
 import { create, invoke } from "@/api";
 import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
+import { useScheduleView } from "@/hooks/useScheduleView";
 import { useApprovals } from "@/lib/approvals";
 import { useClock, listAllSessions } from "@/lib/clock";
 import { usePermission, useCanExport, useCanWriteOthers } from "@/lib/perm";
@@ -175,24 +176,34 @@ export default function Attendance({ me }: { me: Me }) {
   // the leave feed above is already on this page for the team panel, so the history fetches none of its own.
   const myLeave = useMemo(() => ({ ranges: leaveRanges, forDay: leaveForDay }), [leaveRanges, leaveForDay]);
 
+  // Whose day is what, over every day this page draws. WIDENED TO INCLUDE TODAY, because the today row is
+  // built independently of whichever history page the table is showing - resolved against a window that did
+  // not cover it, today would quietly fall back to the org's own week.
+  const schedFrom = fromYmd < orgToday ? fromYmd : orgToday;
+  const schedTo = toYmd > orgToday ? toYmd : orgToday;
+  const view = useScheduleView(sched, schedFrom, schedTo);
+
   // One way to turn a set of punches into per-day rows, reused for today's row and every teammate's window
   // (each with their own leave + join date).
   const buildRows = useCallback(
-    (sessions: AttendanceSession[], opts: { from: string; to: string; leaves: LeaveRange[]; joined?: string; tracked?: string; excusals?: Map<string, DayExcusal> }) =>
+    (sessions: AttendanceSession[], opts: { from: string; to: string; leaves: LeaveRange[]; joined?: string; tracked?: string; excusals?: Map<string, DayExcusal>; employeeId?: string }) =>
       buildAttendanceRows({
-        fromYmd: opts.from, toYmd: opts.to, todayYmd: orgToday, sched,
+        fromYmd: opts.from, toYmd: opts.to, todayYmd: orgToday,
+        // WHOSE days these are. A rest day in somebody's own schedule is not an absence, and a four-hour
+        // shift is a full day at four hours - the grid has to read that the way payroll does.
+        schedOf: view.of(opts.employeeId ?? ""),
         summaries: summarizeByDay(sessions, sched, { excusals: opts.excusals, policy: punctuality.attendance, leaveRanges: opts.leaves }),
         holidays: holidaySet, leaveRanges: opts.leaves, joinedYmd: opts.joined, trackedFromYmd: opts.tracked,
       }),
-    [orgToday, sched, holidaySet, punctuality],
+    [orgToday, sched, holidaySet, punctuality, view],
   );
   const myExcusals = me.employee_id ? excusalsByEmp.get(me.employee_id) : undefined;
 
   // Today's row (always today, independent of which history page the table shows) - built from a small recent
   // fetch so the My-clock punch log and the cumulative total stay put while you page through history.
   const todayRow = useMemo(
-    () => buildRows(recentSessions.filter((s) => mine(s.employee)), { from: orgToday, to: orgToday, leaves: leaveRanges, joined: joinedYmd, tracked: trackedFromYmd, excusals: myExcusals })[0],
-    [recentSessions, buildRows, leaveRanges, joinedYmd, trackedFromYmd, mine, orgToday, myExcusals],
+    () => buildRows(recentSessions.filter((s) => mine(s.employee)), { from: orgToday, to: orgToday, leaves: leaveRanges, joined: joinedYmd, tracked: trackedFromYmd, excusals: myExcusals, employeeId: me.employee_id ?? undefined })[0],
+    [recentSessions, buildRows, leaveRanges, joinedYmd, trackedFromYmd, mine, orgToday, myExcusals, me.employee_id],
   );
 
   const myOpen = clock.mine;
@@ -425,18 +436,18 @@ export default function Attendance({ me }: { me: Me }) {
     return roster
       .map((e) => {
         const id = idOf(e.path);
-        const empRows = buildRows(byEmp.get(id) ?? [], { from: fromYmd, to: toYmd, leaves: approvedLeaveByEmp.get(id) ?? [], joined: e.start_date, tracked: trackedFromOf(e), excusals: excusalsByEmp.get(id) });
+        const empRows = buildRows(byEmp.get(id) ?? [], { from: fromYmd, to: toYmd, leaves: approvedLeaveByEmp.get(id) ?? [], joined: e.start_date, tracked: trackedFromOf(e), excusals: excusalsByEmp.get(id), employeeId: id });
         return {
           id,
           name: `${e.first_name} ${e.last_name}`,
           dept: e.department ? idOf(e.department) : undefined,
           rows: empRows,
-          stats: statsOf(empRows, tz, sched.full_day_minutes, orgToday),
+          stats: statsOf(empRows, tz, view.of(id), orgToday),
         };
       })
       // Worst first: absences, then lateness - the rows a manager has to act on lead.
       .sort((a, b) => b.stats.absent - a.stats.absent || b.stats.late - a.stats.late || a.name.localeCompare(b.name));
-  }, [canApprove, roster, pageSessions, buildRows, approvedLeaveByEmp, excusalsByEmp, fromYmd, toYmd, tz, sched.full_day_minutes, orgToday]);
+  }, [canApprove, roster, pageSessions, buildRows, approvedLeaveByEmp, excusalsByEmp, fromYmd, toYmd, tz, view, orgToday]);
 
   return (
     <div>
@@ -505,7 +516,7 @@ export default function Attendance({ me }: { me: Me }) {
                     // The day the forgotten punch belongs to, built from the recent fetch rather than read off
                     // the history: the history may be paged back to a window that does not contain it.
                     const day = localDay(staleOpen.clock_in, tz);
-                    const [row] = buildRows(recentSessions.filter((s) => mine(s.employee)), { from: day, to: day, leaves: leaveRanges, joined: joinedYmd, tracked: trackedFromYmd, excusals: myExcusals });
+                    const [row] = buildRows(recentSessions.filter((s) => mine(s.employee)), { from: day, to: day, leaves: leaveRanges, joined: joinedYmd, tracked: trackedFromYmd, excusals: myExcusals, employeeId: me.employee_id ?? undefined });
                     setCorrecting([row ?? { day, status: "absent" as DayStatus }]);
                   }}
                 >

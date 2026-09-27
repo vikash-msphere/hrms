@@ -7,6 +7,7 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
+import { orgScheduleOf } from "../src/domain/workSchedule";
 import { genId } from "../src/lib/idCodec";
 import type { ListScope } from "../src/domain/access";
 import { peopleAnalytics } from "../src/services/peopleAnalytics";
@@ -258,6 +259,20 @@ describe("people analytics", () => {
     expect(rowFor(out, B.uuid).values.leave_days_taken).toBe(0); // A's leave is not theirs to count
   });
 
+  it("rosters whose WORK the caller sees, not whose name: the directory alone reports nobody else", async () => {
+    await seed();
+    // Every employee reads the whole directory (bootstrap/authz/roles/employee.json), so a directory-wide
+    // `employees` scope with own-only work is the plain employee's shape. The report is about work, so it is
+    // theirs alone - not the whole company with blank rows.
+    const scopes = new Map<string, ListScope>([
+      ["employees", all()], ["leave-requests", own(B.uuid)], ["attendance", own(B.uuid)],
+    ]);
+    const out = await peopleAnalytics(deps, scopes, WINDOW);
+    expect(out.people.map((p) => p.employee)).toEqual([`employees/${B.uuid}`]);
+    // And with neither attendance nor leave listable there is no work to report at all.
+    expect((await peopleAnalytics(deps, new Map<string, ListScope>([["employees", all()]]), WINDOW)).people).toEqual([]);
+  });
+
   it("filters the roster by department", async () => {
     await seed();
     const dept = genId();
@@ -374,7 +389,9 @@ describe("punctuality rules (pure)", () => {
   });
 
   it("counts a person's expected working days inside their employment only", () => {
-    const args = { fromYmd: "2026-06-01", toYmd: "2026-06-30", workDays: [1, 2, 3, 4, 5], holidays: new Set<string>(), todayYmd: "2026-08-26" };
+    // Mon-Fri as the day-by-day resolver (src/domain/workSchedule.ts): the figures below are unchanged,
+    // because nobody here is on a schedule of their own.
+    const args = { fromYmd: "2026-06-01", toYmd: "2026-06-30", schedOf: orgScheduleOf({ work_days: [1, 2, 3, 4, 5] }), holidays: new Set<string>(), todayYmd: "2026-08-26" };
     expect(expectedWorkingDays(args)).toBe(22);
     expect(expectedWorkingDays({ ...args, joinedYmd: "2026-06-15" })).toBe(12);
     expect(expectedWorkingDays({ ...args, leftYmd: "2026-06-12" })).toBe(10);

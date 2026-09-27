@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { ROLE_TEMPLATES, templateRuleBody, templateSize } from "../web/src/components/access/roleTemplates";
 import { validateAccessRule } from "../src/domain/policyValidate";
-import { DEFAULT_POLICY, SUPPORTED_SCOPES } from "../src/domain/manifests";
+import { DEFAULT_POLICY, SUPPORTED_SCOPES } from "../bootstrap/authz/policy";
 import { COLLECTIONS } from "../src/domain/collections";
 
 // Starter packs for a new role, which is otherwise deny-all (`services/roles.ts` writes no rules).

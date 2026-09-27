@@ -23,6 +23,7 @@ import { nudgeMissingScorecards } from "./services/ats";
 import { reconcilePendingEsign } from "./services/esign/callback";
 import { publishDueAnnouncements } from "./services/announcements";
 import { drainSearchEmbeddings } from "./services/searchEmbed";
+import { pruneInsights } from "./services/searchInsights";
 import { drainModeration, reconcileHolds } from "./services/moderation";
 import { sweepCardDuplicates, pruneDuplicateSuggestions } from "./services/cardDuplicateSweep";
 import { sweepAiCache, sweepAiUsage } from "./services/ai";
@@ -253,8 +254,10 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // was retired, decided or never written is a post nobody can see and nobody can let out. This is the
     // mirror of `retireOrphans`: that closes a flag with no host, this re-queues a host with no flag.
     const holdsRequeued = await run("reconcileHolds", async () => (await reconcileHolds(deps)).requeued);
+    // ⌘K usage counters keep 30 days; they are for tuning search now, not a history of it.
+    const searchInsightsPruned = await run("pruneSearchInsights", () => pruneInsights(deps));
     return {
-      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, attentionDigests, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, payrollBudgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, aiUsageSwept, idempotencySwept, accessReviewed, duplicatesFlagged, duplicatesPruned, holdsRequeued },
+      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, attentionDigests, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, payrollBudgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, aiUsageSwept, idempotencySwept, accessReviewed, duplicatesFlagged, duplicatesPruned, holdsRequeued, searchInsightsPruned },
       failures,
     };
   }
@@ -450,7 +453,7 @@ async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" 
       // the field gone from every surface with some values still on disk - recoverable by the next tick, which
       // is the direction that does not destroy data it cannot finish destroying.
       const purge = payload as IdentityPurgeCursor;
-      const res = await purgeIdentityFieldsSlice(deps, systemActor(), purge);
+      const res = await purgeIdentityFieldsSlice(deps, await systemActor(deps), purge);
       if (!res.done && res.next) {
         await deps.db
           .update(schema.jobs)

@@ -2,7 +2,8 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import type { Bindings } from "../src/env";
-import { DEFAULT_POLICY, type Policy } from "../src/domain/manifests";
+import type { Policy } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import { rulesToGrant, type CompiledRule } from "../src/domain/compileGrants";
 import { decide, type SelfContext } from "../src/domain/permissions";
 import { base32ToBytes } from "../src/lib/idCodec";

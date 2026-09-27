@@ -16,7 +16,9 @@ import { encashmentRateConfig } from "./leaveEncashments";
 import { orgToday, dayStartMs } from "./orgDay";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, eventCreditByDay, sessionWorkedMinutes, unpaidLeaveDayUnits } from "../domain/attendance";
 import { marksForPeriod } from "./attendanceDayMarks";
-import { periodLop, punchDays, punctualityTouchesPay, shiftScheduleOf } from "../domain/punctuality";
+import { periodLop, punchDays, punctualityTouchesPay } from "../domain/punctuality";
+import type { DayScheduleOf } from "../domain/workSchedule";
+import { scheduleCtxWith } from "./workSchedule";
 import { approvedExcusals, punctualityPolicy } from "./lateEarlyRequests";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidReimbursements, markReimbursementsSettledStmt, releaseReimbursementsSettledStmt } from "./reimbursements";
@@ -156,7 +158,7 @@ async function runCoverage(deps: Deps, employeeId: string, startedMs: number | n
  * automatic loss of pay is off, matching the run build (services/payroll.ts). Two reads: holidays come off the
  * per-request snapshot, leave is bound to the month in SQL.
  */
-async function finalMonthUnpaidLeaveDays(deps: Deps, employeeId: string, fromMs: number, untilMs: number, endYmd: string, att: AttendanceConfig): Promise<number> {
+async function finalMonthUnpaidLeaveDays(deps: Deps, employeeId: string, fromMs: number, untilMs: number, endYmd: string, att: AttendanceConfig, schedOf: DayScheduleOf): Promise<number> {
   const toMs = Math.max(untilMs, Date.parse(`${endYmd}T00:00:00Z`));
   const unpaidTypes = new Set((await refLeaveTypes(deps)).filter((t) => t.paid === false).map((t) => t.uuid));
   if (!unpaidTypes.size) return 0;
@@ -176,7 +178,7 @@ async function finalMonthUnpaidLeaveDays(deps: Deps, employeeId: string, fromMs:
     )))
     .filter((l) => +new Date(l.endDate) >= fromMs && +new Date(l.startDate) <= toMs)
     .map((l) => ({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)), startSession: l.startSession, endSession: l.endSession, ...(unpaidTypes.has(l.leaveTypeId) ? { paid: false } : {}) }));
-  return unpaidLeaveDayUnits(utcDay(fromMs), endYmd, att.work_days, holidays, ranges);
+  return unpaidLeaveDayUnits(utcDay(fromMs), endYmd, schedOf, holidays, ranges);
 }
 
 // Unexcused absence day-units inside the final month's employed window, from exactly the facts a payroll run
@@ -191,6 +193,9 @@ async function finalMonthLopDays(
   endYmd: string,
   att: AttendanceConfig,
   trackedFrom: Date | number | null | undefined,
+  // Whose day is what (domain/workSchedule.ts). A settlement is a leaver's terminal payout and there is no
+  // later run to correct a disagreement, so it is handed the same resolver the run build uses.
+  schedOf: DayScheduleOf,
 ): Promise<number> {
   const tz = att.timezone || "Asia/Kolkata";
   // THE DATA WINDOW HAS TO COVER EVERY DAY THE WALK ENUMERATES, and `untilMs` on its own does not.
@@ -285,8 +290,7 @@ async function finalMonthLopDays(
     events.push({ startMs: +new Date(e.startTime), endMs: +new Date(e.endTime), allDay: !!e.allDay, requiresClockIn: !!e.requiresClockIn });
   }
   const credit = eventCreditByDay({
-    events, tz, workDays: att.work_days,
-    fullDayMinutes: att.full_day_minutes ?? 480,
+    events, tz, schedOf,
     todayYmd: localDay(nowMs, tz),
     nowMs,
     punchedDays: new Set(workedByDay.keys()), // before the merge, so credit never counts as a punch
@@ -304,7 +308,7 @@ async function finalMonthLopDays(
   const policy = await punctualityPolicy(deps);
   const punctuality = punctualityTouchesPay(policy)
     ? {
-      sched: shiftScheduleOf(att as unknown as Record<string, unknown>),
+      timezone: tz,
       policy,
       punches: punchDays(sessions, (ms) => localDay(ms, tz)),
       excusals: (await approvedExcusals(deps, fromMs, toMs, [employeeId])).get(employeeId),
@@ -312,10 +316,8 @@ async function finalMonthLopDays(
     : undefined;
 
   return periodLop({
-    startYmd, endYmd, workDays: att.work_days, holidays, leaveRanges, workedByDay, marksByDay,
+    startYmd, endYmd, schedOf, holidays, leaveRanges, workedByDay, marksByDay,
     trackedFromYmd: trackedFrom ? utcDay(+new Date(trackedFrom)) : null,
-    fullDayMinutes: att.full_day_minutes ?? 480,
-    halfDayMinutes: att.half_day_minutes ?? 240,
     punctuality,
   }).units;
 }
@@ -557,11 +559,14 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   const lopEndYmd = settleYmd < todayYmd ? settleYmd : todayYmd;
   // With automatic loss of pay off, approved UNPAID leave in the exit month is still docked - the same rule the
   // run build applies (services/payroll.ts), and the leaver has no later run to correct a disagreement.
+  // This leaver's own schedule over the final month (services/workSchedule.ts), so the exit month is judged
+  // against the days they were actually scheduled for - the same resolution the run build makes.
+  const schedOf = (await scheduleCtxWith(deps, att, utcDay(startedThisMonth), lopEndYmd, [employeeId]))(employeeId);
   const lopDaysInFinalMonth = coverage.finalPaid || lopUntilMs < startedThisMonth
     ? 0
     : att.lop_enabled
-      ? await finalMonthLopDays(deps, employeeId, startedThisMonth, lopUntilMs, lopEndYmd, att, emp.trackedFrom)
-      : await finalMonthUnpaidLeaveDays(deps, employeeId, startedThisMonth, lopUntilMs, lopEndYmd, att);
+      ? await finalMonthLopDays(deps, employeeId, startedThisMonth, lopUntilMs, lopEndYmd, att, emp.trackedFrom, schedOf)
+      : await finalMonthUnpaidLeaveDays(deps, employeeId, startedThisMonth, lopUntilMs, lopEndYmd, att, schedOf);
 
   // ---- Exit benefits --------------------------------------------------------------------------------------
   // Statutory gratuity, and the s.10(10AA) exemption on the leave being encashed, both need completed service.

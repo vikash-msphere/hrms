@@ -142,6 +142,7 @@ the ledger in step 6 says there is room for it.
 | Setting key | What turns on | Needs the index |
 |---|---|---|
 | `search.semantic` | ⌘K also matches by meaning | yes |
+| `search.ask` | ⌘K answers a plain-language question (Enter or ⌘↵ only) with up to three pages, settings or actions the person can already open. The model sees the question and those destination names, never a record | no |
 | `tickets.triage` | Suggested department/category/priority, duplicate hints | yes |
 | `cards.triage` | On a board task: what comparable delivered work says about its filing, how long it took, what blocked it, the goal it probably serves, the steps it needs, and open tasks that look like duplicates (including the nightly sweep) | yes |
 | `goals.similar` | Goals that are the same work in other words, and the goal one could roll up under | yes |

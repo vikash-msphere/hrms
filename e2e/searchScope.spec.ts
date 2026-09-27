@@ -29,7 +29,7 @@ async function open(page: import("@playwright/test").Page) {
 
 /** A row in the palette, by the label on it. */
 function row(page: import("@playwright/test").Page, label: string | RegExp) {
-  return palette(page).getByRole("button").filter({ hasText: label });
+  return palette(page).getByRole("option").filter({ hasText: label });
 }
 
 test.describe("what the palette offers", () => {

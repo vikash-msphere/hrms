@@ -233,7 +233,7 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
     if (ifNoneMatch && etagMatches(ifNoneMatch, etag)) return c.body(null, 304, { ETag: etag });
     const listed = spec.list
       ? await spec.list(c, page)
-      : await svc.list(c.get("deps"), user, c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, page.deletedOnly);
+      : await svc.list(c.get("deps"), user, c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, page.deletedOnly, c.req.query("q"));
     const { items, nextPageToken, extra }: { items: any[]; nextPageToken?: string; extra?: Record<string, unknown> } = listed;
     const rows = await decorate(c, items);
     // Owner codes for the page, in ONE read, for the flat-coded owner-column collections only. The hint needs

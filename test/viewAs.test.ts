@@ -8,6 +8,7 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
+import { seedManifest } from "./seedManifest";
 import { genId } from "../src/lib/idCodec";
 import { clearCache } from "../src/lib/cache";
 import { app } from "../src/index";
@@ -28,6 +29,7 @@ beforeAll(async () => {
     const s = stmt.trim();
     if (s) await b.DB.prepare(s).run();
   }
+  await seedManifest(b.DB);
   deps = makeDeps(b);
 });
 
@@ -36,7 +38,7 @@ beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
   await deps.db.insert(schema.roles).values([
     { name: "super_admin", label: "Super" },
-    { name: "employee", label: "Employee" },
+    { name: "employee", label: "Employee", provisioned: true }, // what a never-signed-in subject is graded as
     { name: "hr_admin", label: "HR" },
   ]);
   // The compiled grants this bare DB needs: super sees everything (a level rule AND the verb rule that

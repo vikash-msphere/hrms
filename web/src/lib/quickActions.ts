@@ -156,9 +156,10 @@ export function resolveQuickActionList(me: Me, raw?: { groups?: QuickMenuGroup[]
   return [...flat, ...standalone];
 }
 
-export function runQuickAction(a: QuickAction) {
+/** `arg` rides the intent to the page's create flow - a prefill, e.g. the words ⌘K searched for. */
+export function runQuickAction(a: QuickAction, arg?: unknown) {
   // A routeless action opens where the caller already is (report-problem). Navigating to "" would land on the
   // dashboard, which for a bug report throws away the screen being reported.
   if (a.route) navigate(a.route);
-  fireIntent(a.intent);
+  fireIntent(a.intent, arg);
 }

@@ -32,6 +32,8 @@ export const TABLES: Record<string, any> = {
   "benefit-enrollments": schema.benefitEnrollments,
   shifts: schema.shifts,
   "shift-assignments": schema.shiftAssignments,
+  "work-patterns": schema.workPatterns,
+  "work-pattern-assignments": schema.workPatternAssignments,
   projects: schema.projects,
   "time-entries": schema.timeEntries,
   loans: schema.loans,
@@ -83,6 +85,7 @@ export const TABLES: Record<string, any> = {
   "ticket-checklists": schema.ticketChecklists,
   operations: schema.jobs, // the jobs table is surfaced as the `operations` collection (employee-owned)
   "cron-runs": schema.cronRuns, // recorded cron ticks; private-by-default (super-only via **)
+  "search-insights": schema.searchInsights, // daily ⌘K usage counters; private-by-default (super-only via **)
   automations: schema.automations, // workflow rules (HR-authored)
   "event-log": schema.eventLog, // domain event log (admin observability)
   "automation-runs": schema.automationRuns, // automation firing log (admin observability)
@@ -190,6 +193,7 @@ export const LIST_OWNER_COLUMNS: Record<string, string> = {
   reviews: "employeeId",
   settlements: "employeeId",
   "shift-assignments": "employeeId",
+  "work-pattern-assignments": "employeeId",
   stocktakes: "code",
   suggestions: "submitterId",
   "table-views": "ownerId",

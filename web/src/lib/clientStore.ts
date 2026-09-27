@@ -29,6 +29,12 @@
 // collection nothing on the first screen touches. So a consumer hands over a string, registers a hydrator to
 // receive its class's records once at boot, and parses lazily on first touch - which is what lets the row store
 // stay synchronous (see lib/resourceStore.ts) even though IndexedDB is not.
+//
+// EVERY PAYLOAD IS ENCRYPTED ON DISK (AES-GCM), under a key the server hands only to an UNLOCKED session
+// (`client_key` on /users/me - src/lib/appLock.ts clientKeyFor). The key lives in memory as a non-extractable
+// CryptoKey and is never stored, so a locked browser - which the app lock reloads into a fresh page, and which
+// the server refuses the key - holds only ciphertext it cannot read (app-lock-plan.md). No key, no disk: the
+// store runs memory-only rather than write plain text.
 
 const DB_NAME = "hrms";
 const DB_VERSION = 1;
@@ -38,10 +44,63 @@ const DB_VERSION = 1;
  *  rather than copied into this store - and a bump is how its records leave the disks they are already on. A
  *  class that no longer exists would otherwise be hydrated into a budget with no entry for it.
  *
+ *  3: payloads are ciphertext (`c`) rather than plain text (`v`). A version-2 record is plain text: cached server
+ *  data is simply deleted, and a DRAFT is re-encrypted in place, because it exists nowhere else.
+ *
  *  EXPORTED for test/resourceStoreCache.test.ts, which seeds records "as a previous page life would have left
  *  them" and so has to write this number into their keys. It used to spell it `1` by hand, which made a bump
  *  look like a cache that had stopped working. */
-export const SCHEMA = 2;
+export const SCHEMA = 3;
+const PLAIN_SCHEMA = 2;
+
+// ---- The key --------------------------------------------------------------------------------------------
+
+const fromB64url = (s: string): Uint8Array<ArrayBuffer> => {
+  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4));
+  const out = new Uint8Array(new ArrayBuffer(bin.length));
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+};
+
+const importStoreKey = (b64url: string) => crypto.subtle.importKey("raw", fromB64url(b64url), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+
+let keyGiven: string | null | undefined; // undefined = not told yet
+let keyReady: Promise<CryptoKey | null> = Promise.resolve(null);
+
+/**
+ * The key this identity's records are encrypted under, from `client_key` on /users/me. Called by the shell
+ * BEFORE it names the identity (App.tsx), so hydration waits for the key rather than racing it. Null or absent
+ * (an old server, an API-key lane) means memory-only.
+ */
+export function setClientKey(b64url: string | null | undefined): void {
+  const next = b64url || null;
+  if (next === keyGiven) return;
+  keyGiven = next;
+  keyReady = next ? importStoreKey(next).catch(() => null) : Promise.resolve(null);
+}
+
+// The record's own key rides as the additional data, so a ciphertext copied under another record's key fails
+// to open rather than being served as that record.
+const te = new TextEncoder();
+
+/** A stored payload: 12-byte IV then ciphertext+tag. Exported for the test that seeds records like a previous page left them. */
+export async function sealRecord(key: CryptoKey, k: string, value: string): Promise<ArrayBuffer> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: te.encode(k) }, key, te.encode(value));
+  const out = new Uint8Array(12 + ct.byteLength);
+  out.set(iv, 0);
+  out.set(new Uint8Array(ct), 12);
+  return out.buffer;
+}
+
+async function openRecord(key: CryptoKey, k: string, sealed: ArrayBuffer): Promise<string> {
+  const bytes = new Uint8Array(sealed);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes.slice(0, 12), additionalData: te.encode(k) }, key, bytes.slice(12));
+  return new TextDecoder().decode(pt);
+}
+
+/** For the test: the key a `client_key` string imports to. */
+export const storeKeyFrom = importStoreKey;
 
 /** What kind of thing is stored. Each class has its own budget, so one can never crowd out another. */
 export type StoreClass = "rows" | "snapshot" | "draft";
@@ -254,14 +313,22 @@ export function openFor(key: string | undefined): Promise<void> {
 async function hydrate(id: string): Promise<void> {
   const d = await openDb();
   if (!d) return;
+  // No key, no disk: nothing stored can be read, and nothing is deleted either - a key that arrives on the next
+  // page load opens what is here.
+  const key = await keyReady;
+  if (!key) return;
+  const live: { m: Meta; sealed: ArrayBuffer }[] = [];
+  const plainDrafts: { m: Meta; value: string }[] = [];
   try {
     const t = tx("readwrite");
     if (!t) return;
     const metas = (await wrap(t.meta.getAll())) as Meta[];
     const mine: Meta[] = [];
+    const legacy: Meta[] = [];
     const doomed: string[] = [];
     for (const m of metas) {
       if (m.ver === SCHEMA && m.id === id) mine.push(m);
+      else if (m.ver === PLAIN_SCHEMA && m.id === id && m.cls === "draft") legacy.push(m); // re-encrypted below
       else doomed.push(m.k); // another identity, or a payload shape this build no longer understands
     }
     for (const k of doomed) {
@@ -269,7 +336,6 @@ async function hydrate(id: string): Promise<void> {
       t.data.delete(k);
     }
     const now = Date.now();
-    const byClass = new Map<StoreClass, StoredRecord[]>();
     // ONE request for the payloads, not one per record. This used to `await t.data.get(m.k)` inside the loop,
     // so boot cost a round trip through the database per stored key - and awaiting between requests inside a
     // live transaction is the shape that ends as `TransactionInactiveError` on a slower engine, which would
@@ -279,31 +345,75 @@ async function hydrate(id: string): Promise<void> {
     // Filtered to this identity's keys as it is read, so no other namespace's bytes are ever held in memory -
     // the deletes above are queued on the same transaction and requests within one run in order, so they are
     // already gone from what comes back, and this is the belt to that pair of braces.
-    const wanted = new Set(mine.map((m) => m.k));
-    const payloads = new Map<string, string>();
-    for (const rec of (await wrap(t.data.getAll())) as { k: string; v: string }[]) {
-      if (rec && typeof rec.v === "string" && wanted.has(rec.k)) payloads.set(rec.k, rec.v);
+    const wanted = new Set([...mine, ...legacy].map((m) => m.k));
+    const payloads = new Map<string, { v?: unknown; c?: unknown }>();
+    for (const rec of (await wrap(t.data.getAll())) as { k: string; v?: unknown; c?: unknown }[]) {
+      if (rec && wanted.has(rec.k)) payloads.set(rec.k, rec);
     }
-    for (const m of mine) {
-      if (now - m.ts > MAX_AGE_MS[m.cls]) {
+    for (const m of [...mine, ...legacy]) {
+      const p = payloads.get(m.k);
+      const expired = now - m.ts > MAX_AGE_MS[m.cls];
+      const usable = m.ver === SCHEMA ? p?.c instanceof ArrayBuffer : typeof p?.v === "string";
+      if (expired || !usable) {
+        // Past its age, or metadata without a payload: nothing to hand anyone.
         t.meta.delete(m.k);
         t.data.delete(m.k);
         continue;
       }
-      const value = payloads.get(m.k);
-      if (value === undefined) {
-        t.meta.delete(m.k); // metadata without a payload: nothing to hand anyone
-        continue;
-      }
-      track(m);
-      const list = byClass.get(m.cls) ?? [];
-      list.push({ key: m.key, value, ts: m.ts, collection: m.collection, etag: m.etag });
-      byClass.set(m.cls, list);
+      if (m.ver === SCHEMA) live.push({ m, sealed: p!.c as ArrayBuffer });
+      else plainDrafts.push({ m, value: p!.v as string });
     }
-    for (const [cls, records] of byClass) notifyRecords(cls, records);
   } catch {
-    /* a failed hydration is a cold cache, which every consumer already handles */
+    return; /* a failed hydration is a cold cache, which every consumer already handles */
   }
+  // Decrypted OUTSIDE the transaction: a transaction that waits on anything but its own requests commits.
+  const opened: { m: Meta; value: string }[] = [];
+  const unreadable: string[] = [];
+  await Promise.all(
+    live.map(async ({ m, sealed }) => {
+      try {
+        opened.push({ m, value: await openRecord(key, m.k, sealed) });
+      } catch {
+        unreadable.push(m.k); // written under another key (an admin reset moved it): gone for good
+      }
+    }),
+  );
+  const migrated: { m: Meta; value: string; sealed: ArrayBuffer }[] = [];
+  for (const { m, value } of plainDrafts) {
+    const k = composite(id, "draft", m.key);
+    migrated.push({ m: { ...m, k, ver: SCHEMA }, value, sealed: await sealRecord(key, k, value) });
+  }
+  if (identity !== id) return; // the namespace moved on while this was decrypting
+  if (unreadable.length || plainDrafts.length) {
+    try {
+      const t = tx("readwrite");
+      if (t) {
+        for (const k of unreadable) {
+          t.meta.delete(k);
+          t.data.delete(k);
+        }
+        // The encrypted copy and the plain one's removal in ONE transaction, so a draft is never in neither.
+        for (const { m, sealed } of migrated) {
+          t.meta.put(m);
+          t.data.put({ k: m.k, c: sealed });
+        }
+        for (const { m } of plainDrafts) {
+          t.meta.delete(m.k);
+          t.data.delete(m.k);
+        }
+      }
+    } catch {
+      /* the plain drafts stay where they were and are tried again on the next load */
+    }
+  }
+  const byClass = new Map<StoreClass, StoredRecord[]>();
+  for (const { m, value } of [...opened, ...migrated]) {
+    track(m);
+    const list = byClass.get(m.cls) ?? [];
+    list.push({ key: m.key, value, ts: m.ts, collection: m.collection, etag: m.etag });
+    byClass.set(m.cls, list);
+  }
+  for (const [cls, records] of byClass) notifyRecords(cls, records);
 }
 
 // ---- Writes -------------------------------------------------------------------------------------------------
@@ -337,7 +447,7 @@ function scheduleFlush() {
  * its class ceiling: every consumer treats a miss as "not stored", which is always a correct answer here.
  */
 export function put(cls: StoreClass, key: string, value: string, opts: { collection?: string; etag?: string } = {}): void {
-  if (!identity || dbFailed) return;
+  if (!identity || dbFailed || !keyGiven) return;
   if (value.length > MAX_RECORD[cls]) return;
   const k = composite(identity, cls, key);
   queued.set(k, { cls, key, value, collection: opts.collection, etag: opts.etag, ts: Date.now() });
@@ -403,6 +513,15 @@ async function runOneFlush(): Promise<void> {
   const batch = [...queued.entries()];
   queued.clear();
   try {
+    // Sealed BEFORE the transaction opens, for the reason hydration decrypts after one closes: a transaction
+    // that waits on anything but its own requests commits underneath the writer.
+    const key = await keyReady;
+    const sealed = new Map<string, ArrayBuffer>();
+    for (const [k, p] of batch) {
+      if (!p) continue;
+      if (!key) return; // no key: a write would be plain text, so this batch is not stored at all
+      sealed.set(k, await sealRecord(key, k, p.value));
+    }
     const d = await openDb();
     const t = d && tx("readwrite");
     if (!t) return;
@@ -416,7 +535,7 @@ async function runOneFlush(): Promise<void> {
       const meta: Meta = { k, ver: SCHEMA, id: id!, cls: p.cls, key: p.key, collection: p.collection, ts: p.ts, bytes: p.value.length, etag: p.etag };
       track(meta);
       t.meta.put(meta);
-      t.data.put({ k, v: p.value });
+      t.data.put({ k, c: sealed.get(k)! });
     }
     // Bring each touched class back inside its budget by dropping the least recently stored. Recency, not size:
     // the biggest stored copy is often the directory, which is also the one most worth keeping.
@@ -507,6 +626,69 @@ export async function purgeAll(): Promise<void> {
     req.onerror = finish;
     req.onblocked = finish;
   });
+}
+
+/**
+ * The localStorage keys a LOCK leaves behind: the theme, the lock's own bookkeeping, the change-feed sync point
+ * that pairs with the encrypted copies, and toggles that only say how something LOOKS. Everything else goes,
+ * including every key nobody listed here - a search history, a saved table view, a filter can each carry a
+ * name, so an unknown key is treated as one that might.
+ */
+const KEPT_ON_LOCK = [
+  "theme", "hrms.lock.", "hrms.sync:", "nav:collapsed:", "nav:rail:", "am:", "hrms:overflow-probe", "hrms.scanCamera",
+  "hrms.attendance.view:", "events:view", "goals:view", "goals:rollup", "orgchart.", "directory:", "boards:collapsed:",
+  "tickets-last-seen", "tab_seen:", "dash.personal:", "push-enroll-dismissed",
+];
+
+/**
+ * What the app lock takes off this browser (web/src/lib/appLock.ts). The encrypted records STAY: without the key
+ * they are unreadable, the key goes with this page, and the server hands it only to an unlocked session - so an
+ * unlock resumes from them warm, drafts included. What is readable without a key goes: sessionStorage (the
+ * dialog drafts), every localStorage key not listed above, Cache Storage, and any record still in plain text.
+ * Never rejects: a lock must not wait on storage.
+ */
+export async function purgeForLock(): Promise<void> {
+  queued.clear();
+  index.clear();
+  for (const cls of Object.keys(used) as StoreClass[]) used[cls] = 0;
+  identity = null;
+  openedFor = null;
+  keyGiven = undefined;
+  keyReady = Promise.resolve(null);
+  for (const set of hydrators.values()) set.forEach((h) => h.onReset?.());
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && !KEPT_ON_LOCK.some((p) => k === p || k.startsWith(p))) localStorage.removeItem(k);
+    }
+  } catch {
+    /* storage denied: nothing was written to begin with */
+  }
+  try {
+    sessionStorage.clear();
+  } catch {
+    /* same */
+  }
+  try {
+    if (typeof caches !== "undefined") for (const name of await caches.keys()) await caches.delete(name);
+  } catch {
+    /* no Cache Storage here */
+  }
+  try {
+    const d = await openDb();
+    const t = d && tx("readwrite");
+    if (t) {
+      for (const m of (await wrap(t.meta.getAll())) as Meta[]) {
+        if (m.ver === SCHEMA) continue;
+        t.meta.delete(m.k);
+        t.data.delete(m.k);
+      }
+    }
+  } catch {
+    /* nothing more to do */
+  }
+  db?.close();
+  db = null;
 }
 
 /**

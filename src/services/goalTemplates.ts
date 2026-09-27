@@ -108,6 +108,10 @@ export async function applyGoalTemplate(
   const ids = [...new Set(employeeRefs.map(idFromPath).filter(Boolean) as string[])];
   if (!ids.length) throw invalidArgument("select at least one employee");
 
+  // WHOSE GOALS is decided before this runs: the authz middleware asks write on `goals.<code>` of every person
+  // in `employees` (BODY_TARGET_VERBS), so `apply` alone never stamps goals onto someone the caller could not
+  // set a goal for by hand.
+
   const cycleId = idFromPath(cycleRef) ?? null;
   // Validated once for the run, not once per employee: it is the same cycle for all of them. Same rule as
   // goals.ts resolveCycleId - a CLOSED cycle is a legal target, a deleted one is not.

@@ -15,7 +15,7 @@ import {
 } from "../src/domain/aiPolicy";
 import { COLLECTIONS } from "../src/domain/collections";
 import { SEARCH_INDEX } from "../src/domain/searchIndex";
-import { AUDIT } from "../src/domain/manifests";
+import { AUDIT } from "../bootstrap/authz/policy";
 
 // domain/aiPolicy.ts is a set of lists, and a list of collection names is worth exactly as much as the
 // guarantee that the names are real. A typo in NEVER_TO_MODEL is not a failing test anywhere else in the
@@ -66,18 +66,12 @@ describe("the two lists cannot disagree", () => {
     expect(both, "a collection is both opted into the AI index and forbidden from reaching a model").toEqual([]);
   });
 
-  it("every collection the audit policy calls sensitive is forbidden", () => {
-    // The denylist is DERIVED from AUDIT, so this holds the derivation rather than a copy: if somebody later
-    // rewrites NEVER_TO_MODEL as a hand-maintained list, this is the test that notices.
-    for (const c of AUDIT.sensitive_collections) expect(NEVER_TO_MODEL.has(c), `${c} is audited as sensitive but may reach a model`).toBe(true);
-    for (const s of AUDIT.sensitive_subresources) expect(NEVER_TO_MODEL.has(s), `${s} is audited as sensitive but may reach a model`).toBe(true);
-  });
-
-  it("marking a new collection sensitive in AUDIT closes the AI door at the same time", () => {
-    // Not a behavioural test so much as a statement of the coupling the comment in aiPolicy.ts claims. If the
-    // spread ever becomes a literal, the previous test fails; this one documents why that matters.
-    expect(NEVER_TO_MODEL_COLLECTIONS.slice(0, AUDIT.sensitive_collections.length)).toEqual(AUDIT.sensitive_collections);
-    expect(NEVER_TO_MODEL_SUBRESOURCES.slice(0, AUDIT.sensitive_subresources.length)).toEqual(AUDIT.sensitive_subresources);
+  it("every collection the seeded audit policy calls sensitive is forbidden", () => {
+    // The denylist is a code guardrail and the audit policy is data, so the coupling the comment in aiPolicy.ts
+    // claims is held here: marking a collection or sub-resource sensitive in the seeded manifest fails this until
+    // it is forbidden too.
+    for (const c of AUDIT.sensitive_collections) expect(NEVER_TO_MODEL_COLLECTIONS, `${c} is audited as sensitive but may reach a model`).toContain(c);
+    for (const s of AUDIT.sensitive_subresources) expect(NEVER_TO_MODEL_SUBRESOURCES, `${s} is audited as sensitive but may reach a model`).toContain(s);
   });
 });
 

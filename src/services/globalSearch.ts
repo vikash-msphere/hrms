@@ -12,6 +12,7 @@
 // '%q%'` fan-out would scan every searchable table on every keystroke and get more expensive as the database
 // grows, whereas an FTS hit reads the matching rows and a miss reads none.
 import { and, eq, inArray, or, sql, type SQL } from "drizzle-orm";
+import { getTableConfig } from "drizzle-orm/sqlite-core";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -24,6 +25,8 @@ import { aiEmbed, aiFeatureOn } from "./ai";
 import { parseVectorId } from "../lib/vector";
 import { MODELS } from "../domain/aiPolicy";
 import { SEMANTIC_MAX, SEMANTIC_MIN_SCORE, SEMANTIC_WINDOW, meaningful } from "../domain/semanticSearch";
+import { explains, matchExpression, queryTerms, type QueryTerm } from "../domain/searchQuery";
+import { orgSynonymGroups } from "./searchSynonyms";
 
 export type SearchHit = {
   collection: string;
@@ -42,21 +45,29 @@ export type SearchHit = {
  * `semantic` is not a ranking detail - it changes which question the field gate has to ask of the row. See
  * the note in `narrowRedacted`.
  */
-type ScoredHit = SearchHit & { code: string | null; semantic?: boolean };
+// `exact`: found by its human key ("MS-12", `cardsByKey`), not by text - so there is no matched text to re-explain.
+type ScoredHit = SearchHit & { code: string | null; semantic?: boolean; exact?: boolean };
 
 /** The hit as the route returns it: the decision-time fields dropped, and HOW it was found kept as `related`. */
-const toHit = ({ code: _code, semantic, ...hit }: ScoredHit): SearchHit => (semantic ? { ...hit, related: true } : hit);
+const toHit = ({ code: _code, semantic, exact: _exact, ...hit }: ScoredHit): SearchHit => (semantic ? { ...hit, related: true } : hit);
 
 /** A drizzle property as `policy.redacted_fields` spells it (`baseComp` -> `base_comp`). */
 const wireOf = (prop: string) => prop.replace(/[A-Z]/g, (m) => `_${m.toLowerCase()}`);
 
-/** The tokens a match expression is built from - the same split, so the re-check below judges the same words. */
-const tokensOf = (raw: string) =>
-  raw.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((t) => t.length > 0).slice(0, MAX_TOKENS);
-
 const MIN_QUERY = 2;
-const MAX_TOKENS = 6; // a search box query; more terms than this is a paste, not a search
 const TOTAL = 60;
+
+// RANKING. bm25 over the indexed text, then three multipliers on it (bm25 is negative-is-better, so a factor
+// above 1 pushes a row up without ever lifting a weak match far over a strong one):
+//   - TITLE: the share of the query's terms, by any spelling, that appear in the row's TITLE. The index has one
+//     text column, so a word in a ticket's subject and the same word deep in its description ranked alike; the
+//     rendered title is already on the joined `search_docs` row, so asking it costs no read and no migration.
+//   - OWN: the row belongs to the caller (their leave, their ticket, their own profile).
+//   - RECENT: created in the last month.
+const TITLE_BOOST = 1;
+const OWN_BOOST = 0.5;
+const RECENT_BOOST = 0.25;
+const RECENT_MS = 30 * 86_400_000;
 // Neighbours asked of the vector index before the SQL re-check. Generous on purpose: the re-check is the real
 // filter, and a caller with narrow breadth will have most of these thrown away, so asking for too few would
 // leave them with nothing to keep.
@@ -70,18 +81,100 @@ const SEMANTIC_WHEN_KEYWORD_UNDER = 8;
 
 const docs = schema.searchDocs;
 
-// Turn the raw box input into an FTS5 MATCH expression. Every token becomes a quoted prefix term, and terms
-// are ANDed (FTS5's default), so "ali kap" finds "Alice Kapoor". Stripping everything but letters and digits
-// leaves no FTS5 operator or quote in the string, so the expression cannot be subverted by the query text.
-function matchExpression(raw: string): string | null {
-  const tokens = raw
-    .toLowerCase()
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((t) => t.length > 0)
-    .slice(0, MAX_TOKENS);
-  if (tokens.length === 0) return null;
-  return tokens.map((t) => `"${t}"*`).join(" ");
+// A board task's human key: the board's prefix, a dash, the task's number on that board (serialize.ts renders
+// it the same way). The index holds the prefix but not the number, so "MS-12" could not be found by its words.
+const CARD_KEY = /^([a-z][a-z0-9]{0,9})-(\d{1,7})$/i;
+
+/**
+ * The task(s) a whole-query card key names, as hits the caller may see. Three small reads: the boards with
+ * that prefix (a flat catalogue of a handful of rows), the card by (board, number) on its unique index, and
+ * that card's search doc under `branch` - the caller's own cards predicate, which is what decides visibility.
+ */
+async function cardsByKey(deps: Deps, q: string, branch: SQL): Promise<ScoredHit[]> {
+  const m = CARD_KEY.exec(q.trim());
+  if (!m) return [];
+  const boards = await deps.db
+    .select({ uuid: schema.boards.uuid })
+    .from(schema.boards)
+    .where(sql`lower(${schema.boards.taskPrefix}) = ${m[1]!.toLowerCase()}`);
+  if (!boards.length) return [];
+  const cards = await deps.db
+    .select({ uuid: schema.cards.uuid })
+    .from(schema.cards)
+    .where(and(inArray(schema.cards.boardId, boards.map((b) => b.uuid)), eq(schema.cards.seq, Number(m[2]))));
+  if (!cards.length) return [];
+  const found = await deps.db
+    .select({ collection: docs.collection, id: docs.recordId, code: docs.code, title: docs.title, subtitle: docs.subtitle })
+    .from(docs)
+    .where(and(eq(docs.collection, "cards"), inArray(docs.recordId, cards.map((c) => c.uuid)), eq(docs.deleted, false), branch));
+  return found.map((r) => ({ ...r, exact: true }));
 }
+
+/**
+ * The share (0..1) of the query's terms found in the row's title, by any of their spellings, as SQL.
+ *
+ * LITERALS, not bound parameters: a query of six terms with their synonyms is dozens of spellings, and D1 binds
+ * at most 100 per statement, which the scope predicates also spend from. A spelling is letters, digits and
+ * spaces by construction (domain/searchQuery.ts splits on everything else) and anything else is dropped here
+ * rather than trusted, so no quote can reach the statement. `instr` is a substring test, so a half-typed
+ * word ("moni") counts as found in "Monitor", which is what type-ahead wants.
+ */
+function titleShare(terms: QueryTerm[]): SQL {
+  const title = `lower(coalesce("search_docs"."title", ''))`;
+  const parts = terms.map((t) => {
+    const spellings = [t.typed, ...t.alternatives].map((s) => s.join(" ")).filter((s) => /^[\p{L}\p{N} ]+$/u.test(s));
+    return spellings.length ? `(${spellings.map((s) => `instr(${title}, '${s}') > 0`).join(" OR ")})` : "0";
+  });
+  return parts.length ? sql.raw(`((${parts.join(" + ")}) * 1.0 / ${parts.length})`) : sql.raw("0");
+}
+
+/**
+ * The searchable collections an `in:` word names. Forgiving on purpose, because people type what they call
+ * the thing: the exact name (`tickets`), its singular (`ticket`), or the start of it (`leave` names leave
+ * requests, leave types and leave encashments; `asset` names assets, asset categories and asset requests).
+ * A start needs three letters, so `in:a` names nothing rather than half the app.
+ */
+function collectionsNamed(words: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const raw of words) {
+    const w = raw.toLowerCase().replace(/[^a-z-]/g, "");
+    if (!w) continue;
+    for (const { collection: c } of SEARCH_INDEX) {
+      if (c === w || c === `${w}s` || c === `${w}es` || (w.length >= 3 && (c.startsWith(w) || c.replace(/-/g, "").startsWith(w.replace(/-/g, ""))))) out.add(c);
+    }
+  }
+  return out;
+}
+
+/**
+ * Narrowing the caller asked for - `in:tickets`, `@priya`, `is:mine` in the palette. ONLY EVER NARROWS: each
+ * is an extra AND on a query already bound to the caller's own scopes, so none of them can reach a row the
+ * caller's lists would not return.
+ *   - `collections` keeps only the collections these words name (`collectionsNamed`); one the caller may not
+ *     list still contributes nothing, and words that name nothing searchable answer nothing.
+ *   - `ownerId` keeps only rows whose owner column is this employee (see `SearchScoping.owner` - the person a
+ *     leave request, ticket or asset belongs to). Flat catalogues have no owner and drop out.
+ *   - `after` / `before` (epoch ms) keep rows created in that window, off `search_docs.created_at` (indexed).
+ *   - `status` keeps rows whose own state/status column holds that value. Collections with no such column drop
+ *     out, and a value that is not status-shaped answers nothing rather than being ignored.
+ */
+export type SearchNarrowing = { collections?: string[]; ownerId?: string; after?: number; before?: number; status?: string };
+
+/** A collection's state/status column, as `{ prop, table, column, idColumn }`, or null when it has none. Every
+ *  entry that has one lists it among its `match` columns, so it is found there rather than listed twice. */
+function statusColumnOf(entry: SearchEntry): { prop: string; table: string; column: string; id: string } | null {
+  const prop = entry.match.find((p) => p === "state" || p === "status");
+  const column = prop ? (entry.table as Record<string, { name?: string }>)[prop]?.name : undefined;
+  const id = (entry.table as Record<string, { name?: string }>).uuid?.name;
+  return prop && column && id ? { prop, table: getTableConfig(entry.table).name, column, id } : null;
+}
+
+// A status value as a SQL literal: lower-case letters, digits, space, `_` and `-` only, so it can be inlined
+// (no bound parameter spent per branch) with no quote able to reach the statement. Null = not a status.
+const statusLiteral = (raw: string): string | null => {
+  const v = raw.trim().toLowerCase();
+  return /^[a-z0-9_ -]{1,30}$/.test(v) ? v : null;
+};
 
 // `collection IN (...)` as a literal - the names come from the registry, never from the caller, so they cost
 // no bound parameters. That matters: D1 caps a statement's parameters, and the scope predicates need them.
@@ -109,11 +202,19 @@ export async function globalSearch(
   // The per-row field gate (`http/fieldAccess.ts redactionGateFor`), supplied by the route because deciding is
   // not this file's job. Absent = no field-level narrowing, which is what every caller did before it existed.
   gate?: RedactionGate,
+  narrowing: SearchNarrowing = {},
 ): Promise<SearchHit[]> {
   const q = rawQuery.trim();
   if (q.length < MIN_QUERY || scopes.size === 0) return [];
-  const match = matchExpression(q);
+  // The org's own synonym groups ride beside the built-in ones (services/searchSynonyms.ts).
+  const synonyms = await orgSynonymGroups(deps);
+  const match = matchExpression(q, synonyms);
   if (!match) return [];
+  const only = narrowing.collections?.length ? collectionsNamed(narrowing.collections) : null;
+  if (only && only.size === 0) return []; // `in:` named nothing searchable
+  const owner = narrowing.ownerId;
+  const status = narrowing.status !== undefined ? statusLiteral(narrowing.status) : undefined;
+  if (status === null) return []; // `status:` named something that is not a status
 
   // Collections whose filter is identical share one OR-branch, so the statement stays small: for most callers
   // every own-scoped collection collapses into a single predicate, rather than one per collection.
@@ -121,6 +222,9 @@ export async function globalSearch(
   for (const entry of SEARCH_INDEX) {
     const scope = scopes.get(entry.collection);
     if (!scope) continue; // not listable by this caller
+    if (only && !only.has(entry.collection)) continue; // `in:` asked for other collections
+    if (owner && entry.scoping.kind === "flat") continue; // a catalogue row belongs to nobody
+    if (status && !statusColumnOf(entry)) continue; // a collection with no status has no row in that status
     const pred = scopePredicate(user, entry.collection, scope);
     if (pred === null) continue; // provably empty
     // Non-public rows (an unpublished announcement) are indexed but hidden unless the caller holds the
@@ -133,19 +237,44 @@ export async function globalSearch(
   }
   if (groups.size === 0) return [];
 
+  // The owner narrowing rides INSIDE each branch, so the semantic half's re-read (which reuses `branches`)
+  // is narrowed by it too.
+  // So do the date window and the status, as LITERALS: a bound parameter per branch per filter would spend the
+  // statement's 100-parameter budget the scope predicates need.
+  const after = Number.isFinite(narrowing.after) ? sql.raw(`"search_docs"."created_at" >= ${Math.floor(narrowing.after!)}`) : undefined;
+  const before = Number.isFinite(narrowing.before) ? sql.raw(`"search_docs"."created_at" < ${Math.floor(narrowing.before!)}`) : undefined;
+  const statusIn = (collections: string[]): SQL | undefined => {
+    if (!status) return undefined;
+    const parts = collections.flatMap((c) => {
+      const s = statusColumnOf(SEARCH_INDEX.find((e) => e.collection === c)!);
+      return s ? [`("search_docs"."collection" = '${c}' AND exists (select 1 from "${s.table}" t where t."${s.id}" = "search_docs"."record_id" and lower(t."${s.column}") = '${status}'))`] : [];
+    });
+    return sql.raw(parts.length ? `(${parts.join(" OR ")})` : "0");
+  };
   const branches = [...groups.values()].map((g) => {
     const inList = collectionIn(g.collections);
-    return g.pred ? and(inList, g.pred)! : inList;
+    return and(inList, g.pred, owner ? eq(docs.ownerId, owner) : undefined, after, before, statusIn(g.collections))!;
   });
 
+  // The boosts, as 0/1 terms. `coalesce` because a row with no owner compares NULL, and a NULL factor would
+  // make the whole score NULL - which sorts FIRST in an ascending order.
+  const mine = user.employeeId ? sql`coalesce(${docs.ownerId} = ${user.employeeId}, 0)` : sql`0`;
+  const recent = sql`coalesce(${docs.createdAt} > ${deps.clock.now().getTime() - RECENT_MS}, 0)`;
+  const inTitle = titleShare(queryTerms(q, synonyms));
+  // The FTS table is named, not aliased: bm25() takes the table itself as its first argument.
   const rows = await deps.db.all<SearchHit & { code: string | null }>(sql`
     select ${docs.collection} as collection, ${docs.recordId} as id, ${docs.code} as code, ${docs.title} as title, ${docs.subtitle} as subtitle
-    from "search_fts" f join ${docs} on ${docs}."rowid" = f."rowid"
-    where f."text" match ${match} and ${eq(docs.deleted, false)} and (${or(...branches)})
-    order by f."rank"
+    from "search_fts" join ${docs} on ${docs}."rowid" = "search_fts"."rowid"
+    where "search_fts" match ${match} and ${eq(docs.deleted, false)} and (${or(...branches)})
+    order by bm25("search_fts") * (1.0 + ${sql.raw(String(TITLE_BOOST))} * ${inTitle} + ${sql.raw(String(OWN_BOOST))} * ${mine} + ${sql.raw(String(RECENT_BOOST))} * ${recent})
     limit ${sql.raw(String(TOTAL))}
   `);
-  const keyword = rows.map((r) => ({ collection: r.collection, id: r.id, code: r.code, title: r.title, subtitle: r.subtitle }));
+  const matched = rows.map((r) => ({ collection: r.collection, id: r.id, code: r.code, title: r.title, subtitle: r.subtitle }));
+  // A board task's key ("MS-12") first, when that is what was typed. Read under the SAME branch predicate the
+  // cards rows above were, so a card the caller cannot list is not found this way either.
+  const cardsAt = [...groups.values()].findIndex((g) => g.collections.includes("cards"));
+  const exact = cardsAt >= 0 ? await cardsByKey(deps, q, branches[cardsAt]!) : [];
+  const keyword = exact.length ? [...exact, ...matched.filter((h) => !exact.some((e) => e.id === h.id && e.collection === h.collection))] : matched;
 
   // The semantic half, when this deployment has a model and an index. Everything below is additive: a refusal
   // at any step leaves `keyword` exactly as it was, which is the search this app had before any of this.
@@ -160,7 +289,20 @@ export async function globalSearch(
     ? []
     : await semanticHits(deps, q, [...groups.values()].flatMap((g) => g.collections), branches);
   const hits = semantic.length ? appendRelated(keyword, semantic) : keyword;
-  return gate ? await narrowRedacted(deps, hits, tokensOf(q), gate) : hits.map(toHit);
+  // An owner narrowing is a question about the owner COLUMN. A caller denied that column on a row may still
+  // list the row, but must not learn whose it is by asking `@name` and watching it come back.
+  // A status narrowing is the same kind of question about the status column.
+  const probed = (owner || status) && gate
+    ? hits.filter((h) => {
+        const entry = SEARCH_INDEX.find((e) => e.collection === h.collection);
+        if (!entry) return true;
+        const denied = gate(h.collection, h.code);
+        if (owner && entry.scoping.kind !== "flat" && denied.includes(wireOf(entry.scoping.owner))) return false;
+        const s = status ? statusColumnOf(entry) : null;
+        return !(s && denied.includes(wireOf(s.prop)));
+      })
+    : hits;
+  return gate ? await narrowRedacted(deps, probed, queryTerms(q, synonyms), gate) : probed.map(toHit);
 }
 
 /**
@@ -282,7 +424,7 @@ function appendRelated(keyword: ScoredHit[], semantic: ScoredHit[]): ScoredHit[]
 async function narrowRedacted(
   deps: Deps,
   hits: ScoredHit[],
-  tokens: string[],
+  terms: QueryTerm[],
   gate: RedactionGate,
 ): Promise<SearchHit[]> {
   const entryOf = new Map(SEARCH_INDEX.map((e) => [e.collection, e]));
@@ -318,6 +460,12 @@ async function narrowRedacted(
       if (!hidden(entry.title) && !hidden(entry.subtitle)) out.push(next);
       continue;
     }
+    // A task found by its key was matched on the board prefix and the task's number - neither a redactable
+    // field - so there is no withheld text to re-explain it from. It still shows only what the caller may read.
+    if (hit.exact) {
+      out.push(next);
+      continue;
+    }
 
     out.push(next);
     if (!hidden(entry.match)) continue; // nothing denied was matchable, so the hit needs no explaining
@@ -345,7 +493,9 @@ async function narrowRedacted(
         .from(group.entry.table)
         .where(inArray(table.uuid, ids)) as PromiseLike<{ uuid: string; text: string }[]>,
     );
-    for (const row of rows) if (tokens.every((t) => (row.text ?? "").includes(t))) explained.add(`${group.entry.collection}|${row.uuid}`);
+    // By any spelling of each term: a hit found through a synonym ("pto" matching "Earned Leave") is explained
+    // by the synonym, and asking for the typed word would drop every such hit for a caller with a field deny.
+    for (const row of rows) if (explains(row.text ?? "", terms)) explained.add(`${group.entry.collection}|${row.uuid}`);
   }
   const needed = new Set([...recheck.values()].flatMap((g) => g.ids.map((id) => `${g.entry.collection}|${id}`)));
   return out

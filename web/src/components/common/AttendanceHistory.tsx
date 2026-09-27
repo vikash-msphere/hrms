@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { get, create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
+import { useScheduleView } from "@/hooks/useScheduleView";
 import { useMedia } from "@/hooks/useMedia";
 import { listAllSessions } from "@/lib/clock";
 import { cn, idOf, formatDate } from "@/lib/utils";
@@ -222,14 +223,20 @@ export function AttendanceHistory({
     return (ref?: string) => (ref ? m.get(idOf(ref)) : undefined);
   }, [leaveTypes]);
 
+  // This person's own days. WIDENED BACK TO THE COMPARISON WINDOW, because the same `buildRows` is used for
+  // it: resolved against the visible window alone, the previous period would fall back to the org's week and
+  // the two halves of the comparison would be counted on different calendars.
+  const schedView = useScheduleView(sched, prevWindow.from < fromYmd ? prevWindow.from : fromYmd, toYmd, employeeId);
+  const schedOf = useMemo(() => schedView.of(employeeId), [schedView, employeeId]);
+
   const buildRows = useCallback(
     (src: AttendanceSession[], opts: { from: string; to: string }) =>
       buildAttendanceRows({
-        fromYmd: opts.from, toYmd: opts.to, todayYmd: orgToday, sched,
+        fromYmd: opts.from, toYmd: opts.to, todayYmd: orgToday, schedOf,
         summaries: summarizeByDay(src, sched, { excusals, policy: punctuality.attendance, leaveRanges }),
         holidays: holidaySet, leaveRanges, marksByDay, joinedYmd, trackedFromYmd,
       }),
-    [orgToday, sched, holidaySet, leaveRanges, marksByDay, joinedYmd, trackedFromYmd, excusals, punctuality],
+    [orgToday, sched, schedOf, holidaySet, leaveRanges, marksByDay, joinedYmd, trackedFromYmd, excusals, punctuality],
   );
 
   const rows = useMemo(() => buildRows(sessions, { from: fromYmd, to: toYmd }), [sessions, buildRows, fromYmd, toYmd]);
@@ -264,7 +271,7 @@ export function AttendanceHistory({
   const listRows = useMemo(() => kf.apply(rows), [rows, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
   const weeks = useMemo<WeekGroup[]>(() => groupWeeks(listRows), [listRows]);
 
-  const stats = useMemo(() => statsOf(rows, tz, sched.full_day_minutes, orgToday), [rows, tz, sched.full_day_minutes, orgToday]);
+  const stats = useMemo(() => statsOf(rows, tz, schedOf, orgToday), [rows, tz, schedOf, orgToday]);
   // Absent days in the visible window, surfaced above the table so a missed punch is one click from a fix.
   const absentRows = useMemo(() => rows.filter((r) => r.status === "absent"), [rows]);
   const shortDays = useMemo(() => rows.filter(isShortRow).length, [rows, sched.full_day_minutes]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -282,13 +289,13 @@ export function AttendanceHistory({
           `attendance?employee=employees/${employeeId}&from=${encodeURIComponent(`${prevWindow.from}T00:00:00.000Z`)}&to=${encodeURIComponent(`${prevWindow.to}T23:59:59.999Z`)}`,
         );
         if (!live) return;
-        setPrevStats(statsOf(buildRows(prev, { from: prevWindow.from, to: prevWindow.to }), tz, sched.full_day_minutes, orgToday));
+        setPrevStats(statsOf(buildRows(prev, { from: prevWindow.from, to: prevWindow.to }), tz, schedOf, orgToday));
       } catch {
         if (live) setPrevStats(null);
       }
     })();
     return () => { live = false; };
-  }, [compare, prevWindow, buildRows, employeeId, tz, sched.full_day_minutes, orgToday]);
+  }, [compare, prevWindow, buildRows, employeeId, tz, schedOf, orgToday]);
 
   // The grid opens on the day you're most likely to be looking for: today, else the newest day with a record.
   useEffect(() => {

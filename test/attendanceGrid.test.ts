@@ -3,6 +3,7 @@ import {
   buildAttendanceRows, statsOf, summarizeByDay, trackedFromOf, DEFAULT_SCHEDULE,
   type AttendanceSchedule, type DayCredit,
 } from "../web/src/lib/attendance";
+import { orgScheduleOf } from "../src/domain/workSchedule";
 import type { AttendanceSession } from "../web/src/types";
 
 // The grid the browser draws, where a day mark has to agree with what the server settles.
@@ -14,6 +15,9 @@ import type { AttendanceSession } from "../web/src/types";
 
 const TZ = "Asia/Kolkata";
 const sched: AttendanceSchedule = { ...DEFAULT_SCHEDULE, timezone: TZ, work_days: [1, 2, 3, 4, 5], full_day_minutes: 480, half_day_minutes: 240 };
+// The same schedule as the day-by-day resolver the grid reads (src/domain/workSchedule.ts). Nobody here is on
+// a roster entry or a work pattern, so every day is the org's own and these figures are what they always were.
+const schedOf = orgScheduleOf(sched);
 
 // 2026-06-01 is a Monday; 06-06 a Saturday.
 const MON = "2026-06-01";
@@ -28,14 +32,14 @@ const punch = (day: string, hours: number): AttendanceSession => ({
 
 const build = (opts: { sessions?: AttendanceSession[]; marks?: Map<string, DayCredit>; holidays?: Set<string>; leaveRanges?: { start: string; end: string; startSession?: number; endSession?: number }[] } = {}) =>
   buildAttendanceRows({
-    fromYmd: MON, toYmd: TUE, todayYmd: TODAY, sched,
+    fromYmd: MON, toYmd: TUE, todayYmd: TODAY, schedOf,
     summaries: summarizeByDay(opts.sessions ?? [], sched),
     holidays: opts.holidays ?? new Set<string>(),
     leaveRanges: opts.leaveRanges ?? [],
     marksByDay: opts.marks,
   });
 
-const absences = (rows: ReturnType<typeof build>) => statsOf(rows, TZ, sched.full_day_minutes, TODAY).absent;
+const absences = (rows: ReturnType<typeof build>) => statsOf(rows, TZ, schedOf, TODAY).absent;
 
 describe("a day mark rides on the row beside what the punches earned", () => {
   it("keeps both facts, because a marked day is the one somebody asks about later", () => {
@@ -84,7 +88,7 @@ describe("the absence count says what payroll will dock", () => {
     const onTimeTue = { ...punch(TUE, 9), clock_in: `${TUE}T03:00:00.000Z` } as AttendanceSession;
     const late = build({ sessions: [punch(MON, 9), onTimeTue], marks: new Map([[MON, "absent"]]) });
     expect(late.find((r) => r.day === MON)!.status).toBe("late");
-    const stats = statsOf(late, TZ, sched.full_day_minutes, TODAY);
+    const stats = statsOf(late, TZ, schedOf, TODAY);
     expect(stats.late).toBe(1); // still late - the mark does not claim the punches were wrong
     expect(stats.absent).toBe(1); // and still docked
   });
@@ -103,7 +107,7 @@ describe("the absence count says what payroll will dock", () => {
   it("leaves every other figure reading the punches", () => {
     // A mark does not claim the punches were wrong - that is a regularization's job - so days worked, hours
     // and lateness stay observations.
-    const marked = statsOf(build({ sessions: [punch(MON, 3)], marks: new Map([[MON, "full"]]) }), TZ, sched.full_day_minutes, TODAY);
+    const marked = statsOf(build({ sessions: [punch(MON, 3)], marks: new Map([[MON, "full"]]) }), TZ, schedOf, TODAY);
     expect(marked.worked).toBe(1);
     expect(marked.minutes).toBe(180);
   });
@@ -113,7 +117,7 @@ describe("days before HRMS records start are not absences", () => {
   // Joined years ago, HRMS records start on Tuesday: Monday had no way to be punched.
   const tracked = (opts: { sessions?: AttendanceSession[]; marks?: Map<string, DayCredit>; holidays?: Set<string>; leaveRanges?: { start: string; end: string; startSession?: number; endSession?: number; paid?: boolean }[] } = {}) =>
     buildAttendanceRows({
-      fromYmd: MON, toYmd: TUE, todayYmd: TODAY, sched,
+      fromYmd: MON, toYmd: TUE, todayYmd: TODAY, schedOf,
       summaries: summarizeByDay(opts.sessions ?? [], sched),
       holidays: opts.holidays ?? new Set<string>(),
       leaveRanges: opts.leaveRanges ?? [],
@@ -126,7 +130,7 @@ describe("days before HRMS records start are not absences", () => {
     const rows = tracked();
     expect(rows.find((r) => r.day === MON)?.status).toBe("untracked");
     expect(rows.find((r) => r.day === TUE)?.status).toBe("absent");
-    const stats = statsOf(rows, TZ, sched.full_day_minutes, TODAY);
+    const stats = statsOf(rows, TZ, schedOf, TODAY);
     expect(stats.absent).toBe(1);
     expect(stats.workingDays).toBe(1); // the untracked day owes nothing
   });
@@ -141,7 +145,7 @@ describe("days before HRMS records start are not absences", () => {
   });
 
   it("lets HR's mark give an untracked day its value", () => {
-    const marked = (credit: DayCredit) => statsOf(tracked({ marks: new Map([[MON, credit]]) }), TZ, sched.full_day_minutes, TODAY);
+    const marked = (credit: DayCredit) => statsOf(tracked({ marks: new Map([[MON, credit]]) }), TZ, schedOf, TODAY);
     expect(marked("absent").absent).toBe(2);
     expect(marked("full").absent).toBe(1);
   });

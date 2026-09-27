@@ -12,6 +12,7 @@ import { DOCUMENT_KINDS } from "../services/letterheads";
 import { validateStateMachine, type StateMachine } from "../domain/stateMachines";
 import { validateRestrictions } from "../domain/leaveRestrictions";
 import { validatePunctuality } from "../domain/punctuality";
+import { MAX_GROUP_TERMS, MAX_ORG_GROUPS, MAX_TERM_CHARS } from "../domain/searchQuery";
 import { AI_FEATURES, CARD_DUPLICATE_SENSITIVITIES, MODERATION_FALLBACKS } from "../domain/aiPolicy";
 import { MODERATABLE, MODERATION_WALL_SCOPES, isModeratable } from "../domain/moderation";
 import { EXTRACTABLE_FIELDS } from "../domain/resumeFields";
@@ -21,6 +22,7 @@ import { validateAtsConfig, orphanedStages, type AtsStage } from "../domain/ats"
 import { stagesInUse } from "../services/ats";
 import { getFieldDefs, identityValueCounts, purgeIdentityFieldsSlice, IDENTITY_PURGE_JOB, type IdentityPurgeCursor } from "../services/identityDetails";
 import { allocFlatCode } from "../services/codeAlloc";
+import { MAX_CELEBRATION_LEAD_DAYS } from "../services/celebrations";
 import * as schema from "../db/schema";
 
 // `value` IS REQUIRED AND IS AN OBJECT. Every setting is a JSON object blob - `getSettingValue` spreads it over
@@ -198,6 +200,10 @@ function validateTagCustody(value: unknown) {
 const LOP_BASES = ["working_days", "days_30"] as const;
 const LOP_WAGE_BASES = ["gross", "basic"] as const;
 const PRORATION_BASES = ["calendar_days", "working_days"] as const;
+// Whether a day is resolved through the roster and work patterns, or from this blob alone
+// (domain/workSchedule.ts). Closed here for the reason every vocabulary above is: an unknown value reads as
+// the default, so a typo would leave the org on "org" while the screen said schedules were switched on.
+const SCHEDULE_SOURCES = ["org", "resolved"] as const;
 
 function validateTimezone(tz: unknown) {
   if (typeof tz !== "string" || !tz.trim()) throw invalidArgument("attendance.timezone must be a non-empty IANA timezone name, e.g. Asia/Kolkata");
@@ -230,7 +236,7 @@ function validateAttendance(value: unknown) {
     throw invalidArgument("attendance.half_day_minutes must not exceed attendance.full_day_minutes");
   }
   if (value.lop_enabled != null && typeof value.lop_enabled !== "boolean") throw invalidArgument("attendance.lop_enabled must be a boolean");
-  for (const [k, allowed] of [["lop_basis", LOP_BASES], ["lop_wage_basis", LOP_WAGE_BASES], ["proration_basis", PRORATION_BASES]] as const) {
+  for (const [k, allowed] of [["lop_basis", LOP_BASES], ["lop_wage_basis", LOP_WAGE_BASES], ["proration_basis", PRORATION_BASES], ["schedule_source", SCHEDULE_SOURCES]] as const) {
     const v = value[k];
     if (v != null && (typeof v !== "string" || !(allowed as readonly string[]).includes(v))) {
       throw invalidArgument(`attendance.${k} must be one of: ${allowed.join(", ")}`);
@@ -746,10 +752,26 @@ function validateApprovals(value: unknown): void {
   }
 }
 
+/**
+ * How far ahead birthdays and anniversaries show (services/celebrations.ts#celebrationLeadDays). REQUIRED, not
+ * optional like most leaves here: the reader has no fallback window, so a blob without it would turn the
+ * feed into an error for everyone.
+ */
+function validateCelebrations(value: unknown): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw invalidArgument("celebrations must be an object");
+  const v = value as Record<string, unknown>;
+  for (const k of Object.keys(v)) if (k !== "lead_days") throw invalidArgument(`celebrations.${k} is not a setting`);
+  const n = v.lead_days;
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > MAX_CELEBRATION_LEAD_DAYS) {
+    throw invalidArgument(`celebrations.lead_days must be a whole number of days between 0 and ${MAX_CELEBRATION_LEAD_DAYS}`);
+  }
+}
+
 const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
   ["ai", validateAi],
   ["approvals", validateApprovals],
   ["attention", validateAttention],
+  ["celebrations", validateCelebrations],
   ["ctc", validateCtc],
   ["esign", validateEsign],
   ["payslip", validatePayslip],
@@ -783,7 +805,27 @@ const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
   ["payroll-variance", validatePayrollVariance],
   ["performance", validatePerformance],
   ["referrals", validateReferrals],
+  // The org's own ⌘K synonym groups. Every member widens every other member of its group in EVERY search, so
+  // a malformed or oversized blob is refused rather than stored to be half-read (domain/searchQuery.ts).
+  ["search-synonyms", validateSearchSynonyms],
 ]);
+
+function validateSearchSynonyms(value: unknown) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw invalidArgument("search-synonyms must be an object");
+  const v = value as Record<string, unknown>;
+  for (const k of Object.keys(v)) if (k !== "groups") throw invalidArgument(`search-synonyms.${k} is not a setting`);
+  if (v.groups === undefined) return;
+  if (!Array.isArray(v.groups)) throw invalidArgument("search-synonyms.groups must be a list of groups");
+  if (v.groups.length > MAX_ORG_GROUPS) throw invalidArgument(`at most ${MAX_ORG_GROUPS} synonym groups`);
+  for (const [i, g] of v.groups.entries()) {
+    if (!Array.isArray(g)) throw invalidArgument(`synonym group ${i + 1} must be a list of words`);
+    if (g.length < 2 || g.length > MAX_GROUP_TERMS) throw invalidArgument(`synonym group ${i + 1} needs 2 to ${MAX_GROUP_TERMS} terms`);
+    for (const t of g) {
+      if (typeof t !== "string" || !t.trim() || t.length > MAX_TERM_CHARS) throw invalidArgument(`synonym group ${i + 1}: each term is 1 to ${MAX_TERM_CHARS} characters`);
+      if (!/[\p{L}\p{N}]/u.test(t)) throw invalidArgument(`synonym group ${i + 1}: "${t}" has no letters or digits to search by`);
+    }
+  }
+}
 
 /**
  * Keys the server READS through `getSettingValue` that deliberately have no validator, each with the reason.
@@ -904,7 +946,8 @@ export const settings = new Hono<AppEnv>()
     }
     // Optional, like every other patch in the API: send the ETag the edited value was read at and a save that
     // would overwrite somebody else's is refused with 409 instead of silently winning (services/settings.ts).
-    const row = await upsertSetting(c.get("deps"), c.get("user"), c.req.param("setting_id"), c.req.valid("json").value, c.req.header("If-Match"));
+    // A caller that read NO row sends `If-None-Match: *` instead, so its first save cannot land over another's.
+    const row = await upsertSetting(c.get("deps"), c.get("user"), c.req.param("setting_id"), c.req.valid("json").value, c.req.header("If-Match"), c.req.header("If-None-Match"));
     // THE SETTINGS ROW IS WRITTEN FIRST, and only then is anything destroyed. The purge walks every employee's
     // encrypted blob and every uploaded proof, which does not fit in one invocation - so it runs as a bounded
     // slice here and the rest goes to the drain (services/identityDetails.ts#purgeIdentityFieldsSlice). Ordered

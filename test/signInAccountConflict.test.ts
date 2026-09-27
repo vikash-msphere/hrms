@@ -62,7 +62,7 @@ beforeEach(async () => {
   await deps.db.delete(schema.users);
   await deps.db.delete(schema.employees);
   await deps.db.delete(schema.codeSequences);
-  await deps.db.insert(schema.roles).values([{ name: "employee", label: "Employee" }]).onConflictDoNothing();
+  await deps.db.insert(schema.roles).values([{ name: "employee", label: "Employee", provisioned: true }]).onConflictDoNothing();
 });
 
 describe("first login when the employee already has a different account", () => {

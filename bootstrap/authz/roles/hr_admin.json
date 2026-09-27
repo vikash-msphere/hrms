@@ -1,0 +1,1165 @@
+{
+  "role": "hr_admin",
+  "label": "HR Admin",
+  "protected": true,
+  "provisioned": false,
+  "description": "Runs people operations - the employee record (never anyone else's bank, identity or personal info), org catalogues and HR settings, leave and attendance decisions, recruiting, lifecycle, benefits, compliance, the help desk, the asset register and the board. An employee first (`extends: employee`), so HR files its own leave and claims like anyone. Write, not admin: HR soft-deletes, only super admin force-purges. Pay configuration is payroll's, and governance switches are super admin's.",
+  "extends": "employee",
+  "levels": [
+    {
+      "area": "catalog",
+      "pattern": "holidays.**",
+      "level": "write",
+      "why": "Maintains the holiday calendar."
+    },
+    {
+      "area": "catalog",
+      "pattern": "leave-types.**",
+      "level": "write",
+      "why": "Maintains the leave types."
+    },
+    {
+      "area": "catalog",
+      "pattern": "departments.**",
+      "level": "write",
+      "why": "Maintains the department tree."
+    },
+    {
+      "area": "catalog",
+      "pattern": "announcements.**",
+      "level": "write",
+      "why": "Runs and moderates the company board."
+    },
+    {
+      "area": "catalog",
+      "pattern": "reimbursement-categories.**",
+      "level": "write",
+      "why": "HR configures reimbursement categories"
+    },
+    {
+      "area": "catalog",
+      "pattern": "expense-categories.**",
+      "level": "write",
+      "why": "HR (finance) configures operational-expense categories"
+    },
+    {
+      "area": "catalog",
+      "pattern": "asset-categories.**",
+      "level": "write",
+      "why": "HR maintains the kinds of asset, and the tag code each one prints"
+    },
+    {
+      "area": "catalog",
+      "pattern": "benefit-plans.**",
+      "level": "write",
+      "why": "Authors the benefit plan catalogue."
+    },
+    {
+      "area": "catalog",
+      "pattern": "shifts.**",
+      "level": "write",
+      "why": "Maintains the shift catalogue."
+    },
+    {
+      "area": "catalog",
+      "pattern": "projects.**",
+      "level": "write",
+      "why": "Maintains the project catalogue timesheets log against."
+    },
+    {
+      "area": "catalog",
+      "pattern": "events.**",
+      "level": "write",
+      "why": "Runs the org calendar."
+    },
+    {
+      "area": "catalog",
+      "pattern": "review-cycles.**",
+      "level": "write",
+      "why": "Administers review cycles."
+    },
+    {
+      "area": "people",
+      "pattern": "employees",
+      "level": "write",
+      "why": "Field-precise employee write: collection (create/list) + base record + the two non-PII protected fields (department/manager). Deliberately omits bank-account/identity/personal-info, so HR no longer reaches anyone else's PII through a broad grant. (Re-parent via department is still 501-guarded.)"
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*",
+      "level": "write",
+      "why": "Field-precise employee write: collection (create/list) + base record + the two non-PII protected fields (department/manager). Deliberately omits bank-account/identity/personal-info, so HR no longer reaches anyone else's PII through a broad grant. (Re-parent via department is still 501-guarded.)"
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.probation_end_date.**",
+      "level": "read",
+      "why": "redacted field the row grant above does not reach"
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.legal_name.**",
+      "level": "read",
+      "why": "Anyone's legal name: a redacted field the row grant does not reach. HR keeps the record."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.employee_number.**",
+      "level": "read",
+      "why": "Anyone's employee number: a redacted field the row grant does not reach. HR keeps the record."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.epf_enrolled.**",
+      "level": "read",
+      "why": "Anyone's epf enrolled: a redacted field the row grant does not reach. HR keeps the record."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.eps_excluded.**",
+      "level": "read",
+      "why": "Anyone's eps excluded: a redacted field the row grant does not reach. HR keeps the record."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.tracked_from.**",
+      "level": "read",
+      "why": "Anyone's tracked from: a redacted field the row grant does not reach. HR keeps the record."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.department.**",
+      "level": "write",
+      "why": "Moves people between departments (a protected field)."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.manager.**",
+      "level": "write",
+      "why": "Sets anyone's manager (a protected field)."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.bio.**",
+      "level": "write",
+      "why": "moderate/tidy anyone's public about-me (not PII)"
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.presence.**",
+      "level": "read",
+      "why": "anyone's status pill (derived from leave + attendance, which HR reads in full)"
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "positions.**",
+      "level": "write",
+      "why": "HR records promotions/transfers (effective-dated role history)"
+    },
+    {
+      "area": "money",
+      "pattern": "bonuses.**",
+      "level": "write",
+      "why": "HR records one-off awards (bonus/incentive)"
+    },
+    {
+      "area": "money",
+      "pattern": "settlements.**",
+      "level": "write",
+      "why": "HR computes full-and-final settlements at exit"
+    },
+    {
+      "area": "documents",
+      "pattern": "letter-templates.**",
+      "level": "write",
+      "why": "HR authors letter types (read = who may generate is per-template ACL)"
+    },
+    {
+      "area": "documents",
+      "pattern": "org-documents.**",
+      "level": "write",
+      "why": "Publishes and manages org documents and policies."
+    },
+    {
+      "area": "documents",
+      "pattern": "personal-documents.**",
+      "level": "write",
+      "why": "Files and manages everyone's personal documents."
+    },
+    {
+      "area": "documents",
+      "pattern": "document-acknowledgements.**",
+      "level": "read",
+      "why": "Who has signed the current version of a policy, and who is still pending: the Documents page's AckProgressDialog reads this roster, and HR is the only role that opens it. Nothing had granted the collection at any level, so the panel silently showed an empty signed list next to a chase list holding the whole company - the same \"route shipped, grant did not\" shape as the presence pill."
+    },
+    {
+      "area": "money",
+      "pattern": "vendors.**",
+      "level": "write",
+      "why": "HR (finance) maintains the vendor master"
+    },
+    {
+      "area": "money",
+      "pattern": "expense-budgets.**",
+      "level": "write",
+      "why": "HR (finance) sets + reviews budgets (spend derived from expenses)"
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.**",
+      "level": "read",
+      "why": "HR can view all leave-requests"
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-balances.**",
+      "level": "read",
+      "why": "HR can view everyone's leave balances (encashment page needs the real number)"
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.**",
+      "level": "read",
+      "why": "HR can view + decide all reimbursement claims"
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.**",
+      "level": "read",
+      "why": "HR (finance) views + decides all operational expenses org-wide"
+    },
+    {
+      "area": "automation",
+      "pattern": "automations.**",
+      "level": "write",
+      "why": "Workflow engine: HR authors the automation rules (authoring is the privileged act - actions run with system authority) and reads the event + run logs. Not granted to employee/manager (private-by-default)."
+    },
+    {
+      "area": "automation",
+      "pattern": "event-log.**",
+      "level": "read",
+      "why": "Reads the workflow engine's event log."
+    },
+    {
+      "area": "automation",
+      "pattern": "automation-runs.**",
+      "level": "read",
+      "why": "Reads the workflow engine's run log."
+    },
+    {
+      "area": "automation",
+      "pattern": "workflow-instances.**",
+      "level": "read",
+      "why": "Reads running workflow instances."
+    },
+    {
+      "area": "automation",
+      "pattern": "workflow-meta.**",
+      "level": "read",
+      "why": "builder metadata endpoint (virtual)"
+    },
+    {
+      "area": "automation",
+      "pattern": "esign-providers.**",
+      "level": "read",
+      "why": "e-sign driver catalog for the Settings E-signature tab (virtual)"
+    },
+    {
+      "area": "work",
+      "pattern": "boards.**",
+      "level": "write",
+      "why": "HR administers the boards org-wide (create/rename/archive; shape verbs below)"
+    },
+    {
+      "area": "work",
+      "pattern": "sprints.**",
+      "level": "write",
+      "why": "Runs sprints on any board."
+    },
+    {
+      "area": "work",
+      "pattern": "goal-templates.**",
+      "level": "write",
+      "why": "HR curates the goal blueprint catalogue (a Settings entry)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance.**",
+      "level": "read",
+      "why": "HR sees all attendance (presence, history)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-regularizations.**",
+      "level": "read",
+      "why": "HR reviews all regularization requests"
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-day-marks.**",
+      "level": "write",
+      "why": "HR decides what a day counts as, org-wide (and withdraws its own marks)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "overtime-requests.**",
+      "level": "read",
+      "why": "HR reviews + decides these org-wide (verbs below)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "remote-work-requests.**",
+      "level": "read",
+      "why": "Reviews remote-work requests org-wide (decisions are the verbs below)."
+    },
+    {
+      "area": "attendance",
+      "pattern": "late-early-requests.**",
+      "level": "read",
+      "why": "HR decides these org-wide (verbs below)"
+    },
+    {
+      "area": "workplace",
+      "pattern": "asset-requests.**",
+      "level": "read",
+      "why": "HR decides these org-wide and hands the kit over (verbs below)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "time-entries.**",
+      "level": "read",
+      "why": "org-wide timesheet visibility (approval stays the manager's)"
+    },
+    {
+      "area": "recruiting",
+      "pattern": "job-requisitions.**",
+      "level": "write",
+      "why": "Recruiting (ATS): HR runs the whole pipeline."
+    },
+    {
+      "area": "recruiting",
+      "pattern": "candidates.**",
+      "level": "write",
+      "why": "Recruiting (ATS): HR runs the whole pipeline."
+    },
+    {
+      "area": "recruiting",
+      "pattern": "applications.**",
+      "level": "write",
+      "why": "Recruiting (ATS): HR runs the whole pipeline."
+    },
+    {
+      "area": "recruiting",
+      "pattern": "interviews.**",
+      "level": "write",
+      "why": "Recruiting (ATS): HR runs the whole pipeline."
+    },
+    {
+      "area": "recruiting",
+      "pattern": "interview-feedback.**",
+      "level": "write",
+      "why": "Recruiting (ATS): HR runs the whole pipeline."
+    },
+    {
+      "area": "recruiting",
+      "pattern": "offers.**",
+      "level": "write",
+      "why": "Recruiting (ATS): HR runs the whole pipeline."
+    },
+    {
+      "area": "recruiting",
+      "pattern": "background-checks.**",
+      "level": "write",
+      "why": "HR runs background verification"
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transitions.**",
+      "level": "write",
+      "why": "Lifecycle: HR opens/drives onboarding + offboarding and records notice periods."
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transition-tasks.**",
+      "level": "read",
+      "why": "task mutation is verb-only (complete/reopen/upload, allowed below)"
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "notice-periods.**",
+      "level": "write",
+      "why": "Records and manages notice periods."
+    },
+    {
+      "area": "money",
+      "pattern": "dependents.**",
+      "level": "write",
+      "why": "Manages anyone's dependents."
+    },
+    {
+      "area": "money",
+      "pattern": "benefit-enrollments.**",
+      "level": "write",
+      "why": "Manages anyone's benefit enrolments."
+    },
+    {
+      "area": "compliance",
+      "pattern": "compliance-events.**",
+      "level": "write",
+      "why": "Compliance calendar: HR files statutory events + maintains the recurrence rules."
+    },
+    {
+      "area": "compliance",
+      "pattern": "compliance-rules.**",
+      "level": "write",
+      "why": "Compliance calendar: HR files statutory events + maintains the recurrence rules."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.**",
+      "level": "read",
+      "why": "Reads every review; HR administers the cycle and does not edit assessments."
+    },
+    {
+      "area": "performance",
+      "pattern": "review-feedback.**",
+      "level": "read",
+      "why": "Reads 360 feedback."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.**",
+      "level": "read",
+      "why": "Reads every goal."
+    },
+    {
+      "area": "attendance",
+      "pattern": "shift-assignments.**",
+      "level": "write",
+      "why": "Rosters anyone."
+    },
+    {
+      "area": "catalog",
+      "pattern": "work-patterns.**",
+      "level": "write",
+      "why": "Maintains the schedule catalogue."
+    },
+    {
+      "area": "attendance",
+      "pattern": "work-pattern-assignments.**",
+      "level": "write",
+      "why": "Puts anyone on a schedule."
+    },
+    {
+      "area": "workplace",
+      "pattern": "tickets.**",
+      "level": "write",
+      "why": "Runs the help desk."
+    },
+    {
+      "area": "workplace",
+      "pattern": "ticket-checklists.**",
+      "level": "write",
+      "why": "Maintains the help-desk checklists."
+    },
+    {
+      "area": "workplace",
+      "pattern": "assets.**",
+      "level": "write",
+      "why": "Maintains the asset register."
+    },
+    {
+      "area": "workplace",
+      "pattern": "stocktakes.**",
+      "level": "write",
+      "why": "Inventory counts. A stocktake is the asset register being walked, by the same administrator who maintains the register - but nothing was seeded for it at ANY level, so the whole page was reachable only by super_admin while `assets` and `asset-categories` beside it were HR's. Not a withheld verb: a withheld collection, which is how the earlier role-grants gap looked too."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-encashments.**",
+      "level": "write",
+      "why": "HR records + decides encashments"
+    },
+    {
+      "area": "money",
+      "pattern": "loans.**",
+      "level": "read",
+      "why": "visibility only; decisions are payroll's verbs"
+    },
+    {
+      "area": "workplace",
+      "pattern": "suggestions.**",
+      "level": "read",
+      "why": "triage visibility (the box itself opens via the `everyone` ACL)"
+    },
+    {
+      "area": "money",
+      "pattern": "pay-grades.**",
+      "level": "read",
+      "why": "comp catalogs are payroll-authored; HR reads for letters/requisitions"
+    },
+    {
+      "area": "money",
+      "pattern": "salary-structures.**",
+      "level": "read",
+      "why": "Reads salary structures for letters and requisitions; payroll authors them."
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.organization",
+      "level": "write",
+      "why": "HR setting: name, branding, address, currency, letter defaults"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.probation",
+      "level": "write",
+      "why": "HR setting: default probation length"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.employee-number",
+      "level": "write",
+      "why": "HR setting: the employee ID format"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.employee_fields",
+      "level": "write",
+      "why": "HR setting: which identity fields are collected"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.dashboard",
+      "level": "write",
+      "why": "HR setting: what the dashboard shows"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.celebrations",
+      "level": "write",
+      "why": "HR setting: birthday and anniversary display"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.kudos",
+      "level": "write",
+      "why": "HR setting: kudos levels and categories"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.asset-tags",
+      "level": "write",
+      "why": "HR setting: tag format, stickers, custody policy"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.search-synonyms",
+      "level": "write",
+      "why": "HR setting: the org's search synonyms"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.leave_caps",
+      "level": "write",
+      "why": "HR setting: leave caps"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.leave_encashment",
+      "level": "write",
+      "why": "HR setting: encashment rates"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.leave_accrual",
+      "level": "write",
+      "why": "HR setting: accrual rounding"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.leave_restrictions",
+      "level": "write",
+      "why": "HR setting: org-wide leave restrictions"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.leave-requests",
+      "level": "write",
+      "why": "HR setting: backdating rules"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.holidays",
+      "level": "write",
+      "why": "HR setting: optional-holiday picks and the calendar feed"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.attendance",
+      "level": "write",
+      "why": "HR setting: the working week, day lengths and loss-of-pay rules"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.punctuality",
+      "level": "write",
+      "why": "HR setting: the late and early policy"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.ats",
+      "level": "write",
+      "why": "HR setting: the recruiting pipeline"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.referrals",
+      "level": "write",
+      "why": "HR setting: referral bonus rules"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.performance",
+      "level": "write",
+      "why": "HR setting: the performance framework"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.transition-templates",
+      "level": "write",
+      "why": "HR setting: onboarding and offboarding templates"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.esign",
+      "level": "write",
+      "why": "HR setting: e-signature methods and vendor settings"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.notifications",
+      "level": "write",
+      "why": "HR setting: notification channels and defaults"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.ticket-categories",
+      "level": "write",
+      "why": "HR setting: help-desk categories"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.ticket-workflow",
+      "level": "write",
+      "why": "HR setting: the help-desk state machine"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.attention",
+      "level": "write",
+      "why": "HR setting: the Needs-you thresholds"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.approvals",
+      "level": "write",
+      "why": "HR setting: which one-click decisions ask for confirmation"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.expenses",
+      "level": "write",
+      "why": "HR setting: expense budget alerts. Its panel also edits the expense categories, which are HR's, so the setting is too."
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.reimbursements",
+      "level": "write",
+      "why": "HR setting: how approved claims are paid out. Its panel also edits the reimbursement categories, which are HR's, so the setting is too."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-adjustments.**",
+      "level": "write",
+      "why": "Correct anyone's leave balance and import opening balances (the ledger every balance is computed from)."
+    },
+    {
+      "area": "documents",
+      "pattern": "letterheads.**",
+      "level": "write",
+      "why": "The stationery letters are issued on - HR authors the letters, so HR maintains what they print on."
+    },
+    {
+      "area": "dashboard",
+      "pattern": "timeline",
+      "level": "read",
+      "why": "The Dashboard team timeline widget; every row is still gated by its own collection."
+    },
+    {
+      "area": "reports",
+      "pattern": "export.**",
+      "level": "read",
+      "why": "Export any table HR can read to CSV/Excel. Export is generated from rows the caller already reads, so this adds no data - only the bulk download, which is audited (export:record)."
+    }
+  ],
+  "allow": [
+    {
+      "area": "work",
+      "pattern": "cards.**",
+      "why": "every card verb (move/assign/block/comment/todos/watch) on the shared board surface"
+    },
+    {
+      "area": "work",
+      "pattern": "boards.**",
+      "why": "configure any board's shape + restore"
+    },
+    {
+      "area": "work",
+      "pattern": "sprints.**",
+      "why": "Every custom verb on sprints, including lifecycle and restore."
+    },
+    {
+      "area": "work",
+      "pattern": "goal-templates.**",
+      "why": ":apply + lifecycle/restore on the blueprint catalogue"
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-regularizations.*.approve",
+      "why": "HR decides regularizations org-wide"
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-regularizations.*.reject",
+      "why": "Decides attendance corrections org-wide."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.*.approve",
+      "why": "leave.decide includes hr_admin (not just managers)"
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.*.reject",
+      "why": "Decides leave org-wide."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.*.download",
+      "why": "any request's supporting document"
+    },
+    {
+      "area": "attendance",
+      "pattern": "overtime-requests.*.approve",
+      "why": "HR decides overtime + remote-work org-wide (like regularizations)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "overtime-requests.*.reject",
+      "why": "Decides overtime org-wide."
+    },
+    {
+      "area": "attendance",
+      "pattern": "remote-work-requests.*.approve",
+      "why": "Decides remote work org-wide."
+    },
+    {
+      "area": "attendance",
+      "pattern": "remote-work-requests.*.reject",
+      "why": "Decides remote work org-wide."
+    },
+    {
+      "area": "attendance",
+      "pattern": "late-early-requests.*.approve",
+      "why": "Decides late arrival / early departure org-wide."
+    },
+    {
+      "area": "attendance",
+      "pattern": "late-early-requests.*.reject",
+      "why": "Decides late arrival / early departure org-wide."
+    },
+    {
+      "area": "workplace",
+      "pattern": "asset-requests.*.approve",
+      "why": "Decides asset requests org-wide."
+    },
+    {
+      "area": "workplace",
+      "pattern": "asset-requests.*.reject",
+      "why": "Decides asset requests org-wide."
+    },
+    {
+      "area": "workplace",
+      "pattern": "asset-requests.*.issue",
+      "why": "hand over the actual asset, which is what closes the request"
+    },
+    {
+      "area": "recruiting",
+      "pattern": "job-requisitions.**",
+      "why": "every ATS custom method (advance/reject, complete/cancel, offer workflow, uploads)"
+    },
+    {
+      "area": "recruiting",
+      "pattern": "candidates.**",
+      "why": "Every custom verb on candidates, including lifecycle and restore."
+    },
+    {
+      "area": "recruiting",
+      "pattern": "applications.**",
+      "why": "Every custom verb on applications, including lifecycle and restore."
+    },
+    {
+      "area": "recruiting",
+      "pattern": "interviews.**",
+      "why": "Every custom verb on interviews, including lifecycle and restore."
+    },
+    {
+      "area": "recruiting",
+      "pattern": "interview-feedback.**",
+      "why": "Every custom verb on interview feedback, including lifecycle and restore."
+    },
+    {
+      "area": "recruiting",
+      "pattern": "offers.**",
+      "why": "Every custom verb on offers, including lifecycle and restore."
+    },
+    {
+      "area": "recruiting",
+      "pattern": "background-checks.**",
+      "why": "Every custom verb on background checks, including lifecycle and restore."
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transitions.**",
+      "why": "complete/cancel/reopen/appendTask + restore"
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transition-tasks.**",
+      "why": "complete/reopen/upload on anyone's tasks"
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "notice-periods.**",
+      "why": "Every custom verb on notice periods, including lifecycle and restore."
+    },
+    {
+      "area": "catalog",
+      "pattern": "benefit-plans.**",
+      "why": "Every custom verb on benefit plans, including lifecycle and restore."
+    },
+    {
+      "area": "money",
+      "pattern": "dependents.**",
+      "why": "Every custom verb on dependents, including lifecycle and restore."
+    },
+    {
+      "area": "money",
+      "pattern": "benefit-enrollments.**",
+      "why": "Every custom verb on benefit enrolments, including lifecycle and restore."
+    },
+    {
+      "area": "compliance",
+      "pattern": "compliance-events.**",
+      "why": "Every custom verb on compliance events, including lifecycle and restore."
+    },
+    {
+      "area": "compliance",
+      "pattern": "compliance-rules.**",
+      "why": "Every custom verb on compliance rules, including lifecycle and restore."
+    },
+    {
+      "area": "catalog",
+      "pattern": "review-cycles.**",
+      "why": "launch/enroll/close/reopen"
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.*.skipStage",
+      "why": "unblock a stuck review (stage owners keep their own verbs)"
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.*.nudge",
+      "why": "remind the current stage's owner on any stalled review"
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.*.pdf",
+      "why": "record copy of any finished review"
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.*.assignReviewer",
+      "why": "Hand one review to a different writer (a transfer mid-cycle, a manager on leave). HR's rather than the manager's: it reassigns who is accountable for the write-up, which is the cycle administrator's call."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.*.evidence",
+      "why": "the same pack on any review HR reads - the cycle's own record, not an assessment"
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.*.collaborators",
+      "why": "and the 360 picker's list of who actually worked with them"
+    },
+    {
+      "area": "catalog",
+      "pattern": "shifts.**",
+      "why": "Every custom verb on shifts, including lifecycle and restore."
+    },
+    {
+      "area": "attendance",
+      "pattern": "shift-assignments.**",
+      "why": "Every custom verb on shift assignments, including lifecycle and restore."
+    },
+    {
+      "area": "catalog",
+      "pattern": "work-patterns.**",
+      "why": "Every custom verb on schedules, including lifecycle and restore."
+    },
+    {
+      "area": "attendance",
+      "pattern": "work-pattern-assignments.**",
+      "why": "Every custom verb on schedule assignments, including lifecycle and restore."
+    },
+    {
+      "area": "catalog",
+      "pattern": "projects.**",
+      "why": "Every custom verb on projects, including lifecycle and restore."
+    },
+    {
+      "area": "workplace",
+      "pattern": "tickets.**",
+      "why": "run the help desk (assign/start/resolve/close/comment/todos)"
+    },
+    {
+      "area": "workplace",
+      "pattern": "ticket-checklists.**",
+      "why": "Every custom verb on ticket checklists, including lifecycle and restore."
+    },
+    {
+      "area": "workplace",
+      "pattern": "assets.**",
+      "why": "Every asset verb: verify, print and reissue tags, batch create, lifecycle and restore."
+    },
+    {
+      "area": "catalog",
+      "pattern": "asset-categories.**",
+      "why": "Every custom verb on asset categories, including lifecycle and restore."
+    },
+    {
+      "area": "workplace",
+      "pattern": "stocktakes.**",
+      "why": "open a count, record what was found on the walk, close it (and restore one deleted)"
+    },
+    {
+      "area": "catalog",
+      "pattern": "events.**",
+      "why": "Every custom verb on events, including lifecycle and restore."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-encashments.**",
+      "why": "approve/reject/cancel"
+    },
+    {
+      "area": "workplace",
+      "pattern": "suggestions.*.respond",
+      "why": "HR triage (status + response) on any suggestion"
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.*.approve",
+      "why": "HR decides reimbursement claims (no manager involvement)"
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.*.reject",
+      "why": "Decides reimbursement claims."
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.*.pay",
+      "why": "separate-mode payout (mark approved claims paid out-of-band)"
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.*.upload",
+      "why": "attach/replace any claim's receipt"
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.*.download",
+      "why": "view any claim's receipt"
+    },
+    {
+      "area": "catalog",
+      "pattern": "reimbursement-categories.**",
+      "why": "Every custom verb on reimbursement categories, including lifecycle and restore."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.submit",
+      "why": "finance can submit on behalf (e.g. a vendor invoice)"
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.approve",
+      "why": "finance decides expenses org-wide"
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.reject",
+      "why": "Decides expenses org-wide."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.pay",
+      "why": "record out-of-band vendor payment"
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.upload",
+      "why": "attach/replace any expense's invoice"
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.download",
+      "why": "Any expense's invoice."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.extractReceipt",
+      "why": "Read a DRAFT claim's PDF invoice into suggested fields. Granted to whoever already records the claim, because it fills a form they are filling anyway - a level grant carries no custom methods, so writing the row is not enough on its own. Doubly gated beyond this: the org must switch the feature on AND choose which fields a model may propose, so the grant alone sends nothing anywhere."
+    },
+    {
+      "area": "catalog",
+      "pattern": "expense-categories.**",
+      "why": "Every custom verb on expense categories, including lifecycle and restore."
+    },
+    {
+      "area": "money",
+      "pattern": "vendors.**",
+      "why": "Every custom verb on vendors, including lifecycle and restore."
+    },
+    {
+      "area": "money",
+      "pattern": "expense-budgets.**",
+      "why": "Every custom verb on expense budgets, including lifecycle and restore."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.**",
+      "why": "Every employee verb: photo, signature and identity documents (signature reads stay owner-only in the service), records-start date, default benefits enrolment, lifecycle."
+    },
+    {
+      "area": "catalog",
+      "pattern": "departments.**",
+      "why": "Every custom verb on departments, including lifecycle and restore."
+    },
+    {
+      "area": "catalog",
+      "pattern": "holidays.**",
+      "why": "Every custom verb on holidays, including lifecycle and restore."
+    },
+    {
+      "area": "catalog",
+      "pattern": "leave-types.**",
+      "why": "Every custom verb on leave types, including lifecycle and restore."
+    },
+    {
+      "area": "documents",
+      "pattern": "letter-templates.**",
+      "why": "Every custom verb on letter templates, including lifecycle and restore."
+    },
+    {
+      "area": "catalog",
+      "pattern": "announcements.**",
+      "why": "Every board verb: post, publish, pin, lock, moderate, draft."
+    },
+    {
+      "area": "documents",
+      "pattern": "org-documents.**",
+      "why": "Every org-document verb: publish, download, acknowledgement chasing, lifecycle."
+    },
+    {
+      "area": "documents",
+      "pattern": "personal-documents.**",
+      "why": "Every personal-document verb: generate and preview letters, e-sign refresh, print, lifecycle. Signing stays owner-only in the service."
+    },
+    {
+      "area": "automation",
+      "pattern": "automations.**",
+      "why": "author rules + the enable/disable/test custom verbs"
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-adjustments.importOpenings",
+      "why": "Import leave opening balances for people who joined before HRMS (Opening balances page)."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.importHistory",
+      "why": "Import leave taken before HRMS as history (Opening balances page)."
+    },
+    {
+      "area": "documents",
+      "pattern": "letterheads.**",
+      "why": "Every letterhead verb: upload and delete images, preview, duplicate, restore."
+    },
+    {
+      "area": "reports",
+      "pattern": "export.record",
+      "why": "Record the audit entry for an export (the SPA sends it with every download)."
+    }
+  ],
+  "deny": [],
+  "excluded": [
+    {
+      "pattern": "employees.*.bank-account | identity | personal-info .**",
+      "why": "Others' PII stays super-only by default; HR sees its own through employees.me.*."
+    },
+    {
+      "pattern": "compensation.** | payroll-runs.**",
+      "why": "Pay is payroll's."
+    },
+    {
+      "pattern": "check-ins.**",
+      "why": "1:1 notes stay private to the pair."
+    },
+    {
+      "pattern": "activity.**",
+      "why": "The per-record activity trail is private by default; grant it per role or record in the ACL."
+    },
+    {
+      "pattern": "settings.access-approval | access-review | payroll-approval | sign-in | ai | attachments",
+      "why": "Governance switches - four-eyes on permission changes and on the payroll commit, access reviews, how people sign in, whether data goes to a model, upload limits. Super admin's, so the people the switches restrain cannot turn them off."
+    },
+    {
+      "pattern": "settings.ctc | tax-config | professional-tax | overtime | gratuity | loan-perquisite | payslip | payroll-gl | payroll-variance | payroll-recovery",
+      "why": "Pay configuration is payroll's."
+    },
+    {
+      "pattern": "pay-components.** | pay-periods.** | bank-formats.** write",
+      "why": "Pay configuration is payroll's; HR reads the catalogues like everyone."
+    },
+    {
+      "pattern": "employees.*.tax.** | tax-declarations.**",
+      "why": "Everyone's TDS projection and declarations (PAN, rent receipts, prior salary) are payroll's work, and a projection reveals pay HR does not otherwise see."
+    },
+    {
+      "pattern": "payroll-openings.** | tax-verifications",
+      "why": "Pay and tax before HRMS, and prior-employer salary: payroll's."
+    },
+    {
+      "pattern": "moderation",
+      "why": "The flagged-post queue quotes public posts in full and is not narrowed per holder, so it goes to a named moderator through the ACL, never to a role. HR's own board moderation (disable, hide, lock) is on announcements."
+    },
+    {
+      "pattern": "card-transactions.**",
+      "why": "Every row is a named person's spending on a company card. Reconciling it is finance's (payroll_admin); HR decides expenses without it."
+    }
+  ]
+}

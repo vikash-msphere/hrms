@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
 import { COLLECTIONS, isGrantCollection } from "../src/domain/collections";
-import { SUPPORTED_SCOPES } from "../src/domain/manifests";
+import { SUPPORTED_SCOPES } from "../bootstrap/authz/policy";
 
 // The gate `domain/collections.ts` names in its own header, and did not have.
 //

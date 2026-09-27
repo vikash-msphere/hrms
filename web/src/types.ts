@@ -293,6 +293,8 @@ export type BenefitEnrollment = Wire<"benefit-enrollment">;
 
 export type Shift = Wire<"shift">;
 export type ShiftAssignment = Wire<"shift-assignment">;
+export type WorkPattern = Wire<"work-pattern">;
+export type WorkPatternAssignment = Wire<"work-pattern-assignment">;
 
 export type Project = Wire<"project">;
 export type TimeEntryStatus = "DRAFT" | "SUBMITTED" | "APPROVED" | "REJECTED";
@@ -370,6 +372,9 @@ export type Operation = Wire<"operation">;
 // A recorded cron tick (admin-only; from /v1/cron-runs).
 export type CronRun = Wire<"cron_run">;
 
+// A daily ⌘K usage counter (admin-only; from /v1/search-insights). Counts, never who searched.
+export type SearchInsight = Wire<"search_insight">;
+
 export type User = Wire<"user">;
 
 // A machine credential. It acts as its `owner`, narrowed by `scope` - never wider than that user's own
@@ -400,6 +405,10 @@ export type Me = {
   // caches are namespaced to it (see App.tsx `cacheUser`) so cached records cannot outlive their session.
   // Null on the lanes that carry no session (API key, Access JWT, dev bypass).
   session_id: string | null;
+  // The app lock of the person at this browser (lib/appLock.ts), and the key the client store encrypts under.
+  // Both null on a lane with no browser (an API key) or an older server.
+  app_lock: { enabled: boolean; pinLength: number | null; idleMinutes: number; expireTime: number | null } | null;
+  client_key: string | null;
 };
 
 export type IdentityField = Wire<"identity-field">;

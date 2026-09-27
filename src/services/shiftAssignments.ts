@@ -14,8 +14,16 @@ import { notify } from "./notifications";
 export type ShiftAssignmentInput = {
   employee?: string | null;
   shift?: string | null;
+  kind?: string | null;
   date?: string | null;
   note?: string | null;
+};
+const KINDS = ["shift", "off"] as const;
+type AssignmentKind = (typeof KINDS)[number];
+const kindOf = (v: unknown): AssignmentKind => {
+  if (v == null || v === "") return "shift";
+  if (!(KINDS as readonly string[]).includes(v as string)) throw invalidArgument(`kind must be one of ${KINDS.join(", ")}`);
+  return v as AssignmentKind;
 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
@@ -69,19 +77,32 @@ export const shiftAssignmentSpec: CrudSpec<ShiftAssignmentInput, typeof schema.s
   insert: async (input, deps, actor) => {
     const employeeId = idFromPath(input.employee) ?? actor.employeeId;
     if (!employeeId) throw invalidArgument("employee is required");
-    const shiftId = idFromPath(input.shift);
-    if (!shiftId) throw invalidArgument("shift is required");
+    // "off" is a REST DAY - a day this person is explicitly not working, whatever their pattern or the org's
+    // week says - so it names no shift. Anything else has to name one.
+    const kind = kindOf(input.kind);
+    const shiftId = idFromPath(input.shift) ?? null;
+    if (kind === "shift" && !shiftId) throw invalidArgument("shift is required");
     const ms = dayMs(input.date);
     if (Number.isNaN(ms)) throw invalidArgument("date is required");
     const date = new Date(ms);
     if (await rosteredOn(deps, employeeId, date)) throw alreadyExists(`that employee is already rostered on ${input.date} - change the existing entry instead`);
-    return { employeeId, shiftId, date, note: input.note?.trim() || null };
+    return { employeeId, shiftId: kind === "off" ? null : shiftId, kind, date, note: input.note?.trim() || null };
   },
   // A patch can MOVE an entry onto an occupied day, so the same check runs here - against the row being
   // edited, which is excluded (moving an entry onto the day it already sits on is a no-op, not a clash).
   patch: async (patch, row, deps) => {
     const set: SetOf<typeof schema.shiftAssignments> = {};
-    if (has(patch, "shift")) { const s = idFromPath(patch.shift); if (!s) throw invalidArgument("shift is required"); set.shiftId = s; }
+    // The two fields move together, because the pair is what has to stay consistent: turning an entry into a
+    // rest day clears its shift, and naming a shift turns it back into a worked day. Read from the patch where
+    // it sets them and from the row where it does not, so a patch that sets only one of them is still checked
+    // against what the other will be.
+    if (has(patch, "kind") || has(patch, "shift")) {
+      const kind = has(patch, "kind") ? kindOf(patch.kind) : (row.kind as AssignmentKind);
+      const shiftId = has(patch, "shift") ? idFromPath(patch.shift) ?? null : (row.shiftId as string | null);
+      if (kind === "shift" && !shiftId) throw invalidArgument("shift is required");
+      set.kind = kind;
+      set.shiftId = kind === "off" ? null : shiftId;
+    }
     if (has(patch, "date")) {
       const ms = dayMs(patch.date);
       if (Number.isNaN(ms)) throw invalidArgument("date is invalid");

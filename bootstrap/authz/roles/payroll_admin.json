@@ -1,0 +1,439 @@
+{
+  "role": "payroll_admin",
+  "label": "Payroll Admin",
+  "protected": true,
+  "provisioned": false,
+  "description": "Runs payroll: compensation, pay configuration and payroll settings, runs, payslips, Form 16, loans, tax declarations and verifications, pay openings, and finance (expenses, vendors, budgets, card charges). An employee first (`extends: employee`). Separation of duties: approving a run, the bank file and payment results stay with super admin, and so does the switch that requires a second approver.",
+  "extends": "employee",
+  "levels": [
+    {
+      "area": "people",
+      "pattern": "employees.*.legal_name.**",
+      "level": "read",
+      "why": "Anyone's legal name: a redacted field the row grant does not reach, read for payroll, statutory filings and payslips."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.employee_number.**",
+      "level": "read",
+      "why": "Anyone's employee number: a redacted field the row grant does not reach, read for payroll, statutory filings and payslips."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.epf_enrolled.**",
+      "level": "read",
+      "why": "Anyone's epf enrolled: a redacted field the row grant does not reach, read for payroll, statutory filings and payslips."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.eps_excluded.**",
+      "level": "read",
+      "why": "Anyone's eps excluded: a redacted field the row grant does not reach, read for payroll, statutory filings and payslips."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.tracked_from.**",
+      "level": "read",
+      "why": "Anyone's tracked from: a redacted field the row grant does not reach, read for payroll, statutory filings and payslips."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.*.tax.**",
+      "level": "write",
+      "why": "income-tax (TDS) projection for everyone (payroll runs it)"
+    },
+    {
+      "area": "money",
+      "pattern": "compensation.**",
+      "level": "write",
+      "why": "Authors everyone's compensation."
+    },
+    {
+      "area": "money",
+      "pattern": "payroll-runs.**",
+      "level": "write",
+      "why": "Builds and runs payroll."
+    },
+    {
+      "area": "money",
+      "pattern": "payslips.**",
+      "level": "read",
+      "why": "Reads every payslip the runs produce."
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.**",
+      "level": "read",
+      "why": "payroll views + decides + pays out reimbursement claims"
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.**",
+      "level": "read",
+      "why": "payroll (finance) views + decides + pays operational expenses org-wide"
+    },
+    {
+      "area": "money",
+      "pattern": "vendors.**",
+      "level": "write",
+      "why": "finance maintains the vendor master"
+    },
+    {
+      "area": "money",
+      "pattern": "expense-budgets.**",
+      "level": "write",
+      "why": "finance sets + reviews budgets"
+    },
+    {
+      "area": "money",
+      "pattern": "pay-grades.**",
+      "level": "write",
+      "why": "Comp catalogs: payroll authors the grade bands + salary structures compensation rows reference."
+    },
+    {
+      "area": "money",
+      "pattern": "salary-structures.**",
+      "level": "write",
+      "why": "Comp catalogs: payroll authors the grade bands + salary structures compensation rows reference."
+    },
+    {
+      "area": "money",
+      "pattern": "loans.**",
+      "level": "write",
+      "why": "Loans + tax declarations are payroll's workflows (EMIs deduct in the run; declarations feed TDS review)."
+    },
+    {
+      "area": "money",
+      "pattern": "tax-declarations.**",
+      "level": "write",
+      "why": "Loans + tax declarations are payroll's workflows (EMIs deduct in the run; declarations feed TDS review)."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-encashments.**",
+      "level": "read",
+      "why": "encashments pay out through the run (HR creates/decides them)"
+    },
+    {
+      "area": "money",
+      "pattern": "bonuses.**",
+      "level": "read",
+      "why": "bonuses pay out through the run (HR awards them)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "overtime-requests.**",
+      "level": "read",
+      "why": "approved overtime pays out through the run"
+    },
+    {
+      "area": "attendance",
+      "pattern": "late-early-requests.**",
+      "level": "read",
+      "why": "an approved one can change a day's loss of pay under the punctuality policy"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.ctc",
+      "level": "write",
+      "why": "Payroll setting: how CTC splits into basic, HRA and special"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.tax-config",
+      "level": "write",
+      "why": "Payroll setting: income-tax regimes and slabs"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.professional-tax",
+      "level": "write",
+      "why": "Payroll setting: PT slabs"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.overtime",
+      "level": "write",
+      "why": "Payroll setting: overtime pay"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.gratuity",
+      "level": "write",
+      "why": "Payroll setting: gratuity at exit"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.loan-perquisite",
+      "level": "write",
+      "why": "Payroll setting: the interest perquisite on employer loans"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.payslip",
+      "level": "write",
+      "why": "Payroll setting: the payslip design"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.payroll-gl",
+      "level": "write",
+      "why": "Payroll setting: the payroll journal's GL mapping"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.payroll-variance",
+      "level": "write",
+      "why": "Payroll setting: the variance warning threshold"
+    },
+    {
+      "area": "settings",
+      "pattern": "settings.payroll-recovery",
+      "level": "write",
+      "why": "Payroll setting: the net-pay floor for recoveries"
+    },
+    {
+      "area": "money",
+      "pattern": "pay-components.**",
+      "level": "write",
+      "why": "Author the pay components (earnings, statutory deductions) every run computes from."
+    },
+    {
+      "area": "money",
+      "pattern": "pay-periods.**",
+      "level": "write",
+      "why": "Maintain the pay-period calendar runs are built for."
+    },
+    {
+      "area": "money",
+      "pattern": "bank-formats.**",
+      "level": "write",
+      "why": "Per-bank bulk-payment file formats. The bank file itself and the debit account stay super-only."
+    },
+    {
+      "area": "money",
+      "pattern": "payroll-openings.**",
+      "level": "write",
+      "why": "Pay and tax paid before HRMS ran payroll, which year-to-date TDS and Form 16 build on."
+    },
+    {
+      "area": "money",
+      "pattern": "payroll-budgets.**",
+      "level": "write",
+      "why": "Payroll cost budgets."
+    },
+    {
+      "area": "money",
+      "pattern": "card-transactions.**",
+      "level": "read",
+      "why": "Corporate card charges, reconciled against expenses finance pays."
+    },
+    {
+      "area": "reports",
+      "pattern": "export.**",
+      "level": "read",
+      "why": "Export any table payroll can read to CSV/Excel; adds no data, only the audited bulk download."
+    }
+  ],
+  "allow": [
+    {
+      "area": "money",
+      "pattern": "payroll-runs.*.submit",
+      "why": "Submit a run for approval. Approving it, the bank file and recording payment results stay super-only (separation of duties)."
+    },
+    {
+      "area": "money",
+      "pattern": "payroll-runs.*.build",
+      "why": "Build a run's items."
+    },
+    {
+      "area": "money",
+      "pattern": "payroll-runs.*.publish",
+      "why": "Publish an approved run's payslips."
+    },
+    {
+      "area": "money",
+      "pattern": "payslips.*.preview",
+      "why": "View any payslip the run produced (audited as a sensitive read)."
+    },
+    {
+      "area": "money",
+      "pattern": "payslips.*.download",
+      "why": "Download any payslip the run produced (audited as a sensitive read)."
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.*.approve",
+      "why": "Decides reimbursement claims."
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.*.reject",
+      "why": "Decides reimbursement claims."
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.*.pay",
+      "why": "Marks approved claims paid out-of-band."
+    },
+    {
+      "area": "money",
+      "pattern": "reimbursements.*.download",
+      "why": "Any claim's receipt."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.submit",
+      "why": "finance can submit a vendor invoice on behalf"
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.approve",
+      "why": "Decides expenses org-wide."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.reject",
+      "why": "Decides expenses org-wide."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.pay",
+      "why": "record out-of-band vendor payment"
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.upload",
+      "why": "Attach or replace any expense's invoice."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.download",
+      "why": "Any expense's invoice."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.*.extractReceipt",
+      "why": "same reason as hr_admin above: payroll also records vendor invoices"
+    },
+    {
+      "area": "money",
+      "pattern": "vendors.**",
+      "why": "Every vendor verb, including lifecycle and restore."
+    },
+    {
+      "area": "money",
+      "pattern": "expense-budgets.**",
+      "why": "Every budget verb, including lifecycle and restore."
+    },
+    {
+      "area": "money",
+      "pattern": "compensation.reapplySplit",
+      "why": "re-derive every current row's basic/special under the live ctc config (CTC held fixed)"
+    },
+    {
+      "area": "money",
+      "pattern": "compensation.preview",
+      "why": "price a PROPOSED revision without writing it - the conversation before the raise"
+    },
+    {
+      "area": "money",
+      "pattern": "compensation.increment",
+      "why": "an increment ROUND: price a team's raises, or apply them one at a time"
+    },
+    {
+      "area": "money",
+      "pattern": "pay-grades.**",
+      "why": "lifecycle/restore on the comp catalogs"
+    },
+    {
+      "area": "money",
+      "pattern": "salary-structures.**",
+      "why": "Lifecycle and restore on salary structures."
+    },
+    {
+      "area": "money",
+      "pattern": "loans.**",
+      "why": "approve/reject/disburse/recordRepayment"
+    },
+    {
+      "area": "money",
+      "pattern": "tax-declarations.**",
+      "why": "verify/reject + proof upload/download"
+    },
+    {
+      "area": "work",
+      "pattern": "cards.**",
+      "why": "every card verb (move/assign/block/comment/todos/watch) on the shared board surface"
+    },
+    {
+      "area": "money",
+      "pattern": "pay-components.**",
+      "why": "Lifecycle verbs and restore on pay components."
+    },
+    {
+      "area": "money",
+      "pattern": "pay-periods.**",
+      "why": "Lifecycle verbs and restore on pay periods."
+    },
+    {
+      "area": "money",
+      "pattern": "bank-formats.**",
+      "why": "Upload a bank's template."
+    },
+    {
+      "area": "money",
+      "pattern": "payroll-openings.**",
+      "why": "Import pay openings, and restore."
+    },
+    {
+      "area": "money",
+      "pattern": "payroll-budgets.**",
+      "why": "Restore a deleted budget."
+    },
+    {
+      "area": "documents",
+      "pattern": "personal-documents.generateForm16",
+      "why": "Render an employee's Form 16 from finalized payroll and the tax computation - payroll's own output."
+    },
+    {
+      "area": "documents",
+      "pattern": "personal-documents.uploadForm16",
+      "why": "File the official TRACES Form 16."
+    },
+    {
+      "area": "money",
+      "pattern": "card-transactions.import",
+      "why": "Import the card statement."
+    },
+    {
+      "area": "money",
+      "pattern": "card-transactions.reconcile",
+      "why": "Match card charges to expenses."
+    },
+    {
+      "area": "reports",
+      "pattern": "export.record",
+      "why": "Record the audit entry for an export."
+    }
+  ],
+  "deny": [],
+  "excluded": [
+    {
+      "pattern": "payroll-runs.*.approve | bankFile | paymentResult",
+      "why": "Separation of duties. Not granted rather than granted-then-denied, so no future broad grant can re-expose them: only super admin's `**` reaches them. The bank file carries the employer debit account and every account number."
+    },
+    {
+      "pattern": "employees.*.bank-account | identity | personal-info .**",
+      "why": "Others' PII stays super-only by default."
+    },
+    {
+      "pattern": "settings.payroll-approval",
+      "why": "The switch that requires a second approver on the payroll commit is super admin's, so the operator it restrains cannot turn it off."
+    },
+    {
+      "pattern": "tax-verifications",
+      "why": "The verification queue is reached through the `tax` capability (employees.*.tax, which payroll holds), decided per employee sub-resource - a collection grant here would be a second gate for one question."
+    }
+  ]
+}

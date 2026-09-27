@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { sql } from "drizzle-orm";
@@ -9,6 +9,7 @@ import { openSession, sealSession } from "../lib/session";
 import { counter, keyedCounter } from "../lib/isolateRate";
 import { syncGoogleProfile, type GoogleProfileClaims } from "../services/googleProfile";
 import { EDGE_COOKIE } from "../http/assetPaths";
+import { UNLOCK_COOKIE } from "../lib/appLock";
 
 // Direct Google sign-in (OIDC authorization-code flow), the no-per-seat-cost alternative to fronting the
 // app with Cloudflare Access. Selected by configuration: GOOGLE_CLIENT_ID set = Google mode; absent =
@@ -112,20 +113,27 @@ const total = counter(300);
 // unattributable traffic must not be the way to get an unbounded allowance. Same shape as routes/found.ts.
 const NO_IP = "-";
 
+// On the three sign-in routes BY NAME, not on "*": this app is mounted at /auth, and "*" would reach every
+// other /auth path too - the app lock's (routes/appLockRoutes.ts), whose keepalives from an office behind one
+// address would then spend that address's sign-in budget.
+const signInFloor: MiddlewareHandler<AppEnv> = async (c, next) => {
+  const now = Date.now();
+  // Per-IP FIRST, so its `retryAfterSeconds` is the one reported when it is the budget that refused - the
+  // two counters keep separate windows, and reading the wrong one parks a client for a window that had
+  // nothing to do with them.
+  if (perIp.throttled(c.req.header("cf-connecting-ip") ?? NO_IP, now)) {
+    return c.text("too many sign-in attempts; try again in a minute", 429, { "Retry-After": String(perIp.retryAfterSeconds) });
+  }
+  if (total.throttled(now)) {
+    return c.text("too many sign-in attempts; try again in a minute", 429, { "Retry-After": String(total.retryAfterSeconds) });
+  }
+  await next();
+};
+
 export const authRoutes = new Hono<AppEnv>()
-  .use("*", async (c, next) => {
-    const now = Date.now();
-    // Per-IP FIRST, so its `retryAfterSeconds` is the one reported when it is the budget that refused - the
-    // two counters keep separate windows, and reading the wrong one parks a client for a window that had
-    // nothing to do with them.
-    if (perIp.throttled(c.req.header("cf-connecting-ip") ?? NO_IP, now)) {
-      return c.text("too many sign-in attempts; try again in a minute", 429, { "Retry-After": String(perIp.retryAfterSeconds) });
-    }
-    if (total.throttled(now)) {
-      return c.text("too many sign-in attempts; try again in a minute", 429, { "Retry-After": String(total.retryAfterSeconds) });
-    }
-    await next();
-  })
+  .use("/login", signInFloor)
+  .use("/callback", signInFloor)
+  .use("/logout", signInFloor)
   .get("/login", (c) => {
     // Access mode: the edge already challenges every request - going home IS going to login.
     if (!c.env.GOOGLE_CLIENT_ID) return c.redirect("/");
@@ -259,6 +267,9 @@ export const authRoutes = new Hono<AppEnv>()
     // also unregister the push service worker. The cost is a fresh download of the bundle on this device's
     // next sign-in - only after an explicit sign-out, never on an expiry.
     deleteCookie(c, EDGE_COOKIE, { path: "/" });
+    // And the app lock's proof: the next sign-in is a new session, which a proof is bound to anyway, so this is
+    // hygiene rather than the guarantee.
+    deleteCookie(c, UNLOCK_COOKIE, { path: "/" });
     c.header("Clear-Site-Data", '"cache"');
 
     // Deleting the cookie only takes this browser's copy away; the TOKEN stays valid until it expires, because

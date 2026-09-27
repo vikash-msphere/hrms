@@ -4,14 +4,13 @@ import { lazyPage as lazy } from "@/lib/lazyPage";
 import { navigate, redirect, setQueryParam, useRoute } from "@/router";
 import { Plus, Trash2, Save, Building, X, ChevronDown, Users, User, Search, ArrowLeft, ArrowUp, ArrowDown, Check, Globe, Palette, Type, GripVertical, Image as ImageIcon } from "lucide-react";
 import { get, patch, create, remove, list, dataUrl } from "@/api";
-import { SETTINGS_REGISTRY, SETTINGS_GROUPS, SETTINGS_LEGACY, settingsEntry, entryScope, type SettingsEntry } from "@/settings/registry";
-import { hasCapability } from "@/lib/perm";
+import { SETTINGS_REGISTRY, SETTINGS_GROUPS, SETTINGS_LEGACY, settingsEntry, entryScope, settingsEntryVisible, hasAnySettings, mayWriteSetting, type SettingsEntry } from "@/settings/registry";
 import { APP_NAME } from "@/lib/brand";
 import type { OrgSettings } from "@/lib/org";
 import { roleLabel } from "@/lib/roles";
 import { type Audience, type DashboardConfig, type KpiCategory, KPI_DEFS, KPI_CATEGORIES, KPI_DEFAULT_AUDIENCE, MARKER_DEFS } from "@/lib/dashboardConfig";
 import { KPI_ICONS, CATEGORY_ICONS } from "@/lib/kpiIcons";
-import { usePermission } from "@/lib/perm";
+import { useCapabilities } from "@/lib/perm";
 import { useOrg, currencyDecimals, orgNameFontStack, orgNameWeight, orgNameSizePx, NAME_FONTS, NAME_WEIGHTS, NAME_SIZES, type LetterDefaults } from "@/lib/org";
 import { useCollection } from "@/hooks/useCollection";
 import { useLetterheads } from "@/lib/letterheads";
@@ -33,6 +32,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { EmptyState } from "@/components/common/EmptyState";
 import { PanelSkeleton, RowsSkeleton } from "@/components/common/Skeletons";
 import { UnsavedScope, useUnsaved, useUnsavedTracker } from "@/components/common/UnsavedChanges";
+import { CelebrationsSettingsTab } from "@/components/common/CelebrationsSettingsTab";
 import { Field, FieldRow } from "@/components/common/Field";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -59,6 +59,7 @@ const LeaveTypes = lazy(() => import("@/pages/LeaveTypes"));
 const ReviewCycles = lazy(() => import("@/pages/ReviewCycles"));
 const BenefitPlansAdmin = lazy(() => import("@/pages/BenefitPlansAdmin"));
 const ShiftsAdmin = lazy(() => import("@/pages/ShiftsAdmin"));
+const WorkPatternsPanel = lazy(() => import("@/settings/WorkPatternsPanel"));
 const ProjectsAdmin = lazy(() => import("@/pages/ProjectsAdmin"));
 const Departments = lazy(() => import("@/pages/Departments"));
 const ReimbursementCategories = lazy(() => import("@/pages/ReimbursementCategories"));
@@ -67,11 +68,12 @@ const AssetCategories = lazy(() => import("@/pages/AssetCategories"));
 const Operations = lazy(() => import("@/pages/Operations"));
 // Named exports, so the module has to be re-shaped into the `{ default }` lazy() expects.
 const BoardConfigPanel = lazy(() => import("@/settings/BoardConfigPanel").then((m) => ({ default: m.BoardConfigPanel })));
+const SearchInsightsPanel = lazy(() => import("@/settings/SearchInsightsPanel").then((m) => ({ default: m.SearchInsightsPanel })));
+const SearchSynonymsPanel = lazy(() => import("@/settings/SearchSynonymsPanel").then((m) => ({ default: m.SearchSynonymsPanel })));
 const NotificationPrefsPanel = lazy(() => import("@/components/notifications/NotificationPrefsPanel").then((m) => ({ default: m.NotificationPrefsPanel })));
 const KudosLevelsTab = lazy(() => import("@/components/common/KudosLevelsTab").then((m) => ({ default: m.KudosLevelsTab })));
 const AiSettingsTab = lazy(() => import("@/components/common/AiSettingsTab").then((m) => ({ default: m.AiSettingsTab })));
-const AttentionSettingsTab = lazy(() => import("@/components/common/AttentionSettingsTab").then((m) => ({ default: m.AttentionSettingsTab })));
-const SignInSettingsTab = lazy(() => import("@/components/common/SignInSettingsTab").then((m) => ({ default: m.SignInSettingsTab })));
+const AttentionSettingsTab = lazy(() => import("@/components/common/AttentionSettingsTab").then((m) => ({ default: m.AttentionSettingsTab })));const SignInSettingsTab = lazy(() => import("@/components/common/SignInSettingsTab").then((m) => ({ default: m.SignInSettingsTab })));
 const RolesPanel = lazy(() => import("@/components/common/RolesPanel").then((m) => ({ default: m.RolesPanel })));
 const RolesManagePanel = lazy(() => import("@/components/common/RolesManagePanel").then((m) => ({ default: m.RolesManagePanel })));
 const ApiKeysPanel = lazy(() => import("@/components/common/ApiKeysPanel").then((m) => ({ default: m.ApiKeysPanel })));
@@ -245,7 +247,7 @@ function NotificationsTab({ toast }: { toast: Toast }) {
 // panel per topic at `settings/<key>` with a persistent left rail for sideways hops. The registry
 // (src/settings/registry.ts) is the single source of truth for keys, labels, grouping, gating and search.
 
-const canSee = (me: Me, e: SettingsEntry) => !e.perm || hasCapability(me.capabilities, e.perm);
+const canSee = (me: Me, e: SettingsEntry) => settingsEntryVisible(me.capabilities, e);
 
 // Opening a settings entry: org singletons open their panel page; non-org entries (per-board, per-user) have
 // no instance here, so the card/rail item is a nav card that jumps to the host page where the inline gear lives.
@@ -257,7 +259,9 @@ const settingsMatch = (e: SettingsEntry, ql: string) =>
   [e.title, e.desc, e.group, ...(e.keywords ?? [])].join(" ").toLowerCase().includes(ql);
 
 export default function Settings({ me, tab, openId }: { me: Me; tab?: string; openId?: string }) {
-  const writable = usePermission("settings.write");
+  // Any panel at all - settings are owned per key (HR's policies, payroll's pay configuration), so there is no
+  // single app-wide write to ask about.
+  const writable = hasAnySettings(me.capabilities);
   const { toast } = useToast();
 
   if (!writable) {
@@ -544,6 +548,7 @@ function pickSettingsPanel(key: string, me: Me, toast: Toast, slot: HTMLDivEleme
     case "attendance": return <AttendanceTab toast={toast} />;
     case "late-early": return <PunctualityPolicyPanel />;
     case "shifts": return <ShiftsAdmin openId={openId} />;
+    case "work-patterns": return <WorkPatternsPanel openId={openId} />;
     // Pay & money
     case "pay-components": return <PayComponents embedded openId={openId} />;
     case "pay-grades": return <PayGradesAdmin embedded openId={openId} />;
@@ -575,6 +580,8 @@ function pickSettingsPanel(key: string, me: Me, toast: Toast, slot: HTMLDivEleme
     case "permissions": return <PermissionsPanel controlsSlot={slot} />;
     case "api-keys": return <ApiKeysPanel controlsSlot={slot} />;
     case "operations": return <Operations embedded />;
+    case "search-insights": return <SearchInsightsPanel />;
+    case "search-synonyms": return <SearchSynonymsPanel />;
     default: return null;
   }
 }
@@ -697,6 +704,9 @@ const sortSlabs = (slabs: PtSlab[]): PtSlab[] =>
 // exit, and the loan-interest perquisite. Each is an independent settings blob (settings/ctc, settings/overtime,
 // settings/professional-tax, settings/gratuity, settings/loan-perquisite).
 function PayrollPolicyTab({ toast }: { toast: Toast }) {
+  // The Approval tab is the four-eyes switch on the payroll commit - its own setting key, and super admin's by
+  // default, so the payroll admin it restrains is not offered a switch to turn it off.
+  const canApproval = mayWriteSetting(useCapabilities(), "payroll-approval");
   const [ctc, setCtc] = useState<{ basic_pct: number; pf_wage_basis: string }>({ basic_pct: 50, pf_wage_basis: "basic" });
   const [gratuity, setGratuity] = useState({ enabled: true, min_years: 5, days_per_year: 15, divisor: 26, exemption_cap: 2000000 });
   const [perq, setPerq] = useState({ enabled: false, sbi_rate_pct: 0, interest_charged_pct: 0, exempt_principal_upto: 20000 });
@@ -765,7 +775,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
         <TabsTrigger value="pt">Professional Tax</TabsTrigger>
         <TabsTrigger value="gratuity">Gratuity</TabsTrigger>
         <TabsTrigger value="perquisite">Loan perquisite</TabsTrigger>
-        <TabsTrigger value="approval">Approval</TabsTrigger>
+        {canApproval && <TabsTrigger value="approval">Approval</TabsTrigger>}
       </TabsList>
 
       <TabsContent value="ctc">
@@ -889,7 +899,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
       {/* Four-eyes on the payroll commit (settings/payroll-approval). The same switch PermissionsPanel offers
           for access rules, on the step that moves money - and off by default for the same reason: a single
           payroll admin has nobody else to approve, so the way out of that has to be this switch. */}
-      <TabsContent value="approval">
+      {canApproval && <TabsContent value="approval">
         <Card>
           <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/payroll-approval" label="Payroll approval"><span>Separate approver</span></AccessAction></CardTitle></CardHeader>
           <CardContent className="space-y-4">
@@ -898,7 +908,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
             <Button size="sm" onClick={saveApproval}><Save className="h-4 w-4" /> Save</Button>
           </CardContent>
         </Card>
-      </TabsContent>
+      </TabsContent>}
     </Tabs>
   );
 }
@@ -1387,6 +1397,35 @@ function AttendanceTab({ toast }: { toast: Toast }) {
                   </SelectContent>
                 </Select>
               </Field>
+            </div>
+
+            {/* THE GATE ON PER-PERSON SCHEDULES. Everything above describes the ORG's week; with this set to
+                "resolved", a person's roster entry and the schedule they are on decide their days instead -
+                which days are owed, which shift each is judged against, and how many worked minutes earn a
+                full or half day. An org that has been keeping a roster as a planning grid must not find those
+                entries deciding pay the moment schedules ship, so it is off until HR turns it on. */}
+            <div className="rounded-lg border p-3 sm:max-w-md">
+              <Field
+                label="Whose schedule decides a day"
+                hint="The settings above are the org's default either way - they apply to everybody not on a schedule of their own."
+              >
+                <Select value={cfg.schedule_source ?? "org"} onValueChange={(v) => setCfg((c) => ({ ...c, schedule_source: v as "org" | "resolved" }))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="org">This org-wide schedule, for everyone</SelectItem>
+                    <SelectItem value="resolved">Each person's own roster and schedule</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              {(cfg.schedule_source ?? "org") === "resolved" ? (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Roster entries and assigned schedules now decide attendance, leave charging and loss of pay for the people they cover. Someone on neither keeps the org's week above.
+                </p>
+              ) : (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  The roster is a planning grid only - it changes nothing anyone is paid or measured on. Switch this to use part-time weeks, rotations and per-person shift lengths.
+                </p>
+              )}
             </div>
           </TabsContent>
         </Tabs>
@@ -2990,16 +3029,20 @@ function DashboardTab({ toast }: { toast: Toast }) {
         <CardTitle><AccessAction collection="settings" objectPath="settings/dashboard" label="Dashboard"><span>Dashboard</span></AccessAction></CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <p className="text-sm text-muted-foreground">Choose who sees each KPI card and timeline marker, and which shortcut tiles the dashboard ends with. Selecting no one hides an item.</p>
+        <p className="text-sm text-muted-foreground">Choose who sees each KPI card and timeline marker, which shortcut tiles the dashboard ends with, and how far ahead celebrations show. Selecting no one hides an item.</p>
         <Tabs defaultValue="kpis">
           <TabsList variant="segmented">
             <TabsTrigger value="kpis">KPI cards</TabsTrigger>
             <TabsTrigger value="timeline">Timeline markers</TabsTrigger>
             <TabsTrigger value="shortcuts">Shortcuts</TabsTrigger>
+            <TabsTrigger value="celebrations">Celebrations</TabsTrigger>
           </TabsList>
           <TabsContent value="kpis">{kpiSection()}</TabsContent>
           <TabsContent value="timeline">{section(MARKER_DEFS, "timeline", "Save markers", "Timeline markers saved", "Everyone")}</TabsContent>
           <TabsContent value="shortcuts">{shortcutSection()}</TabsContent>
+          {/* Kept mounted while another tab is showing: unlike the three above, whose drafts live in `cfg` up
+              here, this tab holds its own form state, and unmounting it would drop an unsaved edit. */}
+          <TabsContent value="celebrations" forceMount className="data-[state=inactive]:hidden"><CelebrationsSettingsTab /></TabsContent>
         </Tabs>
       </CardContent>
     </Card>

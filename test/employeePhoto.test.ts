@@ -8,6 +8,7 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
+import { seedManifest } from "./seedManifest";
 import { genId } from "../src/lib/idCodec";
 import { clearCache } from "../src/lib/cache";
 import { systemActor } from "../src/lib/systemActor";
@@ -36,6 +37,7 @@ beforeAll(async () => {
     const s = stmt.trim();
     if (s) await b.DB.prepare(s).run().catch(() => {}); // tables may already exist from another suite
   }
+  await seedManifest(b.DB);
   deps = makeDeps(b);
 });
 
@@ -85,7 +87,7 @@ async function seedPerson(code: string, first: string, role: string) {
 
 /** Give this person a photo through the ordinary upload path, and answer with the version it was stamped. */
 async function givePhoto(employeeId: string): Promise<number> {
-  await uploadPhoto(deps, systemActor(), employeeId, JPEG.buffer.slice(0) as ArrayBuffer);
+  await uploadPhoto(deps, await systemActor(deps), employeeId, JPEG.buffer.slice(0) as ArrayBuffer);
   const row = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0]!;
   return +new Date(row.photoAt!);
 }

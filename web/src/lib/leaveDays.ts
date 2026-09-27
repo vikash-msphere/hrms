@@ -10,13 +10,16 @@
 //
 // Sessions: 1 = first half (morning), 2 = second half (afternoon). null = incomplete/unparseable input.
 import { leaveDays, type SandwichRule } from "../../../src/domain/leave";
+import type { DayScheduleOf } from "../../../src/domain/workSchedule";
 
 export function chargeableDays(
   startStr: string,
   endStr: string,
   startSession: number,
   endSession: number,
-  workDays: number[],
+  // The requester's schedule, day by day (src/domain/workSchedule.ts) - the days THEY work, so a part-timer
+  // is quoted the three days a Mon-Fri week costs them rather than five.
+  schedOf: DayScheduleOf,
   holidays: Set<string>,
   halfDayHolidays: Set<string> = new Set(),
   // The leave type's sandwich rule, when it has one: weekends or holidays inside (or beside) the block that
@@ -27,5 +30,5 @@ export function chargeableDays(
   if (!startStr || !endStr) return null;
   const s = Date.parse(startStr + "T00:00:00Z"), e = Date.parse(endStr + "T00:00:00Z");
   if (Number.isNaN(s) || Number.isNaN(e) || e < s) return null;
-  return leaveDays(s, e, startSession, endSession, workDays, holidays, halfDayHolidays, sandwich);
+  return leaveDays(s, e, startSession, endSession, schedOf, holidays, halfDayHolidays, sandwich);
 }

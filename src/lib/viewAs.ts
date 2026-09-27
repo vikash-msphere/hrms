@@ -25,6 +25,7 @@ import { mergeGrants, mergeGuards } from "../domain/compileGrants";
 import { EMPTY_GRANT, isSuperGrant } from "../domain/grants";
 import type { GuardIndex } from "../domain/ruleCondition";
 import { loadRoleGrant, loadRoleGuards, loadUserGrant, loadUserGuards, loadUserRoles } from "./policyLoad";
+import { provisionedRole } from "../services/roles";
 
 export const VIEW_AS_HEADER = "X-View-As";
 const TOKEN_RE = /^[0-9a-hj-km-np-tv-z]{26}$/; // a wire-id token (the SPA speaks tokens, tests speak internal ids)
@@ -124,7 +125,8 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
 
   const userUuid = row.userUuid ?? null;
   const email = row.email ?? (row as { workEmail?: string }).workEmail ?? "";
-  const roleName = row.role ?? "employee";
+  // A person with no account yet would get the provisioned role at first sign-in, so that is what they hold.
+  const roleName = row.role ?? (await provisionedRole(deps));
   const status = row.status ?? "active";
   // A disabled account never gets past auth for real, so simulating it would be a lie. Refuse loudly instead
   // of quietly rendering an empty app.
@@ -181,6 +183,8 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
     grant,
     guards,
     policy: real.policy, // the body-AC manifest is global - reuse the one auth already loaded
+    // The browser's lock and storage key are the admin's own: the simulation runs in THEIR browser.
+    ...(real.appLock ? { appLock: real.appLock } : {}),
     // The real admin's SITTING travels with them: a simulation is still something that human did while signed
     // in, and it is the sitting an incident review most wants grouped.
     // The real admin's SITTING travels with them, and so does their own AUTHORITY: rail 2's second half is

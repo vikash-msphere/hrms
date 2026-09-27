@@ -13,6 +13,7 @@ import { etagOf } from "../src/http/serialize";
 import { createEmployee, updateEmployee } from "../src/services/employees";
 import { updateUser } from "../src/services/users";
 import { awardBonus } from "../src/services/bonuses";
+import { upsertSetting } from "../src/services/settings";
 
 // OPTIMISTIC CONCURRENCY, ON THE PATHS THAT HAND-ROLL IT.
 //
@@ -42,7 +43,7 @@ beforeAll(async () => {
 const TABLES = [schema.notifications, schema.bonuses, schema.auditLog, schema.eventLog, schema.employees, schema.users, schema.roles, schema.codeSequences, schema.settings];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
-  await deps.db.insert(schema.roles).values([{ name: "employee", label: "Employee" }, { name: "manager", label: "Manager" }]).onConflictDoNothing();
+  await deps.db.insert(schema.roles).values([{ name: "employee", label: "Employee", provisioned: true }, { name: "manager", label: "Manager" }]).onConflictDoNothing();
 });
 
 const actor: AppUser = { uuid: "u-actor", email: "hr@test.example", role: "super_admin", status: "active", employeeId: null, employeeCode: null } as unknown as AppUser;
@@ -141,5 +142,23 @@ describe("a company-wide bonus award", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.employeeId).toBe(keep);
     expect(rows[0]!.batchId).toBeNull(); // an individual award is not a group
+  });
+});
+
+describe("a first save of a setting nobody has written yet", () => {
+  // Two callers that both read NO row have no version to send, so If-Match cannot guard them; the second of
+  // them used to find the first one's row and overwrite it with a value built on the defaults.
+  it("is refused once the row exists, when the caller said it read none", async () => {
+    await upsertSetting(deps, actor, "ticket-categories", { categories: [{ key: "a" }] }, undefined, "*");
+    await expect(upsertSetting(deps, actor, "ticket-categories", { categories: [{ key: "b" }] }, undefined, "*")).rejects.toThrow(/created concurrently/);
+    const row = (await deps.db.select().from(schema.settings).where(eq(schema.settings.key, "ticket-categories")).limit(1))[0]!;
+    expect(JSON.parse(row.value)).toEqual({ categories: [{ key: "a" }] });
+  });
+
+  it("still takes a caller that sends neither header, last-write-wins", async () => {
+    await upsertSetting(deps, actor, "ticket-categories", { categories: [{ key: "a" }] });
+    await upsertSetting(deps, actor, "ticket-categories", { categories: [{ key: "b" }] });
+    const row = (await deps.db.select().from(schema.settings).where(eq(schema.settings.key, "ticket-categories")).limit(1))[0]!;
+    expect(JSON.parse(row.value)).toEqual({ categories: [{ key: "b" }] });
   });
 });

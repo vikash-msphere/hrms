@@ -4,6 +4,7 @@ import {
   punctualityOverPeriod, punctualityPolicyOf, requestMinutes, shiftScheduleOf, validatePunctuality,
   type PunctualityPolicy, type ShiftSchedule,
 } from "../src/domain/punctuality";
+import { orgScheduleOf } from "../src/domain/workSchedule";
 import { summarizeAttendance } from "../src/domain/peopleAnalytics";
 
 // The late arrival / early departure rules, as pure functions. Every reader of a day goes through these - the
@@ -17,6 +18,11 @@ const policy = (over: { requests?: Partial<PunctualityPolicy["requests"]>; atten
   penalties: { ...DEFAULT_PUNCTUALITY.penalties, ...over.penalties },
 });
 const SCHED: ShiftSchedule = { timezone: "UTC", work_days: [1, 2, 3, 4, 5], shift_start: "09:00", shift_end: "18:00", grace_minutes: 15 };
+// The same shift as the day-by-day resolver, and one resolved working day out of it (domain/workSchedule.ts).
+// Nobody here is on a roster entry or a work pattern, so every day is the org's own and the figures below are
+// the ones these rules always produced.
+const SCHED_OF = orgScheduleOf(SCHED);
+const MONDAY = SCHED_OF("2026-03-02");
 const at = (hhmm: string) => { const [h, m] = hhmm.split(":").map(Number); return h! * 60 + m!; };
 
 describe("reading the stored policy", () => {
@@ -74,9 +80,9 @@ describe("the shift the rules judge against", () => {
   });
 
   it("measures a request from the shift edge it moves", () => {
-    expect(requestMinutes("late_arrival", "10:30", SCHED)).toBe(90);
-    expect(requestMinutes("early_departure", "16:00", SCHED)).toBe(120);
-    expect(requestMinutes("late_arrival", "08:30", SCHED)).toBeLessThan(0);
+    expect(requestMinutes("late_arrival", "10:30", MONDAY)).toBe(90);
+    expect(requestMinutes("early_departure", "16:00", MONDAY)).toBe(120);
+    expect(requestMinutes("late_arrival", "08:30", MONDAY)).toBeLessThan(0);
   });
 });
 
@@ -123,6 +129,38 @@ describe("judging one day", () => {
     expect(judge({ arrMin: at("11:00"), flexible: true }).late).toBe(false);
   });
 
+  // A NIGHT SHIFT IS ONE RUN ON A LINEAR TIMELINE. Its end is `endMin + 1440`, and every reading taken after
+  // midnight belongs to the same run. Left as plain wall-clock minutes the comparison is nonsense in one
+  // direction only, which is why it could survive: a 06:00 clock-out on a 22:00-06:00 shift happens to
+  // compare correctly, while a 23:00 one reads 1380 against an end of 360 and so was never "left early".
+  describe("a shift that runs past midnight", () => {
+    const night = (o: Partial<Parameters<typeof judgeDay>[0]>) =>
+      judgeDay({ arrMin: at("22:00"), depMin: at("06:00"), open: false, startMin: at("22:00"), endMin: at("06:00"), grace: 15, policy: DEFAULT_PUNCTUALITY.attendance, ...o });
+
+    it("is on time when it is worked end to end", () => {
+      expect(night({})).toMatchObject({ late: false, leftEarly: false });
+    });
+
+    it("flags a late arrival before midnight", () => {
+      expect(night({ arrMin: at("22:10") }).late).toBe(false); // inside grace
+      expect(night({ arrMin: at("22:40") })).toMatchObject({ late: true, lateByMin: 40 });
+    });
+
+    it("flags a departure after midnight but before the shift ends", () => {
+      expect(night({ depMin: at("05:00") })).toMatchObject({ leftEarly: true, earlyByMin: 60 });
+      expect(night({ depMin: at("05:50") }).leftEarly).toBe(false); // inside grace
+    });
+
+    it("flags leaving an hour into the shift, which a wall-clock comparison read as staying late", () => {
+      expect(night({ depMin: at("23:00") })).toMatchObject({ leftEarly: true, earlyByMin: 420 });
+    });
+
+    it("measures an approved departure across midnight too", () => {
+      expect(night({ depMin: at("04:05"), excusal: { earlyFrom: at("04:00") } })).toMatchObject({ leftEarly: false, excusedEarly: true });
+      expect(night({ depMin: at("03:00"), excusal: { earlyFrom: at("04:00") } })).toMatchObject({ leftEarly: true, earlyByMin: 60 });
+    });
+  });
+
   it("credits only the part of the approved gap actually missed, and only when the policy says so", () => {
     const excusal = { lateUntil: at("11:00"), earlyFrom: at("17:00") };
     const credit = { grace_on_top: true, credit_minutes: true };
@@ -137,10 +175,16 @@ describe("judging one day", () => {
 
 describe("filing a request", () => {
   const base = {
-    kind: "late_arrival" as const, date: "2026-03-02", at: "10:30", reason: "Doctor", sched: SCHED, policy: policy(),
+    kind: "late_arrival" as const, date: "2026-03-02", at: "10:30", reason: "Doctor", sched: MONDAY, policy: policy(),
     todayYmd: "2026-03-02", nowMin: at("08:00"), isHoliday: false, onFullLeave: false, monthRequests: [],
   };
-  const check = (over: Partial<Parameters<typeof checkFiling>[0]>) => checkFiling({ ...base, ...over });
+  // The day is resolved from the DATE, because that is what the service does: a request names a day, and the
+  // shift it is measured against is whatever that person was scheduled for on it. A case naming its own
+  // `sched` keeps it.
+  const check = (over: Partial<Parameters<typeof checkFiling>[0]>) => {
+    const merged = { ...base, ...over };
+    return checkFiling({ ...merged, sched: over.sched ?? SCHED_OF(merged.date) });
+  };
 
   it("files an ordinary late arrival and prices it in minutes", () => {
     expect(check({})).toMatchObject({ minutes: 90, errors: [], overLimit: false, autoApprove: false });
@@ -230,7 +274,7 @@ describe("a pay period's punctuality", () => {
   const week = (lateOn: string[], arrival = "09:40") =>
     punchDays(["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06"].map((d) => day(d, lateOn.includes(d) ? arrival : "09:00", "18:00")), (ms) => new Date(ms).toISOString().slice(0, 10));
   const over = (o: Partial<Parameters<typeof punctualityOverPeriod>[0]>) =>
-    punctualityOverPeriod({ startYmd: "2026-03-02", endYmd: "2026-03-06", holidays: new Set(), sched: SCHED, punches: week([]), policy: policy({ penalties: { enabled: true, free_marks: 0, every: 2, deduct_days: 0.5 } }), ...o });
+    punctualityOverPeriod({ startYmd: "2026-03-02", endYmd: "2026-03-06", holidays: new Set(), timezone: SCHED.timezone, schedOf: SCHED_OF, punches: week([]), policy: policy({ penalties: { enabled: true, free_marks: 0, every: 2, deduct_days: 0.5 } }), ...o });
 
   it("collapses sessions into a first-in / last-out day", () => {
     const d = punchDays([day("2026-03-02", "09:00", "13:00"), day("2026-03-02", "14:00", "18:30")], (ms) => new Date(ms).toISOString().slice(0, 10)).get("2026-03-02")!;
@@ -275,7 +319,7 @@ describe("a pay period's punctuality", () => {
 
 describe("a period's loss of pay with the policy in play", () => {
   const DAYS = ["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06"];
-  const base = { startYmd: "2026-03-02", endYmd: "2026-03-06", workDays: [1, 2, 3, 4, 5], holidays: new Set<string>(), leaveRanges: [], fullDayMinutes: 480, halfDayMinutes: 240 };
+  const base = { startYmd: "2026-03-02", endYmd: "2026-03-06", schedOf: SCHED_OF, holidays: new Set<string>(), leaveRanges: [] };
   const worked = (minutes: Record<string, number>) => new Map(DAYS.map((d) => [d, minutes[d] ?? 540]));
 
   it("is exactly lopDayUnits without the policy", () => {
@@ -287,8 +331,8 @@ describe("a period's loss of pay with the policy in play", () => {
     const punches = punchDays([{ clockInMs: Date.parse("2026-03-02T10:30:00Z"), clockOutMs: Date.parse("2026-03-02T17:30:00Z") }], (ms) => new Date(ms).toISOString().slice(0, 10));
     const excusals = excusalsByDay([{ date: "2026-03-02", kind: "late_arrival", at: "10:30" }]);
     const workedByDay = worked({ "2026-03-02": 420 });
-    const without = periodLop({ ...base, workedByDay, punctuality: { sched: SCHED, policy: policy(), punches, excusals } });
-    const withCredit = periodLop({ ...base, workedByDay, punctuality: { sched: SCHED, policy: policy({ attendance: { credit_minutes: true } }), punches, excusals } });
+    const without = periodLop({ ...base, workedByDay, punctuality: { timezone: SCHED.timezone, policy: policy(), punches, excusals } });
+    const withCredit = periodLop({ ...base, workedByDay, punctuality: { timezone: SCHED.timezone, policy: policy({ attendance: { credit_minutes: true } }), punches, excusals } });
     expect(without.absenceUnits).toBe(0.5);
     expect(withCredit.absenceUnits).toBe(0);
   });
@@ -296,7 +340,7 @@ describe("a period's loss of pay with the policy in play", () => {
   it("adds the marks' penalty to the absence, never past the days owed", () => {
     const late = DAYS.map((d) => ({ clockInMs: Date.parse(`${d}T09:40:00Z`), clockOutMs: Date.parse(`${d}T18:00:00Z`) }));
     const punches = punchDays(late, (ms) => new Date(ms).toISOString().slice(0, 10));
-    const r = periodLop({ ...base, workedByDay: worked({}), punctuality: { sched: SCHED, policy: policy({ penalties: { enabled: true, free_marks: 0, every: 1, deduct_days: 1 } }), punches } });
+    const r = periodLop({ ...base, workedByDay: worked({}), punctuality: { timezone: SCHED.timezone, policy: policy({ penalties: { enabled: true, free_marks: 0, every: 1, deduct_days: 1 } }), punches } });
     expect(r.lateMarks).toBe(5);
     expect(r.penaltyUnits).toBe(5);
     expect(r.units).toBe(5);
@@ -311,7 +355,7 @@ describe("a period's loss of pay with the policy in play", () => {
     const r = periodLop({
       ...base,
       workedByDay: new Map(three.map((d) => [d, 440])),
-      punctuality: { sched: SCHED, policy: policy({ penalties: { enabled: true, counts: "both", free_marks: 0, every: 1, deduct_days: 1 } }), punches },
+      punctuality: { timezone: SCHED.timezone, policy: policy({ penalties: { enabled: true, counts: "both", free_marks: 0, every: 1, deduct_days: 1 } }), punches },
     });
     expect(r).toMatchObject({ lateMarks: 3, earlyMarks: 3, absenceUnits: 3.5, penaltyUnits: 1.5, units: 5 });
   });
@@ -326,7 +370,7 @@ describe("a period's loss of pay with the policy in play", () => {
       ...base,
       workedByDay: new Map(three.map((d) => [d, 440])),
       trackedFromYmd: "2026-03-04",
-      punctuality: { sched: SCHED, policy: policy({ penalties: { enabled: true, counts: "both", free_marks: 0, every: 1, deduct_days: 1 } }), punches },
+      punctuality: { timezone: SCHED.timezone, policy: policy({ penalties: { enabled: true, counts: "both", free_marks: 0, every: 1, deduct_days: 1 } }), punches },
     });
     expect(r).toMatchObject({ lateMarks: 3, earlyMarks: 3, absenceUnits: 1.5, penaltyUnits: 1.5, units: 3 });
   });

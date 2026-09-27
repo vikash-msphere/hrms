@@ -52,7 +52,7 @@ const PAGE_OF: Record<string, string> = {
   applications: "pipeline", referrals: "referrals",
   "benefit-plans": "benefits", "benefit-enrollments": "benefits", dependents: "benefits",
   "payroll-runs": "payroll-runs", payslips: "payslips",
-  "shift-assignments": "schedule", shifts: "schedule",
+  "shift-assignments": "schedule", shifts: "schedule", "work-patterns": "schedule", "work-pattern-assignments": "schedule",
   "org-documents": "documents", "personal-documents": "documents",
   holidays: "holidays", automations: "workflows",
 };

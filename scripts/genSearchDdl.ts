@@ -1,37 +1,42 @@
-// Checks the generated search DDL (FTS5 table + sync triggers + backfill) against the migration that carries it.
-// drizzle-kit cannot emit virtual tables or triggers, so this runs straight after `drizzle-kit generate` - see
-// the `db:generate` script.
+// Checks the search index's sync triggers (the ones behind ⌘K, src/db/searchDdl.ts) that the migrations create
+// against what the registry describes - drizzle-kit cannot emit triggers or virtual tables.
 //
-// The block lives in 0000, which production has applied, and migrations are append-only: wrangler tracks them
-// by tag and never re-reads an applied file, so rewriting the block there would deploy green and change
-// nothing (scripts/freezeMigrations.ts). So this never writes. An unchanged block passes, which is what lets
-// `db:generate` run for a schema change that does not touch search. A changed one fails, naming the file,
-// because the new or altered triggers then have to be written into the new migration as DROP/CREATE by hand.
+// The full block lives in 0000, which production has applied, and migrations are append-only, so the triggers
+// the migrations leave in place, applied in order, are compared with the generator's. They match: pass. They
+// differ - a newly searchable collection, a changed match column - and this prints exactly what the newest
+// migration has to carry (CREATE for a new trigger, DROP + CREATE for a changed one, a backfill for a
+// collection indexed for the first time) and fails. `--write` appends it to the newest migration instead,
+// which must be one production has not applied.
 //
-//   Run:  node --import ./scripts/tsResolve.mjs scripts/genSearchDdl.ts        (or just `npm run db:generate`)
-import { readdirSync, readFileSync } from "node:fs";
+//   Check:  node --import ./scripts/tsResolve.mjs scripts/genSearchDdl.ts        (or `npm run db:generate`)
+//   Write:  node --import ./scripts/tsResolve.mjs scripts/genSearchDdl.ts --write
+import { appendFileSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { renderSearchDdl, SEARCH_DDL_MARKER } from "../src/db/searchDdl";
-import { CHANGE_DDL_MARKER } from "../src/db/changeDdl";
+import { appliedSearchTriggers, FTS_TABLE_DDL, searchDdlDelta } from "../src/db/searchDdl";
+// The triggers bake in the SEEDED state-visibility rules: DDL is written at migration time, so it can only
+// reflect the manifest a fresh database starts with.
+import { STATE_VISIBILITY } from "../bootstrap/authz/policy";
 
 const DIR = "src/db/migrations";
 const files = readdirSync(DIR).filter((f) => f.endsWith(".sql")).sort();
-const holders = files.filter((f) => readFileSync(join(DIR, f), "utf8").includes(SEARCH_DDL_MARKER));
-if (holders.length !== 1) {
-  throw new Error(`expected the generated search DDL in exactly one migration in ${DIR}, found it in ${holders.length}: ${holders.join(", ")}`);
+const sql = files.map((f) => readFileSync(join(DIR, f), "utf8"));
+
+if (!sql.some((s) => s.includes(FTS_TABLE_DDL))) {
+  throw new Error("no migration creates the search FTS table as src/db/searchDdl.ts describes it. Changing its columns is a rebuild of every trigger and row, written by hand.");
 }
 
-const path = join(DIR, holders[0]!);
-const current = readFileSync(path, "utf8");
-const cut = current.indexOf(SEARCH_DDL_MARKER);
-// The change-stamp block (scripts/genChangeDdl.ts) follows this one in the same file.
-const next = current.indexOf(CHANGE_DDL_MARKER, cut);
-const block = (next > cut ? current.slice(cut, next) : current.slice(cut)).replace(/(?:\s*-->\s*statement-breakpoint)+\s*$/, "").trim();
-if (block !== renderSearchDdl().trim()) {
+const delta = searchDdlDelta(appliedSearchTriggers(sql), STATE_VISIBILITY);
+if (delta.length === 0) {
+  console.error(`search DDL matches the registry across ${files.length} migrations`);
+} else if (process.argv.includes("--write")) {
+  const newest = files[files.length - 1]!;
+  const body = sql[sql.length - 1]!;
+  appendFileSync(join(DIR, newest), `${body.endsWith("\n") ? "" : "\n"}--> statement-breakpoint\n-- Search index delta (printed by scripts/genSearchDdl.ts).\n${delta.join("\n--> statement-breakpoint\n")}\n`);
+  console.error(`appended ${delta.length} search DDL statement(s) to ${newest} - it must be a migration production has not applied`);
+} else {
+  console.error(delta.join("\n--> statement-breakpoint\n"));
   throw new Error(
-    `search DDL changed, but its block lives in ${path}, which is applied to the live database and is never rewritten. ` +
-      "Write the new or changed FTS triggers into the newest migration by hand (DROP TRIGGER + CREATE TRIGGER), " +
-      "and extend test/searchDdlDrift.test.ts to read them from there.",
+    `the search triggers the migrations create differ from the registry. Append the ${delta.length} statement(s) above to ` +
+      `the newest migration (${files[files.length - 1]}), or re-run with --write; 0000 is applied to the live database and is never rewritten.`,
   );
 }
-console.error(`search DDL unchanged in ${path}`);

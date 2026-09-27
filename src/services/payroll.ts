@@ -41,7 +41,9 @@ import { etagOf } from "../http/serialize";
 import { keysetPage } from "./keysetPage";
 import { refDepartments, refHolidays, refLeaveTypes, refPayComponents, refPayPeriods } from "../lib/refData";
 import { marksForPeriod } from "./attendanceDayMarks";
-import { periodLop, punchDays, punctualityTouchesPay, shiftScheduleOf, type DayExcusal, type PeriodLop, type PunchDay, type PunctualityPolicy, type ShiftSchedule } from "../domain/punctuality";
+import { periodLop, punchDays, punctualityTouchesPay, type DayExcusal, type PeriodLop, type PunchDay, type PunctualityPolicy } from "../domain/punctuality";
+import { orgScheduleOf, sameForEveryone, type ScheduleResolver } from "../domain/workSchedule";
+import { scheduleCtxWith } from "./workSchedule";
 import { approvedExcusals, punctualityPolicy } from "./lateEarlyRequests";
 
 // Resolve user ids to a display name: the linked employee's full name, else the user's email.
@@ -688,7 +690,7 @@ async function periodLeave(deps: Deps, period: typeof schema.payPeriods.$inferSe
 // Gather the period's attendance facts once (holidays, approved leave, punches) so the per-employee LOP
 // in buildRunItems is pure map lookups. `endYmd` is clamped to today so a mid-period build never charges
 // not-yet-arrived days as absences.
-async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSelect, att: AttendanceConfig) {
+async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSelect, att: AttendanceConfig, schedFor: ScheduleResolver) {
   const tz = att.timezone || "Asia/Kolkata";
   const startMs = +new Date(period.periodStart);
   const endMs = +new Date(period.periodEnd);
@@ -751,8 +753,7 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
     const credit = eventCreditByDay({
       events,
       tz,
-      workDays: att.work_days,
-      fullDayMinutes: att.full_day_minutes ?? 480,
+      schedOf: schedFor(empId),
       todayYmd,
       nowMs,
       punchedDays: new Set(worked.keys()), // taken before the merge below, so credit never counts as a punch
@@ -778,20 +779,29 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
     const punchesByEmp = new Map<string, Map<string, PunchDay>>();
     for (const [emp, ss] of sessionsByEmp) punchesByEmp.set(emp, punchDays(ss, (ms) => localDay(ms, tz)));
     punctuality = {
-      // The stored attendance blob carries the shift window the SPA saved; `AttendanceConfig` just never named it.
-      sched: shiftScheduleOf(att as unknown as Record<string, unknown>),
+      // The window each day is judged against comes from that person's own schedule now; the timezone is what
+      // is left of the org blob here, and it is what the punches are read in.
+      timezone: tz,
       policy,
       punchesByEmp,
       excusalsByEmp: await approvedExcusals(deps, startMs, endMs),
     };
   }
 
-  const workingDaysInPeriod = workingDaysInRange(startYmd, periodEndYmd, att.work_days, holidays);
-  return { startYmd, endYmd, holidays, leaveByEmp, workedByEmp, marksByEmp, punctuality, workingDaysInPeriod };
+  // THE DIVISOR IS PER EMPLOYEE, because the schedule is: a day off a three-day week is a third of that week's
+  // pay, not the fifth of it that an org-wide count would price. Memoized and lazy, so a run where nobody was
+  // absent counts nobody's days.
+  const divisors = new Map<string, number>();
+  const workingDaysFor = (employeeId: string): number => {
+    let n = divisors.get(employeeId);
+    if (n === undefined) divisors.set(employeeId, (n = workingDaysInRange(startYmd, periodEndYmd, schedFor(employeeId), holidays)));
+    return n;
+  };
+  return { startYmd, endYmd, holidays, leaveByEmp, workedByEmp, marksByEmp, punctuality, workingDaysFor };
 }
 
 type LopPunctuality = {
-  sched: ShiftSchedule;
+  timezone: string;
   policy: PunctualityPolicy;
   punchesByEmp: Map<string, Map<string, PunchDay>>;
   excusalsByEmp: Map<string, Map<string, DayExcusal>>;
@@ -807,7 +817,7 @@ type LopPunctuality = {
  */
 function employeeLop(
   lop: Awaited<ReturnType<typeof assembleLop>>,
-  att: AttendanceConfig,
+  schedFor: ScheduleResolver,
   employeeId: string,
   startYmd: string,
   endYmd: string,
@@ -817,16 +827,14 @@ function employeeLop(
   return periodLop({
     startYmd,
     endYmd,
-    workDays: att.work_days,
+    schedOf: schedFor(employeeId),
     holidays: lop.holidays,
     leaveRanges: lop.leaveByEmp.get(employeeId) ?? [],
     workedByDay: lop.workedByEmp.get(employeeId) ?? new Map<string, number>(),
     marksByDay: lop.marksByEmp.get(employeeId),
     trackedFromYmd: trackedFrom ? utcDay(+new Date(trackedFrom)) : null,
-    fullDayMinutes: att.full_day_minutes ?? 480,
-    halfDayMinutes: att.half_day_minutes ?? 240,
     punctuality: pn
-      ? { sched: pn.sched, policy: pn.policy, punches: pn.punchesByEmp.get(employeeId) ?? new Map<string, PunchDay>(), excusals: pn.excusalsByEmp.get(employeeId) }
+      ? { timezone: pn.timezone, policy: pn.policy, punches: pn.punchesByEmp.get(employeeId) ?? new Map<string, PunchDay>(), excusals: pn.excusalsByEmp.get(employeeId) }
       : undefined,
   });
 }
@@ -1000,7 +1008,12 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // Loss-of-pay for unexcused absences (opt-in via settings/attendance.lop_enabled). Assemble the period's
   // holidays, approved leave and attendance punches ONCE; the per-employee absent-day count + amount follow.
   const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
-  const lop = att.lop_enabled && period ? await assembleLop(deps, period, att) : null;
+  // Whose day is what: the roster entry, the work pattern, then the org's own week (domain/workSchedule.ts).
+  // Three reads for the whole run, and none at all while the org is on `schedule_source: "org"`.
+  const schedFor = period
+    ? await scheduleCtxWith(deps, att, utcDay(+new Date(period.periodStart)), utcDay(+new Date(period.periodEnd)))
+    : sameForEveryone(orgScheduleOf(att));
+  const lop = att.lop_enabled && period ? await assembleLop(deps, period, att, schedFor) : null;
   // With automatic LOP off, approved UNPAID leave still docks its own days (see the per-employee block below),
   // so the period's leave is read on its own - one leave read, from the same helper assembleLop uses.
   const unpaidLeave = !lop && period ? await periodLeave(deps, period, att) : null;
@@ -1039,7 +1052,17 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // per-request cached reference read); `assembleLop` derives its own copy from the same helper, so the two
   // cannot disagree. Only the fallback for a run with no period stays 30 - with no period there are no bounds
   // to count, and `days_30` is the honest reading of "a month" there.
-  const workingDaysInPeriod = lop?.workingDaysInPeriod ?? (period ? workingDaysInRange(periodStartYmd, periodEndYmd, att.work_days, holidaySet) : 30);
+  //
+  // PER EMPLOYEE, because the schedule is (see `workingDaysFor` in assembleLop). Memoized here too for the
+  // runs that assemble no LOP facts at all, so the two paths answer the same figure by the same arithmetic.
+  const divisors = new Map<string, number>();
+  const workingDaysFor = (employeeId: string): number => {
+    if (lop) return lop.workingDaysFor(employeeId);
+    if (!period) return 30;
+    let n = divisors.get(employeeId);
+    if (n === undefined) divisors.set(employeeId, (n = workingDaysInRange(periodStartYmd, periodEndYmd, schedFor(employeeId), holidaySet)));
+    return n;
+  };
 
   // The payslip is rendered in the org currency, and every line total is summed as a bare number. The app is
   // single-currency: guard the invariant so an employee's comp - or any payable - in a different currency fails
@@ -1140,7 +1163,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     const empStartYmd = e.startDate ? utcDay(+new Date(e.startDate)) : null;
     const empEndYmd = e.endDate ? utcDay(+new Date(e.endDate)) : null;
     const factor = period
-      ? employmentFraction({ periodStartYmd, periodEndYmd, empStartYmd, empEndYmd, workDays: att.work_days, holidays: holidaySet, basis: prorationBasis })
+      ? employmentFraction({ periodStartYmd, periodEndYmd, empStartYmd, empEndYmd, schedOf: schedFor(e.uuid), holidays: holidaySet, basis: prorationBasis })
       : 1;
     const base = comp.basePay * factor;
     const special = comp.specialAllowance * factor;
@@ -1180,6 +1203,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // uses. Hoisted because a MANUAL loss of pay arrives as a rupee amount and still has to state its day-units
     // (the PF/ESI registers report non-contributing days, not rupees).
     const lopWage = (att.lop_wage_basis ?? "gross") === "basic" ? comp.basePay : fullMonthlyBase;
+    const workingDaysInPeriod = workingDaysFor(e.uuid);
     const lopDailyRate = lopAmount(lopWage, 1, att.lop_basis ?? "working_days", workingDaysInPeriod);
 
     // One-off inputs the caller passed for this employee (manual adjustments, statutory deduction inputs, a
@@ -1224,7 +1248,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       const lopStartYmd = empStartYmd && empStartYmd > lop.startYmd ? empStartYmd : lop.startYmd;
       const lopEndYmd = empEndYmd && empEndYmd < lop.endYmd ? empEndYmd : lop.endYmd;
       // Absence plus whatever the punctuality policy docks for unexcused lateness (domain/punctuality.ts).
-      const owed = employeeLop(lop, att, e.uuid, lopStartYmd, lopEndYmd, e.trackedFrom);
+      const owed = employeeLop(lop, schedFor, e.uuid, lopStartYmd, lopEndYmd, e.trackedFrom);
       const dayUnits = owed.units;
       // Never dock more than the period's regular wage (a full-month absence zeroes the salary, it doesn't turn
       // it negative - which a prorated part-month at the full daily rate could otherwise do). `lopWage` is the
@@ -1263,7 +1287,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       // with automatic LOP on, these days are already inside `lopDayUnits`, so the two never stack.
       const fromYmd = empStartYmd && empStartYmd > unpaidLeave.startYmd ? empStartYmd : unpaidLeave.startYmd;
       const toYmd = empEndYmd && empEndYmd < unpaidLeave.endYmd ? empEndYmd : unpaidLeave.endYmd;
-      const dayUnits = unpaidLeaveDayUnits(fromYmd, toYmd, att.work_days, unpaidLeave.holidays, unpaidLeave.leaveByEmp.get(e.uuid) ?? []);
+      const dayUnits = unpaidLeaveDayUnits(fromYmd, toYmd, schedFor(e.uuid), unpaidLeave.holidays, unpaidLeave.leaveByEmp.get(e.uuid) ?? []);
       const amt = Math.min(lopAmount(lopWage, dayUnits, att.lop_basis ?? "working_days", workingDaysInPeriod), Math.max(0, round2(regularGross - manualLop)));
       if (amt > 0) {
         autoLop = amt;
@@ -2177,6 +2201,8 @@ type PayslipRunContext = {
   org: { name?: string; logo?: string; address?: string };
   att: AttendanceConfig;
   depts: Map<string, string>;
+  /** Whose day is what, so the attendance strip counts the days THAT person was scheduled for. */
+  schedFor: ScheduleResolver;
   lop: Awaited<ReturnType<typeof assembleLop>> | null;
   currencyCode: string;
   dp: number;
@@ -2193,7 +2219,10 @@ async function payslipRunContext(deps: Deps, run: typeof schema.payrollRuns.$inf
   const chosen = await documentLetterhead(deps, org, "payslip");
   const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
   const depts = new Map((await refDepartments(deps)).map((d) => [d.uuid, d.name] as const));
-  const lop = period ? await assembleLop(deps, period, att) : null;
+  const schedFor = period
+    ? await scheduleCtxWith(deps, att, utcDay(+new Date(period.periodStart)), utcDay(+new Date(period.periodEnd)))
+    : sameForEveryone(orgScheduleOf(att));
+  const lop = period ? await assembleLop(deps, period, att, schedFor) : null;
   const currencyCode = org.default_currency || "INR";
   // The design is org config. A blob that fails validation falls back to the stock layout rather than failing
   // the run - payslips must still go out if someone saved a broken template.
@@ -2208,6 +2237,7 @@ async function payslipRunContext(deps: Deps, run: typeof schema.payrollRuns.$inf
     letterhead: onLetterhead ? chosen : undefined,
     att,
     depts,
+    schedFor,
     lop,
     currencyCode,
     template,
@@ -2221,7 +2251,7 @@ async function payslipDataForItem(deps: Deps, ctx: PayslipRunContext, it: typeof
   const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, it.employeeId)).limit(1))[0];
   if (!emp) return null;
   const lines: Line[] = JSON.parse(it.linesJson);
-  const { att, lop } = ctx;
+  const { att, lop, schedFor } = ctx;
 
   // Employee bank details (decrypt the PII blob; degrade gracefully if absent/unreadable). Account is masked.
   let bank: { bank_name?: string; ifsc_code?: string; account_number?: string } = {};
@@ -2243,8 +2273,8 @@ async function payslipDataForItem(deps: Deps, ctx: PayslipRunContext, it: typeof
     const wEnd = empEndYmd && empEndYmd < lop.endYmd ? empEndYmd : lop.endYmd;
     // The same reading the LOP line was priced by, late and early marks included, so the strip's LOP days and
     // payable days agree with the money on the slip.
-    const lopDays = employeeLop(lop, att, emp.uuid, wStart, wEnd, emp.trackedFrom).units;
-    const workingDays = workingDaysInRange(wStart, wEnd, att.work_days, lop.holidays);
+    const lopDays = employeeLop(lop, schedFor, emp.uuid, wStart, wEnd, emp.trackedFrom).units;
+    const workingDays = workingDaysInRange(wStart, wEnd, schedFor(emp.uuid), lop.holidays);
     const payable = round2(workingDays - lopDays);
     attendance = { workingDays, lopDays, actualDays: payable, daysPayable: payable };
   }
@@ -2379,7 +2409,8 @@ export async function recomputeLopUnits(deps: Deps, employeeId: string, payPerio
     .limit(1))[0];
   if (!emp) return null;
 
-  const lop = await assembleLop(deps, period, att);
+  const schedFor = await scheduleCtxWith(deps, att, utcDay(+new Date(period.periodStart)), utcDay(+new Date(period.periodEnd)), [employeeId]);
+  const lop = await assembleLop(deps, period, att, schedFor);
   // The same employment clamp the build applies: days before joining or after leaving are handled by
   // proration, not counted as unauthorised absence, or a joiner is docked twice.
   const empStartYmd = emp.startDate ? utcDay(+new Date(emp.startDate)) : null;
@@ -2387,7 +2418,7 @@ export async function recomputeLopUnits(deps: Deps, employeeId: string, payPerio
   const startYmd = empStartYmd && empStartYmd > lop.startYmd ? empStartYmd : lop.startYmd;
   const endYmd = empEndYmd && empEndYmd < lop.endYmd ? empEndYmd : lop.endYmd;
   // The build's own reading (employeeLop), so a restatement is priced against the same answer the run gave.
-  return employeeLop(lop, att, employeeId, startYmd, endYmd, emp.trackedFrom).units;
+  return employeeLop(lop, schedFor, employeeId, startYmd, endYmd, emp.trackedFrom).units;
 }
 
 /**

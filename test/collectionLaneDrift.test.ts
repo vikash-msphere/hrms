@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
 import * as schema from "../src/db/schema";
-import { GRANTS } from "../src/domain/grants";
+import { GRANTS } from "../bootstrap/authz/grants";
 import { actorCan, actorScope } from "../src/domain/access";
 
 // ONE way to define a collection. Every route file that exposes the AEP standard methods (a collection-level
@@ -178,7 +178,7 @@ describe("every collection is built by the factory", () => {
     const GENERIC_LIST = [
       "asset-categories", "benefit-plans", "compliance-rules", "expense-categories", "goal-templates", "holidays", "leave-types",
       "letter-templates", "letterheads", "pay-components", "pay-grades", "pay-periods", "projects", "reimbursement-categories",
-      "access-rules", "salary-structures", "shifts", "vendors", "card-transactions",
+      "access-rules", "salary-structures", "shifts", "vendors", "card-transactions", "work-patterns",
     ];
     const genericListFiles = entries.filter((e) => usesFactory(e.src) && !/^\s*list:/m.test(e.src)).map((e) => e.name);
     expect(genericListFiles.length, `these list through crud.ts: ${genericListFiles.join(", ")} - keep GENERIC_LIST in step`).toBe(GENERIC_LIST.length);

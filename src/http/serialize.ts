@@ -356,6 +356,7 @@ export function toRoleResource(r: any): Wire<"role"> {
     name: r.name,
     label: r.label,
     protected: !!r.protected,
+    provisioned: !!r.provisioned,
   };
 }
 
@@ -996,6 +997,13 @@ export function toShiftResource(r: any): Wire<"shift"> {
     start: r.startTime,
     end: r.endTime,
     break_minutes: r.breakMinutes ?? 0,
+    // Null means "derive it" (domain/workSchedule.ts#shiftDay), which is not the same as zero - the field is
+    // omitted rather than defaulted, so the editor can show the derived figure as a placeholder instead of
+    // printing a number nobody chose.
+    full_day_minutes: r.fullDayMinutes ?? undefined,
+    half_day_minutes: r.halfDayMinutes ?? undefined,
+    grace_minutes: r.graceMinutes ?? undefined,
+    flexible_hours: r.flexibleHours == null ? undefined : !!r.flexibleHours,
     color: r.color ?? undefined,
   };
 }
@@ -1005,7 +1013,35 @@ export function toShiftAssignmentResource(r: any): Wire<"shift-assignment"> {
     ...baseResource(r, "shift-assignments"),
     employee: ref("employees", r.employeeId),
     shift: ref("shifts", r.shiftId),
+    // "off" is a rest day and carries no shift; "shift" is the ordinary entry and every existing row is one.
+    kind: r.kind ?? "shift",
     date: r.date ? iso(r.date).slice(0, 10) : undefined,
+    note: r.note ?? undefined,
+  };
+}
+
+export function toWorkPatternResource(r: any): Wire<"work-pattern"> {
+  return {
+    ...baseResource(r, "work-patterns"),
+    name: r.name,
+    cycle_weeks: r.cycleWeeks ?? 1,
+    // The cycle, as refs: `cycle_weeks * 7` entries indexed `weekIndex * 7 + weekday` (0=Sun), each a shift or
+    // null for a rest day. Null survives the mapping because it is a VALUE here - the day somebody is off -
+    // rather than a missing one, so the array stays the length the cycle claims.
+    days: jsonOr<(string | null)[]>(r.daysJson, []).map((id) => (id ? ref("shifts", id) ?? null : null)),
+    color: r.color ?? undefined,
+  };
+}
+
+export function toWorkPatternAssignmentResource(r: any): Wire<"work-pattern-assignment"> {
+  return {
+    ...baseResource(r, "work-pattern-assignments"),
+    employee: ref("employees", r.employeeId),
+    pattern: ref("work-patterns", r.patternId),
+    start_date: r.startDate ? iso(r.startDate).slice(0, 10) : undefined,
+    end_date: r.endDate ? iso(r.endDate).slice(0, 10) : undefined,
+    // Absent means the cycle counts from `start_date`, which is what it does when nobody offsets it.
+    anchor_date: r.anchorDate ? iso(r.anchorDate).slice(0, 10) : undefined,
     note: r.note ?? undefined,
   };
 }
@@ -2306,6 +2342,28 @@ export function toCronRunResource(r: {
     ...(r.durationMs != null ? { duration_ms: r.durationMs } : {}),
     ...(r.error ? { error: r.error } : {}),
     ...(r.summaryJson ? { summary: jsonOr<Wire<"cron_run">["summary"]>(r.summaryJson, {}) } : {}),
+  };
+}
+
+// A daily ⌘K usage counter (services/searchInsights.ts). Counts only - nothing here names a person.
+export function toSearchInsightResource(r: {
+  uuid: string;
+  day: string;
+  kind: "zero" | "open" | "ask";
+  label: string;
+  count: number;
+  createdAt: Date | number;
+  updatedAt: Date | number;
+}): Wire<"search_insight"> {
+  return {
+    path: `search-insights/${r.uuid}`,
+    create_time: iso(r.createdAt),
+    update_time: iso(r.updatedAt),
+    etag: etagOf(+new Date(r.updatedAt)),
+    day: r.day,
+    kind: r.kind,
+    label: r.label,
+    count: r.count,
   };
 }
 

@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { computeAccrual, creditedBeforeFloor, hrmsPricingStartMs, leaveDays, roundToIncrement, ymOf } from "../src/domain/leave";
+import { orgScheduleOf } from "../src/domain/workSchedule";
+
+// A working week as the day-by-day resolver `leaveDays` takes (domain/workSchedule.ts). The weekday set the
+// cases used to pass, in the shape the walk asks for it.
+const week = (...days: number[]) => orgScheduleOf({ work_days: days });
 
 const ms = (d: string) => Date.parse(d + "T00:00:00Z");
 // 12 days/year -> exactly 1.0 day per full month, keeps the arithmetic easy to read.
@@ -521,12 +526,12 @@ describe("leaveDays (sessions: 1=AM, 2=PM)", () => {
   it("defaults are a full range", () => expect(leaveDays(mon, wed)).toBe(3));
   it("excludes holidays from the count", () => {
     // Mon..Wed with Tue (2026-06-02) a holiday -> Mon + Wed = 2 working days.
-    expect(leaveDays(mon, wed, 1, 2, [1, 2, 3, 4, 5], new Set(["2026-06-02"]))).toBe(2);
+    expect(leaveDays(mon, wed, 1, 2, week(1, 2, 3, 4, 5), new Set(["2026-06-02"]))).toBe(2);
   });
   it("honors a custom working week (Saturday configured as a working day)", () => {
     const sat = ms("2026-06-06");
-    expect(leaveDays(sat, sat, 1, 2, [1, 2, 3, 4, 5, 6])).toBe(1); // Sat counts when configured
-    expect(leaveDays(sat, sat, 1, 2, [1, 2, 3, 4, 5])).toBe(0); // and not otherwise
+    expect(leaveDays(sat, sat, 1, 2, week(1, 2, 3, 4, 5, 6))).toBe(1); // Sat counts when configured
+    expect(leaveDays(sat, sat, 1, 2, week(1, 2, 3, 4, 5))).toBe(0); // and not otherwise
   });
   it("weekends don't count and sessions on a weekend boundary are ignored", () => {
     expect(leaveDays(ms("2026-06-06"), ms("2026-06-07"), 2, 1)).toBe(0); // Sat..Sun, no working days
@@ -535,16 +540,16 @@ describe("leaveDays (sessions: 1=AM, 2=PM)", () => {
   });
   it("charges a half-day holiday as half a day", () => {
     const half = new Set(["2026-06-02"]); // Tue, office open in the afternoon only
-    expect(leaveDays(mon, wed, 1, 2, [1, 2, 3, 4, 5], new Set(), half)).toBe(2.5);
+    expect(leaveDays(mon, wed, 1, 2, week(1, 2, 3, 4, 5), new Set(), half)).toBe(2.5);
     // A full holiday wins over a half one, so a mis-set pair can't charge 1.5 days for a closed office.
-    expect(leaveDays(mon, wed, 1, 2, [1, 2, 3, 4, 5], new Set(["2026-06-02"]), half)).toBe(2);
+    expect(leaveDays(mon, wed, 1, 2, week(1, 2, 3, 4, 5), new Set(["2026-06-02"]), half)).toBe(2);
   });
   it("shaves only what a half-day holiday boundary is worth", () => {
     const tue = ms("2026-06-02");
     const half = new Set(["2026-06-02"]);
     // The one day is worth 0.5; a PM start can't take it below zero.
-    expect(leaveDays(tue, tue, 1, 2, [1, 2, 3, 4, 5], new Set(), half)).toBe(0.5);
-    expect(leaveDays(tue, tue, 2, 2, [1, 2, 3, 4, 5], new Set(), half)).toBe(0);
+    expect(leaveDays(tue, tue, 1, 2, week(1, 2, 3, 4, 5), new Set(), half)).toBe(0.5);
+    expect(leaveDays(tue, tue, 2, 2, week(1, 2, 3, 4, 5), new Set(), half)).toBe(0);
   });
 });
 

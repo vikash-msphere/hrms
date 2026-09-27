@@ -31,7 +31,8 @@ import {
 import { holidayApplies } from "./holidays";
 import { getSettingValue } from "./settings";
 import { orgToday } from "./orgDay";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, utcDay, type AttendanceConfig } from "../domain/attendance";
+import { scheduleCtxWith } from "./workSchedule";
 import { refHolidays, refLeaveTypes } from "../lib/refData";
 import { getAttachment } from "./attachments";
 import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
@@ -419,7 +420,11 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   const holidayFrom = Math.min(start, policyWindow?.fromMs ?? start) - 8 * 86_400_000;
   const holidayTo = Math.max(end, policyWindow?.toMs ?? end) + 8 * 86_400_000;
   const holidays = await holidaysInRange(deps, holidayFrom, holidayTo, await employeeLocation(deps, employeeId));
-  const days = leaveDays(start, end, startSession, endSession, att.work_days, holidays.full, holidays.half, sandwichOf(rules));
+  // Whose working days these are (services/workSchedule.ts): a week of leave costs a Mon/Wed/Fri part-timer
+  // three days, not the five an org-wide weekday set would charge them. Resolved over the POLICY window, not
+  // just the requested range, because the restriction rules below walk the neighbours too.
+  const schedOf = (await scheduleCtxWith(deps, att, utcDay(holidayFrom), utcDay(holidayTo), [employeeId]))(employeeId);
+  const days = leaveDays(start, end, startSession, endSession, schedOf, holidays.full, holidays.half, sandwichOf(rules));
   if (days <= 0) throw invalidArgument("no working days in the selected range (weekends and holidays aren't counted) - pick a working day");
 
   // Balance check: a paid (entitlement-tracked) leave type can't be drawn below zero. The balance is reserved
@@ -496,7 +501,7 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
       // can actually be checked: on approval, below.
       hasDocument: null,
       reason: input.reason ?? null,
-      workDays: att.work_days,
+      schedOf,
       holidays: holidays.full,
       halfDayHolidays: holidays.half,
       ...facts,

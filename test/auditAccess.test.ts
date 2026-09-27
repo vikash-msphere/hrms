@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { accessAudit, mutationAudit, READ_VERBS } from "../src/domain/auditAccess";
-import { AUDIT } from "../src/domain/manifests";
+import { AUDIT } from "../bootstrap/authz/policy";
 import { COLLECTIONS } from "../src/domain/collections";
 import type { Decision } from "../src/domain/permissions";
 import { decide, resolveRequest } from "../src/domain/permissions";

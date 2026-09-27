@@ -12,7 +12,7 @@ import { genId } from "../src/lib/idCodec";
 import { createAccessRule, deleteAccessRule, decideAccessRule, purgeExpiredAccessRules, cloneAccessRules } from "../src/services/accessRules";
 import { previewAccess } from "../src/services/accessPreview";
 import { loadRoleGrant, loadRoleGrantUncached, loadRoleGuards } from "../src/lib/policyLoad";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import { clearCachePrefix } from "../src/lib/cache";
 import { invalidateCodeCache } from "../src/lib/authzResolve";
 import { guardAllows } from "../src/domain/ruleCondition";

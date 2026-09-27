@@ -102,8 +102,8 @@ export async function watchCard(deps: Deps, actor: AppUser, id: string, on: bool
 // is a promise about which fields the whole call tree reads, made in a file that cannot see the call tree: it
 // held only while `audit()` happened to touch email/employeeId/name/role, it left `actor_role` null on every
 // row this wrote, and the day anything downstream reads another field it is `undefined` at runtime with the
-// types saying otherwise. One honest system identity, shared with the automation engine and internal dispatch.
-const SYSTEM_ACTOR = systemActor();
+// types saying otherwise. One honest system identity, shared with the automation engine and internal dispatch,
+// built per tick because it carries the stored policy manifest.
 
 /**
  * File the next card in every delivered recurring series - the nightly tick's half of `cadence`.
@@ -202,7 +202,7 @@ export async function rollRecurringCards(deps: Deps): Promise<number> {
         .from(schema.cardTodos)
         .where(eq(schema.cardTodos.cardId, r.uuid))
         .orderBy(asc(schema.cardTodos.createdAt));
-      const created = await createCard(deps, SYSTEM_ACTOR, {
+      const created = await createCard(deps, await systemActor(deps), {
         board: `boards/${r.boardId}`,
         employee: `employees/${r.employeeId}`,
         title: r.title,

@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 import { computeCan, accessHint, withAccess, ACCESS_VERBS, KNOWN_VERBS } from "../src/http/accessHint";
 import { COLLECTIONS } from "../src/domain/collections";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import type { AppUser } from "../src/env";
 
 // M2: `access.can` is a UX HINT computed by the SAME engine. These prove computeCan never disagrees with the

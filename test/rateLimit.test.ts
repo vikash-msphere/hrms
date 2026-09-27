@@ -6,6 +6,7 @@ const migrationSql = Object.values(migrationModules).join("\n");
 import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
+import { seedManifest } from "./seedManifest";
 import { genId } from "../src/lib/idCodec";
 import { app } from "../src/index";
 import { budgetFor } from "../src/middleware/rateLimit";
@@ -34,6 +35,7 @@ beforeAll(async () => {
     const s = stmt.trim();
     if (s) await b.DB.prepare(s).run();
   }
+  await seedManifest(b.DB);
   deps = makeDeps(b);
   await deps.db.insert(schema.roles).values([{ name: "super_admin", label: "Super" }, { name: "employee", label: "Employee" }]).onConflictDoNothing();
   await deps.db.insert(schema.accessRules).values([

@@ -380,7 +380,7 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
       const { emitEvent } = await import("./eventBus");
       // `relayed` when the rule doing the relaying was not authored by a super admin: the event is real and is
       // logged and dispatched exactly as any other, but it may not trigger a rule holding a privileged action.
-      await emitEvent(deps, systemActor(), action.type, {
+      await emitEvent(deps, await systemActor(deps), action.type, {
         subject: event.subject,
         employeeId: event.employeeId,
         // Relayed over the READABLE context: re-emitting the event whole must not be a way to launder its

@@ -169,6 +169,8 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
       verb("attendance-regularizations", "approve"), verb("attendance-regularizations", "reject"),
       list("shifts"), all("shifts"),
       list("shift-assignments"), all("shift-assignments", "write"),
+      list("work-patterns"), all("work-patterns"),
+      list("work-pattern-assignments"), all("work-pattern-assignments", "write"),
       list("holidays"), all("holidays"),
       list("employees"), all("employees"),
     ],

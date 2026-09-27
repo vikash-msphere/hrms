@@ -6,6 +6,8 @@ import { photoMarker } from "../http/serialize";
 import { daysInMonthUtc } from "../domain/calendar";
 import { orgToday, dayStartMs } from "./orgDay";
 import { liveEmployee } from "./liveEmployee";
+import { getSettingValue } from "./settings";
+import { notConfigured } from "../lib/errors";
 
 // Company-wide "who's celebrating soon" feed for the dashboard. Birthdays come from the ENCRYPTED personal
 // details blob (date_of_birth) and are returned as day+month ONLY - never the year, so no age is exposed.
@@ -51,7 +53,23 @@ async function readDob(deps: Deps, enc: string | null): Promise<string | undefin
   }
 }
 
-export async function upcomingCelebrations(deps: Deps, withinDays = 30): Promise<Celebration[]> {
+// How many days ahead of the day itself a celebration starts to show (settings/celebrations `lead_days`; 0 =
+// only on the day). The org sets it in Settings → Dashboard visibility → Celebrations; the dashboard card, its KPI, the timeline
+// markers and the sidebar's anniversary banner all read the same number. A missing or malformed row is refused
+// rather than replaced with a built-in window, so a broken setting is visible instead of quietly overridden.
+export const MAX_CELEBRATION_LEAD_DAYS = 90;
+export async function celebrationLeadDays(deps: Deps): Promise<number> {
+  const { lead_days } = await getSettingValue<{ lead_days?: unknown }>(deps, "celebrations", {});
+  if (typeof lead_days !== "number" || !Number.isInteger(lead_days) || lead_days < 0 || lead_days > MAX_CELEBRATION_LEAD_DAYS) {
+    throw notConfigured("settings/celebrations.lead_days is missing or invalid - set it in Settings → Dashboard visibility → Celebrations");
+  }
+  return lead_days;
+}
+
+// Everything occurring within `withinDays` of the org's today (inclusive). Omitted, the window is the org's
+// configured lead time.
+export async function upcomingCelebrations(deps: Deps, withinDays?: number): Promise<Celebration[]> {
+  if (withinDays === undefined) withinDays = await celebrationLeadDays(deps);
   // The ORG's today. This widget has to agree with the cron that sends the greeting (`isAnniversaryOf`, run
   // off the same org day), and a UTC-derived one disagrees with it for part of every day: east of UTC the
   // card still read "in 1 day" on the morning the mail went out, west of UTC it read "today" the evening

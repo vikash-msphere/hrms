@@ -1,9 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { weekdayOf, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, localDay, utcDay, creditUnits, leaveCover, unpaidLeaveDayUnits, type DayCredit, type WorkEvent } from "../src/domain/attendance";
+import { orgScheduleOf } from "../src/domain/workSchedule";
 
 const WORK = [1, 2, 3, 4, 5]; // Mon-Fri
 const FULL = 480; // minutes for a full day
 const HALF = 240; // minimum minutes to earn a half day
+// The org's own schedule, as the day-by-day resolver every walk here takes (domain/workSchedule.ts). The same
+// three constants above, in the shape a walk asks for them: nobody in these cases is on a roster entry or a
+// work pattern, so every day resolves to the org's week and the figures are the ones they always were.
+const SCHED = orgScheduleOf({ work_days: WORK, full_day_minutes: FULL, half_day_minutes: HALF });
 
 describe("which day a value names: an instant's is the org's, a date-only column's is UTC", () => {
   // The schema anchors every date-only column at UTC midnight (`period_start`, `holidays.date`,
@@ -38,16 +43,16 @@ describe("which day a value names: an instant's is the org's, a date-only column
     // another and comes out level - which is exactly why the bug survived: the window is always wrong, and the
     // arithmetic only sometimes shows it.)
     expect(weekdayOf("2026-06-01")).toBe(1);
-    const correct = workingDaysInRange("2026-06-01", "2026-06-30", WORK, new Set());
-    const shifted = workingDaysInRange("2026-05-31", "2026-06-29", WORK, new Set());
+    const correct = workingDaysInRange("2026-06-01", "2026-06-30", SCHED, new Set());
+    const shifted = workingDaysInRange("2026-05-31", "2026-06-29", SCHED, new Set());
     expect(shifted).toBe(correct - 1);
   });
 
   it("the shift is not cosmetic: a holiday keyed a day early excuses the wrong day and docks the holiday", () => {
     const holiday = Date.parse("2026-04-03T00:00:00Z"); // Friday
     const base = {
-      startYmd: "2026-04-01", endYmd: "2026-04-03", workDays: WORK, leaveRanges: [],
-      workedByDay: new Map<string, number>(), fullDayMinutes: FULL, halfDayMinutes: HALF,
+      startYmd: "2026-04-01", endYmd: "2026-04-03", schedOf: SCHED, leaveRanges: [],
+      workedByDay: new Map<string, number>(),
     };
     // Read correctly: Wed + Thu are absences, the Friday holiday is excused.
     expect(lopDayUnits({ ...base, holidays: new Set([utcDay(holiday)]) })).toBe(2);
@@ -59,7 +64,7 @@ describe("which day a value names: an instant's is the org's, a date-only column
 });
 
 describe("employment fraction (partial-month proration)", () => {
-  const P = { periodStartYmd: "2026-01-01", periodEndYmd: "2026-01-31", workDays: WORK, holidays: new Set<string>() };
+  const P = { periodStartYmd: "2026-01-01", periodEndYmd: "2026-01-31", schedOf: SCHED, holidays: new Set<string>() };
   it("is 1 for a full-period employee (no start/end)", () => {
     expect(employmentFraction({ ...P, basis: "calendar_days" })).toBe(1);
     expect(employmentFraction({ ...P, basis: "working_days" })).toBe(1);
@@ -72,8 +77,8 @@ describe("employment fraction (partial-month proration)", () => {
   });
   it("working-days basis prorates by scheduled working days", () => {
     // Joined Jan 19 (Mon) -> working days Jan 19..31 over working days in the whole month.
-    const whole = workingDaysInRange("2026-01-01", "2026-01-31", WORK, new Set());
-    const worked = workingDaysInRange("2026-01-19", "2026-01-31", WORK, new Set());
+    const whole = workingDaysInRange("2026-01-01", "2026-01-31", SCHED, new Set());
+    const worked = workingDaysInRange("2026-01-19", "2026-01-31", SCHED, new Set());
     expect(employmentFraction({ ...P, empStartYmd: "2026-01-19", basis: "working_days" })).toBeCloseTo(worked / whole, 6);
   });
   it("is 0 when the employee is not employed within the period at all", () => {
@@ -84,8 +89,8 @@ describe("employment fraction (partial-month proration)", () => {
 describe("attendance LOP (loss of pay) derivation", () => {
   it("working days in a range exclude weekends and holidays", () => {
     // 2026-06-01 (Mon) .. 2026-06-07 (Sun): Mon-Fri = 5 working days; minus one holiday = 4.
-    expect(workingDaysInRange("2026-06-01", "2026-06-07", WORK, new Set())).toBe(5);
-    expect(workingDaysInRange("2026-06-01", "2026-06-07", WORK, new Set(["2026-06-03"]))).toBe(4);
+    expect(workingDaysInRange("2026-06-01", "2026-06-07", SCHED, new Set())).toBe(5);
+    expect(workingDaysInRange("2026-06-01", "2026-06-07", SCHED, new Set(["2026-06-03"]))).toBe(4);
   });
 
   it("weekdayOf maps calendar dates correctly", () => {
@@ -97,22 +102,20 @@ describe("attendance LOP (loss of pay) derivation", () => {
     const units = lopDayUnits({
       startYmd: "2026-06-01", // Mon
       endYmd: "2026-06-07", // Sun
-      workDays: WORK,
+      schedOf: SCHED,
       holidays: new Set(["2026-06-02"]), // Tue holiday
       leaveRanges: [{ start: "2026-06-03", end: "2026-06-03" }], // Wed on leave
       workedByDay: new Map([
         ["2026-06-04", 480], // Thu full day -> 0
         ["2026-06-05", 300], // Fri >= half min, < full -> half day 0.5
       ]),
-      fullDayMinutes: FULL,
-      halfDayMinutes: HALF,
     });
     // Mon = absent(1) + Tue holiday(skip) + Wed leave(skip) + Thu full(0) + Fri half(0.5) = 1.5
     expect(units).toBe(1.5);
   });
 
   it("a present day with worked >= full day adds nothing; a no-punch working day is a full absence", () => {
-    const base = { startYmd: "2026-06-01", endYmd: "2026-06-01", workDays: WORK, holidays: new Set<string>(), leaveRanges: [], fullDayMinutes: FULL, halfDayMinutes: HALF };
+    const base = { startYmd: "2026-06-01", endYmd: "2026-06-01", schedOf: SCHED, holidays: new Set<string>(), leaveRanges: [] };
     expect(lopDayUnits({ ...base, workedByDay: new Map([["2026-06-01", 500]]) })).toBe(0); // full
     expect(lopDayUnits({ ...base, workedByDay: new Map([["2026-06-01", 300]]) })).toBe(0.5); // half (>= half min)
     expect(lopDayUnits({ ...base, workedByDay: new Map() })).toBe(1); // absent
@@ -126,10 +129,8 @@ describe("attendance LOP (loss of pay) derivation", () => {
     const base = {
       startYmd: "2026-06-01",
       endYmd: "2026-06-01",
-      workDays: WORK,
+      schedOf: SCHED,
       holidays: new Set<string>(),
-      fullDayMinutes: FULL,
-      halfDayMinutes: HALF,
     };
 
     it("a PM-only leave day with no punch at all still costs the unworked morning", () => {
@@ -187,7 +188,7 @@ describe("attendance LOP (loss of pay) derivation", () => {
   });
 
   it("a punch below the half-day minimum doesn't earn a half day -> full absence", () => {
-    const base = { startYmd: "2026-06-01", endYmd: "2026-06-01", workDays: WORK, holidays: new Set<string>(), leaveRanges: [], fullDayMinutes: FULL, halfDayMinutes: HALF };
+    const base = { startYmd: "2026-06-01", endYmd: "2026-06-01", schedOf: SCHED, holidays: new Set<string>(), leaveRanges: [] };
     expect(lopDayUnits({ ...base, workedByDay: new Map([["2026-06-01", 239]]) })).toBe(1); // just under half min -> absent
     expect(lopDayUnits({ ...base, workedByDay: new Map([["2026-06-01", 240]]) })).toBe(0.5); // exactly half min -> half day
   });
@@ -209,8 +210,7 @@ describe("attendance.eventCreditByDay", () => {
   const ms = (iso: string) => Date.parse(iso);
   const base = {
     tz: "Asia/Kolkata",
-    workDays: [1, 2, 3, 4, 5],
-    fullDayMinutes: 480,
+    schedOf: SCHED,
     todayYmd: "2026-06-10",
     nowMs: ms("2026-06-10T00:00:00.000Z"),
     punchedDays: new Set<string>(),
@@ -275,11 +275,9 @@ describe("attendance.eventCreditByDay", () => {
     const lopBase = {
       startYmd: "2026-06-01",
       endYmd: "2026-06-01",
-      workDays: [1, 2, 3, 4, 5],
+      schedOf: SCHED,
       holidays: new Set<string>(),
       leaveRanges: [],
-      fullDayMinutes: 480,
-      halfDayMinutes: 240,
     };
     // No punch, no event: a full day of loss of pay.
     expect(lopDayUnits({ ...lopBase, workedByDay: new Map() })).toBe(1);
@@ -304,8 +302,7 @@ describe("attendance.eventCreditByDay", () => {
 describe("a day mark replaces what the punches say a day is worth", () => {
   const base = {
     startYmd: "2026-06-01", endYmd: "2026-06-01", // a Monday
-    workDays: WORK, holidays: new Set<string>(), leaveRanges: [],
-    fullDayMinutes: FULL, halfDayMinutes: HALF,
+    schedOf: SCHED, holidays: new Set<string>(), leaveRanges: [],
   };
   const marks = (c: DayCredit) => new Map([["2026-06-01", c]]);
 
@@ -380,7 +377,7 @@ describe("a day mark replaces what the punches say a day is worth", () => {
 // used to excuse the day like any other leave, so an employee on approved unpaid leave was paid in full - and
 // the same day, unrequested, would have been docked.
 describe("unpaid leave", () => {
-  const base = { startYmd: "2026-06-01", endYmd: "2026-06-03", workDays: WORK, holidays: new Set<string>(), workedByDay: new Map<string, number>(), fullDayMinutes: FULL, halfDayMinutes: HALF };
+  const base = { startYmd: "2026-06-01", endYmd: "2026-06-03", schedOf: SCHED, holidays: new Set<string>(), workedByDay: new Map<string, number>() };
 
   it("does not excuse the days it covers, while paid leave still does", () => {
     const paid = lopDayUnits({ ...base, leaveRanges: [{ start: "2026-06-01", end: "2026-06-03" }] });
@@ -396,7 +393,7 @@ describe("unpaid leave", () => {
       { start: "2026-06-05", end: "2026-06-05" }, // Fri, paid leave - not counted
     ];
     // Mon + Tue(holiday, skipped) + Wed half = 1.5
-    expect(unpaidLeaveDayUnits("2026-06-01", "2026-06-07", WORK, new Set(["2026-06-02"]), ranges)).toBe(1.5);
+    expect(unpaidLeaveDayUnits("2026-06-01", "2026-06-07", SCHED, new Set(["2026-06-02"]), ranges)).toBe(1.5);
   });
 });
 
@@ -407,8 +404,8 @@ describe("unpaid leave", () => {
 describe("days before HRMS records start", () => {
   // Mon 1 .. Fri 5 June 2026; records start Thursday the 4th.
   const base = {
-    startYmd: "2026-06-01", endYmd: "2026-06-05", workDays: WORK, holidays: new Set<string>(), leaveRanges: [] as { start: string; end: string; paid?: boolean; startSession?: number; endSession?: number }[],
-    workedByDay: new Map<string, number>(), fullDayMinutes: FULL, halfDayMinutes: HALF, trackedFromYmd: "2026-06-04",
+    startYmd: "2026-06-01", endYmd: "2026-06-05", schedOf: SCHED, holidays: new Set<string>(), leaveRanges: [] as { start: string; end: string; paid?: boolean; startSession?: number; endSession?: number }[],
+    workedByDay: new Map<string, number>(), trackedFromYmd: "2026-06-04",
   };
 
   it("owes nothing on an empty day before it, and docks an empty day from it on", () => {

@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, ChevronUp, Cake, PartyPopper, UserPlus, Shie
 import type { Employee, LeaveRequest, LeaveType, Holiday, Celebration, AttendanceSession, Event, LateEarlyRequest, Me } from "@/types";
 import { cn, idOf } from "@/lib/utils";
 import { useCollection } from "@/hooks/useCollection";
+import { useScheduleView } from "@/hooks/useScheduleView";
 import { excusalsByEmployee, usePunctualityPolicy } from "@/lib/lateEarly";
 import { hhmmOf } from "../../../../src/domain/punctuality";
 import { todayStr } from "@/lib/orgDay";
@@ -359,6 +360,15 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   }, [events]);
   const eventColor = (ev: Event) => ev.color || "#6366f1"; // indigo fallback
 
+  // Whose day is what, across the window this timeline draws. The event-credit block below mirrors the
+  // server's `eventCreditByDay`, which reads the day's own full-day minutes - so this has to as well, or a
+  // four-hour day gets credited eight here and the timeline shows a day as covered that payroll docks.
+  const schedView = useScheduleView(
+    schedule,
+    new Date(startMs).toISOString().slice(0, 10),
+    new Date(endMs).toISOString().slice(0, 10),
+  );
+
   // Per-employee, per-day attendance status across the window (present/late/half-day/absent/open). Reuses the
   // Attendance page's derivation (schedule + holidays + approved leave). Keyed by employee id -> day -> status.
   const statusByEmp = useMemo(() => {
@@ -377,6 +387,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     const out = new Map<string, Map<string, AttendanceRow>>();
     for (const e of employees) {
       const eid = idOf(e.path);
+      const schedOf = schedView.of(eid);
       // Don't flag days before the employee joined as a missing log.
       const empFrom = e.start_date && e.start_date.slice(0, 10) > fromYmd ? e.start_date.slice(0, 10) : fromYmd;
       if (empFrom > toYmd) continue;
@@ -402,21 +413,22 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
         const sDay = ev.all_day ? ev.start_time.slice(0, 10) : localDay(ev.start_time, schedule.timezone);
         const eDay = ev.all_day ? ev.end_time.slice(0, 10) : localDay(ev.end_time, schedule.timezone);
         for (const day of enumerateDays(sDay, eDay)) {
-          if (!workDays.includes(weekdayOf(day))) continue; // credit working days only
+          const ds = schedOf(day);
+          if (ds.off) continue; // credit days this person was scheduled on only
           if (ev.all_day && day >= todayYmd) continue; // all-day: only days that have fully ended
           if (ev.requires_clock_in && !punchedDays.has(day)) continue; // credit only those actually at work
           if (onLeaveDay(day)) continue; // never credit an on-leave attendee
           let m: number;
-          if (ev.all_day) m = schedule.full_day_minutes;
+          if (ev.all_day) m = ds.fullDayMinutes;
           else if (sDay === eDay) m = localMinutes(ev.end_time, schedule.timezone) - localMinutes(ev.start_time, schedule.timezone);
           else if (day === sDay) m = 1440 - localMinutes(ev.start_time, schedule.timezone);
           else if (day === eDay) m = localMinutes(ev.end_time, schedule.timezone);
           else m = 1440;
-          m = Math.min(schedule.full_day_minutes, Math.max(0, m));
+          m = Math.min(ds.fullDayMinutes, Math.max(0, m));
           workMinutesByDay.set(day, (workMinutesByDay.get(day) ?? 0) + m);
         }
       }
-      const rows = buildAttendanceRows({ fromYmd: empFrom, toYmd, todayYmd, sched: schedule, summaries, holidays: holSet, leaveRanges, workMinutesByDay, trackedFromYmd: trackedFromOf(e) });
+      const rows = buildAttendanceRows({ fromYmd: empFrom, toYmd, todayYmd, schedOf, summaries, holidays: holSet, leaveRanges, workMinutesByDay, trackedFromYmd: trackedFromOf(e) });
       // A gap this widget did not load is not an absence. When the session walk stopped on its page ceiling,
       // the `absent` days are dropped rather than drawn: a blank cell says "nothing to show", the red "No
       // log" dot says "this person did not come in", and only one of those is knowable here.
@@ -424,7 +436,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       out.set(eid, new Map(shown.map((r) => [r.day, r] as const)));
     }
     return out;
-  }, [sessions, sessionsTruncated, employees, leavesByEmp, eventsByEmp, excusalsByEmp, punctuality, holidays, schedule, startMs, endMs, workDays, unpaidTypes]);
+  }, [sessions, sessionsTruncated, employees, leavesByEmp, eventsByEmp, excusalsByEmp, punctuality, holidays, schedule, schedView, startMs, endMs, unpaidTypes]);
 
   // Styled tooltip card for an attendance day: a colored status header, the punch times / hours worked, and
   // late-arrival / early-departure chips (kept even when flexible hours count the day as full).

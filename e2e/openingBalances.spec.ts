@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { SPA_HEADERS, allowConsoleErrors, gotoRoute, makeThrowawayPerson, retireThrowawayPerson, test, expect, toast, userPath, ymd } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, apiPost, gotoRoute, makeThrowawayPerson, retireThrowawayPerson, test, expect, toast, userPath, ymd } from "./fixtures";
 
 // Bringing in what happened before HRMS for somebody who joined before it (web/src/pages/OpeningBalances.tsx
 // and every screen that reads what it brings in): the page's three imports, the records-start date on the
@@ -37,13 +37,27 @@ async function personWhoJoinedBefore(page: Page, tag: string, tracked: string | 
   return person;
 }
 
-/** A paid leave type from the seed - one that holds a balance. */
-async function paidLeaveType(page: Page): Promise<{ path: string; display_name: string }> {
-  const res = await page.request.get("/v1/leave-types?max_page_size=100");
-  const { results: types = [] } = (await res.json()) as { results?: { path: string; display_name?: string; paid?: boolean; disabled?: boolean }[] };
-  const type = types.find((t) => t.display_name && t.paid !== false && !t.disabled);
-  expect(type, "the seed has no paid leave type").toBeTruthy();
-  return type as { path: string; display_name: string };
+/**
+ * A paid leave type of this test's own, which accrues nothing - so every balance on it is exactly what the test
+ * imported and adjusted.
+ *
+ * Its own, not the first paid type on the list: that is whichever one another spec made most recently, and
+ * `catalogEditors` creates "E2E del leave-types …" only to delete it - a balance on a type that is gone by the
+ * time the person opens History is titled "Unknown type history". The seeded types all accrue.
+ */
+async function ownLeaveType(page: Page): Promise<{ path: string; display_name: string }> {
+  const display_name = `E2E opening ${test.info().parallelIndex}-${Date.now() % 1_000_000}`;
+  const res = await apiPost(page, "leave-types", { display_name, paid: true, accrual_days_per_year: 0 });
+  expect(res.status(), await res.text()).toBe(200);
+  return { path: ((await res.json()) as { path: string }).path, display_name };
+}
+
+/** Trash the type. Not a purge: the retired person's balances still name it, so a hard delete is refused 409. */
+async function trashLeaveType(page: Page, path: string) {
+  const got = await page.request.get(`/v1/${path}`);
+  if (!got.ok()) return;
+  const { etag } = (await got.json()) as { etag: string };
+  await page.request.delete(`/v1/${path}`, { headers: { ...SPA_HEADERS, "If-Match": etag } }).catch(() => undefined);
 }
 
 const post = async (page: Page, path: string, data: unknown) => {
@@ -57,8 +71,8 @@ test("brings over a leave balance, leave history and the year's pay through the 
   const page = await as("super");
   const tracked = ymd(new Date(Date.now() - 10 * DAY));
   const person = await personWhoJoinedBefore(page, "Opening", tracked);
+  const type = await ownLeaveType(page);
   try {
-    const type = await paidLeaveType(page);
     await gotoRoute(page, "opening-balances", "Opening balances");
 
     // ---- Leave balance ----
@@ -141,6 +155,7 @@ test("brings over a leave balance, leave history and the year's pay through the 
     }, { timeout: 15_000 }).toBe(0);
   } finally {
     await retireThrowawayPerson(page, person.path);
+    await trashLeaveType(page, type.path);
   }
 });
 
@@ -198,8 +213,8 @@ test("the leave page shows a brought-over balance, HR's adjustment, and imported
   // Leave-request search matches the reason and state, not the person, so the imported leave carries a word of
   // its own for HR to find it by.
   const marker = `bhrms${test.info().parallelIndex}${Date.now() % 1_000_000}`;
+  const type = await ownLeaveType(hr);
   try {
-    const type = await paidLeaveType(hr);
     await post(hr, "/v1/leave-adjustments:importOpenings", { items: [{ employee: person.path, leave_type: type.path, opening_days: 6 }], dry_run: false });
     await post(hr, "/v1/leave-requests:importHistory", {
       items: [{ employee: person.path, leave_type: type.path, start_date: "2025-03-03", end_date: "2025-03-04", days: 2, reason: marker }],
@@ -228,7 +243,8 @@ test("the leave page shows a brought-over balance, HR's adjustment, and imported
     // ---- The person reads where their balance came from ----
     const them = await as({ email: person.email });
     await gotoRoute(them, "leave-requests", "Leaves");
-    await them.getByRole("button", { name: "History", exact: true }).first().click();
+    // On this type's own card: the person's other balances (the seeded types all accrue) have History too.
+    await them.getByRole("button", { name: `Show only ${type.display_name}` }).getByRole("button", { name: "History", exact: true }).click();
     const sheet = them.getByRole("dialog");
     await expect(sheet.getByRole("heading", { name: `${type.display_name} history` })).toBeVisible({ timeout: 30_000 });
     await expect(sheet.getByText("Brought over from before HRMS")).toBeVisible();
@@ -266,6 +282,7 @@ test("the leave page shows a brought-over balance, HR's adjustment, and imported
       if (r.subject === subject) await hr.request.delete(`/v1/${r.path}?force=true`, { headers: SPA_HEADERS }).catch(() => undefined);
     }
     await retireThrowawayPerson(hr, person.path);
+    await trashLeaveType(hr, type.path);
   }
 });
 

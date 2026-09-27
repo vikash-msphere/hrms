@@ -1,6 +1,6 @@
 import * as React from "react";
 import { AlertCircle, ChevronLeft, ChevronRight, Download, ExternalLink, Loader2, PenLine } from "lucide-react";
-import { blobOf, invoke } from "@/api";
+import { ApiError, blobOf, invoke } from "@/api";
 import { navigate } from "@/router";
 import { describeError } from "@/lib/formError";
 import { cn, idOf } from "@/lib/utils";
@@ -58,6 +58,12 @@ export function SignDocumentDialog({
   // Rendered document bytes, as an object URL for the inline reader. Fetched per opening, revoked on close.
   const [bytes, setBytes] = React.useState<Blob | null>(null);
   const [fetchFailed, setFetchFailed] = React.useState(false);
+  // The document was deleted while it sat in the queue - somebody removed the policy after the list was read.
+  // Not "couldn't be shown, download it": the download is the same missing file and the signature the same
+  // refusal, so there is nothing to offer but the way on.
+  const [gone, setGone] = React.useState(false);
+  const onDoneRef = React.useRef(onDone);
+  onDoneRef.current = onDone;
 
   const aadhaar = mode === "acknowledge" && doc?.ack_method === "cashfree";
   // Aadhaar signs inside the vendor's journey, so no on-file signature image is needed for that path.
@@ -78,22 +84,32 @@ export function SignDocumentDialog({
     setAtEnd(false);
     setError(null);
     setFetchFailed(false);
+    setGone(false);
   }, [doc?.path]);
 
-  // Fetch through the normal authorized path (the read is audited like any other).
+  // Fetch through the normal authorized path (the read is audited like any other). Keyed on the document and
+  // its version, not the row object: the page hands over the LIVE row (Documents.tsx), which is a new object on
+  // every list re-read, and re-fetching then would reset the reader under somebody halfway down it.
+  const docPath = doc?.path;
+  const docVersion = doc?.ack_version;
   React.useEffect(() => {
-    if (!doc || !viewable) { setBytes(null); return; }
+    if (!docPath || !viewable) { setBytes(null); return; }
     let live = true;
     void (async () => {
       try {
-        const blob = await blobOf(doc.path);
+        const blob = await blobOf(docPath);
         if (live) setBytes(blob);
-      } catch {
-        if (live) setFetchFailed(true);
+      } catch (e) {
+        if (!live) return;
+        if (e instanceof ApiError && e.status === 404) {
+          setGone(true);
+          // Re-read the list, so the queue this dialog walks stops offering it.
+          onDoneRef.current();
+        } else setFetchFailed(true);
       }
     })();
     return () => { live = false; setBytes(null); };
-  }, [doc, viewable]);
+  }, [docPath, docVersion, viewable]);
 
   // j / k walk the queue, like the board and ticket dialogs - but never while a decision is in flight.
   React.useEffect(() => {
@@ -143,7 +159,9 @@ export function SignDocumentDialog({
   // is even on screen, and a policy signed there was signed without ever having been shown.
   const loadingDoc = viewable && !bytes && !fetchFailed;
   const mustScroll = viewable && !fetchFailed && !atEnd;
-  const canConfirm = read && !mustScroll && (!needsSignature || hasSignature);
+  const canConfirm = !gone && read && !mustScroll && (!needsSignature || hasSignature);
+  // Where a reader on a removed document goes next: anything else still waiting, once the re-read has dropped it.
+  const onward = gone ? list.find((d) => d.path !== doc?.path) : undefined;
   const whyNot = loadingDoc
     ? "Wait for the document to load."
     : mustScroll
@@ -191,7 +209,7 @@ export function SignDocumentDialog({
                   {doc.display_name}
                   {mode === "acknowledge" && doc.ack_version ? <span className="ml-1.5 text-xs font-normal text-muted-foreground">version {doc.ack_version}</span> : null}
                 </p>
-                {doc.size_bytes ? (
+                {doc.size_bytes && !gone ? (
                   // Saving a copy is the document's own `download` verb - a separate grant from reading it in
                   // here, so the offer follows the row's hint.
                   <AccessAction collection={doc.path.split("/")[0]} objectPath={doc.path} can={doc.access?.can} verb="download" label="Download">
@@ -202,7 +220,11 @@ export function SignDocumentDialog({
                 ) : null}
               </div>
 
-              {viewable && !fetchFailed ? (
+              {gone ? (
+                <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+                  This document has been removed, so there is nothing left to sign.
+                </p>
+              ) : viewable && !fetchFailed ? (
                 bytes ? (
                   <PdfReader src={bytes} className="h-[48dvh]" onReachedEnd={() => setAtEnd(true)} />
                 ) : (
@@ -220,15 +242,15 @@ export function SignDocumentDialog({
                 </p>
               )}
 
-              <label className={cn("flex items-start gap-2 rounded-lg border p-3", mustScroll && "opacity-60")}>
+              {!gone && <label className={cn("flex items-start gap-2 rounded-lg border p-3", mustScroll && "opacity-60")}>
                 <Checkbox checked={read} disabled={mustScroll} onCheckedChange={(v) => setRead(v === true)} className="mt-0.5" />
                 <span className="text-sm">
                   I have read {mode === "acknowledge" ? "this document" : "this letter"} and agree to sign it{mode === "acknowledge" && doc.ack_version ? ` (version ${doc.ack_version})` : ""}.
                   {mustScroll && <span className="block text-xs text-muted-foreground">{loadingDoc ? "Available once the document has loaded." : "Available once you reach the last page."}</span>}
                 </span>
-              </label>
+              </label>}
 
-              {needsSignature && (hasSignature ? (
+              {needsSignature && !gone && (hasSignature ? (
                 <div className="rounded-lg border bg-white p-3 dark:bg-brand-neutral-100">
                   <p className="mb-1 text-xs text-muted-foreground dark:text-brand-neutral-500">
                     Signing as <span className="font-medium text-foreground dark:text-brand-neutral-900">{name}</span>
@@ -248,13 +270,17 @@ export function SignDocumentDialog({
           )}
         </DialogBody>
         <DialogFooter className="sm:items-center sm:justify-end">
-          {!canConfirm && <p className="text-xs text-muted-foreground sm:mr-1 sm:max-w-[20rem] sm:text-right">{whyNot}</p>}
-          <Button variant="outline" onClick={onClose}>{list.length > 1 ? "Close" : "Cancel"}</Button>
-          <Button onClick={confirm} loading={busy} disabled={!canConfirm}>
-            {aadhaar
-              ? <><ExternalLink className="h-4 w-4" /> Continue to Aadhaar e-Sign</>
-              : <><PenLine className="h-4 w-4" /> {mode === "acknowledge" ? "Acknowledge" : "Sign"}{next ? " & next" : ""}</>}
-          </Button>
+          {!canConfirm && !gone && <p className="text-xs text-muted-foreground sm:mr-1 sm:max-w-[20rem] sm:text-right">{whyNot}</p>}
+          <Button variant="outline" onClick={onClose}>{list.length > 1 || gone ? "Close" : "Cancel"}</Button>
+          {gone ? (
+            onward && <Button onClick={() => onSelect?.(onward)}><ChevronRight className="h-4 w-4" /> Next document</Button>
+          ) : (
+            <Button onClick={confirm} loading={busy} disabled={!canConfirm}>
+              {aadhaar
+                ? <><ExternalLink className="h-4 w-4" /> Continue to Aadhaar e-Sign</>
+                : <><PenLine className="h-4 w-4" /> {mode === "acknowledge" ? "Acknowledge" : "Sign"}{next ? " & next" : ""}</>}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -21,10 +21,12 @@ import { hasApiKeyBearer, parseToken } from "../lib/apiKeyToken";
 import { findLiveKeyByPrefix, shouldTouchLastUsed, touchLastUsed } from "../services/apiKeys";
 import { narrowGrant, parseScope } from "../domain/keyScope";
 import { touchLastSeen } from "../services/users";
+import { provisionedRole } from "../services/roles";
+import { sessionBinding, unlockState, type LockColumns } from "../services/appLock";
 
 let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 
-type UserRow = {
+export type UserRow = LockColumns & {
   uuid: string;
   email: string;
   role: string;
@@ -107,9 +109,18 @@ async function loadUserRow(deps: Deps, where: SQL | undefined, stable = false): 
       employeeDeleteTime: schema.employees.deleteTime,
       sessionsValidFrom: schema.users.sessionsValidFrom,
       lastSeenAt: schema.users.lastSeenAt,
+      // The app lock, on the same read: one primary-key probe, and a row only for people who set a PIN. What
+      // it decides is in services/appLock.ts unlockState.
+      lockPinHash: schema.appLocks.pinHash,
+      lockPinLength: schema.appLocks.pinLength,
+      lockIdleMinutes: schema.appLocks.idleMinutes,
+      lockValidFrom: schema.appLocks.unlocksValidFrom,
+      lockRevoked: schema.appLocks.revokedJson,
+      lockKeyEpoch: schema.appLocks.keyEpoch,
     })
     .from(schema.users)
     .leftJoin(schema.employees, eq(schema.users.employeeId, schema.employees.uuid))
+    .leftJoin(schema.appLocks, eq(schema.appLocks.userId, schema.users.uuid))
     .where(where);
   return (await (stable ? q.orderBy(asc(schema.users.createdAt), asc(schema.users.uuid)) : q).limit(1))[0];
 }
@@ -136,6 +147,30 @@ async function loadUserRow(deps: Deps, where: SQL | undefined, stable = false): 
 function assertLive(user: UserRow): void {
   if (user.status !== "active") throw forbidden("user disabled");
   if (user.employeeDeleteTime) throw forbidden("user disabled");
+}
+
+// Session revocation. A session cookie issued before the user's cut-off is dead, whatever its `exp` says -
+// this is what makes "sign out" mean something for a stateless token, and what answers a lost device without
+// rotating the signing key for everyone. Strictly BEFORE, so a session minted in the same millisecond as the
+// stamp (sign out, then straight back in) survives; the cut-off is set from the same clock.
+function assertSessionLive(user: UserRow, sessionIat: number | null): void {
+  if (sessionIat !== null && user.sessionsValidFrom !== null && sessionIat < +new Date(user.sessionsValidFrom)) {
+    throw unauthenticated("session was signed out");
+  }
+}
+
+/**
+ * The signed-in person at this browser, for the routes that must work while it is LOCKED (routes/appLockRoutes.ts):
+ * the same credential, the same account lookup and the same liveness and revocation checks the middleware below
+ * makes, stopping short of the lock check and the grants. No provisioning - somebody with no account has no PIN.
+ */
+export async function signedInCaller(c: Context<AppEnv>, deps: Deps): Promise<{ user: UserRow; binding: string }> {
+  const { email, sessionIat } = await resolveBrowserIdentity(c);
+  const user = (await loadUserRow(deps, eq(schema.users.email, email))) ?? (await loadUserRow(deps, sql`lower(${schema.users.email}) = ${email}`, true));
+  if (!user) throw unauthenticated("not signed in");
+  assertLive(user);
+  assertSessionLive(user, sessionIat);
+  return { user, binding: sessionBinding(sessionIat !== null ? fnv1a64(`${user.uuid}:${sessionIat}`) : undefined) };
 }
 
 /**
@@ -385,7 +420,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
       const inserted = (
         await deps.db
           .insert(schema.users)
-          .values({ code: await allocFlatCode(deps, schema.users), email, role: "employee", employeeId: emp?.uuid ?? null })
+          .values({ code: await allocFlatCode(deps, schema.users), email, role: await provisionedRole(deps), employeeId: emp?.uuid ?? null })
           .returning()
       )[0]!;
       provisioned = {
@@ -401,6 +436,13 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
         lastName: null,
         sessionsValidFrom: inserted.sessionsValidFrom,
         lastSeenAt: inserted.lastSeenAt,
+        // A first login has set no PIN.
+        lockPinHash: null,
+        lockPinLength: null,
+        lockIdleMinutes: null,
+        lockValidFrom: null,
+        lockRevoked: null,
+        lockKeyEpoch: null,
       };
     } catch (e) {
       // THE OTHER UNIQUE INDEX ON THIS INSERT, and it is not a race.
@@ -434,13 +476,11 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     user = provisioned;
   }
   assertLive(user);
-  // Session revocation. A session cookie issued before the user's cut-off is dead, whatever its `exp` says -
-  // this is what makes "sign out" mean something for a stateless token, and what answers a lost device without
-  // rotating the signing key for everyone. Strictly BEFORE, so a session minted in the same millisecond as the
-  // stamp (sign out, then straight back in) survives; the cut-off is set from the same clock.
-  if (sessionIat !== null && user.sessionsValidFrom !== null && sessionIat < +new Date(user.sessionsValidFrom)) {
-    throw unauthenticated("session was signed out");
-  }
+  assertSessionLive(user, sessionIat);
+  // The app lock (services/appLock.ts): a person with a PIN whose browser holds no valid unlock proof is refused
+  // here, before any grant is loaded. Browser lanes only - an API key is a machine credential and never locks.
+  const sessionId = sessionIat !== null ? fnv1a64(`${user.uuid}:${sessionIat}`) : undefined;
+  const appLock = await unlockState(c, user, sessionBinding(sessionId), +deps.clock.now());
   // The caller's broad authority = their role's grant + their own broad user rules (both cached, warm ~0
   // reads). Users are first-class like roles: a user can hold collection/dept/field-scope access, not only
   // per-object exceptions (those still ride the narrowed lane in authz.ts). The common case (no user rules)
@@ -480,7 +520,8 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     // but a filter. Its input carries the uuid's full 64 bits of entropy, so it is not a hash of a guessable
     // secret; and the same helper already backs `authzVersion` and the list validator, which are identities
     // decided the same way.
-    ...(sessionIat !== null ? { sessionId: fnv1a64(`${user.uuid}:${sessionIat}`) } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    appLock,
   };
 
   // "View as": an access admin can ask the app to answer as another user (read-only, audited). This swaps the

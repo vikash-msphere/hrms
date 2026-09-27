@@ -1,0 +1,380 @@
+{
+  "role": "manager",
+  "label": "Manager",
+  "protected": true,
+  "provisioned": false,
+  "extends": "employee",
+  "description": "A department head: everything an employee holds, plus the department subtree - the team's records, requests to decide, goals, 1:1s, reviews and roster, and the boards they run.",
+  "levels": [
+    {
+      "area": "work",
+      "pattern": "boards.**",
+      "level": "write",
+      "why": "Own the team's work surface: create, rename and archive boards (the shape verbs are below). Everyone else reads boards and works the cards."
+    },
+    {
+      "area": "work",
+      "pattern": "sprints.**",
+      "level": "write",
+      "why": "Plan and run the team's sprints (activate/complete are the verbs below)."
+    },
+    {
+      "area": "attendance",
+      "pattern": "shift-assignments",
+      "level": "write",
+      "why": "roster the team (create gate pins the owner to the dept scope below)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "work-pattern-assignments",
+      "level": "write",
+      "why": "Put the team on a schedule. The CATALOG stays HR's (a manager picks from the patterns that exist, and does not invent one), which is the same split as shifts: `shifts.**` is HR's below and a manager only rosters them."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.my-dept",
+      "level": "read",
+      "why": "Base directory record of each dept member (2-token item) - NOT their sub-resources. `employees.my-dept` matches `employees.<member>` but not `employees.<member>.bank-account`, so a manager sees the team roster without their PII (PII stays super-only by default). Own PII still via OWN_PII."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.my-dept.probation_end_date.**",
+      "level": "read",
+      "why": "The team's probation end dates: the manager is who the nightly reminder asks to confirm or extend."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.my-dept.employee_number.**",
+      "level": "read",
+      "why": "The team's employee numbers: a redacted field the directory read does not reach, and the one HR identifier a manager quotes about their own people."
+    },
+    {
+      "area": "people",
+      "pattern": "employees.my-dept.presence.**",
+      "level": "read",
+      "why": "Presence of each dept member - the same reading of leave + attendance the manager already holds through `attendance.my-dept.**`, surfaced as the profile header's pill."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.my-dept.**",
+      "level": "read",
+      "why": "dept's leave-requests (to review/approve) - no PII sub-resources"
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-balances.my-dept.**",
+      "level": "read",
+      "why": "dept's leave balances"
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance.my-dept.**",
+      "level": "read",
+      "why": "dept's attendance (sessions + presence)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-regularizations.my-dept.**",
+      "level": "read",
+      "why": "dept's regularization requests (to review)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-day-marks.my-dept.**",
+      "level": "read",
+      "why": "marks on the dept's days"
+    },
+    {
+      "area": "attendance",
+      "pattern": "overtime-requests.my-dept.**",
+      "level": "read",
+      "why": "dept's overtime requests (to review)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "remote-work-requests.my-dept.**",
+      "level": "read",
+      "why": "dept's remote-work requests (to review)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "late-early-requests.my-dept.**",
+      "level": "read",
+      "why": "dept's late arrival / early departure requests (to review)"
+    },
+    {
+      "area": "workplace",
+      "pattern": "asset-requests.my-dept.**",
+      "level": "read",
+      "why": "dept's asset requests (to review; handing the kit over is HR/IT's step)"
+    },
+    {
+      "area": "attendance",
+      "pattern": "time-entries.my-dept.**",
+      "level": "read",
+      "why": "dept's timesheets (to review)"
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.my-dept.**",
+      "level": "write",
+      "why": "set + edit the team's goals"
+    },
+    {
+      "area": "performance",
+      "pattern": "check-ins.my-dept.**",
+      "level": "write",
+      "why": "run 1:1s with the team"
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.my-dept.**",
+      "level": "read",
+      "why": "the team's reviews (manager stage verbs below)"
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transitions.my-dept.**",
+      "level": "read",
+      "why": "the team's onboarding/offboarding progress"
+    },
+    {
+      "area": "lifecycle",
+      "pattern": "transition-tasks.my-dept.**",
+      "level": "read",
+      "why": "The team's onboarding and offboarding tasks, read only: ticking them is the task owner's or HR's."
+    },
+    {
+      "area": "attendance",
+      "pattern": "shift-assignments.my-dept.**",
+      "level": "write",
+      "why": "Roster the team: create and edit shift assignments for people in the department."
+    },
+    {
+      "area": "attendance",
+      "pattern": "work-pattern-assignments.my-dept.**",
+      "level": "write",
+      "why": "Put the team on a schedule. The CATALOG stays HR's (a manager picks from the patterns that exist, and does not invent one), which is the same split as shifts: `shifts.**` is HR's below and a manager only rosters them."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.my-dept.**",
+      "level": "read",
+      "why": "dept's operational expenses (to review/approve)"
+    },
+    {
+      "area": "money",
+      "pattern": "vendors.**",
+      "level": "read",
+      "why": "resolve vendor names on the team's expenses"
+    },
+    {
+      "area": "work",
+      "pattern": "goal-templates.**",
+      "level": "read",
+      "why": "apply a blueprint to the team; authoring the catalogue is HR's"
+    },
+    {
+      "area": "dashboard",
+      "pattern": "timeline",
+      "level": "read",
+      "why": "The Dashboard team timeline widget. It decides only whether the widget shows; every row in it is still gated by its own collection, so a manager sees their department's leave and nobody else's."
+    }
+  ],
+  "allow": [
+    {
+      "area": "leave",
+      "pattern": "leave-requests.my-dept.approve",
+      "why": "Decide the team's leave requests. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.my-dept.reject",
+      "why": "Decide the team's leave requests. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "leave",
+      "pattern": "leave-requests.my-dept.download",
+      "why": "read the sick note behind a team member's request before deciding"
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-regularizations.my-dept.approve",
+      "why": "Decide the team's attendance corrections. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "attendance",
+      "pattern": "attendance-regularizations.my-dept.reject",
+      "why": "Decide the team's attendance corrections. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "attendance",
+      "pattern": "overtime-requests.my-dept.approve",
+      "why": "Decide the team's overtime requests. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "attendance",
+      "pattern": "overtime-requests.my-dept.reject",
+      "why": "Decide the team's overtime requests. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "attendance",
+      "pattern": "remote-work-requests.my-dept.approve",
+      "why": "Decide the team's remote-work requests. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "attendance",
+      "pattern": "remote-work-requests.my-dept.reject",
+      "why": "Decide the team's remote-work requests. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "attendance",
+      "pattern": "late-early-requests.my-dept.approve",
+      "why": "Decide the team's late arrival / early departure requests. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "attendance",
+      "pattern": "late-early-requests.my-dept.reject",
+      "why": "Decide the team's late arrival / early departure requests. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "workplace",
+      "pattern": "asset-requests.my-dept.approve",
+      "why": "Decide the team's asset requests. Scoped my-dept, never `*`: a manager decides only their own department's. Handing the kit over stays HR's (`issue`)."
+    },
+    {
+      "area": "workplace",
+      "pattern": "asset-requests.my-dept.reject",
+      "why": "Decide the team's asset requests. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "attendance",
+      "pattern": "time-entries.my-dept.approve",
+      "why": "Decide the team's timesheets. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "attendance",
+      "pattern": "time-entries.my-dept.reject",
+      "why": "Decide the team's timesheets. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.my-dept.submitManager",
+      "why": "manager assessment + 360 nominations for the team's reviews"
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.my-dept.nominate",
+      "why": "Nominate 360 feedback givers for a report's review."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.my-dept.nudge",
+      "why": "remind the current stage's owner on a stalled team review"
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.my-dept.evidence",
+      "why": "Writing about somebody is the case the evidence pack was built for: what they delivered, what was said about them and what they contributed to, gathered under the cycle's window instead of across four tabs."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.my-dept.collaborators",
+      "why": "Who saw the work, so the 360 picker leads with them rather than with the whole directory."
+    },
+    {
+      "area": "performance",
+      "pattern": "reviews.my-dept.pdf",
+      "why": "record copy of a report's finished review"
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.my-dept.setConfidence",
+      "why": "the same call on a goal the manager set for the team"
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.my-dept.comment",
+      "why": "coach on the team's goals - the thread under a goal is where that happens"
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.my-dept.watch",
+      "why": "follow the team's goals"
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.my-dept.unwatch",
+      "why": "Stop following a team goal."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.my-dept.setContributors",
+      "why": "Credit a share of a team goal to whoever delivered it. The manager's call and not the owner's: a share scores in the CONTRIBUTOR's review, so it is a statement about somebody else's performance."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.my-dept.similar",
+      "why": "duplicated effort across the team, and what a report's goal should align to"
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.my-dept.suggestMeasure",
+      "why": "a measure for a report's goal that has none, offered while agreeing it"
+    },
+    {
+      "area": "work",
+      "pattern": "boards.**",
+      "why": "configure the board's shape (columns, WIP limits, swimlanes, labels) + restore"
+    },
+    {
+      "area": "work",
+      "pattern": "sprints.**",
+      "why": "activate/complete the team's sprints + restore"
+    },
+    {
+      "area": "work",
+      "pattern": "goal-templates.*.apply",
+      "why": "stamp a blueprint onto a report or the whole team"
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.my-dept.approve",
+      "why": "The manager's half of the goal-setting handshake: agree the goal a report submitted, or send it back with the reason (services/goals.ts#approveGoal / #requestGoalChanges). `my-dept` like every other decision verb here - `*` would let a manager agree any department's goals. A goal the manager SETS for a report lands AGREED at creation, so these are only ever the report-proposed path."
+    },
+    {
+      "area": "performance",
+      "pattern": "goals.my-dept.requestChanges",
+      "why": "The manager's half of the goal-setting handshake: agree the goal a report submitted, or send it back with the reason (services/goals.ts#approveGoal / #requestGoalChanges). `my-dept` like every other decision verb here - `*` would let a manager agree any department's goals. A goal the manager SETS for a report lands AGREED at creation, so these are only ever the report-proposed path."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.my-dept.approve",
+      "why": "Decide the team's operational expenses. Scoped my-dept, never `*`: a manager decides only their own department's."
+    },
+    {
+      "area": "money",
+      "pattern": "expenses.my-dept.reject",
+      "why": "Decide the team's operational expenses. Scoped my-dept, never `*`: a manager decides only their own department's."
+    }
+  ],
+  "deny": [],
+  "excluded": [
+    {
+      "pattern": "leave-requests.*.approve (and every other `*` decision)",
+      "why": "A manager decides for their own department only; `*` would let them decide any department's (cross-department BOLA)."
+    },
+    {
+      "pattern": "attendance-day-marks.my-dept.** write",
+      "why": "Re-valuing a report's day is a pay decision the seeded default leaves with HR; an org that wants managers doing it grants write in the ACL."
+    },
+    {
+      "pattern": "employees.my-dept.<pii>.**",
+      "why": "The team's bank, identity, personal-info and tax sub-resources stay with HR and payroll."
+    },
+    {
+      "pattern": "boards.** write (any board)",
+      "why": "NOT narrowed, and worth knowing: boards carry no department scope (flat codes), so a manager's board write reaches every department's board. Narrowing it needs board ownership in the data model first."
+    }
+  ]
+}

@@ -90,7 +90,7 @@ function settingDiff(before: string, after: string): Record<string, { from: unkn
  *  saying something about the value rather than about the transport. */
 export const MAX_SETTING_BYTES = 2 * 1024 * 1024;
 
-export async function upsertSetting(deps: Deps, actor: AppUser, key: string, value: unknown, ifMatch?: string) {
+export async function upsertSetting(deps: Deps, actor: AppUser, key: string, value: unknown, ifMatch?: string, ifNoneMatch?: string) {
   const json = JSON.stringify(value ?? {});
   if (json.length > MAX_SETTING_BYTES) {
     throw invalidArgument(`this setting is ${Math.round(json.length / 1024)} KB; a settings value may be at most ${Math.round(MAX_SETTING_BYTES / 1024)} KB`);
@@ -99,6 +99,12 @@ export async function upsertSetting(deps: Deps, actor: AppUser, key: string, val
   // snapshot would write a wrong audit diff).
   const existing = (await deps.db.select().from(schema.settings).where(eq(schema.settings.key, key)).limit(1))[0];
   if (existing) {
+    // `If-None-Match: *` is the If-Match of a caller that read NO row: "create it, only if it still does not
+    // exist". Without it, the second of two first saves could only ever be blind - there is no version to name -
+    // so once the first insert had committed, the second found a row, carried no If-Match, and overwrote it with
+    // a value built on the defaults. Seen as two e2e specs each adding a ticket category to a key neither had
+    // found, a 200 each, and one category gone.
+    if (ifNoneMatch?.trim() === "*") throw aborted("the setting was created concurrently; read it again and retry");
     if (ifMatch && ifMatch !== etagOf(+new Date(existing.updatedAt))) throw aborted("etag mismatch");
     // COMPARE-AND-SWAP when the caller said which version it edited, exactly as services/crud.ts does for
     // every other row. It matters MORE here than there: a settings value is one blob holding many independent

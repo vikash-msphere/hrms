@@ -78,7 +78,7 @@ There is also **no test at all** for this endpoint (`rg -l presence e2e test` re
 matches), which is why it shipped.
 
 **Fix:** add `employees.me.presence.**: read` to the self-service tier (`OWN_PII` sits next to it), plus the
-dept/all equivalents for manager/hr_admin, and regenerate the seed (`scripts/genAccessRulesSeed.ts` —
+dept/all equivalents for manager/hr_admin, and regenerate the seed (`bootstrap/authz/grants.ts` —
 `test/seedDrift.test.ts` pins the two together).
 
 ---

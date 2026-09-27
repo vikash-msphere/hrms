@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { validateAccessRule, validateManifest } from "../src/domain/policyValidate";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import { COLLECTIONS, isGrantCollection } from "../src/domain/collections";
-import { GRANTS } from "../src/domain/grants";
+import { GRANTS } from "../bootstrap/authz/grants";
 import { RESOURCE_COLLECTIONS } from "../src/lib/authzResolve";
 
 const P = DEFAULT_POLICY;

@@ -8,6 +8,7 @@
 // collection the caller may not list is absent from the answer - so an employee sees their own row, a manager
 // their team's, and neither sees a column they could not have read the rows behind.
 import { DEFAULT_PUNCTUALITY, judgeDay, type DayExcusal, type PunctualityPolicy } from "./punctuality";
+import type { DayScheduleOf } from "./workSchedule";
 
 /** How a measure rolls up to the team line under the table. */
 export type MetricAgg = "sum" | "avg";
@@ -324,7 +325,10 @@ export function enumerateDays(fromYmd: string, toYmd: string): string[] {
 export function expectedWorkingDays(opts: {
   fromYmd: string;
   toYmd: string;
-  workDays: number[];
+  /** THIS PERSON'S schedule (domain/workSchedule.ts). Every figure derived from this is a share of the days
+   *  THEY were expected on - measuring a part-timer against a five-day week reports absences they never
+   *  owed, and a remote share of a denominator they never worked. */
+  schedOf: DayScheduleOf;
   holidays: Set<string>;
   joinedYmd?: string | null;
   leftYmd?: string | null;
@@ -337,7 +341,7 @@ export function expectedWorkingDays(opts: {
   if (from > to) return 0;
   let n = 0;
   for (const day of enumerateDays(from, to)) {
-    if (!opts.workDays.includes(weekdayOf(day))) continue;
+    if (opts.schedOf(day).off) continue;
     if (opts.holidays.has(day)) continue;
     n++;
   }

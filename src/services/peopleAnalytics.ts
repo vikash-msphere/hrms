@@ -9,7 +9,9 @@ import type { ListScope } from "../domain/access";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
 import { chunk } from "../lib/dbBatch";
-import { localDay } from "../domain/attendance";
+import { localDay, type AttendanceConfig } from "../domain/attendance";
+import { orgScheduleOf } from "../domain/workSchedule";
+import { scheduleCtxWith } from "./workSchedule";
 import { excusalsByDay, judgeDay, type LateEarlyKind } from "../domain/punctuality";
 import { punctualityPolicy } from "./lateEarlyRequests";
 import {
@@ -151,7 +153,15 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
   const wants = (collection: string) => metrics.some((m) => m.collection === collection);
 
   const empScope = scopes.get("employees");
-  if (!empScope) return { window: { from: q.from, to: q.to, timezone: sched.timezone, working_days: 0 }, groups, metrics, people: [], team: {}, truncated: false };
+  // WHOSE WORK, not whose name. Reading someone's directory record is how widely everyone reads (every employee
+  // sees every colleague's base record), so the directory breadth says nothing about whose attendance, leave or
+  // goals the caller may see - taken alone it put the whole company in every report, each row blank past the
+  // caller's own. The report is about work, so its roster is the people whose ATTENDANCE the caller may list (the
+  // measure the report is built around), or failing that their LEAVE: a manager's department, HR's organisation,
+  // and nobody else's for someone who sees only their own. Both predicates bind together, so the directory can
+  // still narrow it and never widens it.
+  const workScope = scopes.get("attendance") ?? scopes.get("leave-requests");
+  if (!empScope || !workScope) return { window: { from: q.from, to: q.to, timezone: sched.timezone, working_days: 0 }, groups, metrics, people: [], team: {}, truncated: false };
 
   const t = schema;
   const db = deps.db;
@@ -182,6 +192,9 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
   };
   const rosterWhere = (extra?: SQL) => and(...([
     applyScope(empScope, t.employees.code, t.employees.uuid),
+    // Bound against the employee's own code and id: an attendance row's code nests under its employee's, so
+    // the same breadth (own / department / subtree / all) selects the same people here.
+    applyScope(workScope, t.employees.code, t.employees.uuid),
     isNull(t.employees.deleteTime),
     q.departmentId ? eq(t.employees.departmentId, q.departmentId) : undefined,
     // Naming one person NARROWS the report; it never widens it. The scope predicate above still decides
@@ -633,6 +646,11 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
   const kudos = index("kudos");
   const tickets = index("tickets");
 
+  // Whose days are whose (services/workSchedule.ts). Every share this report computes - absences, the remote
+  // percentage - is a share of the days THAT PERSON was expected on, so a part-timer is not reported absent
+  // for a Tuesday their schedule never asked them to work.
+  const schedFor = await scheduleCtxWith(deps, sched as unknown as AttendanceConfig, q.from, q.to, allIds);
+
   const keys = new Set(metrics.map((m) => m.key));
   const rows: PersonRow[] = people.map((p) => {
     const values: Record<string, number | null> = {};
@@ -665,7 +683,7 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     const expected = expectedWorkingDays({
       fromYmd: q.from,
       toYmd: q.to,
-      workDays: sched.work_days,
+      schedOf: schedFor(p.uuid),
       holidays,
       joinedYmd: trackedYmd && (!joinedYmd || trackedYmd > joinedYmd) ? trackedYmd : joinedYmd,
       leftYmd: p.endDate ? ymd(+new Date(p.endDate)) : null,
@@ -756,7 +774,10 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
   // "no request shape returns it for an individual" is a property of the code rather than a claim about it.
   for (const r of rows) r.values = withoutTeamOnly(r.values, metrics);
 
-  const workingDays = expectedWorkingDays({ fromYmd: q.from, toYmd: q.to, workDays: sched.work_days, holidays, todayYmd });
+  // The WINDOW's own working days, reported once for the whole report rather than per person - so this is
+  // the org's week, which is what a single number about the period can honestly be. The per-person figures
+  // above each use their own schedule.
+  const workingDays = expectedWorkingDays({ fromYmd: q.from, toYmd: q.to, schedOf: orgScheduleOf(sched as unknown as AttendanceConfig), holidays, todayYmd });
 
   // The calendar: one named person's days, in date order, each with what they worked and whether they were
   // late by the same rule the rest of the report uses. Only ever for ONE person - a series per head is a

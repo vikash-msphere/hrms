@@ -7,11 +7,13 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
+import { seedManifest } from "./seedManifest";
 import { genId } from "../src/lib/idCodec";
 import { clearCache } from "../src/lib/cache";
 import { invalidateCodeCache } from "../src/lib/authzResolve";
 import { deriveNarrowing } from "../src/domain/compileGrants";
-import { PROTECTED_FIELDS, REFERENCES, OWNER_REFS, SUBRESOURCE_BODY, subresourceBodyKey } from "../src/domain/manifests";
+import { SUBRESOURCE_BODY, subresourceBodyKey } from "../src/domain/manifests";
+import { PROTECTED_FIELDS, REFERENCES, OWNER_REFS } from "../bootstrap/authz/policy";
 import type { Level } from "../src/domain/permissions";
 import { app } from "../src/index";
 
@@ -67,6 +69,7 @@ beforeAll(async () => {
     const s = stmt.trim();
     if (s) await b.DB.prepare(s).run();
   }
+  await seedManifest(b.DB);
   deps = makeDeps(b);
 
   await deps.db.insert(schema.roles).values([{ name: ROLE, label: "Gate tester" }, { name: "employee", label: "Employee" }]);
@@ -111,6 +114,9 @@ beforeAll(async () => {
   await put("stocktakes", schema.stocktakes, { label: "Q1 count", startedAt: new Date("2026-01-05") });
   await put("benefit-plans", schema.benefitPlans, { name: "Health base" });
   await put("shifts", schema.shifts, { name: "General" });
+  // A one-week cycle of rest days: the gate is about whether the REFERENCE is readable, so the pattern only
+  // has to be a live row of the right length (services/workPatterns.ts refuses a short `days`).
+  await put("work-patterns", schema.workPatterns, { name: "Standard week", cycleWeeks: 1, daysJson: JSON.stringify(Array(7).fill(null)) });
   await put("projects", schema.projects, { name: "Platform" });
   await put("pay-grades", schema.payGrades, { name: "L3" });
   await put("boards", schema.boards, { name: "Delivery" });

@@ -45,7 +45,7 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   // benefits: HR-authored plan catalog + employee-owned dependents & enrollments
   "benefit-plans", "dependents", "benefit-enrollments",
   // shift scheduling: HR shift catalog + employee-owned roster assignments (manager rosters the dept)
-  "shifts", "shift-assignments",
+  "shifts", "shift-assignments", "work-patterns", "work-pattern-assignments",
   // timesheets: project catalog + employee-owned time entries (manager approves the dept's)
   "projects", "time-entries",
   // loans / salary advances; employee-owned request, payroll decides/disburses
@@ -69,6 +69,8 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   // recorded cron ticks; private-by-default (no grant names it, so super-only via **) but still a real
   // code-bearing resource, so it must be registered here.
   "cron-runs",
+  // daily ⌘K usage counters (services/searchInsights.ts); private-by-default, read-only, same reasoning.
+  "search-insights",
   // workflow & automation engine: rules (HR-authored) + the event log + run observability. Authoring is the
   // privileged act (actions run with system authority), so writes are HR/super only; event-log/automation-runs
   // are read-only admin observability.

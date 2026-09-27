@@ -1,13 +1,13 @@
 // Generates scripts/seed.sql: 10 departments, 100 employees, and real-world activity (leave, attendance,
 // reimbursements, kudos, compensation, goals, announcements). DETERMINISTIC - fixed ids/timestamps, no
 // Date.now/random - so re-running produces byte-identical output. The 5 role logins + their employees + 2
-// base departments keep their fixed ids (start.sh logins depend on them). The access_rules + policy blocks
-// come from the same generators the runtime/tests use (test/seedDrift stays green).
+// base departments keep their fixed ids (start.sh logins depend on them). The roles + access_rules + policy
+// blocks come from the production seed's renderer in bootstrap/authz/ (test/seedDrift stays green).
 //
 //   Run:  node --import ./scripts/tsResolve.mjs scripts/genSeed.ts > scripts/seed.sql
-import { renderAccessRulesSeed, seedRuleId } from "./genAccessRulesSeed";
+import { renderAuthzSeed } from "../bootstrap/authz/accessRules";
 import { kudos as kudosSettings } from "../bootstrap/collections/kudos";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 import { encodeBase32 } from "../src/domain/codes";
 import { bytesToBase32 } from "../src/lib/idCodec";
 
@@ -124,31 +124,9 @@ emit(DEPTS.map((d) => ` (${q(d.uuid)},${q(d.code)},${q(d.name)},${deptHead[d.cod
 emit("INSERT INTO employees (uuid,code,first_name,last_name,work_email,job_title,department_id,manager_id,start_date,status,epf_enrolled,created_at,updated_at) VALUES");
 emit(employees.map((e) => ` (${q(e.uuid)},${q(e.code)},${q(e.first)},${q(e.last)},${q(e.email)},${q(e.title)},${q(e.deptUuid)},${e.managerUuid ? q(e.managerUuid) : "NULL"},${e.start},'active',1,${T0},${T0})`).join(",\n") + ";");
 
-// roles + access_rules + policy + users (fixed)
-emit(`INSERT INTO roles (name,label,protected,created_at,updated_at) VALUES
- ('everyone','Everyone',1,${T0},${T0}),
- ('employee','Employee',1,${T0},${T0}),
- ('manager','Manager',1,${T0},${T0}),
- ('hr_admin','HR Admin',1,${T0},${T0}),
- ('payroll_admin','Payroll Admin',1,${T0},${T0}),
- ('super_admin','Super Admin',1,${T0},${T0});`);
-emit(renderAccessRulesSeed());
-// Demo: enable in-app notifications for everyone. This is RUNTIME ACL data (pre-seeded access_rules rows for
-// the `everyone` pseudo-role) - exactly what an admin would create in the Access Management UI - NOT a
-// grants.ts/code grant. Mirrors the leave-requests employee shape: the bare-collection rule grants the LIST
-// call (a 1-token pattern never matches an item, so it can't widen breadth), while the `.me.**` self rules
-// drive OWN-only breadth + own writes. So a caller only ever sees/marks their OWN notifications.
-// The `markAllRead` row is a COLLECTION-level custom method, so it is encoded broad (scope all, match_code
-// NULL) exactly as compileGrant encodes a 2-token verb pattern - a match_code would file it in the
-// per-object lane, which a verb with no object id never reaches, and the capability would be unreachable.
-// Separate INSERT so the generated block above still byte-matches the drift gate. The ids come from the same
-// helper the compiled block uses (a rule id must be a real 13-char base32 internal id: the list cursor
-// tokenizes it through the wire codec), from a range far past the compiled rows.
-emit(`INSERT INTO access_rules (uuid,subject,subject_kind,namespace,pattern,scope_kind,scope_code,match_code,level,effect,created_at,updated_at) VALUES
- (${q(seedRuleId(900_001))},'everyone','role','notifications','notifications','all','',NULL,'read','allow',${T0},${T0}),
- (${q(seedRuleId(900_002))},'everyone','role','notifications','notifications.me.**','self','',NULL,'read','allow',${T0},${T0}),
- (${q(seedRuleId(900_003))},'everyone','role','notifications','notifications.me.**','self','',NULL,'write','allow',${T0},${T0}),
- (${q(seedRuleId(900_004))},'everyone','role','notifications','notifications.markAllRead','all','',NULL,NULL,'allow',${T0},${T0});`);
+// roles + access_rules + policy + users (fixed). The role set and its rules are the production seed's own
+// (bootstrap/authz/), so the demo database starts with exactly the authority a fresh install does.
+emit(renderAuthzSeed());
 emit(`INSERT INTO policy (key,value_json,updated_at) VALUES\n ('manifest',${q(JSON.stringify(DEFAULT_POLICY))},${T0});`);
 // One sign-in account per employee, which is what the app does at create time (services/employees.ts
 // provisionAccount): an access rule names a `users/{id}` subject, so an employee with no account row cannot be

@@ -15,11 +15,12 @@ import { keysetPage } from "./keysetPage";
 import { restateLopForDay } from "./payroll";
 import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
-import { localMinutes, utcDay } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, localMinutes, utcDay, type AttendanceConfig } from "../domain/attendance";
 import {
   checkFiling, excusalsByDay, fmtMinutes, KIND_LABEL, LATE_EARLY_KINDS, leaveHalves, punctualityPolicyOf, shiftScheduleOf,
   type DayExcusal, type LateEarlyKind, type PunctualityPolicy,
 } from "../domain/punctuality";
+import { scheduleCtxWith } from "./workSchedule";
 
 // Late arrival / early departure requests: an employee asks to come in late or leave early on one working day;
 // a manager (own dept) or HR approves or rejects it; the owner cancels it while it is pending. Who may do which
@@ -96,7 +97,8 @@ export async function createLateEarlyRequest(deps: Deps, actor: AppUser, input: 
   const reason = input.reason?.trim() || null;
 
   const policy = await punctualityPolicy(deps);
-  const sched = shiftScheduleOf(await getSettingValue<Record<string, unknown>>(deps, "attendance", {}));
+  const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
+  const tz = shiftScheduleOf(att).timezone;
   const todayYmd = await orgToday(deps);
   const t = schema.lateEarlyRequests;
 
@@ -133,9 +135,15 @@ export async function createLateEarlyRequest(deps: Deps, actor: AppUser, input: 
     throw failedPrecondition(`there is already a ${nounOf(kind)} request for that day - cancel it or ask for it to be rejected before filing another`);
   }
 
+  // The window a request moves is the one THAT PERSON was rostered for on THAT DAY
+  // (services/workSchedule.ts), so a night-shift worker files a late arrival against 22:00 and not against the
+  // org's 09:00 - and a rest day in their rotation refuses the request as "not a working day" the same way a
+  // Sunday does.
+  const daySched = (await scheduleCtxWith(deps, att, ymd, ymd, [employeeId]))(employeeId)(ymd);
+
   const verdict = checkFiling({
-    kind, date: ymd, at, reason, sched, policy, todayYmd,
-    nowMin: localMinutes(+deps.clock.now(), sched.timezone),
+    kind, date: ymd, at, reason, sched: daySched, policy, todayYmd,
+    nowMin: localMinutes(+deps.clock.now(), tz),
     isHoliday,
     onFullLeave: halves.am && halves.pm,
     monthRequests: month.map((m) => ({ kind: m.kind, minutes: m.minutes, date: utcDay(+new Date(m.date)) })),

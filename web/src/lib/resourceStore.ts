@@ -934,6 +934,10 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   // nothing. It is a POST because the app's verb transport is, not because anything changes. Unmapped it
   // refetched the suggestion list and the bell every time somebody opened the merge dialog.
   "suggestions:similar": [],
+  // ⌘K's counters (services/searchInsights.ts). Both write only the usage counters, which nobody but the
+  // insights panel reads - so this refreshes that and nothing else, not the collection the palette was on.
+  "search:feedback": ["search-insights"],
+  "search:ask": ["search-insights"],
 };
 
 // Collections a mutation on `path` (custom `verb` optional) should invalidate.

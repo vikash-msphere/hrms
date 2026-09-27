@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, gotoRoute, landedResponse, purge, test, expect } from "./fixtures";
 import { addTicketCategory, dropTicketCategories } from "./ticketCategories";
 
 // "Notify the manager" - one field ("What is it about"), and never composed through the builder before this.
@@ -39,7 +39,7 @@ test("a rule with a notifyManager action reaches the requester's manager", async
 
   await expect(form.getByText(/^When /).first()).toBeVisible({ timeout: 30_000 });
   const [saved] = await Promise.all([
-    page.waitForResponse((r) => r.url().includes("/v1/automations") && r.request().method() === "POST", { timeout: 30_000 }),
+    landedResponse(page, (r) => r.url().includes("/v1/automations") && r.request().method() === "POST"),
     form.getByRole("button", { name: "Create rule" }).click(),
   ]);
   expect(saved.status(), await saved.text()).toBe(200);

@@ -43,6 +43,7 @@ import { EmployeeIdentityDetails } from "@/components/common/EmployeeIdentityDet
 import { SignatureField } from "@/components/common/SignatureField";
 import { MyCompensation } from "@/components/common/MyCompensation";
 import { MyViewers } from "@/components/common/MyViewers";
+import { AppLockSettings } from "@/components/lock/AppLockSettings";
 import { EmployeeTaxDetails } from "@/components/common/EmployeeTaxDetails";
 import EmployeeCompensation from "@/components/common/EmployeeCompensation";
 import { EmployeePersonalDetails } from "@/components/common/EmployeePersonalDetails";
@@ -137,8 +138,8 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   // answers for the owner, `my-dept` / `my-reports` / `my-org` for the team, `<code>-*` for a granted branch,
   // and a per-object share for the single record - because the item request merged it (`ctx.objectGrant`).
   //
-  // `canManage` and `canSettings` above stay on `usePermission`, and correctly: they are ORG-level questions
-  // ("may I edit employee records at all", "may I change org settings"), not questions about this person.
+  // `canManage` above stays on `usePermission`, and correctly: it is an ORG-level question ("may I edit employee
+  // records at all"), not a question about this person.
   const subject = useMemo(() => subjectScopesOf(emp?.access), [emp]);
   const canRead = (key: string) => subject.read.has(key);
   const canWrite = (key: string) => subject.write.has(key);
@@ -210,9 +211,9 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   // The trail is TWO gates, and the server ANDs them: the `activity` capability (org-level - may I see trails
   // at all) and read on the record. The second half is scoped per subject like everything else here.
   const canActivity = canSeeEmpActivity && canRead("activity.employees");
-  // Org-level, not about this person: the inline settings gears open ORG singletons (the department list, the
-  // pay-component catalogue) that happen to be shown where HR is already looking.
-  const canSettings = usePermission("settings.write");
+  // The inline settings gears open ORG singletons (the department list, the pay-component catalogue) that happen
+  // to be shown where HR is already looking. Which of them the caller may open is decided per panel by
+  // SettingsMenu itself (it renders nothing when none is theirs), so there is no page-level settings gate here.
   const { rows: depts } = useCollection<Department>("departments", { all: true });
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: types } = useCollection<LeaveType>("leave-types", { enabled: canLeave });
@@ -422,7 +423,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   // takes the whole first line, where `justify-between` would have nothing to push against (see the tab band).
   const tabGears = (tab: string) => {
     const keys = TAB_SETTINGS[tab];
-    if (!canSettings || !keys?.length) return null;
+    if (!keys?.length) return null;
     return (
       <div className="order-1 ml-auto flex shrink-0 items-center gap-2 sm:order-2">
         <SettingsMenu me={me} items={keys.map((key) => ({ key }))} />
@@ -651,7 +652,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                     {/* Not an AccessTab: this tab is ABOUT access rather than governed by one. `shrink-0` for
                         the reason AccessTab's own wrapper carries it - in a scrolling strip a shrinkable
                         trigger is squeezed narrower than its nowrap label and spills over the next. */}
-                    {isSelf && <TabsTrigger value="privacy" className="shrink-0"><ShieldCheck className="h-4 w-4" /> Privacy</TabsTrigger>}
+                    {isSelf && <TabsTrigger value="privacy" className="shrink-0"><ShieldCheck className="h-4 w-4" /> Privacy & security</TabsTrigger>}
                   </TabsList>
                   {tabGears(tab)}
                 </div>
@@ -941,7 +942,14 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
               )}
               {isSelf && (
                 <TabsContent value="privacy">
-                  <MyViewers selfPath={empPath} />
+                  <div className="space-y-4">
+                    {/* The person's own app lock (lib/appLock.ts): theirs to set, and nobody else's to see. */}
+                    <section className="rounded-xl border bg-card p-4 shadow-sm sm:p-5">
+                      <h3 className="text-sm font-semibold">App lock</h3>
+                      <AppLockSettings />
+                    </section>
+                    <MyViewers selfPath={empPath} />
+                  </div>
                 </TabsContent>
               )}
             </Tabs>

@@ -11,21 +11,14 @@
 import { sql, type SQL } from "drizzle-orm";
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import type { Deps } from "../deps";
+import { matchExpression } from "../domain/searchQuery";
+import { orgSynonymGroups } from "./searchSynonyms";
 
 const MIN_QUERY = 2;
 const MAX_MATCHES = 500; // bounds the IN list; a query this broad is a browse, not a search
-const MAX_TOKENS = 6;
 
-// Same tokenisation as global search: quoted prefix terms, ANDed. Stripping to letters/digits leaves no FTS5
-// operator or quote in the expression, so the query text cannot alter its structure.
-function matchExpression(raw: string): string | null {
-  const tokens = raw
-    .toLowerCase()
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((t) => t.length > 0)
-    .slice(0, MAX_TOKENS);
-  return tokens.length === 0 ? null : tokens.map((t) => `"${t}"*`).join(" ");
-}
+// The expression is global search's own (domain/searchQuery.ts), synonyms included, so a list page's search
+// box and ⌘K agree on what "pto" means.
 
 /** A `WHERE` fragment restricting `idCol` to this collection's text matches for `q`, or undefined when there
  *  is nothing to filter by (blank/too-short query). Returns a never-true condition when the query matches
@@ -33,7 +26,7 @@ function matchExpression(raw: string): string | null {
 export async function searchFilter(deps: Deps, collection: string, q: string | undefined, idCol: AnySQLiteColumn): Promise<SQL | undefined> {
   const trimmed = (q ?? "").trim();
   if (trimmed.length < MIN_QUERY) return undefined;
-  const match = matchExpression(trimmed);
+  const match = matchExpression(trimmed, await orgSynonymGroups(deps));
   if (!match) return undefined;
   // ORDERED BY RANK, AND DELETED ROWS EXCLUDED - the two things services/globalSearch.ts already does and this
   // sibling did not.
@@ -49,9 +42,9 @@ export async function searchFilter(deps: Deps, collection: string, q: string | u
   // live row needed, so a collection with a lot of trash quietly lost search coverage.
   const rows = await deps.db.all<{ id: string }>(sql`
     select d."record_id" as id
-    from "search_fts" f join "search_docs" d on d."rowid" = f."rowid"
-    where f."text" match ${match} and d."collection" = ${collection} and d."deleted" = 0
-    order by f."rank"
+    from "search_fts" join "search_docs" d on d."rowid" = "search_fts"."rowid"
+    where "search_fts" match ${match} and d."collection" = ${collection} and d."deleted" = 0
+    order by bm25("search_fts")
     limit ${sql.raw(String(MAX_MATCHES))}
   `);
   // The id list goes in as LITERALS, not as bound parameters. D1 binds at most 100 per statement (see

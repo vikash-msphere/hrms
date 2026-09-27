@@ -1,21 +1,22 @@
 import { describe, it, expect } from "vitest";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 
-// Bank bulk-payment formats: HR + super manage the mappings/templates (/v1/bank-formats); the sensitive
-// debit account + currency (/v1/payroll-debit) are private-by-default so ONLY super_admin reaches them -
-// no grant names that namespace, so every other role fails closed. These assert the data-driven gate.
+// Bank bulk-payment formats: payroll + super manage the mappings/templates (/v1/bank-formats) - they are how a
+// payout file is laid out, which is payroll's work; the sensitive debit account + currency (/v1/payroll-debit)
+// are private-by-default so ONLY super_admin reaches them - no grant names that namespace, so every other role
+// fails closed. These assert the data-driven gate.
 const can = (role: string, method: string, path: string) =>
   decide(grantFor(role), resolveRequest(method, path), { employeeCode: "04-001-001" }).allow;
 
 const ALL = ["employee", "manager", "hr_admin", "payroll_admin", "super_admin"];
 
-describe("bank-formats authz (HR + super manage; others denied)", () => {
-  it("read + write (mappings + template upload): hr_admin + super only", () => {
+describe("bank-formats authz (payroll + super manage; others denied)", () => {
+  it("read + write (mappings + template upload): payroll_admin + super only", () => {
     for (const [method, path] of [["GET", "/v1/bank-formats"], ["PUT", "/v1/bank-formats"], ["POST", "/v1/bank-formats/IDFC FIRST Bank:uploadTemplate"]] as const) {
-      expect(can("hr_admin", method, path)).toBe(true);
+      expect(can("payroll_admin", method, path)).toBe(true);
       expect(can("super_admin", method, path)).toBe(true);
-      for (const role of ["employee", "manager", "payroll_admin"]) expect(can(role, method, path)).toBe(false);
+      for (const role of ["employee", "manager", "hr_admin"]) expect(can(role, method, path)).toBe(false);
     }
   });
 });

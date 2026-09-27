@@ -42,7 +42,7 @@ beforeEach(async () => {
   clearCachePrefix(""); // grant + manifest caches are cross-test state; start clean
   invalidateCodeCache();
   await deps.db.insert(schema.roles).values([
-    { name: "employee", label: "Employee" },
+    { name: "employee", label: "Employee", provisioned: true }, // what an unlinked person is graded as
     { name: "hr_admin", label: "HR Admin" },
     { name: "everyone", label: "Everyone" },
   ]);

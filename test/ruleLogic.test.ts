@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { ruleSentence, ruleFlags, denyBlocking, expiryLabel } from "../web/src/components/access/ruleLogic";
 import type { AccessRule } from "../web/src/components/access/permMatrix";
+import { registerRoleLabels } from "../web/src/lib/roles";
+
+// Role labels are data the SPA learns from the server (users/me, the roles collection); stand in that load.
+registerRoleLabels([{ name: "hr_admin", label: "HR Admin" }]);
 
 // The reading side of the access UI: rules rendered as sentences, and the lint that says which rules the
 // engine will never actually use. Both are pure, and both are claims ABOUT the engine's semantics (deny

@@ -60,6 +60,9 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   "transition-tasks": ["complete", "reopen", "upload"],
   announcements: ["update", "delete", "post", "giveKudos", "markRead", "markAllRead", "react", "reply", "vote", "publish", "unpublish", "disable", "enable", "lock", "unlock", "pin", "unpin"],
   "api-keys": ["delete", "revoke"], // no update: a credential's scope is fixed at mint time, so there is no PATCH
+  // `resetPin` clears somebody's forgotten app PIN and signs them out everywhere (services/appLock.ts). Listed so
+  // the ACL modal can grant it by name; nothing seeds it, so out of the box it is super admin's alone.
+  users: ["update", "resetPin"],
   holidays: ["update", "delete"],
   // `respond` is the attendee's RSVP: a verb an ordinary employee holds on an event aimed at them, without any
   // write access to the event itself.
@@ -131,6 +134,7 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "update", "delete", // standard
   "enable", "disable", "lock", "unlock", "publish", "unpublish", "restore", // shared lifecycle
   "revoke", // kill an API key without deleting it (api-keys), so the audit trail can still resolve it
+  "resetPin", // clear a forgotten app PIN and sign the person out everywhere (users)
   "post", // create a generic board post (announcements)
   "giveKudos", // give a kudo (a board post about a recipient; announcements, kind="kudos")
   "markRead", // record the caller's read receipt on a board post (announcements)

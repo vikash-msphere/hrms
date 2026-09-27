@@ -30,7 +30,7 @@ test("a board card in search results is labelled Task, grouped under Tasks", asy
     await search.fill(title);
 
     await expect(page.getByText("Tasks", { exact: true })).toBeVisible({ timeout: 30_000 });
-    const result = page.getByRole("button").filter({ hasText: title }).first();
+    const result = page.getByRole("option").filter({ hasText: title }).first();
     await expect(result).toBeVisible();
     await expect(result.getByText("Task", { exact: true })).toBeVisible();
 

@@ -11,6 +11,9 @@ import { collectionRoutes } from "../http/collectionRoute";
 import { getUser, listUsers, updateUser, type UserInput, decorateUserRoles } from "../services/users";
 import { toUserResource } from "../http/serialize";
 import { getSettingValue } from "../services/settings";
+import { roleLabels } from "../services/roles";
+import { clientKeyFor } from "../lib/appLock";
+import { resetPin } from "../services/appLock";
 
 const updateSchema = z
   .object({
@@ -48,6 +51,11 @@ const accounts = collectionRoutes<UserInput, typeof schema.users>({
   // field on this factory uses, so item, list and the write response all carry it without three spellings.
   // `users.role` is on the row already; this is only the join table.
   decorate: (deps, _actor, rows) => decorateUserRoles(deps, rows),
+  verbs: {
+    // The only way back from a forgotten app PIN (services/appLock.ts resetPin): super admin by default and
+    // grantable by name in the ACL, never self-service. Answers with a receipt, not the account.
+    resetPin: { raw: async (c, id) => c.json(await resetPin(c.get("deps"), c.get("user"), id)) },
+  },
 });
 
 // `users/me` is NOT a collection item: it answers about the CALLER. It carries the capability set the SPA gates
@@ -83,12 +91,24 @@ export const users = new Hono<AppEnv>()
     // has nothing for a cache to outlive, and inventing a value would make the namespace change on every
     // request. `simulatedBy` carries the real admin's sitting, so a simulation is scoped to it too.
     const sessionId = u.simulatedBy?.sessionId ?? u.sessionId;
+    // The app lock (services/appLock.ts), for the person at this browser - the real admin under "view as". A
+    // request only reaches here unlocked, so `client_key` - what the SPA encrypts its stored copies under - is
+    // handed to an unlocked browser and never to a locked one. Absent on an API key: it keeps no browser store.
+    const lock = u.appLock;
+    const lockFields = lock
+      ? {
+          app_lock: { enabled: lock.enabled, pin_length: lock.pinLength, idle_minutes: lock.idleMinutes, expire_time: lock.expiresAt ? new Date(lock.expiresAt).toISOString() : null },
+          client_key: await clientKeyFor(c.env.FIELD_ENCRYPTION_KEY, lock.keyOwner, lock.keyEpoch),
+        }
+      : {};
     const withCallerAccess = async <T extends object>(res: T) => {
       const scopes = callerScopes(u, await selfContextFor(c.get("deps"), u));
       return c.json({
         ...res,
+        role_labels: await roleLabels(c.get("deps"), [u.role, ...(u.roles ?? [])]),
         holiday_feed_token: await feedToken(),
         ...(sessionId ? { session_id: sessionId } : {}),
+        ...lockFields,
         // `grantableScopes`, not the raw manifest map: a tier the UI must offer can be DERIVED from another
         // (named-dept from dept), and the chips have to reflect what the engine honours, not what the row stores.
         //

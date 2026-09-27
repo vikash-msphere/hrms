@@ -17,6 +17,7 @@ import { getSetting } from "@/lib/settingsStore";
 
 export type AiFeatureKey =
   | "search.semantic"
+  | "search.ask"
   | "tickets.triage"
   | "cards.triage"
   | "goals.similar"

@@ -8,6 +8,7 @@ import { useClock } from "@/lib/clock";
 import { cn, formatDate, idOf, personIndex, personName } from "@/lib/utils";
 import { orgDayFromToday, thisMonthStr, todayStr } from "@/lib/orgDay";
 import { localMinutes } from "@/lib/attendance";
+import { orgScheduleOf } from "../../../src/domain/workSchedule";
 import { navigate, navigateTab } from "@/router";
 import type { Employee, LateEarlyRequest, Me } from "@/types";
 import { Card, CardContent } from "@/components/ui/card";
@@ -97,7 +98,9 @@ export default function LateEarly({ me }: { me: Me }) {
       .filter((r) => r.employee && idOf(r.employee) === idOf(form.employee) && LIVE.has(upper(r.state)) && (r.date ?? "").slice(0, 7) === month && r.kind)
       .map((r) => ({ kind: r.kind as LateEarlyKind, minutes: r.minutes ?? 0, date: r.date! }));
     return checkFiling({
-      kind: form.kind, date: form.date, at: form.at, reason: form.reason, sched, policy,
+      // The window the request moves is the one that day was scheduled for (src/domain/workSchedule.ts), so
+      // the form quotes the same edges the server measures against.
+      kind: form.kind, date: form.date, at: form.at, reason: form.reason, sched: orgScheduleOf(sched)(form.date), policy,
       todayYmd: todayStr(),
       nowMin: localMinutes(new Date().toISOString(), sched.timezone),
       isHoliday: false,

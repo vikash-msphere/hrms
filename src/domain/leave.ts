@@ -1,5 +1,13 @@
 // PURE leave helpers. No I/O.
 import { round2 } from "./money";
+import { orgScheduleOf, type DayScheduleOf } from "./workSchedule";
+
+/**
+ * The default schedule these helpers fall back to: Mon-Fri, which is what the `workDays` parameter they used
+ * to take defaulted to. Callers that know whose leave it is pass that person's own resolver instead, so a
+ * Mon/Wed/Fri part-timer's week of leave costs three days rather than five.
+ */
+const MON_TO_FRI: DayScheduleOf = orgScheduleOf({ work_days: [1, 2, 3, 4, 5] });
 
 export function monthlyAccrual(daysPerYear: number): number {
   return round2(daysPerYear / 12);
@@ -36,8 +44,9 @@ export const NO_SANDWICH: SandwichRule = { weekends: "exclude", holidays: "exclu
 // no reason to stop.
 const FLANK_LIMIT_DAYS = 7;
 
-// Chargeable leave days for a range, counting only the org's configured working days and excluding holidays.
-// `workDays` is the weekday set (0=Sun..6=Sat; default Mon-Fri); `holidays` is a set of "YYYY-MM-DD" (UTC).
+// Chargeable leave days for a range, counting only the days THAT PERSON was scheduled to work and excluding
+// holidays. `schedOf` is their resolved schedule (domain/workSchedule.ts); `holidays` is a set of
+// "YYYY-MM-DD" (UTC).
 // Sessions: 1 = first half (morning), 2 = second half (afternoon). The leave runs contiguously from
 // `startSession` of the start day to `endSession` of the end day, so a first day that starts in the afternoon
 // (startSession=2) and a last day that ends at midday (endSession=1) each drop half a working day - but only
@@ -50,13 +59,13 @@ export function leaveDays(
   endMs: number,
   startSession = 1,
   endSession = 2,
-  workDays: readonly number[] = [1, 2, 3, 4, 5],
+  schedOf: DayScheduleOf = MON_TO_FRI,
   holidays: ReadonlySet<string> = new Set(),
   halfDayHolidays: ReadonlySet<string> = new Set(),
   sandwich: SandwichRule = NO_SANDWICH,
 ): number {
   let total = 0;
-  for (const v of Object.values(daysByMonth(startMs, endMs, startSession, endSession, workDays, holidays, halfDayHolidays, sandwich))) total += v;
+  for (const v of Object.values(daysByMonth(startMs, endMs, startSession, endSession, schedOf, holidays, halfDayHolidays, sandwich))) total += v;
   return Math.round(total * 2) / 2;
 }
 
@@ -76,16 +85,17 @@ export function daysByMonth(
   endMs: number,
   startSession = 1,
   endSession = 2,
-  workDays: readonly number[] = [1, 2, 3, 4, 5],
+  schedOf: DayScheduleOf = MON_TO_FRI,
   holidays: ReadonlySet<string> = new Set(),
   halfDayHolidays: ReadonlySet<string> = new Set(),
   sandwich: SandwichRule = NO_SANDWICH,
 ): Record<string, number> {
-  // What kind of day this is, before any sandwich rule: a weekend is one the org doesn't work, a holiday is a
-  // working weekday the org has declared off. The distinction is the whole point of two sandwich settings.
+  // What kind of day this is, before any sandwich rule: a weekend is a day this person isn't scheduled on (an
+  // ordinary weekend, or a rest day in their rotation), a holiday is a scheduled day the org has declared off.
+  // The distinction is the whole point of two sandwich settings.
   const kindOf = (ms: number): "work" | "weekend" | "holiday" | "half" => {
-    if (!workDays.includes(new Date(ms).getUTCDay())) return "weekend";
     const ymd = ymdUtc(ms);
+    if (schedOf(ymd).off) return "weekend";
     if (holidays.has(ymd)) return "holiday";
     return halfDayHolidays.has(ymd) ? "half" : "work";
   };

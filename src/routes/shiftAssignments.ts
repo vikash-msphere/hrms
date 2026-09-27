@@ -7,6 +7,7 @@ import { toShiftAssignmentResource } from "../http/serialize";
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
   shift: z.string().nullable().optional(),
+  kind: z.enum(["shift", "off"]).nullable().optional(),
   date: z.string().nullable().optional(),
   note: z.string().nullable().optional(),
 }).strict();

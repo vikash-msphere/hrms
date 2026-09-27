@@ -1,0 +1,24 @@
+{
+  "role": "super_admin",
+  "label": "Super Admin",
+  "protected": true,
+  "provisioned": false,
+  "description": "Break-glass: every level on everything and every verb, including force-purge. Exempt from `everyone` rules, so an `everyone` deny can never lock it out.",
+  "levels": [
+    {
+      "area": "all",
+      "pattern": "**",
+      "level": "admin",
+      "why": "Every collection, every record, at admin (force-purge included)."
+    }
+  ],
+  "allow": [
+    {
+      "area": "all",
+      "pattern": "**",
+      "why": "Every custom verb."
+    }
+  ],
+  "deny": [],
+  "excluded": []
+}

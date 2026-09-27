@@ -4,6 +4,7 @@
 // A custom method is fail-closed: allowed ONLY by an explicit verb-allow grant; a verb-deny always wins.
 export const CUSTOM_METHODS: Record<string, string[]> = {
   "api-keys": ["revoke"],
+  users: ["resetPin"],
   moderation: ["decide", "hide", "unhide"],
   // `uploadPhoto` / `clearPhoto` are grantable verbs like any other (`employees.me.uploadPhoto` for the owner,
   // HR's broad rule for everyone), so the modal offers them by name and the avatar's own gate reads them out

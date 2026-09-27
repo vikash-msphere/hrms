@@ -15,7 +15,7 @@ import { createCorrection, importOpenings } from "../src/services/leaveAdjustmen
 import { encashedDaysThisYear, encashedDaysThisYearAll } from "../src/services/leaveEncashments";
 import { updateEmployee } from "../src/services/employees";
 import { orgYear } from "../src/services/orgDay";
-import { grantFor } from "../src/domain/grants";
+import { grantFor } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
 
 // Opening leave balances (services/leaveAdjustments.ts), through the real accrual and the real ledger write.
@@ -215,11 +215,18 @@ describe("what an opening fixes in place", () => {
 });
 
 describe("who may import openings", () => {
-  const PATH = "/v1/leave-adjustments:importOpenings";
-  it("is left to the ACL: no seeded role but super reaches it", () => {
-    for (const role of ["employee", "manager", "hr_admin", "payroll_admin"]) {
-      expect(decide(grantFor(role), resolveRequest("POST", PATH), { employeeCode: "04-001-001" }).allow).toBe(false);
+  const can = (role: string, path: string) => decide(grantFor(role), resolveRequest("POST", path), { employeeCode: "04-001-001" }).allow;
+  // Going live is each owner's own job: HR brings in leave balances and leave history, payroll brings in pay and
+  // tax so far (bootstrap/authz/roles/). Nobody else - an import moves balances for a whole workforce at once.
+  it("leave openings and leave history: HR and super", () => {
+    for (const path of ["/v1/leave-adjustments:importOpenings", "/v1/leave-requests:importHistory"]) {
+      for (const role of ["hr_admin", "super_admin"]) expect(can(role, path), `${role} ${path}`).toBe(true);
+      for (const role of ["employee", "manager", "payroll_admin"]) expect(can(role, path), `${role} ${path}`).toBe(false);
     }
-    expect(decide(grantFor("super_admin"), resolveRequest("POST", PATH), { employeeCode: "04-001-001" }).allow).toBe(true);
+  });
+  it("pay and tax openings: payroll and super", () => {
+    const path = "/v1/payroll-openings:importOpenings";
+    for (const role of ["payroll_admin", "super_admin"]) expect(can(role, path), role).toBe(true);
+    for (const role of ["employee", "manager", "hr_admin"]) expect(can(role, path), role).toBe(false);
   });
 });

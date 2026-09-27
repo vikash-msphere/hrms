@@ -74,6 +74,7 @@ const LABELERS: Record<string, Labeler> = {
   "approval-delegations": (r) => u(dateRange(get(r, "from_date"), get(r, "to_date"))),
   "attendance": (r) => u(shortDate(get(r, "date"))),
   "cron-runs": (r) => u([txt(get(r, "cron")), txt(get(r, "status"))].filter(Boolean).join(" · ")),
+  "search-insights": (r) => u([txt(get(r, "day")), txt(get(r, "kind"))].filter(Boolean).join(" · ")),
   "holiday-selections": (r) => u(shortDate(get(r, "created_at"))),
   "interview-feedback": (r) => u(txt(get(r, "recommendation"))),
   "leave-encashments": (r) => u(txt(get(r, "state"))),

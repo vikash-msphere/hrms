@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 import { useCollection } from "@/hooks/useCollection";
 import { useEmployee } from "@/hooks/useEmployee";
-import { useCelebrations } from "@/hooks/useCelebrations";
+import { useCelebrations, useCelebrationLeadDays } from "@/hooks/useCelebrations";
 import { useSortable } from "@/hooks/useSortable";
 import { useVisibleRegions } from "@/hooks/useInView";
 import { usePermission } from "@/lib/perm";
@@ -71,7 +71,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { resolveDashboardShortcuts } from "@/lib/dashboardShortcuts";
 import { AccessAction } from "@/components/access/AccessAction";
-import { useOrg, currencyDecimals, orgAnniversary, CELEBRATION_WEEK_DAYS } from "@/lib/org";
+import { useOrg, currencyDecimals, orgAnniversary } from "@/lib/org";
 import { getSetting } from "@/lib/settingsStore";
 
 
@@ -215,7 +215,11 @@ export default function Dashboard({ me }: { me: Me }) {
   const wantCelebrations = wantCalendar || wantKpis || wantTimeline;
   // Held per tab and revalidated rather than re-read: the server walks the roster and decrypts a blob per
   // employee to answer this, and the dashboard mounts often. See hooks/useCelebrations.ts.
-  const { rows: celebrations, loading: celebsLoading } = useCelebrations(30, wantCelebrations);
+  // The window is the org's lead time (Settings → Dashboard visibility → Celebrations), so nothing shows before
+  // the org wants it to.
+  // Until the setting is known the read waits, and a gated read stays "loading".
+  const leadDays = useCelebrationLeadDays();
+  const { rows: celebrations, loading: celebsLoading } = useCelebrations(leadDays ?? 0, wantCelebrations && typeof leadDays === "number");
 
   const canTimeline = usePermission("timeline.read");
   // Events are private by default, so the events card is dropped entirely for callers without the grant
@@ -611,23 +615,20 @@ export default function Dashboard({ me }: { me: Me }) {
   }
 
   // The org's own incorporation anniversary, announced in the Celebrations widget alongside the per-employee
-  // feed (but NOT merged into `celebrations`, so the timeline is left untouched). Shown within the same 30-day
-  // window as the rest and sorted in by proximity.
+  // feed (but NOT merged into `celebrations`, so the timeline is left untouched). Shown within the same lead
+  // time as the rest and sorted in by proximity.
   const orgAnniv = useMemo(() => orgAnniversary(org.incorporation_date), [org.incorporation_date]);
-  const celebRows = useMemo(() => {
+  const celebAll = useMemo(() => {
     const rows = celebrations.map((c) => ({ org: false as const, in_days: c.in_days, c }));
     const merged: ({ org: false; in_days: number; c: Celebration } | { org: true; in_days: number; years: number })[] = [...rows];
-    if (orgAnniv && orgAnniv.in_days <= 30) merged.push({ org: true, in_days: orgAnniv.in_days, years: orgAnniv.years });
-    return merged.sort((a, b) => a.in_days - b.in_days).slice(0, 6);
-  }, [celebrations, orgAnniv]);
+    if (orgAnniv && typeof leadDays === "number" && orgAnniv.in_days <= leadDays) merged.push({ org: true, in_days: orgAnniv.in_days, years: orgAnniv.years });
+    return merged.sort((a, b) => a.in_days - b.in_days);
+  }, [celebrations, orgAnniv, leadDays]);
+  const celebRows = useMemo(() => celebAll.slice(0, 6), [celebAll]);
 
-  // Celebrations within the next 7 days (employee + org anniversary) + the very next one overall, used by the
-  // StatCard. `celebRows` is already sorted by proximity, so its head is the soonest celebration.
-  const celebsThisWeek = useMemo(
-    () => celebRows.filter((r) => r.in_days <= CELEBRATION_WEEK_DAYS),
-    [celebRows],
-  );
-  const nextCeleb = celebRows[0];
+  // The StatCard counts everything inside the lead time (employee + org anniversary) and names the soonest.
+  // `celebAll` is sorted by proximity, so its head is the next celebration.
+  const nextCeleb = celebAll[0];
   const nextCelebLabel = nextCeleb ? (nextCeleb.org ? org.name : nextCeleb.c.name.split(" ")[0]) : null;
 
   // New joiners in the last 30 days (by start date).
@@ -930,7 +931,7 @@ export default function Dashboard({ me }: { me: Me }) {
     clocked_in: { value: clockedIn, tone: clockedIn > 0 ? "success" : "muted", hint: "On the clock now", target: { collection: "attendance", label: "Attendance" }, onClick: () => navigate("attendance") },
     not_clocked_in: { value: notClockedIn, tone: "muted", hint: isHolidayToday ? "Holiday today" : "excl. leave & remote", target: { collection: "attendance", label: "Attendance" }, onClick: () => navigate("attendance") },
     remote_today: { value: remoteTodayV, tone: remoteTodayV > 0 ? "primary" : "muted", hint: `of ${people}`, target: { collection: "remote-work-requests", label: "Remote work" }, onClick: () => navigate("remote-work") },
-    celebrations: { value: celebsThisWeek.length, tone: celebsThisWeek.length > 0 ? "success" : "muted", hint: nextCeleb ? `Next: ${nextCelebLabel}` : "None this week", target: { collection: "employees", label: "Celebrations (employee data)" }, onClick: () => document.getElementById("dash-celebrations")?.scrollIntoView({ behavior: "smooth", block: "center" }) },
+    celebrations: { value: celebAll.length, tone: celebAll.length > 0 ? "success" : "muted", hint: nextCeleb ? `Next: ${nextCelebLabel}` : leadDays === null ? "Not configured" : "None coming up", target: { collection: "employees", label: "Celebrations (employee data)" }, onClick: () => document.getElementById("dash-celebrations")?.scrollIntoView({ behavior: "smooth", block: "center" }) },
     joiners: { value: joinersV, tone: joinersV > 0 ? "primary" : "muted", hint: `${headcountV} total ${headcountV === 1 ? "employee" : "employees"}`, target: { collection: "employees", label: "Employees" }, onClick: () => navigate("employees") },
     headcount: { value: headcountV, tone: "primary", hint: "across the org", target: { collection: "employees", label: "Employees" }, onClick: () => navigate("employees") },
     transitions_active: { value: transitionsActiveV, tone: transitionsActiveV > 0 ? "primary" : "muted", hint: transitionsActiveV === 0 ? "Nothing in progress" : `${transitionsOnboardingV} joining · ${transitionsActiveV - transitionsOnboardingV} exiting`, target: { collection: "transitions", label: "Transitions" }, onClick: () => navigate("transitions") },
@@ -1572,12 +1573,19 @@ export default function Dashboard({ me }: { me: Me }) {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {celebsLoading ? (
+              {leadDays === null ? (
+                <div className="flex flex-col items-center gap-2 py-6 text-center">
+                  <Cake className="h-8 w-8 text-muted-foreground/40" aria-hidden />
+                  <p className="text-sm text-muted-foreground">How far ahead celebrations show isn&apos;t set. An admin sets it in Settings → Dashboard visibility → Celebrations.</p>
+                </div>
+              ) : celebsLoading ? (
                 <ListSkeleton avatarClass="h-9 w-9 rounded-full" />
               ) : celebRows.length === 0 ? (
                 <div className="flex flex-col items-center gap-2 py-6 text-center">
                   <Cake className="h-8 w-8 text-muted-foreground/40" aria-hidden />
-                  <p className="text-sm text-muted-foreground">Nothing in the next 30 days.</p>
+                  <p className="text-sm text-muted-foreground">
+                    {leadDays === 0 ? "Nothing today." : `Nothing in the next ${leadDays} ${leadDays === 1 ? "day" : "days"}.`}
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-3">

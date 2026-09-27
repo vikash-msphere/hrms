@@ -26,7 +26,11 @@ import { CapabilitiesContext, ScopesContext, hasCapability } from "./lib/perm";
 import { OrgProvider } from "./lib/org";
 import { setTablePrefsUser } from "./lib/tablePrefs";
 import { setResourceStoreUser } from "./lib/resourceStore";
-import { whenReady, gc } from "./lib/clientStore";
+import { whenReady, gc, setClientKey } from "./lib/clientStore";
+import { useAppLock, configureLock } from "./lib/appLock";
+import { LockScreen } from "./components/lock/LockScreen";
+import { AutoLockBanner } from "./components/lock/AutoLockBanner";
+import { AppLockSheet } from "./components/lock/AppLockSheet";
 import { sweepSeenTickets } from "./lib/ticketsSeen";
 import { setSettingsUser } from "./lib/settingsStore";
 import { hydrateOrgTimezone } from "./lib/orgDay";
@@ -316,6 +320,7 @@ function FullScreen({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  const lock = useAppLock();
   const { me, loaded, error, retry } = useMe();
   const route = useRoute();
   const { toast } = useToast();
@@ -353,6 +358,9 @@ export default function App() {
   // records `openFor` deletes rather than reads. Absent on a session-less lane (API key, Access JWT, dev
   // bypass), where the key falls back to the email alone and behaves as it always did.
   const cacheUser = me ? `${me.email}${me.session_id ? `#${me.session_id}` : ""}${viewAs ? `~${viewAs.subject}` : ""}` : undefined;
+  // The key the stored copies are encrypted under (lib/clientStore.ts), handed over BEFORE the identity so
+  // hydration waits for it rather than racing it. Only an unlocked browser is ever given one.
+  setClientKey(me?.client_key);
   void setResourceStoreUser(cacheUser);
   setSettingsUser(cacheUser); // and the org settings snapshot, which gates other reads (see lib/settingsStore.ts)
 
@@ -404,6 +412,11 @@ export default function App() {
       void syncThemeFromServer();
       void syncTabSeenFromServer();
     }
+  }, [me]);
+
+  // The person's app lock (lib/appLock.ts): with a PIN set, this arms auto-lock, the keepalive and the shade.
+  useEffect(() => {
+    if (me) configureLock(me.app_lock);
   }, [me]);
 
   // With a signed-in shell on screen there is work worth preserving: a mid-session 401 overlays the
@@ -471,6 +484,10 @@ export default function App() {
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.page, route.id]);
+
+  // A locked browser renders the lock screen and nothing else: no shell, no providers, no reads. The server
+  // refuses them anyway (401 /errors/app-locked); this is what the page shows instead of a sign-in.
+  if (lock.locked) return <LockScreen />;
 
   if (!loaded) {
     return (
@@ -795,6 +812,9 @@ export default function App() {
         <Toaster />
         <CommandPalette me={gme} open={paletteOpen} onOpenChange={setPaletteOpen} />
         <ShortcutLayer me={gme} page={route.page} />
+        {/* The 30-second warning before an auto-lock, and the person's own app lock settings. */}
+        <AutoLockBanner />
+        <AppLockSheet />
         <SessionExpiredDialog
           open={sessionExpired}
           onSignedIn={() => {

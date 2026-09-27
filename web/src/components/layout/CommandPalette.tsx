@@ -1,22 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { Search, CornerDownLeft, ArrowUp, ArrowDown, User, Loader2, KeyRound, X } from "lucide-react";
+import { Search, CornerDownLeft, ArrowUp, ArrowDown, ArrowLeft, User, Loader2, KeyRound, X, Sparkles, ListFilter, Lock, History, Check, Ban } from "lucide-react";
+import { useConfirm } from "@/components/common/confirm";
+import { useToast } from "@/components/ui/use-toast";
+import { confirmDecision } from "@/lib/confirmDecision";
+import { useSelfApprovalAllowed } from "@/lib/approvals";
+import { hasPaletteActions, paletteVerbs, type ActionableRow, type PaletteVerb, type PaletteVerbOption } from "@/lib/paletteActions";
+import { readLocal, userKey, writeLocal } from "@/lib/localPref";
+import { useAppLock, lockNow } from "@/lib/appLock";
+import { openAppLockSettings } from "@/components/lock/AppLockSheet";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { useAccessMode } from "@/components/access/AccessModeProvider";
 import { NAV, itemVisible, navAdmits } from "@/nav";
-import { SETTINGS_REGISTRY } from "@/settings/registry";
+import { SETTINGS_REGISTRY, settingsEntryVisible } from "@/settings/registry";
 import { hasCapability } from "@/lib/perm";
 import { navigate } from "@/router";
 import { cn, idOf } from "@/lib/utils";
 import { useCollection } from "@/hooks/useCollection";
 import { resolveQuickActionList, runQuickAction } from "@/lib/quickActions";
 import { useOrg } from "@/lib/org";
-import { api } from "@/api";
+import { api, invoke } from "@/api";
 import { resourceRoute } from "@/lib/resourceRoute";
 import { entityLabel, entityLabelSingular, iconOf, toneOf, TONE_CLS, type Tone } from "@/lib/entityKinds";
 import type { OrgSettings } from "@/lib/org";
 import type { LucideIcon } from "lucide-react";
 import type { Employee, Me, SearchHit, SearchPage } from "@/types";
+import { useAiFeature } from "@/lib/aiFeatures";
+import { highlightParts, highlightTokens, isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, searchParams } from "@/lib/paletteQuery";
 
 // One row of the palette. Everything the palette can offer - a create flow, a page, a settings panel, or an
 // actual record out of the database - is normalised to this shape, so the list renders and keyboard-navigates
@@ -30,7 +40,38 @@ type Item = {
   icon: LucideIcon;
   route?: string; // app route to navigate to
   run?: () => void; // ...or an action to fire instead
+  // How it was found, for the open counters (routes/search.ts `search:feedback`). Absent = a palette row that
+  // is not a result at all (See all, Ask), which is not counted.
+  source?: "keyword" | "related" | "local";
+  stay?: boolean; // runs without closing the palette (See all, Ask)
+  // A database record (a server hit): its ref and collection, which is what the Tab actions act on.
+  record?: { name: string; collection: string };
 };
+
+// The record whose actions the palette is showing (Tab on a result), and what loading it found.
+type ActionsState = {
+  item: Item;
+  name: string;
+  collection: string;
+  status: "loading" | "ready" | "error";
+  verbs: PaletteVerbOption[];
+  etag?: string;
+  message?: string;
+};
+
+// Rows shown per record type before "See all". The top of each group is what a person reads; the rest is one
+// press away, narrowed to that type.
+const PER_SECTION = 5;
+// The server answers at most this many hits across every type (services/globalSearch.ts TOTAL), so a group
+// that reached it may have more than it shows.
+const SERVER_TOTAL = 60;
+
+type AskAnswer = { destinations: { key: string; why: string }[]; search: string | null };
+type AskState =
+  | { status: "idle" }
+  | { status: "loading"; question: string }
+  | { status: "done"; question: string; answer: AskAnswer }
+  | { status: "error"; question: string; message: string };
 type Section = { label: string; items: Item[] };
 
 // Build the always-available, zero-latency half of the palette: "Do" actions first (run a create flow from
@@ -56,19 +97,17 @@ function buildLocal(me: Me, quickCfg?: OrgSettings["quick_actions"]): { actions:
       return [{ key: i.key, label: i.label, detail: g.label, badge: "Page", tone: "page", icon: i.icon, route: i.key }];
     }),
   );
-  // Every settings panel is a jump target ("Leave types"), gated exactly like the Settings page: the page-level
-  // capability plus the panel's own, so nobody is offered a door they can't open.
-  const settings: Item[] = hasCapability(me.capabilities, "settings.write")
-    ? SETTINGS_REGISTRY.filter((s) => !s.perm || hasCapability(me.capabilities, s.perm)).map((s) => ({
-        key: `settings/${s.key}`,
-        label: s.title,
-        detail: s.group,
-        badge: "Setting",
-        tone: "setting",
-        icon: s.icon,
-        route: `settings/${s.key}`,
-      }))
-    : [];
+  // Every settings panel is a jump target ("Leave types"), gated exactly like the Settings page - write on what
+  // the panel edits (registry.ts settingsEntryVisible) - so nobody is offered a door they can't open.
+  const settings: Item[] = SETTINGS_REGISTRY.filter((s) => settingsEntryVisible(me.capabilities, s)).map((s) => ({
+    key: `settings/${s.key}`,
+    label: s.title,
+    detail: s.group,
+    badge: "Setting",
+    tone: "setting",
+    icon: s.icon,
+    route: `settings/${s.key}`,
+  }));
   return { actions, pages, settings };
 }
 
@@ -117,12 +156,48 @@ function frecencyScore(e?: { n: number; t: number }): number {
   return e.n / (1 + days); // linear recency decay: recent + frequent floats up, stale entries fade
 }
 
+/** True when the caret sits at the end of the input, so an arrow key is not also moving through the text. */
+const caretAtEnd = (e: React.KeyboardEvent) => {
+  const el = e.currentTarget as HTMLInputElement;
+  return el.selectionStart === el.value.length && el.selectionEnd === el.value.length;
+};
+
+// ---- Recent searches ----------------------------------------------------------------------------------------
+// The last few queries that ended in something being opened, per person (lib/localPref.ts `userKey`, so a
+// shared machine does not hand one person's searches to the next, and sign-out clears them).
+const RECENT_QUERIES = "palette:recentq";
+function loadRecentQueries(): string[] {
+  const k = userKey(RECENT_QUERIES);
+  if (!k) return [];
+  try {
+    const v: unknown = JSON.parse(readLocal(k) ?? "[]");
+    return Array.isArray(v) ? v.filter((s): s is string => typeof s === "string").slice(0, 8) : [];
+  } catch {
+    return [];
+  }
+}
+function saveRecentQuery(q: string) {
+  const k = userKey(RECENT_QUERIES);
+  if (k) writeLocal(k, JSON.stringify(pushRecent(loadRecentQueries(), q)));
+}
+
 const filterLocal = (items: Item[], q: string, fre: FrecencyMap): Item[] =>
   items
     .map((c) => ({ c, s: score(c, q) }))
     .filter((x) => x.s >= 0)
     .sort((a, b) => a.s - b.s || frecencyScore(fre[b.c.key]) - frecencyScore(fre[a.c.key]))
     .map((x) => x.c);
+
+/** A row's label or detail with the typed words marked where they matched (lib/paletteQuery.ts highlightParts). */
+function Marked({ text, tokens }: { text: string; tokens: readonly string[] }) {
+  return (
+    <>
+      {highlightParts(text, tokens).map((p, i) =>
+        p.hit ? <mark key={i} className="rounded-sm bg-primary/15 font-semibold text-foreground">{p.text}</mark> : <span key={i}>{p.text}</span>,
+      )}
+    </>
+  );
+}
 
 export function CommandPalette({
   me,
@@ -140,13 +215,28 @@ export function CommandPalette({
   // How much of the screen the on-screen keyboard covers, so the panel can stop above it (phone only).
   const keyboard = useKeyboardInset();
   const listRef = useRef<HTMLDivElement>(null);
+  // Ties the box to its listbox and to the row it is highlighting (aria-controls / aria-activedescendant).
+  const listId = useId();
   const { org } = useOrg();
   const quickCfg = org.quick_actions;
   const am = useAccessMode();
+  const lockEnabled = !!useAppLock().config?.enabled;
+  // The create flows a nothing-found search can hand its words to, when this caller has them.
+  const prefillable = useMemo(
+    () => resolveQuickActionList(me, quickCfg).filter((a) => a.id === "new-ticket" || a.id === "new-suggestion"),
+    [me, quickCfg],
+  );
   const local = useMemo(() => {
     const built = buildLocal(me, quickCfg);
     // Access mode used to be reachable only from the user menu - a mode you had to know about to find. It is
     // an action like any other, so it belongs in ⌘K for the people who may use it.
+    // The app lock is an action from anywhere, for everyone: lock now, or set it up.
+    built.actions = [
+      ...built.actions,
+      lockEnabled
+        ? { key: "action:lock", label: "Lock the app", badge: "Action", tone: "action", icon: Lock, run: () => void lockNow() }
+        : { key: "action:lock", label: "Set up app lock (PIN)", badge: "Action", tone: "action", icon: Lock, run: () => openAppLockSettings({ setup: true }) },
+    ];
     if (am.available) {
       built.actions = [
         ...built.actions,
@@ -154,7 +244,7 @@ export function CommandPalette({
       ];
     }
     return built;
-  }, [me, quickCfg, am.available, am.enabled, am.toggle]);
+  }, [me, quickCfg, am.available, am.enabled, am.toggle, lockEnabled]);
   // Directory is server-scoped to who the caller may see, so people results never leak hidden employees.
   // Matching it locally gives instant people hits while the cross-collection search is still in flight;
   // identical server hits are deduped below. Read only once the palette has been OPENED: the shell mounts on
@@ -165,6 +255,14 @@ export function CommandPalette({
     if (open) setOpened(true);
   }, [open]);
   const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: opened });
+  // The directory as `@name` and "did you mean" read it.
+  const directory = useMemo(() => employees.map((e) => ({ id: idOf(e.path), first: e.first_name ?? "", last: e.last_name ?? "", e })), [employees]);
+  const parsed = useMemo(() => parsePaletteQuery(query, directory), [query, directory]);
+  const narrowed = isNarrowed(parsed);
+  const askOn = useAiFeature("search.ask");
+  const [ask, setAsk] = useState<AskState>({ status: "idle" });
+  // An answer is about the question it was asked; editing the box makes it an answer to something else.
+  useEffect(() => setAsk({ status: "idle" }), [query]);
 
   // Global ⌘K / Ctrl+K to open from anywhere.
   useEffect(() => {
@@ -184,6 +282,7 @@ export function CommandPalette({
       setQuery("");
       setActive(0);
       setHits([]);
+      setHitsKey("");
     }
   }, [open]);
 
@@ -200,39 +299,65 @@ export function CommandPalette({
   // on the keyword index reads no rows, so the skip was saving very little.
   const seq = useRef(0);
   const cache = useRef(new Map<string, SearchHit[]>());
+  // Bumped after a decision made from the palette, so the results re-read what that decision changed.
+  const [refreshTick, setRefreshTick] = useState(0);
+  // Keyed by the whole request, narrowing included: `in:tickets laptop` and `laptop` are different questions.
+  const requestKey = parsed.text.trim().length >= 2 ? searchParams(parsed) : "";
+  // WHICH request the hits on screen answer. Between a keystroke and the effect below flipping `searching`
+  // there is a render where the hits are still the last query's (or none), and anything that concludes
+  // "nothing was found" from that render - Did you mean, the nothing-found offers, the spoken count - flashed
+  // for a result that had not arrived yet. `settled` is the honest version of "the answer is in".
+  const [hitsKey, setHitsKey] = useState("");
+  const settled = !searching && hitsKey === requestKey;
   useEffect(() => {
     if (!open) return;
-    const q = query.trim();
-    if (q.length < 2) {
+    const key = requestKey;
+    if (!key) {
       setHits([]);
+      setHitsKey("");
       setSearching(false);
       return;
     }
-    const cached = cache.current.get(q);
+    const cached = cache.current.get(key);
     if (cached) {
       seq.current++;
       setHits(cached);
+      setHitsKey(key);
       setSearching(false);
       return;
     }
     const mine = ++seq.current;
     setSearching(true);
     const timer = setTimeout(() => {
-      api<SearchPage>(`/search?q=${encodeURIComponent(q)}`)
+      api<SearchPage>(`/search?${key}`)
         .then((r) => {
           const results = r.results ?? [];
-          cache.current.set(q, results);
-          if (seq.current === mine) setHits(results);
+          cache.current.set(key, results);
+          if (seq.current === mine) {
+            setHits(results);
+            setHitsKey(key);
+          }
         })
         .catch(() => {
-          if (seq.current === mine) setHits([]); // never cached: a failure says nothing about the data
+          if (seq.current === mine) {
+            setHits([]); // never cached: a failure says nothing about the data
+            setHitsKey(key);
+          }
         })
         .finally(() => {
           if (seq.current === mine) setSearching(false);
         });
     }, 220);
     return () => clearTimeout(timer);
-  }, [query, open]);
+  }, [requestKey, open, refreshTick]);
+
+  // Tab on a result: the decisions this caller can make on it, loaded from the record itself (its `access.can`
+  // and state), so what is offered is what the server would allow.
+  const [actions, setActions] = useState<ActionsState | null>(null);
+  const confirm = useConfirm();
+  const { toast } = useToast();
+  const allowSelfApproval = useSelfApprovalAllowed();
+  useEffect(() => setActions(null), [query, open]);
 
   // Drop the cache when the palette closes: a write made between two openings must not be masked by a stale
   // "no results" from the previous session.
@@ -242,8 +367,28 @@ export function CommandPalette({
 
   // Re-read frecency each time the palette opens (another tab may have bumped it since).
   const frecent = useMemo(() => (open ? loadFrecency(me.email) : {}), [open, me.email]);
+  // And the last few searches that led somewhere, for the empty box.
+  const recentQueries = useMemo(() => (open ? loadRecentQueries() : []), [open]);
 
   const sections = useMemo((): Section[] => {
+    // Showing one record's actions replaces the list until Esc or ← goes back to it.
+    if (actions) {
+      const back: Item = { key: "actions:back", label: "Back to results", badge: "Back", tone: "page", icon: ArrowLeft, stay: true, run: () => setActions(null) };
+      const verbs: Item[] = actions.verbs.map((v) => ({
+        key: `actions:${v.verb}`,
+        label: `${v.label}: ${actions.item.label}`,
+        detail: actions.item.detail,
+        badge: v.label,
+        tone: "action",
+        icon: v.verb === "approve" ? Check : Ban,
+        stay: true,
+        run: () => void decide(v.verb),
+      }));
+      const label = actions.status === "loading" ? "Loading actions…"
+        : actions.status === "error" ? `Could not load actions: ${actions.message ?? "try again"}`
+        : verbs.length ? "Actions" : "Nothing to decide on this one";
+      return [{ label, items: [...verbs, back] }];
+    }
     const q = query.trim().toLowerCase();
     if (!q) {
       // Empty query: this user's most-opened targets first, then the full catalogue.
@@ -254,7 +399,18 @@ export function CommandPalette({
         .sort((a, b) => b.f - a.f)
         .slice(0, 5)
         .map((x) => x.i);
+      // The searches that ended in something being opened - running one again puts the words back in the box.
+      const searches: Item[] = recentQueries.map((s) => ({
+        key: `recent-search:${s}`,
+        label: s,
+        badge: "Search",
+        tone: "action",
+        icon: History,
+        stay: true,
+        run: () => setQuery(s),
+      }));
       return [
+        { label: "Recent searches", items: searches },
         { label: "Recent", items: recent },
         { label: "Actions", items: local.actions },
         { label: "Go to", items: local.pages },
@@ -262,20 +418,33 @@ export function CommandPalette({
       ].filter((s) => s.items.length > 0);
     }
 
+    const text = parsed.text.trim().toLowerCase();
+    const personItem = (e: Employee): Item => ({
+      key: `employees/${idOf(e.path)}`,
+      label: `${e.first_name} ${e.last_name}`,
+      detail: e.job_title,
+      badge: "Person",
+      tone: "people",
+      icon: User,
+      route: `employees/${idOf(e.path)}`,
+      source: "local",
+    });
+    // What this person opens most, first, within each group - the server's order otherwise.
+    const byFrecency = (items: Item[]) =>
+      items
+        .map((it, i) => ({ it, i, f: frecencyScore(frecent[it.key]) }))
+        .sort((a, b) => b.f - a.f || a.i - b.i)
+        .map((x) => x.it);
+
     // People from the cached directory — instant, and the route matches the server's `employees/<id>` hit
-    // exactly, so the dedupe below keeps whichever arrives without ever showing the person twice.
-    const people: Item[] = employees
-      .filter((e) => `${e.first_name} ${e.last_name} ${e.work_email ?? ""} ${e.job_title ?? ""}`.toLowerCase().includes(q))
-      .slice(0, 6)
-      .map((e) => ({
-        key: `employees/${idOf(e.path)}`,
-        label: `${e.first_name} ${e.last_name}`,
-        detail: e.job_title,
-        badge: "Person",
-        tone: "people",
-        icon: User,
-        route: `employees/${idOf(e.path)}`,
-      }));
+    // exactly, so the dedupe below keeps whichever arrives without ever showing the person twice. Not for a
+    // narrowed query: `in:tickets` or `@priya` is asking about records, not about who works here.
+    const people: Item[] = narrowed || !text
+      ? []
+      : employees
+          .filter((e) => `${e.first_name} ${e.last_name} ${e.work_email ?? ""} ${e.job_title ?? ""}`.toLowerCase().includes(text))
+          .slice(0, 6)
+          .map(personItem);
 
     // Records from the server, grouped by collection so a list of 40 mixed rows stays scannable. Related hits
     // (found by meaning, not by the typed words) are kept out of those groups and shown last, under their own
@@ -295,6 +464,8 @@ export function CommandPalette({
         tone: toneOf(h.collection),
         icon: h.collection === "employees" ? User : iconOf(h.collection),
         route,
+        source: h.related ? "related" : "keyword",
+        record: { name: h.name, collection: h.collection },
       };
       if (h.related) {
         related.push(item);
@@ -305,18 +476,96 @@ export function CommandPalette({
       else byCollection.set(h.collection, [item]);
     }
 
+    // The Ask answer, when there is one, leads: it is what the person pressed Enter for.
     const out: Section[] = [];
-    const actions = filterLocal(local.actions, q, frecent);
-    const pages = filterLocal(local.pages, q, frecent);
-    const settings = filterLocal(local.settings, q, frecent);
-    if (actions.length) out.push({ label: "Actions", items: actions });
+    if (ask.status === "done") {
+      const all = [...local.actions, ...local.pages, ...local.settings];
+      const picks: Item[] = ask.answer.destinations
+        .map((d): Item | null => {
+          const target = all.find((i) => i.key === d.key);
+          return target ? { ...target, key: `ask:${target.key}`, detail: d.why } : null;
+        })
+        .filter((i): i is Item => i !== null);
+      const words = ask.answer.search;
+      if (words) {
+        picks.push({ key: `ask-search:${words}`, label: `Search records for "${words}"`, badge: "Search", tone: "action", icon: Search, stay: true, run: () => setQuery(words) });
+      }
+      out.push({ label: picks.length ? "Answer" : "No answer - nothing here fits that question", items: picks });
+    }
+
+    const actionItems = narrowed ? [] : filterLocal(local.actions, text, frecent);
+    const pages = narrowed ? [] : filterLocal(local.pages, text, frecent);
+    const settings = narrowed ? [] : filterLocal(local.settings, text, frecent);
+    if (actionItems.length) out.push({ label: "Actions", items: actionItems });
     if (people.length) out.push({ label: "People", items: people });
     if (pages.length) out.push({ label: "Go to", items: pages });
     if (settings.length) out.push({ label: "Settings", items: settings });
-    for (const [collection, items] of byCollection) out.push({ label: entityLabel(collection), items });
+    for (const [collection, found] of byCollection) {
+      const items = byFrecency(found);
+      // Narrowed to this type already, the whole list is the point; otherwise the top few, and one row that
+      // re-asks the same words of this type alone, which the server answers with up to SERVER_TOTAL of them.
+      const capped = narrowed || items.length <= PER_SECTION ? items : items.slice(0, PER_SECTION);
+      if (capped.length < items.length) {
+        const plural = entityLabel(collection).toLowerCase();
+        const next = `in:${collection} ${parsed.text}`.trim();
+        capped.push({
+          key: `see-all:${collection}`,
+          label: `See all ${plural}`,
+          detail: `${items.length}${hits.length >= SERVER_TOTAL ? "+" : ""} found`,
+          badge: "Show",
+          tone: "action",
+          icon: ListFilter,
+          stay: true,
+          run: () => setQuery(next),
+        });
+      }
+      out.push({ label: entityLabel(collection), items: capped });
+    }
     if (related.length) out.push({ label: "Related", items: related });
+
+    // Nothing matched a name, and nothing at all came back: offer the people one slip away ("Kpoor").
+    if (!narrowed && settled && people.length === 0 && byCollection.size === 0 && text.length >= 4) {
+      const near = nearPeople(text, directory).map((d) => personItem(d.e));
+      if (near.length) out.push({ label: "Did you mean", items: near });
+    }
+
+    // And when there is still nothing at all, the thing to do next is usually to ask a person: the caller's own
+    // "raise a ticket" / "submit a suggestion", started with the words they searched for. Only the actions this
+    // caller already has (resolveQuickActionList), so nothing is offered that they cannot do.
+    if (!narrowed && settled && text.length >= 3 && out.every((s) => s.items.length === 0)) {
+      const words = parsed.text.trim();
+      const offers: Item[] = prefillable.map((a) => ({
+        key: `nothing-found:${a.id}`,
+        label: `${a.label}: "${words}"`,
+        detail: a.id === "new-ticket" ? "Nothing here matched - ask the helpdesk" : "Nothing here matched - suggest it",
+        badge: "Action",
+        tone: "action",
+        icon: a.icon,
+        run: () => runQuickAction(a, a.id === "new-ticket" ? { subject: words } : { title: words }),
+      }));
+      if (offers.length) out.push({ label: "Nothing found", items: offers });
+    }
+
+    // Ask, last and only when switched on: a question is not a search, so it never displaces the results.
+    if (askOn && !narrowed && looksLikeQuestion(parsed.text) && ask.status !== "done") {
+      out.push({
+        label: "Ask",
+        items: [{
+          key: "ask",
+          label: ask.status === "loading" ? "Asking…" : `Ask: "${parsed.text.trim()}"`,
+          detail: ask.status === "error" ? ask.message : "Point me to where this is answered",
+          badge: "Ask",
+          tone: "action",
+          icon: Sparkles,
+          stay: true,
+          run: () => void runAsk(),
+        }],
+      });
+    }
     return out;
-  }, [local, employees, hits, query, frecent]);
+    // `runAsk` reads the same state this memo does, so listing it would only rebuild the list twice.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [local, employees, directory, hits, query, parsed, narrowed, frecent, recentQueries, ask, askOn, settled, prefillable, actions]);
 
   const flat = useMemo(() => sections.flatMap((s) => s.items), [sections]);
 
@@ -325,9 +574,69 @@ export function CommandPalette({
     setActive((a) => Math.min(a, Math.max(0, flat.length - 1)));
   }, [flat.length]);
 
+  // Ask: the question and the destinations this palette offers (so the answer can only name places this person
+  // can already open), sent on Enter only - never while typing.
+  const runAsk = async () => {
+    const question = parsed.text.trim();
+    if (!askOn || !question || ask.status === "loading") return;
+    setAsk({ status: "loading", question });
+    const destinations = [...local.actions, ...local.pages, ...local.settings].map((i) => ({ key: i.key, label: i.label, group: i.detail ?? i.badge }));
+    try {
+      const answer = await api<AskAnswer>("/search:ask", { method: "POST", body: JSON.stringify({ question, destinations }) });
+      setAsk({ status: "done", question, answer });
+      setActive(0);
+    } catch (e) {
+      setAsk({ status: "error", question, message: (e as Error).message || "Ask could not answer just now" });
+    }
+  };
+
+  // Load a result's record for its actions: one read, and what it says (`access.can`, its state) is the whole
+  // basis for what is offered - the palette never guesses a verb is allowed.
+  const openActions = async (item: Item) => {
+    const rec = item.record;
+    if (!rec || !hasPaletteActions(rec.collection)) return;
+    setActions({ item, name: rec.name, collection: rec.collection, status: "loading", verbs: [] });
+    setActive(0);
+    try {
+      const row = await api<ActionableRow & { etag?: string }>(`/${rec.name}`);
+      const verbs = paletteVerbs(rec.collection, row, { selfEmployeeId: me.employee_id, allowSelfApproval });
+      setActions((a) => (a && a.name === rec.name ? { ...a, status: "ready", verbs, etag: row.etag } : a));
+    } catch (e) {
+      setActions((a) => (a && a.name === rec.name ? { ...a, status: "error", message: (e as Error).message } : a));
+    }
+  };
+
+  // A decision from the palette: asked first, exactly as the page asks (lib/confirmDecision.ts), then sent
+  // against the version that was read, so a request decided meanwhile by somebody else is refused, not repeated.
+  const decide = async (verb: PaletteVerb) => {
+    if (!actions || actions.status !== "ready") return;
+    const subject = actions.item.label;
+    if (!(await confirmDecision(confirm, verb, subject))) return;
+    try {
+      await invoke(actions.name, verb, actions.etag);
+      toast({ title: verb === "approve" ? "Approved" : "Rejected", description: subject, variant: "success" });
+      setActions(null);
+      cache.current.clear();
+      setRefreshTick((t) => t + 1);
+    } catch (e) {
+      toast({ title: `Couldn't ${verb} that`, description: (e as Error).message, variant: "destructive" });
+    }
+  };
+
   const go = (item: Item | undefined) => {
     if (!item) return;
+    if (item.stay) {
+      item.run?.();
+      return;
+    }
     bumpFrecency(me.email, item.key);
+    // A search that led somewhere is worth offering again next time the box is empty.
+    if (query.trim()) saveRecentQuery(query);
+    // Counted, not logged: how it was found and where it sat, never what it was (services/searchInsights.ts).
+    // Fire and forget - a counter is never worth delaying the navigation it describes.
+    if (item.source) {
+      api("/search:feedback", { method: "POST", body: JSON.stringify({ source: item.source, position: Math.max(0, flat.indexOf(item)) }) }).catch(() => {});
+    }
     if (item.run) item.run();
     else if (item.route) navigate(item.route);
     onOpenChange(false);
@@ -340,6 +649,19 @@ export function CommandPalette({
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActive((a) => Math.max(a - 1, 0));
+    } else if (!actions && (e.key === "Tab" || (e.key === "ArrowRight" && caretAtEnd(e))) && flat[active]?.record && hasPaletteActions(flat[active]!.record!.collection)) {
+      // Tab (or → at the end of the text) opens the highlighted record's actions.
+      e.preventDefault();
+      void openActions(flat[active]!);
+    } else if (actions && (e.key === "Escape" || (e.key === "ArrowLeft" && caretAtEnd(e)))) {
+      // Back to the results rather than closing the palette.
+      e.preventDefault();
+      setActions(null);
+      setActive(0);
+    } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && askOn) {
+      // ⌘↵ asks whatever is typed, wherever the highlight is.
+      e.preventDefault();
+      void runAsk();
     } else if (e.key === "Enter") {
       e.preventDefault();
       go(flat[active]);
@@ -359,6 +681,8 @@ export function CommandPalette({
   }, [active]);
 
   let idx = -1; // running index across sections, so keyboard selection and rendering agree
+  // The typed words, for marking where each row matched them (not while a record's actions are showing).
+  const marks = actions ? [] : highlightTokens(parsed.text);
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
@@ -385,6 +709,13 @@ export function CommandPalette({
               onChange={(e) => { setQuery(e.target.value); setActive(0); }}
               onKeyDown={onInputKey}
               placeholder="Search people, records, pages and settings…"
+              // The combobox pattern: focus never leaves the box, and the highlighted row is announced through
+              // `aria-activedescendant`, so a screen reader follows the arrow keys the way the eye does.
+              role="combobox"
+              aria-expanded={flat.length > 0}
+              aria-controls={listId}
+              aria-autocomplete="list"
+              aria-activedescendant={flat[active] ? `${listId}-opt-${active}` : undefined}
               // Names, codes and page titles - not prose. Left to itself a phone capitalises the first letter
               // and autocorrects the rest, which is how "Anaya" becomes "Anya" and the search finds nothing.
               autoCapitalize="none"
@@ -407,25 +738,35 @@ export function CommandPalette({
               <X className="h-4 w-4" />
             </button>
           </div>
-          <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2 sm:max-h-[55vh] sm:flex-none">
+          {/* Said once the results settle, not on every keystroke: how many there are, or that there are none. */}
+          <p className="sr-only" aria-live="polite">
+            {!settled || query.trim().length < 2 ? "" : flat.length ? `${flat.length} result${flat.length === 1 ? "" : "s"}` : "No matches"}
+          </p>
+          <div ref={listRef} id={listId} role="listbox" aria-label="Search results" className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2 sm:max-h-[55vh] sm:flex-none">
             {flat.length === 0 ? (
               <p className="px-3 py-8 text-center text-sm text-muted-foreground">
-                {searching
-                  ? "Searching…"
-                  : query.trim().length < 2
-                    ? "Keep typing to search your data…"
+                {query.trim().length < 2
+                  ? "Keep typing to search your data…"
+                  : !settled
+                    ? "Searching…"
                     : `No matches for "${query}".`}
               </p>
             ) : (
-              sections.map((section) => (
-                <div key={section.label} className="mb-1 last:mb-0">
-                  <p className="px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{section.label}</p>
+              sections.map((section, si) => (
+                <div key={section.label} role="group" aria-labelledby={`${listId}-sec-${si}`} className="mb-1 last:mb-0">
+                  <p id={`${listId}-sec-${si}`} className="px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{section.label}</p>
                   {section.items.map((item) => {
                     const Icon = item.icon;
                     const i = ++idx;
                     return (
+                      // A button, so a pointer and a touch still press it, with the ROLE of an option in the
+                      // listbox (a role HTML allows on a button). Out of the Tab order: the box keeps focus.
                       <button
                         key={item.key}
+                        id={`${listId}-opt-${i}`}
+                        role="option"
+                        aria-selected={i === active}
+                        tabIndex={-1}
                         data-idx={i}
                         type="button"
                         onMouseMove={() => setActive(i)}
@@ -439,8 +780,8 @@ export function CommandPalette({
                           <Icon className="h-4 w-4" />
                         </span>
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate font-medium">{item.label}</span>
-                          {item.detail && <span className="block truncate text-xs text-muted-foreground">{item.detail}</span>}
+                          <span className="block truncate font-medium"><Marked text={item.label} tokens={marks} /></span>
+                          {item.detail && <span className="block truncate text-xs text-muted-foreground"><Marked text={item.detail} tokens={marks} /></span>}
                         </span>
                         <span className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium", TONE_CLS[item.tone])}>{item.badge}</span>
                       </button>
@@ -459,6 +800,9 @@ export function CommandPalette({
             <span className="flex items-center gap-1">
               <CornerDownLeft className="h-3 w-3" /> open
             </span>
+            <span>⇥ actions</span>
+            {askOn && <span>⌘↵ ask</span>}
+            <span className="hidden md:inline">in:tickets · @name · is:mine · status:pending · after:2026-01</span>
             <span className="ml-auto">esc to close</span>
           </div>
         </DialogPrimitive.Content>

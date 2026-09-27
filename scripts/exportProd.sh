@@ -166,7 +166,6 @@ EXPORT_WEB=(index.html vite.config.ts tsconfig.json tailwind.config.js postcss.c
 EXPORT_SCRIPTS=(
   tsResolve.mjs           # ts loader every node script runs through
   preflight.ts            # `npm run deploy` step 1; reads wrangler.toml, web/.env, web/src/lib/ccaRoots.ts
-  genAccessRulesSeed.ts   # imported by bootstrap/genBootstrap.ts
   genTemplatesSeed.ts     # imported by bootstrap/genBootstrap.ts
   genSearchDdl.ts         # db:generate step
   genChangeDdl.ts         # db:generate step

@@ -133,7 +133,7 @@ async function createFromSignIn(deps: Deps, email: string, claims: GoogleProfile
     if (held) return;
 
     const department = await getDefaultDepartmentId(deps);
-    await createEmployee(deps, systemActor(), {
+    await createEmployee(deps, await systemActor(deps), {
       first_name: first,
       last_name: last,
       // The address the session is for, lowercased - `provisionAccount` inside `createEmployee` links the
@@ -223,7 +223,7 @@ async function syncName(deps: Deps, email: string, claims: GoogleProfileClaims, 
     // actor: Google said so, nobody pressed anything.
     await audit(
       deps,
-      systemActor(),
+      await systemActor(deps),
       "employee.name.update",
       "employees",
       emp.uuid,
@@ -312,7 +312,7 @@ async function importPhoto(deps: Deps, email: string, pictureUrl: string): Promi
       if (!bytes.byteLength || bytes.byteLength > MAX_BYTES) throw new Error(`google avatar is ${bytes.byteLength} bytes`);
       // Through the ordinary upload path: it owns the encrypted R2 put, the `photo_key` / `photo_at` write and
       // the audit entry. `systemActor` is the honest actor - nobody pressed upload.
-      await uploadPhoto(deps, systemActor(), employeeId, bytes);
+      await uploadPhoto(deps, await systemActor(deps), employeeId, bytes);
     } catch (e) {
       // RELEASE THE CLAIM. Without this a single bad response (Google down, a transient 500) would spend the
       // one chance this person ever gets, silently and permanently - the predicate above would never match

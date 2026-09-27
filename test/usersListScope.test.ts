@@ -12,7 +12,7 @@ import { genId } from "../src/lib/idCodec";
 import { listUsers, updateUser } from "../src/services/users";
 import type { AppUser } from "../src/env";
 import { EMPTY_GRANT } from "../src/domain/grants";
-import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 
 // A sign-in account names a person, their email and the role they hold, so who may LIST accounts matters.
 // Everyone holds `users.me.**` (their own account), which resolves to breadth `own`; only an admin holds

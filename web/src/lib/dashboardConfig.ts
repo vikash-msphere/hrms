@@ -86,7 +86,7 @@ export const KPI_DEFS: { key: string; label: string; category: KpiCategory; defa
   { key: "clocked_in", label: "Clocked in now", category: "snapshot", defaultAudience: "everyone" },
   { key: "not_clocked_in", label: "Not clocked in", category: "snapshot" },
   { key: "remote_today", label: "Remote today", category: "snapshot" },
-  { key: "celebrations", label: "Celebrations this week", category: "snapshot", defaultAudience: "everyone" },
+  { key: "celebrations", label: "Upcoming celebrations", category: "snapshot", defaultAudience: "everyone" },
   { key: "joiners", label: "New joiners (30 days)", category: "snapshot" },
   { key: "headcount", label: "Total employees", category: "snapshot", defaultAudience: "everyone" },
   { key: "transitions_active", label: "Onboarding / offboarding", category: "snapshot", defaultAudience: "hr" },

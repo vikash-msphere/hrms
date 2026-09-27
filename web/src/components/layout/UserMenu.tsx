@@ -1,4 +1,6 @@
-import { KeyRound, LogOut, ShieldCheck, ChevronDown, Sun, Moon, Monitor } from "lucide-react";
+import { KeyRound, LogOut, ShieldCheck, ChevronDown, Sun, Moon, Monitor, Lock, LockKeyhole } from "lucide-react";
+import { useAppLock, lockNow } from "@/lib/appLock";
+import { openAppLockSettings } from "@/components/lock/AppLockSheet";
 import { cn } from "@/lib/utils";
 import { roleLabel } from "@/lib/roles";
 import { useTheme, type Theme } from "@/lib/theme";
@@ -62,6 +64,7 @@ const THEMES: { value: Theme; label: string; icon: typeof Sun }[] = [
 
 export function UserMenu({ me }: { me: Me }) {
   const am = useAccessMode();
+  const lock = useAppLock();
   const confirm = useConfirm();
   const { theme, setTheme } = useTheme();
   // Prefer the real employee name + photo over the raw email handle ("write2vkas"); fall back to a tidied
@@ -116,6 +119,17 @@ export function UserMenu({ me }: { me: Me }) {
         )}
         <DropdownMenuItem asChild>
           <a href="/profile">View my profile</a>
+        </DropdownMenuItem>
+        {/* The app lock: lock now when a PIN is set, and the person's own settings either way. */}
+        {lock.config?.enabled && (
+          <DropdownMenuItem onClick={() => void lockNow()}>
+            <Lock className="h-4 w-4" />
+            Lock now
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuItem onClick={() => openAppLockSettings()}>
+          <LockKeyhole className="h-4 w-4" />
+          App lock settings
         </DropdownMenuItem>
         {/* Appearance, at every width - this is the only theme control in the app. A preference, not a page
             action: it belongs with the person rather than in a row of per-page chrome, and a dedicated top-bar

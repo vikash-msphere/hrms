@@ -31,6 +31,8 @@ export default defineWorkersConfig({
     // specs into the workers pool - where `@playwright/test` cannot even be imported (workerd forbids I/O in
     // global scope) and where they mean nothing anyway. The browser lane is `npm run test:e2e`.
     include: ["test/**/*.test.ts"],
+    // A killed run otherwise leaves one orphaned workerd per test file holding its memory; see the script.
+    globalSetup: ["./scripts/workerdWatchdog.mjs"],
     // The local-model integration test is OPT-IN (`npm run test:ai`), and this is the one exclusion in the
     // suite.
     //

@@ -11,6 +11,8 @@ import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, forbidden, failedPrecondition, isDocumentAckDuplicate } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
+import { searchFilter } from "./searchFilter";
+import { SEARCHABLE_COLLECTIONS } from "../domain/searchIndex";
 import { etagOf } from "../http/serialize";
 import { deleteStateFilter, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { hasPrintVersion } from "./letterheads";
@@ -55,6 +57,8 @@ function validateAckConfig(requiresAck: boolean, method?: string | null, anchor?
     throw invalidArgument("sign_anchor (page + box coordinates) is required when the document requires acknowledgement");
 }
 
+const SEARCHABLE: ReadonlySet<string> = new Set(SEARCHABLE_COLLECTIONS);
+
 export function makeDocumentService(cfg: Cfg) {
   const { table, collection, singular, owned, acknowledgeable = false } = cfg;
   const ownerCol = owned ? table.employeeId : table.code; // personal -> employee_id; org has no owner
@@ -98,14 +102,16 @@ export function makeDocumentService(cfg: Cfg) {
    * hundred-and-first document in the org. It only ever narrows: the scope is applied first and still decides
    * what the caller may see at all.
    */
-  async function list(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false, actor?: AppUser, employee?: string, deletedOnly = false) {
+  async function list(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false, actor?: AppUser, employee?: string, deletedOnly = false, q?: string) {
     const scoped = applyScope(scope, table.code, ownerCol);
     const employeeId = owned ? idFromPath(employee) : undefined;
     // Paged in SQL (services/keysetPage.ts), soft-delete filter included. This one list backs every document
     // collection in the app (personal, org, offer, letter...), and it used to read every row the scope
     // matched into the isolate to slice fifty out of it - the exact cost the `employee` narrowing above was
     // added to avoid, still being paid by every caller who does not pass one.
-    const conds = [scoped, employeeId ? eq(table.employeeId, employeeId) : undefined, deleteStateFilter(table.deleteTime, showDeleted, deletedOnly)];
+    // The search box narrows the same way, for the document collections the search index covers.
+    const text = q && SEARCHABLE.has(collection) ? await searchFilter(deps, collection, q, table.uuid) : undefined;
+    const conds = [scoped, employeeId ? eq(table.employeeId, employeeId) : undefined, deleteStateFilter(table.deleteTime, showDeleted, deletedOnly), text];
     const page = await keysetPage<any>(deps, table, collection, and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
     return { items: await decorate(deps, actor, page.items), nextPageToken: page.nextPageToken };
   }

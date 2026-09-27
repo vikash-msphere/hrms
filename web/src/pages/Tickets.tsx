@@ -242,8 +242,14 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
   const openTicket = useCallback((t: Ticket) => { setActive(t); markSeen(t); setRouteRecord(idOf(t.path)); }, [markSeen]);
   const closeTicket = useCallback(() => { setActive(null); setRouteRecord(null); }, []);
   useDeepOpen(openId, rows, openTicket);
-  // Global "Raise a support ticket" quick action opens the new-ticket dialog on arrival.
-  useIntent("new-ticket", () => { if (me.employee_id) setOpen(true); });
+  // Global "Raise a support ticket" quick action opens the new-ticket dialog on arrival. From ⌘K's nothing-found
+  // offer it carries the words searched for, which start the subject.
+  useIntent("new-ticket", (arg) => {
+    if (!me.employee_id) return;
+    const subject = (arg as { subject?: unknown } | undefined)?.subject;
+    if (typeof subject === "string" && subject.trim()) setForm((f) => ({ ...f, subject: subject.trim().slice(0, 200) }));
+    setOpen(true);
+  });
 
   const catName = useMemo(() => {
     const m = new Map(categories.map((c) => [c.key, c.name]));

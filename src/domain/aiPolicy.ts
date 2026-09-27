@@ -30,7 +30,6 @@
 // statutory, financial or medical data the denylist names. If the org later takes on a residency obligation
 // that covers working text too, the lever is Data Localization Suite, and the honest interim answer is to
 // turn the feature flags off.
-import { AUDIT } from "./manifests";
 // Type only, and deliberately one-way: `domain/moderation.ts` owns what a wall is and what an org may say
 // about it; this file owns the `ai` settings blob those choices are stored in.
 import type { ModerationScope } from "./moderation";
@@ -143,17 +142,24 @@ export const isIndexable = (collection: string): boolean => INDEXABLE.has(collec
 /**
  * Collections and sub-resources whose content may never reach a model, by any route.
  *
- * Built from the AUDIT policy rather than hand-listed, because that policy is already the app's answer to
- * "which reads are an accountability event" - statutory ids, bank details, tax declarations, salary, medical
- * notes, an outside candidate's resume. A collection that is sensitive enough to audit every read of is
- * sensitive enough that it must not become prompt tokens. Deriving the list means a future edit that marks a
- * new collection sensitive closes this door at the same time, instead of leaving two lists to drift.
+ * A GUARDRAIL, NOT A SETTING, and that is why it is code: nothing an admin edits can open this door (the named
+ * exceptions below are the only way through, and they are code too). It covers at least every collection the
+ * seeded audit policy treats as sensitive to read - statutory ids, bank details, tax declarations, salary,
+ * medical notes, an outside candidate's resume - because a collection sensitive enough to audit every read of is
+ * sensitive enough that it must not become prompt tokens. test/aiPolicy.test.ts holds this list against the
+ * seeded manifest (bootstrap/authz/policy.ts AUDIT), so marking a new collection sensitive there fails the build
+ * until it is listed here too.
  *
- * The extras below are the ones AUDIT does not name because they are not READ events: fields this app
+ * The rest are the ones the audit policy does not name because they are not READ events: fields this app
  * encrypts at rest, and the free-text notes attached to a person's employment rather than to their work.
  */
 export const NEVER_TO_MODEL_COLLECTIONS: readonly string[] = [
-  ...AUDIT.sensitive_collections,
+  // Read-audited as sensitive in the seeded manifest.
+  "compensation",
+  "payslips",
+  "settlements",
+  "offers",
+  "payroll-openings",
   // Money. A row here is somebody's pay, their debt to the company, or the account it lands in.
   "tax-declarations",
   "tax-verifications",
@@ -200,7 +206,9 @@ export const NEVER_TO_MODEL_COLLECTIONS: readonly string[] = [
  *  are encrypted at rest (lib/crypto.ts): decrypting one into a prompt would defeat that encryption by taking
  *  the plaintext to a place the ciphertext was specifically kept out of. */
 export const NEVER_TO_MODEL_SUBRESOURCES: readonly string[] = [
-  ...AUDIT.sensitive_subresources, // bank-account, identity, tax
+  "bank-account",
+  "identity",
+  "tax",
   "personal-info", // not audited (volume), but it is home address, emergency contacts and date of birth
   "compensation",
 ];
@@ -471,12 +479,15 @@ export type AiConfig = {
 };
 
 /** The switchable features. A new one is added here, which is also what puts it in the settings panel. */
-export const AI_FEATURES = ["search.semantic", "tickets.triage", "cards.triage", "goals.similar", "goals.measure", "boards.narrate", "drafting", "ats.extraction", "expenses.receiptExtraction", "tables.describe", "analytics.narrate", "budgets.narrate", "moderation", "moderation.conduct", "suggestions.similar", "attention.summary"] as const;
+export const AI_FEATURES = ["search.semantic", "search.ask", "tickets.triage", "cards.triage", "goals.similar", "goals.measure", "boards.narrate", "drafting", "ats.extraction", "expenses.receiptExtraction", "tables.describe", "analytics.narrate", "budgets.narrate", "moderation", "moderation.conduct", "suggestions.similar", "attention.summary"] as const;
 export type AiFeature = (typeof AI_FEATURES)[number];
 
 export const AI_CONFIG_DEFAULT: AiConfig = {
   features: {
     "search.semantic": false,
+    // ⌘K's "Ask": a question typed into the palette, sent on Enter only, routed to the pages and actions that
+    // answer it. Reads no record - the model sees the question and the names of places the caller may go.
+    "search.ask": false,
     "tickets.triage": false,
     "cards.triage": false,
     "goals.similar": false,

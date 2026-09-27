@@ -12,7 +12,13 @@
 // it is late by the minutes past the approved time. Nothing else about the day changes unless the policy says so
 // (`attendance.credit_minutes`).
 import { invalidArgument } from "../lib/errors";
-import { isUntracked, leaveCover, localMinutes, lopDayUnits, weekdayOf, type DayCredit, type LeaveRange } from "./attendance";
+import { isUntracked, leaveCover, localMinutes, lopDayUnits, type DayCredit, type LeaveRange } from "./attendance";
+import { hhmmOf, minOfDay, shiftSpanMinutes, type DaySchedule, type DayScheduleOf } from "./workSchedule";
+
+// The org's own window and the helpers that read it live in domain/workSchedule.ts now, beside the resolver
+// that layers a roster entry and a work pattern over them. Re-exported here because these rules are where
+// every caller already reaches for them.
+export { DEFAULT_SHIFT, graceOn, hhmmOf, minOfDay, shiftScheduleOf, type ShiftSchedule } from "./workSchedule";
 
 export type LateEarlyKind = "late_arrival" | "early_departure";
 export const LATE_EARLY_KINDS: readonly LateEarlyKind[] = ["late_arrival", "early_departure"];
@@ -203,62 +209,12 @@ export function validatePunctuality(raw: unknown): PunctualityPolicy {
   return p;
 }
 
-// ---- The org schedule, as these rules read it ------------------------------------------------------------
-
-/** The fields of `settings/attendance` a day is judged against. Mirrors web/src/lib/attendance.ts#AttendanceSchedule. */
-export type ShiftSchedule = {
-  timezone: string;
-  work_days: number[];
-  shift_start: string; // "HH:MM"
-  shift_end: string; // "HH:MM"
-  grace_minutes: number;
-  grace_exceptions?: { date: string; reason?: string; extra_grace_minutes?: number }[];
-  flexible_hours?: boolean;
-};
-
-export const DEFAULT_SHIFT: ShiftSchedule = { timezone: "Asia/Kolkata", work_days: [1, 2, 3, 4, 5], shift_start: "09:00", shift_end: "18:00", grace_minutes: 15 };
-
-/**
- * The schedule out of a stored attendance blob, with the SPA's defaults filled in. The server's own
- * `AttendanceConfig` never carried the shift window because loss of pay never needed it; the blob the SPA saves
- * has always held it, and an org that never saved one is on the defaults the SPA shows.
- */
-export function shiftScheduleOf(att: Partial<ShiftSchedule> | Record<string, unknown> | null | undefined): ShiftSchedule {
-  const a = (att ?? {}) as Partial<ShiftSchedule>;
-  const hhmm = (v: unknown, d: string) => (typeof v === "string" && /^\d{1,2}:\d{2}$/.test(v) ? v : d);
-  return {
-    timezone: typeof a.timezone === "string" && a.timezone ? a.timezone : DEFAULT_SHIFT.timezone,
-    work_days: Array.isArray(a.work_days) ? a.work_days : DEFAULT_SHIFT.work_days,
-    shift_start: hhmm(a.shift_start, DEFAULT_SHIFT.shift_start),
-    shift_end: hhmm(a.shift_end, DEFAULT_SHIFT.shift_end),
-    grace_minutes: typeof a.grace_minutes === "number" && Number.isFinite(a.grace_minutes) && a.grace_minutes >= 0 ? a.grace_minutes : DEFAULT_SHIFT.grace_minutes,
-    grace_exceptions: Array.isArray(a.grace_exceptions) ? a.grace_exceptions : [],
-    flexible_hours: a.flexible_hours === true,
-  };
-}
-
-/** Minutes since midnight of a wall-clock "HH:MM". */
-export const minOfDay = (hhmm: string): number => {
-  const [h, m] = hhmm.split(":").map(Number);
-  return (h || 0) * 60 + (m || 0);
-};
-/** A minutes-since-midnight as "HH:MM". */
-export const hhmmOf = (min: number): string => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
-
-/**
- * The day's grace allowance: the org's, widened by a grace exception, or Infinity when the exception waives the
- * judgement entirely. The same reading web/src/lib/attendance.ts#summarizeByDay and analytics make.
- */
-export function graceOn(day: string, sched: ShiftSchedule): number {
-  const ex = (sched.grace_exceptions ?? []).find((e) => e.date === day);
-  if (!ex) return sched.grace_minutes;
-  return ex.extra_grace_minutes == null ? Infinity : sched.grace_minutes + ex.extra_grace_minutes;
-}
+// ---- The day a request is measured against ---------------------------------------------------------------
 
 /** How far a request's time is from the shift edge it moves. Zero or less = not a late arrival / early departure. */
-export function requestMinutes(kind: LateEarlyKind, at: string, sched: Pick<ShiftSchedule, "shift_start" | "shift_end">): number {
+export function requestMinutes(kind: LateEarlyKind, at: string, sched: Pick<DaySchedule, "startMin" | "endMin">): number {
   const t = minOfDay(at);
-  return kind === "late_arrival" ? t - minOfDay(sched.shift_start) : minOfDay(sched.shift_end) - t;
+  return kind === "late_arrival" ? t - sched.startMin : sched.endMin - t;
 }
 
 // ---- Judging one day -------------------------------------------------------------------------------------
@@ -316,9 +272,19 @@ export function judgeDay(opts: {
   halves?: LeaveHalves;
   policy: PunctualityPolicy["attendance"];
 }): DayJudgement {
-  const { arrMin, depMin, open, startMin, endMin, grace, flexible, excusal, halves, policy } = opts;
-  const lateUntil = excusal?.lateUntil != null && excusal.lateUntil > startMin ? excusal.lateUntil : null;
-  const earlyFrom = excusal?.earlyFrom != null && excusal.earlyFrom < endMin ? excusal.earlyFrom : null;
+  const { open, startMin, grace, flexible, excusal, halves, policy } = opts;
+  // A SHIFT THAT WRAPS PAST MIDNIGHT IS ONE RUN ON A LINEAR TIMELINE. Its end is `endMin + 1440`, and every
+  // reading taken after midnight - the clock-out, an approved departure time - belongs to the same run, so it
+  // sits at `+ 1440` too. Left as wall-clock minutes, a 23:00 clock-out on a 22:00-06:00 shift reads as 1380
+  // against an end of 360 and so was never "left early", while the 06:00 one happened to compare correctly:
+  // the night shift was judged right only where it ended on time. A day that does not wrap normalises to
+  // itself, so this changes nothing for the ordinary case.
+  const endMin = startMin + shiftSpanMinutes(startMin, opts.endMin);
+  const norm = (m: number) => (endMin > 1440 && m < startMin ? m + 1440 : m);
+  const arrMin = opts.arrMin != null ? norm(opts.arrMin) : null;
+  const depMin = opts.depMin != null ? norm(opts.depMin) : null;
+  const lateUntil = excusal?.lateUntil != null && norm(excusal.lateUntil) > startMin ? norm(excusal.lateUntil) : null;
+  const earlyFrom = excusal?.earlyFrom != null && norm(excusal.earlyFrom) < endMin ? norm(excusal.earlyFrom) : null;
   // Minutes of the approved gap actually missed: an approved 10:30 start with a 10:10 arrival credits 70, not
   // 90 - and a day with no punch at all credits nothing, so a no-show is never paid through an approval.
   let creditMinutes = 0;
@@ -401,31 +367,34 @@ export function punctualityOverPeriod(opts: {
   startYmd: string;
   endYmd: string;
   holidays: Set<string>;
-  sched: ShiftSchedule;
+  /** The org timezone the punches are read in. The window each day is judged against comes from `schedOf`. */
+  timezone: string;
+  /** This employee's schedule: a day is judged against the shift it was actually rostered for. */
+  schedOf: DayScheduleOf;
   punches: Map<string, PunchDay>;
   excusals?: Map<string, DayExcusal>;
   leaveRanges?: LeaveRange[];
   marksByDay?: Map<string, DayCredit>;
   policy: PunctualityPolicy;
 }): PeriodPunctuality {
-  const { startYmd, endYmd, holidays, sched, punches, excusals, leaveRanges = [], marksByDay, policy } = opts;
-  const startMin = minOfDay(sched.shift_start);
-  const endMin = minOfDay(sched.shift_end);
+  const { startYmd, endYmd, holidays, timezone, schedOf, punches, excusals, leaveRanges = [], marksByDay, policy } = opts;
   const pen = policy.penalties;
   const out: PeriodPunctuality = { creditByDay: new Map(), capByDay: new Map(), lateMarks: 0, earlyMarks: 0, severeDays: 0, penaltyUnits: 0 };
   for (const [day, p] of punches) {
     if (day < startYmd || day > endYmd) continue;
-    if (!sched.work_days.includes(weekdayOf(day)) || holidays.has(day)) continue;
+    const ds = schedOf(day);
+    if (ds.off || holidays.has(day)) continue;
     const halves = leaveHalves(day, leaveRanges);
     if (halves.am && halves.pm) continue;
     if (marksByDay?.has(day)) continue;
     const j = judgeDay({
-      arrMin: localMinutes(p.arrMs, sched.timezone),
-      depMin: p.depMs != null ? localMinutes(p.depMs, sched.timezone) : null,
+      arrMin: localMinutes(p.arrMs, timezone),
+      depMin: p.depMs != null ? localMinutes(p.depMs, timezone) : null,
       open: p.open,
-      startMin, endMin,
-      grace: graceOn(day, sched),
-      flexible: sched.flexible_hours,
+      startMin: ds.startMin,
+      endMin: ds.endMin,
+      grace: ds.graceMinutes,
+      flexible: ds.flexible,
       excusal: excusals?.get(day),
       halves,
       policy: policy.attendance,
@@ -467,20 +436,19 @@ export type PeriodLop = {
 export function periodLop(opts: {
   startYmd: string;
   endYmd: string;
-  workDays: number[];
+  /** This employee's schedule, day by day (domain/workSchedule.ts). */
+  schedOf: DayScheduleOf;
   holidays: Set<string>;
   leaveRanges: LeaveRange[];
   workedByDay: Map<string, number>;
   marksByDay?: Map<string, DayCredit>;
   /** The day HRMS records start for this person - see `trackedFromYmd` on lopDayUnits. */
   trackedFromYmd?: string | null;
-  fullDayMinutes: number;
-  halfDayMinutes: number;
-  punctuality?: { sched: ShiftSchedule; policy: PunctualityPolicy; punches: Map<string, PunchDay>; excusals?: Map<string, DayExcusal> };
+  punctuality?: { timezone: string; policy: PunctualityPolicy; punches: Map<string, PunchDay>; excusals?: Map<string, DayExcusal> };
 }): PeriodLop {
   const { punctuality: pn, ...base } = opts;
   const p = pn
-    ? punctualityOverPeriod({ startYmd: opts.startYmd, endYmd: opts.endYmd, holidays: opts.holidays, sched: pn.sched, punches: pn.punches, excusals: pn.excusals, leaveRanges: opts.leaveRanges, marksByDay: opts.marksByDay, policy: pn.policy })
+    ? punctualityOverPeriod({ startYmd: opts.startYmd, endYmd: opts.endYmd, holidays: opts.holidays, timezone: pn.timezone, schedOf: opts.schedOf, punches: pn.punches, excusals: pn.excusals, leaveRanges: opts.leaveRanges, marksByDay: opts.marksByDay, policy: pn.policy })
     : null;
   const absenceUnits = lopDayUnits({ ...base, creditByDay: p?.creditByDay, capByDay: p?.capByDay });
   const penaltyUnits = p?.penaltyUnits ? Math.max(0, Math.min(p.penaltyUnits, owedDays(opts) - absenceUnits)) : 0;
@@ -502,7 +470,7 @@ export function periodLop(opts: {
 function owedDays(o: {
   startYmd: string;
   endYmd: string;
-  workDays: number[];
+  schedOf: DayScheduleOf;
   holidays: Set<string>;
   leaveRanges: LeaveRange[];
   workedByDay: Map<string, number>;
@@ -512,7 +480,7 @@ function owedDays(o: {
   let owed = 0;
   for (let t = Date.parse(`${o.startYmd}T00:00:00Z`); t <= Date.parse(`${o.endYmd}T00:00:00Z`); t += 86_400_000) {
     const d = new Date(t).toISOString().slice(0, 10);
-    if (!o.workDays.includes(weekdayOf(d)) || o.holidays.has(d)) continue;
+    if (o.schedOf(d).off || o.holidays.has(d)) continue;
     if (isUntracked(d, o.trackedFromYmd, o.workedByDay, o.marksByDay, o.leaveRanges)) continue;
     owed += 1 - leaveCover(d, o.leaveRanges);
   }
@@ -558,7 +526,9 @@ export function checkFiling(ctx: {
   date: string;
   at: string;
   reason?: string | null;
-  sched: ShiftSchedule;
+  /** THE DAY'S OWN schedule, resolved for this person and this date - the shift they were actually rostered
+   *  for, not the org's window, so a night-shift worker files against 22:00 and not against 09:00. */
+  sched: DaySchedule;
   policy: PunctualityPolicy;
   todayYmd: string;
   /** Minutes since midnight now, in the org timezone. */
@@ -572,23 +542,28 @@ export function checkFiling(ctx: {
   const r = policy.requests;
   const errors: string[] = [];
   const noun = KIND_LABEL[kind].toLowerCase();
-  const startMin = minOfDay(sched.shift_start);
-  const endMin = minOfDay(sched.shift_end);
+  const startMin = sched.startMin;
+  const endMin = sched.endMin;
+  const startAt = hhmmOf(startMin);
+  const endAt = hhmmOf(endMin);
   const atMin = minOfDay(at);
   const minutes = requestMinutes(kind, at, sched);
 
   if (!r.enabled) errors.push("Late arrival and early departure requests are switched off.");
   else if (!r[kind]) errors.push(`${KIND_LABEL[kind]} requests are switched off.`);
-  if (endMin <= startMin) errors.push("The org's shift ends before it starts, which these requests cannot describe.");
-  if (!sched.work_days.includes(weekdayOf(date))) errors.push("That day is not a working day.");
+  // A shift that ends before it starts is a NIGHT SHIFT, which these requests genuinely cannot describe: the
+  // window they move spans two calendar days and the request carries one. Named as such rather than as the
+  // org's shift being misconfigured, which is what it used to be the only way to reach.
+  if (endMin <= startMin) errors.push("That day's shift runs past midnight, which a late arrival or early departure request cannot describe. File the time as leave instead.");
+  if (sched.off) errors.push("That day is not a working day.");
   else if (isHoliday) errors.push("That day is a holiday.");
   else if (onFullLeave) errors.push("You are on approved leave for the whole of that day.");
   if (kind === "late_arrival") {
-    if (minutes <= 0) errors.push(`A late arrival has to be after the shift starts at ${sched.shift_start}.`);
-    else if (atMin >= endMin) errors.push(`A late arrival has to be before the shift ends at ${sched.shift_end}.`);
+    if (minutes <= 0) errors.push(`A late arrival has to be after the shift starts at ${startAt}.`);
+    else if (atMin >= endMin) errors.push(`A late arrival has to be before the shift ends at ${endAt}.`);
   } else {
-    if (minutes <= 0) errors.push(`An early departure has to be before the shift ends at ${sched.shift_end}.`);
-    else if (atMin <= startMin) errors.push(`An early departure has to be after the shift starts at ${sched.shift_start}.`);
+    if (minutes <= 0) errors.push(`An early departure has to be before the shift ends at ${endAt}.`);
+    else if (atMin <= startMin) errors.push(`An early departure has to be after the shift starts at ${startAt}.`);
   }
   if (minutes > 0 && r.max_minutes != null && minutes > r.max_minutes) {
     errors.push(`A ${noun} can be at most ${fmtMinutes(r.max_minutes)}; this one is ${fmtMinutes(minutes)}. Longer than that is half-day leave.`);
@@ -601,7 +576,7 @@ export function checkFiling(ctx: {
   if (r.before_time) {
     const cutoff = kind === "late_arrival" ? startMin : atMin;
     if (date < todayYmd || (date === todayYmd && nowMin >= cutoff)) {
-      errors.push(kind === "late_arrival" ? `A late arrival has to be requested before the shift starts at ${sched.shift_start}.` : `An early departure has to be requested before you leave at ${at}.`);
+      errors.push(kind === "late_arrival" ? `A late arrival has to be requested before the shift starts at ${startAt}.` : `An early departure has to be requested before you leave at ${at}.`);
     }
   }
   if (r.reason_required && !reason?.trim()) errors.push("Say why - the policy asks for a reason.");

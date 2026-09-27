@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 import { MAX_DRAFT_INPUT, useAiFeature } from "@/lib/aiFeatures";
+import { usePermission } from "@/lib/perm";
 
 // The "Draft" affordance for a long-form field, shared by every page that has one.
 //
@@ -69,9 +70,13 @@ export function DraftButton({ collection, kind, existing, onDraft, label = "Draf
   const [busy, setBusy] = useState(false);
   /** What the model last returned, held here rather than pushed into the field. `null` = nothing asked yet. */
   const [result, setResult] = useState<string | null>(null);
-  // Gated HERE rather than at each of the four call sites, so a page that adds a Draft button cannot forget
-  // it and ship a button whose only behaviour is to explain that it does not work.
-  const enabled = useAiFeature("drafting");
+  // Gated HERE rather than at each of the call sites, so a page that adds a Draft button cannot forget it and
+  // ship a button whose only behaviour is to explain that it does not work. Two gates, both required: the org
+  // switched drafting on, AND this caller holds `<collection>:draft` - the verb the server checks. Without the
+  // second, a caller the policy does not give drafting to saw the button and got a 403 on every press.
+  const featureOn = useAiFeature("drafting");
+  const mayDraft = usePermission(`${collection}.draft`);
+  const enabled = featureOn && mayDraft;
 
   // Context is not a draft in progress, so it never turns this into an "Improve".
   const improving = !existingIsContext && !!(existing && existing.trim());

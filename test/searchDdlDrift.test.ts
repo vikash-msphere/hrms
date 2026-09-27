@@ -1,38 +1,50 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
-import { renderSearchDdl, SEARCH_DDL_MARKER } from "../src/db/searchDdl";
+import { appliedSearchTriggers, FTS_TABLE_DDL, renderSearchDdl, searchDdlDelta, searchTriggersIn, SEARCH_DDL_MARKER } from "../src/db/searchDdl";
 import { SEARCH_INDEX } from "../src/domain/searchIndex";
-import { CHANGE_DDL_MARKER } from "../src/db/changeDdl";
+import { STATE_VISIBILITY } from "../bootstrap/authz/policy";
 
 // The FTS index and its sync triggers are GENERATED from SEARCH_INDEX (drizzle-kit emits neither virtual tables
-// nor triggers), and the block lives in migration 0000. Nothing at runtime would fail if the two fell out of
-// step - search would just quietly stop covering a renamed column, or index a stale expression - so this gate
-// makes that impossible. 0000 is applied to the live database and never rewritten, so a registry or schema
-// change that moves the generated DDL fails here (and in `npm run db:generate`) until the delta is written into
-// a new migration.
+// nor triggers). Nothing at runtime would fail if the two fell out of step - search would just quietly stop
+// covering a renamed column, or index a stale expression - so this gate makes that impossible. The full block
+// lives in 0000, which the live database has applied; later changes ship as DELTAS in newer migrations, so the
+// question is what every migration leaves in place, applied in order (src/db/searchDdl.ts).
 const files = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const paths = Object.keys(files).sort();
-const holders = paths.filter((p) => files[p]!.includes(SEARCH_DDL_MARKER));
-const migration = holders.length === 1 ? files[holders[0]!]! : "";
+const applied = appliedSearchTriggers(paths.map((p) => files[p]!));
 
-describe("generated search DDL matches the migration", () => {
-  it("keeps the generated block in exactly one migration", () => {
-    expect(holders.length, `search DDL found in: ${holders.join(", ") || "no migration"}`).toBe(1);
+describe("generated search DDL matches the migrations", () => {
+  it("leaves exactly the generator's triggers in place once every migration has applied", () => {
+    expect(
+      searchDdlDelta(applied, STATE_VISIBILITY),
+      "search triggers drifted - run `node --import ./scripts/tsResolve.mjs scripts/genSearchDdl.ts --write` on a new migration",
+    ).toEqual([]);
   });
 
-  it("has the generated block, byte-identical to the generator's output", () => {
-    const cut = migration.indexOf(SEARCH_DDL_MARKER);
-    expect(cut, "no generated search DDL in the migration - run `npm run db:generate`").toBeGreaterThan(0);
-    // The migration carries a SECOND generated block after this one (the change stamps, src/db/changeDdl.ts),
-    // so compare up to where that starts rather than to the end of the file.
-    const next = migration.indexOf(CHANGE_DDL_MARKER, cut);
-    const block = (next > cut ? migration.slice(cut, next) : migration.slice(cut))
-      .replace(/(?:\s*-->\s*statement-breakpoint)+\s*$/, "");
-    expect(block.trim(), "search DDL is stale - run `npm run db:generate`").toBe(renderSearchDdl().trim());
+  it("creates the FTS table exactly as the generator describes it, once", () => {
+    // The table is not part of the delta: changing its columns is a rebuild of every trigger and every row.
+    expect(paths.filter((p) => files[p]!.includes(FTS_TABLE_DDL))).toHaveLength(1);
+    expect(paths.filter((p) => files[p]!.includes(SEARCH_DDL_MARKER))).toHaveLength(1);
+  });
+
+  it("backfills a collection in the migration that first indexes it", () => {
+    // A collection whose triggers arrive after 0000 has rows already; without its backfill they are never found.
+    const missing: string[] = [];
+    for (const [i, p] of paths.entries()) {
+      if (i === 0) continue;
+      const before = appliedSearchTriggers(paths.slice(0, i).map((q) => files[q]!));
+      for (const name of searchTriggersIn(files[p]!).keys()) {
+        const m = name.match(/^search_ai_(.+)$/);
+        if (!m || before.has(name)) continue;
+        const collection = SEARCH_INDEX.find((e) => e.collection.replace(/-/g, "_") === m[1])?.collection;
+        if (collection && !new RegExp(`INSERT OR IGNORE INTO "search_docs" \\([^)]*\\) SELECT '${collection}'`).test(files[p]!)) missing.push(`${p}: ${collection}`);
+      }
+    }
+    expect(missing).toEqual([]);
   });
 
   it("covers every searchable collection with insert, update and delete triggers", () => {
-    const ddl = renderSearchDdl();
+    const ddl = renderSearchDdl(STATE_VISIBILITY);
     const missing = SEARCH_INDEX.flatMap((e) => {
       const slug = e.collection.replace(/-/g, "_");
       return (["ai", "au", "ad"] as const)
@@ -95,11 +107,11 @@ describe("generated search DDL matches the migration", () => {
   // Case-SENSITIVE on purpose: the generator emits SQL keywords uppercase, and wrangler strips comments before
   // splitting, so the English word "case" in a comment is harmless and must not fail this.
   it("uses no bare CASE in the generated DDL (wrangler's splitter cannot close it)", () => {
-    expect(renderSearchDdl()).not.toMatch(/\sCASE\s/);
+    expect(renderSearchDdl(STATE_VISIBILITY)).not.toMatch(/\sCASE\s/);
   });
 
   it("indexes every column the registry says it matches on", () => {
-    const ddl = renderSearchDdl();
+    const ddl = renderSearchDdl(STATE_VISIBILITY);
     const missing: string[] = [];
     for (const e of SEARCH_INDEX) {
       for (const prop of e.match) {

@@ -136,8 +136,29 @@ one person another's words about a named colleague.
 - **`useResource` is not served from cached list rows.** It would save one row read per detail navigation, and a
   list row is not always the same projection as an item read, so a partially-populated record could render as a
   complete one. Not worth it for one row.
-- **No `Clear-Site-Data` on the logout response.** `"storage"` would also deregister the push service worker and
-  silently cost the person their web-push subscription. The client purge is awaited before the logout request,
-  so the header would only cover a case that cannot happen.
-- **Nothing is encrypted at rest in the browser.** A web app cannot hold a key the browser cannot also read, so
-  it would be comfort rather than protection. Not persisting the sensitive collections is the real answer.
+- **`Clear-Site-Data: "cache"` only, never `"storage"`,** on logout and on lock. `"storage"` would also deregister
+  the push service worker and silently cost the person their web-push subscription; the client clears its own
+  storage before either request, so the header covers only what script cannot reach (the HTTP cache, which holds
+  photos, and the back/forward cache).
+- **The sensitive collections stay memory-only** even though the store is encrypted (below): encryption keeps a
+  locked browser from reading its copies, and not writing them down at all is still the stronger answer for
+  the data the system holds most carefully.
+
+## Encryption at rest
+
+Every payload in IndexedDB is AES-GCM ciphertext (`SCHEMA` 3), under a key the server derives per person
+(`src/lib/appLock.ts clientKeyFor`) and hands out only as `client_key` on `/users/me` - that is, only to a
+browser the app lock has not locked (`app-lock-plan.md`). The browser holds it as a non-extractable CryptoKey in
+memory and never stores it. Each record's own key is the AES-GCM additional data, so a ciphertext moved under
+another record's key fails to open.
+
+- **No key, no disk.** Until the key arrives, and on a lane that never gets one, the store is memory-only: it
+  never writes plain text.
+- **Locking** reloads into a fresh page and the server refuses the key to a locked browser, so what is on disk
+  cannot be read; it is not deleted either, which is what makes an unlock warm and keeps drafts. What a lock
+  does remove is everything readable without the key: sessionStorage, localStorage except a short list of
+  visual toggles (`KEPT_ON_LOCK` in `lib/clientStore.ts`), Cache Storage, and any record still in plain text.
+- **An admin PIN reset** moves the person's key epoch: records written under the old key fail to decrypt and are
+  deleted at the next hydration.
+- **Upgrading from plain text**: version-2 records are deleted at hydration, except drafts, which are
+  re-encrypted in the same transaction that removes the plain copy.
