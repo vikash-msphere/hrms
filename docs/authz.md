@@ -580,9 +580,12 @@ another predicate onto those branches, so it can narrow a caller's answer and ne
 field gate withholds (`policy.redacted_fields`) is dropped from an answer narrowed by it: otherwise "is this
 row Priya's?" would be answerable by whether it comes back. A board task typed by its key (`MS-12`) is looked
 up by board prefix and number and then read under the same cards branch, so the key finds nothing the
-caller's list of tasks would not. The two verbs beside it, `search:feedback` and
-`search:ask`, read no record at all - one bumps a usage counter, the other routes a question among the
-destinations the caller's own palette sent - so the middleware resolves no per-collection scopes for them.
+caller's list of tasks would not. The three verbs beside it, `search:feedback`, `search:ask` and
+`search:vocabulary`, read no record at all - one bumps a usage counter, one routes a question among the
+destinations the caller's own palette sent, and one lists the collections `in:` may name with their status
+values - so the middleware resolves no per-collection scopes for them. `search:vocabulary` needs only the
+boolean half of the list decision (`listableCollectionsFor`, as `/v1/changes` does), so it names no collection
+the caller could not list.
 
 The invariant is therefore unchanged: **a search hit is always a row the caller's list of that collection
 would have returned**, and `test/singleSource.test.ts` still holds - no decision is made outside the

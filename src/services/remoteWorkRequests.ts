@@ -30,12 +30,14 @@ export type RemoteWorkInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
-export async function listRemoteWorkRequests(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, q?: string, fromYmd?: string, toYmd?: string) {
+export async function listRemoteWorkRequests(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, q?: string, fromYmd?: string, toYmd?: string, employeeId?: string) {
   const conds = [applyScope(scope, schema.remoteWorkRequests.code, schema.remoteWorkRequests.employeeId)];
   // Server-side text filter (FTS). Narrows the scope above; it can never widen it.
   const textMatch = await searchFilter(deps, "remote-work-requests", q, schema.remoteWorkRequests.uuid);
   if (textMatch) conds.push(textMatch);
   if (stateFilter) conds.push(eq(schema.remoteWorkRequests.state, stateFilter as typeof schema.remoteWorkRequests.$inferSelect.state));
+  // `?employee=`: one person's requests (a profile's attendance tab). Narrows the scope, never widens it.
+  if (employeeId) conds.push(eq(schema.remoteWorkRequests.employeeId, employeeId));
   // `?from=&to=`: the window a calendar month asks for (see services/dateWindow.ts).
   conds.push(...dateWindow(schema.remoteWorkRequests.startDate, schema.remoteWorkRequests.endDate, fromYmd, toYmd));
   return keysetPage<typeof schema.remoteWorkRequests.$inferSelect>(deps, schema.remoteWorkRequests, "remote-work-requests", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken });
@@ -55,6 +57,9 @@ export async function createRemoteWorkRequest(deps: Deps, actor: AppUser, input:
   const startSession = input.start_session === 2 ? 2 : 1;
   const endSession = input.end_session === 1 ? 1 : 2;
   if (start === end && startSession > endSession) throw invalidArgument("the start session must be on or before the end session");
+  // Enforced on create only: rows filed before the rule may still carry no reason.
+  const reason = input.reason?.trim();
+  if (!reason) throw invalidArgument("reason is required");
   // Default to the caller's own record unless an admin files on someone's behalf (owner-create is gated by the
   // middleware's owner_refs check, so a non-admin can only create under their own employee).
   const employeeId = idFromPath(input.employee) ?? actor.employeeId;
@@ -62,7 +67,7 @@ export async function createRemoteWorkRequest(deps: Deps, actor: AppUser, input:
   // Allocated inside the retry (codeAlloc.ts): filing at the same moment as somebody else is not an error.
   const row = (await withFreshCode(async () => deps.db
     .insert(schema.remoteWorkRequests)
-    .values({ code: await allocOwnedCode(deps, schema.remoteWorkRequests, schema.remoteWorkRequests.employeeId, employeeId), employeeId, startDate: new Date(start), endDate: new Date(end), startSession, endSession, location: input.location?.trim() || null, reason: input.reason?.trim() || null, state: "PENDING" })
+    .values({ code: await allocOwnedCode(deps, schema.remoteWorkRequests, schema.remoteWorkRequests.employeeId, employeeId), employeeId, startDate: new Date(start), endDate: new Date(end), startSession, endSession, location: input.location?.trim() || null, reason, state: "PENDING" })
     .returning()))[0]!;
   await audit(deps, actor, "remote_work_request.create", "remote-work-requests", row.uuid, createdMeta(row, "remote-work-requests"), row);
   await notifyManager(deps, employeeId, { type: "remote.requested", noun: "remote work request" });

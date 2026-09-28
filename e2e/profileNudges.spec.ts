@@ -102,6 +102,26 @@ test("a missing section is nudged, jumped to, filled in, and the nudge goes away
   }
 });
 
+// The app PIN step is on one's OWN checklist only, read from the caller's lock rather than the record. Seeded
+// logins never hold a PIN (setting one would lock every worker sharing the login), so the tile always reads
+// unfinished here - and pressing it has to land on the Privacy tab, where the lock is set up.
+test("the app PIN step is on your own checklist and opens the Privacy tab", async ({ as }) => {
+  test.setTimeout(90_000);
+  const page = await as("employee");
+  // No setup: the missing PIN alone keeps the card up, so this touches no record the spec above is writing.
+  // Reloaded if the first paint came before the record the card rides on.
+  await gotoRoute(page, "profile");
+  const tile = page.getByRole("button", { name: "App PIN", exact: true });
+  await expect(async () => {
+    if (!(await tile.count())) await page.reload();
+    await expect(tile).toBeVisible({ timeout: 15_000 });
+  }).toPass({ timeout: 60_000 });
+  await expect(tile.getByText("Not set up yet")).toBeVisible();
+  await tile.click();
+  await expect(page).toHaveURL(/\/profile\/privacy$/);
+  await expect(page.getByRole("tab", { name: /Privacy/ })).toHaveAttribute("aria-selected", "true");
+});
+
 /**
  * Empty the emergency contact, and nothing else.
  *

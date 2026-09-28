@@ -396,6 +396,7 @@ export default function Approvals({ me }: { me: Me }) {
         collection={g.collection}
         row={r}
         {...who}
+        selfEmployeeId={me.employee_id}
         summary={summary}
         context={g.context?.(r)}
         kind={withKind ? { label: g.label, icon: g.icon } : undefined}

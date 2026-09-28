@@ -19,7 +19,7 @@ import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
 import { applyScope } from "./listScope";
 import { byIdChunks } from "../lib/dbBatch";
-import { SEARCH_INDEX, type SearchEntry } from "../domain/searchIndex";
+import { SEARCH_INDEX, statusPropOf, type SearchEntry } from "../domain/searchIndex";
 import type { RedactionGate } from "../http/fieldAccess";
 import { aiEmbed, aiFeatureOn } from "./ai";
 import { parseVectorId } from "../lib/vector";
@@ -160,10 +160,9 @@ function collectionsNamed(words: string[]): Set<string> {
  */
 export type SearchNarrowing = { collections?: string[]; ownerId?: string; after?: number; before?: number; status?: string };
 
-/** A collection's state/status column, as `{ prop, table, column, idColumn }`, or null when it has none. Every
- *  entry that has one lists it among its `match` columns, so it is found there rather than listed twice. */
+/** A collection's state/status column, as `{ prop, table, column, idColumn }`, or null when it has none. */
 function statusColumnOf(entry: SearchEntry): { prop: string; table: string; column: string; id: string } | null {
-  const prop = entry.match.find((p) => p === "state" || p === "status");
+  const prop = statusPropOf(entry);
   const column = prop ? (entry.table as Record<string, { name?: string }>)[prop]?.name : undefined;
   const id = (entry.table as Record<string, { name?: string }>).uuid?.name;
   return prop && column && id ? { prop, table: getTableConfig(entry.table).name, column, id } : null;

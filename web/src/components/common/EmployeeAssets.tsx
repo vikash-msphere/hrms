@@ -21,6 +21,7 @@ import { WriteDialog } from "@/components/common/WriteDialog";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
+import { FOCUSED_ROW, useFocusedRequest, useScrollToFocused } from "@/components/common/EmployeeRequests";
 
 const EMPTY_REQUEST = { category: "", neededBy: "", justification: "" };
 
@@ -35,13 +36,17 @@ const EMPTY_REQUEST = { category: "", neededBy: "", justification: "" };
 // person's open and recent requests are listed under their assets, because "what do I hold / what did I ask
 // for" is one question. An approver looking at this card can hand over the actual thing from the same picker
 // that assigns stock (`:issue`), which is what closes the request.
+//
+// An approver of asset requests need not read the register: `canReadAssets` false lists only the requests, so
+// their "Open" from the inbox lands on the request instead of on a failed read of somebody's kit.
 export function EmployeeAssets({
-  employeeId, employeeName, canAssign, isSelf, title = "Assigned assets", requestNow, onRequestHandled,
+  employeeId, employeeName, canAssign, isSelf, canReadAssets = true, title = "Assigned assets", requestNow, onRequestHandled,
 }: {
   employeeId: string;
   employeeName?: string;
   canAssign?: boolean;
   isSelf?: boolean;
+  canReadAssets?: boolean;
   title?: string;
   // Set by the profile page when the "+ New → Request an asset" quick action brought the person here: the tab
   // switches and the dialog is already open, so the action costs one click from anywhere in the app.
@@ -67,17 +72,24 @@ export function EmployeeAssets({
     // Walked, like the stock read below: a raw `get()` sends no `max_page_size`, so the server's default of 50
     // applies and the cursor comes back unread - a long-serving employee's earliest kit and oldest requests
     // simply stop being listed, with nothing on the card saying so.
-    getAllPages<Asset>(`assets?employee=${encodeURIComponent(empRef)}`, 200)
-      .then((r) => { setRows(r.results); setRowsCropped(r.truncated); })
-      .catch((e) => toast({ variant: "destructive", title: "Couldn't load assets", description: (e as Error).message }))
-      .finally(() => setLoaded(true));
+    if (canReadAssets) {
+      getAllPages<Asset>(`assets?employee=${encodeURIComponent(empRef)}`, 200)
+        .then((r) => { setRows(r.results); setRowsCropped(r.truncated); })
+        .catch((e) => toast({ variant: "destructive", title: "Couldn't load assets", description: (e as Error).message }))
+        .finally(() => setLoaded(true));
+    } else {
+      setLoaded(true);
+    }
     // Requests share this card's one open: a person who cannot read them (no grant) just sees no section.
     getAllPages<AssetRequest>(`asset-requests?employee=${encodeURIComponent(empRef)}`, 200)
       .then((r) => { setRequests(r.results); setRequestsCropped(r.truncated); })
       .catch(() => { setRequests([]); setRequestsCropped(false); });
-  }, [empRef, toast]);
+  }, [empRef, toast, canReadAssets]);
 
   useEffect(() => { load(); }, [load]);
+  // `?request=asset-requests/<id>`: the approver's "Open" - that request is picked out and scrolled to.
+  const focusedId = useFocusedRequest("asset-requests");
+  const focusRef = useScrollToFocused<HTMLDivElement>(focusedId, requests.length > 0);
 
   // Open requests lead: a pending one is a decision somebody owes, an approved one is kit somebody owes.
   const sortedRequests = useMemo(
@@ -170,6 +182,8 @@ export function EmployeeAssets({
     }
   }
 
+  // Requests only, and there are none: nothing about this person's kit to show.
+  if (!canReadAssets && sortedRequests.length === 0) return null;
   return (
     <Card>
       <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
@@ -192,7 +206,7 @@ export function EmployeeAssets({
         </div>
       </CardHeader>
       <CardContent>
-        {!loaded ? (
+        {!canReadAssets ? null : !loaded ? (
           <TableSkeleton rows={3} cols={5} />
         ) : rows.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">No assets assigned.</p>
@@ -229,11 +243,16 @@ export function EmployeeAssets({
         {/* Requests sit under the assets: "what I hold" and "what I asked for" are one question, and an
             approved request is visibly still owed until somebody hands the kit over. */}
         {sortedRequests.length > 0 && (
-          <div className="mt-5 border-t pt-4">
+          <div className={canReadAssets ? "mt-5 border-t pt-4" : undefined}>
             <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">{isSelf ? "My requests" : "Requests"}</p>
             <div className="space-y-2">
               {sortedRequests.map((r) => (
-                <div key={r.path} className="flex flex-wrap items-center gap-2 text-sm">
+                <div
+                  key={r.path}
+                  ref={idOf(r.path) === focusedId ? focusRef : undefined}
+                  aria-current={idOf(r.path) === focusedId ? "true" : undefined}
+                  className={cn("flex flex-wrap items-center gap-2 rounded-md text-sm", idOf(r.path) === focusedId && `${FOCUSED_ROW} p-1.5`)}
+                >
                   <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium", ASSET_REQUEST_STATE_TONE[r.state])}>
                     {ASSET_REQUEST_STATE_LABEL[r.state] ?? r.state}
                   </span>

@@ -31,13 +31,15 @@ export type ReimbursementInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
-export async function listReimbursements(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, q?: string) {
+export async function listReimbursements(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, q?: string, employeeId?: string) {
   // Visibility decided by the middleware (scopeFor over the grant); here we only bind it to columns.
   const conds = [applyScope(scope, schema.reimbursements.code, schema.reimbursements.employeeId)];
   // Server-side text filter (FTS). Narrows the scope above; it can never widen it.
   const textMatch = await searchFilter(deps, "reimbursements", q, schema.reimbursements.uuid);
   if (textMatch) conds.push(textMatch);
   if (stateFilter) conds.push(eq(schema.reimbursements.state, stateFilter as typeof schema.reimbursements.$inferSelect.state));
+  // `?employee=`: one person's claims (a profile's compensation tab). Narrows the scope, never widens it.
+  if (employeeId) conds.push(eq(schema.reimbursements.employeeId, employeeId));
   return keysetPage(deps, schema.reimbursements, "reimbursements", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 

@@ -213,4 +213,29 @@ test.describe("global search", () => {
       await purge(sup, path);
     }
   });
+
+  test("filter words complete from what the caller can search", async ({ as }) => {
+    const employee = await as("employee");
+    await gotoRoute(employee, "dashboard");
+    await employee.keyboard.press("ControlOrMeta+k");
+    const search = employee.getByPlaceholder("Search people, records, pages and settings…");
+    const filters = employee.getByRole("group", { name: "Filters" });
+
+    // status: offers the values the caller's own collections hold (GET /v1/search:vocabulary); Tab takes the
+    // highlighted one and leaves the caret after it.
+    await search.fill("status:pen");
+    await expect(filters.getByRole("option").first()).toContainText("status:pending");
+    await employee.keyboard.press("Tab");
+    await expect(search).toHaveValue("status:pending ");
+
+    // in: offers collections by name; picking one with the pointer keeps the box focused for the next word.
+    await search.pressSequentially("in:leave");
+    await filters.getByRole("option").filter({ hasText: "in:leave-requests" }).click();
+    await expect(search).toHaveValue("status:pending in:leave-requests ");
+    await expect(search).toBeFocused();
+
+    // A word typed out in full offers nothing, so Enter is left to open a result.
+    await search.pressSequentially("is:mine");
+    await expect(filters).toHaveCount(0);
+  });
 });

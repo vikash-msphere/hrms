@@ -224,6 +224,24 @@ export const SEARCH_INDEX: SearchEntry[] = [
 
 export const SEARCHABLE_COLLECTIONS = SEARCH_INDEX.map((e) => e.collection);
 
+/** The entry's state/status property, which `status:` narrows by. Every entry that has one lists it among its
+ *  `match` columns, so it is found there rather than declared twice. */
+export const statusPropOf = (entry: SearchEntry): string | undefined => entry.match.find((p) => p === "state" || p === "status");
+
+/**
+ * What ⌘K can suggest after `in:` and `status:`: each searchable collection in `listable`, with the values its
+ * state/status column can hold, lower-cased the way `status:` compares them. Read off the schema's enums, so it
+ * costs no database read and cannot drift from what the column accepts. A collection whose status column is
+ * free text, or that has none, answers no statuses.
+ */
+export function searchVocabulary(listable: ReadonlySet<string>): { collection: string; statuses: string[] }[] {
+  return SEARCH_INDEX.filter((e) => listable.has(e.collection)).map((e) => {
+    const prop = statusPropOf(e);
+    const values = prop ? ((e.table as Record<string, { enumValues?: readonly string[] }>)[prop]?.enumValues ?? []) : [];
+    return { collection: e.collection, statuses: [...new Set(values.map((v) => v.toLowerCase()))] };
+  });
+}
+
 /**
  * Indexable collections whose embed text must stay `<title> - <subtitle>`, with no `noun` and every subtitle.
  *

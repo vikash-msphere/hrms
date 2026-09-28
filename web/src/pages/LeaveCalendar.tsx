@@ -665,6 +665,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
                     collection="leave-requests"
                     row={r}
                     employeeId={r.employee ? idOf(r.employee) : undefined}
+                    selfEmployeeId={me.employee_id}
                     name={empName(r.employee)}
                     photo={r.employee ? empById.get(idOf(r.employee))?.photo : undefined}
                     summary={leaveSummary(r, typeName)}

@@ -77,6 +77,36 @@ export function resourceRoute(collection: string, ref?: string): string | null {
   return null;
 }
 
+// The query param a profile tab reads to pick out ONE request among the person's rows (`?request=<collection>/<id>`).
+export const REQUEST_PARAM = "request";
+
+// The profile tab that lists one person's requests of each kind. The source pages of these collections are
+// self-service (the Requests tab is the caller's own; nobody else's pending request is ever on them), so an
+// approver opening somebody else's request from them landed on their OWN requests.
+const PROFILE_TAB_OF: Record<string, string> = {
+  "leave-requests": "leave", "leave-encashments": "leave",
+  "remote-work-requests": "attendance", "late-early-requests": "attendance",
+  "attendance-regularizations": "attendance", "overtime-requests": "attendance", "time-entries": "attendance",
+  reimbursements: "compensation", loans: "compensation",
+  "asset-requests": "employment",
+};
+
+/**
+ * Where a decider opens ONE request: somebody else's goes to the requester's profile tab that lists it, with
+ * the request picked out; the caller's own goes to their self-service page, which is where it lives. Company
+ * expenses have a page of their own for other people's claims (the review queue, or the whole ledger once
+ * decided). Anything else falls back to `resourceRoute`.
+ */
+export function requestRoute(collection: string, ref: string, ownerId: string | undefined, selfId: string | null | undefined, decided = false): string | null {
+  const others = !!ownerId && ownerId !== selfId;
+  if (collection === "expenses") return !!ownerId && ownerId === selfId ? "expenses/mine" : decided ? "expenses/all" : "expenses/review";
+  const tab = PROFILE_TAB_OF[collection];
+  if (tab && others) return `employees/${ownerId}/${tab}?${REQUEST_PARAM}=${encodeURIComponent(`${collection}/${idOf(ref)}`)}`;
+  // One's own asset request lives on one's own profile (there is no list page for them).
+  if (collection === "asset-requests" && !others) return "profile/employment";
+  return resourceRoute(collection, ref);
+}
+
 // Whether clicking navigates to the exact record (vs. just the list page) — for tooltip wording.
 export function opensExactRecord(collection: string): boolean {
   return collection in DEEP_OPEN;

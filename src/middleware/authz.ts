@@ -910,8 +910,9 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // scopes for them would be an access_rules read spent on nothing.
     if ((collection === "search" && pathname === "/v1/search") || collection === "activity-counts") c.set("searchScopes", await searchScopesFor(c.get("deps"), user));
     // "What changed since I last looked" answers with collection NAMES, so it needs only the boolean half of
-    // that same decision - no scope, and no per-object exception read.
-    if (collection === "changes") c.set("listableCollections", listableCollectionsFor(user));
+    // that same decision - no scope, and no per-object exception read. So does the palette's vocabulary: which
+    // collections `in:` may name for this caller.
+    if (collection === "changes" || pathname === "/v1/search:vocabulary") c.set("listableCollections", listableCollectionsFor(user));
     // Dashboard summary fans COUNT/SUM queries across the KPI collections - same per-collection decide/scope
     // pair as search, handed over as a map; the service only binds them.
     if (collection === "dashboard-summary") c.set("summaryScopes", await scopesForCollections(c.get("deps"), user, DASHBOARD_SUMMARY_COLLECTIONS));

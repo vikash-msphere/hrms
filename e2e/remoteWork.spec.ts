@@ -47,6 +47,16 @@ test("an employee requests remote days, the form counts them, and the manager ap
     .filter({ has: manager.getByRole("button", { name: "Approve", exact: true }) })
     .last();
   await expect(row).toBeVisible({ timeout: 30_000 });
+
+  // "Open" is THIS request, on the requester's record - not the Remote work page, which lists only the
+  // manager's own requests and so had nothing of the employee's on it.
+  await row.getByRole("button", { name: "Open this request" }).click();
+  await expect(manager).toHaveURL(/\/employees\/[^/]+\/attendance\?request=remote-work-requests%2F/);
+  await expect(manager.getByRole("tab", { name: "Attendance", exact: true })).toHaveAttribute("aria-selected", "true", { timeout: 30_000 });
+  await expect(manager.locator('tr[aria-current="true"]').filter({ hasText: reason })).toBeVisible({ timeout: 30_000 });
+  await manager.goBack();
+
+  await expect(row).toBeVisible({ timeout: 30_000 });
   await row.getByRole("button", { name: "Approve", exact: true }).click();
   await manager.getByRole("dialog").getByRole("button", { name: "Approve", exact: true }).click();
   // The decision is done when THIS request has left the queue - not when the queue is a particular size.

@@ -26,12 +26,14 @@ export type OvertimeInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const MAX_MINUTES = 24 * 60;
 
-export async function listOvertimeRequests(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, q?: string) {
+export async function listOvertimeRequests(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, q?: string, employeeId?: string) {
   const conds = [applyScope(scope, schema.overtimeRequests.code, schema.overtimeRequests.employeeId)];
   // Server-side text filter (FTS). Narrows the scope above; it can never widen it.
   const textMatch = await searchFilter(deps, "overtime-requests", q, schema.overtimeRequests.uuid);
   if (textMatch) conds.push(textMatch);
   if (stateFilter) conds.push(eq(schema.overtimeRequests.state, stateFilter as typeof schema.overtimeRequests.$inferSelect.state));
+  // `?employee=`: one person's requests (a profile's attendance tab). Narrows the scope, never widens it.
+  if (employeeId) conds.push(eq(schema.overtimeRequests.employeeId, employeeId));
   return keysetPage<typeof schema.overtimeRequests.$inferSelect>(deps, schema.overtimeRequests, "overtime-requests", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken });
 }
 

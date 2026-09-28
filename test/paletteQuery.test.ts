@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { editDistance, highlightParts, highlightTokens, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, searchParams } from "../web/src/lib/paletteQuery";
+import { applySuggestion, collectionsNamedBy, editDistance, highlightParts, highlightTokens, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, searchParams, suggestFilters, tokenAt, type FilterVocabulary } from "../web/src/lib/paletteQuery";
 
 const people = [
   { id: "e1", first: "Priya", last: "Nair" },
@@ -63,6 +63,75 @@ describe("pushRecent", () => {
     expect(pushRecent(["laptop", "payslip"], "Payslip")).toEqual(["Payslip", "laptop"]);
     expect(pushRecent(["a1", "a2", "a3"], "new", 3)).toEqual(["new", "a1", "a2"]);
     expect(pushRecent(["laptop"], " x ")).toEqual(["laptop"]); // too short to be worth offering again
+  });
+});
+
+describe("filter suggestions", () => {
+  const vocabulary: FilterVocabulary = [
+    { collection: "leave-requests", statuses: ["pending", "approved"] },
+    { collection: "tickets", statuses: ["open", "in_progress", "pending"] },
+    { collection: "holidays", statuses: [] },
+  ];
+  const labels: Record<string, string> = { "leave-requests": "Leave requests", tickets: "Tickets", holidays: "Holidays" };
+  const ctx: Parameters<typeof suggestFilters>[2] = { people, vocabulary, labelOf: (c: string) => labels[c]!, today: "2026-09-28", daysAgo30: "2026-08-29" };
+  const tokens = (raw: string, caret = raw.length, over = ctx) => suggestFilters(raw, caret, over)?.items.map((s) => s.token) ?? null;
+
+  it("finds the word the caret is in", () => {
+    expect(tokenAt("laptop in:tic", 13)).toEqual({ start: 7, end: 13, text: "in:tic" });
+    expect(tokenAt("in:tic laptop", 2)).toEqual({ start: 0, end: 6, text: "in:tic" });
+    expect(tokenAt("laptop ", 7)).toEqual({ start: 7, end: 7, text: "" });
+  });
+
+  it("completes in: by collection name or label, leaving out what the query already names", () => {
+    expect(tokens("in:")).toEqual(["in:holidays", "in:leave-requests", "in:tickets"]);
+    expect(tokens("laptop in:req")).toEqual(["in:leave-requests"]); // a word of the label
+    expect(tokens("in:leave in:")).toEqual(["in:holidays", "in:tickets"]);
+    expect(tokens("in:tickets")).toBeNull(); // typed out in full: Enter opens a result, not a completion
+    expect(tokens("in:", 3, { ...ctx, vocabulary: null })).toBeNull(); // not loaded yet
+  });
+
+  it("completes status: from every collection, or only from the ones in: names", () => {
+    expect(tokens("status:")).toEqual(["status:pending", "status:approved", "status:in_progress", "status:open"]);
+    expect(tokens("status:prog")).toEqual(["status:in_progress"]);
+    expect(tokens("in:leave status:")).toEqual(["status:approved", "status:pending"]);
+    const pending = suggestFilters("status:pe", 9, ctx)!.items[0]!;
+    expect(pending).toMatchObject({ kind: "status", collections: ["leave-requests", "tickets"] });
+  });
+
+  it("completes @name with a handle that means exactly that person", () => {
+    expect(tokens("@pri")).toEqual(["@priya", "@priyanka"]);
+    expect(tokens("@kap")).toEqual(["@alice"]);
+    expect(tokens("@priya")).toBeNull(); // already one person, though @priyanka starts with it
+    expect(tokens("@")).toBeNull(); // not the whole directory
+    const twins = [...people, { id: "e4", first: "Priya", last: "Das" }];
+    // Two Priyas: the first name no longer singles either out, so each gets the whole name.
+    expect(tokens("@priya", 6, { ...ctx, people: twins })).toEqual(["@priyadas", "@priyanair", "@priyanka"]);
+    expect(parsePaletteQuery("@priyadas", twins).owner?.id).toBe("e4");
+  });
+
+  it("completes is: and the dates", () => {
+    expect(tokens("is:")).toEqual(["is:mine"]);
+    expect(tokens("is:mine laptop is:")).toBeNull();
+    expect(tokens("after:")).toEqual(["after:2026-09", "after:2026-08", "after:2026-08-29", "after:2026-01"]);
+    expect(tokens("before:2026-0")).toEqual(["before:2026-09", "before:2026-08", "before:2026-08-29", "before:2026-01"]);
+    expect(tokens("after:2026-01")).toBeNull();
+  });
+
+  it("offers nothing for a plain word", () => {
+    expect(tokens("laptop")).toBeNull();
+    expect(tokens("")).toBeNull();
+  });
+
+  it("swaps the word for the suggestion and puts the caret after it", () => {
+    expect(applySuggestion("in:tic laptop", { start: 0, end: 6 }, "in:tickets")).toEqual({ query: "in:tickets laptop", caret: 11 });
+    expect(applySuggestion("laptop @pri", { start: 7, end: 11 }, "@priya")).toEqual({ query: "laptop @priya ", caret: 14 });
+  });
+
+  it("reads back every suggestion as the filter it names", () => {
+    expect(parsePaletteQuery("in:leave-requests status:in_progress @priyanka is:mine after:2026-08-29", people)).toMatchObject({
+      in: ["leave-requests"], status: "in_progress", owner: people[1], mine: true, after: "2026-08-29", text: "",
+    });
+    expect(collectionsNamedBy("leave", ["leave-requests", "leave-types", "tickets"])).toEqual(["leave-requests", "leave-types"]);
   });
 });
 

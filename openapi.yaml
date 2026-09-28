@@ -2086,7 +2086,7 @@ components:
         end_session: { type: integer, description: "1 = first half, 2 = second half; range ends this session of end_date." }
         days: { type: number, readOnly: true, description: Half-day-aware day count. }
         location: { type: string, description: Where they'll work from (e.g. Home). }
-        reason: { type: string }
+        reason: { type: string, description: "Required on create (non-blank). Requests filed before that rule may have none." }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
         decided_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who approved or rejected the request." }
         decision_note: { type: string, readOnly: true }
@@ -12040,6 +12040,10 @@ paths:
           schema: { type: string }
           description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters."
         - { in: query, name: state, schema: { type: string } }
+        - in: query
+          name: employee
+          schema: { type: string }
+          description: "Resource path employees/{employee_id}: one person's requests. Narrows the caller's scope; it never widens it."
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -12148,6 +12152,10 @@ paths:
         - { in: query, name: state, schema: { type: string } }
         - { in: query, name: from, schema: { type: string, format: date }, description: "Window start (YYYY-MM-DD). Returns requests OVERLAPPING the window, so one crossing the edge is included." }
         - { in: query, name: to, schema: { type: string, format: date }, description: "Window end (YYYY-MM-DD), inclusive. Pairs with `from`; either may be given alone." }
+        - in: query
+          name: employee
+          schema: { type: string }
+          description: "Resource path employees/{employee_id}: one person's requests. Narrows the caller's scope; it never widens it."
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -13439,6 +13447,10 @@ paths:
           schema: { type: string }
           description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters."
         - { in: query, name: state, schema: { type: string } }
+        - in: query
+          name: employee
+          schema: { type: string }
+          description: "Resource path employees/{employee_id}: one person's claims. Narrows the caller's scope; it never widens it."
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -18476,6 +18488,34 @@ paths:
                   search: { type: [string, 'null'], description: "A few words to search records by, when that would help." }
                   cached: { type: boolean }
         '400': { $ref: '#/components/responses/Problem' }
+  /v1/search:vocabulary:
+    get:
+      description: "Custom method vocabulary: what the search box suggests after `in:` and `status:`. Lists the searchable collections the caller may list, each with the values its state or status column can hold, lower-cased as the `status` filter compares them. Read off the schema, so it reads no record."
+      operationId: ":VocabularySearch"
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  collections:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        collection: { type: string }
+                        statuses:
+                          type: array
+                          items: { type: string }
+                          description: "Empty when the collection has no status column, or one that holds free text."
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/search:
     get:
       description: "Global search across every collection the caller may list. Each collection is included only if the caller's list decision for it allows, and its rows are filtered by that collection's own list scope, so a hit is always a row the caller could already have listed."

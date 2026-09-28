@@ -1,6 +1,6 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { Search, CornerDownLeft, ArrowUp, ArrowDown, ArrowLeft, User, Loader2, KeyRound, X, Sparkles, ListFilter, Lock, History, Check, Ban } from "lucide-react";
+import { Search, ArrowLeft, User, Loader2, KeyRound, X, Sparkles, ListFilter, Lock, History, Check, Ban, CalendarDays } from "lucide-react";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 import { confirmDecision } from "@/lib/confirmDecision";
@@ -26,7 +26,8 @@ import type { OrgSettings } from "@/lib/org";
 import type { LucideIcon } from "lucide-react";
 import type { Employee, Me, SearchHit, SearchPage } from "@/types";
 import { useAiFeature } from "@/lib/aiFeatures";
-import { highlightParts, highlightTokens, isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, searchParams } from "@/lib/paletteQuery";
+import { applySuggestion, highlightParts, highlightTokens, isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, searchParams, suggestFilters, tokenAt, type FilterSuggestion, type FilterVocabulary } from "@/lib/paletteQuery";
+import { orgDayFromToday, todayStr } from "@/lib/orgDay";
 
 // One row of the palette. Everything the palette can offer - a create flow, a page, a settings panel, or an
 // actual record out of the database - is normalised to this shape, so the list renders and keyboard-navigates
@@ -46,6 +47,7 @@ type Item = {
   stay?: boolean; // runs without closing the palette (See all, Ask)
   // A database record (a server hit): its ref and collection, which is what the Tab actions act on.
   record?: { name: string; collection: string };
+  completes?: boolean; // a filter suggestion: Tab accepts it, as Enter does
 };
 
 // The record whose actions the palette is showing (Tab on a result), and what loading it found.
@@ -188,6 +190,29 @@ const filterLocal = (items: Item[], q: string, fre: FrecencyMap): Item[] =>
     .sort((a, b) => a.s - b.s || frecencyScore(fre[b.c.key]) - frecencyScore(fre[a.c.key]))
     .map((x) => x.c);
 
+const statusLabel = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, " ");
+
+// One filter suggestion as a palette row. The detail always leads with the token itself, so picking from the
+// list teaches the syntax that typing it would have needed.
+function filterItem(s: FilterSuggestion<{ id: string; first: string; last: string; e: Employee }>, accept: (token: string) => void): Item {
+  const base = { key: `filter:${s.token}`, badge: "Filter", tone: "action" as const, icon: ListFilter, stay: true, completes: true, run: () => accept(s.token) };
+  switch (s.kind) {
+    case "in":
+      return { ...base, label: entityLabel(s.collection), detail: s.token };
+    case "status": {
+      const names = s.collections.slice(0, 3).map(entityLabel).join(", ");
+      const more = s.collections.length > 3 ? ` +${s.collections.length - 3}` : "";
+      return { ...base, label: statusLabel(s.status), detail: `${s.token} · ${names}${more}` };
+    }
+    case "person":
+      return { ...base, label: `${s.person.first} ${s.person.last}`, detail: [s.token, s.person.e.job_title].filter(Boolean).join(" · "), icon: User };
+    case "is":
+      return { ...base, label: "Mine", detail: `${s.token} · records that belong to you` };
+    case "date":
+      return { ...base, label: s.label, detail: s.token, icon: CalendarDays };
+  }
+}
+
 /** A row's label or detail with the typed words marked where they matched (lib/paletteQuery.ts highlightParts). */
 function Marked({ text, tokens }: { text: string; tokens: readonly string[] }) {
   return (
@@ -210,6 +235,11 @@ export function CommandPalette({
 }) {
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
+  // Where the caret is, so the filter word it sits in can be completed. `pendingCaret` is where a completion
+  // puts it once the new text has rendered.
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [caret, setCaret] = useState(0);
+  const pendingCaret = useRef<number | null>(null);
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
   // How much of the screen the on-screen keyboard covers, so the panel can stop above it (phone only).
@@ -264,6 +294,52 @@ export function CommandPalette({
   // An answer is about the question it was asked; editing the box makes it an answer to something else.
   useEffect(() => setAsk({ status: "idle" }), [query]);
 
+  // What `in:` and `status:` can be completed with - the collections this caller may search, and their status
+  // values. Asked for the first time somebody types one of those two words, not on open: most searches never
+  // narrow, and the answer does not change within a session. A failure is asked again the next time.
+  const [vocabulary, setVocabulary] = useState<FilterVocabulary | null>(null);
+  const vocabularyAsked = useRef(false);
+  useEffect(() => {
+    setVocabulary(null);
+    vocabularyAsked.current = false;
+  }, [me.email]);
+  const wantsVocabulary = /^(in|status):/i.test(tokenAt(query, caret).text);
+  useEffect(() => {
+    if (!wantsVocabulary || vocabulary || vocabularyAsked.current) return;
+    vocabularyAsked.current = true;
+    api<{ collections?: FilterVocabulary }>("/search:vocabulary")
+      .then((r) => setVocabulary(r.collections ?? []))
+      .catch(() => {
+        vocabularyAsked.current = false;
+      });
+  }, [wantsVocabulary, vocabulary]);
+  const filterOffers = useMemo(
+    () => suggestFilters(query, caret, { people: directory, vocabulary, labelOf: entityLabel, today: todayStr(), daysAgo30: orgDayFromToday(-30) }),
+    [query, caret, directory, vocabulary],
+  );
+  // New text for the box that the person did not type (a completion, a recent search, See all), with the caret
+  // put where it belongs - the end, unless said otherwise - so the word being completed is the right one.
+  const replaceQuery = (text: string, at = text.length) => {
+    pendingCaret.current = at;
+    setQuery(text);
+    setCaret(at);
+    setActive(0);
+  };
+  // Accepting a suggestion swaps the word under the caret for it and leaves the caret after it, ready for the
+  // next word. Read off the input itself so a row built a render ago still edits what is in the box now.
+  const acceptFilter = (token: string) => {
+    const raw = inputRef.current?.value ?? query;
+    const next = applySuggestion(raw, tokenAt(raw, inputRef.current?.selectionStart ?? caret), token);
+    replaceQuery(next.query, next.caret);
+  };
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (pendingCaret.current === null || !el) return;
+    el.focus();
+    el.setSelectionRange(pendingCaret.current, pendingCaret.current);
+    pendingCaret.current = null;
+  }, [query]);
+
   // Global ⌘K / Ctrl+K to open from anywhere.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -280,6 +356,7 @@ export function CommandPalette({
   useEffect(() => {
     if (open) {
       setQuery("");
+      setCaret(0);
       setActive(0);
       setHits([]);
       setHitsKey("");
@@ -407,7 +484,7 @@ export function CommandPalette({
         tone: "action",
         icon: History,
         stay: true,
-        run: () => setQuery(s),
+        run: () => replaceQuery(s),
       }));
       return [
         { label: "Recent searches", items: searches },
@@ -476,8 +553,11 @@ export function CommandPalette({
       else byCollection.set(h.collection, [item]);
     }
 
-    // The Ask answer, when there is one, leads: it is what the person pressed Enter for.
     const out: Section[] = [];
+    // Completions for the filter word under the caret lead: the person is mid-word, and Enter or Tab should
+    // finish it before anything else.
+    if (filterOffers) out.push({ label: "Filters", items: filterOffers.items.map((s) => filterItem(s, acceptFilter)) });
+    // The Ask answer, when there is one, leads the results: it is what the person pressed Enter for.
     if (ask.status === "done") {
       const all = [...local.actions, ...local.pages, ...local.settings];
       const picks: Item[] = ask.answer.destinations
@@ -488,7 +568,7 @@ export function CommandPalette({
         .filter((i): i is Item => i !== null);
       const words = ask.answer.search;
       if (words) {
-        picks.push({ key: `ask-search:${words}`, label: `Search records for "${words}"`, badge: "Search", tone: "action", icon: Search, stay: true, run: () => setQuery(words) });
+        picks.push({ key: `ask-search:${words}`, label: `Search records for "${words}"`, badge: "Search", tone: "action", icon: Search, stay: true, run: () => replaceQuery(words) });
       }
       out.push({ label: picks.length ? "Answer" : "No answer - nothing here fits that question", items: picks });
     }
@@ -516,7 +596,7 @@ export function CommandPalette({
           tone: "action",
           icon: ListFilter,
           stay: true,
-          run: () => setQuery(next),
+          run: () => replaceQuery(next),
         });
       }
       out.push({ label: entityLabel(collection), items: capped });
@@ -563,9 +643,10 @@ export function CommandPalette({
       });
     }
     return out;
-    // `runAsk` reads the same state this memo does, so listing it would only rebuild the list twice.
+    // `runAsk` and `acceptFilter` read the same state this memo does, so listing them would only rebuild the
+    // list twice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [local, employees, directory, hits, query, parsed, narrowed, frecent, recentQueries, ask, askOn, settled, prefillable, actions]);
+  }, [local, employees, directory, hits, query, parsed, narrowed, frecent, recentQueries, ask, askOn, settled, prefillable, actions, filterOffers]);
 
   const flat = useMemo(() => sections.flatMap((s) => s.items), [sections]);
 
@@ -642,6 +723,12 @@ export function CommandPalette({
     onOpenChange(false);
   };
 
+  // What Tab would do on the highlighted row - finish a filter word, or open a record's actions. The key
+  // handler and the hints read the same answers.
+  const canComplete = !!flat[active]?.completes;
+  const collection = flat[active]?.record?.collection;
+  const canOpenActions = !actions && !!collection && hasPaletteActions(collection);
+
   const onInputKey = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -649,7 +736,10 @@ export function CommandPalette({
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActive((a) => Math.max(a - 1, 0));
-    } else if (!actions && (e.key === "Tab" || (e.key === "ArrowRight" && caretAtEnd(e))) && flat[active]?.record && hasPaletteActions(flat[active]!.record!.collection)) {
+    } else if (canComplete && e.key === "Tab" && !e.shiftKey) {
+      e.preventDefault();
+      go(flat[active]);
+    } else if (canOpenActions && (e.key === "Tab" || (e.key === "ArrowRight" && caretAtEnd(e)))) {
       // Tab (or → at the end of the text) opens the highlighted record's actions.
       e.preventDefault();
       void openActions(flat[active]!);
@@ -705,8 +795,11 @@ export function CommandPalette({
           <div className="flex shrink-0 items-center gap-3 border-b px-4">
             <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
             <input
+              ref={inputRef}
               value={query}
-              onChange={(e) => { setQuery(e.target.value); setActive(0); }}
+              onChange={(e) => { setQuery(e.target.value); setCaret(e.target.selectionStart ?? e.target.value.length); setActive(0); }}
+              // The caret moving without the text changing (← →, a click) moves which word is being completed.
+              onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
               onKeyDown={onInputKey}
               placeholder="Search people, records, pages and settings…"
               // The combobox pattern: focus never leaves the box, and the highlighted row is announced through
@@ -728,7 +821,7 @@ export function CommandPalette({
               className="h-12 w-full bg-transparent text-base outline-none placeholder:text-muted-foreground sm:text-sm"
             />
             {searching && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />}
-            {/* Esc closes it on a keyboard; a phone has no Esc, and the hint row that says so is hidden. */}
+            {/* Esc closes it on a keyboard; a phone has no Esc, so it gets a button. */}
             <button
               type="button"
               onClick={() => onOpenChange(false)}
@@ -791,19 +884,15 @@ export function CommandPalette({
               ))
             )}
           </div>
-          {/* Keyboard hints, for devices with a keyboard. On a phone the row is three lies and a wasted line. */}
-          <div className="hidden shrink-0 items-center gap-4 border-t px-4 py-2 text-[11px] text-muted-foreground sm:flex">
-            <span className="flex items-center gap-1">
-              <ArrowUp className="h-3 w-3" />
-              <ArrowDown className="h-3 w-3" /> navigate
-            </span>
-            <span className="flex items-center gap-1">
-              <CornerDownLeft className="h-3 w-3" /> open
-            </span>
-            <span>⇥ actions</span>
+          {/* Hints for what this box does beyond a plain search list, for devices with a keyboard. The
+              conventions every list shares (arrows, Enter, Esc) go unsaid, and the Tab hint shows only while Tab
+              does something on the highlighted row. Below md the filter syntax is hidden, so with none of the
+              others to say the row goes too rather than leave an empty bar. */}
+          <div className={cn("hidden shrink-0 items-center gap-4 border-t px-4 py-2 text-[11px] text-muted-foreground", canComplete || canOpenActions || askOn ? "sm:flex" : "md:flex")}>
+            {canComplete && <span>⇥ complete</span>}
+            {canOpenActions && <span>⇥ actions</span>}
             {askOn && <span>⌘↵ ask</span>}
             <span className="hidden md:inline">in:tickets · @name · is:mine · status:pending · after:2026-01</span>
-            <span className="ml-auto">esc to close</span>
           </div>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>

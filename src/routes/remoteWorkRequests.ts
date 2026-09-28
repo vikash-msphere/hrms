@@ -39,11 +39,15 @@ export const remoteWorkRequests = collectionRoutes<RemoteWorkInput, typeof schem
   overrides: {
     create: (deps, actor, input) => createRemoteWorkRequest(deps, actor, input),
   },
-  list: (c, page) =>
-    listRemoteWorkRequests(
+  list: (c, page) => {
+    // Row visibility was decided in middleware; `?employee` narrows it. The inbound edge (decodeWireIds) already
+    // decoded the query ref to its internal id.
+    const emp = c.req.query("employee");
+    return listRemoteWorkRequests(
       c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken,
-      c.req.query("state"), c.req.query("q"), c.req.query("from"), c.req.query("to"),
-    ),
+      c.req.query("state"), c.req.query("q"), c.req.query("from"), c.req.query("to"), emp ? emp.split("/").pop()! : undefined,
+    );
+  },
   verbs: {
     approve: { run: async (deps, user, id, _body, c) => approveRemoteWorkRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
     reject: { run: async (deps, user, id, _body, c) => rejectRemoteWorkRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },

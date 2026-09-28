@@ -83,7 +83,7 @@ test("an off-network punch offers the remote-work request and opens the form", a
   const form = page.getByRole("dialog").filter({ hasText: "Request remote work" });
   await expect(form).toBeVisible();
 
-  // Dated today, so the common case (I am at home right now) is submit-and-done. Reached BY LABEL, which is
+  // Dated today, so the common case (I am at home right now) needs only a reason. Reached BY LABEL, which is
   // also the assertion that <Field> binds its label to the control it names (components/common/Field.tsx):
   // located positionally this would pass just as well with every label in the app naming nothing.
   // The LOCAL day: the form offers "today" as the reader sees it, which is a different date from

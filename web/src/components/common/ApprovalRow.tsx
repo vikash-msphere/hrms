@@ -4,7 +4,7 @@ import { Check, X, ExternalLink, type LucideIcon } from "lucide-react";
 import { invoke } from "@/api";
 import { navigate } from "@/router";
 import { idOf, formatDate } from "@/lib/utils";
-import { resourceRoute } from "@/lib/resourceRoute";
+import { requestRoute } from "@/lib/resourceRoute";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -38,6 +38,7 @@ export function ApprovalRow({
   collection,
   row,
   employeeId,
+  selfEmployeeId,
   name,
   photo,
   summary,
@@ -52,6 +53,9 @@ export function ApprovalRow({
   collection: string;
   row: Approvable;
   employeeId?: string;
+  // The viewer's own employee id: their own request opens on their self-service page, anybody else's on the
+  // requester's profile.
+  selfEmployeeId?: string | null;
   name: string;
   photo?: string;
   summary: React.ReactNode;
@@ -73,6 +77,9 @@ export function ApprovalRow({
   const can = row.access?.can ?? [];
   const ref = { collection, objectPath: row.path, can };
   const waited = waitingDays(row.create_time);
+  // The request itself, as the requester's record lists it - not the collection's page, which is the
+  // decider's OWN requests.
+  const openRoute = requestRoute(collection, row.path, employeeId, selfEmployeeId, !!decidedState);
   // Approving from an inbox row is one click next to a dozen identical rows, and it notifies the requester
   // and commits whatever they asked for. Rejection already goes through its own dialog (it takes a note), so
   // this is the half that was missing.
@@ -139,8 +146,8 @@ export function ApprovalRow({
           request rather than to the list. Approve/Reject share the leftover width as real targets. */}
       <div className="flex items-center gap-1.5 pl-12 sm:ml-auto sm:shrink-0 sm:pl-0">
         <RowActivityButton resource={row.path} />
-        {resourceRoute(collection) && (
-          <Button size="sm" variant="ghost" onClick={() => navigate(resourceRoute(collection)!)} title="Open the source page" aria-label="Open the source page">
+        {openRoute && (
+          <Button size="sm" variant="ghost" onClick={() => navigate(openRoute)} title="Open this request" aria-label="Open this request">
             <ExternalLink className="h-4 w-4" /> <span className="hidden sm:inline">Open</span>
           </Button>
         )}

@@ -3,15 +3,19 @@ import type { Employee } from "@/types";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 
-type Flags = NonNullable<Employee["profile_completeness"]>;
+// `app_lock` is not on the employee record: whether somebody has an app PIN is theirs alone (lib/appLock.ts),
+// so the self page adds it from the caller's own lock state and nobody else's view ever carries it.
+type Flags = NonNullable<Employee["profile_completeness"]> & { app_lock?: boolean };
 export type CompletenessKey = keyof Flags;
 
-/** Fixed checklist order; labels match the tab/section each chip jumps to. */
-const ITEMS: { key: CompletenessKey; label: string }[] = [
+/** Fixed checklist order; labels match the tab/section each chip jumps to. `done`/`todo` override the tile's
+ *  status line where "Added" does not describe finishing the item. */
+const ITEMS: { key: CompletenessKey; label: string; done?: string; todo?: string }[] = [
   { key: "photo", label: "Profile photo" },
   { key: "personal", label: "Personal details" },
   { key: "contact", label: "Contact details" },
   { key: "emergency", label: "Emergency contact" },
+  { key: "app_lock", label: "App PIN", done: "Set up", todo: "Not set up yet" },
   { key: "identity", label: "Identity" },
   { key: "bank", label: "Bank details" },
   { key: "signature", label: "Signature" },
@@ -116,7 +120,7 @@ export function ProfileCompleteness({ flags, onItem, canOpen, variant = "self" }
                 </span>
                 <span className="flex min-w-0 flex-col gap-px">
                   <span className={cn("truncate text-sm font-semibold", complete && "text-muted-foreground")}>{i.label}</span>
-                  <span className="truncate text-xs text-muted-foreground">{complete ? "Added" : "Not added yet"}</span>
+                  <span className="truncate text-xs text-muted-foreground">{complete ? (i.done ?? "Added") : (i.todo ?? "Not added yet")}</span>
                 </span>
                 {/* The chevron is the promise that pressing goes somewhere, so it goes with the button. */}
                 {!complete && openable && <ChevronRight className="ml-auto h-[15px] w-[15px] shrink-0 text-muted-foreground" />}

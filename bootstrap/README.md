@@ -44,11 +44,20 @@ npm run -s bootstrap:authz > bootstrap/authz.sql
 npx wrangler d1 execute hrms --local --file=bootstrap/authz.sql       # drop --local for remote
 ```
 
+Catalog automations added after a database was bootstrapped, into that live database. Name each rule; a rule of
+that name already there is left alone, and the code is taken from the app's own counter:
+
+```bash
+npm run -s bootstrap:automations -- "<rule name>" > bootstrap/automations.sql
+npx wrangler d1 execute hrms --local --file=bootstrap/automations.sql  # swap --local for --remote
+```
+
 ## Layout
 
 ```
 genBootstrap.ts            thin orchestrator: wires the collection modules in a fixed order, concatenates
 genAuthz.ts                the authz block alone (npm run bootstrap:authz)
+genAutomations.ts          named automations a live database is missing (npm run bootstrap:automations)
 lib.ts                     shared helpers (id gen, SQL quoting, code2, rows) + the HOLIDAY_YEAR/FY_START_YEAR knobs
 authz/
   roles/*.json             one file per role: everyone, employee, manager, hr_admin, payroll_admin, super_admin

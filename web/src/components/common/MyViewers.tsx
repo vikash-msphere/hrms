@@ -118,16 +118,16 @@ export function MyViewers({ selfPath }: { selfPath: string }) {
 
   return (
     <Card>
-      <CardContent className="space-y-4 pt-4">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
+      <CardContent className="space-y-4 p-4 sm:p-5">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
             <p className="flex items-center gap-2 text-sm font-semibold"><ShieldCheck className="h-4 w-4 text-primary" /> Who can see your data</p>
             <p className="text-xs text-muted-foreground">
               Every colleague who can currently read something of yours, area by area. Worked out by the same
               engine that decides every request - not a guess.
             </p>
           </div>
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => void load()}>
+          <Button size="sm" variant="outline" className="shrink-0" disabled={busy} onClick={() => void load()}>
             <Eye className="h-4 w-4" /> {busy ? "Checking…" : data ? "Refresh" : "Check"}
           </Button>
         </div>
