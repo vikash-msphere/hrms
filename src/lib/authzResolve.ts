@@ -7,6 +7,7 @@ import { eq, inArray } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { byIdChunks } from "./dbBatch";
+import { currentGenerations } from "./cacheGenerations";
 
 // Collection name -> table, for resources that carry an authz-relevant `code`.
 // The registry is exported (as COLLECTION_TABLES) because it is the one place that knows, for every wire
@@ -242,18 +243,32 @@ export function listOwnerColumn(collection: string, table?: any): any | undefine
 // id is the wire identifier in the path (currently the uuid; later the random wire id). Resolve -> code.
 // uuid->code is normally immutable, so this per-isolate cache is fast; it is bounded (FIFO eviction) so a
 // long-lived isolate seeing many distinct ids can't grow it without limit. Re-parenting (moveDepartment /
-// moveEmployee in codeCascade.ts) is the ONE operation that rewrites a code: the acting isolate calls
-// `invalidateCodeCache()` immediately, and a short TTL bounds how long OTHER isolates can serve a stale code
-// (so a just-moved employee is correctly re-scoped everywhere within the TTL). The TTL costs at most one
-// re-resolve per distinct id per window on the authz path (a single indexed lookup) - negligible.
+// moveEmployee in codeCascade.ts) is the ONE operation that rewrites a code, and it always rewrites an employee's
+// or a department's own code, which moves the `codes` counter (lib/cacheGenerations.ts). The acting isolate
+// calls `invalidateCodeCache()` immediately; every other isolate empties this cache the next time it sees the
+// counter move, within a few seconds.
+//
+// The TTL stays as the backstop, because entries are not filed under the counter they were read at: a lookup
+// answered by a replica that is behind the one the counter came from could still cache a pre-move code, and the
+// TTL bounds how long. It costs at most one re-resolve per distinct id per window (a single indexed lookup).
 const codeCache = new Map<string, { code: string; exp: number }>(); // `${collection}:${id}` -> {code, expiry ms}
 const CODE_CACHE_MAX = 10_000;
 const CODE_CACHE_TTL_MS = 10 * 60 * 1000;
 
 // Drop the whole per-isolate uuid->code cache. Called after a re-parent rewrites codes (codeCascade.ts) so the
-// acting isolate never serves a stale code; other isolates self-heal via the TTL.
+// acting isolate never serves a stale code, and by the manual cache flush (services/cacheFlush.ts).
 export function invalidateCodeCache(): void {
   codeCache.clear();
+}
+
+// The `codes` counter this isolate last emptied the cache at. Counters only go up, so a lower reading (a replica
+// that is behind) is ignored rather than treated as a change.
+let codesSeen: number | null = null;
+async function syncCodeCache(deps: Deps): Promise<void> {
+  const current = await currentGenerations(deps);
+  if (!current) return; // no counter row: the TTL alone bounds staleness, as before
+  if (codesSeen !== null && current.codes > codesSeen) codeCache.clear();
+  if (codesSeen === null || current.codes > codesSeen) codesSeen = current.codes;
 }
 
 /**
@@ -266,6 +281,7 @@ export function invalidateCodeCache(): void {
 export async function primeCodes(deps: Deps, collection: string, ids: string[]): Promise<void> {
   const t = TABLES[collection];
   if (!t) return;
+  await syncCodeCache(deps);
   const now = Date.now();
   const missing = [...new Set(ids)].filter((id) => {
     const hit = codeCache.get(`${collection}:${id}`);
@@ -284,6 +300,7 @@ export async function uuidToCode(deps: Deps, collection: string, id: string): Pr
   const t = TABLES[collection];
   if (!t) return null;
   const key = `${collection}:${id}`;
+  await syncCodeCache(deps);
   const hit = codeCache.get(key);
   if (hit && hit.exp > Date.now()) return hit.code;
   const row = (await deps.db.select({ code: t.code }).from(t).where(eq(t.uuid, id)).limit(1))[0] as { code: string | null } | undefined;

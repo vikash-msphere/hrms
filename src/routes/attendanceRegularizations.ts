@@ -12,13 +12,14 @@ const createSchema = z
   .object({
     employee: z.string().nullable().optional(),
     date: z.string(),
-    sessions: z.array(z.object({ clock_in: z.string(), clock_out: z.string() }).strict()),
+    // `clock_out` may be left out of today's last session only ("still clocked in"); the service enforces which.
+    sessions: z.array(z.object({ clock_in: z.string(), clock_out: z.string().nullable().optional() }).strict()),
     reason: z.string().nullable().optional(),
   })
   .strict();
 
 // A request to correct one day's clock times. The create validates the whole intended day (pairs ordered, no
-// overlaps) and the approval supersedes that day's punches, so both stay in the service. A filed request is
+// overlaps, only today's last one open) and the approval supersedes that day's punches, so both stay in the service. A filed request is
 // answered, never edited, and its table has no delete_time - so no PATCH, no DELETE, no `:restore`.
 export const attendanceRegularizations = collectionRoutes<RegularizationInput, typeof schema.attendanceRegularizations>({
   table: schema.attendanceRegularizations,

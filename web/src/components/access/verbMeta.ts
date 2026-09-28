@@ -139,7 +139,10 @@ const PER_COLLECTION: Record<string, Record<string, VerbInfo>> = {
     preview: { label: "Preview page", description: "Render a sample document on this letterhead." },
     duplicate: { label: "Duplicate", description: "Copy this letterhead, artwork and all, as a new one." },
   },
-  operations: { run: { label: "Run", description: "Execute the maintenance job." } },
+  operations: {
+    run: { label: "Run", description: "Execute the maintenance job." },
+    clearCache: { label: "Clear caches", description: "Make every server reload permissions, roles and rules it holds in memory." },
+  },
   "cron-runs": { run: { label: "Run now", description: "Fire a scheduled tick on demand." } },
   automations: {
     enable: { label: "Enable rule" }, disable: { label: "Disable rule" },

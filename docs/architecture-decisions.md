@@ -564,6 +564,29 @@ classifier on its own ground - so the prompt is written to under-flag, and the r
 that would make a moderator stop trusting the queue: disagreement read as abuse, criticism of the company
 read as defamation.
 
+### A TTL is not an invalidation
+
+The authority caches (`lib/policyLoad.ts`) held a role's rules for five seconds per isolate. That looked cheap
+and was the most expensive read in the app: the SPA does not poll, so two page loads are rarely five seconds
+apart, and nearly every navigation re-read every role's rules, hundreds of rows each, on a plan billed per row.
+A TTL only asks "has enough time passed?", and a short one answers yes almost every time.
+
+The caches now ask the database whether anything changed. `cache_generations` is one row of counters, bumped by
+triggers in the same transaction as each write (`lib/cacheGenerations.ts`, migration 0003), and a cached value
+is held until one of its own counters moves. Three choices follow from what went wrong with the first attempt,
+which checked the client-facing `collection_versions` stamps instead:
+
+- **Counters, not timestamps.** A millisecond stamp cannot tell two writes in the same millisecond apart, and
+  a clock step can make a change look older than the copy it replaced. A counter only goes up.
+- **Split by who reads it.** Ticket assignment writes `access_rules` rows (the share machinery), so a single
+  "rules changed" signal reloaded every role's grant on every assignment. Role broad rules and everything else
+  have separate counters.
+- **Counters first, then data, in one session.** With read replicas, the order is what makes a 30-day hold
+  safe: data read after its counter is at least as new as the counter it is filed under.
+
+The check itself is one row per isolate every five seconds, which is also how long a revocation takes to reach
+every isolate - the same bound the TTL gave, at a fraction of the reads.
+
 ---
 
 ## 10. When you outgrow the free tier

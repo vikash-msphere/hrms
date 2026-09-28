@@ -88,10 +88,16 @@ test("a person's access is granted and revoked from the Users permission sheet",
     await expect(confirm).toBeVisible({ timeout: 30_000 });
     await expect(confirm.getByText("They currently have read", { exact: false })).toBeVisible();
     await confirm.getByRole("button", { name: "Remove access" }).click();
-    await expect(toast(admin, "Updated Vendors")).toBeVisible({ timeout: 30_000 });
+    // Not the toast: the grant above raised the same "Updated Vendors", and it can still be on screen, so it
+    // proves nothing about this write. The cell is disabled from the press until the delete AND the re-read
+    // have landed, and the level it shows while saving is the one asked for - so enabled-and-none is the
+    // server's answer, and the wire read is polled as well.
+    await expect(level).toBeEnabled({ timeout: 30_000 });
     await expect(level).toContainText("none");
 
-    expect((await accessRules(admin)).find((r) => r.subject === subject && r.collection === "vendors")).toBeUndefined();
+    await expect
+      .poll(async () => (await accessRules(admin)).find((r) => r.subject === subject && r.collection === "vendors"), { timeout: 30_000 })
+      .toBeUndefined();
     await theirs.reload();
     await gotoRoute(theirs, "vendors");
     await expect(theirs.getByText("You don't have access to this")).toBeVisible({ timeout: 30_000 });

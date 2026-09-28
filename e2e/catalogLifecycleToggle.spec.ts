@@ -21,7 +21,7 @@ const CATALOGS: Toggled[] = [
   { route: "settings/pay-components", heading: "Pay Components", collection: "pay-components", label: "Pay component", data: { display_name: "Comp", kind: "earning", method: "fixed" } },
   { route: "settings/asset-tags", heading: "Asset Tags", tab: "Categories", collection: "asset-categories", label: "Category", data: { display_name: "Cat" } },
   {
-    route: "pay-periods", heading: "Pay Periods", collection: "pay-periods", label: "Pay period",
+    route: "payroll-runs/periods", heading: "Pay Periods", collection: "pay-periods", label: "Pay period",
     // A year no other payroll-lane spec touches (see the year ledger in `payrollBankFile.spec.ts` and
     // `operationsJobRun.spec.ts`), so this row is never mistaken for one a run has been built against.
     data: { display_name: "Period", period_start: "2033-05-01", period_end: "2033-05-31", pay_date: "2033-05-31" },

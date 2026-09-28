@@ -64,6 +64,7 @@ import { operations } from "./routes/operations";
 import { cronRuns } from "./routes/cronRuns";
 import { searchInsights } from "./routes/searchInsights";
 import { cronTrigger } from "./routes/cronTrigger";
+import { cacheFlush } from "./routes/cacheFlush";
 import { holidays } from "./routes/holidays";
 import { holidaySelections } from "./routes/holidaySelections";
 import { complianceEvents } from "./routes/complianceEvents";
@@ -340,6 +341,7 @@ app.route("/v1/payroll-openings:importOpenings", payrollOpeningImport); // pay a
 app.route("/v1/payroll-openings", payrollOpenings);
 app.route("/v1/payroll-runs", payrollRuns);
 app.route("/v1/payroll-budgets", payrollBudgets);
+app.route("/v1/operations:clearCache", cacheFlush); // collection custom method, before the operations mount
 app.route("/v1/operations", operations);
 app.route("/v1/cron-runs:run", cronTrigger); // collection custom method, before the cron-runs mount
 app.route("/v1/cron-runs", cronRuns);

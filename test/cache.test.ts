@@ -42,3 +42,36 @@ describe("isolate cache - correctness-independent + invalidation", () => {
     expect(await cached("x", 10_000, async () => "X2")).toBe("X2"); // reloaded after a full clear
   });
 });
+
+// The `stale` question is how a long-held value is checked against the cache counters (lib/cacheGenerations.ts).
+describe("isolate cache - the stale check", () => {
+  beforeEach(() => clearCache());
+
+  it("keeps a hit the check calls fresh, and reloads one it calls stale", async () => {
+    let calls = 0;
+    const load = async () => ++calls;
+    await cached("k", 10_000, load);
+    expect(await cached("k", 10_000, load, () => false)).toBe(1);
+    expect(await cached("k", 10_000, load, () => true)).toBe(2);
+    expect(calls).toBe(2);
+  });
+
+  it("reloads ONCE per call even when the fresh value is stale too (a replica behind the check), never looping", async () => {
+    let calls = 0;
+    const load = async () => ++calls;
+    await cached("k", 10_000, load);
+    // Always stale: the reloaded value is returned without being asked about again.
+    expect(await cached("k", 10_000, load, () => true)).toBe(2);
+    expect(calls).toBe(2);
+  });
+
+  it("callers who find the same stale entry share one reload", async () => {
+    let calls = 0;
+    const load = async () => ++calls;
+    await cached("k", 10_000, load);
+    const stale = (v: number) => v === 1;
+    const [a, b, c] = await Promise.all([cached("k", 10_000, load, stale), cached("k", 10_000, load, stale), cached("k", 10_000, load, stale)]);
+    expect([a, b, c]).toEqual([2, 2, 2]);
+    expect(calls).toBe(2);
+  });
+});

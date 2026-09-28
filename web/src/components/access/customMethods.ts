@@ -17,7 +17,7 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   "remote-work-requests": ["approve", "reject", "cancel"],
   "late-early-requests": ["approve", "reject", "cancel"],
   "asset-requests": ["approve", "reject", "cancel", "issue"],
-  operations: ["run"],
+  operations: ["run", "clearCache"],
   "cron-runs": ["run"],
   "leave-requests": ["approve", "reject", "cancel", "upload", "download", "importHistory"],
   goals: ["updateProgress", "comment", "setContributors", "watch", "unwatch", "similar", "suggestMeasure"],

@@ -8,7 +8,8 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta, removedMeta } from "../lib/audit";
 import { notFound, invalidArgument, failedPrecondition, alreadyExists } from "../lib/errors";
-import { cached, clearCache } from "../lib/cache";
+import { clearCache } from "../lib/cache";
+import { generational } from "../lib/cacheGenerations";
 import { EVERYONE_ROLE } from "../domain/grants";
 import { paginate } from "../http/pagination";
 
@@ -47,9 +48,9 @@ const PROVISIONED_KEY = "role:provisioned";
  * gets a clear error on the next hire rather than accounts quietly landing in some role.
  */
 export function provisionedRole(deps: Deps): Promise<string> {
-  // Throws INSIDE the loader, so the refusal is never cached: the moment an admin marks a role, the next hire
-  // sees it rather than waiting out the TTL on a remembered "none".
-  return cached(PROVISIONED_KEY, 5000, async () => {
+  // Held until the `roles` counter moves (lib/cacheGenerations.ts). Throws INSIDE the loader, so the refusal is
+  // never cached: the moment an admin marks a role, the next hire sees it rather than a remembered "none".
+  return generational(deps, PROVISIONED_KEY, ["roles"], async () => {
     const row = (await deps.db.select({ name: schema.roles.name }).from(schema.roles).where(eq(schema.roles.provisioned, true)).limit(1))[0];
     if (!row) throw failedPrecondition("no role is set to be given to new accounts - choose one in Access Management > Roles");
     return row.name;

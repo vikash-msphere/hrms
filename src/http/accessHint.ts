@@ -41,7 +41,8 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   "late-early-requests": ["approve", "reject", "cancel"],
   // `issue` is the hand-over: an approved request is closed by giving the person an actual asset.
   "asset-requests": ["approve", "reject", "cancel", "issue"],
-  operations: ["run"],
+  // `clearCache` is collection-level: every server instance reloads what it holds in memory.
+  operations: ["run", "clearCache"],
   "cron-runs": ["run"],
   // `importHistory` is collection-level (leave from before HRMS, for many people at once); listed so the ACL
   // modal can grant it by name.
@@ -187,6 +188,7 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "refreshEsign", // poll an e-sign vendor for a pending document's status and apply it (personal-documents)
   "remindAck", // nudge whoever still owes a signature on a policy's current version (org-documents)
   "run", // run a queued job (operations) or fire a cron tick on demand (cron-runs)
+  "clearCache", // collection-level: make every server instance reload its in-memory caches (operations)
   "uploadTemplate", // upload a bank's blank bulk-payment .xlsx (bank-formats)
   "uploadImage", "image", "deleteImage", // upload / read / remove one of a letterhead's images (letterheads)
   "duplicate", // copy a letterhead, artwork and all, as the basis for a variant (letterheads)

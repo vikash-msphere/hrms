@@ -13,7 +13,8 @@ import { createAccessRule, deleteAccessRule, decideAccessRule, purgeExpiredAcces
 import { previewAccess } from "../src/services/accessPreview";
 import { loadRoleGrant, loadRoleGrantUncached, loadRoleGuards } from "../src/lib/policyLoad";
 import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
-import { clearCachePrefix } from "../src/lib/cache";
+import { clearCache, clearCachePrefix } from "../src/lib/cache";
+import { CURRENT_KEY } from "../src/lib/cacheGenerations";
 import { invalidateCodeCache } from "../src/lib/authzResolve";
 import { guardAllows } from "../src/domain/ruleCondition";
 
@@ -115,6 +116,38 @@ describe("expiring grants", () => {
     expect(await cachedRoleCanRead(later)).toBe(false);
 
     // And the entry really was reused rather than quietly refilled - back on this clock it decides again.
+    expect(await cachedRoleCanRead()).toBe(true);
+  });
+
+  it("a write that busts no cache still reaches the cached grant once the counters are re-read", async () => {
+    await createAccessRule(deps, ana(), grantEmployeeRead());
+    expect(await cachedRoleCanRead()).toBe(true);
+
+    // Remove the rule the way the cron, a migration or manual SQL would: straight at the table, no cache bust.
+    // The trigger moves the `role_rules` counter in the same transaction.
+    await deps.db.delete(schema.accessRules);
+    // Until the counters themselves are re-read the isolate keeps serving its rows - that is the whole saving.
+    expect(await cachedRoleCanRead()).toBe(true);
+
+    // The check interval passing, which is all a re-read needs: the counter has moved past the cached rows.
+    clearCache(CURRENT_KEY);
+    expect(await cachedRoleCanRead()).toBe(false);
+  });
+
+  it("a per-object rule (a ticket share's shape) does not reload any role's grant", async () => {
+    await createAccessRule(deps, ana(), grantEmployeeRead());
+    expect(await cachedRoleCanRead()).toBe(true);
+    // Take the role's rule away behind the cache's back WITHOUT moving `role_rules`: put the counter back after
+    // the delete, so the only counter that has moved is the one a user's exact rule moves next.
+    const before = (await deps.db.select().from(schema.cacheGenerations))[0]!;
+    await deps.db.delete(schema.accessRules);
+    await deps.db.update(schema.cacheGenerations).set({ roleRules: before.roleRules });
+    await deps.db.insert(schema.accessRules).values({
+      uuid: genId(), subject: ids.bo, subjectKind: "user", namespace: "leave-requests", pattern: "leave-requests.04-002-9.**",
+      scopeKind: "exact", scopeCode: "04-002-9", matchCode: "04-002-9", level: "read", effect: "allow",
+    });
+    clearCache(CURRENT_KEY);
+    // Still the held rows: an `acl_rules` move is not a reason to re-read a role's grant.
     expect(await cachedRoleCanRead()).toBe(true);
   });
 

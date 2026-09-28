@@ -450,7 +450,7 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
     if (Array.isArray(m.sessions)) {
       const hm = (iso: unknown) => (typeof iso === "string" ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "?");
       const pairs = m.sessions as { clock_in?: string; clock_out?: string }[];
-      const label = pairs.length ? pairs.map((p) => `${hm(p.clock_in)}–${hm(p.clock_out)}`).join(", ") : "no punches";
+      const label = pairs.length ? pairs.map((p) => `${hm(p.clock_in)}–${p.clock_out ? hm(p.clock_out) : "still clocked in"}`).join(", ") : "no punches";
       bits.push(<span key="ses" className="text-muted-foreground tabular-nums">{label}</span>);
     }
     // Permission changes (`access-rule.*`): the rule itself, in words, plus who it is for.

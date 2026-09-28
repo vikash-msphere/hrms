@@ -323,6 +323,11 @@ export function Chart(props: ChartProps) {
   const builtData = React.useRef<FrappeData | null>(null);
   const builtWidth = React.useRef(0);
   const empty = isEmpty(props);
+  // The palette as a build dep by VALUE. A caller writing `colors={[a, b, c]}` hands over a new array on
+  // every render of its page, and keyed on identity that tore the chart down and drew it again each time -
+  // the SVG on screen was replaced under whatever held it. The offers donut on Recruiting analytics was the
+  // one caller doing this, and the one chart `everyChart` once found with no box under a loaded lane.
+  const colorKey = colors?.join("|");
   const shape =
     props.type === "heatmap"
       ? `h${Object.keys(days).length}`
@@ -466,9 +471,10 @@ export function Chart(props: ChartProps) {
       chart.current = null;
       el.innerHTML = "";
     };
-    // `data` is deliberately absent: new numbers UPDATE the chart (below) rather than rebuilding it.
+    // `data` is deliberately absent: new numbers UPDATE the chart (below) rather than rebuilding it. `colors`
+    // is read through `colorKey`, its value (see there).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lib, empty, type, resolved, height, colors, stacked, areaFill, spline, hideDots, maxSlices, countLabel, rebuild, paint]);
+  }, [lib, empty, type, resolved, height, colorKey, stacked, areaFill, spline, hideDots, maxSlices, countLabel, rebuild, paint]);
 
   // One click listener for the life of the host, resolving what was pressed out of the SVG - see CLICKING.
   // It outlives every rebuild (the host div is ours; only its contents are frappe's) and reads the current

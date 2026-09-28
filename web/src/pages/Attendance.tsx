@@ -11,7 +11,7 @@ import { navigate } from "@/router";
 import { exportTable } from "@/lib/exportTable";
 import { cn, idOf, formatDate } from "@/lib/utils";
 import {
-  summarizeByDay, buildAttendanceRows, statsOf, fmtDay, fmtHM, fmtHM24, fmtDuration, fmtDurationShort,
+  summarizeByDay, buildAttendanceRows, statsOf, fmtDay, fmtHM, fmtHM24, fmtDuration, fmtDurationShort, fmtCorrectionTimes,
   localDay, trackedFromOf, localMinutes, zonedInstant, weekdayOf, hhmmToMin, signedDuration, STATUS_UI, leaveRangeOf, unpaidLeaveTypes,
   type DayStatus, type AttendanceRow, type AttendanceSchedule, type LeaveRange, type WindowStats,
 } from "@/lib/attendance";
@@ -65,6 +65,7 @@ export default function Attendance({ me }: { me: Me }) {
   const canExport = useCanExport("attendance");
   const canLogOvertime = usePermission("overtime-requests.write");
   const canRequestLateEarly = usePermission("late-early-requests.write");
+  const canCorrect = usePermission("attendance-regularizations.write");
   const punctuality = usePunctualityPolicy();
   // Re-valuing a day, for the teammate logs this page opens from the roster. A roster spans everybody, so
   // there is no one subject to ask about: the caller-level question ("is there anybody but me whose day I
@@ -291,6 +292,7 @@ export default function Attendance({ me }: { me: Me }) {
   // A correction request is an attendance-regularization carrying the day's full intended in/out set. On
   // approval (manager/HR, via Approvals) the day's punches are superseded and these are written as the day's
   // sessions - no ticket, no manual data fixing. `pairs` are wall-clock "HH:MM"; [] means "remove all punches".
+  // A pair with no clock-out is today's last session, still running: it goes up without `clock_out`.
   // Several days at once file one regularization each, so every day stays independently approvable.
   // Files one regularization per day, each carrying that day's intended punches. Returns the failure message
   // (rather than toasting it) so the dialog can keep it beside the form the user still has to fix.
@@ -307,7 +309,7 @@ export default function Attendance({ me }: { me: Me }) {
       // `has(day)` test above and both filed the same day.
       filedThisDialog.current.add(day);
       try {
-        const sessions = perDay[day].map((p) => ({ clock_in: zonedInstant(day, p.in, tz), clock_out: zonedInstant(day, p.out, tz) }));
+        const sessions = perDay[day].map((p) => ({ clock_in: zonedInstant(day, p.in, tz), ...(p.out ? { clock_out: zonedInstant(day, p.out, tz) } : {}) }));
         await create("attendance-regularizations", { date: day, sessions, reason: reason || undefined });
         filed.push(day);
       } catch (e) {
@@ -495,7 +497,19 @@ export default function Attendance({ me }: { me: Me }) {
                     <Button className="h-11 w-full px-6 text-base sm:w-auto" loading={clock.busy} onClick={() => void punch("clockIn")}><LogIn className="h-4 w-4" /> Clock in</Button>
                   </AccessAction>
                 )}
-                <p className="text-xs text-muted-foreground sm:text-right">Clock out and back in to record a break.</p>
+                <p className="text-xs text-muted-foreground sm:text-right">
+                  Clock out and back in to record a break.
+                  {/* The morning punch is the one people miss or make late, and they notice while still at work -
+                      so today's fix sits next to the clock rather than down in the history. */}
+                  {canCorrect && !staleOpen && (
+                    <>
+                      {" "}
+                      <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={() => setCorrecting([todayRow ?? { day: orgToday, status: "absent" as DayStatus }])}>
+                        Missed or wrong punch?
+                      </button>
+                    </>
+                  )}
+                </p>
               </div>
             </div>
 
@@ -588,7 +602,7 @@ export default function Attendance({ me }: { me: Me }) {
             <CardHeader><CardTitle className="text-base">My correction requests</CardTitle></CardHeader>
             <CardContent className="divide-y">
               {myRegs.map((r) => {
-                const times = r.sessions.length === 0 ? "Remove all punches" : r.sessions.map((s) => `${fmtHM(s.clock_in, tz)}–${fmtHM(s.clock_out, tz)}`).join(", ");
+                const times = fmtCorrectionTimes(r.sessions, (iso) => fmtHM(iso, tz));
                 return (
                   <div key={r.path} className="flex items-start gap-3 py-2.5 first:pt-0 last:pb-0">
                     <div className="min-w-0 flex-1">
@@ -636,6 +650,7 @@ export default function Attendance({ me }: { me: Me }) {
           rows={correcting}
           tz={tz}
           sched={sched}
+          today={orgToday}
           pendingDays={pendingCorrectionDays}
           busy={correctionBusy}
           onClose={closeCorrection}
@@ -734,7 +749,7 @@ function PendingCorrections({ tz, employees, onDecided }: { tz: string; employee
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">{nameOf(r.employee)} · {formatDate(r.date)}</p>
               <p className="truncate text-xs text-muted-foreground">
-                {r.sessions.length === 0 ? "Remove all punches" : r.sessions.map((s) => `${fmtHM(s.clock_in, tz)}–${fmtHM(s.clock_out, tz)}`).join(", ")}
+                {fmtCorrectionTimes(r.sessions, (iso) => fmtHM(iso, tz))}
                 {r.reason ? ` · ${r.reason}` : ""}
               </p>
             </div>
@@ -1054,29 +1069,55 @@ function RegStatePill({ state }: { state?: string }) {
   }
 }
 
-type PunchRow = { in: string; out: string };
+// One in/out on the form. `was` is the punch it started as, on a row seeded from the day's record, so the form
+// can mark exactly which time the request changes; it travels with the row, so removing a row above keeps it.
+type PunchRow = { in: string; out: string; was?: { in: string; out: string } };
 
 // Correction request modal: seeded with the day's existing sessions (one row per punch), each editable, with
 // add/remove. Submitting files an attendance-regularization carrying the FULL intended day; on approval the
 // day's punches are superseded and these become the day's sessions. Removing every row clears the day.
+// Fixing one punch is editing one field: the others are already filled with what was recorded, and the
+// changed time is marked against it. On today the latest in/out may leave its clock-out blank - the person is
+// still at work, and the approval keeps whatever clock-out they punch (services/attendanceRegularizations.ts).
 // Several days at once default to one shared set of times (the "I forgot to clock all week" case) and file one
 // request each; per-day mode gives each selected day its own times, because a real week is rarely identical.
 
-// Per-row error: a row must have both times, in order ("HH:MM" compares lexically). Fully-blank rows are dropped.
-const punchError = (r: PunchRow): string | undefined => {
-  if (!r.in && !r.out) return undefined;
-  if (!r.in || !r.out) return "Both times are required";
-  if (r.out <= r.in) return "Clock-out must be after clock-in";
-  return undefined;
+// `now` is today's wall clock ("HH:MM") when the list is for today, which is what lets a row stay open.
+type OpenAllowance = { now: string } | undefined;
+
+// Per-row errors for one day's list. A row needs both times, in order ("HH:MM" compares lexically) - except the
+// latest one on today, which may leave its clock-out blank. Fully-blank rows are dropped, so they never error.
+const punchErrors = (rows: PunchRow[], open: OpenAllowance): (string | undefined)[] => {
+  const latest = rows.reduce((best, r, i) => (r.in && (best < 0 || r.in > rows[best]!.in) ? i : best), -1);
+  return rows.map((r, i) => {
+    if (!r.in && !r.out) return undefined;
+    if (!r.in) return "Add the clock-in time";
+    if (!r.out) {
+      if (!open) return "Add the clock-out time";
+      if (i !== latest) return "Only the latest in/out can be left without a clock-out";
+      if (r.in > open.now) return "Clock-in can't be later than now";
+      return undefined;
+    }
+    if (r.out <= r.in) return "Clock-out must be after clock-in";
+    return undefined;
+  });
 };
 const keptPunches = (rows: PunchRow[]) => rows.filter((r) => r.in || r.out); // rows the user actually filled
-const punchTotal = (rows: PunchRow[]) => keptPunches(rows).reduce((sum, r) => (punchError(r) ? sum : sum + (hhmmToMin(r.out) - hhmmToMin(r.in))), 0);
+const isOpenPunch = (r: PunchRow) => !!r.in && !r.out;
+// Minutes the rows add up to. An open row counts up to `now`, so a day still in progress totals "so far".
+const punchTotal = (rows: PunchRow[], open: OpenAllowance) => {
+  const errs = punchErrors(rows, open);
+  return rows.reduce((sum, r, i) => (errs[i] || (!r.in && !r.out) ? sum : sum + Math.max(0, hhmmToMin(r.out || open!.now) - hhmmToMin(r.in))), 0);
+};
+const sameTimes = (a: PunchRow[], b: PunchRow[]) => a.map((r) => `${r.in}-${r.out}`).join() === b.map((r) => `${r.in}-${r.out}`).join();
 
-function CorrectionDialog({ rows, tz, sched, pendingDays, busy, onClose, onSubmit }: {
+function CorrectionDialog({ rows, tz, sched, today, pendingDays, busy, onClose, onSubmit }: {
   rows: AttendanceRow[];
   tz: string;
   // The org work schedule, so the standard day can be filled in with one click instead of typed twice.
   sched: AttendanceSchedule;
+  // The org-local today: only a correction for today can leave its latest clock-out blank.
+  today: string;
   // Days that already carry a pending correction - filing a second one for the same day is almost never meant.
   pendingDays: string[];
   busy: boolean;
@@ -1086,22 +1127,31 @@ function CorrectionDialog({ rows, tz, sched, pendingDays, busy, onClose, onSubmi
 }) {
   const guardClose = useDiscardGuard();
   const single = rows.length === 1 ? rows[0] : undefined;
-  const seeded = (single?.summary?.sessions ?? []).map((s) => ({ in: fmtHM24(s.clock_in, tz), out: s.clock_out ? fmtHM24(s.clock_out, tz) : "" }));
+  const seeded: PunchRow[] = (single?.summary?.sessions ?? []).map((s) => {
+    const was = { in: fmtHM24(s.clock_in, tz), out: s.clock_out ? fmtHM24(s.clock_out, tz) : "" };
+    return { ...was, was };
+  });
   const [punches, setPunches] = useState<PunchRow[]>(seeded.length ? seeded : [{ in: "", out: "" }]);
   // null = every selected day takes the shared times above; a record = each day carries its own.
   const [perDay, setPerDay] = useState<Record<string, PunchRow[]> | null>(null);
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  // Only one day, and only today: the latest in/out may be left running. Read at render, which the page's own
+  // 15s tick keeps close enough for a "not later than now" check.
+  const openAllowed: OpenAllowance = single?.day === today ? { now: fmtHM24(new Date().toISOString(), tz) } : undefined;
   // What each targeted day would become - the single source both the summary and the submit read from.
   const targets: Record<string, PunchRow[]> = perDay ?? Object.fromEntries(rows.map((r) => [r.day, punches]));
   const kept = keptPunches(punches);
-  const canSubmit = Object.values(targets).every((p) => !keptPunches(p).some((r) => punchError(r))); // an empty set clears the day
-  const total = punchTotal(punches);
+  const canSubmit = Object.values(targets).every((p) => !punchErrors(p, openAllowed).some(Boolean)); // an empty set clears the day
+  const total = punchTotal(punches, openAllowed);
+  const stillIn = !!openAllowed && kept.some(isOpenPunch);
   // What the day currently says, so the request reads as "this, instead of that" rather than a bare set of times.
-  const recorded = single?.summary?.workedMinutes ?? 0;
+  // A punch still running counts up to now on both sides, so moving this morning's clock-in reads as the
+  // difference it makes rather than as the whole open stretch.
+  const recorded = openAllowed ? punchTotal(seeded, openAllowed) : single?.summary?.workedMinutes ?? 0;
   const delta = Math.max(0, total) - recorded;
-  const edited = JSON.stringify(kept) !== JSON.stringify(seeded);
+  const edited = !sameTimes(kept, seeded);
   const dirty = edited || !!reason.trim() || !!perDay;
   const clashes = rows.map((r) => r.day).filter((d) => pendingDays.includes(d));
   // One-click fills for the two shapes almost every correction takes: the org's standard day, and no punches at all.
@@ -1132,7 +1182,9 @@ function CorrectionDialog({ rows, tz, sched, pendingDays, busy, onClose, onSubmi
           <DialogTitle>{single ? `Correct attendance — ${formatDate(single.day)}` : `Correct ${rows.length} days`}</DialogTitle>
           <DialogDescription>
             {single
-              ? "Set the day's actual clock in/out times. Your manager or HR approves it, and the day is fixed. Remove every row to clear the day's punches."
+              ? openAllowed
+                ? "Change only the time that's wrong - the rest stay as recorded. Still at work? Leave the last clock-out blank and clock out as usual. Your manager or HR approves it."
+                : "Change only the time that's wrong - the rest stay as recorded. Your manager or HR approves it, and the day is fixed. Remove every row to clear the day's punches."
               : perDay
                 ? "Each day carries its own times, and files its own request so it can be approved on its own."
                 : "These times are applied to every selected day, filing one request per day so each can be approved on its own."}
@@ -1161,7 +1213,7 @@ function CorrectionDialog({ rows, tz, sched, pendingDays, busy, onClose, onSubmi
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-sm font-medium">{fmtDay(r.day)}</span>
                     <span className="flex flex-wrap items-center gap-1 text-xs tabular-nums text-muted-foreground">
-                      {dayKept.length === 0 ? "Clears the day" : <>Totals <span className="font-semibold text-foreground">{fmtDuration(Math.max(0, punchTotal(dayPunches)))}</span></>}
+                      {dayKept.length === 0 ? "Clears the day" : <>Totals <span className="font-semibold text-foreground">{fmtDuration(Math.max(0, punchTotal(dayPunches, undefined)))}</span></>}
                       <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => set(scheduledDay())}>Scheduled</Button>
                       <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => set([{ in: "", out: "" }])}>Clear</Button>
                     </span>
@@ -1179,7 +1231,7 @@ function CorrectionDialog({ rows, tz, sched, pendingDays, busy, onClose, onSubmi
               <span className="text-muted-foreground">
                 {single
                   ? seeded.length
-                    ? <>Recorded now: <span className="font-medium tabular-nums text-foreground">{seeded.map((s) => `${s.in}-${s.out || "?"}`).join(", ")}</span> · {fmtDuration(recorded)}</>
+                    ? <>Recorded now: <span className="font-medium tabular-nums text-foreground">{seeded.map((s) => `${s.in}-${s.out || (openAllowed ? "still in" : "?")}`).join(", ")}</span> · {fmtDuration(recorded)}</>
                     : <>Nothing recorded on this day.</>
                   : <>No punches are read from the selected days; the times below replace each day in full.</>}
               </span>
@@ -1191,14 +1243,14 @@ function CorrectionDialog({ rows, tz, sched, pendingDays, busy, onClose, onSubmi
               </span>
             </div>
             <div className="space-y-2">
-              <PunchRows punches={punches} onChange={setPunches} labels autoFocus />
+              <PunchRows punches={punches} onChange={setPunches} open={openAllowed} labels autoFocus />
               <div className="flex items-center justify-end gap-3">
                 <span className="text-xs tabular-nums text-muted-foreground">
                   {kept.length === 0 ? (
                     single ? "Clears the day" : "Clears every selected day"
                   ) : (
                     <>
-                      {single ? "Day totals" : "Each day totals"} <span className="font-semibold text-foreground">{fmtDuration(Math.max(0, total))}</span>
+                      {stillIn ? "So far" : single ? "Day totals" : "Each day totals"} <span className="font-semibold text-foreground">{fmtDuration(Math.max(0, total))}</span>
                       {/* The change, not just the result: an approver is deciding on the difference. */}
                       {single && delta !== 0 && (
                         <span className={cn("ml-1 font-medium", delta > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400")}>
@@ -1226,26 +1278,47 @@ function CorrectionDialog({ rows, tz, sched, pendingDays, busy, onClose, onSubmi
 // One editable in/out list: a row per punch, add and remove, each row validated on its own. Shared by the
 // correction dialog's two modes (one set of times for every day, or a set per day), which is the only reason
 // it is a component rather than inline markup.
-function PunchRows({ punches, onChange, labels, autoFocus }: {
+function PunchRows({ punches, onChange, open, labels, autoFocus }: {
   punches: PunchRow[];
   onChange: (next: PunchRow[]) => void;
+  // Set when the list is for today, so its latest in/out may leave the clock-out blank.
+  open?: OpenAllowance;
   // Column labels sit above the first row. A per-day block repeats the list, where repeating the labels is noise.
   labels?: boolean;
   autoFocus?: boolean;
 }) {
   const set = (i: number, patch: Partial<PunchRow>) => onChange(punches.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const errors = punchErrors(punches, open);
+  // Under a field whose time the request changes, what the record said before - so fixing one punch reads as
+  // exactly that, and the untouched ones visibly stay as they were.
+  const was = (now: string, before?: string) =>
+    before !== undefined && now !== before ? <p className="text-xs tabular-nums text-muted-foreground">was {before || "not punched"}</p> : null;
   return (
     <div className="space-y-2">
       {punches.map((r, i) => {
-        const err = punchError(r);
+        const err = errors[i];
+        const running = !err && !!open && isOpenPunch(r);
         const label = (text: string) => (labels && i === 0 ? text : "");
+        // The field the error is about, so the other one of the pair is not painted wrong alongside it.
+        const badIn = !!err && !r.in;
+        const badOut = !!err && !badIn;
+        const inNote = was(r.in, r.was?.in);
+        const outNote = running ? <p className="text-xs font-medium text-success">Still clocked in</p> : was(r.out, r.was?.out);
         return (
           <div key={i} className="space-y-1">
             <div className="flex items-end gap-4">
-              <Field label={label("Clock in")} className="flex-1"><Input type="time" aria-label={`Clock in, punch ${i + 1}`} autoFocus={autoFocus && i === 0} value={r.in} onChange={(e) => set(i, { in: e.target.value })} /></Field>
-              <Field label={label("Clock out")} className="flex-1"><Input type="time" aria-label={`Clock out, punch ${i + 1}`} aria-invalid={!!err} className={cn(err && "border-destructive focus-visible:ring-destructive")} value={r.out} onChange={(e) => set(i, { out: e.target.value })} /></Field>
+              <Field label={label("Clock in")} className="flex-1"><Input type="time" aria-label={`Clock in, punch ${i + 1}`} aria-invalid={badIn} className={cn(badIn && "border-destructive focus-visible:ring-destructive")} autoFocus={autoFocus && i === 0} value={r.in} onChange={(e) => set(i, { in: e.target.value })} /></Field>
+              <Field label={label("Clock out")} className="flex-1"><Input type="time" aria-label={`Clock out, punch ${i + 1}`} aria-invalid={badOut} className={cn(badOut && "border-destructive focus-visible:ring-destructive")} value={r.out} onChange={(e) => set(i, { out: e.target.value })} /></Field>
               <Button type="button" variant="ghost" size="icon" className="mb-0.5 h-9 w-9 shrink-0 text-muted-foreground hover:text-destructive" onClick={() => onChange(punches.filter((_, j) => j !== i))} aria-label="Remove this in/out"><Trash2 className="h-4 w-4" /></Button>
             </div>
+            {/* Same columns as the inputs above (the spacer stands in for the remove button), so each note sits under its field. */}
+            {(inNote || outNote) && (
+              <div className="flex gap-4">
+                <div className="flex-1">{inNote}</div>
+                <div className="flex-1">{outNote}</div>
+                <div className="w-9 shrink-0" aria-hidden />
+              </div>
+            )}
             {err && <p className="text-xs font-medium text-destructive">{err}</p>}
           </div>
         );

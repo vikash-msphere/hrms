@@ -41,9 +41,10 @@ How access control works in this codebase, end to end. This is the **current** r
 - **DB narrows, the engine decides.** The DB only ever narrows candidate rules by **exact code** (a
   subject, a namespace, an ancestor-code `IN` set) - never a SQL prefix/`LIKE` on the scope key. Every
   BOLA-critical comparison (`me` / `my-dept` / `isUnder` / deny-wins) happens in the tested TS engine.
-- **Read-mostly, cached.** A role's compiled rules and the global manifest are read-mostly; they are cached
-  per isolate with a short TTL, so warm decisions approach zero DB reads. The cache is
-  correctness-independent (a cold isolate computes the identical verdict from the same rows).
+- **Read-mostly, cached.** A role's compiled rules, the caller's own rules, roles held, reporting lines and the
+  global manifest are held in each isolate's memory until the database says they changed (section 9, "How the
+  caches stay fresh"), so warm decisions read no rules at all. The cache is correctness-independent (a cold
+  isolate computes the identical verdict from the same rows).
 - **BOLA-resistant by construction.** Every item decision resolves the object's hierarchical `code` and
   matches it against the caller's scope. Opaque wire ids are defense in depth, never the guard.
 
@@ -380,13 +381,16 @@ then resolves the caller and their authority:
 - One query left-joins the caller's identity + employee `code`: `users LEFT JOIN employees`.
 - The **broad role grant** comes from `loadRoleGrant(role)` (`src/lib/policyLoad.ts`): it reads the role's
   SCOPE rows (`subject = role AND subject_kind = 'role' AND match_code IS NULL`) and reconstructs the `Grant`
-  via `rulesToGrant`. Cached per role (`cache.ts`, ~5s TTL). Object-pinned (exact) role rules are excluded
-  here - they ride the per-object narrowed lane (step 3 below), so the cached grant stays small.
+  via `rulesToGrant`. Cached per role until the `role_rules` counter moves (below). Object-pinned (exact) role
+  rules are excluded here - they ride the per-object narrowed lane (step 3 below), so the cached grant stays
+  small.
 - The **broad user grant** comes from `loadUserGrant(uuid)` - the caller's OWN scope rules
   (`subject_kind = 'user' AND match_code IS NULL`), merged onto the role grant (`mergeGrants`). Cached per user
-  (~5s); the common case is no rows (`EMPTY_GRANT`, so the merge is a no-op). This makes a user first-class
-  like a role (it can hold collection/dept/field-scope access, not only per-object exceptions).
-- The **global manifest** comes from `loadManifest()` (the `policy` row, parsed fail-closed), also cached.
+  until the `acl_rules` counter moves; the common case is no rows (`EMPTY_GRANT`, so the merge is a no-op).
+  This makes a user first-class like a role (it can hold collection/dept/field-scope access, not only
+  per-object exceptions).
+- The **global manifest** comes from `loadManifest()` (the `policy` row, parsed fail-closed), cached until the
+  `policy` counter moves.
 - Sets `user = { ..., employeeCode, grant, policy }`. A disabled user is rejected. First login auto-provisions
   a row.
 
@@ -397,8 +401,9 @@ then resolves the caller and their authority:
 2. `resolveRequest` builds the `Resolved`.
 3. **Per-object overlay (item paths).** If an object `code` resolved, `loadObjectRulesForRequest` takes the
    per-object rows matching the object's ancestor codes (section 10) - the caller's USER exceptions AND any
-   exact ROLE rules - out of the caller's cached per-object rule set (one indexed read per caller per TTL,
-   `subject IN (uuid, role)` paired by `subject_kind`, sliced in memory afterwards); any are overlaid on the
+   exact ROLE rules - out of the caller's cached per-object rule set (one indexed read per caller, repeated
+   only when the `acl_rules` counter moves; `subject IN (uuid, role)` paired by `subject_kind`, sliced in
+   memory afterwards); any are overlaid on the
    broad role grant via `mergeGrants`. The merged grant is also stashed on `ctx.objectGrant` for the
    `access.can` hint (section 13). No object code -> the broad grant.
 4. `decide(grant, resolved, { employeeCode })` - reads memory, zero queries.
@@ -413,6 +418,7 @@ Per-request read budget:
 | Read | When | Cold | Warm |
 |---|---|---|---|
 | `users (+ employees)` identity | every request | 1 | 1 |
+| the cache counters (`cache_generations`, one row) | at most once per isolate per 5s | 1 | ~0 |
 | broad role grant (scope rows -> `rulesToGrant`) | every request | 1 | ~0 (cached per role) |
 | broad user grant (own scope rows) | every request | 1 (usually empty) | ~0 (cached per user) |
 | manifest | every request | 1 | ~0 (cached) |
@@ -420,10 +426,35 @@ Per-request read budget:
 | per-object rules (user + exact-role rows) | item paths, and every list's shares/denies | 1 (tiny, index-only; usually empty) | ~0 (cached per caller) |
 | the decision | every request | **0** (memory) | **0** |
 
-Nothing scales with object or rule count; the decision itself never queries. Reads are served from the
-nearest D1 replica once read-replication is enabled (a deferred `[human]` step + a Sessions wrapper - see
-`PLAN.md` W2); today they go to the primary, and a grant edit propagates within the cache TTL (a few
-seconds, accepted).
+Nothing scales with object or rule count; the decision itself never queries.
+
+### How the caches stay fresh
+
+Every cache above lives in ONE isolate's memory, and Cloudflare runs many isolates, so no code in one of them
+can clear another's. What they share is the database: `cache_generations` (`src/db/schema.ts`) is one row with a
+counter per kind of cached data, and a trigger on each source table bumps its counter in the same transaction as
+the write (migration `0003_release_three.sql`). Every writer is covered - a service, a cron, the code
+cascade, a migration, hand-run SQL - and no code path has to remember to clear anything.
+
+| counter | moved by | what reloads |
+|---|---|---|
+| `role_rules` | a role's broad rule (`subject_kind = 'role'`, no `match_code`) | that role's grant, in every role that unions `everyone` |
+| `acl_rules` | any other rule: user rules, per-object rules, ticket shares | callers' user grants and per-object rule sets |
+| `user_roles` | a secondary role granted or taken away | roles held |
+| `policy` | the manifest row | the manifest |
+| `roles` | the role catalog | the role new accounts get |
+| `org` | an employee added or removed, or a manager, code or delete-time change | reporting lines |
+| `codes` | an employee or department code change (every re-parent) | the `uuid -> code` map |
+| `automations` | any automation rule write | the enabled rule set |
+
+`src/lib/cacheGenerations.ts` holds a value for up to 30 days and reloads it only when one of ITS counters has
+moved; each isolate re-reads the counter row at most every 5s. The counters are read before the data, in the
+same D1 session, so a read replica that is behind can never file old rows under a newer counter, and counters
+only go up, so no clock is involved. A change therefore reaches every isolate within about 5s plus replica
+lag. Without the row (the migration not applied) every cache falls back to expiring after 5s.
+
+`POST /v1/operations:clearCache` (the "Clear caches" button on Settings > Operations, super-only unless
+granted) moves every counter and empties the answering isolate at once, for changes made outside these tables.
 
 ## 10. Per-object rules (a user, or an object-pinned role)
 
@@ -810,6 +841,8 @@ sibling doc, having no row, stays denied.
 | `src/http/accessHint.ts` | `computeCan` / `withAccess` - the per-object `access.can` UX hint (gates nothing) |
 | `src/http/collectionRoute.ts` + `src/services/crud.ts` | the ONE standard-method surface every collection is built from; shapes requests, decides no permission |
 | `src/lib/cache.ts` | in-isolate TTL cache (`cached` / `clearCache`); correctness-independent |
+| `src/lib/cacheGenerations.ts` | long-held caches checked against the `cache_generations` counters (`generational`); section 9 |
+| `src/services/cacheFlush.ts` | `POST /v1/operations:clearCache`: move every counter, empty this isolate |
 | `src/lib/authzResolve.ts` | path -> coded path, `uuid <-> code` resolvers + cache, collection->table map |
 | `src/middleware/auth.ts` | resolve caller + employeeCode; load grant + manifest from the store |
 | `src/middleware/authz.ts` | the sole gate: resolve, overlay exceptions, decide, body AC, set scope, fail closed |

@@ -13,6 +13,7 @@ import { StatusBadge } from "@/components/common/StatusBadge";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { TableSkeleton } from "@/components/common/Skeletons";
 import { AccessAction } from "@/components/access/AccessAction";
+import { fmtCorrectionTimes } from "@/lib/attendance";
 
 // One person's requests of one kind, on their record: the place an approver's "Open" lands. The self-service
 // pages for these collections list only the caller's own requests, so somebody else's had no page at all.
@@ -77,7 +78,7 @@ const SPECS: Record<EmployeeRequestKind, Spec<Row>> = {
     status: (r) => r.state,
     what: (r) => {
       const t = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      const times = r.sessions.length === 0 ? "remove punches" : r.sessions.map((s) => `${t(s.clock_in)}–${t(s.clock_out)}`).join(", ");
+      const times = fmtCorrectionTimes(r.sessions, t, "remove punches");
       return `${formatDate(r.date)} · ${times}${r.reason ? ` · ${r.reason}` : ""}`;
     },
   }),

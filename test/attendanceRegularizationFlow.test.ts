@@ -269,3 +269,106 @@ describe("attendance: a superseded open session does not count as being clocked 
     expect(closed.clockOut).not.toBeNull();
   });
 });
+
+// ---- Fixing one punch while still at work ----------------------------------------------------------------------
+//
+// The morning punch is the one people miss or make late, and they notice while still at work: they know when
+// they came in and cannot know when they will leave. Today's last session may therefore omit `clock_out`
+// ("still clocked in"). Approval splits the day at the filing instant: punches that existed then are replaced,
+// punches made after it stand, and the open session ends where work actually stopped.
+describe("attendance regularization: today's last session left open", () => {
+  const noFence = { ip: null, allowList: undefined };
+  const at = (iso: string): Deps => ({ ...deps, clock: { now: () => new Date(iso) } });
+  // 2026-07-20 in Asia/Kolkata (+05:30): 03:30Z = 09:00, 05:30Z = 11:00, 07:30Z = 13:00, 12:30Z = 18:00.
+  const DAY = "2026-07-20";
+  const liveOf = async (employeeId: string) =>
+    (await deps.db.select().from(schema.attendanceSessions).where(eq(schema.attendanceSessions.employeeId, employeeId)))
+      .filter((s) => s.supersededBy === null)
+      .sort((a, b) => +new Date(a.clockIn) - +new Date(b.clockIn));
+
+  it("approved while still at work: the corrected clock-in replaces the late one and stays open", async () => {
+    const actor = await seedActor();
+    await clockIn(at(`${DAY}T05:30:00.000Z`), actor, noFence); // punched at 11:00, came in at 09:00
+    const reg = await createRegularization(at(`${DAY}T07:30:00.000Z`), actor, { date: DAY, sessions: [{ clock_in: `${DAY}T03:30:00.000Z` }], reason: "forgot to punch in" });
+    expect(reg.sessions).toEqual([{ clock_in: `${DAY}T03:30:00.000Z` }]);
+
+    await approveRegularization(at(`${DAY}T08:00:00.000Z`), actor, reg.uuid);
+    const live = await liveOf(actor.employeeId!);
+    expect(live).toHaveLength(1);
+    expect(+new Date(live[0]!.clockIn)).toBe(Date.parse(`${DAY}T03:30:00.000Z`));
+    expect(live[0]!.clockOut, "still at work, so still clocked in").toBeNull();
+    expect(live[0]!.source).toBe("correction");
+
+    // ...and the ordinary clock-out closes it.
+    const closed = await clockOut(at(`${DAY}T12:30:00.000Z`), actor, noFence);
+    expect(closed.uuid).toBe(live[0]!.uuid);
+    expect(+new Date(closed.clockOut!)).toBe(Date.parse(`${DAY}T12:30:00.000Z`));
+  });
+
+  it("approved after clocking out: the open session ends at the real clock-out", async () => {
+    const actor = await seedActor();
+    await clockIn(at(`${DAY}T05:30:00.000Z`), actor, noFence);
+    const reg = await createRegularization(at(`${DAY}T07:30:00.000Z`), actor, { date: DAY, sessions: [{ clock_in: `${DAY}T03:30:00.000Z` }] });
+    await clockOut(at(`${DAY}T12:30:00.000Z`), actor, noFence);
+
+    await approveRegularization(at(`${DAY}T13:00:00.000Z`), actor, reg.uuid);
+    const live = await liveOf(actor.employeeId!);
+    expect(live.map((s) => [new Date(s.clockIn).toISOString(), s.clockOut && new Date(s.clockOut).toISOString(), s.source])).toEqual([
+      [`${DAY}T03:30:00.000Z`, `${DAY}T12:30:00.000Z`, "correction"],
+    ]);
+  });
+
+  it("keeps the punches made after filing, and ends the open session where they begin", async () => {
+    const actor = await seedActor();
+    // Nothing punched at all when filed at 10:30; they then clock in at 11:30 and out at 17:30.
+    const reg = await createRegularization(at(`${DAY}T05:00:00.000Z`), actor, { date: DAY, sessions: [{ clock_in: `${DAY}T03:30:00.000Z` }] });
+    await clockIn(at(`${DAY}T06:00:00.000Z`), actor, noFence);
+    await clockOut(at(`${DAY}T12:00:00.000Z`), actor, noFence);
+
+    await approveRegularization(at(`${DAY}T12:30:00.000Z`), actor, reg.uuid);
+    const live = await liveOf(actor.employeeId!);
+    expect(live.map((s) => [new Date(s.clockIn).toISOString(), s.clockOut && new Date(s.clockOut).toISOString(), s.source])).toEqual([
+      [`${DAY}T03:30:00.000Z`, `${DAY}T06:00:00.000Z`, "correction"],
+      [`${DAY}T06:00:00.000Z`, `${DAY}T12:00:00.000Z`, "clock"],
+    ]);
+  });
+
+  it("keeps earlier closed sessions in the request and leaves only the latest open", async () => {
+    const actor = await seedActor();
+    await punch(actor.employeeId!, `${DAY}T03:30:00.000Z`, `${DAY}T07:30:00.000Z`); // 09:00-13:00
+    await clockIn(at(`${DAY}T09:00:00.000Z`), actor, noFence); // back from lunch at 14:30, meant 14:00
+    const reg = await createRegularization(at(`${DAY}T10:00:00.000Z`), actor, {
+      date: DAY,
+      sessions: [{ clock_in: `${DAY}T03:30:00.000Z`, clock_out: `${DAY}T07:30:00.000Z` }, { clock_in: `${DAY}T08:30:00.000Z`, clock_out: null }],
+    });
+    await approveRegularization(at(`${DAY}T10:30:00.000Z`), actor, reg.uuid);
+    const live = await liveOf(actor.employeeId!);
+    expect(live.map((s) => [new Date(s.clockIn).toISOString(), s.clockOut && new Date(s.clockOut).toISOString()])).toEqual([
+      [`${DAY}T03:30:00.000Z`, `${DAY}T07:30:00.000Z`],
+      [`${DAY}T08:30:00.000Z`, null],
+    ]);
+  });
+
+  it("refuses an open session anywhere but today's last, or one that starts in the future", async () => {
+    const actor = await seedActor();
+    const now = at(`${DAY}T07:30:00.000Z`);
+    // A past day must say when it ended.
+    await expect(createRegularization(now, actor, { date: "2026-07-19", sessions: [{ clock_in: "2026-07-19T03:30:00.000Z" }] })).rejects.toThrow(/only today's last session/);
+    // Only the last one may be open.
+    await expect(createRegularization(now, actor, {
+      date: DAY,
+      sessions: [{ clock_in: `${DAY}T03:30:00.000Z` }, { clock_in: `${DAY}T05:30:00.000Z`, clock_out: `${DAY}T06:30:00.000Z` }],
+    })).rejects.toThrow(/only the last session/);
+    // "Still clocked in" from a time that has not happened yet.
+    await expect(createRegularization(now, actor, { date: DAY, sessions: [{ clock_in: `${DAY}T09:00:00.000Z` }] })).rejects.toThrow(/before now/);
+  });
+
+  it("refuses to approve while another day's session is still open, and leaves the request pending", async () => {
+    const actor = await seedActor();
+    await clockIn(at("2026-07-19T03:30:00.000Z"), actor, noFence); // yesterday, never clocked out
+    const reg = await createRegularization(at(`${DAY}T07:30:00.000Z`), actor, { date: DAY, sessions: [{ clock_in: `${DAY}T03:30:00.000Z` }] });
+    await expect(approveRegularization(at(`${DAY}T08:00:00.000Z`), actor, reg.uuid)).rejects.toThrow(/still clocked in from 2026-07-19/);
+    const after = (await deps.db.select().from(schema.attendanceRegularizations).where(eq(schema.attendanceRegularizations.uuid, reg.uuid)))[0]!;
+    expect(after.state).toBe("PENDING");
+  });
+});

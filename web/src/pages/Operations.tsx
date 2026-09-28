@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Activity, RefreshCw, Clock3, CalendarClock, Play } from "lucide-react";
+import { Activity, RefreshCw, Clock3, CalendarClock, Play, DatabaseZap } from "lucide-react";
 import { api } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { humanize, idOf } from "@/lib/utils";
@@ -11,6 +11,9 @@ import { StatusBadge } from "@/components/common/StatusBadge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
+import { useAccessMode } from "@/components/access/AccessModeProvider";
+import { usePermission } from "@/lib/perm";
+import { useViewAs } from "@/lib/viewAsStore";
 import { useToast } from "@/components/ui/use-toast";
 
 // The app's scheduled triggers. Kept in lockstep with wrangler.toml `crons` and src/cron.ts dispatch.
@@ -75,6 +78,27 @@ export default function Operations({ embedded }: { me?: Me; embedded?: boolean }
   const now = useMemo(() => new Date(), [crons.rows, jobs.rows]);
   const [running, setRunning] = useState<string | null>(null);
   const [runningJob, setRunningJob] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+  // The same visibility AccessAction gives the button inside: whoever may clear, plus an access admin managing
+  // who may - except mid-simulation, where the simulated person's own answer is what must show.
+  const canClearCaches = usePermission("operations.clearCache");
+  const accessMode = useAccessMode();
+  const viewAs = useViewAs();
+  const showCaches = canClearCaches || (accessMode.enabled && !viewAs);
+
+  // Every server reloads what it holds in memory (src/services/cacheFlush.ts). The one answering is cleared at
+  // once; the others follow within seconds, which is what the toast says rather than claiming it is instant.
+  async function clearCaches() {
+    setClearing(true);
+    try {
+      await api("/operations:clearCache", { method: "POST" });
+      toast({ title: "Caches cleared", description: "Every server reloads within about 5 seconds.", variant: "success" });
+    } catch (e) {
+      toast({ title: "Couldn't clear caches", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setClearing(false);
+    }
+  }
 
   // Fire a scheduled task on demand (e.g. the job drainer) instead of waiting for the next tick.
   async function runNow(cron: string) {
@@ -182,6 +206,25 @@ export default function Operations({ embedded }: { me?: Me; embedded?: boolean }
           })}
         </div>
       </DataState>
+
+      {/* Server caches. The card is nothing but its action, so it shows exactly when that action's gate would. */}
+      {showCaches && (
+        <>
+          <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-muted-foreground"><DatabaseZap className="h-4 w-4" /> Server caches</h2>
+          <Card className="mb-8">
+            <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-4">
+              <p className="text-sm text-muted-foreground">
+                Servers keep permissions, role assignments, the access policy, reporting lines and automation rules in memory, and reload them within seconds of any change made in the app. Clear them if something still looks out of date, for example after data was edited directly in the database.
+              </p>
+              <AccessAction collection="operations" verb="clearCache" label="Clear caches">
+                <Button variant="outline" size="sm" className="shrink-0" loading={clearing} onClick={clearCaches}>
+                  {!clearing && <DatabaseZap className="h-4 w-4" />} Clear caches
+                </Button>
+              </AccessAction>
+            </CardContent>
+          </Card>
+        </>
+      )}
 
       {/* Background jobs */}
       <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-muted-foreground"><Activity className="h-4 w-4" /> Background jobs</h2>
