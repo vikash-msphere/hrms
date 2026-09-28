@@ -102,6 +102,18 @@ describe("subjectScopes - the answer correlates with WHO the subject is", () => 
     expect(subjectScopes(grant({ "employees.me.tax.**": "write" }), self(), ME, []).write).toContain("employees.tax");
   });
 
+  // The profile asks for presence only when this says so; before it was reported, every colleague's profile
+  // fetched presence and 403'd for a caller holding only their own.
+  it("presence is reported like the other sub-resources, read-only", () => {
+    const own = grant({ "employees.me.presence.**": "read" });
+    expect(subjectScopes(own, self(), ME, []).read).toContain("employees.presence");
+    expect(subjectScopes(own, self(), TEAMMATE, []).read).not.toContain("employees.presence");
+    const dept = grant({ "employees.my-dept.presence.**": "read" });
+    expect(subjectScopes(dept, self(), TEAMMATE, []).read).toContain("employees.presence");
+    expect(subjectScopes(dept, self(), OUTSIDER, []).read).not.toContain("employees.presence");
+    expect(subjectScopes(grant({ "employees.**": "write" }), self(), TEAMMATE, []).write).not.toContain("employees.presence");
+  });
+
   it("the activity trail is asked for separately, with its own scope", () => {
     const s = subjectScopes(grant({ "activity.my-dept.**": "read" }), self(), TEAMMATE, ["employees"]);
     expect(s.read).toContain("activity.employees");

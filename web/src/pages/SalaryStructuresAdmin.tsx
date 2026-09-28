@@ -297,7 +297,7 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
                   {earnings.length === 0 ? (
                     <>
                       No earning components exist yet - a structure is built out of them.{" "}
-                      <button type="button" className="font-medium text-primary hover:underline" onClick={() => { setOpen(false); navigate("pay-components"); }}>
+                      <button type="button" className="font-medium text-primary hover:underline" onClick={() => { setOpen(false); navigate("settings/pay-components"); }}>
                         Create a pay component
                       </button>{" "}
                       first.

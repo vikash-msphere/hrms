@@ -38,7 +38,7 @@ test("a PIN locks the browser: the server refuses it, a reload stays locked, and
     await sheet.getByRole("button", { name: /6 digits/ }).click();
     await sheet.getByLabel("Choose a 6-digit PIN").fill(PIN);
     await sheet.getByLabel("Enter it again").fill(PIN);
-    await expect(sheet.getByText("App lock is on.")).toBeVisible();
+    await expect(sheet.getByText("Your PIN is set.")).toBeVisible();
 
     // A second tab of the same browser, open on the app, must lock along with this one.
     const other = await page.context().newPage();

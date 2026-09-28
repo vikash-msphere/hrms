@@ -4,7 +4,7 @@ import { lazyPage as lazy } from "@/lib/lazyPage";
 import { navigate, redirect, setQueryParam, useRoute } from "@/router";
 import { Plus, Trash2, Save, Building, X, ChevronDown, Users, User, Search, ArrowLeft, ArrowUp, ArrowDown, Check, Globe, Palette, Type, GripVertical, Image as ImageIcon } from "lucide-react";
 import { get, patch, create, remove, list, dataUrl } from "@/api";
-import { SETTINGS_REGISTRY, SETTINGS_GROUPS, SETTINGS_LEGACY, settingsEntry, entryScope, settingsEntryVisible, hasAnySettings, mayWriteSetting, type SettingsEntry } from "@/settings/registry";
+import { SETTINGS_REGISTRY, SETTINGS_GROUPS, settingsEntry, entryScope, settingsEntryVisible, hasAnySettings, mayWriteSetting, type SettingsEntry } from "@/settings/registry";
 import { APP_NAME } from "@/lib/brand";
 import type { OrgSettings } from "@/lib/org";
 import { roleLabel } from "@/lib/roles";
@@ -66,6 +66,7 @@ const ReimbursementCategories = lazy(() => import("@/pages/ReimbursementCategori
 const ExpenseCategories = lazy(() => import("@/pages/ExpenseCategories"));
 const AssetCategories = lazy(() => import("@/pages/AssetCategories"));
 const Operations = lazy(() => import("@/pages/Operations"));
+const OpeningBalances = lazy(() => import("@/pages/OpeningBalances"));
 // Named exports, so the module has to be re-shaped into the `{ default }` lazy() expects.
 const BoardConfigPanel = lazy(() => import("@/settings/BoardConfigPanel").then((m) => ({ default: m.BoardConfigPanel })));
 const SearchInsightsPanel = lazy(() => import("@/settings/SearchInsightsPanel").then((m) => ({ default: m.SearchInsightsPanel })));
@@ -273,8 +274,7 @@ export default function Settings({ me, tab, openId }: { me: Me; tab?: string; op
     );
   }
 
-  const key = tab ? SETTINGS_LEGACY[tab] ?? tab : undefined;
-  const entry = key ? settingsEntry(key) : undefined;
+  const entry = tab ? settingsEntry(tab) : undefined;
   if (!entry || !canSee(me, entry)) return <SettingsHub me={me} />;
   // Non-org settings have no single instance to edit here; they live on their host page. Bounce there.
   if (entryScope(entry) !== "org") return <SettingsRedirect entry={entry} />;
@@ -542,6 +542,7 @@ function pickSettingsPanel(key: string, me: Me, toast: Toast, slot: HTMLDivEleme
     case "ai": return <AiSettingsTab />;
     case "attention": return <AttentionSettingsTab />;
     case "quick-actions": return <QuickActionsTab toast={toast} />;
+    case "opening-balances": return <OpeningBalances me={me} />;
     // Time & leave
     case "leave-policy": return <LeaveCapsTab toast={toast} />;
     case "leave-types": return <LeaveTypes embedded title="Leave types" openId={openId} />;

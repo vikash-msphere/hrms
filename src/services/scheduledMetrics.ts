@@ -2,7 +2,7 @@
 // database, so a scheduled firing carries these precomputed numbers in its payload - letting a data-defined
 // rule be genuinely smart ("every Monday, if pendingApprovals > 0 -> nudge the manager") without teaching the
 // evaluator to aggregate. Computed once per tick in a bounded set of full-table reads (daily cadence, D1).
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import { goalPace, staleDays, STALE_AFTER_DAYS } from "../domain/goals";
 import { round2 } from "../domain/money";
@@ -26,6 +26,7 @@ export type EmployeeMetrics = {
   teamReviewsDue: number; // reviews of their reports awaiting THEIR write-up
   goalSettingMissing: number; // 1 when an ACTIVE cycle wants goals by a date and they have none in it
   teamGoalSettingMissing: number; // how many of their reports are in that position
+  appPinMissing: number; // 1 when their active sign-in account has no app PIN
 };
 
 const ZERO: Omit<EmployeeMetrics, "daysSinceLastLeave"> = {
@@ -33,6 +34,7 @@ const ZERO: Omit<EmployeeMetrics, "daysSinceLastLeave"> = {
   goalsDueSoon: 0, goalsOverdue: 0, goalsAtRisk: 0, goalsStale: 0,
   tasksDueSoon: 0, tasksOverdue: 0, tasksBlocked: 0,
   selfReviewsDue: 0, teamReviewsDue: 0, goalSettingMissing: 0, teamGoalSettingMissing: 0,
+  appPinMissing: 0,
 };
 
 // Sentinel for "has never taken leave" - large enough that `daysSinceLastLeave >= N` style thresholds fire.
@@ -193,6 +195,15 @@ export async function computeEmployeeMetrics(
       }
     }
   }
+
+  // App lock: 1 when an active sign-in account linked to them has no PIN - no lock row at all, or one whose PIN
+  // was turned off or reset. Somebody with no active account stays 0: they cannot sign in to set one.
+  const pinless = await deps.db
+    .select({ e: schema.users.employeeId })
+    .from(schema.users)
+    .leftJoin(schema.appLocks, eq(schema.appLocks.userId, schema.users.uuid))
+    .where(and(eq(schema.users.status, "active"), isNotNull(schema.users.employeeId), isNull(schema.appLocks.pinHash)));
+  for (const r of pinless) { const m = r.e ? metrics.get(r.e) : undefined; if (m) m.appPinMissing = 1; }
 
   // `round2`, not an inline `Math.round(n * 100) / 100`. Leave-day values sit under the same rounding rule as
   // money (domain/money.ts is the one helper for both), and the inline form multiplies in float, so a decimal

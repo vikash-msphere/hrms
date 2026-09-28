@@ -139,6 +139,9 @@ export function actorSubtrees(
   return out;
 }
 
+// The employee record's derived, read-only sub-resources (`GET /v1/employees/<id>/presence`, services/presence.ts).
+const READ_ONLY_SUBRESOURCES = ["presence"] as const;
+
 /** What the caller may reach ABOUT ONE PERSON: the collection keys, read and write. */
 export type SubjectScopes = { read: string[]; write: string[] };
 
@@ -196,6 +199,11 @@ export function subjectScopes(
       decide(grant, resolveRequest(method, `/v1/employees/${subjectCode}/${sub}`), self).allow;
     if (at("GET")) read.push(`employees.${sub}`);
     if (at("PATCH")) write.push(`employees.${sub}`);
+  }
+  // Read-only sub-resources: derived, so there is nothing to write and no body map to list them in. Probed the
+  // same way, so a profile asks for a colleague's presence only when the engine would answer it.
+  for (const sub of READ_ONLY_SUBRESOURCES) {
+    if (decide(grant, resolveRequest("GET", `/v1/employees/${subjectCode}/${sub}`), self).allow) read.push(`employees.${sub}`);
   }
   return { read, write };
 }

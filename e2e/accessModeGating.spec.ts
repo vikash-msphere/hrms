@@ -38,7 +38,7 @@ test.describe("access-management mode availability", () => {
       await expect(toggle).toHaveCount(expected ? 1 : 0);
       // The menu is still the useful thing it always was for everybody - this is a missing entry, not a
       // broken menu.
-      await expect(page.getByRole("menuitem", { name: "View my profile" })).toBeVisible();
+      await expect(page.getByRole("menuitem", { name: "Sign out" })).toBeVisible();
 
       if (!expected) {
         // And there is no way in from the page either: the key icons are what the mode draws, and a caller

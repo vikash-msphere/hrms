@@ -17,7 +17,7 @@ import { gotoRoute, test, expect } from "./fixtures";
 test.describe("table state in the URL", () => {
   test("sorting writes the URL, and the URL restores the sort", async ({ as }) => {
     const page = await as("super");
-    await gotoRoute(page, "departments", "Departments");
+    await gotoRoute(page, "settings/departments", "Departments");
     await expect(page.locator("tbody tr").first()).toBeVisible({ timeout: 30_000 });
     await resetTable(page);
 
@@ -47,7 +47,7 @@ test.describe("table state in the URL", () => {
 
   test("the link opens somebody else's view", async ({ as }) => {
     const author = await as("super");
-    await gotoRoute(author, "departments", "Departments");
+    await gotoRoute(author, "settings/departments", "Departments");
     await expect(author.locator("tbody tr").first()).toBeVisible({ timeout: 30_000 });
     await resetTable(author);
     await sortBy(author, "Name");

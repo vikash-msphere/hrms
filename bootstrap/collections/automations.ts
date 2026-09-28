@@ -35,7 +35,7 @@ export const AUTOMATIONS: AutomationSeed[] = [
     actions: [
       { kind: "apiCall", method: "POST", path: "/v1/transitions", body: { employee: "{{subject}}", kind: "onboarding", template: "default-onboarding", anchor_date: "{{startDate}}" }, captureAs: "onboarding" },
       { kind: "apiCall", method: "POST", path: "/v1/{{subject}}:enrollDefaultBenefits", captureAs: "benefits" },
-      { kind: "notify", recipient: { of: "subject" }, title: "Welcome aboard!", body: "Your onboarding checklist is ready and you're enrolled in {{results.benefits.enrolled}} benefit plan(s). Check your tasks to get started.", link: "onboarding" },
+      { kind: "notify", recipient: { of: "subject" }, title: "Welcome aboard!", body: "Your onboarding checklist is ready and you're enrolled in {{results.benefits.enrolled}} benefit plan(s). Check your tasks to get started.", link: "transitions" },
       { kind: "email", to: { of: "subject" }, subject: "Welcome aboard!", html: "<p>Welcome to the team! Your onboarding checklist is ready and you're enrolled in {{results.benefits.enrolled}} benefit plan(s). Log in to see your first-week tasks and get started.</p>" },
       { kind: "notifyManager", noun: "new hire - set up their first week" },
       {
@@ -169,7 +169,7 @@ export const AUTOMATIONS: AutomationSeed[] = [
       recipient: { of: "ref", field: "hiringManagerId" },
       title: "You have a new hire",
       body: "{{candidateName}} is hired for {{requisitionTitle}}. Their onboarding checklist is open.",
-      link: "onboarding",
+      link: "transitions",
       type: "recruiting.hired",
     }],
   },
@@ -1214,7 +1214,8 @@ export const AUTOMATIONS: AutomationSeed[] = [
   // -------------------------------------------------------------------------------------------------------
   // Scheduled (time-driven) rules. A daily scanner fires these when the recurrence matches - no inbound event.
   // `once` rules broadcast to an audience; `perEmployee` rules fan out per active employee with derived metrics
-  // (pendingApprovals / daysSinceLastLeave / leaveBalanceDays / goalsDueSoon / goalsOverdue) in scope, so the condition can be genuinely
+  // (pendingApprovals / daysSinceLastLeave / leaveBalanceDays / goals* / tasks* / review-season counts /
+  // appPinMissing - the full list is services/scheduledMetrics.ts) in scope, so the condition can be genuinely
   // smart. Enabled by default - they're gentle, opt-out nudges that make the app feel proactive.
   // -------------------------------------------------------------------------------------------------------
 
@@ -1484,6 +1485,17 @@ export const AUTOMATIONS: AutomationSeed[] = [
     schedule: { freq: "weekly", day: 5, scope: "once" },
     enabled: false,
     actions: [{ kind: "notifyAudience", audience: { kind: "everyone" }, title: "🕒 Log your time", body: "It's Friday - please submit your timesheets for the week so approvals aren't held up." }],
+  },
+
+  // Security: the app lock only protects the people who turn it on. Weekly, per person, until they set a PIN -
+  // the condition stops matching the moment they do, so nobody who has one is asked again.
+  {
+    name: "Monday: remind people to set an app PIN",
+    description: "Every Monday, ask each person who hasn't set an app PIN to set one from the Privacy tab of their profile. Stops by itself once they have one.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
+    condition: { field: "appPinMissing", op: "gte", value: 1 },
+    actions: [{ kind: "notify", recipient: { of: "subject" }, type: "security.pin_reminder", title: "Set an app PIN", body: "Protect your HR data with an app PIN. Open My profile, then the Privacy tab, and set one under App lock.", link: "profile/privacy" }],
   },
 ];
 

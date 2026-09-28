@@ -268,7 +268,7 @@ async function syncAccountEmail(deps: Deps, actor: AppUser, employeeId: string, 
         type: "account.loginEmailMismatch",
         title: "Sign-in address left unchanged",
         body: `A work email was changed to ${workEmail.toLowerCase()}, but the linked account holds elevated access, so its sign-in address was not moved. Update it from the account if the change is right.`,
-        link: "settings/accounts",
+        link: "settings/users",
         actorId: actor.employeeId,
       }).catch(() => {});
     }

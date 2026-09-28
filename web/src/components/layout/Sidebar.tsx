@@ -62,7 +62,8 @@ function Brand({ collapsed }: { collapsed?: boolean }) {
   const anniv = orgAnniversary(org.incorporation_date);
   const celebrating = anniv != null && typeof leadDays === "number" && anniv.in_days <= leadDays;
   const annivTitle = celebrating ? `${anniv!.years}-year company anniversary` : undefined;
-  const caption = celebrating && org.incorporation_date ? <AnniversaryCaption years={anniv!.years} incorporationDate={org.incorporation_date} /> : null;
+  const caption = (placement: "under-mark" | "slot") =>
+    celebrating && org.incorporation_date ? <AnniversaryCaption years={anniv!.years} incorporationDate={org.incorporation_date} placement={placement} /> : null;
   if (wordmark && !collapsed) {
     return (
       <div className="relative min-w-0 flex-1 px-4 py-4">
@@ -72,8 +73,10 @@ function Brand({ collapsed }: { collapsed?: boolean }) {
               uploaded aspect ratio is. The wordmark carries the org name, so it takes the name as alt text. */}
           <img src={wordmark} alt={org.logo_text?.trim() || org.name} className="relative z-[1] max-h-11 w-full object-contain object-left" />
           {celebrating && <AnniversaryOrbit />}
+          {/* In the image's box: the image is shorter when the slot is narrower (the phone drawer's close
+              button takes some of it), and the caption has to follow the image, not the slot's top. */}
+          {caption("under-mark")}
         </div>
-        {caption}
       </div>
     );
   }
@@ -89,7 +92,7 @@ function Brand({ collapsed }: { collapsed?: boolean }) {
         )}
         {celebrating && <AnniversaryOrbit />}
       </div>
-      {!collapsed && caption}
+      {!collapsed && caption("slot")}
       {!collapsed && (
         <div className="leading-tight">
           <div className="truncate text-foreground" style={{ fontFamily: orgNameFontStack(org.name_font), fontWeight: orgNameWeight(org.name_weight), fontSize: orgNameSizePx(org.name_size) }}>{org.logo_text?.trim() || org.name}</div>
@@ -146,7 +149,31 @@ export function Sidebar({
   const autoNarrow = useMedia("(min-width: 768px) and (max-width: 1023px)");
   const [railPref, setRailPref] = useState(() => loadRail(me.email));
   const rail = docked && (railPref || autoNarrow);
-  const toggleRail = () => setRailPref((v) => { const next = !v; saveRail(me.email, next); return next; });
+  // Hovering the collapsed rail with a mouse opens the full menu as an overlay (`peek`), and leaving the
+  // opened menu folds it back. The rail keeps its w-16 slot in the layout while it peeks, so the page never
+  // reflows under the pointer. Mouse only: a tap on a touch screen fires pointerenter too, and must just
+  // follow the link. The short open delay stops a pointer that is only crossing the rail from flashing it.
+  const [peek, setPeek] = useState(false);
+  const peekTimer = useRef<number | undefined>(undefined);
+  const onPointerEnter = (e: React.PointerEvent) => {
+    if (e.pointerType !== "mouse") return;
+    window.clearTimeout(peekTimer.current);
+    peekTimer.current = window.setTimeout(() => setPeek(true), 120);
+  };
+  const onPointerLeave = () => {
+    window.clearTimeout(peekTimer.current);
+    setPeek(false);
+  };
+  useEffect(() => () => window.clearTimeout(peekTimer.current), []);
+  const peeking = rail && peek;
+  // What the menu draws as: icons only when collapsed and not peeking.
+  const iconsOnly = rail && !peek;
+  // Collapsing from the handle leaves the pointer inside the sidebar, so the peek is dropped with it;
+  // otherwise the collapse would not show until the pointer left.
+  const toggleRail = () => {
+    setPeek(false);
+    setRailPref((v) => { const next = !v; saveRail(me.email, next); return next; });
+  };
 
   // --- drawer behaviour (below md only) ---------------------------------------------------------------------
   // Open, the drawer is a modal surface and has to behave like one: Escape closes it, the page behind it does
@@ -220,21 +247,25 @@ export function Sidebar({
         onTouchStart={drawerOpen ? onTouchStart : undefined}
         onTouchMove={drawerOpen ? onTouchMove : undefined}
         onTouchEnd={drawerOpen ? onTouchEnd : undefined}
+        onPointerEnter={rail ? onPointerEnter : undefined}
+        onPointerLeave={rail ? onPointerLeave : undefined}
         className={cn(
           // Mobile: a fixed off-canvas drawer. Desktop: sticky to the viewport at full height (md:sticky +
           // md:h-screen) so it never stretches with tall page content; the nav inside scrolls on its own.
-          // Collapsed to a w-16 icon rail when `rail` is set (see above); full w-64 otherwise.
+          // Collapsed to a w-16 icon rail when `rail` is set (see above); full w-64 otherwise. Peeking, it is
+          // w-64 with -mr-48 (256px - 192px = the rail's 64px), so it overlays the page instead of pushing it.
           // standalone:pt-safe-t: installed as a PWA there is no browser chrome, so the drawer's own top
           // edge is what the status bar/notch overlaps.
           // `pl-safe-l` is the landscape notch: the drawer is fixed to the left edge on a phone, so it is
           // exactly what the notch covers. From `md` it is sticky inside the shell, which pads itself.
-          "fixed inset-y-0 left-0 z-50 flex flex-col border-r border-sidebar-border bg-sidebar pl-safe-l transition-[transform,width] standalone:pt-safe-t md:sticky md:top-0 md:h-screen md:shrink-0 md:translate-x-0 md:pl-0",
-          rail ? "w-16" : "w-64",
+          "fixed inset-y-0 left-0 z-50 flex flex-col border-r border-sidebar-border bg-sidebar pl-safe-l transition-[transform,width,margin] standalone:pt-safe-t md:sticky md:top-0 md:h-screen md:shrink-0 md:translate-x-0 md:pl-0",
+          iconsOnly ? "w-16" : "w-64",
+          peeking && "-mr-48 shadow-xl",
           mobileOpen ? "translate-x-0" : "-translate-x-full"
         )}
       >
-        <div className={cn("flex items-center", rail ? "justify-center pt-1" : "justify-between")}>
-          <Brand collapsed={rail} />
+        <div className={cn("flex items-center", iconsOnly ? "justify-center pt-1" : "justify-between")}>
+          <Brand collapsed={iconsOnly} />
           {/* Finger-sized close, and labelled: an unlabelled X is the most common unnamed control in a drawer. */}
           <button
             type="button"
@@ -251,10 +282,13 @@ export function Sidebar({
           className={cn(
             "flex-1 space-y-3 overflow-y-auto overscroll-contain pt-1",
             "pb-[calc(0.75rem+env(safe-area-inset-bottom))]",
-            rail ? "px-2" : "px-3",
+            iconsOnly ? "px-2" : "px-3",
+            // The peek widens while the full menu is already drawn, so labels would wrap and a sideways
+            // scrollbar flash for the length of the width transition.
+            rail && "overflow-x-hidden whitespace-nowrap",
           )}
         >
-          {rail ? (
+          {iconsOnly ? (
             // Icon rail: labels + group headers collapse to icons; the label (and unread count) live in a
             // hover tooltip, and unread badges shrink to a corner dot. Groups are split by a thin divider.
             <TooltipProvider delayDuration={0}>
@@ -376,7 +410,11 @@ export function Sidebar({
             onClick={toggleRail}
             title={rail ? "Expand sidebar" : "Collapse sidebar"}
             aria-label={rail ? "Expand sidebar" : "Collapse sidebar"}
-            className="absolute bottom-4 right-0 z-20 hidden h-6 w-6 translate-x-1/2 items-center justify-center rounded-full border border-sidebar-border bg-sidebar text-sidebar-foreground/60 shadow-sm transition-colors hover:text-foreground md:flex"
+            // One neutral step LIGHTER than the sidebar in both themes, so the handle sits slightly raised off
+            // the nav rows and off the page it overhangs. Not bg-background: in dark mode the page is darker
+            // than the sidebar, so the handle read as a hole and its outer half matched the page. Card is that
+            // step in light (white on neutral-100) and muted is it in dark (neutral-800 on neutral-900).
+            className="absolute bottom-4 right-0 z-20 hidden h-6 w-6 translate-x-1/2 items-center justify-center rounded-full border border-sidebar-border bg-card text-sidebar-foreground/80 shadow-sm transition-colors hover:text-foreground dark:bg-muted md:flex"
           >
             {rail ? <ChevronsRight className="h-3.5 w-3.5" /> : <ChevronsLeft className="h-3.5 w-3.5" />}
           </button>

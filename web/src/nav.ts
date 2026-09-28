@@ -17,7 +17,6 @@ import {
   ScrollText,
   ReceiptText,
   Table2,
-  History,
   type LucideIcon,
 } from "lucide-react";
 import { RupeeCircle } from "./components/icons/RupeeCircle";
@@ -263,8 +262,6 @@ export const NAV: NavGroup[] = [
       // somebody an admin has granted it to.
       { key: "tables", label: "Tables", icon: Table2, perm: "table-views.read" },
       { key: "workflows", label: "Workflows", icon: Workflow, perm: "automations.read" },
-      // Go-live setup: what happened before the org used HRMS. Shown to whoever may run any of its steps.
-      { key: "opening-balances", label: "Opening balances", icon: History, anyPerm: ["employees.setTrackedFrom", "leave-adjustments.importOpenings", "leave-requests.importHistory", "payroll-openings.importOpenings"] },
       { key: "activity", label: "Activity", icon: ScrollText, perm: "audit.read" },
       // Settings are owned per key (HR's policies, payroll's pay configuration, super admin's governance
       // switches), so the entry shows for whoever owns any panel (settings/registry.ts).
@@ -283,20 +280,10 @@ export function workspaceForKey(key: string): NavItem | undefined {
   return ALL_ITEMS.find((i) => i.tabs?.some((t) => t.key === key));
 }
 
-// Route keys that render another page's component and therefore borrow its gate: the Settings deep links
-// (a settings panel reached by its old top-level URL) and the pages reached from chrome rather than the
-// sidebar (the top bar's Support entry, the bell). A key absent from both the nav and this map is an
-// identity surface open to every signed-in user (dashboard, profile).
+// Route keys reached from chrome rather than the sidebar (the top bar's Support entry, the bell), with their
+// gates. A key absent from both the nav and this map is an identity surface open to every signed-in user
+// (dashboard, profile).
 const ALIAS_GATE: Record<string, { perm?: string; anyPerm?: string[] }> = {
-  // Each panel's own gate (settings/registry.ts), not a blanket settings write: pay components are payroll's,
-  // departments HR's, users and operations super admin's.
-  departments: { perm: "departments.write" },
-  "leave-types": { perm: "leave-types.write" },
-  "pay-components": { perm: "pay-components.write" },
-  users: { perm: "users.write" },
-  operations: { perm: "cron-runs.read" },
-  "pay-periods": { perm: "payroll-runs.read" }, // merged into Payroll Runs, which is where it renders
-  kudos: { perm: "announcements.read" }, // the board, opened on its kudos filter
   tickets: { perm: "tickets.read" },
   // The bell. Named in this map's own header and missing from it, so `pageGate("notifications")` was undefined
   // and `/notifications` rendered for a caller with no `notifications.read` - an empty feed (useCollection
@@ -341,8 +328,7 @@ export function itemPageKeys(item: NavItem): string[] {
 // the page itself owns which tabs actually render (permission-gated). First entry is the default tab.
 export const PAGE_TAB_LABELS: Record<string, Record<string, string>> = {
   "payroll-runs": { runs: "Runs", periods: "Pay periods", bonuses: "Bonuses", budgets: "Budgets" },
-  // Settings panels come from the registry - one breadcrumb label per panel key (legacy keys resolve
-  // before they reach the breadcrumb, so only canonical keys need entries).
+  // Settings panels come from the registry - one breadcrumb label per panel key.
   settings: Object.fromEntries(SETTINGS_REGISTRY.map((e) => [e.key, e.title])),
 };
 
@@ -352,18 +338,14 @@ export const PAGE_TAB_LABELS: Record<string, Record<string, string>> = {
 /**
  * The human name of a route, for the tab title and the navigation announcement.
  *
- * `navBreadcrumb` only knows keys that are in NAV, and nine of App's route cases are not: seven Settings
- * deep-link aliases (`/departments` renders the same screen the titled `/settings/departments` does) plus the
- * two pages reached from the chrome rather than the sidebar - Tickets, from the top bar's Support menu, and
- * Notifications, from the bell. For those the tab read a bare app name and the live region was set to "" -
- * which announces NOTHING - the two failures `useRouteAnnounce` exists to fix.
+ * `navBreadcrumb` only knows keys that are in NAV, and two of App's route cases are not: the pages reached
+ * from the chrome rather than the sidebar - Tickets, from the top bar's Support menu, and Notifications, from
+ * the bell. For those the tab read a bare app name and the live region was set to "" - which announces
+ * NOTHING - the two failures `useRouteAnnounce` exists to fix.
  */
 const OFF_NAV_LABELS: Record<string, string> = {
-  ...Object.fromEntries(SETTINGS_REGISTRY.map((e) => [e.key, e.title])),
   notifications: "Notifications",
   tickets: "Support tickets",
-  kudos: "Kudos",
-  "pay-periods": "Pay periods",
 };
 
 export function pageLabel(key: string, sub?: string): string | undefined {

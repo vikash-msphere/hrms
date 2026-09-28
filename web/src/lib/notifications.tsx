@@ -10,16 +10,10 @@ import { broadcastInvalidation, invalidateCollections } from "@/lib/resourceStor
 import type { Notification } from "@/types";
 
 /**
- * The PAGE KEY a notification's `link` points at.
- *
- * `link` is documented as "Web route to open (page key, optional /id)", and rows written before the app moved
- * off hash routes may still carry a leading `#/` or `/`. `router.navigate` strips either deliberately, so
- * CLICKING one has always worked; the two readers that split the string did not, and both failed silently:
- * `unreadByPage` bucketed them under `"#"`, which no nav item carries, so they badged nothing, and the
- * leave-a-page sweep compared `"#" === "settings"`, so they were never auto-marked-read and sat unread in the
- * bell indefinitely. Normalising here means all three readers agree whichever form the row holds.
+ * The PAGE KEY a notification's `link` points at. `link` is "Web route to open (page key, optional /id)", so
+ * the key is its first segment - the badge rollup (`unreadByPage`) and the leave-a-page sweep both read it.
  */
-const pageOfLink = (link: string): string => link.replace(/^#?\//, "").split("/")[0] ?? "";
+const pageOfLink = (link: string): string => link.split("/")[0] ?? "";
 
 /** Row ceiling for the snoozed walk. Bounded because each page is a request; high enough that the wake timer
  *  and the list are right for anybody's real snooze pile, and `truncated` is what says when it was not. */

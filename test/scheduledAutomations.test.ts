@@ -15,6 +15,7 @@ import { notify } from "../src/services/notifications";
 import { activeDelegatesFor } from "../src/services/approvalDelegations";
 import { SCHEDULE_TRIGGER, type Schedule, type Condition, type Action } from "../src/domain/automations";
 import { genId } from "../src/lib/idCodec";
+import { AUTOMATIONS } from "../bootstrap/collections/automations";
 
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 let deps: Deps;
@@ -31,7 +32,7 @@ beforeAll(async () => {
 });
 
 const TABLES = [
-  schema.notificationDigestQueue, schema.notifications, schema.overtimeRequests, schema.approvalDelegations,
+  schema.appLocks, schema.users, schema.notificationDigestQueue, schema.notifications, schema.overtimeRequests, schema.approvalDelegations,
   schema.automationRuns, schema.automations, schema.cards, schema.boards, schema.reviews, schema.reviewCycles,
   schema.goals, schema.employees,
 ];
@@ -243,6 +244,35 @@ describe("scheduled metrics", () => {
     // their own count, not their team's.
     expect(metrics.get(mgr)!.teamGoalSettingMissing).toBe(2);
     expect(metrics.get(mgr)!.goalSettingMissing).toBe(1);
+  });
+
+  it("asks only the people whose active account has no app PIN to set one (the seeded reminder rule)", async () => {
+    await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee" }).onConflictDoNothing();
+    const person = async (opts: { status?: "active" | "disabled"; lock?: "pin" | "cleared" } = {}) => {
+      const employeeId = await seedEmployee();
+      const uuid = genId();
+      await deps.db.insert(schema.users).values({ uuid, code: `u-${genId().slice(0, 4)}`, email: `${uuid}@test.example`, status: opts.status ?? "active", employeeId });
+      if (opts.lock) await deps.db.insert(schema.appLocks).values({ userId: uuid, pinHash: opts.lock === "pin" ? "hash" : null });
+      return employeeId;
+    };
+    const hasPin = await person({ lock: "pin" });
+    const neverSet = await person();
+    const cleared = await person({ lock: "cleared" }); // turned off, or reset by an admin: the row outlives the PIN
+    const disabled = await person({ status: "disabled" });
+    const noAccount = await seedEmployee();
+
+    const metrics = await computeEmployeeMetrics(deps, [hasPin, neverSet, cleared, disabled, noAccount].map((uuid) => ({ uuid, managerId: null })));
+    expect([hasPin, neverSet, cleared, disabled, noAccount].map((id) => metrics.get(id)!.appPinMissing)).toEqual([0, 1, 1, 0, 0]);
+
+    // The seeded rule's own condition and action, on a daily schedule so the test does not depend on the weekday.
+    const seed = AUTOMATIONS.find((a) => a.name === "Monday: remind people to set an app PIN")!;
+    await seedScheduledRule({ schedule: { freq: "daily", scope: "perEmployee" }, condition: seed.condition, actions: seed.actions });
+    expect(await runScheduledAutomations(deps)).toBe(2);
+    for (const id of [neverSet, cleared]) {
+      const rows = await notifsFor(id);
+      expect(rows.map((r) => [r.type, r.link])).toEqual([["security.pin_reminder", "profile/privacy"]]);
+    }
+    for (const id of [hasPin, disabled, noAccount]) expect(await notifsFor(id)).toEqual([]);
   });
 });
 

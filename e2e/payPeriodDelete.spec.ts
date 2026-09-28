@@ -23,7 +23,7 @@ test("an unused pay period is deleted from the list", async ({ as }) => {
   expect(made.status(), await made.text()).toBe(200);
   const path = ((await made.json()) as { path: string }).path;
 
-  await gotoRoute(page, "pay-periods", "Pay Periods");
+  await gotoRoute(page, "payroll-runs/periods", "Pay Periods");
   const row = page.locator("tbody tr").filter({ hasText: label });
   await expect(row).toBeVisible({ timeout: 30_000 });
   await row.getByRole("button", { name: "Actions" }).click();

@@ -126,8 +126,6 @@ const TOKEN_DESC: Record<string, string> = {
   date: "Today's date, formatted.",
   company_signatory_name: "Company (1st party) authorized signatory's name — who signs on behalf of the employer (Settings → Letter defaults).",
   company_signatory_title: "Company (1st party) signatory's title.",
-  signatory_name: "Alias of company_signatory_name (kept for older templates).",
-  signatory_title: "Alias of company_signatory_title (kept for older templates).",
   hr_name: "HR contact name (Letter defaults).",
   hr_email: "HR contact email (Letter defaults).",
   hr_phone: "HR contact phone (Letter defaults).",

@@ -24,6 +24,17 @@ test.describe("the sidebar", () => {
     await expect(page.getByRole("button", { name: "Expand sidebar" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Workforce" })).toHaveCount(0);
 
+    // Hovering the rail opens the full menu over the page, and leaving it folds the menu back. It overlays:
+    // the page keeps its place, so nothing reflows under the pointer.
+    // The collapse animates its width, so the page's left edge is read once it has settled beside the w-16 rail.
+    const mainX = () => page.getByRole("main").boundingBox().then((b) => b!.x);
+    await expect.poll(mainX).toBe(64);
+    await page.getByRole("link", { name: /^Team/ }).first().hover();
+    await expect(page.getByRole("button", { name: "Workforce" })).toBeVisible();
+    expect(await mainX()).toBe(64);
+    await page.getByRole("main").hover();
+    await expect(page.getByRole("button", { name: "Workforce" })).toHaveCount(0);
+
     // A rail that cannot be navigated from is a decoration: the icons are still the links, named for anyone
     // who cannot see the picture.
     // `.first()` and a prefix match: a nav item's accessible name carries its unread badge ("Connect 2"), and

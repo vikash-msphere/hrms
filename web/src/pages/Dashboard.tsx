@@ -34,7 +34,7 @@ import { useEmployee } from "@/hooks/useEmployee";
 import { useCelebrations, useCelebrationLeadDays } from "@/hooks/useCelebrations";
 import { useSortable } from "@/hooks/useSortable";
 import { useVisibleRegions } from "@/hooks/useInView";
-import { usePermission } from "@/lib/perm";
+import { usePermission, useCapabilities, hasCapability } from "@/lib/perm";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { get, invoke } from "@/api";
 import { fmtDuration, DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
@@ -126,6 +126,16 @@ const SUMMARY_KEYS = [
   "notice_serving", "remote_today", "timesheets_draft", "timesheet_week", "team_hours_week",
   "reviews_due_soon", "offers_pending", "transitions_active", "onboarding_tasks_pending", "open_positions",
 ];
+const SUMMARY_KEY_SET: ReadonlySet<string> = new Set(SUMMARY_KEYS);
+
+// The collection a card that is counted from ROWS (not by the summary) reads, so the card can ask whether the
+// caller may read it at all before fetching.
+const ROW_KPI_COLLECTION: Record<string, string> = {
+  budget_over: "expense-budgets",
+  docs_to_ack: "org-documents",
+  docs_expiring: "personal-documents",
+  letters_to_sign: "personal-documents",
+};
 
 // Deep-link into a page with a DataTable filter pre-applied, using the table's own URL-state format
 // (t.<key>={"f":{col:value}} - see DataTable), so a KPI click lands on exactly the rows the number counted.
@@ -299,6 +309,7 @@ export default function Dashboard({ me }: { me: Me }) {
   // KPI visibility. A configured KPI follows its explicit role/user audience. An UNCONFIGURED one falls back to
   // its default audience: everyone, HR only (HR-related cards, see isHrViewer), or none (hidden until shared).
   const hrViewer = isHrViewer(me.scopes);
+  const caps = useCapabilities();
   const kpiVisible = (key: string) => visibleToViewer(dashCfg.kpis?.[key], me.role, me.employee_id, kpiDefaultVisible(KPI_DEFAULT_AUDIENCE[key], hrViewer));
   // Timeline markers this viewer may NOT see -> hidden on the timeline.
   const hiddenMarkers = useMemo(
@@ -379,7 +390,18 @@ export default function Dashboard({ me }: { me: Me }) {
   // Do the rows for this KPI still need fetching? Yes if the summary failed, or settled without the key. Until
   // the wall is on screen the summary hasn't been asked for, so nothing falls back to rows either.
   const needRows = (key: string) => summaryState === "error" || (summaryState === "ready" && !summary?.[key]);
-  const wantRows = (key: string) => wantKpis && kpiVisible(key) && needRows(key);
+  // WHO A CARD IS SHOWN TO IS NOT WHO MAY READ IT. `kpiVisible` is the org's audience config (Settings), so an
+  // org that shows "Background checks open" to everyone was sending every employee's browser after rows it may
+  // not list: a 403 and an access-denied audit row per card per load, and a zero on screen. So a card also needs
+  // its collection to be readable. A summary key answers that itself - the server counts only collections the
+  // caller may list, so a key it left out is one they cannot. A card counted from rows asks the capability set.
+  const kpiReachable = (key: string) => {
+    if (SUMMARY_KEY_SET.has(key)) return summaryState !== "ready" || !!summary?.[key];
+    const collection = ROW_KPI_COLLECTION[key];
+    return !collection || hasCapability(caps, `${collection}.read`);
+  };
+  const wantRows = (key: string) => wantKpis && kpiVisible(key) && kpiReachable(key) && needRows(key);
+  const wantRowKpi = (key: string) => wantKpis && kpiVisible(key) && kpiReachable(key);
   // Summary-first value/extra, falling back to the row-computed number.
   const sv = (key: string, fallback: number) => summary?.[key]?.value ?? fallback;
   const sx = (key: string, fallback: number) => summary?.[key]?.extra ?? fallback;
@@ -391,7 +413,7 @@ export default function Dashboard({ me }: { me: Me }) {
   // them - and then it is counting one page rather than the org, which is exactly why the counts exist.
   // A hidden card whose number feeds a VISIBLE one still needs its number, so the not-clocked-in arithmetic
   // gets the same treatment here as it does in the summary request above.
-  const forNotClockedIn = (key: string) => wantKpis && kpiVisible("not_clocked_in") && needRows(key);
+  const forNotClockedIn = (key: string) => wantKpis && kpiVisible("not_clocked_in") && kpiReachable(key) && needRows(key);
   const readEmployees =
     wantTimeline || wantApprovals || wantBoard ||
     wantRows("headcount") || wantRows("joiners") || wantRows("probation_ending") || forNotClockedIn("headcount");
@@ -447,13 +469,13 @@ export default function Dashboard({ me }: { me: Me }) {
   // didn't already count them.
   const { rows: cards } = useCollection<CardT>("cards", { enabled: wantRows("cards_blocked") || wantRows("cards_overdue") || wantRows("my_open_cards") || wantRows("cards_due_week") });
   // Budget utilization is a service-derived rollup, not a column - not summarizable; the rows stay.
-  const { rows: budgets } = useCollection<ExpenseBudget>("expense-budgets", { enabled: wantKpis && kpiVisible("budget_over") });
+  const { rows: budgets } = useCollection<ExpenseBudget>("expense-budgets", { enabled: wantRowKpi("budget_over") });
   // Document ack/sign state is per-caller (join against acknowledgements) - the rows stay too.
-  const { rows: orgDocuments } = useCollection<DocumentResource>("org-documents", { enabled: wantKpis && kpiVisible("docs_to_ack") });
-  const { rows: personalDocuments } = useCollection<DocumentResource>("personal-documents", { enabled: wantKpis && (kpiVisible("docs_expiring") || kpiVisible("letters_to_sign")) });
+  const { rows: orgDocuments } = useCollection<DocumentResource>("org-documents", { enabled: wantRowKpi("docs_to_ack") });
+  const { rows: personalDocuments } = useCollection<DocumentResource>("personal-documents", { enabled: wantRowKpi("docs_expiring") || wantRowKpi("letters_to_sign") });
   const { rows: noticePeriods } = useCollection<NoticePeriod>("notice-periods", { enabled: wantRows("notice_serving") });
   // Remote-work rows also feed the "not clocked in" math (people working remotely aren't missing).
-  const { rows: remoteRequests } = useCollection<RemoteWorkRequest>("remote-work-requests", { enabled: wantRows("remote_today") || (wantKpis && kpiVisible("not_clocked_in") && needRows("remote_today")) });
+  const { rows: remoteRequests } = useCollection<RemoteWorkRequest>("remote-work-requests", { enabled: wantRows("remote_today") || forNotClockedIn("remote_today") });
   const { rows: timeEntries } = useCollection<TimeEntry>("time-entries", { enabled: wantRows("timesheet_week") || wantRows("timesheets_draft") || wantRows("team_hours_week") });
   const { rows: reviewCycles } = useCollection<ReviewCycle>("review-cycles", { enabled: wantRows("reviews_due_soon") });
   const { rows: offers } = useCollection<Offer>("offers", { enabled: wantRows("offers_pending") });
@@ -960,10 +982,10 @@ export default function Dashboard({ me }: { me: Me }) {
   const bySeverity = (a: { key: string }, b: { key: string }) => Number(isAllClear(kpiData[a.key]!)) - Number(isAllClear(kpiData[b.key]!));
   const allBands = KPI_CATEGORIES
     .filter((cat) => !hiddenCats.has(cat.key))
-    .map((cat) => ({ cat, defs: KPI_DEFS.filter((d) => d.category === cat.key && kpiData[d.key] && kpiVisible(d.key) && !hiddenKpis.has(d.key)).sort(bySeverity) }))
+    .map((cat) => ({ cat, defs: KPI_DEFS.filter((d) => d.category === cat.key && kpiData[d.key] && kpiVisible(d.key) && kpiReachable(d.key) && !hiddenKpis.has(d.key)).sort(bySeverity) }))
     .filter((b) => b.defs.length > 0);
   // Personally hidden cards the viewer WOULD otherwise see (for the "restore" affordance).
-  const personallyHidden = KPI_DEFS.filter((d) => hiddenKpis.has(d.key) && kpiData[d.key] && kpiVisible(d.key) && !hiddenCats.has(d.category)).length;
+  const personallyHidden = KPI_DEFS.filter((d) => hiddenKpis.has(d.key) && kpiData[d.key] && kpiVisible(d.key) && kpiReachable(d.key) && !hiddenCats.has(d.category)).length;
   const allClearCount = allBands.reduce((n, b) => n + b.defs.filter((d) => isAllClear(kpiData[d.key]!)).length, 0);
   const declutteredBands = hideClear
     ? allBands.map((b) => ({ ...b, defs: b.defs.filter((d) => !isAllClear(kpiData[d.key]!)) })).filter((b) => b.defs.length > 0)

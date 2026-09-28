@@ -172,7 +172,6 @@ const PayrollRuns = lazy(() => import("./pages/PayrollRuns"));
 const Settings = lazy(() => import("./pages/Settings"));
 const Workflows = lazy(() => import("./pages/Workflows"));
 const Activity = lazy(() => import("./pages/Activity"));
-const OpeningBalances = lazy(() => import("./pages/OpeningBalances"));
 const Moderation = lazy(() => import("./pages/Moderation"));
 
 // Route-key -> the page's code-chunk loader. React.lazy only starts a chunk download when the page first
@@ -192,7 +191,7 @@ const PAGE_CHUNK: Record<string, () => Promise<unknown>> = {
   benefits: () => import("./pages/Benefits"), schedule: () => import("./pages/Schedule"),
   timesheets: () => import("./pages/Timesheets"), loans: () => import("./pages/Loans"),
   "tax-declarations": () => import("./pages/TaxDeclarations"), announcements: () => import("./pages/Announcements"),
-  kudos: () => import("./pages/Announcements"), holidays: () => import("./pages/Holidays"),
+  holidays: () => import("./pages/Holidays"),
   events: () => import("./pages/Events"), documents: () => import("./pages/Documents"),
   compliance: () => import("./pages/Compliance"), "background-checks": () => import("./pages/BackgroundChecks"),
   overtime: () => import("./pages/Overtime"), "remote-work": () => import("./pages/RemoteWork"),
@@ -213,12 +212,9 @@ const PAGE_CHUNK: Record<string, () => Promise<unknown>> = {
   tables: () => import("./pages/TableBuilder"),
   assets: () => import("./pages/Assets"), stocktakes: () => import("./pages/Stocktakes"),
   "payroll-runs": () => import("./pages/PayrollRuns"),
-  "pay-periods": () => import("./pages/PayrollRuns"), workflows: () => import("./pages/Workflows"),
+  workflows: () => import("./pages/Workflows"),
   activity: () => import("./pages/Activity"),
-  // Deep-linked Settings tabs all resolve to the Settings chunk.
-  settings: () => import("./pages/Settings"), departments: () => import("./pages/Settings"),
-  "leave-types": () => import("./pages/Settings"), "pay-components": () => import("./pages/Settings"),
-  users: () => import("./pages/Settings"), operations: () => import("./pages/Settings"),
+  settings: () => import("./pages/Settings"),
 };
 
 // Route-chunk loading fallback. Shaped like the page that is coming rather than like two grey slabs: nearly
@@ -579,8 +575,6 @@ export default function App() {
         return route.id ? <EmployeeProfile key={route.id} id={route.id} me={gme} sub={route.sub ?? undefined} /> : <Directory me={gme} />;
       case "org-chart":
         return <OrgChart me={gme} focusId={route.id ?? undefined} />;
-      case "departments": // moved into Settings; deep-link to its tab
-        return <Settings me={gme} tab="departments" />;
       case "attendance":
         return <Attendance me={gme} />;
       case "leave-requests":
@@ -613,8 +607,6 @@ export default function App() {
         return <Loans me={gme} />;
       case "tax-declarations":
         return <TaxDeclarations me={gme} openId={route.id ?? undefined} />;
-      case "leave-types": // moved into Settings; deep-link to its tab
-        return <Settings me={gme} tab="leave-types" />;
       // `…/<id>` deep-links a post ON the board (search hits, the activity feed, a copied link); the `/view`
       // tail is the pop-out: that post alone, on a page of its own, with no board behind it.
       case "announcements":
@@ -639,8 +631,6 @@ export default function App() {
         return <Delegations me={gme} />;
       case "notice-periods":
         return <NoticePeriods me={gme} openId={route.id ?? undefined} />;
-      case "kudos": // merged into the board
-        return <Announcements me={gme} />;
       case "suggestions":
         return <Suggestions me={gme} openId={route.id ?? undefined} solo={route.sub === "view"} />;
       case "payslips":
@@ -687,10 +677,6 @@ export default function App() {
       // `stocktakes/<id>` opens that count in place: a count is a record somebody links to, not a dialog.
       case "stocktakes":
         return <Stocktakes me={gme} />;
-      case "pay-components": // moved into Settings; deep-link straight to its tab
-        return <Settings me={gme} tab="pay-components" />;
-      case "pay-periods": // merged into Payroll Runs; deep-link to its Pay periods tab, optionally onto one period
-        return <PayrollRuns me={gme} tab="periods" openId={route.id ?? undefined} />;
       // `payroll-runs/<tab>/<id>`: the tab takes the first segment (it predates deep-opening), so a run id
       // rides in the third - `payroll-runs/runs/<id>` opens that run's breakdown.
       case "payroll-runs":
@@ -701,14 +687,8 @@ export default function App() {
         return <Workflows me={gme} openId={route.id ?? undefined} />;
       case "activity":
         return <Activity me={gme} />;
-      case "opening-balances":
-        return <OpeningBalances me={gme} />;
       case "moderation":
         return <Moderation />;
-      case "users": // legacy deep link -> Settings Access → Roles & permissions
-        return <Settings me={gme} tab="users" />;
-      case "operations": // moved into Settings; deep-link straight to its tab
-        return <Settings me={gme} tab="operations" />;
       default:
         return <Dashboard me={gme} />;
     }

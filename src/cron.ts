@@ -328,7 +328,7 @@ async function notifyJobDeadLetter(deps: Deps, job: JobRow, error: string, why =
     type: "system.jobFailed",
     title: "Background job failed",
     body: `${job.kind} gave up ${why}: ${error.slice(0, 300)}`,
-    link: "operations",
+    link: "settings/operations",
     subject: `operations/${job.uuid}`,
     priority: "high",
     action: "retry",

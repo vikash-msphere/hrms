@@ -25,12 +25,12 @@ const DEEP_OPEN: Record<string, string> = {
 // Collection -> the nav page that shows it (record not auto-opened). Covers the navigable collections; the
 // caller falls back (e.g. to the in-place activity drill) when a collection is absent here.
 const PAGE_OF: Record<string, string> = {
-  departments: "departments", positions: "employees",
+  positions: "employees",
   "leave-requests": "leave-requests", "leave-encashments": "leave-requests",
   reimbursements: "reimbursements",
   expenses: "expenses", vendors: "vendors", "expense-budgets": "expense-budgets",
   "approval-delegations": "delegations", "review-cycles": "reviews", "interview-feedback": "interviews",
-  "pay-periods": "pay-periods", bonuses: "payroll-runs", notifications: "notifications",
+  "pay-periods": "payroll-runs/periods", bonuses: "payroll-runs", notifications: "notifications",
   "overtime-requests": "overtime",
   "remote-work-requests": "remote-work",
   "late-early-requests": "late-early",
@@ -64,7 +64,7 @@ const SETTINGS_PANEL: Record<string, string> = {
   "pay-components": "pay-components", "pay-grades": "pay-grades", "salary-structures": "salary-structures",
   projects: "projects", "benefit-plans": "benefit-plans", "reimbursement-categories": "reimbursements",
   "letter-templates": "letters", "expense-categories": "expenses", "ticket-checklists": "ticket-checklists",
-  "asset-categories": "asset-tags",
+  "asset-categories": "asset-tags", departments: "departments",
 };
 
 // The route to reach a record from the activity feed / approvals inbox: the record inside its Settings

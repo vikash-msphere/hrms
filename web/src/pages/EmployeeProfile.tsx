@@ -300,8 +300,9 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   // What the sticky bar watches: while this header is off screen, the bar carries the identity instead.
   const headerRef = useRef<HTMLDivElement | null>(null);
   // Derived reachability for the status pill and the on-leave note. Lazy and failure-silent: see
-  // hooks/usePresence.ts for why it is not a field on the record.
-  const presence = usePresence(id);
+  // hooks/usePresence.ts for why it is not a field on the record. Asked for only where the engine would answer
+  // it (`access.subject`): presence is read off leave and attendance, which not every viewer may see.
+  const presence = usePresence(canRead("employees.presence") ? id : null);
   // The phone for the facts band. Only fetched when the viewer may see it at all (`canPersonal` is the
   // super, the same gate the server gives the encrypted blob), so a colleague's profile makes no request
   // that could only come back redacted. Failure-silent for the same reason presence is: the cell is a
@@ -652,7 +653,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                     {/* Not an AccessTab: this tab is ABOUT access rather than governed by one. `shrink-0` for
                         the reason AccessTab's own wrapper carries it - in a scrolling strip a shrinkable
                         trigger is squeezed narrower than its nowrap label and spills over the next. */}
-                    {isSelf && <TabsTrigger value="privacy" className="shrink-0"><ShieldCheck className="h-4 w-4" /> Privacy & security</TabsTrigger>}
+                    {isSelf && <TabsTrigger value="privacy" className="shrink-0"><ShieldCheck className="h-4 w-4" /> Privacy</TabsTrigger>}
                   </TabsList>
                   {tabGears(tab)}
                 </div>
@@ -944,8 +945,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                 <TabsContent value="privacy">
                   <div className="space-y-4">
                     {/* The person's own app lock (lib/appLock.ts): theirs to set, and nobody else's to see. */}
-                    <section className="rounded-xl border bg-card p-4 shadow-sm sm:p-5">
-                      <h3 className="text-sm font-semibold">App lock</h3>
+                    <section aria-label="App lock" className="rounded-xl border bg-card p-4 shadow-sm sm:p-5">
                       <AppLockSettings />
                     </section>
                     <MyViewers selfPath={empPath} />

@@ -164,7 +164,9 @@ export async function checkPin(deps: Deps, master: string, user: { uuid: string;
         recipient: user.employeeId,
         type: "security.pin_failed",
         title: "Wrong app PIN entered",
-        body: `Someone entered a wrong PIN ${failures} times in a row on a browser signed in as you. If it wasn't you, lock all your devices from App lock settings.`,
+        body: `Someone entered a wrong PIN ${failures} times in a row. If it wasn't you, lock all your devices from My Profile › Privacy.`,
+        // Straight to the panel the body names, so the fix is one tap away.
+        link: "profile/privacy",
         priority: "urgent",
       });
     }

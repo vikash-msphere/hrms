@@ -73,7 +73,7 @@ test("brings over a leave balance, leave history and the year's pay through the 
   const person = await personWhoJoinedBefore(page, "Opening", tracked);
   const type = await ownLeaveType(page);
   try {
-    await gotoRoute(page, "opening-balances", "Opening balances");
+    await gotoRoute(page, "settings/opening-balances", "Opening balances");
 
     // ---- Leave balance ----
     const leave = page.locator("div").filter({ has: page.getByLabel("Opening balances sheet") }).last();
