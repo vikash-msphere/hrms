@@ -972,21 +972,19 @@ html[data-lock-shade] #root {
   --anniv-head: var(--cyan-200);
   --anniv-halo: 0.26;
 }
-/* The design's 68x68 box, laid over the mark: the mark's top-left sits 16px in from the box's. */
+/* The design's 68x68 box laid over the mark, scaled to the mark's height: its size and offset are set inline
+   by the component, which measures the mark. Everything inside is a fraction of the box. */
 .org-anniv__orbit {
   position: absolute;
-  left: -16px;
-  top: -16px;
-  width: 68px;
-  height: 68px;
   pointer-events: none;
 }
 .org-anniv__halo {
   position: absolute;
-  left: 2px;
-  top: 2px;
-  width: 64px;
-  height: 64px;
+  /* 2px in and 64px across, of the design's 68 */
+  left: 2.94%;
+  top: 2.94%;
+  width: 94.12%;
+  height: 94.12%;
   border-radius: 50%;
   z-index: 0;
   background: radial-gradient(circle, hsl(var(--anniv-glow) / var(--anniv-halo)) 0%, hsl(var(--anniv-glow) / 0) 68%);
@@ -995,8 +993,8 @@ html[data-lock-shade] #root {
 .org-anniv__ring {
   position: absolute;
   inset: 0;
-  width: 68px;
-  height: 68px;
+  width: 100%;
+  height: 100%;
   overflow: visible;
   fill: none;
   stroke-linecap: round;
@@ -1023,9 +1021,8 @@ html[data-lock-shade] #root {
 }
 .org-anniv__cap {
   position: absolute;
-  right: 15px;
-  top: 53px;
   width: 150px;
+  max-width: 100%;
   height: 11px;
   overflow: hidden;
   z-index: 2;
@@ -1033,6 +1030,18 @@ html[data-lock-shade] #root {
   font-size: 8px;
   line-height: 11px;
   letter-spacing: 0.16em;
+}
+/* Hung 1px below the wordmark, its right edge 1px past the image's - the design's spot, taken from the image
+   rather than the slot so it follows the image when the slot narrows (the phone drawer). The 12px it hangs
+   down stays inside the slot's 16px bottom padding. */
+.org-anniv__cap--under-mark {
+  top: calc(100% + 1px);
+  right: -1px;
+}
+/* The square logo + name row is always 68px tall, so the design's slot offsets hold. */
+.org-anniv__cap--slot {
+  top: 53px;
+  right: 15px;
 }
 .org-anniv__row {
   position: absolute;

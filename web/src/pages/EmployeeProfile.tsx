@@ -652,7 +652,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                     {/* Not an AccessTab: this tab is ABOUT access rather than governed by one. `shrink-0` for
                         the reason AccessTab's own wrapper carries it - in a scrolling strip a shrinkable
                         trigger is squeezed narrower than its nowrap label and spills over the next. */}
-                    {isSelf && <TabsTrigger value="privacy" className="shrink-0"><ShieldCheck className="h-4 w-4" /> Privacy & security</TabsTrigger>}
+                    {isSelf && <TabsTrigger value="privacy" className="shrink-0"><ShieldCheck className="h-4 w-4" /> Privacy</TabsTrigger>}
                   </TabsList>
                   {tabGears(tab)}
                 </div>

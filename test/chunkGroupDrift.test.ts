@@ -40,10 +40,11 @@ function parseWorkspaces(): { key: string; tabs: string[] }[] {
 }
 
 // `case "org-chart":` + the JSX on the following lines -> every page component that route key can render.
-// A key renders more than one when it has a detail view (`employees` is Directory or EmployeeProfile).
+// A key renders more than one when it has a detail view (`employees` is Directory or EmployeeProfile). A
+// block ends at the next `case` or at `default:`, so the last case does not claim the fallback page.
 function parseRoutes(): Map<string, string[]> {
   const routes = new Map<string, string[]>();
-  for (const m of app.matchAll(/case "([\w-]+)":\n((?:(?!\s*case ")[^\n]*\n)+)/g)) {
+  for (const m of app.matchAll(/case "([\w-]+)":\n((?:(?!\s*(?:case "|default:))[^\n]*\n)+)/g)) {
     const rendered = [...m[2]!.matchAll(/<([A-Z]\w+)/g)].map((c) => c[1]!).filter((c) => pageFiles.has(c));
     if (rendered.length) routes.set(m[1]!, [...new Set(rendered)]);
   }

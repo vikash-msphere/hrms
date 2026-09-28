@@ -12,7 +12,7 @@ test("picking a period start prefills month-end, flags an overlap, and end-befor
   // Far enough out that no seeded or other spec's period plausibly shares this month.
   const label = `E2E period ${Date.now() % 100000}`;
 
-  await gotoRoute(page, "pay-periods", "Pay Periods");
+  await gotoRoute(page, "payroll-runs/periods", "Pay Periods");
   await page.getByRole("button", { name: "New pay period" }).first().click();
   const form = page.getByRole("dialog");
 

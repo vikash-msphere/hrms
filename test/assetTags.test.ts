@@ -320,13 +320,6 @@ describe("scan payloads", () => {
     expect(parseScanPayload(buildScanPayload("tag_serial", a, origin))).toEqual({ tag: "MS-LAP-004" });
   });
 
-  // A sticker is a physical object: one printed while the app still used hash routes is on a laptop lid
-  // somewhere and has to keep resolving.
-  it("still reads a deep link printed in the old hash form", () => {
-    expect(parseScanPayload(`${origin}/#/assets/abc123`)).toEqual({ id: "abc123" });
-    expect(parseScanPayload(`${origin}/#/assets/abc123?s=7KQ3NBX2WD`)).toEqual({ id: "abc123", secret: "7KQ3NBX2WD" });
-  });
-
   it("handles hand-typed tags, junk and foreign URLs", () => {
     expect(parseScanPayload("  ms-lap-004  ")).toEqual({ tag: "ms-lap-004" });
     expect(parseScanPayload("")).toBeNull();

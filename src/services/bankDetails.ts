@@ -91,7 +91,7 @@ export async function getBankDetails(deps: Deps, _actor: AppUser, employeeId: st
     const json = await deps.encryptor.decrypt(emp.bankDetailsEnc);
     return { ...toMaskedBankView(JSON.parse(json) as StoredBank), etag };
   } catch {
-    // Legacy / unreadable blob: report it's on file without exposing anything.
+    // Unreadable blob: report it's on file without exposing anything.
     return { on_file: true, etag };
   }
 }
@@ -130,7 +130,7 @@ export async function setBankDetails(deps: Deps, actor: AppUser, employeeId: str
   // sign of it is a payroll disbursement that cannot be paid.
   //
   // The current blob is read the same way `getBankDetails` reads it, and an unreadable one merges as empty
-  // rather than failing the write - a legacy/corrupt blob must still be replaceable by typing the details in.
+  // rather than failing the write - a corrupt blob must still be replaceable by typing the details in.
   const current = await readStored(deps, emp.bankDetailsEnc);
   const stored: StoredBank = { ...current };
   for (const f of BANK_FIELDS) {

@@ -39,19 +39,12 @@
 const DB_NAME = "hrms";
 const DB_VERSION = 1;
 /** Bumped when a stored PAYLOAD shape changes. Records of another version are deleted, not merely ignored.
- *
- *  2: the `faces` class was retired - employee photos are ordinary `<img>` URLs now, cached by the browser
- *  rather than copied into this store - and a bump is how its records leave the disks they are already on. A
- *  class that no longer exists would otherwise be hydrated into a budget with no entry for it.
- *
- *  3: payloads are ciphertext (`c`) rather than plain text (`v`). A version-2 record is plain text: cached server
- *  data is simply deleted, and a DRAFT is re-encrypted in place, because it exists nowhere else.
+ *  Payloads are ciphertext (`c`).
  *
  *  EXPORTED for test/resourceStoreCache.test.ts, which seeds records "as a previous page life would have left
  *  them" and so has to write this number into their keys. It used to spell it `1` by hand, which made a bump
  *  look like a cache that had stopped working. */
 export const SCHEMA = 3;
-const PLAIN_SCHEMA = 2;
 
 // ---- The key --------------------------------------------------------------------------------------------
 
@@ -318,17 +311,14 @@ async function hydrate(id: string): Promise<void> {
   const key = await keyReady;
   if (!key) return;
   const live: { m: Meta; sealed: ArrayBuffer }[] = [];
-  const plainDrafts: { m: Meta; value: string }[] = [];
   try {
     const t = tx("readwrite");
     if (!t) return;
     const metas = (await wrap(t.meta.getAll())) as Meta[];
     const mine: Meta[] = [];
-    const legacy: Meta[] = [];
     const doomed: string[] = [];
     for (const m of metas) {
       if (m.ver === SCHEMA && m.id === id) mine.push(m);
-      else if (m.ver === PLAIN_SCHEMA && m.id === id && m.cls === "draft") legacy.push(m); // re-encrypted below
       else doomed.push(m.k); // another identity, or a payload shape this build no longer understands
     }
     for (const k of doomed) {
@@ -345,23 +335,21 @@ async function hydrate(id: string): Promise<void> {
     // Filtered to this identity's keys as it is read, so no other namespace's bytes are ever held in memory -
     // the deletes above are queued on the same transaction and requests within one run in order, so they are
     // already gone from what comes back, and this is the belt to that pair of braces.
-    const wanted = new Set([...mine, ...legacy].map((m) => m.k));
-    const payloads = new Map<string, { v?: unknown; c?: unknown }>();
-    for (const rec of (await wrap(t.data.getAll())) as { k: string; v?: unknown; c?: unknown }[]) {
+    const wanted = new Set(mine.map((m) => m.k));
+    const payloads = new Map<string, { c?: unknown }>();
+    for (const rec of (await wrap(t.data.getAll())) as { k: string; c?: unknown }[]) {
       if (rec && wanted.has(rec.k)) payloads.set(rec.k, rec);
     }
-    for (const m of [...mine, ...legacy]) {
+    for (const m of mine) {
       const p = payloads.get(m.k);
       const expired = now - m.ts > MAX_AGE_MS[m.cls];
-      const usable = m.ver === SCHEMA ? p?.c instanceof ArrayBuffer : typeof p?.v === "string";
-      if (expired || !usable) {
+      if (expired || !(p?.c instanceof ArrayBuffer)) {
         // Past its age, or metadata without a payload: nothing to hand anyone.
         t.meta.delete(m.k);
         t.data.delete(m.k);
         continue;
       }
-      if (m.ver === SCHEMA) live.push({ m, sealed: p!.c as ArrayBuffer });
-      else plainDrafts.push({ m, value: p!.v as string });
+      live.push({ m, sealed: p.c });
     }
   } catch {
     return; /* a failed hydration is a cold cache, which every consumer already handles */
@@ -378,13 +366,8 @@ async function hydrate(id: string): Promise<void> {
       }
     }),
   );
-  const migrated: { m: Meta; value: string; sealed: ArrayBuffer }[] = [];
-  for (const { m, value } of plainDrafts) {
-    const k = composite(id, "draft", m.key);
-    migrated.push({ m: { ...m, k, ver: SCHEMA }, value, sealed: await sealRecord(key, k, value) });
-  }
   if (identity !== id) return; // the namespace moved on while this was decrypting
-  if (unreadable.length || plainDrafts.length) {
+  if (unreadable.length) {
     try {
       const t = tx("readwrite");
       if (t) {
@@ -392,22 +375,13 @@ async function hydrate(id: string): Promise<void> {
           t.meta.delete(k);
           t.data.delete(k);
         }
-        // The encrypted copy and the plain one's removal in ONE transaction, so a draft is never in neither.
-        for (const { m, sealed } of migrated) {
-          t.meta.put(m);
-          t.data.put({ k: m.k, c: sealed });
-        }
-        for (const { m } of plainDrafts) {
-          t.meta.delete(m.k);
-          t.data.delete(m.k);
-        }
       }
     } catch {
-      /* the plain drafts stay where they were and are tried again on the next load */
+      /* tried again on the next load */
     }
   }
   const byClass = new Map<StoreClass, StoredRecord[]>();
-  for (const { m, value } of [...opened, ...migrated]) {
+  for (const { m, value } of opened) {
     track(m);
     const list = byClass.get(m.cls) ?? [];
     list.push({ key: m.key, value, ts: m.ts, collection: m.collection, etag: m.etag });
@@ -644,7 +618,7 @@ const KEPT_ON_LOCK = [
  * What the app lock takes off this browser (web/src/lib/appLock.ts). The encrypted records STAY: without the key
  * they are unreadable, the key goes with this page, and the server hands it only to an unlocked session - so an
  * unlock resumes from them warm, drafts included. What is readable without a key goes: sessionStorage (the
- * dialog drafts), every localStorage key not listed above, Cache Storage, and any record still in plain text.
+ * dialog drafts), every localStorage key not listed above, Cache Storage, and any record of another schema version.
  * Never rejects: a lock must not wait on storage.
  */
 export async function purgeForLock(): Promise<void> {
@@ -696,7 +670,7 @@ export async function purgeForLock(): Promise<void> {
  *
  * `purgeAll` takes the `draft` class with it - a half-written announcement, a review write-up and its ratings
  * grid, an unsent bulk delivery - and none of that exists on the server. Sign-out is a decision somebody makes
- * one click from "View my profile", so the menu asks when there is something to lose and stays silent when
+ * one click from "Appearance", so the menu asks when there is something to lose and stays silent when
  * there is not. Free: the index is already in memory, so this is a filter over a map, no read and no await.
  */
 export function draftCount(): number {
@@ -757,25 +731,10 @@ export async function purgeCachedData(): Promise<void> {
 
 // ---- Collection ---------------------------------------------------------------------------------------------
 // Records are already bounded by class budget and dropped by age at hydration, so what is left for `gc()` is the
-// localStorage side: keys nothing reads any more. Each entry says how to decide, and an unbounded family (one
-// key per ticket, per board, per table) gets a rule that keeps it from climbing for the life of the browser
-// profile. Deliberately a data table rather than logic spread across the pages that write these: a new key
-// family is one line here, and a family nobody claims is visible as an omission.
-// Also the un-namespaced ancestors of keys that now carry the caller's identity. They are not merely dead: each
-// holds one person's state under a key the next person on a shared browser reads, which is why they were
-// namespaced. `prefs.unconfirmed` is the sharpest - `adoptUnconfirmed` PATCHed whatever it held onto whoever is
-// signed in now - and `dash.personal` painted the dashboard from it before the server row arrived.
-const LEGACY_KEYS = [
-  "dash.hideAllClear",
-  "prefs.unconfirmed",
-  "dash.personal",
-  "hrms.board.filter",
-  "goals:filter",
-  "boards:last",
-  "hrms.letters.rail",
-  "letterTemplate:last",
-  "push-enroll-dismissed",
-];
+// localStorage side: an unbounded family (one key per ticket, per board, per table) gets a rule that keeps it
+// from climbing for the life of the browser profile. Deliberately a data table rather than logic spread across
+// the pages that write these: a new key family is one line here, and a family nobody claims is visible as an
+// omission.
 
 /**
  * localStorage families that must not grow without bound, and how many entries of each are worth keeping.
@@ -794,23 +753,12 @@ const SWEEPS: Sweep[] = [
 ];
 
 /**
- * Remove what nothing will read again. Runs once at boot, on an idle callback, so it never competes with the
- * first paint. Everything it touches is a cache or a UI nicety - losing any of it costs a re-fetch or a
- * re-collapse, never data.
+ * Trim the unbounded families. Runs once at boot, on an idle callback, so it never competes with the first
+ * paint. Everything it touches is a UI nicety - losing any of it costs a re-collapse, never data.
  */
 export function gc(opts: { seenTickets?: () => void } = {}): void {
   idle(() => {
     try {
-      for (const k of LEGACY_KEYS) localStorage.removeItem(k);
-      // Drafts written by an earlier build of the app, before they were namespaced and given an expiry.
-      for (let i = localStorage.length - 1; i >= 0; i--) {
-        const k = localStorage.key(i);
-        if (!k) continue;
-        if (k.startsWith("review-draft:") || k.startsWith("board:composer:")) localStorage.removeItem(k);
-        // The pre-clientStore caches. Their keys are orphaned by this module's existence, not by a version bump,
-        // so nothing will ever come back for them.
-        if (/^(rs1|rs1sync|ph1|st1|ap1):/.test(k)) localStorage.removeItem(k);
-      }
       for (const s of SWEEPS) {
         const keys: string[] = [];
         for (let i = 0; i < localStorage.length; i++) {

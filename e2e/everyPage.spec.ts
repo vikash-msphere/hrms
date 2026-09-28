@@ -45,7 +45,6 @@ const PAGES: PageCase[] = [
   { route: "loans", heading: "Loans & Advances" },
   { route: "tax-declarations", heading: "Tax Declarations" },
   { route: "announcements", heading: "Feed" },
-  { route: "kudos", heading: "Feed" },
   { route: "holidays", heading: "Holiday Calendar" },
   { route: "events", heading: "Events" },
   { route: "documents", heading: "Documents" },
@@ -78,19 +77,10 @@ const PAGES: PageCase[] = [
   { route: "assets", heading: "Assets" },
   { route: "stocktakes", heading: "Stocktakes" },
   { route: "payroll-runs", heading: "Payroll" },
-  { route: "pay-periods", heading: "Payroll" },
   { route: "tables", heading: "Tables" },
   { route: "workflows", heading: "Workflows" },
   { route: "activity", heading: "Activity" },
-  { route: "opening-balances", heading: "Opening balances" },
   { route: "settings", heading: "Settings" },
-  // The routes that survive as deep links into a Settings panel: their heading is the panel's, not the
-  // page's, which is exactly what would break if one of them stopped resolving.
-  { route: "departments", heading: "Departments" },
-  { route: "leave-types", heading: "Leave types" },
-  { route: "pay-components", heading: "Pay components" },
-  { route: "users", heading: "Users" },
-  { route: "operations", heading: "System operations" },
 ];
 
 test.describe("every page", () => {

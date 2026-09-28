@@ -219,18 +219,16 @@ export function useRoute(): Route {
   return route;
 }
 
-// Accepts either shape of target: a bare path ("announcements/<id>/view"), one that already leads with a slash,
-// or a legacy hash form ("#/settings/permissions", which is how a couple of server-built notification links are
-// stored) - otherwise the last kind lands on "/#/…" and routes nowhere.
+// Accepts a bare path ("announcements/<id>/view") or one that already leads with a slash.
 export function navigate(to: string) {
-  go(`/${to.replace(/^#?\/?/, "")}`);
+  go(`/${to.replace(/^\//, "")}`);
 }
 
 // Same destination, without keeping the address being left. For a page that redirects on arrival (a settings
 // key whose real home is its host page): the address bounced off is consumed rather than stacked, so Back from
 // the destination reaches wherever the reader actually came from instead of the redirect that would fire again.
 export function redirect(to: string) {
-  go(`/${to.replace(/^#?\/?/, "")}`, true);
+  go(`/${to.replace(/^\//, "")}`, true);
 }
 
 // Switch a page's routed tab (`/leave-requests/history`) while KEEPING the current query string. Clicking a

@@ -32,16 +32,12 @@ const lsKey = () => {
   const id = storedIdentity();
   return id ? `dash.personal:${id}` : null;
 };
-// The pre-prefs "hide all-clear" toggle lived under this key; migrate it once so nobody loses the setting.
-const LEGACY_HIDE_CLEAR_KEY = "dash.hideAllClear";
-
 function loadLocal(): DashPersonalPrefs {
   const key = lsKey();
   if (!key) return {};
   try {
     const raw = localStorage.getItem(key);
-    if (raw) return JSON.parse(raw) as DashPersonalPrefs;
-    return localStorage.getItem(LEGACY_HIDE_CLEAR_KEY) === "1" ? { hideClear: true } : {};
+    return raw ? (JSON.parse(raw) as DashPersonalPrefs) : {};
   } catch {
     return {};
   }

@@ -271,7 +271,7 @@ export async function weeklyAttentionDigest(deps: Deps): Promise<number> {
           ...items.slice(0, 3).map((i) => `${i.title} - ${i.detail}`),
           ...(items.length > 3 ? [`and ${items.length - 3} more`] : []),
         ].join("\n"),
-        link: "/dashboard",
+        link: "dashboard",
       });
       sent++;
     } catch (e) {

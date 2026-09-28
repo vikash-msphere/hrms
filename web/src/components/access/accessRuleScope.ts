@@ -7,8 +7,8 @@
 // affordance - it manages the collection-level CREATE gate (the 1-token `<collection>` write), distinct from
 // per-object access and from whole-collection (`<collection>.**`) access.
 // `scope` is the chosen tier for an object/collection target: "exact" (this object), "self" (own), "dept",
-// "subtree", or "all". Omitted -> the legacy default (exact when an object is in scope, else all), so callers
-// that don't pick a scope behave exactly as before.
+// "subtree", or "all". Omitted -> exact when an object is in scope, else all: the tier a caller that offers no
+// scope picker means.
 // `anchorPath` is the object a "named-dept" rule is anchored to ("departments/<id>"), picked by the grantor
 // rather than taken from the page. It is a SEPARATE field from `objectPath` on purpose: `objectPath` is
 // whatever the clicked element is about (a leave request, an employee), and a named-department rule is
@@ -22,8 +22,8 @@ export type AccessRuleRow = { collection: string; scope: string; scope_ref?: str
 // The scope fields to POST when creating a rule for a target.
 export type RuleScopeBody = { scope: string; scope_ref?: string; field?: string };
 
-// The effective scope tier for an object/collection target (field/create targets ignore it). Defaults to the
-// legacy behavior: a specific object -> "exact", a bare collection -> "all".
+// The effective scope tier for an object/collection target (field/create targets ignore it). With none chosen:
+// a specific object -> "exact", a bare collection -> "all".
 function effScope(t: AccessRuleTarget): string {
   return t.scope ?? (t.objectPath ? "exact" : "all");
 }

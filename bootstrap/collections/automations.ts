@@ -35,7 +35,7 @@ export const AUTOMATIONS: AutomationSeed[] = [
     actions: [
       { kind: "apiCall", method: "POST", path: "/v1/transitions", body: { employee: "{{subject}}", kind: "onboarding", template: "default-onboarding", anchor_date: "{{startDate}}" }, captureAs: "onboarding" },
       { kind: "apiCall", method: "POST", path: "/v1/{{subject}}:enrollDefaultBenefits", captureAs: "benefits" },
-      { kind: "notify", recipient: { of: "subject" }, title: "Welcome aboard!", body: "Your onboarding checklist is ready and you're enrolled in {{results.benefits.enrolled}} benefit plan(s). Check your tasks to get started.", link: "onboarding" },
+      { kind: "notify", recipient: { of: "subject" }, title: "Welcome aboard!", body: "Your onboarding checklist is ready and you're enrolled in {{results.benefits.enrolled}} benefit plan(s). Check your tasks to get started.", link: "transitions" },
       { kind: "email", to: { of: "subject" }, subject: "Welcome aboard!", html: "<p>Welcome to the team! Your onboarding checklist is ready and you're enrolled in {{results.benefits.enrolled}} benefit plan(s). Log in to see your first-week tasks and get started.</p>" },
       { kind: "notifyManager", noun: "new hire - set up their first week" },
       {
@@ -169,7 +169,7 @@ export const AUTOMATIONS: AutomationSeed[] = [
       recipient: { of: "ref", field: "hiringManagerId" },
       title: "You have a new hire",
       body: "{{candidateName}} is hired for {{requisitionTitle}}. Their onboarding checklist is open.",
-      link: "onboarding",
+      link: "transitions",
       type: "recruiting.hired",
     }],
   },

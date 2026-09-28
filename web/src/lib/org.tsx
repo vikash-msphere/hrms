@@ -27,8 +27,7 @@ export type LetterDefaults = {
 };
 // `quick_actions.groups` = the org's custom "+" (quick-create) menu: ordered named sections, each with an
 // ordered list of enabled action ids. Undefined = not configured -> built-in default sections. An id absent
-// from every section is disabled org-wide. `order` is the legacy flat shape, still read for migration. Per-user
-// capability gating still applies on top, so an enabled action a person can't perform won't show. See
+// from every section is disabled org-wide. Per-user capability gating still applies on top, so an enabled action a person can't perform won't show. See
 // lib/quickActions.ts (normalizeQuickMenu / resolveQuickMenu).
 // `logo_dark` is the optional dark-theme variant of `logo`. Both are data URLs rendered in an <img>, and an
 // <img>-embedded SVG cannot see the app's `.dark` class (nor can `prefers-color-scheme` inside it, which
@@ -36,7 +35,7 @@ export type LetterDefaults = {
 // `wordmark`/`wordmark_dark` are the wide logo-plus-name artwork. When set, the sidebar renders it across its
 // full width INSTEAD of the square `logo` + the name text (name_font/weight/size then style nothing). The
 // collapsed icon rail still shows `logo`, since a wordmark can't fit it.
-export type OrgSettings = { name: string; legal_name?: string; logo?: string; logo_dark?: string; wordmark?: string; wordmark_dark?: string; favicon?: string; logo_text?: string; name_font?: string; name_weight?: string; name_size?: string; address?: string; incorporation_date?: string; currencies?: string[]; default_currency?: string; currency_decimals?: Record<string, number>; default_department?: string | null; banks?: string[]; letter_defaults?: LetterDefaults; quick_actions?: { groups?: { id: string; label: string; items: string[] }[]; order?: string[] }; primary_color?: string; email_logo_url?: string; document_logos?: Record<string, string> };
+export type OrgSettings = { name: string; legal_name?: string; logo?: string; logo_dark?: string; wordmark?: string; wordmark_dark?: string; favicon?: string; logo_text?: string; name_font?: string; name_weight?: string; name_size?: string; address?: string; incorporation_date?: string; currencies?: string[]; default_currency?: string; currency_decimals?: Record<string, number>; default_department?: string | null; banks?: string[]; letter_defaults?: LetterDefaults; quick_actions?: { groups?: { id: string; label: string; items: string[] }[] }; primary_color?: string; email_logo_url?: string; document_logos?: Record<string, string> };
 
 // The wordmark's typeface list lives in lib/fonts.ts, shared with the typeface control on a board post; it is
 // re-exported here so the settings/sidebar call sites keep importing it from the module they always have.

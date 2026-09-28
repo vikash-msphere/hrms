@@ -14,7 +14,6 @@ import { useCollection } from "@/hooks/useCollection";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 import { AccessAction } from "@/components/access/AccessAction";
-import { PageHeader } from "@/components/common/PageHeader";
 import { Field } from "@/components/common/Field";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +48,7 @@ const OUTCOME: Record<Outcome, { label: string; variant: "success" | "muted" | "
   joined_after: { label: "Joined on or after it", variant: "muted" },
 };
 
+// A Settings panel (settings/registry.ts `opening-balances`): the panel page supplies the title and description.
 export default function OpeningBalances({ me }: { me: Me }) {
   // Each step is its own grant, so each section shows only to someone who may run it (hide, never disable).
   const canDate = usePermission("employees.setTrackedFrom");
@@ -57,11 +57,6 @@ export default function OpeningBalances({ me }: { me: Me }) {
   const canHistory = usePermission("leave-requests.importHistory");
   return (
     <div className="space-y-4">
-      <PageHeader
-        eyebrow="Admin"
-        title="Opening balances"
-        description="Bring in what happened before your org started using HRMS, so nobody's attendance, pay or leave is worked out from history the app never saw."
-      />
       {canDate && <RecordsStart />}
       {canLeave && <LeaveOpenings />}
       {canHistory && <LeaveHistoryImport />}

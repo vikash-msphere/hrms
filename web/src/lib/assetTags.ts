@@ -321,9 +321,7 @@ export function parseScanPayload(text: string): ScanRef | null {
   const t = text.trim();
   if (!t) return null;
   const secret = t.match(/[?&]s=([A-Za-z0-9]+)/)?.[1];
-  // `#/assets/<id>` as well as `/assets/<id>`: the app moved off hash routes, but a sticker is a physical
-  // object with its own URL printed on it, and one already on a laptop lid has to keep scanning.
-  const deepLink = t.match(/(?:#)?\/assets\/([A-Za-z0-9_-]+)(?:\?[^\s]*)?\s*$/);
+  const deepLink = t.match(/\/assets\/([A-Za-z0-9_-]+)(?:\?[^\s]*)?\s*$/);
   if (deepLink) return { id: deepLink[1]!, ...(secret ? { secret } : {}) };
   const foundUrl = t.match(/\/found\/([A-Za-z0-9_-]+)(?:\?[^\s]*)?\s*$/);
   if (foundUrl) return { id: foundUrl[1]!, ...(secret ? { secret } : {}) };

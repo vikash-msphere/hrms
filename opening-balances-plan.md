@@ -165,9 +165,9 @@ It also stays useful after go-live:
 - `decide()` in `leaveRequests.ts`: HR may cancel an imported row with no refund and no notification. Imported
   rows can't be edited. Web: a "Before HRMS" badge on history rows, and no cancel for the employee.
 
-### 5. The Opening balances page
-- Admin nav item `opening-balances` (`web/src/nav.ts`, `App.tsx`), shown when the user can use any of the verbs
-  above. Sections:
+### 5. The Opening balances panel
+- Settings panel `opening-balances` (`web/src/settings/registry.ts`, Company group, `/settings/opening-balances`),
+  shown when the user can use any of the verbs above. Sections:
   - **Records start**: the date is pre-filled with the org-local day of the earliest employee record. The page
     previews who gets which date, then applies.
   - **Leave balances**: download a template (one row per employee, a column per leave type), paste or upload,

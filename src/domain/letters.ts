@@ -168,11 +168,8 @@ function buildContext(ctx: LetterContext, input: Record<string, string> = {}, de
     work_location: d.work_location || "",
     working_pattern: [d.working_hours, d.working_days].filter(Boolean).join(", "),
     // Company (first-party) sign-off identity: the authorized signatory who signs on behalf of the employer.
-    // These are the canonical names; signatory_name / signatory_title remain as aliases.
     company_signatory_name: d.signatory_name || "Authorised Signatory",
     company_signatory_title: d.signatory_title || "Human Resources",
-    signatory_name: d.signatory_name || "Authorised Signatory",
-    signatory_title: d.signatory_title || "Human Resources",
     hr_name: d.hr_name || "",
     hr_email: d.hr_email || "",
     hr_phone: d.hr_phone || "",
@@ -235,7 +232,7 @@ function buildContext(ctx: LetterContext, input: Record<string, string> = {}, de
   // FILTERED TO THE KEYS THE TEMPLATE DECLARES, because this spread is the LAST assignment into `v` and the
   // route accepts arbitrary keys (`input: z.record(z.string(), z.string().max(20_000))`, up to 200 of them).
   // Unfiltered, last-write-wins let the caller overwrite any DERIVED placeholder - `{{ctc_annual}}`,
-  // `{{settlement_net}}`, `{{inc_new_annual}}`, `{{employee_name}}`, `{{signatory_name}}` - on a letter that is
+  // `{{settlement_net}}`, `{{inc_new_annual}}`, `{{employee_name}}`, `{{company_signatory_name}}` - on a letter that is
   // then rendered, filed as the employee's `personal-documents` row, frozen for re-render, and optionally sent
   // for Aadhaar e-signature.
   //

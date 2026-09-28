@@ -10,7 +10,7 @@ empty:
 - the first HRMS payroll works out the year's TDS as if nothing had been paid or deducted since April, and the
   PT annual cap and the ESI rule read the same gap.
 
-**Admin → Opening balances** is where each of these is put right. Every section previews first and writes
+**Settings → Opening balances** is where each of these is put right. Every section previews first and writes
 nothing until you apply. Each section shows only to somebody who holds its permission.
 
 ## What to get from the old system first

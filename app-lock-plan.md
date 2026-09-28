@@ -233,8 +233,8 @@ browser bindings before it ships). Without a PIN, the same button opens setup.
 
 ### Settings for the person
 
-"App lock" in the avatar menu opens a sheet, and the same panel sits on the profile's self-only Privacy tab
-(renamed Privacy & security): on or off, change PIN, auto-lock time, "Lock all my devices", and the last wrong
+"App lock" in the avatar menu opens a sheet, and the same panel sits on the profile's self-only Privacy tab:
+on or off, change PIN, auto-lock time, "Lock all my devices", and the last wrong
 PIN (when, which browser). A sheet as well as the tab, because accounts with no employee record have no profile.
 
 ### Admin

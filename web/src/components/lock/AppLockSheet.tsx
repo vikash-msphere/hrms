@@ -2,8 +2,8 @@ import * as React from "react";
 import { Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { AppLockSettings } from "@/components/lock/AppLockSettings";
 
-// The app lock settings as a sheet, reachable from the top bar's lock button (first use), the avatar menu and
-// the command palette - for everyone, including an account with no employee record and so no profile page.
+// The app lock settings as a sheet, reachable from the top bar's lock button (first use), the avatar menu
+// (first use) and the command palette - for everyone, including an account with no employee record and so no profile page.
 
 let open = false;
 let setup = false;

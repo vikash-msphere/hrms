@@ -112,30 +112,15 @@ export function defaultQuickMenu(): QuickMenuConfig {
   };
 }
 
-// Coerce whatever is stored in OrgSettings.quick_actions into a QuickMenuConfig. Handles undefined (-> default),
-// the current {groups} shape, and the legacy flat {order} shape (distributed into the default code sections,
-// preserving the saved order; ids absent from `order` stay off).
-export function normalizeQuickMenu(raw?: { groups?: QuickMenuGroup[]; order?: string[] }): QuickMenuConfig {
-  if (raw?.groups?.length) return { groups: raw.groups };
-  if (raw?.order) {
-    const rank = new Map(raw.order.map((id, i) => [id, i]));
-    return {
-      groups: QUICK_ACTION_GROUPS.map((g) => ({
-        id: g.toLowerCase(),
-        label: g,
-        items: CONFIGURABLE_QUICK_ACTIONS.filter((a) => a.group === g && rank.has(a.id))
-          .sort((a, b) => rank.get(a.id)! - rank.get(b.id)!)
-          .map((a) => a.id),
-      })).filter((g) => g.items.length > 0),
-    };
-  }
-  return defaultQuickMenu();
+// OrgSettings.quick_actions as a QuickMenuConfig: the stored sections, or the default ones until configured.
+export function normalizeQuickMenu(raw?: { groups?: QuickMenuGroup[] }): QuickMenuConfig {
+  return raw?.groups?.length ? { groups: raw.groups } : defaultQuickMenu();
 }
 
 // Renderable menu sections for a caller: config sections in order, each with the enabled actions that caller can
 // perform, empty sections dropped. Unknown and standalone ids ignored. Pass raw org config; normalization
 // happens here.
-export function resolveQuickMenu(me: Me, raw?: { groups?: QuickMenuGroup[]; order?: string[] }): { id: string; label: string; actions: QuickAction[] }[] {
+export function resolveQuickMenu(me: Me, raw?: { groups?: QuickMenuGroup[] }): { id: string; label: string; actions: QuickAction[] }[] {
   const byId = new Map(QUICK_ACTIONS.map((a) => [a.id, a]));
   return normalizeQuickMenu(raw)
     .groups.map((g) => ({
@@ -150,7 +135,7 @@ export function resolveQuickMenu(me: Me, raw?: { groups?: QuickMenuGroup[]; orde
 
 // Flat list of enabled, visible menu actions (palette "Action" commands); the standalone top-bar actions are
 // appended so they stay reachable via ⌘K even though they're absent from the "+" menu.
-export function resolveQuickActionList(me: Me, raw?: { groups?: QuickMenuGroup[]; order?: string[] }): QuickAction[] {
+export function resolveQuickActionList(me: Me, raw?: { groups?: QuickMenuGroup[] }): QuickAction[] {
   const flat = resolveQuickMenu(me, raw).flatMap((g) => g.actions);
   const standalone = QUICK_ACTIONS.filter((a) => STANDALONE_ACTION_IDS.has(a.id) && a.visible(me));
   return [...flat, ...standalone];

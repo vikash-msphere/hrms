@@ -12,8 +12,8 @@ import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import type { Me } from "@/types";
 
-// The signed-in user's avatar + menu, anchored in the top bar. Opens (downward) with the profile link, the
-// appearance control, sign-out, and - for those who may manage access - the access-management mode toggle and
+// The signed-in user's avatar + menu, anchored in the top bar. Opens (downward) with "Lock now" when a PIN is
+// set or "Set up app lock" when not, the appearance control, sign-out, and - for those who may manage access - the access-management mode toggle and
 // a shortcut to manage WHO can manage access. Avatar-only trigger to stay compact next to the rest of the
 // top-bar chrome.
 
@@ -31,7 +31,7 @@ import type { Me } from "@/types";
 // real work (a review write-up and its ratings grid, an announcement being composed, an unsent bulk delivery)
 // that exists nowhere else, and every other place this data can be lost asks before dropping it: the
 // composer's discard prompt, `useDialogGuard`, PhotoAvatar's crop. Sign-out was the one door with no sign on
-// it, sitting directly under "View my profile".
+// it.
 async function signOut(confirm: ConfirmFn) {
   const drafts = draftCount();
   if (
@@ -78,8 +78,8 @@ export function UserMenu({ me }: { me: Me }) {
       <DropdownMenuTrigger
         title={`${name} · ${roleLabel(me.role)}`}
         // The avatar is 32px, which is the right visual weight in a 56px bar and two thirds of a fingertip.
-        // The box takes the floor without the avatar changing size - this is the only route to sign out,
-        // switch theme and reach a profile, so it is not a control to miss.
+        // The box takes the floor without the avatar changing size - this is the only route to sign out and
+        // switch theme, so it is not a control to miss.
         className="flex items-center justify-center gap-1.5 rounded-full transition-opacity hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-accent coarse:min-h-9 coarse:min-w-9"
       >
         <PhotoAvatar employeeId={me.employee_id ?? ""} name={name} photo={emp?.photo} className="h-8 w-8 shrink-0" />
@@ -117,20 +117,19 @@ export function UserMenu({ me }: { me: Me }) {
             <DropdownMenuSeparator />
           </>
         )}
-        <DropdownMenuItem asChild>
-          <a href="/profile">View my profile</a>
-        </DropdownMenuItem>
-        {/* The app lock: lock now when a PIN is set, and the person's own settings either way. */}
-        {lock.config?.enabled && (
+        {/* The app lock: lock now when a PIN is set, otherwise straight to choosing one. Changing an existing
+            PIN lives on the profile page, the top bar's lock button and the command palette. */}
+        {lock.config?.enabled ? (
           <DropdownMenuItem onClick={() => void lockNow()}>
             <Lock className="h-4 w-4" />
             Lock now
           </DropdownMenuItem>
+        ) : (
+          <DropdownMenuItem onClick={() => openAppLockSettings({ setup: true })}>
+            <LockKeyhole className="h-4 w-4" />
+            Set up app lock
+          </DropdownMenuItem>
         )}
-        <DropdownMenuItem onClick={() => openAppLockSettings()}>
-          <LockKeyhole className="h-4 w-4" />
-          App lock settings
-        </DropdownMenuItem>
         {/* Appearance, at every width - this is the only theme control in the app. A preference, not a page
             action: it belongs with the person rather than in a row of per-page chrome, and a dedicated top-bar
             button spent a permanent 36px on a choice most people make once.

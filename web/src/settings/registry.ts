@@ -4,7 +4,7 @@ import {
   Building2, Landmark, SlidersHorizontal, Hash, Network, Fingerprint, Trophy,
   CalendarRange, Palmtree, Clock, CalendarClock, AlarmClock,
   Coins, Layers, ListOrdered, Percent, Receipt, Wallet, FileSpreadsheet, FolderKanban,
-  UserSearch, UserPlus, Target, ClipboardList, HeartPulse,
+  UserSearch, UserPlus, Target, ClipboardList, HeartPulse, History,
   FileText, PenLine, FileSignature, Bell, BellRing, LifeBuoy, ListTodo,
   Users, Shield, KeyRound, Wrench, Plus, KanbanSquare, Tag, Sparkles, AlertTriangle, LogIn, Search,
 } from "lucide-react";
@@ -36,6 +36,9 @@ export type SettingsEntry = {
   hostPage?: string; // non-org: the route page the nav card jumps to and the inline gear lives on
   keywords?: string[]; // extra search terms beyond title/desc
   perm?: string; // capability required beyond settings.write (e.g. "leave-types.write")
+  // A panel made of independently granted steps: shown to whoever holds ANY of these, each step then gating
+  // itself. Takes the place of `perm` and `target` in the visibility rule.
+  anyPerm?: string[];
   target?: AccessTargetRef; // manage-access affordance on the panel header (object scope fills objectPath at runtime)
   wide?: boolean; // the inline Sheet opens wider than the 760px default - for panels that are a two-pane editor
 };
@@ -58,6 +61,9 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   { key: "kudos", title: "Kudos levels", desc: "The recognition levels and their icons on the praise wall.", group: "Company", icon: Trophy, keywords: ["recognition", "praise", "badges"], target: { collection: "settings", objectPath: "settings/kudos", label: "Kudos levels" } },
   { key: "asset-tags", title: "Asset tags", desc: "The tag pattern, the asset categories and their tag codes, sticker-sheet formats, label content, and whether custody has to be proved by scanning the tag.", group: "Company", icon: Tag, keywords: ["sticker", "label", "qr", "print", "inventory", "a4-65", "tag format", "categories", "category", "tag code", "custody", "scan", "acknowledge", "stocktake", "verify"], target: { collection: "settings", objectPath: "settings/asset-tags", label: "Asset tags" } },
   { key: "quick-actions", title: "Quick create menu", desc: "Which items appear in the top-bar + (New) menu, and their order.", group: "Company", icon: Plus, keywords: ["new menu", "plus menu", "quick create", "shortcuts", "actions", "+ new"], target: org("Quick create menu") },
+  // Go-live setup: what happened before the org used HRMS. Each section is its own verb, so the panel is anyone's
+  // who may run one of them.
+  { key: "opening-balances", title: "Opening balances", desc: "Bring in what happened before your org started using HRMS, so nobody's attendance, pay or leave is worked out from history the app never saw.", group: "Company", icon: History, anyPerm: ["employees.setTrackedFrom", "leave-adjustments.importOpenings", "leave-requests.importHistory", "payroll-openings.importOpenings"], keywords: ["go-live", "migration", "import", "before hrms", "records start", "tracked from", "leave balance", "leave history", "payroll openings", "tds so far", "legacy"] },
   { key: "search-synonyms", title: "Search synonyms", desc: "Words your organisation uses that the records do not, so searching one finds the others.", group: "Company", icon: Search, keywords: ["⌘k", "search", "synonyms", "vocabulary", "abbreviations", "aliases"], target: { collection: "settings", objectPath: "settings/search-synonyms", label: "Search synonyms" } },
 
   // Time & leave
@@ -115,24 +121,6 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   // from dates and progress.
   { key: "attention", title: "Needs you", desc: "When the dashboard calls a goal silent, a task stuck, or a week worth summarising - and whether the weekly roundup is sent. Worked out from dates and progress; no AI is involved.", group: "Company", icon: AlertTriangle, keywords: ["needs you", "attention", "stale", "stuck", "at risk", "digest", "roundup", "weekly", "dashboard", "reminder"], target: { collection: "settings", objectPath: "settings/attention", label: "Needs you" } },
 ];
-
-// Old routes (parent tabs + renamed children) → today's panel keys, so bookmarks and in-app links keep landing.
-export const SETTINGS_LEGACY: Record<string, string> = {
-  organization: "identity",
-  general: "identity",
-  banks: "banks-currency",
-  fields: "employee-fields",
-  timeoff: "leave-policy",
-  policies: "leave-policy",
-  payroll: "pay-components",
-  policy: "payroll-policy",
-  people: "performance",
-  onboarding: "onboarding-templates",
-  benefits: "benefit-plans",
-  support: "ticket-categories",
-  access: "users",
-  ats: "recruiting",
-};
 
 export const settingsEntry = (key: string): SettingsEntry | undefined => SETTINGS_REGISTRY.find((e) => e.key === key);
 
@@ -206,13 +194,15 @@ const settingKeyOf = (e: SettingsEntry): string | null =>
 
 /**
  * May the caller open this panel? Per-user panels are everyone's. A per-object panel needs the object's verb
- * (the gear on the object decides for the instance). An org panel needs its `perm` when it names one, and
- * write on the setting when it edits one; with neither, write on the collection it manages.
+ * (the gear on the object decides for the instance). An org panel with `anyPerm` needs one of those; otherwise
+ * its `perm` when it names one, and write on the setting when it edits one; with neither, write on the
+ * collection it manages.
  */
 export function settingsEntryVisible(caps: string[], e: SettingsEntry): boolean {
   const scope = entryScope(e);
   if (scope === "user") return true;
   if (scope === "object") return !!e.target && hasCapability(caps, `${e.target.collection}.${e.target.verb ?? "configure"}`);
+  if (e.anyPerm) return e.anyPerm.some((p) => hasCapability(caps, p));
   const key = settingKeyOf(e);
   if (e.perm && !hasCapability(caps, e.perm)) return false;
   if (key) return mayWriteSetting(caps, key);
@@ -225,15 +215,16 @@ export const hasAnySettings = (caps: string[]): boolean =>
 
 /**
  * The same question as a capability list, for the nav's `anyPerm` (which takes capabilities, not a predicate):
- * the capability each org panel leads with. Holding any of them means some panel is the caller's; the hub then
- * filters to exactly which with `settingsEntryVisible`.
+ * the capability each org panel leads with (every one of an `anyPerm` panel's). Holding any of them means some
+ * panel is the caller's; the hub then filters to exactly which with `settingsEntryVisible`.
  */
 export const SETTINGS_NAV_PERMS: string[] = [
   "settings.write",
   ...new Set(
-    SETTINGS_REGISTRY.filter((e) => entryScope(e) === "org").map((e) => {
+    SETTINGS_REGISTRY.filter((e) => entryScope(e) === "org").flatMap((e) => {
+      if (e.anyPerm) return e.anyPerm;
       const key = settingKeyOf(e);
-      return key ? `settings.${key}.write` : e.perm ?? `${e.target?.collection}.write`;
+      return [key ? `settings.${key}.write` : e.perm ?? `${e.target?.collection}.write`];
     }),
   ),
 ];
