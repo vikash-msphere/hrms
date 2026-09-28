@@ -36,7 +36,7 @@ export function AppLockSheet() {
           <SheetTitle>App lock</SheetTitle>
           <SheetDescription>Protect this app with a PIN on your devices.</SheetDescription>
         </SheetHeader>
-        <SheetBody>{open && <AppLockSettings startSetup={setup} onDone={close} />}</SheetBody>
+        <SheetBody>{open && <AppLockSettings startSetup={setup} onDone={close} heading={false} />}</SheetBody>
       </SheetContent>
     </Sheet>
   );

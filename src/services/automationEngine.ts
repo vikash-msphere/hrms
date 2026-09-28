@@ -780,6 +780,7 @@ function scheduledPayload(base: { weekday: number; dayOfMonth: number }, m: Empl
     teamReviewsDue: m?.teamReviewsDue ?? 0,
     goalSettingMissing: m?.goalSettingMissing ?? 0,
     teamGoalSettingMissing: m?.teamGoalSettingMissing ?? 0,
+    appPinMissing: m?.appPinMissing ?? 0,
   };
 }
 

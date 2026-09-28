@@ -300,6 +300,8 @@ export const EVENT_TYPES: EventTypeDef[] = [
     { name: "teamReviewsDue", type: "number", label: "Reviews they owe as a manager" },
     { name: "goalSettingMissing", type: "number", label: "Active cycles they have set no goals in" },
     { name: "teamGoalSettingMissing", type: "number", label: "Reports who have set no goals" },
+    // 1 when their active sign-in account has no app PIN (never set, turned off, or reset by an admin).
+    { name: "appPinMissing", type: "number", label: "Has not set an app PIN (1 = yes)" },
     // THE PAYROLL CALENDAR, and these are the only fields here that arrive on an ORG-LEVEL ("once") firing
     // rather than a per-employee one - they are facts about the company's month, not about a person, and a
     // perEmployee rule would announce to the whole roster that payroll is unbuilt. Together they are what lets

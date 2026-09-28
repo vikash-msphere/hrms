@@ -1,9 +1,10 @@
 import * as React from "react";
-import { Lock, LockKeyhole, MonitorSmartphone, ShieldCheck, ShieldOff } from "lucide-react";
+import { Clock, EyeOff, KeyRound, Lock, LockKeyhole, MonitorSmartphone, ShieldCheck, ShieldOff, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { APP_NAME } from "@/lib/brand";
 import { useAppLock, setPin, removePin, setIdleMinutes, lockNow, lockEverywhere, fetchLockStatus, type LockCallError } from "@/lib/appLock";
 import { PinPad } from "@/components/lock/PinPad";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConfirm } from "@/components/common/confirm";
@@ -33,7 +34,8 @@ type Mode =
   | { kind: "change-confirm"; current: string; first: string }
   | { kind: "off-current" };
 
-export function AppLockSettings({ onDone, startSetup }: { onDone?: () => void; startSetup?: boolean }) {
+// `heading` names the panel "App lock" beside its status; a host that already titles it (the sheet) turns it off.
+export function AppLockSettings({ onDone, startSetup, heading = true }: { onDone?: () => void; startSetup?: boolean; heading?: boolean }) {
   const { config } = useAppLock();
   const enabled = !!config?.enabled;
   const [mode, setMode] = React.useState<Mode>(() => (startSetup && !enabled ? { kind: "setup-length" } : { kind: "view" }));
@@ -141,65 +143,99 @@ export function AppLockSettings({ onDone, startSetup }: { onDone?: () => void; s
     }
   })();
 
+  // The status header sits above every mode, so the on/off state stays in view through a PIN flow; its
+  // action (turn on / turn off) only shows on the overview.
+  const header = (
+    <StatusHeader
+      enabled={enabled}
+      heading={heading}
+      action={
+        mode.kind !== "view" ? null : enabled ? (
+          <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={() => go({ kind: "off-current" })}>
+            <ShieldOff className="h-4 w-4" /> Turn off
+          </Button>
+        ) : (
+          <Button size="sm" onClick={() => go({ kind: "setup-length" })}>
+            <LockKeyhole className="h-4 w-4" /> Turn on
+          </Button>
+        )
+      }
+    />
+  );
+
   if (step) {
     const length = mode.kind === "change-new" || mode.kind === "change-confirm" ? changeLength : pinLength;
+    const progress = STEP_OF[mode.kind];
     return (
-      <div className="flex flex-col items-center gap-2 py-4 text-center">
-        <LockKeyhole className="mb-1 h-8 w-8 text-primary" />
-        <h3 className="text-base font-semibold">{step.title}</h3>
-        {step.hint && <p className="max-w-xs text-sm text-muted-foreground">{step.hint}</p>}
-        <div className="mt-4">
-          <PinPad key={mode.kind} length={length} value={pin} onChange={(v) => { setPinValue(v); setError(null); }} onComplete={step.complete} label={step.title} disabled={busy} shake={shake} keypad={touch} autoFocus />
+      <div>
+        {header}
+        <div className="mt-6 flex flex-col items-center gap-2 text-center">
+          {progress && <StepDots at={progress} />}
+          <h4 className="text-base font-semibold">{step.title}</h4>
+          {step.hint && <p className="max-w-xs text-sm text-muted-foreground">{step.hint}</p>}
+          <div className="mt-4">
+            <PinPad key={mode.kind} length={length} value={pin} onChange={(v) => { setPinValue(v); setError(null); }} onComplete={step.complete} label={step.title} disabled={busy} shake={shake} keypad={touch} autoFocus />
+          </div>
+          <p role="status" aria-live="polite" className="min-h-[1.25rem] text-sm text-destructive">{error}</p>
+          {mode.kind === "change-new" && (
+            <button type="button" className="text-xs text-muted-foreground underline-offset-4 hover:underline" onClick={() => setChangeLength((l) => (l === 6 ? 4 : 6))}>
+              Use {changeLength === 6 ? "4" : "6"} digits instead
+            </button>
+          )}
+          <Button variant="ghost" size="sm" className="mt-2" onClick={() => go({ kind: "view" })} disabled={busy}>
+            Cancel
+          </Button>
         </div>
-        <p role="status" aria-live="polite" className="min-h-[1.25rem] text-sm text-destructive">{error}</p>
-        {mode.kind === "change-new" && (
-          <button type="button" className="text-xs text-muted-foreground underline-offset-4 hover:underline" onClick={() => setChangeLength((l) => (l === 6 ? 4 : 6))}>
-            Use {changeLength === 6 ? "4" : "6"} digits instead
-          </button>
-        )}
-        <Button variant="ghost" size="sm" className="mt-2" onClick={() => go({ kind: "view" })} disabled={busy}>
-          Cancel
-        </Button>
       </div>
     );
   }
 
   if (mode.kind === "setup-length") {
     return (
-      <div className="space-y-5 py-2">
-        <Intro />
-        <div>
-          <p className="mb-2 text-sm font-medium">PIN length</p>
-          <div className="grid grid-cols-2 gap-2">
+      <div>
+        {header}
+        <div className="mt-6 flex flex-col items-center gap-2 text-center">
+          <StepDots at={1} />
+          <h4 className="text-base font-semibold">How long should your PIN be?</h4>
+          <p className="max-w-xs text-sm text-muted-foreground">If you ever forget it, an admin can reset it.</p>
+          <div className="mt-3 grid w-full max-w-sm grid-cols-2 gap-2">
             {([6, 4] as const).map((n) => (
               <button
                 key={n}
                 type="button"
                 onClick={() => go({ kind: "setup-enter", length: n })}
-                className="rounded-lg border bg-card p-3 text-left transition-colors hover:border-primary hover:bg-accent"
+                className="flex flex-col items-center gap-2 rounded-lg border bg-card px-3 py-4 transition-colors hover:border-primary hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                <span className="block text-sm font-semibold">{n} digits</span>
-                <span className="block text-xs text-muted-foreground">{n === 6 ? "Recommended" : "Quicker to type"}</span>
+                <span aria-hidden className="flex gap-1">
+                  {Array.from({ length: n }, (_, i) => <span key={i} className="h-2 w-2 rounded-full bg-foreground/70" />)}
+                </span>
+                <span className="text-sm font-semibold">{n} digits</span>
+                <span className="text-xs text-muted-foreground">{n === 6 ? "Recommended" : "Quicker to type"}</span>
               </button>
             ))}
           </div>
+          <Button variant="ghost" size="sm" className="mt-2" onClick={() => go({ kind: "view" })}>
+            Not now
+          </Button>
         </div>
-        <Button variant="ghost" size="sm" onClick={() => go({ kind: "view" })}>
-          Not now
-        </Button>
       </div>
     );
   }
 
   if (mode.kind === "setup-idle") {
     return (
-      <div className="space-y-5 py-2">
-        <div className="flex items-start gap-3 rounded-lg border border-success/40 bg-success/10 p-3 text-sm">
-          <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-success" />
-          <span>App lock is on. You'll enter this PIN when you come back and after signing in.</span>
+      <div>
+        {header}
+        <div className="mt-5">
+          <p className="text-sm font-medium text-success">Your PIN is set.</p>
+          <p className="text-sm text-muted-foreground">One last choice: when should {APP_NAME} lock by itself?</p>
         </div>
-        <IdleChoice />
-        <div className="flex flex-wrap gap-2">
+        <div className="mt-2">
+          <SettingRow label="Lock automatically" hint={IDLE_HINT}>
+            <IdleSelect />
+          </SettingRow>
+        </div>
+        <div className="flex flex-wrap gap-2 pt-4">
           <Button onClick={() => void lockNow()}>
             <Lock className="h-4 w-4" /> Lock now
           </Button>
@@ -214,99 +250,167 @@ export function AppLockSettings({ onDone, startSetup }: { onDone?: () => void; s
   // ---- The overview ----
   if (!enabled) {
     return (
-      <div className="space-y-4 py-2">
-        <Intro />
-        <Button onClick={() => go({ kind: "setup-length" })}>
-          <LockKeyhole className="h-4 w-4" /> Turn on app lock
-        </Button>
+      <div>
+        {header}
+        <ul className="mt-4">
+          <Fact icon={Clock} title="Locks when you step away">After the idle time you choose, or whenever you lock it yourself.</Fact>
+          <Fact icon={EyeOff} title="Nothing to read while locked">This browser keeps nothing readable, and the server refuses every request until the PIN is entered.</Fact>
+          <Fact icon={KeyRound} title="Yours alone">You'll also enter it after signing in. Nobody can see your PIN; if you forget it, an admin can reset it.</Fact>
+        </ul>
       </div>
     );
   }
+  const pinLengthLabel = `${config?.pinLength ?? 6}-digit PIN.`;
   return (
-    <div className="space-y-5 py-2">
-      <div className="flex items-start gap-3">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-success/15 text-success">
-          <ShieldCheck className="h-5 w-5" />
-        </div>
-        <div className="min-w-0">
-          <p className="text-sm font-semibold">App lock is on</p>
-          <p className="text-sm text-muted-foreground">
-            {config?.pinLength}-digit PIN.{" "}
-            {lastFailed ? `Last wrong PIN ${new Date(lastFailed).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}.` : "No wrong PINs entered."}
-          </p>
-        </div>
-      </div>
-      <IdleChoice />
-      <div className="flex flex-wrap gap-2">
-        <Button variant="outline" onClick={() => { setChangeLength((config?.pinLength as 4 | 6) ?? 6); go({ kind: "change-current" }); }}>
-          Change PIN
-        </Button>
-        <Button
-          variant="outline"
-          onClick={async () => {
-            const ok = await confirm({
-              title: "Lock all your devices?",
-              description: `Every browser signed in to ${APP_NAME} as you locks, this one included, and needs your PIN to open again.`,
-              confirmLabel: "Lock all devices",
-            });
-            if (ok) await lockEverywhere();
-          }}
+    <div>
+      {header}
+      <div className="mt-3">
+        <SettingRow label="Lock automatically" hint={IDLE_HINT}>
+          <IdleSelect />
+        </SettingRow>
+        <SettingRow
+          label="PIN"
+          hint={
+            lastFailed ? (
+              <>
+                {pinLengthLabel}{" "}
+                <span className="inline-flex items-center gap-1 text-warning">
+                  <TriangleAlert className="h-3 w-3" /> Wrong PIN entered {new Date(lastFailed).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}.
+                </span>
+              </>
+            ) : (
+              `${pinLengthLabel} No wrong PINs entered.`
+            )
+          }
         >
-          <MonitorSmartphone className="h-4 w-4" /> Lock all my devices
-        </Button>
-        <Button variant="ghost" className="text-destructive hover:text-destructive" onClick={() => go({ kind: "off-current" })}>
-          <ShieldOff className="h-4 w-4" /> Turn off
-        </Button>
+          <Button variant="outline" className={CONTROL} onClick={() => { setChangeLength((config?.pinLength as 4 | 6) ?? 6); go({ kind: "change-current" }); }}>
+            Change PIN
+          </Button>
+        </SettingRow>
+        <SettingRow label="Lock all my devices" hint={`Every browser signed in to ${APP_NAME} as you locks, this one included.`}>
+          <Button
+            variant="outline"
+            className={CONTROL}
+            onClick={async () => {
+              const ok = await confirm({
+                title: "Lock all your devices?",
+                description: `Every browser signed in to ${APP_NAME} as you locks, this one included, and needs your PIN to open again.`,
+                confirmLabel: "Lock all devices",
+              });
+              if (ok) await lockEverywhere();
+            }}
+          >
+            <MonitorSmartphone className="h-4 w-4" /> Lock everywhere
+          </Button>
+        </SettingRow>
       </div>
     </div>
   );
 }
 
-function Intro() {
+// Which step of three each PIN flow screen is; turning the lock off is a single step and shows none.
+const STEP_OF: Partial<Record<Mode["kind"], 1 | 2 | 3>> = {
+  "setup-enter": 2,
+  "setup-confirm": 3,
+  "change-current": 1,
+  "change-new": 2,
+  "change-confirm": 3,
+};
+
+const IDLE_HINT = `Counted from your last keypress, click or tap in any ${APP_NAME} tab.`;
+
+// One width for every control in the right-hand column, so the rows line up like a form.
+const CONTROL = "w-full sm:w-52";
+
+function StatusHeader({ enabled, heading, action }: { enabled: boolean; heading: boolean; action: React.ReactNode }) {
   return (
-    <div className="space-y-2 text-sm text-muted-foreground">
-      <p>
-        Lock {APP_NAME} with a PIN when you step away. While it's locked, this browser keeps nothing you could read,
-        and the server refuses every request until the PIN is entered.
-      </p>
-      <p>You'll also enter it after signing in. If you forget it, an admin can reset it.</p>
+    <div className="flex items-start gap-3">
+      <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-lg", enabled ? "bg-success/15 text-success" : "bg-muted text-muted-foreground")}>
+        {enabled ? <ShieldCheck className="h-5 w-5" /> : <ShieldOff className="h-5 w-5" />}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          {heading && <h3 className="text-sm font-semibold">App lock</h3>}
+          <Badge variant={enabled ? "success" : "muted"}>
+            <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+            {enabled ? "On" : "Off"}
+          </Badge>
+        </div>
+        <p className="mt-0.5 text-sm text-muted-foreground">
+          {enabled ? `Your PIN is needed to reopen ${APP_NAME} after you've been away.` : `Lock ${APP_NAME} with a PIN when you step away.`}
+        </p>
+      </div>
+      {action && <div className="shrink-0">{action}</div>}
     </div>
   );
 }
 
-function IdleChoice() {
+// The label column is capped rather than stretched, so each control sits beside its own label instead of
+// across the card from it; the capped column also keeps every control starting on one line.
+function SettingRow({ label, hint, children }: { label: string; hint: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-3 py-3 last:pb-0 sm:grid sm:grid-cols-[minmax(0,20rem)_auto] sm:items-center sm:justify-start sm:gap-8">
+      <div className="min-w-0 space-y-0.5">
+        <p className="text-sm font-medium">{label}</p>
+        <p className="text-pretty text-xs text-muted-foreground">{hint}</p>
+      </div>
+      <div className="shrink-0">{children}</div>
+    </div>
+  );
+}
+
+function Fact({ icon: Icon, title, children }: { icon: React.ComponentType<{ className?: string }>; title: string; children: React.ReactNode }) {
+  return (
+    <li className="flex items-start gap-3 py-2 last:pb-0">
+      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+      <div className="min-w-0 space-y-0.5">
+        <p className="text-sm font-medium">{title}</p>
+        <p className="text-pretty text-xs text-muted-foreground">{children}</p>
+      </div>
+    </li>
+  );
+}
+
+function StepDots({ at }: { at: 1 | 2 | 3 }) {
+  return (
+    <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
+      <span aria-hidden className="flex gap-1">
+        {[1, 2, 3].map((n) => <span key={n} className={cn("h-1.5 rounded-full transition-all", n === at ? "w-4 bg-primary" : n < at ? "w-1.5 bg-primary/60" : "w-1.5 bg-muted-foreground/30")} />)}
+      </span>
+      Step {at} of 3
+    </div>
+  );
+}
+
+function IdleSelect() {
   const { config } = useAppLock();
   const { toast } = useToast();
   const [saving, setSaving] = React.useState(false);
   return (
-    <div>
-      <p className="mb-1.5 text-sm font-medium">Lock automatically</p>
-      <Select
-        value={String(config?.idleMinutes ?? 15)}
-        disabled={saving}
-        onValueChange={async (v) => {
-          setSaving(true);
-          try {
-            await setIdleMinutes(Number(v));
-          } catch (e) {
-            toast({ title: "Couldn't save that", description: (e as LockCallError).message, variant: "destructive" });
-          } finally {
-            setSaving(false);
-          }
-        }}
-      >
-        <SelectTrigger className={cn("w-full sm:w-64")} aria-label="Lock automatically">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {IDLE_OPTIONS.map((o) => (
-            <SelectItem key={o.value} value={String(o.value)}>
-              {o.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <p className="mt-1.5 text-xs text-muted-foreground">Counted from your last keypress, click or tap in any {APP_NAME} tab.</p>
-    </div>
+    <Select
+      value={String(config?.idleMinutes ?? 15)}
+      disabled={saving}
+      onValueChange={async (v) => {
+        setSaving(true);
+        try {
+          await setIdleMinutes(Number(v));
+        } catch (e) {
+          toast({ title: "Couldn't save that", description: (e as LockCallError).message, variant: "destructive" });
+        } finally {
+          setSaving(false);
+        }
+      }}
+    >
+      <SelectTrigger className={CONTROL} aria-label="Lock automatically">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {IDLE_OPTIONS.map((o) => (
+          <SelectItem key={o.value} value={String(o.value)}>
+            {o.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
