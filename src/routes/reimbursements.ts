@@ -47,7 +47,12 @@ export const reimbursements = collectionRoutes<ReimbursementInput, typeof schema
   overrides: {
     create: (deps, actor, input) => createReimbursement(deps, actor, input),
   },
-  list: (c, page) => listReimbursements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("q")),
+  list: (c, page) => {
+    // Row visibility was decided in middleware; `?employee` narrows it. The inbound edge (decodeWireIds) already
+    // decoded the query ref to its internal id.
+    const emp = c.req.query("employee");
+    return listReimbursements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("q"), emp ? emp.split("/").pop()! : undefined);
+  },
   verbs: {
     approve: { run: (deps, user, id, _body, c) => approveReimbursement(deps, user, id, c.req.header("If-Match")) },
     reject: { run: (deps, user, id, _body, c) => rejectReimbursement(deps, user, id, c.req.header("If-Match")) },

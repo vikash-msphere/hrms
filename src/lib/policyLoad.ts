@@ -1,14 +1,11 @@
-// Load the caller's authority from the compiled `access_rules` store (the read-extreme path). Replaces the
-// grant-blob join: `auth.ts` reconstructs the role Grant from rows here, then the UNCHANGED engine
-// (`permissions.ts decide`) renders every verdict. The `grants`/`policy` blob tables remain the editable
-// source-of-record (P2 recompiles them into `access_rules` on edit); they are no longer read at decide time.
+// Load the caller's authority from the compiled `access_rules` store (the sole source of record): `auth.ts`
+// reconstructs the role Grant from rows here, then the engine (`permissions.ts decide`) renders every verdict.
 //
-// Read budget: a role's rule set is bounded (RBAC patterns), fetched by the covering (subject, namespace)
-// index and cached per role with a short TTL, so warm decisions approach ~0 DB reads. The cache is
-// correctness-independent (a cold isolate reconstructs the same Grant from the same rows); a grant edit
-// propagates within the TTL (the accepted few-seconds lag). Per-object USER exceptions are NOT loaded here -
-// they are narrowed by exact ancestor-code IN per request in P2.
-import { and, eq, inArray, isNull, isNotNull, or } from "drizzle-orm";
+// Read budget: every load below is held in the instance's memory and checked against the cache counters
+// (lib/cacheGenerations.ts), so a warm decision reads no rules at all and a change still reaches every instance
+// within a few seconds. The cache is correctness-independent (a cold instance reconstructs the same Grant from the
+// same rows). A caller's per-object rules are loaded once and sliced per request (objectRulesFor).
+import { and, eq, gte, inArray, isNull, isNotNull, or } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { Grant } from "../domain/permissions";
@@ -17,7 +14,7 @@ import { notConfigured } from "./errors";
 import { EMPTY_GRANT, EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
 import { rulesToGrant, mergeGrants, guardsOf, mergeGuards, type CompiledRule } from "../domain/compileGrants";
 import type { GuardIndex } from "../domain/ruleCondition";
-import { cached } from "./cache";
+import { generational } from "./cacheGenerations";
 import { byIdChunks } from "./dbBatch";
 
 // THE liveness predicate for authority: which rows actually decide. Every load path below applies this, so
@@ -30,8 +27,8 @@ import { byIdChunks } from "./dbBatch";
 //     the row, but deletion is hygiene, not the mechanism: a skipped tick can never leave access alive.
 //
 // APPLIED AFTER THE CACHE, IN MEMORY, AND NOT AS A SQL PREDICATE. Expiry is TIME-dependent, and every load
-// below is memoized for TTL_MS - so a predicate evaluated inside the cached query freezes the verdict "is this
-// still live" for the life of the entry. The per-object lane was written this way deliberately and said so;
+// below is held until a counter moves - so a predicate evaluated inside the cached query freezes the verdict "is
+// this still live" for the life of the entry. The per-object lane was written this way deliberately and said so;
 // the broad role and user grants were not, so a temporary role grant or user rule went on deciding for up to
 // five seconds after `expires_at`. A grant that outlives its own expiry is the one thing an expiring grant
 // exists not to do, and how long by is not the point: the entry is a pure reduction of the same rows, so the
@@ -91,15 +88,19 @@ export async function loadObjectRulesForRequest(
 // item request AND every list request, for a row set that is usually empty and always small (a caller's ACL
 // shares, not the org's).
 //
-// So it is loaded once per caller and sliced in memory, cached exactly like the broad grant next to it: same
-// TTL, same correctness contract (a pure reduction of the same rows - a cold isolate computes the identical
-// verdict), same busting (any rule write clears the band, see services/accessRules.ts). The liveness predicate
-// is applied AFTER the cache, because expiry is time-dependent: an expiring share must stop deciding the
-// moment it lapses, not when the entry does.
+// So it is loaded once per caller and sliced in memory, cached like the broad grant next to it: held until the
+// `aclRules` counter moves (a ticket share moves it, a role's broad rule does not), with the same correctness
+// contract (a pure reduction of the same rows - a cold instance computes the identical verdict) and the same
+// local busting (any rule write clears the band in the writer's instance, see services/accessRules.ts). The
+// liveness predicate is applied AFTER the cache, because expiry is time-dependent: an expiring share must stop
+// deciding the moment it lapses, not when the entry does.
 type StoredObjectRule = CompiledRule & RuleLifecycle;
 
-async function objectRulesUncached(deps: Deps, userUuid: string, roles: string[]): Promise<StoredObjectRule[]> {
-  return (await deps.db
+// `match_code >= ''` is the same test as IS NOT NULL (the column is text, and every text sorts at or after ''),
+// written as a range so ar_subject_kind_match_idx can seek to the match-coded rows instead of reading every broad
+// rule the caller's roles hold and discarding them.
+const objectRulesQuery = (deps: Deps, userUuid: string, roles: string[]) =>
+  deps.db
     .select(RULE_COLUMNS)
     .from(schema.accessRules)
     .where(
@@ -109,20 +110,18 @@ async function objectRulesUncached(deps: Deps, userUuid: string, roles: string[]
           and(inArray(schema.accessRules.subject, roles), eq(schema.accessRules.subjectKind, "role")),
         ),
         isNotNull(schema.accessRules.matchCode),
+        gte(schema.accessRules.matchCode, ""),
       ),
-    )) as StoredObjectRule[];
-}
+    );
 
 async function objectRulesFor(deps: Deps, userUuid: string, roles: string[]): Promise<StoredObjectRule[]> {
-  const rows = await cached(`objRules:${userUuid}:${[...roles].sort().join("|")}`, TTL_MS, () =>
-    objectRulesUncached(deps, userUuid, roles),
+  const rows = await generational(deps, `objRules:${userUuid}:${[...roles].sort().join("|")}`, ["aclRules"], async () =>
+    (await objectRulesQuery(deps, userUuid, roles)) as StoredObjectRule[],
   );
   // A `pending` rule is inert, a `pending_delete` one still enforces, and a lapsed one decides nothing - see
   // `isLive`, and the note there on why this is after the cache rather than in the query.
   return rows.filter(isLive(deps.clock.now()));
 }
-
-const TTL_MS = 5000; // ~5s: read-mostly authority; an edit reflects within this window (accepted lag).
 
 // Parse the global body-AC manifest, or null when the row is missing, is not JSON, or lacks a section. There is
 // no fallback: the app keeps no copy of the policy (bootstrap/authz/policy.ts only seeds the row), and it is
@@ -150,15 +149,19 @@ export function parsePolicy(json: string | null | undefined): Policy | null {
 type StoredRoleRule = CompiledRule & RuleLifecycle & { subject: string };
 
 /** The role's own + `everyone`'s broad rows in EVERY lifecycle state - what gets cached. See `isLive`. */
-async function roleRulesUncached(deps: Deps, role: string): Promise<StoredRoleRule[]> {
+const roleRulesQuery = (deps: Deps, role: string) => {
   const subjects = role === EVERYONE_ROLE ? [EVERYONE_ROLE] : [role, EVERYONE_ROLE];
-  return (await deps.db
+  return deps.db
     .select({ subject: schema.accessRules.subject, ...RULE_COLUMNS })
     .from(schema.accessRules)
     .where(
       and(inArray(schema.accessRules.subject, subjects), eq(schema.accessRules.subjectKind, "role"), isNull(schema.accessRules.matchCode)),
-    )) as StoredRoleRule[];
-}
+    );
+};
+const roleRulesUncached = async (deps: Deps, role: string) => (await roleRulesQuery(deps, role)) as StoredRoleRule[];
+// Held until the `roleRules` counter moves: only a change to some role's broad rules does that, never a ticket
+// share or a user's own rule.
+const roleRules = (deps: Deps, role: string) => generational(deps, `grant:${role}`, ["roleRules"], () => roleRulesUncached(deps, role));
 
 /** The grant those rows amount to AT `now` - the liveness cut and the `everyone` union, over cached rows. */
 function roleGrantFrom(rows: StoredRoleRule[], role: string, now: Date | number): Grant {
@@ -224,8 +227,7 @@ export async function loadObjectExceptionCodesFor(
 // on `isLive`. The key is unchanged (`grant:<role>`), because services/accessRules.ts busts it by that exact
 // name and by the `grant:` prefix for an `everyone` edit.
 export async function loadRoleGrant(deps: Deps, role: string): Promise<Grant> {
-  const rows = await cached(`grant:${role}`, TTL_MS, () => roleRulesUncached(deps, role));
-  return roleGrantFrom(rows, role, deps.clock.now());
+  return roleGrantFrom(await roleRules(deps, role), role, deps.clock.now());
 }
 
 /**
@@ -235,31 +237,29 @@ export async function loadRoleGrant(deps: Deps, role: string): Promise<Grant> {
  * liveness cut - an expired rule must stop constraining exactly when it stops granting.
  */
 export async function loadRoleGuards(deps: Deps, role: string): Promise<GuardIndex> {
-  const rows = await cached(`grant:${role}`, TTL_MS, () => roleRulesUncached(deps, role));
-  return guardsOf(rows.filter(isLive(deps.clock.now())));
+  return guardsOf((await roleRules(deps, role)).filter(isLive(deps.clock.now())));
 }
 
 /** The same, for the caller's own broad user rules. */
 export async function loadUserGuards(deps: Deps, userUuid: string): Promise<GuardIndex> {
-  const rows = await cached(`userGrant:${userUuid}`, TTL_MS, () => userRulesUncached(deps, userUuid));
-  return guardsOf(rows.filter(isLive(deps.clock.now())));
+  return guardsOf((await userRules(deps, userUuid)).filter(isLive(deps.clock.now())));
 }
 
 // A USER's BROAD grant - the user's own scope rules (match_code IS NULL), symmetric with the role grant, so a
 // user can hold collection/dept/field-scope access just like a role (not only per-object exceptions). Exact
 // (per-object) user rows are excluded here; they ride the narrowed lane (`loadObjectRulesForRequest`). Cached
-// per user with the same short TTL (the common case is no rows -> EMPTY_GRANT), so warm decisions stay ~0 reads.
+// per user and held until the `aclRules` counter moves (the common case is no rows -> EMPTY_GRANT), so warm
+// decisions stay ~0 reads.
 type StoredUserRule = CompiledRule & RuleLifecycle;
 
 /** The user's own broad rows in EVERY lifecycle state - what gets cached. See `isLive`. */
-async function userRulesUncached(deps: Deps, userUuid: string): Promise<StoredUserRule[]> {
-  return (await deps.db
+const userRulesQuery = (deps: Deps, userUuid: string) =>
+  deps.db
     .select(RULE_COLUMNS)
     .from(schema.accessRules)
-    .where(
-      and(eq(schema.accessRules.subject, userUuid), eq(schema.accessRules.subjectKind, "user"), isNull(schema.accessRules.matchCode)),
-    )) as StoredUserRule[];
-}
+    .where(and(eq(schema.accessRules.subject, userUuid), eq(schema.accessRules.subjectKind, "user"), isNull(schema.accessRules.matchCode)));
+const userRulesUncached = async (deps: Deps, userUuid: string) => (await userRulesQuery(deps, userUuid)) as StoredUserRule[];
+const userRules = (deps: Deps, userUuid: string) => generational(deps, `userGrant:${userUuid}`, ["aclRules"], () => userRulesUncached(deps, userUuid));
 
 /** The grant those rows amount to AT `now`. */
 function userGrantFrom(rows: StoredUserRule[], now: Date | number): Grant {
@@ -274,8 +274,7 @@ export async function loadUserGrantUncached(deps: Deps, userUuid: string): Promi
 // Rows cached, liveness cut per request - the same split as `loadRoleGrant` above, and the key is likewise the
 // one services/accessRules.ts busts (`userGrant:<uuid>`, also cleared by services/ticketShares.ts).
 export async function loadUserGrant(deps: Deps, userUuid: string): Promise<Grant> {
-  const rows = await cached(`userGrant:${userUuid}`, TTL_MS, () => userRulesUncached(deps, userUuid));
-  return userGrantFrom(rows, deps.clock.now());
+  return userGrantFrom(await userRules(deps, userUuid), deps.clock.now());
 }
 
 /**
@@ -283,13 +282,14 @@ export async function loadUserGrant(deps: Deps, userUuid: string): Promise<Grant
  *
  * Its own cache band rather than a join onto the auth read: the common case is NO rows, and a cached empty array
  * costs nothing on every subsequent request, whereas widening the auth join would add a table to a query every
- * request in the app runs. Busted by name (`userRoles:<uuid>`) wherever the set is edited - services/users.ts.
+ * request in the app runs. Held until the `userRoles` counter moves, and busted by name (`userRoles:<uuid>`)
+ * wherever the set is edited (services/users.ts) so the writer's own instance sees it at once.
  *
  * The PRIMARY role is deliberately not included: it comes off the `users` row the caller already read, and
  * folding it in here would mean this cache had to be busted on a plain role change too.
  */
 export async function loadUserRoles(deps: Deps, userUuid: string): Promise<string[]> {
-  return cached(`userRoles:${userUuid}`, TTL_MS, async () =>
+  return generational(deps, `userRoles:${userUuid}`, ["userRoles"], async () =>
     (await deps.db.select({ role: schema.userRoles.role }).from(schema.userRoles).where(eq(schema.userRoles.userId, userUuid))).map((r) => r.role),
   );
 }
@@ -312,13 +312,13 @@ const ORG_MAX_PEOPLE = 500;
  * owner's employee code - so a report's code answers for that person's leave requests, payslips and documents
  * without a second lookup per collection.
  *
- * Cached per (employee, depth) like the grant itself: the reporting line is read-mostly, and the same short TTL
- * bounds how long a re-parented report keeps or loses reach. Loaded ONLY when the caller's grant actually uses
- * the tokens (domain/permissions.ts `grantNeedsReports`), so a request from somebody with no manager rule pays
- * nothing.
+ * Cached per (employee, depth) like the grant itself, and held until the `org` counter moves - which a new or
+ * removed employee, a manager change or a code change does - so a re-parented report gains or loses reach
+ * within seconds. Loaded ONLY when the caller's grant actually uses the tokens (domain/permissions.ts
+ * `grantNeedsReports`), so a request from somebody with no manager rule pays nothing.
  */
 export async function loadReportCodes(deps: Deps, managerEmployeeId: string, transitive: boolean): Promise<string[]> {
-  return cached(`reports:${transitive ? "org" : "direct"}:${managerEmployeeId}`, TTL_MS, async () => {
+  return generational(deps, `reports:${transitive ? "org" : "direct"}:${managerEmployeeId}`, ["org"], async () => {
     const childrenOf = async (ids: string[]) =>
       ids.length
         ? await byIdChunks(ids, (group) =>
@@ -347,10 +347,11 @@ export async function loadReportCodes(deps: Deps, managerEmployeeId: string, tra
   });
 }
 
-// The global manifest (one row, key 'manifest'), cached. A missing or unreadable row refuses (503) - thrown
-// inside the loader, so the refusal is never cached and the request after the row is repaired succeeds.
+// The global manifest (one row, key 'manifest'), held until the `policy` counter moves. A missing or unreadable
+// row refuses (503) - thrown inside the loader, so the refusal is never cached and the request after the row is
+// repaired succeeds.
 export function loadManifest(deps: Deps): Promise<Policy> {
-  return cached("manifest", TTL_MS, async () => {
+  return generational(deps, "manifest", ["policy"], async () => {
     const row = (await deps.db.select({ v: schema.policy.valueJson }).from(schema.policy).where(eq(schema.policy.key, "manifest")).limit(1))[0];
     const policy = parsePolicy(row?.v);
     if (!policy) throw notConfigured("the access policy manifest is missing or unreadable - seed it from bootstrap/ or restore the `policy` row");

@@ -36,10 +36,25 @@ function evict(now: number): void {
   }
 }
 
-export async function cached<T>(key: string, ttlMs: number, load: () => Promise<T>): Promise<T> {
+/**
+ * The value under `key`, loading it on a miss.
+ *
+ * `stale`, when given, is asked about a live hit once it has resolved. A stale hit is dropped (only if it is still
+ * the entry this call found - a concurrent caller may already have replaced it) and loaded again, and that fresh
+ * value is returned WITHOUT asking again: a value that is stale the moment it lands (a read replica behind the
+ * one the question was answered from) costs one extra load, never a loop. Concurrent callers who find the same
+ * stale entry join the one reload.
+ */
+export async function cached<T>(key: string, ttlMs: number, load: () => Promise<T>, stale?: (value: T) => boolean): Promise<T> {
   const now = Date.now();
   const hit = store.get(key);
-  if (hit && hit.expires > now) return hit.value as Promise<T>;
+  if (hit && hit.expires > now) {
+    if (!stale) return hit.value as Promise<T>;
+    const value = (await hit.value) as T;
+    if (!stale(value)) return value;
+    if (store.get(key) === hit) store.delete(key);
+    return cached(key, ttlMs, load);
+  }
   evict(now);
   // The in-flight promise goes in BEFORE it settles, so a concurrent caller joins this load instead of
   // starting its own. On rejection the entry is removed (and only if it is still ours - a `clearCache` or an

@@ -329,8 +329,12 @@ export default function RemoteWork({ me }: { me: Me }) {
         guardLabel="request"
         form={form}
         submitLabel="Request remote work"
-        canSubmit={!!form.employee && validRange}
-        whyNot={!form.employee ? "Pick whose remote work this is." : rangeInverted ? "The end date is before the start date." : "Set the dates you'll be remote."}
+        canSubmit={!!form.employee && validRange && !!form.reason.trim()}
+        whyNot={[
+          !form.employee && "Pick whose remote work this is.",
+          rangeInverted ? "The end date is before the start date." : !validRange && "Set the dates you'll be remote.",
+          !form.reason.trim() && "Say why you'll be remote.",
+        ]}
         onSubmit={submit}
       >
           <Field label="Employee">
@@ -420,7 +424,7 @@ export default function RemoteWork({ me }: { me: Me }) {
               </div>
             )}
           </Field>
-          <Field label="Reason"><Textarea rows={2} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} placeholder="Optional" /></Field>
+          <Field label="Reason"><Textarea rows={2} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} placeholder="Required" /></Field>
       </WriteDialog>
     </div>
   );

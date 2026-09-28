@@ -277,7 +277,7 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
     // least-privilege review of the role files gave each to the role whose job it is.
     "access-rules:approve", "access-rules:clone", "access-rules:preview", "access-rules:reject",
     "access-rules:requestAccess", "access-rules:review", "access-rules:scopeCounts", "api-keys:revoke",
-    "cron-runs:run", "operations:run",
+    "cron-runs:run", "operations:run", "operations:clearCache",
     "referrals:award", "suggestions:downvote", "suggestions:merge", "suggestions:upvote",
     // `similar` exists to serve `merge` - it shows which suggestions are the same ask so they can be folded
     // together. Merging is already ACL-only (right above), so the thing that tells somebody what to merge is

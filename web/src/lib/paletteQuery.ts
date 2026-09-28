@@ -26,7 +26,8 @@ export type PaletteQuery = {
 export function resolvePerson(handle: string, people: readonly PalettePerson[]): PalettePerson | null {
   const h = handle.toLowerCase();
   if (h.length < 2) return null;
-  const full = (p: PalettePerson) => `${p.first}${p.last}`.toLowerCase();
+  // Spaces dropped, so a two-word surname ("de Souza") still makes one typeable handle.
+  const full = (p: PalettePerson) => `${p.first}${p.last}`.replace(/\s+/g, "").toLowerCase();
   const exact = people.filter((p) => p.first.toLowerCase() === h || full(p) === h);
   if (exact.length === 1) return exact[0]!;
   const starts = people.filter((p) => p.first.toLowerCase().startsWith(h) || full(p).startsWith(h) || p.last.toLowerCase().startsWith(h));
@@ -73,6 +74,135 @@ export function searchParams(q: PaletteQuery): string {
   if (q.before) p.set("before", q.before);
   if (q.status) p.set("status", q.status);
   return p.toString();
+}
+
+// ---- Filter suggestions -------------------------------------------------------------------------------------
+// While the caret sits in a filter word (`in:tic`, `status:`, `@pri`, `is:`, `after:`), the palette offers the
+// words that complete it. Every offer is a token `parsePaletteQuery` reads back as the narrowing it names, so
+// picking one can never produce a filter the search then ignores.
+
+/** Per searchable collection the caller may list, its status values (`GET /v1/search:vocabulary`). */
+export type FilterVocabulary = readonly { collection: string; statuses: readonly string[] }[];
+
+export type FilterSuggestion<P extends PalettePerson = PalettePerson> =
+  | { kind: "in"; token: string; collection: string }
+  | { kind: "status"; token: string; status: string; collections: string[] }
+  | { kind: "person"; token: string; person: P }
+  | { kind: "is"; token: string }
+  | { kind: "date"; token: string; label: string };
+
+/** The whitespace-delimited word the caret is in (or at the end of), as its span in `raw`. */
+export function tokenAt(raw: string, caret: number): { start: number; end: number; text: string } {
+  const at = Math.max(0, Math.min(caret, raw.length));
+  let start = at;
+  while (start > 0 && !/\s/.test(raw[start - 1]!)) start--;
+  let end = at;
+  while (end < raw.length && !/\s/.test(raw[end]!)) end++;
+  return { start, end, text: raw.slice(start, end) };
+}
+
+/** `raw` with the span replaced by `token` and one space after it, and where the caret goes: past that space. */
+export function applySuggestion(raw: string, span: { start: number; end: number }, token: string): { query: string; caret: number } {
+  const rest = raw.slice(span.end).replace(/^\s+/, "");
+  const head = raw.slice(0, span.start) + token + " ";
+  return { query: head + rest, caret: head.length };
+}
+
+/** The collections an `in:` word names, by the rule the server applies (services/globalSearch.ts collectionsNamed). */
+export function collectionsNamedBy(word: string, collections: readonly string[]): string[] {
+  const w = word.toLowerCase().replace(/[^a-z-]/g, "");
+  if (!w) return [];
+  return collections.filter((c) => c === w || c === `${w}s` || c === `${w}es` || (w.length >= 3 && (c.startsWith(w) || c.replace(/-/g, "").startsWith(w.replace(/-/g, "")))));
+}
+
+// A typed value matches an option at its start, or at the start of any of its words (`prog` finds `in_progress`,
+// `req` finds `leave-requests` and "Leave requests").
+const startsAWord = (option: string, typed: string) => option.split(/[\s_-]+/).some((w) => w.startsWith(typed));
+const matches = (typed: string, ...options: string[]) =>
+  !typed || options.some((o) => o.toLowerCase().startsWith(typed) || startsAWord(o.toLowerCase(), typed));
+
+const monthOf = (day: string, back: number) => {
+  const [y, m] = day.split("-").map(Number) as [number, number];
+  const d = new Date(Date.UTC(y, m - 1 - back, 1));
+  return d.toISOString().slice(0, 7);
+};
+
+export function suggestFilters<P extends PalettePerson>(
+  raw: string,
+  caret: number,
+  ctx: {
+    people: readonly P[];
+    vocabulary: FilterVocabulary | null;
+    labelOf: (collection: string) => string;
+    today: string; // the org-local day, YYYY-MM-DD
+    daysAgo30: string; // the org-local day thirty days back
+  },
+  limit = 8,
+): { start: number; end: number; items: FilterSuggestion<P>[] } | null {
+  const span = tokenAt(raw, caret);
+  const word = span.text.toLowerCase();
+  const colon = word.indexOf(":");
+  const key = colon > 0 ? word.slice(0, colon) : word.startsWith("@") ? "@" : "";
+  const typed = colon > 0 ? word.slice(colon + 1) : word.slice(1);
+  // What the rest of the query already says, so an offer never repeats a filter that is already there.
+  const others = parsePaletteQuery(raw.slice(0, span.start) + raw.slice(span.end), ctx.people);
+  let items: FilterSuggestion<P>[] = [];
+
+  if (key === "in") {
+    const vocab = ctx.vocabulary ?? [];
+    const named = new Set(others.in.flatMap((w) => collectionsNamedBy(w, vocab.map((v) => v.collection))));
+    items = vocab
+      .filter((v) => !named.has(v.collection) && matches(typed, v.collection, ctx.labelOf(v.collection)))
+      .sort((a, b) => ctx.labelOf(a.collection).localeCompare(ctx.labelOf(b.collection)))
+      .map((v) => ({ kind: "in" as const, token: `in:${v.collection}`, collection: v.collection }));
+  } else if (key === "status") {
+    // Narrowed by `in:` already, only those collections' statuses; otherwise every status any collection has.
+    const vocab = ctx.vocabulary ?? [];
+    const scoped = others.in.length ? new Set(others.in.flatMap((w) => collectionsNamedBy(w, vocab.map((v) => v.collection)))) : null;
+    const byStatus = new Map<string, string[]>();
+    for (const v of vocab) {
+      if (scoped && !scoped.has(v.collection)) continue;
+      for (const s of v.statuses) byStatus.set(s, [...(byStatus.get(s) ?? []), v.collection]);
+    }
+    items = [...byStatus]
+      .filter(([s]) => s !== others.status && matches(typed, s))
+      .sort(([a, ac], [b, bc]) => bc.length - ac.length || a.localeCompare(b))
+      .map(([s, cols]) => ({ kind: "status" as const, token: `status:${s}`, status: s, collections: cols }));
+  } else if (key === "@") {
+    if (!typed || others.owner) return null;
+    const compact = (s: string) => s.replace(/\s+/g, "").toLowerCase();
+    items = ctx.people
+      .filter((p) => matches(typed, p.first, p.last, compact(`${p.first}${p.last}`)))
+      .sort((a, b) => `${a.first} ${a.last}`.localeCompare(`${b.first} ${b.last}`))
+      .flatMap((p) => {
+        // The shortest handle that means this one person: the first name when nobody else has it, else the
+        // whole name. Somebody no handle singles out (two people with one name) is not offered at all.
+        const handle = [p.first, `${p.first}${p.last}`].map(compact).find((h) => resolvePerson(h, ctx.people) === p);
+        return handle ? [{ kind: "person" as const, token: `@${handle}`, person: p }] : [];
+      });
+  } else if (key === "is") {
+    items = !others.mine && matches(typed, "mine") ? [{ kind: "is", token: "is:mine" }] : [];
+  } else if (key === "after" || key === "before") {
+    const thisMonth = ctx.today.slice(0, 7);
+    const spans: [string, string, string][] = [
+      // [value, label after:, label before:]
+      [thisMonth, "This month", "Before this month"],
+      [monthOf(ctx.today, 1), "Since last month", "Before last month"],
+      [ctx.daysAgo30, "The last 30 days", "More than 30 days ago"],
+      [`${ctx.today.slice(0, 4)}-01`, "This year", "Before this year"],
+    ];
+    const taken = key === "after" ? others.after : others.before;
+    items = taken ? [] : spans
+      .filter(([v]) => v.startsWith(typed))
+      .map(([v, a, b]) => ({ kind: "date" as const, token: `${key}:${v}`, label: key === "after" ? a : b }));
+  } else {
+    return null;
+  }
+  // A word already typed out in full is finished, even when longer offers start with it (`@priya` and
+  // `@priyanka`): offering anything would make Enter complete what is complete instead of opening the result the
+  // person is looking at.
+  if (!items.length || items.some((s) => s.token === word)) return null;
+  return { start: span.start, end: span.end, items: items.slice(0, limit) };
 }
 
 /**

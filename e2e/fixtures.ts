@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { test as base, expect, type APIResponse, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { test as base, expect, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { sealSession } from "../src/lib/session";
 import { HOLIDAYS } from "../bootstrap/collections/holidays";
 import { HOLIDAY_YEAR } from "../bootstrap/lib";
@@ -238,6 +238,7 @@ export const test = base.extend<Fixtures>({
     await use(async (who) => {
       const email = typeof who === "string" ? ROLES[who] : who.email;
       const context = await signIn(browser, baseURL, email);
+      hardenRequest(context.request);
       contexts.push(context);
       const page = await context.newPage();
       allowed.set(page, []);
@@ -319,6 +320,9 @@ export async function purge(page: Page, path: string) {
 // NOT the app's (`notTheApps500`: Prism's "Request/Response not valid" over a plain-text body). The write may or
 // may not have landed, so every copy carries one `Idempotency-Key` - the server hands a repeat the first copy's
 // stored answer instead of creating the row twice, exactly as `web/src/api.ts` does for the SPA's own writes.
+//
+// `as()` applies the same rule to every request a spec sends itself (`hardenRequest` below), so a bare
+// `page.request.post` fixture is covered too; this stays for pages signed in some other way.
 export async function apiPost(page: Page, path: string, data: unknown): Promise<APIResponse> {
   const headers = { ...SPA_HEADERS, "Idempotency-Key": crypto.randomUUID() };
   let res = await page.request.post(`/v1/${path}`, { headers, data });
@@ -326,6 +330,42 @@ export async function apiPost(page: Page, path: string, data: unknown): Promise<
     res = await page.request.post(`/v1/${path}`, { headers, data });
   }
   return res;
+}
+
+/**
+ * `apiPost`'s rule for every request a signed-in context sends outside the page: `page.request` is the
+ * context's, and about 150 specs set themselves up with bare `page.request.post(...)` calls that the app's
+ * own transport never sees. One dropped connection on one of those failed `eventDelete` on its scaffolding
+ * (2026-09-28, a single `POST /v1/events` lost by the ProxyWorker).
+ *
+ * A write gets an `Idempotency-Key` unless the spec set its own, so a re-sent copy is answered with the
+ * first copy's result rather than landing twice. Re-sent only on an answer the lane made up - a 503, a 500
+ * that is not the app's (`notTheApps500`), or the idempotency middleware's `/errors/aborted` 409 for a copy
+ * that arrived while the first was still running. Every other status is the server's verdict and comes back
+ * unchanged, so a spec asserting a refusal still sees it.
+ */
+function hardenRequest(req: APIRequestContext) {
+  const laneMadeUp = async (res: APIResponse) => {
+    if (res.status() === 503) return true;
+    if (res.status() === 500) return notTheApps500(res);
+    if (res.status() !== 409) return false;
+    return /"type"\s*:\s*"\/errors\/aborted"/.test(await res.text().catch(() => ""));
+  };
+  for (const verb of ["get", "post", "put", "patch", "delete"] as const) {
+    const send = req[verb].bind(req) as (url: string, options?: Parameters<APIRequestContext["post"]>[1]) => Promise<APIResponse>;
+    const write = verb === "post" || verb === "put" || verb === "patch";
+    req[verb] = (async (url: string, options: Parameters<APIRequestContext["post"]>[1] = {}) => {
+      const headers = { ...options.headers };
+      if (write && !Object.keys(headers).some((h) => h.toLowerCase() === "idempotency-key")) headers["Idempotency-Key"] = crypto.randomUUID();
+      const opts = { ...options, headers };
+      let res = await send(url, opts);
+      for (let attempt = 0; attempt < 3 && (await laneMadeUp(res)); attempt++) {
+        if (res.status() === 409) await new Promise((r) => setTimeout(r, 1_000));
+        res = await send(url, opts);
+      }
+      return res;
+    }) as APIRequestContext[typeof verb];
+  }
 }
 
 /**

@@ -395,6 +395,12 @@ export function buildAttendanceRows(opts: {
 
 export const fmtHM = (iso: string, tz: string) => dateFormat(undefined, HM_12(tz)).format(new Date(iso));
 
+// The times an attendance correction asks for: "9:00 AM–1:00 PM, 2:00 PM–still clocked in". A pair with no
+// clock-out is today's last session left open, filed while the person was still at work. Every list of
+// correction requests reads through this, so an open one never renders as a broken time.
+export const fmtCorrectionTimes = (sessions: readonly { clock_in: string; clock_out?: string }[], hm: (iso: string) => string, empty = "Remove all punches") =>
+  sessions.length === 0 ? empty : sessions.map((s) => `${hm(s.clock_in)}–${s.clock_out ? hm(s.clock_out) : "still clocked in"}`).join(", ");
+
 export const fmtDuration = (min: number) => `${Math.floor(min / 60)}h ${min % 60}m`;
 
 // Same duration with the zero part dropped ("8h", "45m") - for tight spots like a calendar cell.

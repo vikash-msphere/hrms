@@ -34,8 +34,21 @@ type Mode =
   | { kind: "change-confirm"; current: string; first: string }
   | { kind: "off-current" };
 
-// `heading` names the panel "App lock" beside its status; a host that already titles it (the sheet) turns it off.
-export function AppLockSettings({ onDone, startSetup, heading = true }: { onDone?: () => void; startSetup?: boolean; heading?: boolean }) {
+// `page` (the profile's Privacy tab) names the panel "App lock" and, on a computer screen, lays the header and
+// every setting out as one two-column form. `sheet` is for a host that already titles it and is too narrow for
+// that form, so its text wraps and each control sits under or beside its own label.
+export function AppLockSettings({ onDone, startSetup, variant = "page" }: { onDone?: () => void; startSetup?: boolean; variant?: "page" | "sheet" }) {
+  return (
+    <WideContext.Provider value={variant === "page"}>
+      <AppLockPanel onDone={onDone} startSetup={startSetup} />
+    </WideContext.Provider>
+  );
+}
+
+const WideContext = React.createContext(false);
+
+function AppLockPanel({ onDone, startSetup }: { onDone?: () => void; startSetup?: boolean }) {
+  const wide = React.useContext(WideContext);
   const { config } = useAppLock();
   const enabled = !!config?.enabled;
   const [mode, setMode] = React.useState<Mode>(() => (startSetup && !enabled ? { kind: "setup-length" } : { kind: "view" }));
@@ -144,18 +157,17 @@ export function AppLockSettings({ onDone, startSetup, heading = true }: { onDone
   })();
 
   // The status header sits above every mode, so the on/off state stays in view through a PIN flow; its
-  // action (turn on / turn off) only shows on the overview.
+  // action (turn on / turn off) only shows on the overview, in the same column as the settings' controls.
   const header = (
     <StatusHeader
       enabled={enabled}
-      heading={heading}
       action={
         mode.kind !== "view" ? null : enabled ? (
-          <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={() => go({ kind: "off-current" })}>
+          <Button variant="outline" className={cn("text-destructive hover:bg-destructive/10 hover:text-destructive", wide && WIDE_CONTROL)} onClick={() => go({ kind: "off-current" })}>
             <ShieldOff className="h-4 w-4" /> Turn off
           </Button>
         ) : (
-          <Button size="sm" onClick={() => go({ kind: "setup-length" })}>
+          <Button className={cn(wide && WIDE_CONTROL)} onClick={() => go({ kind: "setup-length" })}>
             <LockKeyhole className="h-4 w-4" /> Turn on
           </Button>
         )
@@ -230,11 +242,11 @@ export function AppLockSettings({ onDone, startSetup, heading = true }: { onDone
           <p className="text-sm font-medium text-success">Your PIN is set.</p>
           <p className="text-sm text-muted-foreground">One last choice: when should {APP_NAME} lock by itself?</p>
         </div>
-        <div className="mt-2">
+        <Form className="mt-2">
           <SettingRow label="Lock automatically" hint={IDLE_HINT}>
             <IdleSelect />
           </SettingRow>
-        </div>
+        </Form>
         <div className="flex flex-wrap gap-2 pt-4">
           <Button onClick={() => void lockNow()}>
             <Lock className="h-4 w-4" /> Lock now
@@ -251,7 +263,7 @@ export function AppLockSettings({ onDone, startSetup, heading = true }: { onDone
   if (!enabled) {
     return (
       <div>
-        {header}
+        <Form>{header}</Form>
         <ul className="mt-4">
           <Fact icon={Clock} title="Locks when you step away">After the idle time you choose, or whenever you lock it yourself.</Fact>
           <Fact icon={EyeOff} title="Nothing to read while locked">This browser keeps nothing readable, and the server refuses every request until the PIN is entered.</Fact>
@@ -262,9 +274,9 @@ export function AppLockSettings({ onDone, startSetup, heading = true }: { onDone
   }
   const pinLengthLabel = `${config?.pinLength ?? 6}-digit PIN.`;
   return (
-    <div>
+    <Form>
       {header}
-      <div className="mt-3">
+      <div className={cn("mt-3", wide && "lg:contents")}>
         <SettingRow label="Lock automatically" hint={IDLE_HINT}>
           <IdleSelect />
         </SettingRow>
@@ -304,7 +316,7 @@ export function AppLockSettings({ onDone, startSetup, heading = true }: { onDone
           </Button>
         </SettingRow>
       </div>
-    </div>
+    </Form>
   );
 }
 
@@ -321,38 +333,51 @@ const IDLE_HINT = `Counted from your last keypress, click or tap in any ${APP_NA
 
 // One width for every control in the right-hand column, so the rows line up like a form.
 const CONTROL = "w-full sm:w-52";
+const WIDE_CONTROL = "lg:w-52";
 
-function StatusHeader({ enabled, heading, action }: { enabled: boolean; heading: boolean; action: React.ReactNode }) {
+// On a computer screen the wide layout is ONE grid: the header and each setting row dissolve into it
+// (`lg:contents`), so every label shares the first column - as wide as its longest line, which never wraps -
+// and every control, the header's turn on / turn off included, starts on the same line in the second.
+function Form({ className, children }: { className?: string; children: React.ReactNode }) {
+  const wide = React.useContext(WideContext);
+  return <div className={cn(wide && "lg:grid lg:grid-cols-[max-content_auto] lg:items-center lg:justify-start lg:gap-x-16 lg:gap-y-5", className)}>{children}</div>;
+}
+
+function StatusHeader({ enabled, action }: { enabled: boolean; action: React.ReactNode }) {
+  const wide = React.useContext(WideContext);
   return (
-    <div className="flex items-start gap-3">
-      <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-lg", enabled ? "bg-success/15 text-success" : "bg-muted text-muted-foreground")}>
-        {enabled ? <ShieldCheck className="h-5 w-5" /> : <ShieldOff className="h-5 w-5" />}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          {heading && <h3 className="text-sm font-semibold">App lock</h3>}
-          <Badge variant={enabled ? "success" : "muted"}>
-            <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
-            {enabled ? "On" : "Off"}
-          </Badge>
+    <div className={cn("flex items-start gap-3", wide && "lg:contents")}>
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-lg", enabled ? "bg-success/15 text-success" : "bg-muted text-muted-foreground")}>
+          {enabled ? <ShieldCheck className="h-5 w-5" /> : <ShieldOff className="h-5 w-5" />}
         </div>
-        <p className="mt-0.5 text-sm text-muted-foreground">
-          {enabled ? `Your PIN is needed to reopen ${APP_NAME} after you've been away.` : `Lock ${APP_NAME} with a PIN when you step away.`}
-        </p>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            {wide && <h3 className="text-sm font-semibold">App lock</h3>}
+            <Badge variant={enabled ? "success" : "muted"}>
+              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+              {enabled ? "On" : "Off"}
+            </Badge>
+          </div>
+          <p className={cn("mt-0.5 text-sm text-muted-foreground", wide && "lg:whitespace-nowrap")}>
+            {enabled ? `Your PIN is needed to reopen ${APP_NAME} after you've been away.` : `Lock ${APP_NAME} with a PIN when you step away.`}
+          </p>
+        </div>
       </div>
       {action && <div className="shrink-0">{action}</div>}
     </div>
   );
 }
 
-// The label column is capped rather than stretched, so each control sits beside its own label instead of
-// across the card from it; the capped column also keeps every control starting on one line.
+// Below the wide layout the label column is capped rather than stretched, so each control sits beside its own
+// label instead of across the card from it.
 function SettingRow({ label, hint, children }: { label: string; hint: React.ReactNode; children: React.ReactNode }) {
+  const wide = React.useContext(WideContext);
   return (
-    <div className="flex flex-col gap-3 py-3 last:pb-0 sm:grid sm:grid-cols-[minmax(0,20rem)_auto] sm:items-center sm:justify-start sm:gap-8">
+    <div className={cn("flex flex-col gap-3 py-3 last:pb-0 sm:grid sm:grid-cols-[minmax(0,20rem)_auto] sm:items-center sm:justify-start sm:gap-8", wide && "lg:contents")}>
       <div className="min-w-0 space-y-0.5">
         <p className="text-sm font-medium">{label}</p>
-        <p className="text-pretty text-xs text-muted-foreground">{hint}</p>
+        <p className={cn("text-pretty text-xs text-muted-foreground", wide && "lg:whitespace-nowrap")}>{hint}</p>
       </div>
       <div className="shrink-0">{children}</div>
     </div>

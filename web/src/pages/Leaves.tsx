@@ -1115,6 +1115,7 @@ export default function Leaves({ me }: { me: Me }) {
                 collection="leave-requests"
                 row={r}
                 employeeId={r.employee ? idOf(r.employee) : undefined}
+                selfEmployeeId={me.employee_id}
                 name={empName(r.employee)}
                 photo={empOf(r.employee)?.photo}
                 summary={leaveSummary(r, typeName)}

@@ -5,6 +5,7 @@ import { navigate } from "@/router";
 import { startViewAs, stopViewAs, useViewAs } from "@/lib/viewAsStore";
 import { lazyPage } from "@/lib/lazyPage";
 import { fetchAllAccessRules, type AccessRule } from "./permMatrix";
+import { subscribeInvalidations } from "@/lib/resourceStore";
 import { fetchSubjectOptions } from "./subjectOptions";
 
 // The access modal, LAZY. This provider wraps the whole tree, so a static import put all 26 kB of it (the
@@ -140,22 +141,48 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
     setTarget(t);
   }, []);
 
-  // Rules cache for the deny tint: loaded when the mode turns on, refreshed when the modal closes (the
-  // only place rules change while browsing). Failure -> empty (no tint, mode still works).
+  // Rules cache for the deny tint: loaded when the mode turns on, and re-read when the modal closes only if an
+  // access rule was written meanwhile - by this tab or a sibling one (the resource store's invalidations report
+  // both). The read pages through every rule in the org, and re-reading it on EVERY close repainted a tint that
+  // had not changed at the cost of the whole table, on a database billed per row read. Failure -> empty (no
+  // tint, mode still works), and the next close tries again.
   const [rules, setRules] = React.useState<AccessRule[]>([]);
   const on = enabled && available;
+  const rulesStale = React.useRef(true);
+  React.useEffect(
+    () =>
+      subscribeInvalidations((collections) => {
+        if (collections.includes("access-rules")) rulesStale.current = true;
+      }),
+    [],
+  );
   // A superseded load is dropped. The read pages through every rule, so it can take several round trips, and
   // turning the mode off and on (or closing the modal) starts a fresh one while an older one is still paging:
   // left alone, the OLDER answer could land last and put back the rules from before the change - a deny just
-  // written, untinted, until the next reload.
+  // written, untinted, until the next reload. A load dropped before it landed leaves the copy stale, so the
+  // next run reads again rather than trusting what never arrived.
   React.useEffect(() => {
-    if (!on || target !== null) return;
+    if (!on) {
+      rulesStale.current = true; // anything may change while the mode is off
+      return;
+    }
+    if (target !== null || !rulesStale.current) return;
+    rulesStale.current = false;
     let live = true;
+    let landed = false;
     fetchAllAccessRules()
-      .then((r) => live && setRules(r))
-      .catch(() => live && setRules([]));
+      .then((r) => {
+        landed = true;
+        if (live) setRules(r);
+      })
+      .catch(() => {
+        landed = true;
+        rulesStale.current = true;
+        if (live) setRules([]);
+      });
     return () => {
       live = false;
+      if (!landed) rulesStale.current = true;
     };
   }, [on, target]);
   const denyFor = React.useCallback(

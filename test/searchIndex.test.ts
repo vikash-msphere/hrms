@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
-import { SEARCH_INDEX, TEXT_PINNED } from "../src/domain/searchIndex";
+import { SEARCH_INDEX, TEXT_PINNED, searchVocabulary, statusPropOf } from "../src/domain/searchIndex";
 import { INDEXABLE } from "../src/domain/aiPolicy";
 import { LIST_OWNER_COLUMNS, TABLES } from "../src/lib/authzResolve";
 
@@ -104,5 +104,23 @@ describe("search index embed text", () => {
 
   it("every text-pinned collection is indexable", () => {
     expect([...TEXT_PINNED].filter((c) => !INDEXABLE.has(c))).toEqual([]);
+  });
+});
+
+describe("search vocabulary", () => {
+  it("answers only the listable collections, with their status enum lower-cased", () => {
+    const vocab = searchVocabulary(new Set(["leave-requests", "holidays", "not-a-collection"]));
+    expect(vocab).toEqual([
+      { collection: "leave-requests", statuses: ["pending", "approved", "rejected", "cancelled"] },
+      { collection: "holidays", statuses: [] }, // no status column
+    ]);
+  });
+
+  it("every collection with a status column reads a real enum off it", () => {
+    // A status prop that is not an enum would silently offer nothing after `status:` for that collection.
+    const empty = searchVocabulary(new Set(SEARCH_INDEX.map((e) => e.collection)))
+      .filter((v) => v.statuses.length === 0 && statusPropOf(SEARCH_INDEX.find((e) => e.collection === v.collection)!))
+      .map((v) => v.collection);
+    expect(empty).toEqual([]);
   });
 });

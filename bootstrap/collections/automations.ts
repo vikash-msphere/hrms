@@ -1495,7 +1495,7 @@ export const AUTOMATIONS: AutomationSeed[] = [
     trigger: SCHEDULE_TRIGGER,
     schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
     condition: { field: "appPinMissing", op: "gte", value: 1 },
-    actions: [{ kind: "notify", recipient: { of: "subject" }, type: "security.pin_reminder", title: "Set an app PIN", body: "Protect your HR data with an app PIN. Open My profile, then the Privacy tab, and set one under App lock.", link: "profile/privacy" }],
+    actions: [{ kind: "notify", recipient: { of: "subject" }, type: "security.pin_reminder", title: "Set an app PIN", body: "Protect your HR data with an app PIN. Set one up from My Profile › Privacy.", link: "profile/privacy" }],
   },
 ];
 

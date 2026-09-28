@@ -7,7 +7,7 @@ import { useEmployee } from "@/hooks/useEmployee";
 import { useCollection } from "@/hooks/useCollection";
 import { usePresence } from "@/hooks/usePresence";
 import { get, patch } from "@/api";
-import { formatDate, formatMonthYear, humanize, idOf, probationLabel, reportsUnder, tenureDuration } from "@/lib/utils";
+import { cn, formatDate, formatMonthYear, humanize, idOf, probationLabel, reportsUnder, tenureDuration } from "@/lib/utils";
 import { navigate } from "@/router";
 import { fireIntent, useIntent } from "@/lib/intent";
 import { usePermission, useCanSeeActivity, subjectScopesOf, SubjectScopesContext } from "@/lib/perm";
@@ -33,6 +33,7 @@ import { localDay, trackedFromOf } from "@/lib/attendance";
 import { ActivityFeed } from "@/components/common/ActivityFeed";
 import { EmployeeBonuses } from "@/components/common/EmployeeBonuses";
 import { EmployeeAssets } from "@/components/common/EmployeeAssets";
+import { EmployeeRequests, FOCUSED_ROW, useFocusedRequest, useScrollToFocused, type EmployeeRequestKind } from "@/components/common/EmployeeRequests";
 import { EmployeeSettlement } from "@/components/common/EmployeeSettlement";
 import { EmployeePayslips } from "@/components/common/EmployeePayslips";
 import { EmployeeBankDetails } from "@/components/common/EmployeeBankDetails";
@@ -44,6 +45,7 @@ import { SignatureField } from "@/components/common/SignatureField";
 import { MyCompensation } from "@/components/common/MyCompensation";
 import { MyViewers } from "@/components/common/MyViewers";
 import { AppLockSettings } from "@/components/lock/AppLockSettings";
+import { useAppLock } from "@/lib/appLock";
 import { EmployeeTaxDetails } from "@/components/common/EmployeeTaxDetails";
 import EmployeeCompensation from "@/components/common/EmployeeCompensation";
 import { EmployeePersonalDetails } from "@/components/common/EmployeePersonalDetails";
@@ -69,6 +71,11 @@ import { useToast } from "@/components/ui/use-toast";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 
 const NONE = "__none__";
+
+// The request kinds each tab lists for this person (components/common/EmployeeRequests.tsx), in card order.
+const LEAVE_REQUEST_KINDS: EmployeeRequestKind[] = ["leave-encashments"];
+const ATTENDANCE_REQUEST_KINDS: EmployeeRequestKind[] = ["attendance-regularizations", "late-early-requests", "remote-work-requests", "overtime-requests", "time-entries"];
+const COMP_REQUEST_KINDS: EmployeeRequestKind[] = ["reimbursements", "loans"];
 
 // Which org-settings panels surface as inline gears on each profile tab. The gear opens the SAME panel as the
 // central Settings hub (org singletons, not per-employee config) - it just puts the relevant knob where HR is
@@ -178,7 +185,10 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   // not a second reading of the grant. `canWrite("asset-requests")` is the engine's answer ABOUT THIS PERSON,
   // so it is true on one's own record via the `me` rule every employee holds and false about anybody else -
   // no capability string, and nothing here deciding who may ask for what.
-  const canAssets = canRead("assets") || (isSelf && canWrite("asset-requests"));
+  // The third half is the approver of asset requests, who may decide on this person's asks without reading the
+  // register - the card then lists the requests alone.
+  const canReadAssets = canRead("assets") || isSelf;
+  const canAssets = canRead("assets") || (isSelf && canWrite("asset-requests")) || canRead("asset-requests");
   const canAssetsEdit = canWrite("assets");
   // The board and the box, as this person wrote them. Either is reason enough for the tab; the panel reads
   // both and contributes nothing for the one the caller cannot see.
@@ -194,7 +204,17 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   // the affordances this record cannot (clocking in, filing a request, asking for a correction), so the two
   // tabs here were a second, poorer copy of a page the same person already has in the nav.
   const canLeave = !isSelf && (canRead("leave-requests") || canRead("leave-balances"));
-  const canAttendance = !isSelf && canRead("attendance");
+  const canAttendanceLog = !isSelf && canRead("attendance");
+  // This person's requests, listed on the tab they belong with - the place an approver's "Open" lands
+  // (lib/resourceRoute.ts `requestRoute`), since each kind's own page lists only the reader's own. Any one the
+  // caller may read about this person is reason enough for its tab. Cut on one's own record for the reason
+  // leave and attendance are: the self-service pages are where one's own requests live.
+  const leaveRequestKinds = isSelf ? [] : LEAVE_REQUEST_KINDS.filter(canRead);
+  const attendanceRequestKinds = isSelf ? [] : ATTENDANCE_REQUEST_KINDS.filter(canRead);
+  const compRequestKinds = isSelf ? [] : COMP_REQUEST_KINDS.filter(canRead);
+  const canLeaveTab = canLeave || leaveRequestKinds.length > 0;
+  const canAttendance = canAttendanceLog || attendanceRequestKinds.length > 0;
+  const canCompTab = canTax || canComp || canBonuses || canSettlement || canPayslips || compRequestKinds.length > 0;
   const canExportAttendance = useCanExport("attendance");
   const canDocs = canRead("personal-documents");
   // Filing a document on this person's record - the grant behind the insurance e-card's upload, which sits
@@ -243,6 +263,10 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   // happened to land on the first page of the collection.
   const { rows: leaveReqs } = useCollection<LeaveRequest>("leave-requests", { enabled: canLeave, params: { employee: `employees/${id}` } });
   const myLeaves = useMemo(() => [...leaveReqs].sort((a, b) => b.start_date.localeCompare(a.start_date)), [leaveReqs]);
+  // `?request=leave-requests/<id>`: an approver's "Open" from the inbox - that request is picked out in the
+  // history below and scrolled to.
+  const focusedLeave = useFocusedRequest("leave-requests");
+  const focusedLeaveRef = useScrollToFocused(focusedLeave, sub === "leave" && myLeaves.length > 0);
 
   const onProbation = !!emp?.probation_end_date && Date.parse(emp.probation_end_date) >= Date.now();
 
@@ -263,17 +287,17 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
     const t = new Set(["profile", "employment"]);
     if (canDocs) t.add("documents");
     if (canIdentityTab) t.add("identity");
-    if (canLeave) t.add("leave");
+    if (canLeaveTab) t.add("leave");
     if (canAttendance) t.add("attendance");
     if (canPerformance) t.add("performance");
     if (canPosts) t.add("posts");
-    if (canTax || canComp || canBonuses || canSettlement || canPayslips) t.add("compensation");
+    if (canCompTab) t.add("compensation");
     if (canActivity) t.add("activity");
     // Who can see me, asked from the subject's side. Deliberately not access-governed and deliberately
     // self-only: a person finding out who reads their bank details is the point, not a grant to hand out.
     if (isSelf) t.add("privacy");
     return t;
-  }, [canIdentityTab, canDocs, canLeave, isSelf, canAttendance, canPerformance, canPosts, canTax, canComp, canBonuses, canSettlement, canPayslips, canActivity]);
+  }, [canIdentityTab, canDocs, canLeaveTab, isSelf, canAttendance, canPerformance, canPosts, canCompTab, canActivity]);
   const tab = sub && tabValues.has(sub) ? sub : "profile";
   const setTab = (v: string) => navigate(v === "profile" ? base : `${base}/${v}`);
 
@@ -332,14 +356,24 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
       : key === "personal" || key === "contact" || key === "emergency" ? canPersonal
       : key === "identity" ? canIdentity
       : key === "bank" ? canBankDetails
-      // Owner-only at the service level, whatever the grant says (services/employeePhoto.ts assertOwner).
+      // Owner-only at the service level, whatever the grant says (services/employeePhoto.ts assertOwner). The
+      // app PIN tile is self-only too: it opens the Privacy tab, which exists only on one's own profile.
       : isSelf,
     [canPhoto, canPersonal, canIdentity, canBankDetails, isSelf],
+  );
+  // On one's OWN profile the checklist also asks for an app PIN. Read from the live lock state, not the
+  // employee record, so the tile ticks the moment a PIN is set on the Privacy tab; left out where the shell does
+  // not know the lock (null config) and on anybody else's record, where a PIN is none of the viewer's business.
+  const { config: lockConfig } = useAppLock();
+  const completenessFlags = useMemo(
+    () => (isSelf && lockConfig && emp?.profile_completeness ? { ...emp.profile_completeness, app_lock: lockConfig.enabled } : undefined),
+    [isSelf, lockConfig, emp?.profile_completeness],
   );
   // Completeness chips jump to the section where the data is filled in (mirrors /profile's gotoItem).
   function gotoRecordItem(key: CompletenessKey) {
     if (key === "photo") setPhotoOpen(true);
     else if (key === "personal" || key === "contact" || key === "emergency") setTab("profile"); // all three panels live on Profile
+    else if (key === "app_lock") setTab("privacy"); // App lock settings sit on the Privacy tab
     else setTab("identity"); // identity + bank share the Identity tab
   }
   const [coreOpen, setCoreOpen] = useState(false);
@@ -640,14 +674,14 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                         not "are there rows": a caller who may read this person's leave and finds none still
                         gets the tab, and the empty state written for exactly that case. Both are false on
                         one's own record, where the Leaves and Attendance pages are the place instead. */}
-                    {canLeave && <AccessTab value="leave" target={{ collection: "leave-requests", label: "Leave" }}><CalendarDays className="h-4 w-4" /> Leave</AccessTab>}
+                    {canLeaveTab && <AccessTab value="leave" target={{ collection: "leave-requests", label: "Leave" }}><CalendarDays className="h-4 w-4" /> Leave</AccessTab>}
                     {canAttendance && <AccessTab value="attendance" target={{ collection: "attendance", label: "Attendance" }}><Clock className="h-4 w-4" /> Attendance</AccessTab>}
                     {canIdentityTab && <AccessTab value="identity" target={{ collection: "employees", objectPath: empPath, field: "identity", label: "Identity" }}><IdCard className="h-4 w-4" /> Identity</AccessTab>}
                     {/* Three collections behind one tab, so the key points at `goals` - the one of the three
                         whose grant an org actually tunes per person. */}
                     {canPerformance && <AccessTab value="performance" target={{ collection: "goals", label: "Performance" }}><Target className="h-4 w-4" /> Performance</AccessTab>}
                     {canPosts && <AccessTab value="posts" target={{ collection: "announcements", label: "Posts" }}><MessageSquare className="h-4 w-4" /> Posts</AccessTab>}
-                    {(canTax || canComp || canBonuses || canSettlement || canPayslips) && <AccessTab value="compensation" target={{ collection: "compensation", label: "Compensation" }}><Wallet className="h-4 w-4" /> Compensation</AccessTab>}
+                    {canCompTab && <AccessTab value="compensation" target={{ collection: "compensation", label: "Compensation" }}><Wallet className="h-4 w-4" /> Compensation</AccessTab>}
                     {canDocs && <AccessTab value="documents" target={{ collection: "personal-documents", label: "Documents" }}><FileText className="h-4 w-4" /> Documents</AccessTab>}
                     {canActivity && <AccessTab value="activity" target={{ collection: "employees", objectPath: empPath, label: "Activity" }}><History className="h-4 w-4" /> Activity</AccessTab>}
                     {/* Not an AccessTab: this tab is ABOUT access rather than governed by one. `shrink-0` for
@@ -673,7 +707,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                 {emp.profile_completeness && (
                   <ProfileCompleteness
                     variant={isSelf ? "self" : "record"}
-                    flags={emp.profile_completeness}
+                    flags={completenessFlags ?? emp.profile_completeness}
                     canOpen={canOpenSection}
                     onItem={gotoRecordItem}
                   />
@@ -740,15 +774,17 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                     employeeName={`${emp.first_name} ${emp.last_name}`}
                     canAssign={canAssetsEdit}
                     isSelf={isSelf}
+                    canReadAssets={canReadAssets}
+                    title={canReadAssets ? undefined : "Asset requests"}
                     requestNow={requestAsset}
                     onRequestHandled={() => setRequestAsset(false)}
                   />
                 )}
               </TabsContent>
 
-              {canLeave && (
+              {canLeaveTab && (
                 <TabsContent value="leave" className="space-y-4">
-                  {myBalances.length === 0 && myLeaves.length === 0 && (
+                  {canLeave && myBalances.length === 0 && myLeaves.length === 0 && (
                     <Card>
                       <CardContent className="py-6 text-center text-sm text-muted-foreground sm:py-6">
                         {`No leave recorded for ${emp.first_name} yet.`}
@@ -780,7 +816,12 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                             <thead><tr className="border-b text-left text-muted-foreground"><th className="py-2 pr-3 font-medium">Type</th><th className="py-2 pr-3 font-medium">From</th><th className="py-2 pr-3 font-medium">To</th><th className="py-2 pr-3 text-right font-medium">Days</th><th className="py-2 font-medium">Status</th></tr></thead>
                             <tbody>
                               {myLeaves.map((l) => (
-                                <tr key={l.path} className="border-b last:border-0">
+                                <tr
+                                  key={l.path}
+                                  ref={idOf(l.path) === focusedLeave ? focusedLeaveRef : undefined}
+                                  aria-current={idOf(l.path) === focusedLeave ? "true" : undefined}
+                                  className={cn("border-b last:border-0", idOf(l.path) === focusedLeave && FOCUSED_ROW)}
+                                >
                                   <td className="py-1.5 pr-3 font-medium">{typeName(l.leave_type)}</td>
                                   <td data-label="From" className="py-1.5 pr-3 tabular-nums">{formatDate(l.start_date)}</td>
                                   <td data-label="To" className="py-1.5 pr-3 tabular-nums">{formatDate(l.end_date)}</td>
@@ -794,17 +835,18 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                       </CardContent>
                     </Card>
                   )}
+                  {leaveRequestKinds.map((k) => <EmployeeRequests key={k} employeeId={id} kind={k} />)}
                 </TabsContent>
               )}
 
               {canAttendance && (
-                <TabsContent value="attendance">
+                <TabsContent value="attendance" className="space-y-4">
                   {/* The same history the person reads on their own Attendance page, over this record instead:
                       the day-by-day log, its punches, and why a day has none. Read-only - a correction is the
                       employee's to file and an approver's to answer, not something written into their record
                       from here. It reads its own window (`GET /v1/attendance?employee=`, scoped server-side),
                       so nothing is fetched until this tab is opened. */}
-                  <AttendanceHistory
+                  {canAttendanceLog && <AttendanceHistory
                     employeeId={id}
                     joinedYmd={emp.start_date}
                     trackedFromYmd={trackedFromOf(emp)}
@@ -822,7 +864,9 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                     canExport={canExportAttendance}
                     exportName={`attendance-${emp.first_name} ${emp.last_name}`.toLowerCase().replace(/\s+/g, "-")}
                     emptyText={`No attendance recorded for ${emp.first_name} yet.`}
-                  />
+                  />}
+                  {/* What they asked for about their days: corrections, late/early, remote, overtime, time. */}
+                  {attendanceRequestKinds.map((k) => <EmployeeRequests key={k} employeeId={id} kind={k} />)}
                 </TabsContent>
               )}
 
@@ -865,7 +909,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                   <EmployeePosts employeeId={id} isSelf={isSelf} />
                 </TabsContent>
               )}
-              {(canTax || canComp || canBonuses || canSettlement || canPayslips) && (
+              {canCompTab && (
                 <TabsContent value="compensation" className="space-y-4">
                   {/* Two shapes of the same card, and the split is deliberate rather than legacy: a
                       self-service read carries no grade or band (those are the org's ladder, not your pay),
@@ -893,6 +937,8 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                       state somebody opens this tab to change. */}
                   {canPayslips && <EmployeePayslips employeeId={id} />}
                   {canSettlement && <EmployeeSettlement employeeId={id} canEdit={canSettlementEdit} />}
+                  {/* Money they asked for: claims to be repaid and loans or advances against their pay. */}
+                  {compRequestKinds.map((k) => <EmployeeRequests key={k} employeeId={id} kind={k} />)}
                 </TabsContent>
               )}
               {canDocs && (

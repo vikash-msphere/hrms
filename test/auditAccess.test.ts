@@ -183,6 +183,7 @@ describe("mutationAudit", () => {
     // `batch:run` fans out GETs; these two really do run a job. `payslips:download` streams bytes; :upload stores them.
     expect(mutationAudit("POST", "/v1/operations/op1:run")).toMatchObject({ action: "operations.run", entityId: "op1" });
     expect(mutationAudit("POST", "/v1/cron-runs:run")).toMatchObject({ action: "cron-runs.run" });
+    expect(mutationAudit("POST", "/v1/operations:clearCache")).toMatchObject({ action: "operations.clearCache" });
     expect(mutationAudit("POST", "/v1/transition-tasks/t1:upload")).toMatchObject({ action: "transition-tasks.upload" });
     expect(mutationAudit("POST", "/v1/personal-documents:generateForm16")).toMatchObject({ action: "personal-documents.generateForm16" });
   });

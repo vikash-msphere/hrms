@@ -15,6 +15,8 @@ import { and, eq, inArray, isNull, like, ne, or } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { systemActor } from "../lib/systemActor";
+import { clearCache } from "../lib/cache";
+import { generational } from "../lib/cacheGenerations";
 import type { AppUser } from "../env";
 import { redactSensitivePayload, type DomainEvent } from "../domain/events";
 import { allocFlatCode } from "./codeAlloc";
@@ -117,23 +119,20 @@ export async function withDispatchBudget<T>(deps: Deps, fn: () => Promise<T>): P
 
 type AutomationRow = typeof schema.automations.$inferSelect;
 
-// Short in-isolate cache of the enabled rule set (mirrors policyLoad's 5s TTL).
-let cache: { at: number; rows: AutomationRow[] } | null = null;
-const CACHE_TTL_MS = 5000;
+// The enabled rule set, asked for on every event the app emits. Held in the instance's memory until the
+// `automations` counter moves (lib/cacheGenerations.ts), which any write to the table does; the nightly schedule
+// claim is one of those writes, and costs one reload per instance a night.
+const ENABLED_KEY = "automations:enabled";
 
-async function loadEnabled(deps: Deps): Promise<AutomationRow[]> {
-  const now = +deps.clock.now();
-  if (cache && now - cache.at < CACHE_TTL_MS) return cache.rows;
-  const rows = await deps.db
-    .select()
-    .from(schema.automations)
-    .where(eq(schema.automations.disabled, false));
-  cache = { at: now, rows };
-  return rows;
+function loadEnabled(deps: Deps): Promise<AutomationRow[]> {
+  return generational(deps, ENABLED_KEY, ["automations"], () =>
+    deps.db.select().from(schema.automations).where(eq(schema.automations.disabled, false)),
+  );
 }
 
+/** Drop the cached rule set in THIS instance, so an edit takes effect here at once; others follow the counter. */
 export function invalidateAutomationCache(): void {
-  cache = null;
+  clearCache(ENABLED_KEY);
 }
 
 function parseAutomation(row: AutomationRow): Automation {

@@ -276,11 +276,16 @@ export const accessRules = sqliteTable("access_rules", {
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({
-  // One composite index serves every read: the role-rule fetch (subject prefix), the list shares/denies
-  // fetch (subject+namespace prefix), and the user per-object exact-IN narrowing (full key) all use it - a
-  // left-prefix superset, confirmed by EXPLAIN QUERY PLAN. (A separate (subject, namespace) index would be
-  // redundant.)
+  // The subject-keyed reads in the management services (a subject's rules, its rules in one collection).
   subjNsMatch: index("ar_subject_ns_match_idx").on(t.subject, t.namespace, t.matchCode),
+  // The decision loads (lib/policyLoad.ts): every one filters subject + subject_kind and splits on whether
+  // match_code is set. With namespace in the middle of the index above they could only seek on `subject`, so the
+  // per-object load read every broad rule a role holds (~200 rows) to return none. Here all three seek straight
+  // to the rows they return; the per-object load spells its test `match_code >= ''` so it can be a range.
+  subjKindMatch: index("ar_subject_kind_match_idx").on(t.subject, t.subjectKind, t.matchCode),
+  // The list's keyset order (created_at desc, uuid desc). Without it every 100-row page scanned and sorted the
+  // whole table, so paging through all rules read it once per page.
+  created: index("ar_created_idx").on(t.createdAt, t.uuid),
 }));
 
 // Comp-off earned by working on a holiday: one row per (employee, worked day). The row IS the idempotency
@@ -3268,7 +3273,7 @@ export const attendanceRegularizations = sqliteTable("attendance_regularizations
   code: codeCol(),
   employeeId: text("employee_id").notNull().references(() => employees.uuid),
   date: integer("date", { mode: "timestamp_ms" }).notNull(), // the calendar day being corrected (UTC midnight)
-  sessions: text("sessions", { mode: "json" }).notNull().$type<{ clock_in: string; clock_out: string }[]>(), // ISO instants; [] = day had no work (remove punches)
+  sessions: text("sessions", { mode: "json" }).notNull().$type<{ clock_in: string; clock_out?: string }[]>(), // ISO instants; [] = day had no work (remove punches); no clock_out = today's last session, still clocked in
   reason: text("reason"),
   state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED"] }).notNull().default("PENDING"),
   decidedBy: text("decided_by").references(() => users.uuid),
@@ -3774,6 +3779,29 @@ export const collectionVersions = sqliteTable("collection_versions", {
 }, (t) => ({
   atIdx: index("collection_versions_at_idx").on(t.at),
 }));
+
+// What the SERVER's in-memory caches are checked against (lib/cacheGenerations.ts). ONE row (id 1), one counter
+// per kind of cached data, each bumped by a trigger on the table it comes from, in the same transaction as the
+// write (migration 0003). Every Worker instance reads this row at most every few seconds and reloads a cached
+// value only when one of the counters it was loaded under has moved.
+//
+// Counters rather than timestamps: they only go up, so two writes in one millisecond, a clock step or a lagging
+// replica can never make a change look older than the copy it replaced.
+export const cacheGenerations = sqliteTable("cache_generations", {
+  id: integer("id").primaryKey(),
+  // `access_rules` rows a role's broad grant is built from (subject_kind 'role', no match_code).
+  roleRules: integer("role_rules").notNull().default(0),
+  // Every other `access_rules` row: user rules, per-object rules, ticket shares.
+  aclRules: integer("acl_rules").notNull().default(0),
+  userRoles: integer("user_roles").notNull().default(0),
+  policy: integer("policy").notNull().default(0),
+  roles: integer("roles").notNull().default(0),
+  // The reporting line: who reports to whom, and the employee codes it is answered in.
+  org: integer("org").notNull().default(0),
+  // Record codes, which only a re-parent rewrites (services/codeCascade.ts moves an employee or a department).
+  codes: integer("codes").notNull().default(0),
+  automations: integer("automations").notNull().default(0),
+});
 
 export const searchDocs = sqliteTable("search_docs", {
   collection: text("collection").notNull(), // wire collection = the authz namespace

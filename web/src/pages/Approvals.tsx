@@ -23,6 +23,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { fmtCorrectionTimes } from "@/lib/attendance";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 import { bulkInvoke, mergeBulkResults, bulkSummary } from "@/lib/bulk";
@@ -207,7 +208,7 @@ export default function Approvals({ me }: { me: Me }) {
 
   const sumReg = (r: AttendanceRegularization) => {
     const t = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const times = r.sessions.length === 0 ? "remove punches" : r.sessions.map((s) => `${t(s.clock_in)}–${t(s.clock_out)}`).join(", ");
+    const times = fmtCorrectionTimes(r.sessions, t, "remove punches");
     return `${formatDate(r.date)} · ${times}${r.reason ? ` · ${r.reason}` : ""}`;
   };
   // Decision context for an attendance correction: the log it is about to rewrite. The times on the row are
@@ -396,6 +397,7 @@ export default function Approvals({ me }: { me: Me }) {
         collection={g.collection}
         row={r}
         {...who}
+        selfEmployeeId={me.employee_id}
         summary={summary}
         context={g.context?.(r)}
         kind={withKind ? { label: g.label, icon: g.icon } : undefined}

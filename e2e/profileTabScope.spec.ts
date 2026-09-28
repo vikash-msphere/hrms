@@ -15,11 +15,12 @@ import { gotoRoute, personId, test, expect, type Role } from "./fixtures";
 // domain/access.ts callerScopes), and this pins the answer per role against the SEEDED grants. Each
 // expectation below is a line of src/domain/grants.ts, so a grant change that moves a tab fails here with the
 // role and the tab named.
-const EXPECTED: Record<string, { subject: Role; shown: string[]; hidden: string[]; performance: string[] }> = {
+const EXPECTED: Record<string, { subject: Role; shown: string[]; hidden: string[]; performance: string[]; clock: boolean }> = {
   manager: {
     subject: "employee", // a member of the manager fixture's own department
     // attendance / goals / reviews at `my-dept`, and the board everyone reads.
     shown: ["Attendance", "Performance", "Posts"],
+    clock: true, // `attendance.my-dept.**`: the day-by-day log is on the Attendance tab
     // Pay is payroll's: a line manager holds no compensation, bonuses, settlements, payslips or tax grant, so
     // the whole tab goes - where before the stripped `employees.tax.read` off their OWN record opened it.
     // Documents for the same reason one level down: `personal-documents` is self-service for everybody
@@ -32,18 +33,22 @@ const EXPECTED: Record<string, { subject: Role; shown: string[]; hidden: string[
     // Payslips + compensation + `employees.*.tax.**`. Performance is here for ONE reason, and it is a grant
     // rather than an accident: `cards.**` is deliberately all-breadth for everybody (grants.ts OWN_WORK - a
     // board whose columns show only your own cards is a private to-do list), so the Tasks half is public.
-    shown: ["Compensation", "Performance"],
-    // Payroll reads nobody's clock but their own, and nobody's personal file either: they hold
-    // `personal-documents` read at `own` like every employee, and the write that fills somebody's file is
-    // HR's.
-    hidden: ["Attendance", "Documents"],
+    // Attendance is here for the requests, not the clock: payroll holds `overtime-requests.**` and
+    // `late-early-requests.**` (they are paid and docked on), and those are listed on that tab - it is where the
+    // approvals inbox opens one (lib/resourceRoute.ts `requestRoute`).
+    shown: ["Compensation", "Performance", "Attendance"],
+    // Payroll reads nobody's clock but their own, so the tab carries no day-by-day log. Nor anybody's personal
+    // file: they hold `personal-documents` read at `own` like every employee, and the write that fills
+    // somebody's file is HR's.
+    clock: false,
+    hidden: ["Documents"],
     performance: ["Tasks"], // and NOT Goals or Reviews, which payroll holds at `own`
   },
 };
 const PERFORMANCE_CARDS = ["Goals", "Tasks", "Reviews"] as const;
 
 test.describe("an employee record shows the tabs the caller's grant actually reaches", () => {
-  for (const [viewer, { subject: subjectRole, shown, hidden, performance }] of Object.entries(EXPECTED)) {
+  for (const [viewer, { subject: subjectRole, shown, hidden, performance, clock }] of Object.entries(EXPECTED)) {
     test(`${viewer} sees ${shown.join(", ")} and not ${hidden.join(", ")} on a colleague's record`, async ({ as }) => {
       test.setTimeout(180_000);
       // The subject's id comes from an admin's directory: the viewer's own list may be scoped narrower.
@@ -76,13 +81,24 @@ test.describe("an employee record shows the tabs the caller's grant actually rea
         ).toHaveCount(0);
       }
 
+      // Inside the open panel, not the whole page: a card title is a `CardTitle` div rather than a heading
+      // (components/ui/card.tsx), and "Goals" is also a nav entry.
+      const panel = page.getByRole("tabpanel");
+
+      // The Attendance tab is two gates: the clock log is `attendance`, the request cards are each their own
+      // collection. A viewer there for the requests alone must not be shown the person's days.
+      await gotoRoute(page, `employees/${subject}/attendance`);
+      await expect(page.getByRole("tab", { name: "Attendance", exact: true })).toHaveAttribute("aria-selected", "true", { timeout: 30_000 });
+      if (clock) {
+        await expect(panel.getByText("Attendance", { exact: true }), `${viewer} was not shown the attendance log`).toBeVisible({ timeout: 30_000 });
+      } else {
+        await expect(panel.getByText("Attendance", { exact: true }), `${viewer} was shown a colleague's attendance log`).toHaveCount(0);
+      }
+
       // One tab down: Performance is three cards behind one gate, and each card carries its own. Payroll
       // opening it must get the board half and neither the goals nor the reviews of the person they are
       // running pay for.
       await gotoRoute(page, `employees/${subject}/performance`);
-      // Inside the open panel, not the whole page: a card title is a `CardTitle` div rather than a heading
-      // (components/ui/card.tsx), and "Goals" is also a nav entry.
-      const panel = page.getByRole("tabpanel");
       for (const card of PERFORMANCE_CARDS) {
         const title = panel.getByText(card, { exact: true });
         if (performance.includes(card)) {

@@ -38,3 +38,18 @@ test("a scheduled task is run by hand, and the page reads back the tick", async 
   await page.getByRole("button", { name: "Refresh" }).first().click();
   await expect(page.getByText("Scheduled tasks")).toBeVisible();
 });
+
+// Clearing the server caches by hand. `test/cacheFlush.test.ts` owns what the flush DOES (every counter moves,
+// the answering instance empties); what only the browser proves is that the button reaches the worker and the
+// page says what happened - including that the other servers follow within seconds rather than at once.
+test("server caches are cleared by hand, and the page says every server follows", async ({ as }) => {
+  const page = await as("super");
+  await gotoRoute(page, "settings/operations");
+  await expect(page.getByRole("heading", { name: "Server caches" })).toBeVisible();
+  await page.getByRole("button", { name: "Clear caches" }).click();
+  await expect(page.getByText("Caches cleared")).toBeVisible();
+  await expect(page.getByText("Every server reloads within about 5 seconds.")).toBeVisible();
+  // Still usable afterwards: the page that asked is served by an instance that has just emptied every cache.
+  await expect(page.getByRole("button", { name: "Clear caches" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Run now" })).toHaveCount(2);
+});

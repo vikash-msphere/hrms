@@ -337,7 +337,14 @@ export default function App() {
   const [sessionExpired, setSessionExpired] = useState(false);
   const [chunkReady, setChunkReady] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
-  const announced = useRouteAnnounce(route.page, route.id ?? undefined, mainRef);
+  // The page that actually renders. An unrecognised route (a stale bookmark, a since-removed alias such as
+  // `/pay-periods`) falls to the dashboard in renderPage's `default:`, so the chrome around it - breadcrumb,
+  // tab title, announcement, sidebar highlight, replay's page key - names the dashboard too, rather than a
+  // humanized guess at a page that is not on screen. renderPage itself still switches on `route.page`.
+  const known = Object.prototype.hasOwnProperty.call(PAGE_CHUNK, route.page);
+  const page = known ? route.page : "dashboard";
+  const sub = known ? route.id ?? undefined : undefined;
+  const announced = useRouteAnnounce(page, sub, mainRef);
   const booted = useRef(false); // flips true after the first full render; after that, nav uses <Suspense>
 
   // Namespace the table-prefs cache by user before any table mounts.
@@ -727,7 +734,7 @@ export default function App() {
     <ClockProvider me={gme}>
       <NotificationClearOnLeave page={route.page} />
       <div data-app-shell className="flex min-h-screen bg-background">
-        <Sidebar me={gme} current={route.page} mobileOpen={mobileOpen} onNavigate={() => setMobileOpen(false)} />
+        <Sidebar me={gme} current={page} mobileOpen={mobileOpen} onNavigate={() => setMobileOpen(false)} />
         {/* While the mobile drawer is open the page behind it is inert: that is what keeps Tab inside the
             drawer (a modal surface has to trap focus) and stops a stray tap landing on a control under the
             scrim. Paired with the drawer's own `inert` when closed, exactly one of the two is ever reachable.
@@ -738,8 +745,8 @@ export default function App() {
         <div className="flex min-w-0 flex-1 flex-col" {...(mobileOpen && !sidebarDocked ? ({ inert: "" } as React.HTMLAttributes<HTMLDivElement>) : {})}>
           <TopBar
             me={gme}
-            page={route.page}
-            sub={route.id ?? undefined}
+            page={page}
+            sub={sub}
             onOpenSearch={() => setPaletteOpen(true)}
             onOpenMenu={() => setMobileOpen(true)}
             menuOpen={mobileOpen}
@@ -766,7 +773,7 @@ export default function App() {
             // in a handful of panels). So a panel added to the profile is recorded unless it says otherwise:
             // give it `sentry-mask`, or `data-sentry-block` for an image, the way the compensation, bank, tax,
             // identity, personal, emergency, documents and signature panels each do for themselves.
-            data-page={route.page}
+            data-page={page}
             className="mx-auto w-full max-w-screen-2xl flex-1 px-4 pb-[calc(2rem+env(safe-area-inset-bottom))] pt-5 outline-none sm:px-6 sm:pt-8 md:pb-8 lg:px-8"
           >
             {/* Ambient access scope for the whole page: collection = the route key (the collection for most

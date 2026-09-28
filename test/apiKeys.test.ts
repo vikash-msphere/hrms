@@ -214,6 +214,15 @@ describe("the ceiling", () => {
     const body = (await changed.json()) as { now?: number; collections?: string[] };
     expect(typeof body.now).toBe("number");
     expect(Array.isArray(body.collections)).toBe(true);
+    // And the palette's vocabulary: collection names and their status values, gated by that list decision. A
+    // custom method, so a read-only key is refused it like any other verb (domain/keyScope.ts verbsAllowedAt).
+    expect((await call("/v1/search:vocabulary", scoped)).status).toBe(403);
+    expect((await call("/v1/search:vocabulary", broad)).status).toBe(403);
+    const writer = await mintKey(owner, { collections: "*", maxLevel: "write", verbs: "*" });
+    const vocab = await call("/v1/search:vocabulary", writer);
+    expect(vocab.status).toBe(200);
+    const words = ((await vocab.json()) as { collections: { collection: string; statuses: string[] }[] }).collections;
+    expect(words.find((w) => w.collection === "leave-requests")?.statuses).toContain("pending");
   });
 
   // The `access.denied` row is the abuse signal, and "a key acted outside its scope" is the single most
