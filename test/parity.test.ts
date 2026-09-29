@@ -15,7 +15,8 @@ import { resolveRequest, decide } from "../src/domain/permissions";
 //  - pay-components / pay-periods: payroll authors them; everyone else reads the catalogue.
 //  - settings: nobody but super creates a key. HR and payroll WRITE the keys they own (settings.<key>), which
 //    is an item write, not a collection create.
-//  - personal-documents: employees read own, HR writes (employee files are HR-managed). users: super-only.
+//  - personal-documents: employees read own, HR writes (employee files are HR-managed). users: HR lists them
+//    read-only (to reset a forgotten app PIN); creating or editing one is super's.
 const SELF = "04-002-001";
 const can = (role: string, method: string, path: string) =>
   decide(grantFor(role), resolveRequest(method, path), { employeeCode: SELF }).allow;
@@ -39,7 +40,7 @@ const MATRIX: Record<string, { employee: LC; manager: LC; hr_admin: LC; payroll_
   "payroll-runs":       { employee: N, manager: N, hr_admin: N, payroll_admin: T },
   payslips:             { employee: R, manager: R, hr_admin: R, payroll_admin: R },
   operations:           { employee: R, manager: R, hr_admin: R, payroll_admin: R },
-  users:                { employee: N, manager: N, hr_admin: N, payroll_admin: N },
+  users:                { employee: N, manager: N, hr_admin: R, payroll_admin: N },
   settings:             { employee: R, manager: R, hr_admin: R, payroll_admin: R },
   preferences:          { employee: T, manager: T, hr_admin: T, payroll_admin: T },
   compensation:         { employee: N, manager: N, hr_admin: N, payroll_admin: T },

@@ -79,7 +79,7 @@ export async function readGenerations(deps: Deps): Promise<Generations | null> {
 }
 
 /** The counters this instance compares against, re-read at most every CHECK_MS. */
-export const currentGenerations = (deps: Deps): Promise<Generations | null> => cached(CURRENT_KEY, CHECK_MS, () => readGenerations(deps));
+export const currentGenerations = (deps: Deps): Promise<Generations | null> => cached(deps, CURRENT_KEY, CHECK_MS, () => readGenerations(deps));
 
 type Held<T> = { at: Generations | null; loadedAt: number; value: T };
 
@@ -91,6 +91,7 @@ type Held<T> = { at: Generations | null; loadedAt: number; value: T };
 export async function generational<T>(deps: Deps, key: string, on: readonly Generation[], load: () => Promise<T>): Promise<T> {
   const current = await currentGenerations(deps);
   const held = await cached<Held<T>>(
+    deps,
     key,
     HOLD_MS,
     async () => {

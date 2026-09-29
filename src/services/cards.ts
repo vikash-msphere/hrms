@@ -1,5 +1,5 @@
 import { eq, and, isNull, isNotNull, asc, inArray, sql } from "drizzle-orm";
-import { allocOwnedCode, withFreshCode } from "./codeAlloc";
+import { allocUnderRow, withFreshCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
@@ -552,9 +552,11 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
   // compose the same pair, and the unique indexes fail the loser rather than let two tasks answer to MS-4.
   // Allocating INSIDE the retry is what makes that recoverable: the second look sees the winner's row and
   // takes the next numbers. Prefix is copied from the board so the key survives a later prefix change.
-  const row = (await withFreshCode(async () => {
+  const row = (await withFreshCode(async (attempt) => {
     const seq = await nextSeq(deps, boardId);
-    const code = await allocOwnedCode(deps, schema.cards, schema.cards.employeeId, employeeId);
+    // Coded under the BOARD (domain/boardAccess.ts), so whoever may see and work the board may see and work the
+    // task - one subtree rule on the board's code reaches it.
+    const code = await allocUnderRow(deps, schema.cards, schema.cards.boardId, boardId, board.code!, undefined, attempt > 1);
     return deps.db
     .insert(schema.cards)
     .values({

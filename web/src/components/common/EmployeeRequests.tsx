@@ -1,9 +1,9 @@
 import * as React from "react";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlarmClock, Banknote, Clock, Coins, Hourglass, House, ReceiptText, Timer, type LucideIcon } from "lucide-react";
 import { useCollection } from "@/hooks/useCollection";
 import { useRoute } from "@/router";
-import { cn, formatDate, formatMoney, idOf } from "@/lib/utils";
+import { cn, formatDate, formatHHMM, formatMoney, formatTime, idOf } from "@/lib/utils";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { REQUEST_PARAM } from "@/lib/resourceRoute";
 import { KIND_LABEL, fmtMinutes, type LateEarlyKind } from "@/lib/lateEarly";
@@ -13,7 +13,8 @@ import { StatusBadge } from "@/components/common/StatusBadge";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { TableSkeleton } from "@/components/common/Skeletons";
 import { AccessAction } from "@/components/access/AccessAction";
-import { fmtCorrectionTimes } from "@/lib/attendance";
+import { DecisionButtons, RejectDialog, type Approvable, type RejectTarget } from "@/components/common/ApprovalRow";
+import { describeCorrection } from "@/lib/attendance";
 
 // One person's requests of one kind, on their record: the place an approver's "Open" lands. The self-service
 // pages for these collections list only the caller's own requests, so somebody else's had no page at all.
@@ -36,9 +37,11 @@ export type EmployeeRequestKind =
   | "loans"
   | "leave-encashments";
 
-type Row = { path: string; create_time?: string; update_time?: string };
+type Row = Approvable;
 type Spec<T extends Row> = {
   title: string;
+  /** One of them, for the approve confirmation ("Asha's remote work request"). */
+  noun: string;
   icon: LucideIcon;
   when: (r: T) => string | undefined;
   status: (r: T) => string | undefined;
@@ -57,6 +60,7 @@ function spec<T extends Row>(s: Spec<T>): Spec<Row> {
 const SPECS: Record<EmployeeRequestKind, Spec<Row>> = {
   "remote-work-requests": spec<RemoteWorkRequest>({
     title: "Remote work",
+    noun: "remote work request",
     icon: House,
     when: (r) => r.start_date,
     status: (r) => r.state,
@@ -65,25 +69,28 @@ const SPECS: Record<EmployeeRequestKind, Spec<Row>> = {
   }),
   "late-early-requests": spec<LateEarlyRequest>({
     title: "Late arrival & early departure",
+    noun: "late arrival / early departure request",
     icon: AlarmClock,
     when: (r) => r.date,
     status: (r) => r.state,
     what: (r) =>
-      `${formatDate(r.date)} · ${KIND_LABEL[r.kind as LateEarlyKind] ?? r.kind} · ${r.kind === "early_departure" ? "leave at" : "in by"} ${r.at} (${fmtMinutes(r.minutes ?? 0)})${r.over_limit ? " · past the monthly allowance" : ""}${r.reason ? ` · ${r.reason}` : ""}`,
+      `${formatDate(r.date)} · ${KIND_LABEL[r.kind as LateEarlyKind] ?? r.kind} · ${r.kind === "early_departure" ? "leave at" : "in by"} ${formatHHMM(r.at)} (${fmtMinutes(r.minutes ?? 0)})${r.over_limit ? " · past the monthly allowance" : ""}${r.reason ? ` · ${r.reason}` : ""}`,
   }),
   "attendance-regularizations": spec<AttendanceRegularization>({
     title: "Attendance corrections",
+    noun: "attendance correction",
     icon: Clock,
     when: (r) => r.date,
     status: (r) => r.state,
     what: (r) => {
-      const t = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      const times = fmtCorrectionTimes(r.sessions, t, "remove punches");
+      const t = formatTime;
+      const times = describeCorrection(r.recorded_sessions, r.sessions, t, "remove punches");
       return `${formatDate(r.date)} · ${times}${r.reason ? ` · ${r.reason}` : ""}`;
     },
   }),
   "overtime-requests": spec<OvertimeRequest>({
     title: "Overtime",
+    noun: "overtime request",
     icon: Hourglass,
     when: (r) => r.date,
     status: (r) => r.state,
@@ -91,6 +98,7 @@ const SPECS: Record<EmployeeRequestKind, Spec<Row>> = {
   }),
   "time-entries": spec<TimeEntry>({
     title: "Timesheet entries",
+    noun: "timesheet entry",
     icon: Timer,
     when: (r) => r.date,
     status: (r) => r.status,
@@ -99,6 +107,7 @@ const SPECS: Record<EmployeeRequestKind, Spec<Row>> = {
   }),
   reimbursements: spec<Reimbursement>({
     title: "Reimbursements",
+    noun: "reimbursement claim",
     icon: ReceiptText,
     when: (r) => r.incurred_on ?? r.create_time,
     status: (r) => r.state,
@@ -107,6 +116,7 @@ const SPECS: Record<EmployeeRequestKind, Spec<Row>> = {
   }),
   loans: spec<Loan>({
     title: "Loans & advances",
+    noun: "loan request",
     icon: Banknote,
     when: (r) => r.create_time,
     status: (r) => r.status,
@@ -114,6 +124,7 @@ const SPECS: Record<EmployeeRequestKind, Spec<Row>> = {
   }),
   "leave-encashments": spec<LeaveEncashment>({
     title: "Leave encashments",
+    noun: "leave encashment",
     icon: Coins,
     when: (r) => r.create_time,
     status: (r) => r.state,
@@ -142,8 +153,11 @@ export function useScrollToFocused<E extends HTMLElement = HTMLTableRowElement>(
 /** The row class for a request the address picked out. */
 export const FOCUSED_ROW = "bg-primary/10 outline outline-2 -outline-offset-2 outline-primary/40";
 
-export function EmployeeRequests({ employeeId, kind }: { employeeId: string; kind: EmployeeRequestKind }) {
+// A row still awaiting a decision carries Approve / Reject when the row's own `access.can` names them - the same
+// buttons and confirmation as the inbox (DecisionButtons), so opening a request from there loses nothing.
+export function EmployeeRequests({ employeeId, employeeName, kind }: { employeeId: string; employeeName: string; kind: EmployeeRequestKind }) {
   const s = SPECS[kind];
+  const [rejecting, setRejecting] = useState<RejectTarget | null>(null);
   const { rows: raw, state } = useCollection<Row>(kind, { params: { employee: `employees/${employeeId}` } });
   const { rows: lookup } = useCollection<{ path: string; display_name?: string; name?: string }>(s.needs ?? "leave-types", { all: true, enabled: !!s.needs });
   const { org } = useOrg();
@@ -187,7 +201,7 @@ export function EmployeeRequests({ employeeId, kind }: { employeeId: string; kin
                 <tr className="border-b text-left text-muted-foreground">
                   <th className="py-2 pr-3 font-medium">Request</th>
                   <th className="py-2 pr-3 font-medium">Status</th>
-                  <th className="py-2 font-medium"><span className="sr-only">Activity</span></th>
+                  <th className="py-2 font-medium"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -203,7 +217,18 @@ export function EmployeeRequests({ employeeId, kind }: { employeeId: string; kin
                         {note && <span className="block text-xs italic text-muted-foreground">“{note}”</span>}
                       </td>
                       <td data-label="Status" className="py-1.5 pr-3">{status && <StatusBadge state={status} />}</td>
-                      <td className="py-1.5 text-right"><RowActivityButton resource={r.path} /></td>
+                      <td className="py-1.5">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <DecisionButtons
+                            collection={kind}
+                            row={r}
+                            what={`${employeeName}'s ${s.noun}`}
+                            onRejectClick={() => setRejecting({ collection: kind, row: r, name: employeeName, summary: s.what(r, ctx) })}
+                            buttonClassName="coarse:h-10"
+                          />
+                          <RowActivityButton resource={r.path} />
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
@@ -212,6 +237,8 @@ export function EmployeeRequests({ employeeId, kind }: { employeeId: string; kin
           </div>
         )}
       </CardContent>
+      {/* The decision itself invalidates the collection (api.ts invoke), so the row re-reads as decided. */}
+      <RejectDialog target={rejecting} onClose={() => setRejecting(null)} onRejected={() => {}} />
     </Card>
   );
 }

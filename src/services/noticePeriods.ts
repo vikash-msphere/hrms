@@ -1,5 +1,5 @@
 import { allocOwnedCode } from "./codeAlloc";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, ne } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { deleteStateFilter } from "./softDelete";
 import { keysetPage } from "./keysetPage";
@@ -8,7 +8,8 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
+import { dayStartMs, orgToday } from "./orgDay";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { createTransition, terminateForOffboarding } from "./transitions";
@@ -138,5 +139,100 @@ export async function updateNoticePeriod(deps: Deps, actor: AppUser, id: string,
   }
   await audit(deps, actor, "notice_period.update", "notice-periods", id, diffMeta(row, updated, set, "notice-periods"), updated);
   return updated;
+}
+
+/** How many people one nightly tick exits. About four writes each, inside a tick that shares one invocation's
+ *  subrequest budget with every other nightly job; anyone past the cap is picked up the next night. */
+const EXIT_BATCH = 10;
+
+/**
+ * The nightly exit: everyone whose last working day has PASSED loses access, without waiting for HR to click.
+ *
+ * "Passed" is the org-local calendar day (services/orgDay.ts): the last working day itself is still worked, so
+ * a notice ending today is left alone and exits on tomorrow's tick.
+ *
+ * Two sources, because an exit is recorded two ways:
+ * - A SERVING notice period past its last working day. The notice is flipped to `completed` by a guarded write
+ *   (only a row still `serving` moves), so an overlapping manual trigger or a re-run cannot exit someone twice.
+ * - An ACTIVE offboarding past its anchor date that no serving notice speaks for - an offboarding HR started
+ *   directly, with no notice behind it.
+ *
+ * THE CHECKLIST STAYS OPEN. Ending access is what cannot wait; "collect the laptop" and "revoke system access"
+ * are still work somebody owes, and HR completes the offboarding when they are done. That is why the notice is
+ * written here directly rather than through `updateNoticePeriod`, whose sync would close the linked transition
+ * along with it. Completing it later is harmless: `terminateForOffboarding` does nothing to someone already out.
+ *
+ * Returns how many people it exited, for the cron_runs summary.
+ */
+export async function exitDueEmployees(deps: Deps): Promise<number> {
+  const todayStart = dayStartMs(await orgToday(deps));
+  // Audited as "system", like every nightly job's writes; the tick's `actingAs` names the cron run.
+  const actor = "system";
+  let exited = 0;
+
+  const notices = await deps.db
+    .select()
+    .from(schema.noticePeriods)
+    .where(and(eq(schema.noticePeriods.status, "serving"), isNull(schema.noticePeriods.deleteTime), lt(schema.noticePeriods.lastWorkingDay, new Date(todayStart))))
+    .orderBy(asc(schema.noticePeriods.lastWorkingDay))
+    .limit(EXIT_BATCH);
+  for (const n of notices) {
+    const [done] = await deps.db
+      .update(schema.noticePeriods)
+      .set({ status: "completed", updatedAt: new Date() })
+      .where(and(eq(schema.noticePeriods.uuid, n.uuid), eq(schema.noticePeriods.status, "serving")))
+      .returning();
+    if (!done) continue;
+    await audit(deps, actor, "notice_period.update", "notice-periods", n.uuid, stateMeta("serving", "completed", { employee: `employees/${n.employeeId}`, via: "exit-sweep" }), done);
+    if (await terminateForOffboarding(deps, actor, n.employeeId, n.lastWorkingDay)) {
+      exited++;
+      await tellManagerAccessEnded(deps, n.employeeId, n.lastWorkingDay, `notice-periods/${n.uuid}`);
+    }
+  }
+
+  const room = EXIT_BATCH - notices.length;
+  if (room <= 0) return exited;
+  const due = await deps.db
+    .select({ uuid: schema.transitions.uuid, employeeId: schema.transitions.employeeId, anchorDate: schema.transitions.anchorDate })
+    .from(schema.transitions)
+    .innerJoin(schema.employees, eq(schema.employees.uuid, schema.transitions.employeeId))
+    .where(
+      and(
+        eq(schema.transitions.kind, "offboarding"),
+        eq(schema.transitions.state, "ACTIVE"),
+        isNull(schema.transitions.deleteTime),
+        lt(schema.transitions.anchorDate, new Date(todayStart)),
+        ne(schema.employees.status, "terminated"),
+      ),
+    )
+    .orderBy(asc(schema.transitions.anchorDate))
+    .limit(room);
+  if (!due.length) return exited;
+  // A notice still serving owns the date - its last working day may have moved past this anchor - so an
+  // offboarding it is linked to waits for the notice rather than exiting on the older date.
+  const owned = new Set(
+    (await deps.db
+      .select({ t: schema.noticePeriods.transitionId })
+      .from(schema.noticePeriods)
+      .where(and(inArray(schema.noticePeriods.transitionId, due.map((d) => d.uuid)), eq(schema.noticePeriods.status, "serving"), isNull(schema.noticePeriods.deleteTime))))
+      .map((r) => r.t),
+  );
+  for (const t of due) {
+    if (owned.has(t.uuid) || !t.anchorDate) continue;
+    if (await terminateForOffboarding(deps, actor, t.employeeId, t.anchorDate)) {
+      exited++;
+      await tellManagerAccessEnded(deps, t.employeeId, t.anchorDate, `transitions/${t.uuid}`);
+    }
+  }
+  return exited;
+}
+
+/** The leaver's manager (first live one up the chain) hears that access ended, so an exit that happened
+ *  overnight is not discovered by the next person who tries to assign them something. */
+async function tellManagerAccessEnded(deps: Deps, employeeId: string, lastDay: Date, subject: string) {
+  const mgr = await managerIdOf(deps, employeeId);
+  if (!mgr) return;
+  const day = new Date(lastDay).toISOString().slice(0, 10);
+  await notify(deps, { recipient: mgr, type: "notice.exited", title: "A report has exited", body: `Their last working day was ${day}; their login is now disabled.`, link: "notice-periods", subject, actorId: employeeId });
 }
 

@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { Plus, Pencil, Trash2, CalendarClock, Check, Moon } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { idOf } from "@/lib/utils";
+import { formatHHMM, idOf } from "@/lib/utils";
 import type { Shift } from "@/types";
 import { DataState } from "@/components/common/DataState";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
@@ -172,7 +172,7 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
                     <span className="font-medium">{s.name}</span>
                     {/* Paid length is what a scheduler actually compares shifts on, so it sits beside the times. */}
                     <p className="flex flex-wrap items-center gap-x-1.5 text-xs tabular-nums text-muted-foreground">
-                      <span>{s.start}–{s.end}</span>
+                      <span>{formatHHMM(s.start)} – {formatHHMM(s.end)}</span>
                       <span aria-hidden>·</span>
                       <span className="font-medium text-foreground">{fmtDuration(Math.max(0, spanOf(s.start, s.end) - (s.break_minutes ?? 0)))}</span>
                       {s.break_minutes ? <span>· {s.break_minutes}m break</span> : null}
@@ -221,7 +221,7 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
                 {PRESETS.map((p) => (
                   <button key={p.name} type="button" onClick={() => applyPreset(p)}
                     className="shrink-0 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-primary hover:bg-primary/10 hover:text-primary coarse:min-h-9 coarse:px-3.5">
-                    {p.name} <span className="tabular-nums opacity-70">{p.start}–{p.end}</span>
+                    {p.name} <span className="tabular-nums opacity-70">{formatHHMM(p.start)} – {formatHHMM(p.end)}</span>
                   </button>
                 ))}
               </div>

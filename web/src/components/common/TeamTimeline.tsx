@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMous
 import { ChevronLeft, ChevronRight, ChevronUp, Cake, PartyPopper, UserPlus, ShieldCheck, CalendarRange, Clock, CalendarDays, Info, Users, type LucideIcon } from "lucide-react";
 import type { Employee, LeaveRequest, LeaveType, Holiday, Celebration, AttendanceSession, Event, LateEarlyRequest, Me } from "@/types";
 import { cn, idOf } from "@/lib/utils";
+import { isCurrentEmployee } from "@/lib/employees";
 import { useCollection } from "@/hooks/useCollection";
 import { useScheduleView } from "@/hooks/useScheduleView";
 import { excusalsByEmployee, usePunctualityPolicy } from "@/lib/lateEarly";
-import { hhmmOf } from "../../../../src/domain/punctuality";
+import { clockOf } from "../../../../src/domain/workSchedule";
 import { todayStr } from "@/lib/orgDay";
 import { listAllSessionsPaged } from "@/lib/clock";
 import { leaveColor } from "@/lib/leaveColors";
@@ -455,7 +456,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
         <TipRow>{fmtDuration(s.workedMinutes)} worked</TipRow>
         {(s.approvedLateUntil != null || s.approvedEarlyFrom != null) && (
           <TipRow icon={Clock}>
-            Approved {[s.approvedLateUntil != null ? `in by ${hhmmOf(s.approvedLateUntil)}` : null, s.approvedEarlyFrom != null ? `out at ${hhmmOf(s.approvedEarlyFrom)}` : null].filter(Boolean).join(", ")}
+            Approved {[s.approvedLateUntil != null ? `in by ${clockOf(s.approvedLateUntil)}` : null, s.approvedEarlyFrom != null ? `out at ${clockOf(s.approvedEarlyFrom)}` : null].filter(Boolean).join(", ")}
           </TipRow>
         )}
         {(s.late || s.leftEarly) && (
@@ -556,9 +557,10 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     return bars;
   };
 
-  // Live employees, with the caller's own row hoisted to the top (drag-to-request lives there).
+  // The people still here (lib/employees.ts), with the caller's own row hoisted to the top (drag-to-request
+  // lives there).
   const rows = useMemo(() => {
-    const live = employees.filter((e) => !e.delete_time);
+    const live = employees.filter(isCurrentEmployee);
     return live.sort((a, b) => Number(idOf(b.path) === me.employee_id) - Number(idOf(a.path) === me.employee_id));
   }, [employees, me.employee_id]);
 

@@ -15,6 +15,18 @@ only; a live one needs a migration or an edit in the UI.
 | `hr_admin.json` | `extends: employee`, plus people operations and the HR setting keys. |
 | `payroll_admin.json` | `extends: employee`, plus payroll, pay configuration, the payroll setting keys and finance. |
 | `super_admin.json` | Break-glass `**`. Must stay exactly `levels ** admin` + `allow **`. |
+| `it_admin.json` | `extends: employee`, plus the asset register, the asset desk and the asset-tag setting. Its ticket queue is not a rule here: each ticket category's `roles` list shares that category's tickets with the role (`src/services/ticketShares.ts`). |
+| `project_manager.json` | `extends: employee`, plus managing every board (private ones included), its tasks and its sprints, and goals for their direct reports (`my-reports`, the Team goals page). No 1:1s, reviews or request decisions. |
+
+## Boards
+
+No role but super admin and `project_manager` holds an org-wide board, card or sprint rule. A board's code
+starts with its visibility segment and its cards and sprints are coded under it (`src/domain/boardAccess.ts`):
+`employee` reaches the boards everyone works (`ve-`) and sees (`vr-`) by subtree, and nothing reaches a private
+one (`vp-`) but the board's own `board-share` rules - its creator, its sharing list and the managers of its
+department and the departments above it (`src/services/boardShares.ts`). `manager` and `hr_admin` hold only the
+create gate (`boards` write). No role may hold `me` / `my-dept` / `my-reports` / `my-org` on boards, cards or
+sprints: those tokens match by code, and these are board codes (test/roleFiles.test.ts).
 
 Settings are granted per key (`settings.<key>`), never `settings.**` write to a role: each key has one owner
 (HR's policies, payroll's pay configuration), and the governance switches - `access-approval`,

@@ -108,6 +108,14 @@ describe("the other sources, one counter each", () => {
     expect(await moved(() => deps.db.update(schema.departments).set({ name: "Operations" }).where(byId))).toEqual({});
     expect(await moved(() => deps.db.update(schema.departments).set({ code: "09" }).where(byId))).toEqual({ codes: 1 });
   });
+
+  it("boards: a code change (a visibility change re-codes the board) moves codes; a rename moves nothing", async () => {
+    const board = genId();
+    await deps.db.insert(schema.boards).values({ uuid: board, code: "ve-0g", name: "Flow" });
+    const byId = eq(schema.boards.uuid, board);
+    expect(await moved(() => deps.db.update(schema.boards).set({ name: "Flow board" }).where(byId))).toEqual({});
+    expect(await moved(() => deps.db.update(schema.boards).set({ code: "vp-0g" }).where(byId))).toEqual({ codes: 1 });
+  });
 });
 
 describe("generational(): held until its own counter moves", () => {

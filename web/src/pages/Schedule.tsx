@@ -5,7 +5,7 @@ import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
 import { runSequential, batchSummary } from "@/lib/batchRun";
 import { useClock } from "@/lib/clock";
 import { usePermission } from "@/lib/perm";
-import { cn, idOf } from "@/lib/utils";
+import { cn, formatHHMM, idOf } from "@/lib/utils";
 import { todayStr, addDaysYmd, weekStartYmd, weekdayOf } from "@/lib/orgDay";
 import { scheduleView } from "@/lib/workSchedule";
 import type { Department, Employee, Holiday, Me, Shift, ShiftAssignment, WorkPattern, WorkPatternAssignment } from "@/types";
@@ -307,7 +307,7 @@ export default function Schedule({ me }: { me: Me }) {
                 <span key={s.path} className="inline-flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: s.color ?? "#64748b" }} />
                   <span className="font-medium text-foreground">{s.name}</span>
-                  <span className="tabular-nums">{s.start}-{s.end}</span>
+                  <span className="tabular-nums">{formatHHMM(s.start)} - {formatHHMM(s.end)}</span>
                 </span>
               ))}
             </div>
@@ -633,7 +633,7 @@ function AssignDialog({ employeeName, date, existing, shifts, weekDays, workDays
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium">{s.name}</span>
                       <span className="block text-xs tabular-nums text-muted-foreground">
-                        {s.start}-{s.end} · {fmtDuration(paidOf(s))}{s.break_minutes ? ` · ${s.break_minutes}m break` : ""}
+                        {formatHHMM(s.start)} - {formatHHMM(s.end)} · {fmtDuration(paidOf(s))}{s.break_minutes ? ` · ${s.break_minutes}m break` : ""}
                       </span>
                     </span>
                     {on && <Check className="h-4 w-4 shrink-0 text-primary" />}
@@ -884,7 +884,7 @@ function AssignScheduleDialog({ people, patterns, defaultFrom, shiftById, onCrea
                     return (
                       <span key={label} className={cn("rounded px-1.5 py-0.5", s ? "font-medium" : "opacity-50")}
                         style={s ? { backgroundColor: (s.color ?? "#64748b") + "22", color: s.color ?? undefined } : undefined}>
-                        {label}{s ? ` ${s.start}` : " off"}
+                        {label}{s ? ` ${formatHHMM(s.start)}` : " off"}
                       </span>
                     );
                   })}

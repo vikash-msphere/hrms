@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { Plus, Pencil, Trash2, CalendarRange, Check } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { cn, idOf } from "@/lib/utils";
+import { cn, formatHHMM, idOf } from "@/lib/utils";
 import type { Shift, WorkPattern, WorkPatternAssignment } from "@/types";
 import { DataState } from "@/components/common/DataState";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
@@ -278,7 +278,7 @@ export default function WorkPatternsPanel({ openId }: { openId?: string }) {
             <Select value={effectiveBrush} onValueChange={setBrush}>
               <SelectTrigger><SelectValue placeholder="Pick a shift" /></SelectTrigger>
               <SelectContent>
-                {shifts.map((s) => <SelectItem key={s.path} value={`shifts/${idOf(s.path)}`}>{s.name} · {s.start}-{s.end}</SelectItem>)}
+                {shifts.map((s) => <SelectItem key={s.path} value={`shifts/${idOf(s.path)}`}>{s.name} · {formatHHMM(s.start)} - {formatHHMM(s.end)}</SelectItem>)}
               </SelectContent>
             </Select>
           </Field>
@@ -305,7 +305,7 @@ export default function WorkPatternsPanel({ openId }: { openId?: string }) {
                     <button key={label} type="button" aria-pressed={!!s} disabled={!effectiveBrush}
                       aria-label={`Week ${wi + 1} ${label}${s ? `, ${s.name}` : ", rest day"}`}
                       onClick={() => toggleDay(index)}
-                      title={s ? `${s.name} ${s.start}-${s.end}` : "Rest day"}
+                      title={s ? `${s.name} ${formatHHMM(s.start)} - ${formatHHMM(s.end)}` : "Rest day"}
                       className={cn(
                         "flex h-12 flex-1 flex-col items-center justify-center rounded-md border text-[11px] transition-colors",
                         s ? "font-medium" : "border-dashed text-muted-foreground/60",

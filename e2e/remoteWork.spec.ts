@@ -7,6 +7,8 @@ import { gotoRoute, inDays, toast, expect, test } from "./fixtures";
 // ends are switched between full day and half. That preview only exists in the rendered form, and it is the
 // number both the requester and the approver read.
 test("an employee requests remote days, the form counts them, and the manager approves", async ({ as }) => {
+  // Two sign-ins, a request, a decision and three waits of up to 30s each: the 30s default is the whole test.
+  test.setTimeout(120_000);
   const employee = await as("employee");
   const manager = await as("manager");
 
@@ -53,12 +55,16 @@ test("an employee requests remote days, the form counts them, and the manager ap
   await row.getByRole("button", { name: "Open this request" }).click();
   await expect(manager).toHaveURL(/\/employees\/[^/]+\/attendance\?request=remote-work-requests%2F/);
   await expect(manager.getByRole("tab", { name: "Attendance", exact: true })).toHaveAttribute("aria-selected", "true", { timeout: 30_000 });
-  await expect(manager.locator('tr[aria-current="true"]').filter({ hasText: reason })).toBeVisible({ timeout: 30_000 });
-  await manager.goBack();
+  const picked = manager.locator('tr[aria-current="true"]').filter({ hasText: reason });
+  await expect(picked).toBeVisible({ timeout: 30_000 });
 
-  await expect(row).toBeVisible({ timeout: 30_000 });
-  await row.getByRole("button", { name: "Approve", exact: true }).click();
+  // And it is decided right there: the same confirmation as the inbox, and the row re-reads as approved.
+  await picked.getByRole("button", { name: "Approve", exact: true }).click();
   await manager.getByRole("dialog").getByRole("button", { name: "Approve", exact: true }).click();
+  await expect(picked.getByText("Approved", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(picked.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
+
   // The decision is done when THIS request has left the queue - not when the queue is a particular size.
+  await manager.goBack();
   await expect(manager.locator("div").filter({ hasText: reason }).filter({ has: manager.getByRole("button", { name: "Approve", exact: true }) })).toHaveCount(0, { timeout: 30_000 });
 });

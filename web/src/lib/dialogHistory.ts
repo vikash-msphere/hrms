@@ -83,7 +83,24 @@ function selfBack(): void {
 // record id with `setRouteRecord`) - so stepping back can resurrect an address the app has moved on from.
 const pushedOver = new Map<number, string>();
 
+// A drop that has been decided but not yet run (it waits a task - see dropDialogEntry).
+let pendingDrop: { token: number; timer: ReturnType<typeof setTimeout> } | null = null;
+
 export function pushDialogEntry(): number {
+  // REUSE an entry that is about to be dropped, rather than push a second one over it. That is the shape of a
+  // layer unmounted and mounted again in one go - React's StrictMode runs every effect twice on mount, which
+  // is exactly that - and of a dialog closing as another opens with no exit animation between them. Pushing
+  // anyway left the first entry buried (the deferred drop sees a newer token and stands down), so every
+  // dialog opened cost the reader one extra Back press on an address they were already on.
+  if (pendingDrop && pendingDrop.token === lastPush && (window.history.state as { hrmsDialog?: boolean } | null)?.hrmsDialog === true) {
+    clearTimeout(pendingDrop.timer);
+    const over = pushedOver.get(pendingDrop.token) ?? window.location.href;
+    pushedOver.delete(pendingDrop.token);
+    pendingDrop = null;
+    lastPush += 1;
+    pushedOver.set(lastPush, over);
+    return lastPush;
+  }
   const over = window.location.href;
   window.history.pushState({ ...(window.history.state ?? {}), hrmsDialog: true }, "");
   lastPush += 1;
@@ -106,7 +123,8 @@ export function dropDialogEntry(token: number): void {
     pushedOver.delete(token);
     return;
   }
-  setTimeout(() => {
+  const timer = setTimeout(() => {
+    if (pendingDrop?.token === token) pendingDrop = null;
     const stale = pushedOver.get(token);
     pushedOver.delete(token);
     if (token !== lastPush) return;
@@ -142,4 +160,6 @@ export function dropDialogEntry(token: number): void {
     }
     selfBack();
   }, 0);
+  // Visible to pushDialogEntry until it runs, so a layer that mounts again first takes this entry over.
+  pendingDrop = { token, timer };
 }

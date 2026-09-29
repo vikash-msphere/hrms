@@ -7,10 +7,10 @@ import { get, patch, create, remove, list, dataUrl } from "@/api";
 import { SETTINGS_REGISTRY, SETTINGS_GROUPS, settingsEntry, entryScope, settingsEntryVisible, hasAnySettings, mayWriteSetting, type SettingsEntry } from "@/settings/registry";
 import { APP_NAME } from "@/lib/brand";
 import type { OrgSettings } from "@/lib/org";
-import { roleLabel } from "@/lib/roles";
+import { roleLabel, registerRoleLabels, EVERYONE_ROLE } from "@/lib/roles";
 import { type Audience, type DashboardConfig, type KpiCategory, KPI_DEFS, KPI_CATEGORIES, KPI_DEFAULT_AUDIENCE, MARKER_DEFS } from "@/lib/dashboardConfig";
 import { KPI_ICONS, CATEGORY_ICONS } from "@/lib/kpiIcons";
-import { useCapabilities } from "@/lib/perm";
+import { useCapabilities, usePermission } from "@/lib/perm";
 import { useOrg, currencyDecimals, orgNameFontStack, orgNameWeight, orgNameSizePx, NAME_FONTS, NAME_WEIGHTS, NAME_SIZES, type LetterDefaults } from "@/lib/org";
 import { useCollection } from "@/hooks/useCollection";
 import { useLetterheads } from "@/lib/letterheads";
@@ -1637,6 +1637,11 @@ function TicketsTab({ toast }: { toast: Toast }) {
   const [saving, setSaving] = useState(false);
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments", { all: true });
+  // Which roles service a desk is an access decision, so the roles to add come from the roles collection, and
+  // only a caller who may read it is offered them. Anyone else sees the desk's roles and keeps them on save.
+  const canPickRoles = usePermission("roles.read");
+  const { rows: roleRows } = useCollection<{ path: string; name: string; label?: string }>("roles", { all: true, enabled: canPickRoles });
+  useEffect(() => registerRoleLabels(roleRows), [roleRows]);
 
   useEffect(() => {
     getSetting<{ categories?: TicketCategory[] }>("ticket-categories")
@@ -1652,6 +1657,8 @@ function TicketsTab({ toast }: { toast: Toast }) {
   const empName = (ref: string) => { const e = employees.find((x) => idOf(x.path) === idOf(ref)); return e ? `${e.first_name} ${e.last_name}` : idOf(ref); };
   const addMember = (i: number, ref: string) => setCats((cs) => cs.map((c, j) => (j === i && !(c.members ?? []).includes(ref) ? { ...c, members: [...(c.members ?? []), ref] } : c)));
   const removeMember = (i: number, ref: string) => setCats((cs) => cs.map((c, j) => (j === i ? { ...c, members: (c.members ?? []).filter((m) => m !== ref) } : c)));
+  const addRole = (i: number, role: string) => setCats((cs) => cs.map((c, j) => (j === i && !(c.roles ?? []).includes(role) ? { ...c, roles: [...(c.roles ?? []), role] } : c)));
+  const removeRole = (i: number, role: string) => setCats((cs) => cs.map((c, j) => (j === i ? { ...c, roles: (c.roles ?? []).filter((r) => r !== role) } : c)));
 
   const { markSaved } = useUnsaved(cats, ready, save);
   async function save() {
@@ -1664,7 +1671,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
         let key = c.key || slug(c.name);
         while (used.has(key)) key = `${key}_`;
         used.add(key);
-        return { key, name: c.name, assignee: c.assignee || null, members: c.members ?? [], department: c.department || null };
+        return { key, name: c.name, assignee: c.assignee || null, members: c.members ?? [], department: c.department || null, roles: c.roles ?? [] };
       });
     setSaving(true);
     try {
@@ -1685,7 +1692,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
         <CardTitle><AccessAction collection="settings" objectPath="settings/ticket-categories" label="Ticket categories"><span>Ticket categories</span></AccessAction></CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <p className="text-sm text-muted-foreground">Each category routes new tickets to a default assignee and servicing department (changeable per ticket). Members and the department's managers see every ticket in the category.</p>
+        <p className="text-sm text-muted-foreground">Each category routes new tickets to a default assignee and servicing department (changeable per ticket). Members and the department's managers see every ticket in the category, and the roles that service it can work them.</p>
         <div className="space-y-2">
           {cats.map((c, i) => (
             <div key={catKeys[i]} className="space-y-3 rounded-lg border p-3">
@@ -1735,6 +1742,28 @@ function TicketsTab({ toast }: { toast: Toast }) {
                   </Select>
                 </div>
               </Field>
+              {(canPickRoles || (c.roles ?? []).length > 0) && (
+                <Field label="Serviced by roles" hint="Everyone holding one of these roles can work every ticket in this category: assign, resolve, comment and close.">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {(c.roles ?? []).map((r) => (
+                      <Badge key={r} variant="secondary" className="gap-1">
+                        {roleLabel(r)}
+                        {canPickRoles && <button type="button" onClick={() => removeRole(i, r)} aria-label={`Remove ${roleLabel(r)}`}><X className="h-3 w-3" /></button>}
+                      </Badge>
+                    ))}
+                    {canPickRoles && (
+                      <Select value="" onValueChange={(v) => addRole(i, v)}>
+                        <SelectTrigger className="h-8 w-44 text-xs"><SelectValue placeholder="Add role…" /></SelectTrigger>
+                        <SelectContent>
+                          {roleRows.filter((r) => r.name !== EVERYONE_ROLE && !(c.roles ?? []).includes(r.name)).map((r) => (
+                            <SelectItem key={r.name} value={r.name}>{roleLabel(r.name)}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                  </div>
+                </Field>
+              )}
             </div>
           ))}
           {cats.length === 0 && <p className="text-sm text-muted-foreground">No categories yet. Add one to let employees raise tickets.</p>}

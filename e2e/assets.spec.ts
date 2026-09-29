@@ -10,7 +10,7 @@ import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
 // as assigned-but-unconfirmed.
 test("assigning an asset moves it out of stock and waits for the holder to confirm", async ({ as }) => {
   test.setTimeout(120_000);
-  const it = await as("hr");
+  const it = await as("it");
   const name = `E2E Laptop ${Date.now()}`;
 
   const category = await assetCategory(it);

@@ -95,6 +95,29 @@ export async function allocFlatCodes(deps: Deps, table: any, count: number, minW
 }
 
 /**
+ * A code under a fixed PREFIX that is not a row: `<prefix>-<leaf>`, one counter per (table, prefix). Boards use
+ * it for their visibility segment (domain/boardAccess.ts), so a board's code says who may see it.
+ */
+export async function allocUnderPrefix(deps: Deps, table: any, prefix: string, minWidth: number = CODE_WIDTH.flat, resync = false): Promise<string> {
+  const value = await reserve(deps, `${tableName(table)}:prefix:${prefix}`, 1, async () => {
+    const rows = await deps.db.select({ code: table.code }).from(table).where(sql`${table.code} glob ${`${prefix}-*`}`);
+    return maxChildSeg(rows.map((r: { code: string | null }) => r.code), prefix);
+  }, resync);
+  return childCodeAt(prefix, value, minWidth);
+}
+
+/**
+ * A code under ANOTHER ROW's code (`<parent code>-<leaf>`), one counter per parent row: a board's cards and
+ * sprints. The owned lane with the parent's code handed in, since the parent is not an employee. The counter is
+ * keyed on the parent's uuid and holds the leaf, so it survives the parent being re-coded (a board changing
+ * visibility), exactly as an employee's owned rows survive a transfer.
+ */
+export async function allocUnderRow(deps: Deps, table: any, parentCol: any, parentUuid: string, parentCode: string, minWidth: number = CODE_WIDTH.owned, resync = false): Promise<string> {
+  const runs = await allocOwnedCodeRuns(deps, table, parentCol, new Map([[parentUuid, 1]]), minWidth, new Map([[parentUuid, parentCode]]), resync);
+  return runs.get(parentUuid)![0]!;
+}
+
+/**
  * The counter for the child namespace under one department (null = the root level).
  *
  * NOT spelled `<table>:<uuid>` like `ownedScope`, for two reasons. This namespace spans TWO tables - a

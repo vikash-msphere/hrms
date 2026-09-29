@@ -3,7 +3,7 @@
   "label": "HR Admin",
   "protected": true,
   "provisioned": false,
-  "description": "Runs people operations - the employee record (never anyone else's bank, identity or personal info), org catalogues and HR settings, leave and attendance decisions, recruiting, lifecycle, benefits, compliance, the help desk, the asset register and the board. An employee first (`extends: employee`), so HR files its own leave and claims like anyone. Write, not admin: HR soft-deletes, only super admin force-purges. Pay configuration is payroll's, and governance switches are super admin's.",
+  "description": "Runs people operations - the employee record (never anyone else's bank, identity or personal info), org catalogues and HR settings, leave and attendance decisions, recruiting, lifecycle, benefits, compliance, the help desk and the board, and resets a forgotten app PIN. The asset register is it_admin's. An employee first (`extends: employee`), so HR files its own leave and claims like anyone. Write, not admin: HR soft-deletes, only super admin force-purges. Pay configuration is payroll's, and governance switches are super admin's.",
   "extends": "employee",
   "levels": [
     {
@@ -41,12 +41,6 @@
       "pattern": "expense-categories.**",
       "level": "write",
       "why": "HR (finance) configures operational-expense categories"
-    },
-    {
-      "area": "catalog",
-      "pattern": "asset-categories.**",
-      "level": "write",
-      "why": "HR maintains the kinds of asset, and the tag code each one prints"
     },
     {
       "area": "catalog",
@@ -266,15 +260,9 @@
     },
     {
       "area": "work",
-      "pattern": "boards.**",
+      "pattern": "boards",
       "level": "write",
-      "why": "HR administers the boards org-wide (create/rename/archive; shape verbs below)"
-    },
-    {
-      "area": "work",
-      "pattern": "sprints.**",
-      "level": "write",
-      "why": "Runs sprints on any board."
+      "why": "Create a board. HR manages the boards it creates (the creator is put on the sharing list at manage) and any it is shared with - not every board: a private board is seen only by the people it is shared with (services/boardShares.ts)."
     },
     {
       "area": "work",
@@ -317,12 +305,6 @@
       "pattern": "late-early-requests.**",
       "level": "read",
       "why": "HR decides these org-wide (verbs below)"
-    },
-    {
-      "area": "workplace",
-      "pattern": "asset-requests.**",
-      "level": "read",
-      "why": "HR decides these org-wide and hands the kit over (verbs below)"
     },
     {
       "area": "attendance",
@@ -463,18 +445,6 @@
       "why": "Maintains the help-desk checklists."
     },
     {
-      "area": "workplace",
-      "pattern": "assets.**",
-      "level": "write",
-      "why": "Maintains the asset register."
-    },
-    {
-      "area": "workplace",
-      "pattern": "stocktakes.**",
-      "level": "write",
-      "why": "Inventory counts. A stocktake is the asset register being walked, by the same administrator who maintains the register - but nothing was seeded for it at ANY level, so the whole page was reachable only by super_admin while `assets` and `asset-categories` beside it were HR's. Not a withheld verb: a withheld collection, which is how the earlier role-grants gap looked too."
-    },
-    {
       "area": "leave",
       "pattern": "leave-encashments.**",
       "level": "write",
@@ -545,12 +515,6 @@
       "pattern": "settings.kudos",
       "level": "write",
       "why": "HR setting: kudos levels and categories"
-    },
-    {
-      "area": "settings",
-      "pattern": "settings.asset-tags",
-      "level": "write",
-      "why": "HR setting: tag format, stickers, custody policy"
     },
     {
       "area": "settings",
@@ -701,24 +665,21 @@
       "pattern": "export.**",
       "level": "read",
       "why": "Export any table HR can read to CSV/Excel. Export is generated from rows the caller already reads, so this adds no data - only the bulk download, which is audited (export:record)."
+    },
+    {
+      "area": "account",
+      "pattern": "users",
+      "level": "read",
+      "why": "List sign-in accounts, so HR can find the person whose app PIN to reset (Settings, Users). Read only: role, status and the employee link are PROTECTED_FIELDS behind `users.write`, which stays super admin's."
+    },
+    {
+      "area": "account",
+      "pattern": "users.**",
+      "level": "read",
+      "why": "Read one account (email, role, status, last seen) - the row the Reset app PIN action sits on. A user code is flat, so no scope token narrows this to fewer people."
     }
   ],
   "allow": [
-    {
-      "area": "work",
-      "pattern": "cards.**",
-      "why": "every card verb (move/assign/block/comment/todos/watch) on the shared board surface"
-    },
-    {
-      "area": "work",
-      "pattern": "boards.**",
-      "why": "configure any board's shape + restore"
-    },
-    {
-      "area": "work",
-      "pattern": "sprints.**",
-      "why": "Every custom verb on sprints, including lifecycle and restore."
-    },
     {
       "area": "work",
       "pattern": "goal-templates.**",
@@ -778,21 +739,6 @@
       "area": "attendance",
       "pattern": "late-early-requests.*.reject",
       "why": "Decides late arrival / early departure org-wide."
-    },
-    {
-      "area": "workplace",
-      "pattern": "asset-requests.*.approve",
-      "why": "Decides asset requests org-wide."
-    },
-    {
-      "area": "workplace",
-      "pattern": "asset-requests.*.reject",
-      "why": "Decides asset requests org-wide."
-    },
-    {
-      "area": "workplace",
-      "pattern": "asset-requests.*.issue",
-      "why": "hand over the actual asset, which is what closes the request"
     },
     {
       "area": "recruiting",
@@ -938,21 +884,6 @@
       "area": "workplace",
       "pattern": "ticket-checklists.**",
       "why": "Every custom verb on ticket checklists, including lifecycle and restore."
-    },
-    {
-      "area": "workplace",
-      "pattern": "assets.**",
-      "why": "Every asset verb: verify, print and reissue tags, batch create, lifecycle and restore."
-    },
-    {
-      "area": "catalog",
-      "pattern": "asset-categories.**",
-      "why": "Every custom verb on asset categories, including lifecycle and restore."
-    },
-    {
-      "area": "workplace",
-      "pattern": "stocktakes.**",
-      "why": "open a count, record what was found on the walk, close it (and restore one deleted)"
     },
     {
       "area": "catalog",
@@ -1113,10 +1044,27 @@
       "area": "reports",
       "pattern": "export.record",
       "why": "Record the audit entry for an export (the SPA sends it with every download)."
+    },
+    {
+      "area": "account",
+      "pattern": "users.**.resetPin",
+      "why": "Clear a forgotten app PIN - the only way back from one (services/appLock.ts resetPin signs the person out everywhere and notifies them). The lock screen sends people to HR for it. Scoped `**` because a user code is flat."
     }
   ],
   "deny": [],
   "excluded": [
+    {
+      "pattern": "boards.** | cards.** | sprints.** (any board)",
+      "why": "A private board is seen only by the people and roles it is shared with, its creator and its department's managers - HR included, by decision. HR sees and works the org-visible boards like every employee, and manages the boards it creates or is given."
+    },
+    {
+      "pattern": "assets.** | asset-categories.** write | asset-requests.** | stocktakes.** | settings.asset-tags",
+      "why": "The asset register, its catalogue, the asset desk, stocktakes and the tag policy are it_admin's. HR reads asset categories like every employee and holds its own kit like anyone."
+    },
+    {
+      "pattern": "users.** write | users.*.update",
+      "why": "Changing an account's role, status or employee link is identity and authority, which stay super admin's. HR only reads accounts, to reset a PIN."
+    },
     {
       "pattern": "employees.*.bank-account | identity | personal-info .**",
       "why": "Others' PII stays super-only by default; HR sees its own through employees.me.*."

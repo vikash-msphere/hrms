@@ -90,12 +90,18 @@ export async function createRegularization(deps: Deps, actor: AppUser, input: Re
   // Default the employee to the caller's own record unless an admin files on someone's behalf.
   const employeeId = idFromPath(input.employee) ?? actor.employeeId;
   if (!employeeId) throw invalidArgument("employee is required");
+  // What the day says right now, kept beside what it should say, so a request that moves one punch reads as
+  // that one change to the requester, the approver and the audit trail alike.
+  const recordedSessions = (await daySessions(deps, employeeId, date)).rows.map((s) => ({
+    clock_in: new Date(s.clockIn).toISOString(),
+    ...(s.clockOut ? { clock_out: new Date(s.clockOut).toISOString() } : {}),
+  }));
   // Allocated inside the retry (codeAlloc.ts): a forgotten punch is noticed by half a team at once.
   // `createdAt` is stamped from the same clock the open-session check read: approval splits the day's punches
   // at this instant (planApproval), so the two must agree on when the request was filed.
   const row = (await withFreshCode(async () => deps.db
     .insert(schema.attendanceRegularizations)
-    .values({ code: await allocOwnedCode(deps, schema.attendanceRegularizations, schema.attendanceRegularizations.employeeId, employeeId), employeeId, date: new Date(date), sessions, reason: input.reason?.trim() || null, state: "PENDING", createdAt: new Date(now) })
+    .values({ code: await allocOwnedCode(deps, schema.attendanceRegularizations, schema.attendanceRegularizations.employeeId, employeeId), employeeId, date: new Date(date), sessions, recordedSessions, reason: input.reason?.trim() || null, state: "PENDING", createdAt: new Date(now) })
     .returning()))[0]!;
   await audit(deps, actor, "attendance-regularization.create", "attendance-regularizations", row.uuid, { employee: `employees/${employeeId}`, date: new Date(date).toISOString().slice(0, 10), sessions, ...(input.reason ? { reason: input.reason } : {}) }, row);
   await notifyManager(deps, employeeId, { type: "regularization.requested", noun: "attendance regularization" });
@@ -117,7 +123,9 @@ type CorrectionPlan = { supersede: string[]; sessions: { clockIn: Date; clockOut
 // clock-out of the session that was running when the request was filed, or, if none was running, at the
 // first punch made after it. If neither has happened yet the person is still at work, and it is written open
 // so they clock out as usual.
-async function planApproval(deps: Deps, row: Regularization): Promise<CorrectionPlan> {
+// One employee's live (non-superseded) punches on one org-local day, earliest first. Read by the create, to
+// record what the request changes, and by the approval, to decide what it replaces.
+async function daySessions(deps: Deps, employeeId: string, date: Date | number) {
   const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
   const tz = att.timezone || "Asia/Kolkata";
   // `date` is a DATE-ONLY column, anchored at UTC midnight like every other one in the schema, so the day it
@@ -127,30 +135,36 @@ async function planApproval(deps: Deps, row: Regularization): Promise<Correction
   // once. Invisible in the default configuration, because Asia/Kolkata is +05:30 and midnight-Z is 05:30 the
   // same morning. The audit line in `decide` already read it this way; the two now agree. See
   // services/orgDay.ts `dayStartMs` for the same rule stated once.
-  const targetYmd = new Date(row.date).toISOString().slice(0, 10);
+  const targetYmd = new Date(date).toISOString().slice(0, 10);
   // WIDEN IN SQL, DECIDE IN JS - the pattern services/orgDay.ts describes. This used to read EVERY
   // non-superseded punch the employee had ever made and keep the one day of them, so an ordinary approval
   // grew a whole tenure's worth of row reads. No timezone is more than 14 hours from UTC, so one UTC day of
   // slack on each side cannot exclude an instant whose org-local day is `targetYmd`; the exact call stays
   // with `localDay`, which is the one definition of a local day in the app.
   const dayStart = Date.parse(`${targetYmd}T00:00:00Z`);
-  const existing = (await deps.db
+  const rows = (await deps.db
     .select({ uuid: schema.attendanceSessions.uuid, clockIn: schema.attendanceSessions.clockIn, clockOut: schema.attendanceSessions.clockOut })
     .from(schema.attendanceSessions)
     .where(and(
-      eq(schema.attendanceSessions.employeeId, row.employeeId),
+      eq(schema.attendanceSessions.employeeId, employeeId),
       isNull(schema.attendanceSessions.supersededBy),
       gte(schema.attendanceSessions.clockIn, new Date(dayStart - 86_400_000)),
       lt(schema.attendanceSessions.clockIn, new Date(dayStart + 2 * 86_400_000)),
     )))
-    .filter((s) => localDay(+new Date(s.clockIn), tz) === targetYmd);
+    .filter((s) => localDay(+new Date(s.clockIn), tz) === targetYmd)
+    .sort((a, b) => +new Date(a.clockIn) - +new Date(b.clockIn));
+  return { tz, rows };
+}
+
+async function planApproval(deps: Deps, row: Regularization): Promise<CorrectionPlan> {
+  const { tz, rows: existing } = await daySessions(deps, row.employeeId, row.date);
   const sessions = row.sessions.map((p) => ({ clockIn: new Date(p.clock_in), clockOut: p.clock_out ? new Date(p.clock_out) : null }));
   const open = sessions.at(-1)?.clockOut === null ? sessions.at(-1)! : undefined;
   if (!open) return { supersede: existing.map((s) => s.uuid), sessions };
 
   const filedAt = +new Date(row.createdAt);
   const before = existing.filter((s) => +new Date(s.clockIn) <= filedAt);
-  const after = existing.filter((s) => +new Date(s.clockIn) > filedAt).sort((a, b) => +new Date(a.clockIn) - +new Date(b.clockIn));
+  const after = existing.filter((s) => +new Date(s.clockIn) > filedAt); // earliest first, as read
   const running = before.find((s) => s.clockOut === null || +new Date(s.clockOut) > filedAt);
   open.clockOut = running ? running.clockOut : after[0]?.clockIn ?? null;
   if (open.clockOut === null) {

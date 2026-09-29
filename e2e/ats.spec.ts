@@ -77,7 +77,8 @@ async function pick(
 ) {
   await dialog.getByLabel(label, { exact: true }).click();
   await page.getByPlaceholder(/Search/).last().fill(value);
-  await expect(page.getByRole("option", { name: new RegExp(value) })).toBeVisible();
+  // The pickers' lists are read when the dialog opens ("Loading candidates…" until they land).
+  await expect(page.getByRole("option", { name: new RegExp(value) })).toBeVisible({ timeout: 30_000 });
   await page.keyboard.press("Enter");
 }
 

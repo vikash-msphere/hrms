@@ -102,7 +102,7 @@ vi.mock("@/api", () => ({
   changesSince: () => (changesAnswer instanceof Error ? Promise.reject(changesAnswer) : Promise.resolve(changesAnswer)),
 }));
 
-const { freshnessMs, setResourceStoreUser, getSnapshot, invalidateCollections, subscribe, entryCount, ensureFetch, storedCopiesTrusted, persistable, collectionHasMore } =
+const { freshnessMs, setResourceStoreUser, getSnapshot, invalidateCollections, subscribe, retainReader, refetchMounted, clearCache, entryCount, ensureFetch, storedCopiesTrusted, persistable, collectionHasMore } =
   await import("@/lib/resourceStore");
 const { flushNow, put, SCHEMA, setClientKey, sealRecord, storeKeyFrom } = await import("@/lib/clientStore");
 
@@ -226,6 +226,61 @@ describe("resource store disk cache", () => {
   });
 });
 
+// A mounted `useCollection` subscribes whether or not it may fetch: the dashboard mounts a reader per KPI card
+// and switches most of them off (`enabled: false`), and a caller without `<collection>.read` is never fetched
+// for by the hook. The store-wide refetches used to count those listeners as readers, so a change-feed answer
+// naming `offers` sent every employee's dashboard after the offers list - a 403 and an access-denied audit row
+// per employee per write. Only a reader the hook has RETAINED (enabled and capable) is refetched.
+describe("resource store refetches only readers that may fetch", () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it("an invalidation refetches a retained reader and leaves a listener alone", async () => {
+    subscribe("offers", { params: { k: "inv" } }, () => {}); // a dormant dashboard card
+    subscribe("referrals", { params: { k: "inv" } }, () => {});
+    const release = retainReader("referrals", { params: { k: "inv" } });
+    invalidateCollections(["offers", "referrals"]);
+    await settle();
+    expect(listed).not.toContain("offers");
+    expect(listed).toContain("referrals");
+    release();
+  });
+
+  it("a refresh gesture re-reads retained readers only", async () => {
+    subscribe("interviews", { params: { k: "ptr" } }, () => {});
+    subscribe("tickets", { params: { k: "ptr" } }, () => {});
+    const release = retainReader("tickets", { params: { k: "ptr" } });
+    await refetchMounted();
+    expect(listed).not.toContain("interviews");
+    expect(listed).toContain("tickets");
+    release();
+  });
+
+  it("a cache clear re-reads retained readers and empties the rest without reading them", async () => {
+    const opts = { params: { k: "clear" } };
+    subscribe("applications", opts, () => {});
+    const release = retainReader("applications", opts);
+    await ensureFetch("applications", opts);
+    release(); // the reader switched off; rows it loaded are still in the store
+    subscribe("goals", opts, () => {});
+    const keep = retainReader("goals", opts);
+    listed.length = 0;
+    clearCache();
+    await settle();
+    expect(listed).not.toContain("applications");
+    expect(getSnapshot("applications", opts)).toMatchObject({ rows: [], state: "loading" });
+    expect(listed).toContain("goals");
+    keep();
+  });
+
+  it("a released reader no longer counts", async () => {
+    subscribe("suggestions", { params: { k: "rel" } }, () => {});
+    retainReader("suggestions", { params: { k: "rel" } })();
+    invalidateCollections(["suggestions"]);
+    await settle();
+    expect(listed).not.toContain("suggestions");
+  });
+});
+
 describe("resource store retention: the entry map does not grow for the whole session", () => {
   // Four pages key a read on a DEBOUNCED search term (Directory, Tickets, Expenses, Announcements), so every
   // term typed minted a cache entry - and nothing was ever removed from the map, so thirty searches left thirty
@@ -313,7 +368,9 @@ describe("resource store: trusting stored copies against the change feed", () =>
     await seed("t2@x.test", "departments", [{ path: "departments/1" }], 10 * 60_000);
     await identity("t2@x.test");
     subscribe("holidays", {}, () => {}); // a mounted view of the changed collection refetches immediately
+    retainReader("holidays", {});
     subscribe("departments", {}, () => {});
+    retainReader("departments", {});
     await new Promise((r) => setTimeout(r, 0)); // let the feed's answer land
     await ensureFetch("holidays", {});
     await ensureFetch("departments", {});

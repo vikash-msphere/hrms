@@ -236,21 +236,27 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
   const allowSelf = useSelfApprovalAllowed();
   const mine = allowSelf ? null : selfEmployeeId ?? null;
 
-  const leaves = useMemo(() => pending(leave.rows, mine), [leave.rows, mine]);
-  const reimbs = useMemo(() => pending(reimb.rows, mine), [reimb.rows, mine]);
-  const overtimes = useMemo(() => pending(overtime.rows, mine), [overtime.rows, mine]);
-  const remotes = useMemo(() => pending(remote.rows, mine), [remote.rows, mine]);
-  const lateEarlies = useMemo(() => pending(lateEarly.rows, mine), [lateEarly.rows, mine]);
-  const regularizations = useMemo(() => pending(regular.rows, mine), [regular.rows, mine]);
-  const encashments = useMemo(() => pending(encash.rows, mine), [encash.rows, mine]);
-  const loans = useMemo(() => awaiting(loan.rows, (r) => r.status, "PENDING", mine), [loan.rows, mine]);
-  const timeEntries = useMemo(() => awaiting(time.rows, (r) => r.status, "SUBMITTED", mine), [time.rows, mine]);
+  // A queue that is not READ has no rows here - whatever its collection still holds. `enabled: false` stops
+  // the fetch, not the snapshot: the store keeps the copy it had, so a queue the count has just emptied (a
+  // request approved from the person's record, then Back to this page) went on rendering that copy - the
+  // decided request, still offering Approve - with nothing ever scheduled to re-read it.
+  const rowsOf = useCallback(<T,>(collection: string, rows: T[]): T[] => (wanted(collection) ? rows : []), [wanted]);
+
+  const leaves = useMemo(() => pending(rowsOf("leave-requests", leave.rows), mine), [rowsOf, leave.rows, mine]);
+  const reimbs = useMemo(() => pending(rowsOf("reimbursements", reimb.rows), mine), [rowsOf, reimb.rows, mine]);
+  const overtimes = useMemo(() => pending(rowsOf("overtime-requests", overtime.rows), mine), [rowsOf, overtime.rows, mine]);
+  const remotes = useMemo(() => pending(rowsOf("remote-work-requests", remote.rows), mine), [rowsOf, remote.rows, mine]);
+  const lateEarlies = useMemo(() => pending(rowsOf("late-early-requests", lateEarly.rows), mine), [rowsOf, lateEarly.rows, mine]);
+  const regularizations = useMemo(() => pending(rowsOf("attendance-regularizations", regular.rows), mine), [rowsOf, regular.rows, mine]);
+  const encashments = useMemo(() => pending(rowsOf("leave-encashments", encash.rows), mine), [rowsOf, encash.rows, mine]);
+  const loans = useMemo(() => awaiting(rowsOf("loans", loan.rows), (r) => r.status, "PENDING", mine), [rowsOf, loan.rows, mine]);
+  const timeEntries = useMemo(() => awaiting(rowsOf("time-entries", time.rows), (r) => r.status, "SUBMITTED", mine), [rowsOf, time.rows, mine]);
   // Company expenses call the awaiting state SUBMITTED, and a recurring TEMPLATE is never awaiting anything
   // (it stays DRAFT and only seeds real expenses), so it can't reach the queue.
-  const expenses = useMemo(() => awaiting(expense.rows.filter((r) => !r.recurring), (r) => r.state, "SUBMITTED", mine), [expense.rows, mine]);
+  const expenses = useMemo(() => awaiting(rowsOf("expenses", expense.rows).filter((r) => !r.recurring), (r) => r.state, "SUBMITTED", mine), [rowsOf, expense.rows, mine]);
   // Only the decision is an approval: an APPROVED asset request is waiting on a hand-over (`:issue` from the
   // person's profile), not on anybody's judgement, so it leaves the queue as soon as it is decided.
-  const assetRequests = useMemo(() => pending(assetReq.rows, mine), [assetReq.rows, mine]);
+  const assetRequests = useMemo(() => pending(rowsOf("asset-requests", assetReq.rows), mine), [rowsOf, assetReq.rows, mine]);
 
   // Refetch what this page is showing, plus the badge. A disabled collection's reload is a no-op read-through,
   // so this stays correct whichever queues the route asked for.
@@ -289,19 +295,19 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
 
   const history = useMemo<ApprovalsBuckets>(
     () => ({
-      leaves: decided(leave.rows, (r) => r.state),
-      reimbs: decided(reimb.rows, (r) => r.state),
-      overtimes: decided(overtime.rows, (r) => r.state),
-      remotes: decided(remote.rows, (r) => r.state),
-      lateEarlies: decided(lateEarly.rows, (r) => r.state),
-      regularizations: decided(regular.rows, (r) => r.state),
-      encashments: decided(encash.rows, (r) => r.state),
-      loans: decided(loan.rows, (r) => r.status),
-      timeEntries: decided(time.rows, (r) => r.status),
-      expenses: decided(expense.rows.filter((r) => !r.recurring), (r) => r.state),
-      assetRequests: decided(assetReq.rows, (r) => r.state),
+      leaves: decided(rowsOf("leave-requests", leave.rows), (r) => r.state),
+      reimbs: decided(rowsOf("reimbursements", reimb.rows), (r) => r.state),
+      overtimes: decided(rowsOf("overtime-requests", overtime.rows), (r) => r.state),
+      remotes: decided(rowsOf("remote-work-requests", remote.rows), (r) => r.state),
+      lateEarlies: decided(rowsOf("late-early-requests", lateEarly.rows), (r) => r.state),
+      regularizations: decided(rowsOf("attendance-regularizations", regular.rows), (r) => r.state),
+      encashments: decided(rowsOf("leave-encashments", encash.rows), (r) => r.state),
+      loans: decided(rowsOf("loans", loan.rows), (r) => r.status),
+      timeEntries: decided(rowsOf("time-entries", time.rows), (r) => r.status),
+      expenses: decided(rowsOf("expenses", expense.rows).filter((r) => !r.recurring), (r) => r.state),
+      assetRequests: decided(rowsOf("asset-requests", assetReq.rows), (r) => r.state),
     }),
-    [leave.rows, reimb.rows, overtime.rows, remote.rows, lateEarly.rows, regular.rows, encash.rows, loan.rows, time.rows, expense.rows, assetReq.rows],
+    [rowsOf, leave.rows, reimb.rows, overtime.rows, remote.rows, lateEarly.rows, regular.rows, encash.rows, loan.rows, time.rows, expense.rows, assetReq.rows],
   );
 
   // Only the ENABLED queues count: a disabled collection sits at its initial state forever, so including it

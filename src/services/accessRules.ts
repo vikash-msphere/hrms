@@ -12,7 +12,7 @@ import { audit, auditMany } from "../lib/audit";
 import { byIdChunks } from "../lib/dbBatch";
 import { clearCache, clearCachePrefix } from "../lib/cache";
 import { notFound, failedPrecondition, alreadyExists, invalidArgument, forbidden } from "../lib/errors";
-import { ruleWithinAuthority } from "../domain/access";
+import { ruleWithinAuthority, type ListScope } from "../domain/access";
 import { validateAccessRule, type AccessRuleInput } from "../domain/policyValidate";
 import { deriveNarrowing } from "../domain/compileGrants";
 import { EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
@@ -23,6 +23,8 @@ import { systemActor } from "../lib/systemActor";
 import { accessAdminEmployeeIds } from "./accessRequest";
 import { notifyMany } from "./notifications";
 import { toAccessRuleResource, parseRulePattern } from "../http/serialize";
+import { applyScope } from "./listScope";
+import { keysetPage } from "./keysetPage";
 
 // Build the verbatim pattern for a normalized rule. The id-position token encodes the scope (me / my-dept /
 // <code> / <code>-* / * for a field rule); a field rule inserts the field token; the tail is the verb for a
@@ -405,8 +407,47 @@ export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown
   return row!;
 }
 
-/** A clone that copies more rules than this is a mistake with a bigger blast radius than a request should have. */
-const MAX_CLONE_RULES = 200;
+/** What a rules list may be narrowed to. Each one only narrows; none can widen past the caller's scope. */
+export type AccessRuleListFilters = { collection?: string; subjectKind?: string; subject?: string };
+
+/**
+ * One page of rules, newest first, optionally narrowed to one collection and/or one subject.
+ *
+ * WHY THE FILTERS. An org holds thousands of rules (every seeded role, every board's sharing, every e2e or
+ * admin experiment), and the editors that show them ask about ONE collection (Manage access) or ONE subject
+ * (a role's or a person's permissions). Reading the whole table to answer that was dozens of sequential
+ * 100-row pages on every open and every edit - seconds of a stale grid after each press, and every row billed.
+ *
+ * `collection` keeps the rules whose namespace is that collection AND the `**` rules (namespace `*`), because a
+ * blanket rule bears on every collection: it is what a deny check in the editor has to see.
+ */
+export async function listAccessRules(
+  deps: Deps,
+  scope: ListScope | undefined,
+  maxPageSize: number,
+  pageToken: string | undefined,
+  filters: AccessRuleListFilters = {},
+): Promise<{ items: (typeof schema.accessRules.$inferSelect)[]; nextPageToken?: string }> {
+  const t = schema.accessRules;
+  const conds = [applyScope(scope, undefined, undefined)];
+  if (filters.collection) conds.push(inArray(t.namespace, [filters.collection, "*"]));
+  if (filters.subjectKind) {
+    if (filters.subjectKind !== "role" && filters.subjectKind !== "user") throw invalidArgument('subject_kind must be "role" or "user"');
+    conds.push(eq(t.subjectKind, filters.subjectKind));
+  }
+  // A user subject travels as `users/<id>` (decoded by the inbound edge), a role as its name.
+  if (filters.subject) conds.push(eq(t.subject, filters.subject.replace(/^users\//, "")));
+  return keysetPage(deps, t, "access-rules", and(...conds.filter((c): c is NonNullable<typeof c> => !!c)), { max: maxPageSize, pageToken });
+}
+
+/**
+ * A clone that copies more rules than this is a mistake with a bigger blast radius than a request should have.
+ *
+ * Sized above the largest SEEDED role, because "Start from" in the role editor clones one: a cap below a shipped
+ * role refuses the most ordinary use of the feature, and the old 200 sat below hr_admin and, once boards moved to
+ * per-visibility rules, below employee too. test/roleFiles.test.ts holds every seeded role's rows under it.
+ */
+export const MAX_CLONE_RULES = 500;
 
 // One subject spec off the wire: `{ subject_kind, subject }`, the same pair every rule body carries (a user
 // subject arrives as `users/<id>`, already wire-decoded by the inbound edge).

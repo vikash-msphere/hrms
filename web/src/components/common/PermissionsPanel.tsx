@@ -55,6 +55,11 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // nothing in it. Everything that reads `busy` - the disabled cells, the matrix's own placeholder - would
   // otherwise spend that first frame claiming the org has no roles and offering editors over it.
   const [busy, setBusy] = React.useState(true);
+  // Compare reads ITS two roles' rules itself, keyed by the pair they were read for. It cannot wait on the
+  // org-wide walk: the roles arrive first (see reload), so Compare opens while the walk is still paging, and
+  // over an empty rule set every role holds "none" everywhere - announced as "0 of 98 collections differ", a
+  // verdict about two roles nothing had read yet.
+  const [comparePool, setComparePool] = React.useState<{ a: string; b: string; rules: AccessRule[] } | null>(null);
   const [subjectKind, setSubjectKind] = React.useState<"role" | "user">("role");
   const [view, setView] = React.useState<"matrix" | "rules">("matrix");
 
@@ -142,7 +147,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     }
   }
 
-  // The subjects first, the rules after - two stages, not one `Promise.all`.
+  // The subjects paint as they land, the rules whenever the walk ends - not one answer awaited for all.
   //
   // The grid's SHAPE is roles (or users) down the top and collections down the side, and neither of those
   // needs a single access rule to be known: the rules only decide what each cell says. But `fetchAllAccessRules`
@@ -158,11 +163,17 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
       // entirely. For users it is worse - each row IS the editor for that person's per-user rules, so a login
       // outside the window has no row, their existing rules are invisible, and the matrix presents itself as
       // the whole access model while missing people from it.
-      const [ro, us] = await Promise.all([listAll<Role>("roles"), listAll<User>("users")]);
-      registerRoleLabels(ro);
-      setRoles(ro);
-      setUsers(us.map((u) => ({ path: u.path, email: u.email })));
-      setRules(await fetchAllAccessRules());
+      // All three at once, each painted as it lands: the role columns need neither the people (a walk of its
+      // own, as long as the org's head count) nor the rules, and waiting on both left the grid without its
+      // columns for as long as the slower walk took. `busy` still holds every cell until the rules are in.
+      await Promise.all([
+        listAll<Role>("roles").then((ro) => {
+          registerRoleLabels(ro);
+          setRoles(ro);
+        }),
+        listAll<User>("users").then((us) => setUsers(us.map((u) => ({ path: u.path, email: u.email })))),
+        fetchAllAccessRules().then(setRules),
+      ]);
     } catch (e) {
       toast({ variant: "destructive", title: "Could not load permissions", description: String((e as Error).message) });
     } finally {
@@ -172,6 +183,42 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   React.useEffect(() => {
     void reload();
   }, [reload]);
+
+  // After a write about ONE subject, re-read that subject's rules in place of the ones held, rather than paging
+  // through every rule in the org again: that walk is dozens of round trips, and for all of it the cell just
+  // written still read its old level.
+  const reloadSubject = React.useCallback(
+    async (kind: Kind, subject: string) => {
+      setBusy(true);
+      try {
+        const fresh = await fetchAllAccessRules({ subject_kind: kind, subject });
+        setRules((held) => [...fresh, ...held.filter((r) => !(r.subject_kind === kind && r.subject === subject))]);
+      } catch (e) {
+        toast({ variant: "destructive", title: "Could not load permissions", description: String((e as Error).message) });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [toast],
+  );
+
+  // The compare view's two roles, re-read when the pair changes and whenever the held rules do (a copy lands
+  // through reloadSubject, which replaces them) - two subject reads, a page or so each.
+  React.useEffect(() => {
+    if (!compare) return;
+    const { a, b } = compare;
+    let live = true;
+    Promise.all([fetchAllAccessRules({ subject_kind: "role", subject: a }), fetchAllAccessRules({ subject_kind: "role", subject: b })])
+      .then(([ra, rb]) => {
+        if (live) setComparePool({ a, b, rules: [...ra, ...rb] });
+      })
+      .catch((e) => {
+        if (live) toast({ variant: "destructive", title: "Could not load permissions", description: String((e as Error).message) });
+      });
+    return () => {
+      live = false;
+    };
+  }, [compare, rules, toast]);
 
   type Kind = "role" | "user";
   // Collections to show as matrix columns/rows: the curated base + any collection a rule already targets.
@@ -184,16 +231,17 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // twin: a matrix that quietly hid most of itself on arrival would be a different claim about the data.
   const [onlyUserSet, setOnlyUserSet] = React.useState(false);
   // A subject with a global ("*"/"**") allow rule (super_admin) is admin everywhere - shown read-only.
-  const isGlobal = (kind: Kind, subject: string) =>
-    rules.some((r) => r.subject_kind === kind && r.subject === subject && (r.collection === "*" || r.collection === "**") && !r.field && !r.verb && r.effect === "allow");
+  // `pool` is the rules to answer from: the org's, or the two roles the compare view read for itself.
+  const isGlobal = (kind: Kind, subject: string, pool: AccessRule[] = rules) =>
+    pool.some((r) => r.subject_kind === kind && r.subject === subject && (r.collection === "*" || r.collection === "**") && !r.field && !r.verb && r.effect === "allow");
 
   // The collection-wide level/deny rules for a subject on a collection (no field, no verb, scope all).
-  const cellRules = (kind: Kind, subject: string, collection: string) =>
-    rules.filter((r) => r.subject_kind === kind && r.subject === subject && !r.verb && ruleMatchesTarget(r, { collection }));
+  const cellRules = (kind: Kind, subject: string, collection: string, pool: AccessRule[] = rules) =>
+    pool.filter((r) => r.subject_kind === kind && r.subject === subject && !r.verb && ruleMatchesTarget(r, { collection }));
 
-  const valueOf = (kind: Kind, subject: string, collection: string): string => {
-    if (isGlobal(kind, subject)) return "admin";
-    const rs = cellRules(kind, subject, collection);
+  const valueOf = (kind: Kind, subject: string, collection: string, pool: AccessRule[] = rules): string => {
+    if (isGlobal(kind, subject, pool)) return "admin";
+    const rs = cellRules(kind, subject, collection, pool);
     if (rs.some((r) => r.effect === "deny")) return "deny";
     return rs.find((r) => r.effect === "allow")?.level ?? "none";
   };
@@ -261,7 +309,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
           : failure.error,
       });
     }
-    await reload();
+    await reloadSubject(kind, subject);
   }
 
   // Set one role's org-wide level on every collection a group header row covers - the rows shown under it, so
@@ -306,7 +354,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
         description: `${labelOf(failed[0]!.collection)}: ${failed[0]!.error}${failed.length > 1 ? ` (and ${failed.length - 1} more)` : ""}${outstanding ? ` - ${outstanding} rule${outstanding === 1 ? "" : "s"} that had to be removed first could not be put back. Check ${label} · ${group} before relying on it.` : ""}`,
       });
     }
-    await reload();
+    await reloadSubject("role", subject);
   }
 
   // What the subject ALSO holds on this collection beyond the org-wide cell: the `everyone` rule the engine
@@ -477,7 +525,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
       description: `${skipped} already there${failed.length ? ` · ${failed.length} rejected: ${failed[0]}` : ""}`,
       variant: failed.length ? "destructive" : "success",
     });
-    await reload();
+    await reloadSubject(kind, subject);
   }
 
   // Copy every rule one subject holds onto another - the honest way to make "same as HR, plus payroll"
@@ -494,7 +542,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
       ...(failed ? { description: first_error } : {}),
       variant: failed ? "destructive" : "success",
     });
-    await reload();
+    await reloadSubject(to.kind, to.subject);
   }
 
   const toggles = (
@@ -596,8 +644,10 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
           )}
         </div>
         {(() => {
-          const rows = collections
-            .map((c) => ({ c, a: valueOf("role", compare.a, c), b: valueOf("role", compare.b, c) }))
+          if (comparePool?.a !== compare.a || comparePool.b !== compare.b) return <p className="text-xs text-muted-foreground">Reading the two roles' rules…</p>;
+          const pool = comparePool.rules;
+          const rows = collectionsForRules([...rules, ...pool])
+            .map((c) => ({ c, a: valueOf("role", compare.a, c, pool), b: valueOf("role", compare.b, c, pool) }))
             .sort((x, y) => Number(x.a === x.b) - Number(y.a === y.b) || groupOf(x.c).localeCompare(groupOf(y.c)) || x.c.localeCompare(y.c));
           const diffs = rows.filter((r) => r.a !== r.b).length;
           return (

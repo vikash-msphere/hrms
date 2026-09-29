@@ -95,13 +95,16 @@ describe("GRANTS - manager", () => {
 });
 
 describe("GRANTS - hr_admin", () => {
-  it("writes employees/config but cannot force-purge or list users", () => {
+  it("writes employees/config but cannot force-purge or edit users", () => {
     expect(ok("hr_admin", "POST", "/v1/employees")).toBe(true);
     expect(ok("hr_admin", "PATCH", "/v1/employees/07-2a-0b1")).toBe(true);
     expect(ok("hr_admin", "DELETE", "/v1/employees/07-2a-0b1")).toBe(true); // soft delete = write
     expect(ok("hr_admin", "DELETE", "/v1/employees/07-2a-0b1", true)).toBe(false); // force purge = admin (super only)
     expect(ok("hr_admin", "POST", "/v1/holidays")).toBe(true);
-    expect(ok("hr_admin", "GET", "/v1/users")).toBe(false); // admin only
+    // Reads the account list (to reset a forgotten app PIN from it), never edits an account.
+    expect(ok("hr_admin", "GET", "/v1/users")).toBe(true);
+    expect(ok("hr_admin", "POST", "/v1/users/0a:resetPin")).toBe(true);
+    expect(ok("hr_admin", "PATCH", "/v1/users/0a")).toBe(false);
     expect(ok("hr_admin", "POST", "/v1/payroll-runs")).toBe(false);
   });
 });
@@ -313,11 +316,8 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
     // may well want undoing held narrowly, and that is a choice it makes in the ACL rather than one
     // inherited from a seed.
     "moderation:unhide",
-    // Clearing somebody's app PIN (services/appLock.ts): the one way back from a forgotten PIN, and a way past
-    // somebody else's lock, so it is the ACL's to hand out and nothing seeds it.
-    "users:resetPin",
   ];
-  const NON_SUPER = ["employee", "manager", "hr_admin", "payroll_admin"] as const;
+  const NON_SUPER = ["employee", "manager", "hr_admin", "payroll_admin", "it_admin", "project_manager"] as const;
   // Three object codes: own, a dept member's, and a flat-coded row - so a `me` / `my-dept` / `*` rule all get
   // a chance to match. A verb reachable under any of them is reachable.
   const CODES = ["04-1c-0a9", "04-1c-0b2", "0a"];
@@ -368,11 +368,13 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
 
   it("gives the asset administrator the stocktakes that walk their own register", () => {
     // The collection was seeded at no level at all, so this is the page being reachable, not just its verbs.
-    expect(ok("hr_admin", "GET", "/v1/stocktakes")).toBe(true);
-    expect(ok("hr_admin", "POST", "/v1/stocktakes")).toBe(true);
+    expect(ok("it_admin", "GET", "/v1/stocktakes")).toBe(true);
+    expect(ok("it_admin", "POST", "/v1/stocktakes")).toBe(true);
     for (const verb of ["recordFound", "close", "restore"]) {
-      expect(ok("hr_admin", "POST", `/v1/stocktakes/0a:${verb}`)).toBe(true);
+      expect(ok("it_admin", "POST", `/v1/stocktakes/0a:${verb}`)).toBe(true);
     }
+    // The register is IT's now, and HR has no part of it.
+    expect(ok("hr_admin", "GET", "/v1/stocktakes")).toBe(false);
     // Counting the inventory is not self-service.
     expect(ok("employee", "GET", "/v1/stocktakes")).toBe(false);
     expect(ok("employee", "POST", "/v1/stocktakes/0a:recordFound")).toBe(false);

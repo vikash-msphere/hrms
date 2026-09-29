@@ -21,7 +21,8 @@ import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { type TableInsight } from "@/components/common/TableInsights";
-import { stateColumn } from "@/components/common/stateColumn";
+import { employeeStateColumn } from "@/components/common/stateColumn";
+import { isCurrentEmployee } from "@/lib/employees";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
@@ -322,7 +323,7 @@ export default function Directory({ me }: { me: Me }) {
   const [focus, setFocus] = useState<Focus>(null);
   const focusRows = useMemo(() => {
     if (!focus) return visibleRows;
-    const live = visibleRows.filter((e) => !e.delete_time);
+    const live = visibleRows.filter(isCurrentEmployee);
     if (focus === "clockedIn") return live.filter((e) => clockedIn.has(idOf(e.path)));
     if (focus === "joining") return live.filter(isJoiningSoon);
     if (focus === "probation") return live.filter(isProbationDueToMe);
@@ -339,7 +340,9 @@ export default function Directory({ me }: { me: Me }) {
     const counts = new Map<string, number>();
     let none = 0;
     for (const e of focusRows) {
-      if (e.delete_time) continue;
+      // Counted over the rows the table is showing: the people still here, or - once the State column is
+      // filtered - whichever state was picked, which the table narrows to itself.
+      if (!stateFilter && !isCurrentEmployee(e)) continue;
       if (e.department) counts.set(idOf(e.department), (counts.get(idOf(e.department)) ?? 0) + 1);
       else none++;
     }
@@ -353,7 +356,7 @@ export default function Directory({ me }: { me: Me }) {
       chips.push({ id: deptChip, name: deptChip === NONE ? "No department" : deptName(deptChip) || deptChip, n: 0 });
     }
     return chips;
-  }, [focusRows, deptChip, deptName]);
+  }, [focusRows, deptChip, deptName, stateFilter]);
   const chipRows = useMemo(() => {
     if (!deptChip) return focusRows;
     if (deptChip === NONE) return focusRows.filter((e) => !e.department);
@@ -367,7 +370,7 @@ export default function Directory({ me }: { me: Me }) {
   // department bar picks the same chip the row of chips below would: the chart is a filter, not a picture
   // beside one.
   const orgCharts = useMemo(() => {
-    const live = rows.filter((e) => !e.delete_time);
+    const live = rows.filter(isCurrentEmployee);
     const counts = new Map<string, { id: string; n: number }>();
     for (const e of live) {
       const id = e.department ? idOf(e.department) : NONE;
@@ -402,7 +405,8 @@ export default function Directory({ me }: { me: Me }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [chipRows, cf.picked?.key],
   );
-  const gridRows = useMemo(() => monthRows.filter((e) => !e.delete_time), [monthRows]);
+  // The grid has no State column to filter by, so it only ever shows the people still here.
+  const gridRows = useMemo(() => monthRows.filter(isCurrentEmployee), [monthRows]);
   const gridSections = useMemo(() => {
     if (!grouped) return null;
     const by = new Map<string, Employee[]>();
@@ -416,7 +420,7 @@ export default function Directory({ me }: { me: Me }) {
   }, [grouped, gridRows, deptName]);
 
   const stats = useMemo(() => {
-    const live = rows.filter((e) => !e.delete_time);
+    const live = rows.filter(isCurrentEmployee);
     const month = thisMonthStr();
     return {
       total: live.length,
@@ -497,7 +501,7 @@ export default function Directory({ me }: { me: Me }) {
   // is LOADED, which on a truncated directory is a floor rather than a total - the same caveat the page's own
   // headcount tile already carries.
   const reportCounts = useMemo(
-    () => countBy(rows.filter((e) => !e.delete_time), (e) => (e.manager ? idOf(e.manager) : null)),
+    () => countBy(rows.filter(isCurrentEmployee), (e) => (e.manager ? idOf(e.manager) : null)),
     [rows],
   );
   /** "09" as "September", for the anniversary column and the chip that filters it. */
@@ -506,7 +510,7 @@ export default function Directory({ me }: { me: Me }) {
   // The two dates HR is chased about, and the gap that makes an org chart wrong. Each chip turns on the
   // column it is about, because all three live in the column picker rather than on screen by default.
   const directoryInsights = (es: Employee[]): TableInsight[] => {
-    const live = es.filter((e) => !e.delete_time && !e.disabled);
+    const live = es.filter(isCurrentEmployee);
     const out: TableInsight[] = [];
     const probation = live.filter(isProbationDueToMe);
     if (probation.length > 0) {
@@ -690,9 +694,9 @@ export default function Directory({ me }: { me: Me }) {
     ...(seesProbation
       ? [{ id: "probation_end_date", header: "Probation ends", defaultHidden: true, filter: "date" as const, dateHint: "future" as const, accessor: (e: Employee) => e.probation_end_date ?? "", cell: (e: Employee) => (e.probation_end_date ? <span data-sentry-mask>{formatDate(e.probation_end_date)}</span> : "-") }]
       : []),
-    // Fetched on demand: the column offers "Deleted" with none loaded, and must not hide the value it just
-    // went and got.
-    stateColumn<Employee>({ hideDeleted: false, filterOptions: ["Deleted"] }),
+    // Leavers and switched-off records are held back until this column is filtered for them ("Exited",
+    // "Disabled"); "Deleted" is fetched on demand and offered with none loaded.
+    employeeStateColumn<Employee>(),
     ...metaColumns<Employee>(),
     {
       id: "actions",
@@ -877,7 +881,7 @@ export default function Directory({ me }: { me: Me }) {
                 rows={monthRows}
                 getRowId={(e) => e.path}
                 onRowClick={(e) => !e.delete_time && navigate(`employees/${idOf(e.path)}`)}
-                rowClassName={(e) => (e.delete_time ? "opacity-60" : undefined)}
+                rowClassName={(e) => (isCurrentEmployee(e) ? undefined : "opacity-60")}
                 search={{ value: search, onChange: setSearch, placeholder: "Search people…" }}
                 // While searching, the rows ARE the complete server-side result, so the table must not claim to be
                 // showing a truncated first page of the collection.
@@ -978,7 +982,7 @@ export default function Directory({ me }: { me: Me }) {
                 // here means the picker stops offering a move that will come back as an error. See
                 // `reportsUnder` on why this narrows the list rather than deciding anything.
                 ...rows
-                  .filter((e) => !e.delete_time && (!editing || (e.path !== editing.path && !editSubordinateIds.has(idOf(e.path)))))
+                  .filter((e) => isCurrentEmployee(e) && (!editing || (e.path !== editing.path && !editSubordinateIds.has(idOf(e.path)))))
                   .map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` })),
               ]}
               placeholder="No manager"

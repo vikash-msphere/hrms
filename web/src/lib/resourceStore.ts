@@ -129,6 +129,12 @@ type Entry = {
   // A forced read that arrived while `inflight` was already running, waiting for its turn - see ensureFetch.
   queuedForce: Promise<void> | null;
   subs: Set<() => void>;
+  // Mounted readers that may FETCH this key: enabled, and holding the collection's read capability. `subs` also
+  // counts readers that only listen (a dashboard card switched off, a caller who cannot read the collection, a
+  // tab badge following rows someone else loads), and the store-wide refetches below ask this count instead:
+  // asking `subs` sent every dormant reader's list to the server on each invalidation, a 403 and an
+  // access-denied audit row apiece for the collections the caller cannot read.
+  readers: number;
   // When these rows were last edited LOCALLY (an optimistic guess, or a write's own reserialized row folded
   // back in). A list answer whose request left before that moment describes the state the caller has already
   // moved on from, so it must not be adopted - see ensureFetch.
@@ -219,7 +225,7 @@ function getEntry(collection: string, opts: ListOpts): Entry {
   const key = keyOf(collection, opts);
   let e = entries.get(key);
   if (!e) {
-    e = { key, collection, opts, snap: { rows: [], state: "loading", error: null }, ts: 0, inflight: null, queuedForce: null, subs: new Set(), patchedAt: 0 };
+    e = { key, collection, opts, snap: { rows: [], state: "loading", error: null }, ts: 0, inflight: null, queuedForce: null, subs: new Set(), readers: 0, patchedAt: 0 };
     entries.set(key, e);
     evictIfNeeded(key);
     // First touch in this page life: adopt whatever the last page life left on disk. A copy still inside its
@@ -400,7 +406,7 @@ async function syncChanges(point: SyncPoint) {
     }
     // Otherwise the answer names exactly the collections that have been written to. `invalidateCollections` is
     // the one path for giving those up - it drops them on disk, marks them stale in memory, refetches whatever
-    // is mounted, and tells the other stores (the settings snapshot listens for exactly this).
+    // an active reader holds, and tells the other stores (the settings snapshot listens for exactly this).
     const stale = (r.collections ?? []).filter(Boolean);
     if (stale.length) invalidateCollections(stale);
     writeSyncPoint({ at: r.now, authz: r.authz_version ?? point.authz });
@@ -647,6 +653,17 @@ export function subscribe(collection: string, opts: ListOpts, cb: () => void): (
   };
 }
 
+/** Mark a mounted reader as one that may fetch this key, for as long as the returned release is not called.
+ *  Only these readers are refetched by an invalidation, a refresh gesture or a cache clear. Pair it with a
+ *  `subscribe` on the same key: this counts, it does not listen or keep the entry alive. */
+export function retainReader(collection: string, opts: ListOpts): () => void {
+  const e = getEntry(collection, opts);
+  e.readers++;
+  return () => {
+    e.readers--;
+  };
+}
+
 export function getSnapshot(collection: string, opts: ListOpts): Snapshot {
   return getEntry(collection, opts).snap;
 }
@@ -685,8 +702,8 @@ export function invalidateCollections(collections: string[]): string[] {
   dropDisk(set);
   for (const e of entries.values()) {
     if (!set.has(e.collection)) continue;
-    e.ts = 0; // mark stale
-    if (e.subs.size > 0) {
+    e.ts = 0; // mark stale; a dormant reader picks it up when it enables
+    if (e.readers > 0) {
       void ensureFetch(e.collection, e.opts, true);
       notRefetched.delete(e.collection);
     }
@@ -707,7 +724,7 @@ export function invalidateCollections(collections: string[]): string[] {
 export function refetchMounted(): Promise<void> {
   const inflight: Promise<unknown>[] = [];
   for (const e of entries.values()) {
-    if (e.subs.size === 0) continue;
+    if (e.readers === 0) continue;
     inflight.push(ensureFetch(e.collection, e.opts, true).catch(() => {}));
   }
   return Promise.all(inflight).then(() => {});
@@ -716,8 +733,9 @@ export function refetchMounted(): Promise<void> {
 /**
  * Forget every cached read, in memory and on disk. The crash boundary's retry calls this: a page that died
  * rendering a row the store is holding would die identically on the next render, because a remount reads the
- * same cache. Subscribed keys refetch immediately (their entry object has to survive - useSyncExternalStore
- * registered its callback on it), unsubscribed ones are simply dropped and re-read when something mounts them.
+ * same cache. Keys an active reader holds refetch immediately. Keys that are only listened to keep their entry
+ * (useSyncExternalStore registered its callback on it) but give up their rows, and are read when a reader
+ * enables. Unsubscribed ones are simply dropped and re-read when something mounts them.
  */
 export function clearCache(): void {
   dropDisk();
@@ -728,7 +746,8 @@ export function clearCache(): void {
   for (const e of [...entries.values()]) {
     e.ts = 0; // mark stale
     if (e.subs.size === 0 && !e.inflight) dropEntry(e);
-    else void ensureFetch(e.collection, e.opts, true);
+    else if (e.readers > 0) void ensureFetch(e.collection, e.opts, true);
+    else if (!e.inflight) setSnap(e, { rows: [], state: "loading", error: null, meta: undefined });
   }
 }
 
@@ -867,6 +886,9 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   "goal-templates:apply": ["goal-templates", "goals", "notifications"],
   // Default enrolment creates the enrollment rows the Benefits tab lists.
   "employees:enrollDefaultBenefits": ["employees", "benefit-enrollments", "notifications"],
+  // Disabling an employee switches off their linked login as well (services/employees.ts disableEmployee),
+  // which the Roles panel lists. `:enable` writes only the employee row - the login stays off on purpose.
+  "employees:disable": ["employees", "users", "notifications"],
   // Closing a sprint moves every unfinished card out of it.
   "sprints:complete": ["sprints", "cards", "notifications"],
   // Publishing a run starts the payslip-generation Operation, so the job appears on the Operations page. The

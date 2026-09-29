@@ -44,7 +44,9 @@ export const REFERENCES: Record<string, Record<string, RefField>> = {
   // A card lives on a board (need read on it) and may link to a goal (need read on it). `assignee` is a
   // principal ref (like manager), enforced structurally, so it is deliberately not gated here.
   cards: { board: { collection: "boards", level: "read" }, goal: { collection: "goals", level: "read" }, sprint: { collection: "sprints", level: "read" } },
-  sprints: { board: { collection: "boards", level: "read" } },
+  // A sprint is planned by whoever MANAGES its board (write on the board: its creator, its sharing list at
+  // manage, its department's managers, the project manager) - not by everyone who can see it.
+  sprints: { board: { collection: "boards", level: "write" } },
   offers: { application: { collection: "applications", level: "read" } },
 };
 
@@ -157,9 +159,12 @@ export const OWNER_REFS: Record<string, Record<string, OwnerRef>> = {
   // else. The service carries the second half of the same defence.
   expenses: { employee: { collection: "employees" } },
   goals: { employee: { collection: "employees" } },
-  // A card is owned by its employee (default: the caller). Present = create on behalf of that employee (gated:
-  // needs write on cards.<ownerCode>), so an ordinary employee can only own their own cards.
-  cards: { employee: { collection: "employees" } },
+  // A card is coded under its BOARD (domain/boardAccess.ts), so the board is what a create files it under: write
+  // on `cards.<boardCode>` - whoever may work the board's tasks. The 1-token `cards` create grant cannot see which
+  // board, which is exactly the question this answers. `employee` (the task's owner, default the caller) is
+  // gated too: naming somebody else takes write on `cards.<their code>`, which no board rule reaches, so only an
+  // org-wide card grant files a task in another person's name.
+  cards: { board: { collection: "boards" }, employee: { collection: "employees" } },
   transitions: { employee: { collection: "employees" } },
   "check-ins": { employee: { collection: "employees" } },
   dependents: { employee: { collection: "employees" } },
@@ -185,9 +190,9 @@ export const OWNER_REFS: Record<string, Record<string, OwnerRef>> = {
   settlements: { employee: { collection: "employees" } },
   "leave-encashments": { employee: { collection: "employees" } },
   // A ledger row moves the balance of the employee it names, so naming somebody is exactly the thing a narrow
-  // grant must not reach past. Carried onto the live manifest by migration 0005.
+  // grant must not reach past. Carried onto the live manifest by migration 0002.
   "leave-adjustments": { employee: { collection: "employees" } },
-  // Pay and tax paid before HRMS, about the employee it names. Carried onto the live manifest by migration 0006.
+  // Pay and tax paid before HRMS, about the employee it names. Carried onto the live manifest by migration 0002.
   "payroll-openings": { employee: { collection: "employees" } },
   // A delegation says whose approvals somebody else is covering, and `delegator` is the owner: the row is
   // scoped by `delegator_id` (lib/authzResolve.ts) and `activeDelegatesFor` reads it to decide who gets a copy
@@ -215,7 +220,6 @@ export const SUPPORTED_SCOPES: Record<string, ScopeTier[]> = {
   employees: ["self", "reports", "org", "dept", "all"],
   "leave-requests": ["self", "reports", "org", "dept", "all"],
   goals: ["self", "reports", "org", "dept", "all"],
-  cards: ["self", "reports", "org", "dept", "all"], // owner-coded kanban cards: own / the dept's board work / all
   reviews: ["self", "reports", "org", "dept", "all"],
   "review-feedback": ["self", "reports", "org", "dept", "all"],
   transitions: ["self", "reports", "org", "dept", "all"],

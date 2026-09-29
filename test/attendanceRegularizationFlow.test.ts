@@ -74,6 +74,8 @@ describe("attendance regularization: whole-day correction supersedes existing pu
     });
     expect(reg.state).toBe("PENDING");
     expect(reg.sessions).toHaveLength(2);
+    // What the day said when it was filed, kept beside what it should say, so the request reads as a change.
+    expect(reg.recordedSessions).toEqual([{ clock_in: "2026-07-14T03:30:00.000Z", clock_out: "2026-07-14T06:30:00.000Z" }]);
 
     await approveRegularization(deps, actor, reg.uuid);
 
@@ -291,6 +293,8 @@ describe("attendance regularization: today's last session left open", () => {
     await clockIn(at(`${DAY}T05:30:00.000Z`), actor, noFence); // punched at 11:00, came in at 09:00
     const reg = await createRegularization(at(`${DAY}T07:30:00.000Z`), actor, { date: DAY, sessions: [{ clock_in: `${DAY}T03:30:00.000Z` }], reason: "forgot to punch in" });
     expect(reg.sessions).toEqual([{ clock_in: `${DAY}T03:30:00.000Z` }]);
+    // The recorded day carries the running session the same way: no clock-out while it is open.
+    expect(reg.recordedSessions).toEqual([{ clock_in: `${DAY}T05:30:00.000Z` }]);
 
     await approveRegularization(at(`${DAY}T08:00:00.000Z`), actor, reg.uuid);
     const live = await liveOf(actor.employeeId!);

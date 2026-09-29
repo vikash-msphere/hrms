@@ -9,7 +9,8 @@ import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
-import { createAccessRule, deleteAccessRule, decideAccessRule, purgeExpiredAccessRules, cloneAccessRules } from "../src/services/accessRules";
+import { createAccessRule, deleteAccessRule, decideAccessRule, purgeExpiredAccessRules, cloneAccessRules, listAccessRules, type AccessRuleListFilters } from "../src/services/accessRules";
+import type { ListScope } from "../src/domain/access";
 import { previewAccess } from "../src/services/accessPreview";
 import { loadRoleGrant, loadRoleGrantUncached, loadRoleGuards } from "../src/lib/policyLoad";
 import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
@@ -389,6 +390,34 @@ describe("copying one subject's rules onto another", () => {
 // a one-request self-grant for a delegated ACL admin: `compensation` at admin from the next request onward.
 // Asserted at the service, since that is the single door - the collection route, the clone and the four-eyes
 // queue all go through it.
+// The editors about ONE collection or ONE subject read only those rules, not the org's whole table.
+describe("listing rules narrowed to a collection or a subject", () => {
+  const all: ListScope = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: false };
+  const patterns = async (filters: AccessRuleListFilters) =>
+    (await listAccessRules(deps, all, 100, undefined, filters)).items.map((r) => `${r.subject}:${r.pattern}`).sort();
+
+  beforeEach(async () => {
+    await deps.db.insert(schema.roles).values({ name: "manager", label: "Manager" });
+    await createAccessRule(deps, ana(), grantEmployeeRead());
+    await createAccessRule(deps, ana(), grantEmployeeRead({ collection: "attendance" }));
+    await createAccessRule(deps, ana(), grantEmployeeRead({ subject: "manager" }));
+    await deps.db.insert(schema.accessRules).values({ uuid: genId(), subject: "manager", subjectKind: "role", namespace: "*", pattern: "**", scopeKind: "all", level: "read", effect: "allow", status: "active" });
+  });
+
+  it("a collection keeps its own rules and the ** ones that bear on every collection", async () => {
+    expect(await patterns({ collection: "leave-requests" })).toEqual(["employee:leave-requests.**", "manager:**", "manager:leave-requests.**"]);
+  });
+
+  it("a subject keeps only its own rules", async () => {
+    expect(await patterns({ subjectKind: "role", subject: "employee" })).toEqual(["employee:attendance.**", "employee:leave-requests.**"]);
+    await expect(patterns({ subjectKind: "group" })).rejects.toThrow(/subject_kind/);
+  });
+
+  it("with no filter it is every rule, as before", async () => {
+    expect((await patterns({})).length).toBe(4);
+  });
+});
+
 describe("a rule author cannot widen themselves", () => {
   const superAna = () => ({ ...ana(), grant: { levels: { "**": "admin" }, allow: ["**"] } }) as unknown as AppUser;
   const selfRule = (extra: Record<string, unknown> = {}) => ({ subject_kind: "user", subject: `users/${ids.ana}`, collection: "compensation", scope: "all", level: "admin", ...extra });

@@ -165,7 +165,7 @@ export function FineRulesEditor({
         // working rule in the table. Flagging it is the difference between "access is configured" and
         // "access works".
         const flags = ruleFlags(r, rules);
-        const bad = flags.find((f) => f.kind === "denied" || f.kind === "shadowed");
+        const bad = flags.find((f) => f.kind === "denied" || f.kind === "shadowed" || f.kind === "unscoped");
         // NOT struck through, unlike the two above: this rule is live and correct for every individual record,
         // it just has no page to show them on. "Incomplete", not "dead" - striking it out would send an admin
         // to delete the rule when the fix is to add one.
@@ -176,7 +176,7 @@ export function FineRulesEditor({
             <span className={bad ? "text-muted-foreground line-through decoration-muted-foreground/40" : undefined}>{ruleSentence(r, subjLabel(r))}</span>
             {bad && (
               <span className="flex items-start gap-1 text-[11px] text-amber-700 dark:text-amber-400" title={bad.note}>
-                <AlertTriangle className="mt-px h-3 w-3 shrink-0" /> {bad.kind === "denied" ? "no effect - a deny overrides this" : "no effect - already covered by a broader rule"}
+                <AlertTriangle className="mt-px h-3 w-3 shrink-0" /> {bad.kind === "denied" ? "no effect - a deny overrides this" : bad.kind === "unscoped" ? "no effect - this method only takes an org-wide rule" : "no effect - already covered by a broader rule"}
               </span>
             )}
             {partial && (

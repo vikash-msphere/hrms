@@ -4,7 +4,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { notFound, aborted } from "../lib/errors";
+import { notFound, aborted, AppError } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { getSettingValue } from "./settings";
@@ -500,19 +500,28 @@ export async function patchNotification(
   input: { read?: boolean; snoozeUntil?: Date | null; dismissed?: boolean },
   ifMatch?: string,
 ) {
-  const row = await getNotification(deps, actor, id);
-  checkEtag(row, ifMatch);
-  const set: Partial<typeof schema.notifications.$inferInsert> = { updatedAt: new Date() };
-  if (input.read === true) set.readTime = row.readTime ?? new Date();
-  if (input.read === false) set.readTime = null;
-  if ("snoozeUntil" in input) set.snoozeUntil = input.snoozeUntil ?? null;
-  if (input.dismissed === true) {
-    set.dismissedTime = new Date();
-    set.readTime = row.readTime ?? new Date();
+  // WITHOUT an If-Match the caller asked for this change whatever else happened to the row, and every field
+  // below is set outright - so losing the version race (the same person marking it read from two tabs, or the
+  // bell and the dashboard at once) is retried on a fresh read rather than refused with a 409 nobody can act
+  // on. WITH one it is refused: the caller named the version it meant.
+  for (let attempt = 1; ; attempt++) {
+    const row = await getNotification(deps, actor, id);
+    checkEtag(row, ifMatch);
+    const set: Partial<typeof schema.notifications.$inferInsert> = { updatedAt: new Date() };
+    if (input.read === true) set.readTime = row.readTime ?? new Date();
+    if (input.read === false) set.readTime = null;
+    if ("snoozeUntil" in input) set.snoozeUntil = input.snoozeUntil ?? null;
+    if (input.dismissed === true) {
+      set.dismissedTime = new Date();
+      set.readTime = row.readTime ?? new Date();
+    }
+    if (input.dismissed === false) set.dismissedTime = null;
+    try {
+      return await updateAtVersion(deps, schema.notifications, "record", row, set);
+    } catch (e) {
+      if (ifMatch || attempt >= 3 || !(e instanceof AppError && e.type === "/errors/aborted")) throw e;
+    }
   }
-  if (input.dismissed === false) set.dismissedTime = null;
-  const updated = await updateAtVersion(deps, schema.notifications, "record", row, set);
-  return updated;
 }
 
 // Mark every unread notification of the CALLER read in one request. Returns the count cleared.

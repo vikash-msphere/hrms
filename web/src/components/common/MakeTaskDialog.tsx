@@ -29,7 +29,10 @@ export function MakeTaskDialog({ text, source, defaultBoard, onClose, onCreated 
   /** Passed the created task, so the caller can name it ("MS-42 created"). */
   onCreated?: (card: Card) => void;
 }) {
-  const { rows: boards, state } = useCollection<Board>("boards");
+  // Only boards the caller may file a task on: a board they can only view is refused by the server, so it is not
+  // offered (`my_access`, services/boards.ts).
+  const { rows: allBoards, state } = useCollection<Board>("boards");
+  const boards = allBoards.filter((b) => b.my_access === "edit" || b.my_access === "manage");
   const [form, setForm] = useState({ board: defaultBoard ?? "", title: text });
   useEffect(() => {
     // Only when the caller had no opinion: a pre-filled board must not be replaced by whatever loads first.

@@ -1,6 +1,7 @@
 import { Lock } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import type { Column } from "./DataTable";
+import { formatDate } from "@/lib/utils";
 
 type StateRow = { delete_time?: string; disabled?: boolean; locked?: boolean; published?: boolean };
 
@@ -44,5 +45,39 @@ export function stateColumn<T extends StateRow>(opts?: { publishable?: boolean; 
     ...(opts?.filterOptions ? { filterOptions: opts.filterOptions } : {}),
     accessor: (r) => primaryState(r),
     cell: (r) => <StateBadges row={r} publishable={opts?.publishable} />,
+  };
+}
+
+type EmployeeStateRow = StateRow & { status?: string; end_date?: string };
+
+/** An employee's state, where "Exited" (the person left) is told apart from "Disabled" (a record switched off). */
+function employeeState(r: EmployeeStateRow): string {
+  if (r.delete_time) return "Deleted";
+  if (r.status === "terminated") return "Exited";
+  return primaryState(r);
+}
+
+/** The Directory's State column. A roster shows the people still here, so both leavers and switched-off
+ *  records are held back until the column is filtered for them - the rule `isCurrentEmployee`
+ *  (lib/employees.ts) applies everywhere else. The trash is fetched on demand, so "Deleted" is offered
+ *  without being held back a second time (see the note on `hideDeleted` above). */
+export function employeeStateColumn<T extends EmployeeStateRow>(): Column<T> {
+  return {
+    id: "state",
+    header: "State",
+    filter: "select",
+    groupBy: true,
+    hideValueByDefault: ["Exited", "Disabled"],
+    filterOptions: ["Exited", "Disabled", "Deleted"],
+    accessor: (r) => employeeState(r),
+    cell: (r) =>
+      employeeState(r) === "Exited" ? (
+        <span className="inline-flex items-center gap-1.5">
+          <Badge variant="muted">Exited</Badge>
+          {r.end_date && <span className="text-xs text-muted-foreground">{formatDate(r.end_date)}</span>}
+        </span>
+      ) : (
+        <StateBadges row={r} />
+      ),
   };
 }

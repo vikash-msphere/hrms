@@ -17,7 +17,7 @@ import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 // employee, so somebody could be put on a schedule they did not choose - which changes the days they are owed.
 //
 // 0002 carries several changes, one section each (a comment header, then its statements, then a blank line).
-// Only this section is under test: every other migration, and the rest of 0002, is applied first.
+// Only this section is under test: the rest of 0002, and every other migration in order around it, is applied first.
 const migrations = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const paths = Object.keys(migrations).sort();
 const release = paths.find((p) => p.includes("0002_release_two"))!;
@@ -48,9 +48,12 @@ function without(): string {
   return JSON.stringify(p);
 }
 
+// In order around the section: a later migration may need 0002's schema (0004 writes to `roles`, whose
+// `provisioned` column 0002 adds), so the ones after it run after it.
 beforeAll(async () => {
-  for (const p of paths.filter((p) => p !== release)) await runSql(migrations[p]!);
+  for (const p of paths.filter((p) => p < release)) await runSql(migrations[p]!);
   await runSql(whole.slice(0, start) + whole.slice(start + section.length));
+  for (const p of paths.filter((p) => p > release)) await runSql(migrations[p]!);
 });
 beforeEach(async () => {
   await db.prepare("DELETE FROM policy").run();

@@ -4,10 +4,15 @@
 // re-routable via :route). All three are refs the org fills in from Settings; the defaults below deliberately
 // leave them unset, because a shipped default pointing at a person would be wrong at every install.
 //
+// `roles` are the roles that SERVICE the desk, where members only read it: whoever holds one, at decision time,
+// may work every ticket filed under it (write and every verb). Unlike the three refs, a role name is the same at
+// every install, so the IT desk ships serviced by `it_admin`. Members and roles both become per-ticket shares,
+// written by services/ticketShares.ts.
+//
 // Pure data, and it lives in domain/ rather than beside the service for one reason: bootstrap seeds the
 // `ticket-categories` settings row FROM this constant (bootstrap/collections/settings.ts), so a fresh database
 // and the runtime fallback can never disagree about what the starter categories are.
-export type TicketCategory = { key: string; name: string; assignee?: string | null; members?: string[]; department?: string | null };
+export type TicketCategory = { key: string; name: string; assignee?: string | null; members?: string[]; department?: string | null; roles?: string[] };
 export type TicketCategoriesConfig = { categories: TicketCategory[] };
 
 // Starter categories so tickets work out of the box. Keys are stable lowercase ids: the UI dropdown stores
@@ -20,13 +25,29 @@ export const DEFAULT_TICKET_CATEGORIES: TicketCategoriesConfig = {
     // and a bug report buried in that queue reaches whoever fixes hardware rather than whoever fixes software.
     // This is the category "Report a problem" files under, so it is the one desk that must always exist.
     { key: "app", name: "App issues" },
-    { key: "it", name: "IT & Systems" },
+    { key: "it", name: "IT & Systems", roles: ["it_admin"] },
     { key: "facilities", name: "Facilities" },
     { key: "hr", name: "HR" },
     { key: "payroll", name: "Payroll" },
     { key: "general", name: "General" },
   ],
 };
+
+/**
+ * The servicing roles a `ticket-categories` value names, by category key. Read off an UNTRUSTED value (a stored
+ * blob or a PATCH body), so anything that is not a string list reads as no roles, and a repeat is dropped.
+ */
+export function rolesByCategory(value: unknown): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const cats = value && typeof value === "object" ? (value as { categories?: unknown }).categories : undefined;
+  if (!Array.isArray(cats)) return out;
+  for (const c of cats as { key?: unknown; roles?: unknown }[]) {
+    if (!c || typeof c.key !== "string" || !c.key) continue;
+    const roles = Array.isArray(c.roles) ? c.roles.filter((r): r is string => typeof r === "string" && !!r) : [];
+    out.set(c.key, [...new Set(roles)]);
+  }
+  return out;
+}
 
 /** The desk a "Report a problem" submission files under, when the org still has it configured. */
 export const APP_ISSUES_CATEGORY_KEY = "app";

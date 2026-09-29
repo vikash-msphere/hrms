@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 /// <reference types="@cloudflare/vitest-pool-workers" />
 import { env } from "cloudflare:test";
-import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
@@ -844,5 +844,58 @@ describe("date and status filters", () => {
     await leaveFor(alice, "04-a01-l1", "Dentist appointment");
     await leaveFor(bhavna, "04-b01-l1", "Dentist visit");
     expect((await run(alice, "dentist", { status: "pending" })).map((h) => h.title)).toEqual(["Dentist appointment"]);
+  });
+
+  it("answers a value no status column can hold with nothing, and reads nothing for it", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await leaveFor(admin, "04-z01-l1", "Dentist appointment");
+    // `pen` is `pending` half typed: status-shaped, but in no enum. The scopes are resolved first, so the spies
+    // see only what the search itself reads.
+    const scopes = await searchScopesFor(deps, admin);
+    const all = vi.spyOn(deps.db, "all");
+    const select = vi.spyOn(deps.db, "select");
+    try {
+      expect(await globalSearch(deps, admin, scopes, "", redactionGateFor(admin), { status: "pen" })).toEqual([]);
+      expect(await globalSearch(deps, admin, scopes, "dentist", redactionGateFor(admin), { status: "pen" })).toEqual([]);
+      expect(all).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+    } finally {
+      all.mockRestore();
+      select.mockRestore();
+    }
+  });
+});
+
+describe("filters without words", () => {
+  const run = async (user: AppUser, narrowing: Parameters<typeof globalSearch>[5], q = "") =>
+    globalSearch(deps, user, await searchScopesFor(deps, user), q, redactionGateFor(user), narrowing);
+
+  it("lists the newest rows the filters name", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await deps.db.insert(schema.tickets).values([
+      { uuid: genId(), code: "04-z01-t1", employeeId: admin.employeeId!, subject: "Older ticket", createdAt: new Date("2026-01-10") },
+      { uuid: genId(), code: "04-z01-t2", employeeId: admin.employeeId!, subject: "Newer ticket", createdAt: new Date("2026-03-10") },
+    ] as never);
+    await leaveFor(admin, "04-z01-l1", "Dentist appointment");
+    expect((await run(admin, { collections: ["tickets"] })).map((h) => h.title)).toEqual(["Newer ticket", "Older ticket"]);
+    expect((await run(admin, { status: "pending" })).map((h) => h.title)).toContain("Dentist appointment");
+    expect((await run(admin, { collections: ["tickets"], after: Date.UTC(2026, 1, 1) })).map((h) => h.title)).toEqual(["Newer ticket"]);
+  });
+
+  it("keeps the caller's scope, exactly as a worded search does", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    const bhavna = await seedPerson("04-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    await leaveFor(alice, "04-a01-l1", "Dentist appointment");
+    await leaveFor(bhavna, "04-b01-l1", "Dentist visit");
+    expect((await run(alice, { collections: ["leave-requests"] })).map((h) => h.title)).toEqual(["Dentist appointment"]);
+    // Bhavna's own directory entry is hers and Alice may list it; her leave request Alice may not.
+    expect((await run(alice, { ownerId: bhavna.employeeId! })).map((h) => h.collection)).not.toContain("leave-requests");
+  });
+
+  it("still answers nothing with no filters, or a single letter beside them", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await leaveFor(admin, "04-z01-l1", "Dentist appointment");
+    expect(await run(admin, {})).toEqual([]);
+    expect(await run(admin, { collections: ["leave-requests"] }, "d")).toEqual([]);
   });
 });

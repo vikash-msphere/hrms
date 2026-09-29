@@ -236,7 +236,8 @@ export const accessRules = sqliteTable("access_rules", {
   level: text("level", { enum: ["read", "write", "admin"] }), // NULL for verb (allow) / deny rules
   effect: text("effect", { enum: ["allow", "deny"] }).notNull(),
   // WHO OWNS THIS ROW: "acl" = a person authored it (the ACL modal, the permissions panels, the seed);
-  // "ticket-share" = the category/department viewer machinery wrote it (services/ticketShares.ts).
+  // "ticket-share" = the category/department viewer machinery wrote it (services/ticketShares.ts);
+  // "board-share" = a board's sharing list, its creator and its department's managers (services/boardShares.ts).
   //
   // The share rows are byte-identical to a hand-authored `scope:exact, level:read` user rule, which is the
   // point on the way in and was the bug on the way out: the revoke matched on (subject, kind, pattern,
@@ -263,7 +264,7 @@ export const accessRules = sqliteTable("access_rules", {
   // now", which a rule's own `expires_at` cannot say because that bounds when the RULE lives, not which rows it
   // reaches. Subtractive like the two guards above.
   window: text("window"),
-  source: text("source", { enum: ["acl", "ticket-share"] }).notNull().default("acl"),
+  source: text("source", { enum: ["acl", "ticket-share", "board-share"] }).notNull().default("acl"),
   // Row lifecycle, for orgs that want four-eyes on permission changes (settings key `access-approval`).
   // A rule awaiting approval to be ADDED (`pending`) is inert; a rule awaiting approval to be REMOVED
   // (`pending_delete`) keeps enforcing. Fail-safe in both directions - a pending change never applies itself,
@@ -1263,14 +1264,21 @@ export const reviewFeedback = sqliteTable("review_feedback", {
 }));
 
 // ---- Performance: agile kanban boards ----
-// A kanban board: a team/department work-tracking surface. Flat-coded + HR/team-managed (like review-cycles).
-// The workflow lives in `columnsJson` (ordered columns; a column IS the state - like ats.stages), with per-
-// column WIP limits, explicit policies, and the commitment/delivery point flags. Swimlanes + classes of
-// service are data too. `deliveryAdvancesGoal` opts the board into rolling a delivered card's progress up to
-// its linked goal. Private-by-default (no seeded grant; super via ** until an admin widens via the ACL).
+// A kanban board: a team/department work-tracking surface. The workflow lives in `columnsJson` (ordered
+// columns; a column IS the state - like ats.stages), with per-column WIP limits, explicit policies, and the
+// commitment/delivery point flags. Swimlanes + classes of service are data too.
+//
+// The code is `<visibility segment>-<leaf>` (domain/boardAccess.ts): who may see and work the board is read off
+// it, and its cards and sprints are coded under it. `departmentId` is the department whose managers (and whose
+// ancestor departments' managers) manage the board, through `board-share` rules services/boardShares.ts keeps.
 export const boards = sqliteTable("boards", {
   uuid: pk(),
   code: codeCol(),
+  departmentId: text("department_id").references((): AnySQLiteColumn => departments.uuid),
+  // The board's sharing list, BoardMember[] ({kind: user|role, subject, level}). The source the `board-share`
+  // rules are derived from, together with the department's managers - kept on the row because the rules alone
+  // cannot say whether a manager was also added by name.
+  sharesJson: text("shares_json").notNull().default("[]"),
   name: text("name").notNull(),
   description: text("description"),
   taskPrefix: text("task_prefix").notNull().default(""), // human task-key prefix, e.g. "MS" -> MS-1, MS-2 (per-board seq)
@@ -1290,7 +1298,7 @@ export const boards = sqliteTable("boards", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ pageIdx: index("boards_page_idx").on(t.createdAt, t.uuid) }));
+}, (t) => ({ pageIdx: index("boards_page_idx").on(t.createdAt, t.uuid), deptIdx: index("boards_department_idx").on(t.departmentId) }));
 
 // A sprint: a time-boxed iteration on a scrum-mode board (flat-coded, board-scoped, HR/team-managed like the
 // board itself). `state` runs planning -> active -> completed; at most one active sprint per board. Cards join
@@ -3274,6 +3282,10 @@ export const attendanceRegularizations = sqliteTable("attendance_regularizations
   employeeId: text("employee_id").notNull().references(() => employees.uuid),
   date: integer("date", { mode: "timestamp_ms" }).notNull(), // the calendar day being corrected (UTC midnight)
   sessions: text("sessions", { mode: "json" }).notNull().$type<{ clock_in: string; clock_out?: string }[]>(), // ISO instants; [] = day had no work (remove punches); no clock_out = today's last session, still clocked in
+  // The day's live punches when the request was filed, same shape as `sessions`, so every reader can show the
+  // change as "clock-in 11:02 -> 09:00" rather than a bare new day. Display and audit only: approval reads the
+  // live punches again. NULL on requests filed before it was recorded.
+  recordedSessions: text("recorded_sessions", { mode: "json" }).$type<{ clock_in: string; clock_out?: string }[]>(),
   reason: text("reason"),
   state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED"] }).notNull().default("PENDING"),
   decidedBy: text("decided_by").references(() => users.uuid),

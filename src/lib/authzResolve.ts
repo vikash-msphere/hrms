@@ -225,7 +225,9 @@ export const LIST_OWNER_COLUMNS: Record<string, string> = {
  * Getting it wrong is asymmetric: a collection wrongly IN gets a widened item lane, one wrongly OUT keeps the
  * split-brain grant the owner key exists to close. The tripwire covers both directions.
  */
-export const OWNER_COLUMN_COLLECTIONS: ReadonlySet<string> = new Set(["assets", "users"]);
+// `cards` joined when a card's code moved under its BOARD (domain/boardAccess.ts): the code no longer says who
+// filed it, `employee_id` does, and the list already binds a self breadth to that column.
+export const OWNER_COLUMN_COLLECTIONS: ReadonlySet<string> = new Set(["assets", "cards", "users"]);
 
 /**
  * The owner column to hand `applyScope` for `collection`, off the table backing it.

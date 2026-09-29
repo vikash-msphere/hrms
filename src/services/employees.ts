@@ -8,7 +8,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, fieldDiff } from "../lib/audit";
+import { audit, createdMeta, fieldDiff, stateMeta } from "../lib/audit";
 import { emitEvent } from "./eventBus";
 import { notify, notifyMany } from "./notifications";
 import { invalidArgument, failedPrecondition, notFound, aborted, isCodeCollision, isEmployeeNumberCollision } from "../lib/errors";
@@ -16,7 +16,7 @@ import { hasOpening } from "./leaveAdjustments";
 import { moveEmployee } from "./codeCascade";
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
-import { assertNotLocked } from "./lifecycle";
+import { assertNotLocked, setDisabled } from "./lifecycle";
 import { getSettingValue } from "./settings";
 import { DEFAULT_EMPLOYEE_NUMBER_CONFIG, formatEmployeeNumber, nextSeq } from "../domain/employeeNumber";
 import { checkEtag, updateAtVersion } from "./versionGuard";
@@ -322,6 +322,44 @@ export async function removeEmployee(deps: Deps, actor: AppUser, id: string, ifM
   // Recorded separately from the delete: "their account was switched off" is a different fact from "their row
   // was removed", and it is the one somebody asks about later.
   if (disabled.length) await audit(deps, actor, "employee.disableLogin", "employees", id, { via: "delete", users: disabled.length });
+}
+
+/**
+ * `:disable` on an employee ends their ACCESS too, the same half `removeEmployee` adds to delete.
+ *
+ * The generic lifecycle verb flips `employees.disabled` and nothing else, so the person dropped out of every
+ * people picker and went on signing in with full self-service. The flag is still the generic write (lock check,
+ * `employee.disable` audit); the login is switched off after it lands, recorded as its own fact.
+ */
+export async function disableEmployee(deps: Deps, actor: AppUser, id: string) {
+  const row = await setDisabled(deps, actor, schema.employees, "employee", "employees", id, true);
+  const users = await deps.db
+    .update(schema.users)
+    .set({ status: "disabled", updatedAt: new Date() })
+    .where(and(eq(schema.users.employeeId, id), eq(schema.users.status, "active")))
+    .returning({ uuid: schema.users.uuid });
+  if (users.length) await audit(deps, actor, "employee.disableLogin", "employees", id, { via: "disable", users: users.length });
+  return row;
+}
+
+/**
+ * `:enable` on an employee is also how a cancelled exit is undone: someone the exit terminated comes back as
+ * `active`, so payroll and every live roster (services/liveEmployee.ts) count them again. `end_date` is kept as
+ * the record of the exit that was reversed.
+ *
+ * The login is NOT switched back on, for the reason `removeEmployee` gives for restore: re-granting access is
+ * a decision, and `users.status` is editable on its own (the Roles panel).
+ */
+export async function enableEmployee(deps: Deps, actor: AppUser, id: string) {
+  const row = await setDisabled(deps, actor, schema.employees, "employee", "employees", id, false);
+  const [reactivated] = await deps.db
+    .update(schema.employees)
+    .set({ status: "active", updatedAt: new Date() })
+    .where(and(eq(schema.employees.uuid, id), eq(schema.employees.status, "terminated")))
+    .returning();
+  if (!reactivated) return row;
+  await audit(deps, actor, "employee.reactivate", "employees", id, stateMeta("terminated", "active"), reactivated);
+  return reactivated;
 }
 
 /** How far up a reporting line is walked before the depth itself is treated as a cycle. */

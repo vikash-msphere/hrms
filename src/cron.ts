@@ -22,6 +22,7 @@ import { awardReferralBonuses } from "./services/referrals";
 import { nudgeMissingScorecards } from "./services/ats";
 import { reconcilePendingEsign } from "./services/esign/callback";
 import { publishDueAnnouncements } from "./services/announcements";
+import { exitDueEmployees } from "./services/noticePeriods";
 import { drainSearchEmbeddings } from "./services/searchEmbed";
 import { pruneInsights } from "./services/searchInsights";
 import { drainModeration, reconcileHolds } from "./services/moderation";
@@ -178,6 +179,9 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // Time-based domain events (probation ending, work anniversary, document expiring) so automations can react
     // to the passage of time, not just user actions. Best-effort - never aborts the tick.
     const scheduledEvents = await run("emitScheduledEvents", () => emitScheduledEvents(deps));
+    // Leavers lose access the day after their last working day, whether or not HR has clicked "Mark exited":
+    // the employee is terminated and their login disabled; the offboarding checklist stays open (best-effort).
+    const employeesExited = await run("exitDueEmployees", () => exitDueEmployees(deps));
     // Fire time-driven automation rules whose recurrence matches today (weekly nudges, month-start prep,
     // per-employee smart reminders). Guarded per-day so a re-run can't double-fire. Best-effort.
     const scheduledAutomations = await run("runScheduledAutomations", () => runScheduledAutomations(deps));
@@ -257,7 +261,7 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     // ⌘K usage counters keep 30 days; they are for tuning search now, not a history of it.
     const searchInsightsPruned = await run("pruneSearchInsights", () => pruneInsights(deps));
     return {
-      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, attentionDigests, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, payrollBudgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, aiUsageSwept, idempotencySwept, accessReviewed, duplicatesFlagged, duplicatesPruned, holdsRequeued, searchInsightsPruned },
+      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, employeesExited, scheduledAutomations, digestsFlushed, attentionDigests, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, payrollBudgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, cardsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired, aiCacheSwept, aiUsageSwept, idempotencySwept, accessReviewed, duplicatesFlagged, duplicatesPruned, holdsRequeued, searchInsightsPruned },
       failures,
     };
   }

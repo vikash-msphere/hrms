@@ -7,6 +7,7 @@
 import { relativeFuture } from "@/lib/utils";
 import { metaFor } from "./collectionMeta";
 import { verbInfo } from "./verbMeta";
+import { isCollectionMethod } from "./customMethods";
 import { roleLabel, EVERYONE_ROLE } from "@/lib/roles";
 import type { AccessRule } from "./permMatrix";
 
@@ -79,6 +80,9 @@ export function ruleSentence(r: AccessRule, subjectLabel?: string): string {
   // The approval LIMIT, spelled out in the same sentence as the rest of the rule. A cap that only shows as a
   // number in a form the admin has already left is a cap nobody reviewing the list can see.
   const limit = limitPhrase(r);
+  // A method that acts on the collection as a whole reaches no records, so the sentence names none: "Everyone
+  // can use the "Request access" method", not "...on every access rule in the workspace".
+  if (r.verb && isCollectionMethod(r.collection, r.verb)) return `${who} ${deny ? "cannot use" : "can use"} ${permPhrase(r)}${limit}`;
   if (r.verb) return `${who} ${deny ? "cannot use" : "can use"} ${permPhrase(r)} on ${wherePhrase(r)}${limit}`;
   if (deny) return `${who} is denied all access to ${wherePhrase(r)}${field}`;
   return `${who} has ${permPhrase(r)} to ${wherePhrase(r)}${field}${limit}`;
@@ -90,7 +94,7 @@ export function expiryLabel(expiresAt?: string): string | null {
   return +new Date(expiresAt) <= Date.now() ? "expired" : `expires ${relativeFuture(expiresAt)}`;
 }
 
-export type RuleFlag = { kind: "denied" | "shadowed" | "unlistable" | "pending" | "expiring"; note: string };
+export type RuleFlag = { kind: "denied" | "shadowed" | "unscoped" | "unlistable" | "pending" | "expiring"; note: string };
 
 // The scopes whose compiled pattern needs a second token, and so cannot match the ONE-token key a list
 // request is decided on (`leave-requests.read`). `all` compiles to `<collection>.**`, whose `**` matches zero
@@ -183,12 +187,19 @@ export function ruleFlags(r: AccessRule, all: AccessRule[], subjectRole?: string
   const exp = expiryLabel(r.expire_time);
   if (exp) flags.push({ kind: "expiring", note: exp === "expired" ? "Expired - no longer in force." : `Temporary access: ${exp}.` });
 
+  // A collection-level method is decided on the two-token key `<collection>.<verb>`, which has no record in it
+  // for a `me`, `my-dept` or object token to match - only the org-wide `<collection>.**.<verb>` reaches it. So a
+  // narrower rule for one (an allow OR a deny) is inert, and the ACL modal no longer offers to write one.
+  if (r.scope !== "all" && isCollectionMethod(r.collection, r.verb)) {
+    flags.push({ kind: "unscoped", note: `This method acts on ${metaFor(r.collection).plural} as a whole, not on individual records, so only an org-wide rule applies to it. This one is never used.` });
+  }
+
   if (r.effect === "allow") {
     const deny = all.find((o) => o.path !== r.path && o.effect === "deny" && appliesToSameSubject(r, o) && targetCovers(o, r) && covers(o, r) && o.status !== "pending");
     if (deny) {
       flags.push({
         kind: "denied",
-        note: `A deny on ${wherePhrase(deny)}${deny.subject !== r.subject ? ` (via the ${roleLabel(deny.subject)} role)` : ""} overrides this - a deny always wins, so this allow does nothing until that rule is removed.`,
+        note: `A deny on ${isCollectionMethod(r.collection, r.verb) ? "this method" : wherePhrase(deny)}${deny.subject !== r.subject ? ` (via the ${roleLabel(deny.subject)} role)` : ""} overrides this - a deny always wins, so this allow does nothing until that rule is removed.`,
       });
     }
     const mine = LEVEL_RANK[r.level ?? ""] ?? 0;
@@ -211,7 +222,10 @@ export function ruleFlags(r: AccessRule, all: AccessRule[], subjectRole?: string
         (o.scope !== r.scope || (LEVEL_RANK[o.level ?? ""] ?? 0) > mine) &&
         (LEVEL_RANK[o.level ?? ""] ?? 0) >= mine,
     );
-    if (broader) flags.push({ kind: "shadowed", note: `Already covered by a broader rule (${permPhrase(broader)} to ${wherePhrase(broader)}), so this one adds nothing.` });
+    if (broader) {
+      const reach = isCollectionMethod(r.collection, r.verb) ? "" : ` to ${wherePhrase(broader)}`;
+      flags.push({ kind: "shadowed", note: `Already covered by a broader rule (${permPhrase(broader)}${reach}), so this one adds nothing.` });
+    }
     // The half-working rule: every individual record decides correctly and the LIST is refused, so the page
     // that shows those records is a 403 and nothing says why. Only row-scoped LEVEL rules can be in this
     // state - a verb rule grants an action rather than a view, and is left to the grantor.

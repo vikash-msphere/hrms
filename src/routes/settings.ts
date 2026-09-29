@@ -20,6 +20,7 @@ import { RECEIPT_FIELDS } from "../domain/receiptFields";
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
 import { validateAtsConfig, orphanedStages, type AtsStage } from "../domain/ats";
 import { stagesInUse } from "../services/ats";
+import { assertCategoryRoles, storedTicketCategories, syncCategoryServiceRoles } from "../services/tickets";
 import { getFieldDefs, identityValueCounts, purgeIdentityFieldsSlice, IDENTITY_PURGE_JOB, type IdentityPurgeCursor } from "../services/identityDetails";
 import { allocFlatCode } from "../services/codeAlloc";
 import { MAX_CELEBRATION_LEAD_DAYS } from "../services/celebrations";
@@ -854,7 +855,7 @@ export const UNVALIDATED_SETTING_KEYS = new Map<string, string>([
   ["payroll-approval", "one flag, read as `cfg.enabled === true` (services/payroll.ts)"],
   ["reimbursements", "one enum, read as `v.payout_mode === \"separate\"` - anything else is the default"],
   ["sign-in", "two flags and one enum (services/googleProfile.ts), each read strictly: `google_photo` off only on `false`, `google_employee` on only on `true` (so a malformed value never creates people), and an unrecognised `google_name` reads as `never` - a bad value always syncs less, never more"],
-  ["ticket-categories", "a routing catalogue; a malformed one throws where it is read rather than routing a ticket to the wrong team"],
+  ["ticket-categories", "a routing catalogue; a malformed one throws where it is read rather than routing a ticket to the wrong team. Its servicing `roles` ARE checked, in the PATCH handler, because that check reads the roles table (services/tickets.ts#assertCategoryRoles)"],
   ["transition-templates", "checklists; findTemplate tolerates a miss by leaving the checklist empty, which is visible, and a malformed blob throws"],
 ]);
 
@@ -944,6 +945,15 @@ export const settings = new Hono<AppEnv>()
         }
       }
     }
+    // A help-desk category's servicing roles are access: each one gets write and every verb on the desk's tickets.
+    // So the names are checked against the roles table before the save, and the value being replaced is kept, so
+    // the tickets already filed can be re-shared once it lands (services/tickets.ts#syncCategoryServiceRoles).
+    // With no row yet, the replaced value is the default the ticket service has been reading.
+    let ticketCategoriesBefore: unknown;
+    if (key === "ticket-categories") {
+      await assertCategoryRoles(c.get("deps"), c.req.valid("json").value);
+      ticketCategoriesBefore = await storedTicketCategories(c.get("deps"));
+    }
     // Optional, like every other patch in the API: send the ETag the edited value was read at and a save that
     // would overwrite somebody else's is refused with 409 instead of silently winning (services/settings.ts).
     // A caller that read NO row sends `If-None-Match: *` instead, so its first save cannot land over another's.
@@ -965,6 +975,7 @@ export const settings = new Hono<AppEnv>()
         });
       }
     }
+    if (key === "ticket-categories") await syncCategoryServiceRoles(c.get("deps"), c.get("user"), ticketCategoriesBefore, c.req.valid("json").value);
     // A no-op for the caller who just wrote the key - it is the same write decision - but it keeps the
     // invariant simple: every serialized setting leaves this file through the redactor.
     return c.json(redactSettingResource(toSettingResource(row), c.get("user")));

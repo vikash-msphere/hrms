@@ -216,7 +216,7 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
         id: "past-exit",
         label: `${overdue.length} past their last working day`,
         tone: "destructive",
-        hint: "Still marked as serving. Mark them exited to close the account off.",
+        hint: "Still marked as serving. The nightly exit run marks them exited and disables their login; mark them exited now to end access sooner.",
         filters: { status: "serving", lwd: "past" },
         sort: "lwd.asc",
       });
@@ -308,7 +308,7 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
             ? [{ label: "No offboarding started", value: stats.noOffboarding, tone: "warning" as const, hint: "no exit tasks", ...kf.kpi("noOffboarding") }]
             : []),
           ...(stats.pastExit
-            ? [{ label: "Past last working day", value: stats.pastExit, tone: "destructive" as const, hint: "mark them exited", ...kf.kpi("pastExit") }]
+            ? [{ label: "Past last working day", value: stats.pastExit, tone: "destructive" as const, hint: "exit runs tonight", ...kf.kpi("pastExit") }]
             : []),
           { label: "All records", value: rows.length, tone: "muted", hint: "past exits included", onClick: () => kf.setFocus(null), active: kf.focus === null },
         ]}
@@ -326,7 +326,7 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
         open={open}
         onClose={() => setOpen(false)}
         title={editing ? "Edit notice period" : "Record notice period"}
-        description="Starts the exit countdown. On the last working day they're marked exited and their login is disabled; their full & final settlement is computed from that date."
+        description="Starts the exit countdown. The day after the last working day they're marked exited and their login is disabled automatically; their full & final settlement is computed from that date."
         collection="notice-periods"
         objectPath={editing?.path}
         guardLabel="notice record"
@@ -381,7 +381,7 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
           )}
           {pastExit && (
             <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
-              That last working day has already passed. Set the status to Exited if they've left - "Serving" keeps them active with a negative countdown.
+              That last working day has already passed. Left as "Serving", they're marked exited and their login disabled in tonight's exit run; set the status to Exited to end their access now.
             </p>
           )}
           <Field label="Reason"><Input value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} placeholder="Optional" /></Field>

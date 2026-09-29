@@ -15,6 +15,7 @@ import { getSetting, saveSetting } from "@/lib/settingsStore";
 import { useClock } from "@/lib/clock";
 import { navigate } from "@/router";
 import { describeError } from "@/lib/formError";
+import { formatHHMM } from "@/lib/utils";
 import { DEFAULT_PUNCTUALITY, fmtMinutes, policySummary, type PunctualityPolicy } from "@/lib/lateEarly";
 import { penaltyUnitsFor, punctualityPolicyOf } from "../../../src/domain/punctuality";
 
@@ -179,7 +180,7 @@ export function PunctualityPolicyPanel() {
             <p className="text-sm text-muted-foreground">
               An approved late arrival moves that day&apos;s shift start to the approved time, and an approved early departure moves its end.
               The day is then judged against that window, so arriving by the approved time is on time and arriving after it is late by the
-              minutes past it. The shift itself is {sched.shift_start} to {sched.shift_end} with {sched.grace_minutes} minutes of grace (Attendance schedule).
+              minutes past it. The shift itself is {formatHHMM(sched.shift_start)} to {formatHHMM(sched.shift_end)} with {sched.grace_minutes} minutes of grace (Attendance schedule).
             </p>
             <label className="flex items-start gap-2 text-sm">
               <Checkbox className="mt-0.5" checked={a.grace_on_top} onCheckedChange={(v) => set("attendance", "grace_on_top", v === true)} />

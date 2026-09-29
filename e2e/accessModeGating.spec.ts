@@ -21,6 +21,8 @@ const WHO: Record<Role, string> = {
   manager: "Mara Manager",
   payroll: "Pat Pay",
   employee: "Eve Employee",
+  it: "Aditya Patel",
+  pm: "Krishna Williams",
 };
 
 test.describe("access-management mode availability", () => {

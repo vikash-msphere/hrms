@@ -12,6 +12,7 @@ import { parseAttachments } from "../domain/ticketAttachments";
 import { parseFound, parseScope as parseStocktakeScope } from "../domain/stocktake";
 import { competencyScore, goalAttainment, parseCompetencyKeys, type Competency, type GoalSnapshot } from "../domain/performance";
 import { goalPace, staleDays } from "../domain/goals";
+import { visibilityOfCode } from "../domain/boardAccess";
 import { maskedToken } from "../lib/apiKeyToken";
 // From the domain leaf, NOT from services/orgDay: `services/settings.ts` imports this module for `etagOf`, so
 // reaching into services here would close a cycle (serialize -> orgDay -> settings -> serialize).
@@ -189,6 +190,9 @@ export function toEmployeeResource(r: any): Wire<"employee"> {
     start_date: r.startDate ? iso(r.startDate).slice(0, 10) : undefined,
     probation_end_date: r.probationEndDate ? iso(r.probationEndDate).slice(0, 10) : undefined,
     tracked_from: r.trackedFrom ? iso(r.trackedFrom).slice(0, 10) : undefined,
+    // Exit state (read-only). `disabled` alone cannot tell someone who left from a record HR switched off.
+    status: r.status ?? undefined,
+    end_date: r.endDate ? iso(r.endDate).slice(0, 10) : undefined,
     epf_enrolled: !!r.epfEnrolled,
     eps_excluded: !!r.epsExcluded,
     photo: photoMarker(r),
@@ -640,6 +644,12 @@ export function toBoardResource(r: any): Wire<"board"> {
     ...baseResource(r, "boards"),
     name: r.name,
     description: r.description ?? undefined,
+    // Whose managers manage it (and their parent departments' managers) - services/boardShares.ts.
+    department: ref("departments", r.departmentId),
+    // Who may see and work it, read off the code segment (domain/boardAccess.ts). The sharing list itself is
+    // the managers' to read, through `:access`.
+    visibility: visibilityOfCode(r.code) ?? undefined,
+    my_access: r._myAccess, // attached by the route: manage / edit / view, for the page's affordances
     task_prefix: r.taskPrefix ?? "",
     mode: r.mode ?? "kanban",
     columns: parse(r.columnsJson),
@@ -1360,6 +1370,7 @@ export function toAttendanceRegularizationResource(r: any): Wire<"attendance-reg
     employee: ref("employees", r.employeeId),
     date: iso(r.date).slice(0, 10),
     sessions: (typeof r.sessions === "string" ? jsonOr<Wire<"attendance-regularization">["sessions"]>(r.sessions, []) : r.sessions) ?? [],
+    recorded_sessions: (typeof r.recordedSessions === "string" ? jsonOr<Wire<"attendance-regularization">["recorded_sessions"]>(r.recordedSessions, undefined) : r.recordedSessions) ?? undefined,
     reason: r.reason ?? undefined,
     state: r.state,
     decided_by: ref("users", r.decidedBy),

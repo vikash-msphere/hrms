@@ -208,6 +208,12 @@ test.describe("global search", () => {
       await expect(row.first()).toBeVisible();
       await search.fill(`before:${lastYear}-01 ${reason}`);
       await expect(row).toHaveCount(0);
+      // Filters with no words list the newest records they name. Not necessarily THIS one: the employee fixture
+      // is shared, and other workers file pending leave as the same person while this runs, so the newest few can
+      // all be theirs. That the query answers with records at all is the claim; the words above pinned ours.
+      await search.fill("in:leave-requests status:pending");
+      await expect(employee.getByRole("option").filter({ hasText: /pending/i }).first()).toBeVisible({ timeout: 30_000 });
+      await expect(employee.getByText("No matches", { exact: false })).toHaveCount(0);
     } finally {
       const sup = await as("super");
       await purge(sup, path);

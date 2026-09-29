@@ -13,7 +13,7 @@ import { allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
 // the button tracks it, and that the paste ends up as that many records.
 test("the bulk dialog counts what it will create, from a quantity or a pasted list", async ({ as }) => {
   test.setTimeout(180_000);
-  const page = await as("hr");
+  const page = await as("it");
   const admin = await as("super"); // the hard purge is an admin's to make
   // A dev Worker restart mid-request on a busy lane, same rare hiccup documented elsewhere in this suite
   // (complianceRuleDelete.spec.ts et al.) - the retry below on the submit is what actually recovers from it.

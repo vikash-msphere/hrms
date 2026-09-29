@@ -1,0 +1,42 @@
+{
+  "role": "project_manager",
+  "label": "Project Manager",
+  "protected": true,
+  "provisioned": false,
+  "description": "Runs the work: manages every board (private ones included), its tasks and its sprints, and sets and agrees the goals of the people who report to them (their direct reports, `my-reports`, the Team goals page). Everything an employee holds, plus that. Decides no requests: leave, attendance, expenses, timesheets, reviews and rosters stay with the department manager and HR.",
+  "extends": "employee",
+  "relies_on": [
+    "The reporting line. `my-reports` is the people whose manager is the project manager (employees.manager), resolved per caller at decision time - so Team goals shows exactly the people assigned to them, and moving someone to another manager moves the access with them, with no rule to edit."
+  ],
+  "levels": [
+    { "area": "work", "pattern": "boards.**", "level": "write", "why": "Manages EVERY board, private ones included - by decision: create, rename, file under any department, share and archive (the verbs are below)." },
+    { "area": "work", "pattern": "sprints.**", "level": "write", "why": "Plan and run the sprints on any scrum board (activate and complete are the verbs below)." },
+    { "area": "work", "pattern": "cards.**", "level": "write", "why": "The tasks on every board, private ones included: managing a board means working what is on it." },
+    { "area": "performance", "pattern": "goals.my-reports.**", "level": "write", "why": "Set and edit the direct reports' goals - the Team goals page. A goal created for a report passes the owner-on-create gate because the project manager writes `goals.<their code>`." },
+    { "area": "performance", "pattern": "goal-templates.**", "level": "read", "why": "The goal blueprint catalogue, to set goals from it. Authoring the catalogue stays HR's." }
+  ],
+  "allow": [
+    { "area": "work", "pattern": "boards.**", "why": "Every board verb on every board: configure its shape, share it, read its access, restore it." },
+    { "area": "work", "pattern": "sprints.**", "why": "Activate and complete sprints, and restore one." },
+    { "area": "work", "pattern": "cards.**", "why": "Every card verb on every board - the same wildcard a board's own managers hold on it (domain/boardAccess.ts manage)." },
+    { "area": "performance", "pattern": "goals.my-reports.approve", "why": "Agree a goal a report proposed. A proposal is sent to the report's direct manager (services/goals.ts proposeGoal), which is the project manager - without this the goal-setting handshake would stall on someone told to act who cannot." },
+    { "area": "performance", "pattern": "goals.my-reports.requestChanges", "why": "Send a proposed goal back with the reason - the other half of agreeing it." },
+    { "area": "performance", "pattern": "goals.my-reports.setConfidence", "why": "The on-track / at-risk call on a report's goal." },
+    { "area": "performance", "pattern": "goals.my-reports.comment", "why": "Coach on a report's goal; the thread under a goal is where that happens." },
+    { "area": "performance", "pattern": "goals.my-reports.watch", "why": "Follow a report's goal." },
+    { "area": "performance", "pattern": "goals.my-reports.unwatch", "why": "Stop following a report's goal." },
+    { "area": "performance", "pattern": "goals.my-reports.similar", "why": "Overlapping goals across the reports, and what a report's goal should align to - decided against the project manager's own goal scope." },
+    { "area": "performance", "pattern": "goals.my-reports.suggestMeasure", "why": "A unit, start and target for a report's goal that has none, offered while agreeing it." },
+    { "area": "performance", "pattern": "goal-templates.*.apply", "why": "Stamp a blueprint onto the direct reports. The apply service checks write on `goals.<code>` for every person named, so it only reaches the project manager's own reports." }
+  ],
+  "deny": [],
+  "excluded": [
+    { "pattern": "<requests>.my-reports.approve | reject (leave, attendance corrections, overtime, remote work, late/early, assets, timesheets, expenses)", "why": "A project manager decides no requests. They stay with the department manager (`my-dept`) and HR." },
+    { "pattern": "goals.my-reports.setContributors", "lane": "allow", "why": "Crediting a share of a goal scores in the contributor's review, so it is a statement about somebody's performance - the department manager's call." },
+    { "pattern": "goals.my-dept.** | goals.*.**", "why": "Team goals are the direct reports'. A department or org-wide goal write would let a project manager rewrite goals of people they do not lead; an org whose PMs run cross-team goals grants the read in Access Management." },
+    { "pattern": "check-ins.my-reports.**", "why": "1:1s are the team lead's and the manager's; this role is about the work and its goals. An org whose PMs run 1:1s grants it in Access Management, or gives them team_lead." },
+    { "pattern": "reviews.my-reports.**", "why": "The performance review is the department manager's. A project manager's input reaches it through goal comments, and through 360 feedback when nominated." },
+    { "pattern": "projects.** write", "why": "The projects catalogue is what time is logged against, which feeds timesheets and pay; it stays HR's." },
+    { "pattern": "boards | cards | sprints .me | my-dept | my-reports | my-org .**", "why": "These tokens match by code, and boards, cards and sprints are coded by board (domain/boardAccess.ts). The org-wide rules above are the project manager's reach." }
+  ]
+}

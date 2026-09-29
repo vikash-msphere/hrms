@@ -19,7 +19,8 @@ import { etagOf } from "../http/serialize";
 import { idFromPath } from "./documentsCommon";
 import { getSettingValue } from "./settings";
 import { orgToday, orgTimezone, dayStartMs } from "./orgDay";
-import { localDay } from "../domain/attendance";
+import { localDay, localMinutes } from "../domain/attendance";
+import { clockOf } from "../domain/workSchedule";
 import {
   DEFAULT_ATS_CONFIG, type AtsConfig, isStage, nextStage, statusForStage, bandPointAmount,
   REQUISITION_STATUSES, type RequisitionStatus, canOfferTransition, type OfferStatus,
@@ -509,6 +510,10 @@ async function candidateNameForApplication(deps: Deps, applicationId: string): P
   const cand = (await deps.db.select({ n: schema.candidates.name }).from(schema.candidates).where(eq(schema.candidates.uuid, app.c)).limit(1))[0];
   return cand?.n?.trim() || "the candidate";
 }
+// "4 Aug 2026, 6:30 PM" on the org's clock, for the interview notifications. The Worker's own `toLocaleString()`
+// is en-US in UTC with seconds, which put an IST 3 PM interview at "8/4/2026, 9:30:00 AM".
+const interviewWhen = (ms: number, tz: string): string =>
+  `${new Intl.DateTimeFormat("en-GB", { timeZone: tz, day: "numeric", month: "short", year: "numeric" }).format(ms)}, ${clockOf(localMinutes(ms, tz))}`;
 const parseIdList = (json: string | null): string[] => { try { return (JSON.parse(json ?? "[]") as string[]).filter((x) => typeof x === "string"); } catch { return []; } };
 
 export async function createInterview(deps: Deps, actor: AppUser, input: InterviewInput, id?: string) {
@@ -534,7 +539,7 @@ export async function createInterview(deps: Deps, actor: AppUser, input: Intervi
   await audit(deps, actor, "interview.create", "interviews", row.uuid, createdMeta(row, "interviews"), row);
   // Notify each interviewer they're scheduled (with the candidate + time).
   const candName = await candidateNameForApplication(deps, applicationId);
-  const when = row.scheduledStart ? ` on ${new Date(row.scheduledStart).toLocaleString()}` : "";
+  const when = row.scheduledStart ? ` on ${interviewWhen(+new Date(row.scheduledStart), await orgTimezone(deps))}` : "";
   for (const iv of parseIdList(row.interviewerIds).filter((x) => x !== actor.employeeId))
     await notify(deps, { recipient: iv, type: "recruiting.interview_scheduled", title: "Interview scheduled", body: `${title} with ${candName}${when}.`, link: "interviews", subject: `interviews/${row.uuid}`, action: "respond", actorId: actor.employeeId });
   await emitInterviewEvent(deps, actor, "interview.scheduled", row);
@@ -561,7 +566,7 @@ export async function updateInterview(deps: Deps, actor: AppUser, id: string, pa
   const targets = new Set([...(timeChanged ? current : []), ...added].filter((x) => x !== actor.employeeId));
   if (targets.size && updated.applicationId) {
     const candName = await candidateNameForApplication(deps, updated.applicationId);
-    const when = updated.scheduledStart ? ` on ${new Date(updated.scheduledStart).toLocaleString()}` : "";
+    const when = updated.scheduledStart ? ` on ${interviewWhen(+new Date(updated.scheduledStart), await orgTimezone(deps))}` : "";
     for (const iv of targets)
       await notify(deps, { recipient: iv, type: "recruiting.interview_scheduled", title: timeChanged ? "Interview rescheduled" : "Added to an interview", body: `${updated.title} with ${candName}${when}.`, link: "interviews", subject: `interviews/${id}`, action: "respond", actorId: actor.employeeId });
   }

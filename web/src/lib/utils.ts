@@ -2,6 +2,7 @@ import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { dateFormat, numberFormat } from "./intl";
 import { daysBetweenYmd, todayStr } from "./orgDay";
+import { clockOf, minOfDay } from "../../../src/domain/workSchedule";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -123,6 +124,38 @@ export function formatDate(value?: string | null): string {
   if (isNaN(d.getTime())) return value;
   return dateFormat(DATE_LOCALE, dateOnly ? DATE_OPTS_UTC : DATE_OPTS).format(d);
 }
+
+// Times are pinned too, and always 12-hour. Left to the viewer's locale, a browser set to UK English or most of
+// Europe drew "18:30" on the lock screen and in every list, beside the "6:30 PM" attendance has always shown.
+// en-US rather than DATE_LOCALE: en-GB with `hour12` writes "6:30 pm", and every other time in the app is
+// "6:30 PM". A timestamp keeps the viewer's zone, as `formatDate` does for one.
+const TIME_LOCALE = "en-US";
+const TIME_OPTS: Intl.DateTimeFormatOptions = { hour: "numeric", minute: "2-digit", hour12: true };
+const DAY_OPTS: Intl.DateTimeFormatOptions = { weekday: "short", day: "numeric", month: "short" };
+
+/** "6:30 PM" - the time of an instant. */
+export function formatTime(value: string | number | Date): string {
+  const d = value instanceof Date ? value : new Date(value);
+  return isNaN(d.getTime()) ? "" : dateFormat(TIME_LOCALE, TIME_OPTS).format(d);
+}
+
+/** "4 Aug 2026, 6:30 PM" - an instant with its date, in the same date format as `formatDate`. */
+export function formatDateTime(value?: string | null): string {
+  if (!value) return "-";
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return value;
+  return `${dateFormat(DATE_LOCALE, DATE_OPTS).format(d)}, ${formatTime(d)}`;
+}
+
+/** "Tue 4 Aug, 6:30 PM" - a slot in the days ahead, where the weekday matters more than the year. */
+export function formatDayTime(value: string): string {
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return value;
+  return `${dateFormat(DATE_LOCALE, DAY_OPTS).format(d)}, ${formatTime(d)}`;
+}
+
+/** "6:30 PM" - a stored wall-clock "HH:MM" (a shift's start, the org's shift end), which has no zone. */
+export const formatHHMM = (hhmm?: string | null): string => (hhmm ? clockOf(minOfDay(hhmm)) : "");
 
 /** A file size a person can read: "812 B", "44 KB", "2.1 MB". Null for nothing/zero, so callers can skip it. */
 export function formatBytes(n?: number): string | null {

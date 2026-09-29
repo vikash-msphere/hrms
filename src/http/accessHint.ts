@@ -48,7 +48,7 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   // modal can grant it by name.
   "leave-requests": ["update", "delete", "approve", "reject", "cancel", "upload", "download", "importHistory"],
   goals: ["update", "delete", "updateProgress", "comment", "setContributors", "watch", "unwatch", "similar", "suggestMeasure"],
-  boards: ["update", "delete", "configure", "metrics", "duplicates", "narrate"],
+  boards: ["update", "delete", "configure", "share", "sharing", "metrics", "duplicates", "narrate"],
   cards: ["update", "delete", "move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo", "promoteTodo", "watch", "unwatch", "triage", "flow", "suggestGoal", "suggestSteps"],
   sprints: ["update", "delete", "activate", "complete"],
   "review-cycles": ["update", "delete", "launch", "enroll", "close", "reopen"],
@@ -149,6 +149,8 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "updateProgress", // move a goal's progress without full edit rights (goals)
   "setContributors", // credit a share of a goal to the people who delivered it (goals)
   "configure", "metrics", // kanban board config (columns/WIP/policies/lanes) + flow analytics (boards)
+  "share", // who may see and work a board: its visibility and sharing list (boards)
+  "sharing", // read a board's sharing, names included, and who manages it through its department (boards)
   "duplicates", // the open cards a nightly sweep found to be the same work filed twice (boards)
   "move", "block", "unblock", "assign", "prioritize", "comment", // kanban card actions (cards)
   "addTodos", "toggleTodo", "removeTodo", // card checklist (cards; tickets use the same verbs)

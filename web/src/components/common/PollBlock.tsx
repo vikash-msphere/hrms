@@ -1,8 +1,8 @@
 import { Check } from "lucide-react";
-import { cn, relativeFuture } from "@/lib/utils";
+import { cn, formatDateTime, relativeFuture } from "@/lib/utils";
 import type { Announcement } from "@/types";
 
-const dateTime = (iso?: string | null) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "");
+const dateTime = (iso?: string | null) => (iso ? formatDateTime(iso) : "");
 
 // A board poll: its options with anonymous tallies, and voting. Results (bars + counts) are revealed only
 // after the viewer votes, once the poll closes, or when they can't vote - so a tally never biases an open

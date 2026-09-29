@@ -9,7 +9,7 @@ import { useInfiniteScroll } from "@/hooks/useInfiniteScroll";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useKudosLevels, useKudosCategories } from "@/lib/kudosLevels";
-import { cn, colorFromString, formatDate, idOf, relativeFuture } from "@/lib/utils";
+import { cn, colorFromString, formatDate, formatDateTime, idOf, relativeFuture } from "@/lib/utils";
 import { todayStr, thisMonthStr } from "@/lib/orgDay";
 import type { Announcement, Department, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -60,7 +60,7 @@ const FEED_PAGE_SIZE = 20;
 const LONG_BODY_CHARS = 700;
 
 // Exact date + time, for the hover tooltip.
-const dateTime = (iso?: string | null) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "");
+const dateTime = (iso?: string | null) => (iso ? formatDateTime(iso) : "");
 
 // Compact relative time ("just now", "5m ago", "3h ago", "2d ago", "3w ago"); past ~a month it falls back to
 // the absolute date so old items don't read "52w ago".

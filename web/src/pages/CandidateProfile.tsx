@@ -3,7 +3,7 @@ import { ArrowLeft, Mail, Phone, Download, UserCheck, CalendarClock, FileSignatu
 import { download } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useResource } from "@/hooks/useResource";
-import { formatDate, idOf } from "@/lib/utils";
+import { formatDate, formatDateTime, idOf } from "@/lib/utils";
 import { useMoney } from "@/lib/org";
 import { navigate } from "@/router";
 import type { Application, Candidate, Employee, Interview, JobRequisition, Me, Offer, Referral } from "@/types";
@@ -40,7 +40,7 @@ const OFFER_STATUS: Record<string, { label: string; variant: BadgeVariant }> = {
   rescinded: { label: "Rescinded", variant: "muted" },
 };
 const meta = (m: Record<string, { label: string; variant: BadgeVariant }>, s: string) => m[s] ?? { label: s, variant: "outline" as BadgeVariant };
-const fmtWhen = (iso?: string) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "");
+const fmtWhen = (iso?: string) => (iso ? formatDateTime(iso) : "");
 
 export default function CandidateProfile({ id }: { id: string; me: Me }) {
   // ONE candidate's page, so the reads here are narrowed to that candidate rather than pulling a page of each

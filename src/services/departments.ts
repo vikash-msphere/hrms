@@ -8,6 +8,7 @@ import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { moveDepartment } from "./codeCascade";
+import { departmentSubtree, syncBoardsUnder } from "./boardShares";
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lifecycle";
@@ -76,6 +77,10 @@ export async function updateDepartment(deps: Deps, actor: AppUser, id: string, p
   const version = moved ? (await deps.db.select().from(schema.departments).where(eq(schema.departments.uuid, id)).limit(1))[0] ?? row : row;
   const updated = await updateAtVersion(deps, schema.departments, "department", version, set);
   await audit(deps, actor, "department.update", "departments", id, diffMeta(row, updated, set, "departments"), updated);
+  // A department's managers manage the boards filed under it AND under every department below it
+  // (services/boardShares.ts), so a change of managers, or of where the department sits, moves board access
+  // across the whole subtree.
+  if ((has("managers") && updated.managerIds !== row.managerIds) || moved) await syncBoardsUnder(deps, actor, await departmentSubtree(deps, id));
   return updated;
 }
 

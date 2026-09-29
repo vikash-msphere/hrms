@@ -3,6 +3,7 @@ import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import * as schema from "../db/schema";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
+import type { DASHBOARD_SUMMARY_KPIS, DashboardSummaryKey } from "../domain/dashboardSummary";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { orgToday, dayStartMs } from "./orgDay";
@@ -57,9 +58,9 @@ const cond = (c: SQL) => sql<number>`coalesce(sum(case when ${c} then 1 else 0 e
 const t = schema;
 
 // The registry lives in registry() below: `value` is the card's number; `extra` is the one companion number
-// its hint shows (documented per key). Every collection named here must appear in
-// DASHBOARD_SUMMARY_COLLECTIONS (domain) for the middleware to scope it.
-function def(key: string, collection: string, build: (scope: ListScope, ctx: Ctx) => unknown): AggDef {
+// its hint shows (documented per key). The key and its collection are typed against DASHBOARD_SUMMARY_KPIS
+// (domain), which the middleware scopes by and the SPA gates its row fallback by.
+function def<K extends DashboardSummaryKey>(key: K, collection: (typeof DASHBOARD_SUMMARY_KPIS)[K], build: (scope: ListScope, ctx: Ctx) => unknown): AggDef {
   return { key, collection, build: (scope, ctx) => ({ sql: build(scope, ctx) }) };
 }
 

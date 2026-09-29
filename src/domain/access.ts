@@ -8,6 +8,7 @@ import type { Grant, Level, SelfContext } from "./permissions";
 import { isUnder } from "./codes";
 import { isPublicState, SUBRESOURCE_BODY, type StateRule } from "./manifests";
 import { COLLECTIONS } from "./collections";
+import { BOARD_NAMESPACES } from "./boardAccess";
 import type { AppUser } from "../env";
 
 // The matching rule itself lives in domain/capabilityMatch.ts - a dependency-free leaf the SPA imports too, so
@@ -183,9 +184,22 @@ export function subjectScopes(
   // chain, `<code>-*` when they are under a granted branch - each on the real hierarchy, not on a guess.
   const owned = (collection: string, method: string) =>
     decide(grant, resolveRequest(method, `/v1/${collection}/${subjectCode}-${SCOPE_PROBE_LEAF}`), self).allow;
+  // BOARD-CODED rows are the exception: a board, its cards and its sprints are filed under the BOARD's code
+  // (domain/boardAccess.ts), so no row of theirs is ever under a person's code and the probe above matches
+  // nothing for anybody. Which of this person's tasks the caller sees is which boards the caller sees, and
+  // the list decides that per row; what is asked here is whether any board's rows reach the caller at all -
+  // every board (an unscoped grant) or some board's subtree (a visibility segment, or one board's share).
+  const onBoards = (collection: string, method: string) => {
+    const at = (code: string) => decide(grant, resolveRequest(method, `/v1/${collection}/${code}`), self).allow;
+    if (at(SCOPE_PROBE_CODE)) return true;
+    const actor = { grant, employeeCode: self.employeeCode };
+    return actorSubtrees(actor, collection, undefined, self).some((prefix) => at(`${prefix}-${SCOPE_PROBE_LEAF}`));
+  };
+  const boardCoded: ReadonlySet<string> = new Set(BOARD_NAMESPACES);
   for (const collection of collections) {
-    if (owned(collection, "GET")) read.push(collection);
-    if (owned(collection, "PATCH")) write.push(collection);
+    const reaches = boardCoded.has(collection) ? onBoards : owned;
+    if (reaches(collection, "GET")) read.push(collection);
+    if (reaches(collection, "PATCH")) write.push(collection);
     // The per-entity trail, the second and independent gate. Scope sits at token[1] with the collection as the
     // sub-resource (middleware/authz.ts), so it is asked directly rather than as a REST path.
     if (decide(grant, { kind: "standard", resource: `activity.${subjectCode}.${collection}`, level: "read" }, self).allow) {

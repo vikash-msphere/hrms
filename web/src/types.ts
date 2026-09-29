@@ -105,7 +105,7 @@ export type Ticket = Wire<"ticket">;
 
 // A row in the `ticket-categories` settings blob: a category, its default auto-assignee, and `members` -
 // extra employees who can see every ticket in the category (the basis of category-based visibility).
-export type TicketCategory = { key: string; name: string; assignee?: string | null; members?: string[]; department?: string | null };
+export type TicketCategory = { key: string; name: string; assignee?: string | null; members?: string[]; department?: string | null; roles?: string[] };
 
 // A predefined ticket checklist - a first-class, access-controlled collection. Visibility (who sees it in the
 // "add from checklist" pickers) is governed by its own read grant via the ACL.

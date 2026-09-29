@@ -19,10 +19,12 @@ type Props = {
   /** Show the on-screen number pad (the lock screen always; settings on touch screens). */
   keypad?: boolean;
   autoFocus?: boolean;
+  /** Hold focus on the input for as long as it is enabled (the lock screen, where it is the only thing to type into). */
+  keepFocus?: boolean;
   tone?: "default" | "success" | "error";
 };
 
-export function PinPad({ length, value, onChange, onComplete, label, disabled, shake = 0, keypad, autoFocus, tone = "default" }: Props) {
+export function PinPad({ length, value, onChange, onComplete, label, disabled, shake = 0, keypad, autoFocus, keepFocus, tone = "default" }: Props) {
   const inputRef = React.useRef<HTMLInputElement>(null);
   const id = React.useId();
 
@@ -45,6 +47,39 @@ export function PinPad({ length, value, onChange, onComplete, label, disabled, s
   React.useEffect(() => {
     if (autoFocus && !disabled) inputRef.current?.focus({ preventScroll: true });
   }, [autoFocus, disabled]);
+
+  // With `keepFocus`, a click anywhere on the page leaves the focus on the input (buttons still get their
+  // click), and focus that falls to nothing comes back: a blur to the page body, the window or tab coming back
+  // to the front, or a dialog of the unmounted app handing focus back to a trigger that is gone. Focus that
+  // moves to a real control (Tab to "Forgot PIN?") is left there.
+  React.useEffect(() => {
+    if (!keepFocus || disabled) return;
+    const input = inputRef.current;
+    if (!input) return;
+    const grab = () => {
+      if (document.visibilityState === "visible" && document.activeElement !== input) input.focus({ preventScroll: true });
+    };
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.target === input) return;
+      e.preventDefault();
+      grab();
+    };
+    const onFocusOut = (e: FocusEvent) => {
+      if (!e.relatedTarget) requestAnimationFrame(grab);
+    };
+    const onVisible = () => grab();
+    grab();
+    document.addEventListener("mousedown", onMouseDown);
+    input.addEventListener("focusout", onFocusOut);
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      input.removeEventListener("focusout", onFocusOut);
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [keepFocus, disabled]);
 
   return (
     <div className="flex flex-col items-center gap-6">

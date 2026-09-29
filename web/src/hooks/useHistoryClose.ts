@@ -43,6 +43,15 @@ function useHistoryClose(node: HTMLElement | null, enabled: boolean) {
       // form, re-raises the discard prompt they just dismissed). See lib/dialogHistory.ts#isSelfPop.
       if (isSelfPop()) return;
       pushed.current = false;
+      // Already closing: closed from the UI and still mounted through its exit animation, with its entry not
+      // yet dropped (that happens at unmount). The reader's Back is not for this layer - it is on its way out -
+      // so it is for the page, and the entry it landed on is merely ours, left over. Carry the press on one more
+      // step rather than swallow it: swallowed, a Back pressed straight after confirming a decision left the
+      // reader on the same page, and pressing it again was the only way off.
+      if (nodeRef.current?.getAttribute("data-state") === "closed") {
+        window.history.back();
+        return;
+      }
       popping.current = true;
       // The layer's own Close button when it has one, and Escape only when it does not. Both reach the same
       // onOpenChange(false), guards included - but Escape goes to whichever dismissable layer is TOPMOST, and

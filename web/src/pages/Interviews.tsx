@@ -3,7 +3,7 @@ import { AlertTriangle, CalendarClock, CalendarPlus, ChevronLeft, ChevronRight, 
 import { create, patch, remove, invoke, get, getAllPages } from "@/api";
 import type { ListResponse } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { cn, idOf } from "@/lib/utils";
+import { cn, formatDateTime, formatDayTime, formatTime, idOf } from "@/lib/utils";
 import { todayStr, addDaysYmd, orgDayOf } from "@/lib/orgDay";
 import { isConflict } from "@/lib/formError";
 import { navigate, recordUrl, setRouteRecord } from "@/router";
@@ -52,7 +52,7 @@ const STATUS_META: Record<string, { label: string; variant: Variant }> = {
   done: { label: "Done", variant: "success" },
   cancelled: { label: "Cancelled", variant: "destructive" },
 };
-const fmtWhen = (iso?: string) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "Not scheduled");
+const fmtWhen = (iso?: string) => (iso ? formatDateTime(iso) : "Not scheduled");
 
 export default function Interviews({ me, openId }: { me: Me; openId?: string }) {
   const { rows, state, error, reload } = useCollection<Interview>("interviews");
@@ -346,8 +346,8 @@ function nextHourSlot() {
   d.setHours(d.getHours() + 1);
   return { start: d.toISOString(), end: new Date(d.getTime() + 3_600_000).toISOString() };
 }
-const fmtSlot = (iso: string) => new Date(iso).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
-const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { timeStyle: "short" });
+const fmtSlot = formatDayTime;
+const fmtTime = formatTime;
 
 function InterviewDialog({ interview, defaultApplication, apps, interviews, candName, reqName, hiringManagerFor, employees, me, onClose, onSaved }: {
   interview: Interview | null;
