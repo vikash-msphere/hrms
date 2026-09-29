@@ -16,6 +16,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
+import { useSelfApprovalAllowed } from "@/lib/approvals";
 
 // One pending request, rendered the same wherever a decision can be made: the unified Approvals inbox, and the
 // per-feature pages that surface their own slice of the queue (Leaves' "Pending your decision" band). Shared so
@@ -71,30 +72,10 @@ export function ApprovalRow({
   checked?: boolean;
   onCheckedChange?: () => void;
 }) {
-  const { toast } = useToast();
-  const confirm = useConfirm();
-  const [busy, setBusy] = useState(false);
-  const can = row.access?.can ?? [];
-  const ref = { collection, objectPath: row.path, can };
   const waited = waitingDays(row.create_time);
   // The request itself, as the requester's record lists it - not the collection's page, which is the
   // decider's OWN requests.
   const openRoute = requestRoute(collection, row.path, employeeId, selfEmployeeId, !!decidedState);
-  // Approving from an inbox row is one click next to a dozen identical rows, and it notifies the requester
-  // and commits whatever they asked for. Rejection already goes through its own dialog (it takes a note), so
-  // this is the half that was missing.
-  async function approve() {
-    if (!(await confirmDecision(confirm, "approve", `${name}'s ${kind?.label?.toLowerCase() ?? "request"}`))) return;
-    setBusy(true);
-    try {
-      await invoke(`${collection}/${idOf(row.path)}`, "approve", row.etag);
-      toast({ title: "Approved", variant: "success" });
-      onApproved(row.path);
-    } catch (e) {
-      toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" });
-      setBusy(false);
-    }
-  }
   const waitLabel = waited === 0 ? "Today" : `Waiting ${waitingLabel(waited)}`;
   return (
     // One row on a tablet and up. On a phone the action cluster alone (activity, open, approve, reject) wants
@@ -151,24 +132,104 @@ export function ApprovalRow({
             <ExternalLink className="h-4 w-4" /> <span className="hidden sm:inline">Open</span>
           </Button>
         )}
-        {/* The flex-1 lives on a wrapper, not on AccessAction: that component renders its children through
-            AccessTarget and takes no class of its own. */}
-        {!decidedState && can.includes("approve") && (
-          <span className="flex-1 sm:flex-none">
-            <AccessAction {...ref} verb="approve" label="Approve">
-              <Button size="sm" variant="success" loading={busy} onClick={approve} className="w-full coarse:h-10 sm:w-auto"><Check className="h-4 w-4" /> Approve</Button>
-            </AccessAction>
-          </span>
-        )}
-        {!decidedState && can.includes("reject") && (
-          <span className="flex-1 sm:flex-none">
-            <AccessAction {...ref} verb="reject" label="Reject">
-              <Button size="sm" variant="outline" disabled={busy} onClick={onRejectClick} className="w-full coarse:h-10 sm:w-auto"><X className="h-4 w-4" /> Reject</Button>
-            </AccessAction>
-          </span>
+        {!decidedState && (
+          <DecisionButtons
+            collection={collection}
+            row={row}
+            what={`${name}'s ${kind?.label?.toLowerCase() ?? "request"}`}
+            onApproved={onApproved}
+            onRejectClick={onRejectClick}
+            wrapClassName="flex-1 sm:flex-none"
+            buttonClassName="w-full coarse:h-10 sm:w-auto"
+          />
         )}
       </div>
     </div>
+  );
+}
+
+// The state each collection's request waits for a decision in. Most say PENDING on `state`; timesheets and company
+// expenses say SUBMITTED, and loans keep theirs on `status` - the same values lib/approvals.tsx queues on.
+const AWAITING: Record<string, { field: "state" | "status"; value: string }> = {
+  "time-entries": { field: "status", value: "SUBMITTED" },
+  loans: { field: "status", value: "PENDING" },
+  expenses: { field: "state", value: "SUBMITTED" },
+};
+export function isAwaitingDecision(collection: string, row: object): boolean {
+  const a = AWAITING[collection] ?? { field: "state", value: "PENDING" };
+  return String((row as Record<string, unknown>)[a.field] ?? "").toUpperCase() === a.value;
+}
+
+// Approve / Reject on ONE request, wherever it is listed: the inbox row above, and the requester's own record
+// (components/common/EmployeeRequests.tsx, the profile's leave history, the asset card). Shared so every surface
+// asks the same confirmation and gates on the same things: the request is still awaiting a decision, and the
+// row's own `access.can` names the verb (hidden otherwise, never disabled). Reject only calls back - its dialog
+// (RejectDialog, below) collects the note and belongs to the caller.
+//
+// `own`: the viewer's own request. The server refuses deciding one's own in one's favour unless the org allows
+// self-approval (services/decisionGuard.ts), so the buttons are not offered there either.
+export function DecisionButtons({
+  collection,
+  row,
+  what,
+  own = false,
+  onApproved,
+  onRejectClick,
+  wrapClassName,
+  buttonClassName,
+}: {
+  collection: string;
+  row: Approvable;
+  /** What is being decided, for the confirmation ("Asha's remote work"). */
+  what: string;
+  own?: boolean;
+  onApproved?: (path: string) => void;
+  onRejectClick: () => void;
+  // The flex sizing lives on a wrapper, not on AccessAction: that component renders its children through
+  // AccessTarget and takes no class of its own.
+  wrapClassName?: string;
+  buttonClassName?: string;
+}) {
+  const { toast } = useToast();
+  const confirm = useConfirm();
+  const [busy, setBusy] = useState(false);
+  const allowSelf = useSelfApprovalAllowed();
+  const can = row.access?.can ?? [];
+  const ref = { collection, objectPath: row.path, can };
+  // Approving is one click next to a dozen identical rows, and it notifies the requester and commits whatever
+  // they asked for. Rejection already goes through its own dialog (it takes a note), so this is the half that
+  // was missing.
+  async function approve() {
+    if (!(await confirmDecision(confirm, "approve", what))) return;
+    setBusy(true);
+    try {
+      await invoke(`${collection}/${idOf(row.path)}`, "approve", row.etag);
+      toast({ title: "Approved", variant: "success" });
+      onApproved?.(row.path);
+    } catch (e) {
+      toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (!isAwaitingDecision(collection, row) || (own && !allowSelf)) return null;
+  return (
+    <>
+      {can.includes("approve") && (
+        <span className={wrapClassName}>
+          <AccessAction {...ref} verb="approve" label="Approve">
+            <Button size="sm" variant="success" loading={busy} onClick={approve} className={buttonClassName}><Check className="h-4 w-4" /> Approve</Button>
+          </AccessAction>
+        </span>
+      )}
+      {can.includes("reject") && (
+        <span className={wrapClassName}>
+          <AccessAction {...ref} verb="reject" label="Reject">
+            <Button size="sm" variant="outline" disabled={busy} onClick={onRejectClick} className={buttonClassName}><X className="h-4 w-4" /> Reject</Button>
+          </AccessAction>
+        </span>
+      )}
+    </>
   );
 }
 

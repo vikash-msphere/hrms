@@ -106,7 +106,9 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   { key: "ticket-checklists", title: "Ticket checklists", desc: "Reusable task lists an assignee can drop onto a ticket.", group: "Comms & support", icon: ListTodo, keywords: ["support tasks", "todo"], target: { collection: "ticket-checklists", label: "Ticket checklists" } },
 
   // Access & security
-  { key: "users", title: "Users", desc: "Sign-in accounts and the roles each person holds.", group: "Access & security", icon: Users, perm: "users.write", keywords: ["accounts", "login", "assign role"], target: { collection: "users", label: "Users" } },
+  // Also whoever may only reset a forgotten app PIN (HR, by default): the lock screen sends people to this panel for
+  // it, and RolesPanel hides the account and role editing from anyone without `users.write`.
+  { key: "users", title: "Users", desc: "Sign-in accounts and the roles each person holds.", group: "Access & security", icon: Users, anyPerm: ["users.write", "users.resetPin"], keywords: ["accounts", "login", "assign role", "reset pin", "app lock", "forgot pin"], target: { collection: "users", label: "Users" } },
   { key: "sign-in", title: "Sign-in", desc: "What the app takes from someone's Google account when they sign in.", group: "Access & security", icon: LogIn, keywords: ["google", "oauth", "sso", "login", "profile photo", "picture", "avatar", "face"], target: { collection: "settings", objectPath: "settings/sign-in", label: "Sign-in" } },
   { key: "roles", title: "Roles", desc: "Create and rename the roles permissions attach to.", group: "Access & security", icon: Shield, perm: "users.write", target: { collection: "roles", label: "Roles" } },
   { key: "permissions", title: "Permissions", desc: "What each role can see and do, per collection.", group: "Access & security", icon: KeyRound, perm: "users.write", keywords: ["grants", "access rules", "capabilities"], target: { collection: "access-rules", label: "Roles & permissions" } },

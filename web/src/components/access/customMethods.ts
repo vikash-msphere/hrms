@@ -21,7 +21,7 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   "cron-runs": ["run"],
   "leave-requests": ["approve", "reject", "cancel", "upload", "download", "importHistory"],
   goals: ["updateProgress", "comment", "setContributors", "watch", "unwatch", "similar", "suggestMeasure"],
-  boards: ["configure", "metrics", "duplicates", "narrate"],
+  boards: ["configure", "share", "sharing", "metrics", "duplicates", "narrate"],
   cards: ["move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo", "promoteTodo", "watch", "unwatch", "triage", "flow", "suggestGoal", "suggestSteps"],
   sprints: ["activate", "complete"],
   "review-cycles": ["launch", "enroll", "close", "reopen"],
@@ -79,6 +79,48 @@ export const STANDARD_METHODS = new Set(["update", "delete"]);
 // Applicable custom methods for a collection (empty when none).
 export function customMethodsFor(collection: string): string[] {
   return CUSTOM_METHODS[collection] ?? [];
+}
+
+// The custom methods that act on a COLLECTION as a whole rather than on one of its records:
+// `POST /v1/access-rules:requestAccess`, not `POST /v1/leave-requests/<id>:approve`. Such a method is decided on
+// the two-token key `<collection>.<verb>`, which has no record in it for a `me`, `my-dept` or object token to
+// match, so only an org-wide rule (`<collection>.**.<verb>`) reaches it. That decides two things here: the rule
+// sentence names no records ("Everyone can use the "Request access" method", not "...on every access rule in
+// the workspace"), and the ACL modal offers no narrower scope, because a narrower rule is written and never used.
+// Derived from the contract - exactly the openapi.yaml paths of the form `/v1/<collection>:<verb>` - and held
+// to it by test/customMethodsDrift.test.ts. Covers every such method, granted from the modal or not.
+export const COLLECTION_METHODS: Readonly<Record<string, readonly string[]>> = {
+  "access-rules": ["approve", "clone", "preview", "reject", "requestAccess", "review", "scopeCounts"],
+  announcements: ["draft", "giveKudos", "markAllRead", "post"],
+  assets: ["batchCreate"],
+  batch: ["run"],
+  bonuses: ["award"],
+  "card-transactions": ["import", "reconcile"],
+  cards: ["draft"],
+  compensation: ["increment", "preview", "reapplySplit"],
+  "cron-runs": ["run"],
+  employees: ["setTrackedFrom", "upcomingCelebrations"],
+  export: ["record"],
+  goals: ["draft"],
+  "job-requisitions": ["draft"],
+  "leave-adjustments": ["importOpenings"],
+  "leave-requests": ["importHistory"],
+  moderation: ["decide", "hide", "unhide"],
+  notifications: ["markAllRead"],
+  operations: ["clearCache"],
+  "payroll-openings": ["importOpenings"],
+  payslips: ["previewTemplate"],
+  "people-analytics": ["narrate"],
+  "personal-documents": ["generateLetter", "previewLetter"],
+  reviews: ["draft"],
+  search: ["ask", "feedback", "vocabulary"],
+  suggestions: ["draft"],
+  "table-fields": ["describe"],
+};
+
+/** Does `<collection>:<verb>` act on the collection as a whole, with no record to scope a rule to? */
+export function isCollectionMethod(collection: string, verb: string | undefined): boolean {
+  return !!verb && (COLLECTION_METHODS[collection]?.includes(verb) ?? false);
 }
 
 // Is `verb` a custom method (gets its own manage icon) rather than a standard method covered by the level?

@@ -243,7 +243,7 @@ export type Variables = {
   // handler can do per-field read redaction off the SAME code the decision used - no second uuid->code lookup.
   itemCode: string | null;
   // The OWNER's employee code for that item, when the collection is flat-coded with an owner column (assets,
-  // users - services/codeCascade.ts OWNER_COLUMN_COLLECTIONS). It is the second key the decision was made on
+  // cards, users - lib/authzResolve.ts OWNER_COLUMN_COLLECTIONS). It is the second key the decision was made on
   // (domain/permissions.ts Resolved#ownerResource), carried so the access hint can be computed on the same pair
   // and never advertises less than the request itself allows. Null everywhere else.
   itemOwnerCode: string | null;

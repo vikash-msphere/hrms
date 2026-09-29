@@ -6,7 +6,7 @@ import type { AppEnv, AppUser } from "../env";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { collectionRoutes } from "../http/collectionRoute";
-import { listEmployees, getEmployee, createEmployee, updateEmployee, removeEmployee, setBio } from "../services/employees";
+import { listEmployees, getEmployee, createEmployee, updateEmployee, removeEmployee, disableEmployee, enableEmployee, setBio } from "../services/employees";
 import { enrollDefaultBenefits } from "../services/benefitEnrollments";
 import { getBankDetails, setBankDetails } from "../services/bankDetails";
 import { getIdentityDetails, setIdentityDetails } from "../services/identityDetails";
@@ -124,6 +124,10 @@ const records = collectionRoutes<EmployeeWrite, typeof schema.employees>({
   },
   list: (c, page) => listEmployees(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q"), page.deletedOnly),
   verbs: {
+    // The lifecycle pair, answered here rather than by the generic column write: disabling an employee also
+    // switches off their login, and enabling one reverses an exit (services/employees.ts).
+    disable: { run: (deps, user, id) => disableEmployee(deps, user, id) },
+    enable: { run: (deps, user, id) => enableEmployee(deps, user, id) },
     // Profile photo: media + clear (no standard equivalent for a binary upload/download).
     // The profile photo, answered as an IMAGE the browser can cache - every avatar in the app is an `<img>`
     // pointed at this (web/src/components/common/PhotoAvatar.tsx), which is why it takes GET as well as POST.

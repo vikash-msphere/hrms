@@ -1,0 +1,46 @@
+{
+  "role": "it_admin",
+  "label": "IT Admin",
+  "protected": true,
+  "provisioned": false,
+  "description": "Runs IT: the asset register (assets, their categories and tag policy, stocktakes), the asset desk (deciding requests and handing the kit over), and the IT help-desk queue. An employee first (`extends: employee`). Tickets are reached per category, not by a role rule: a ticket category that names `it_admin` in its servicing roles shares each of its tickets with the role. No platform or security access - accounts, roles, access rules, API keys, audit and the governance settings stay super admin's.",
+  "extends": "employee",
+  "relies_on": [
+    "The ticket-categories setting. A category's `roles` list is what gives it_admin the IT queue: services/ticketShares.ts writes a per-ticket role rule (`tickets.<code>.**`, write plus every verb) for each ticket filed under it. The seeded `it` category names it_admin; an org that renames or removes that desk moves the queue with it."
+  ],
+  "levels": [
+    { "area": "workplace", "pattern": "assets.**", "level": "write", "why": "Maintains the asset register." },
+    { "area": "catalog", "pattern": "asset-categories.**", "level": "write", "why": "Maintains the kinds of asset, and the tag code each one prints." },
+    { "area": "workplace", "pattern": "asset-requests.**", "level": "read", "why": "Decides these org-wide and hands the kit over (verbs below)." },
+    { "area": "workplace", "pattern": "stocktakes.**", "level": "write", "why": "Inventory counts: the asset register being walked, by the administrator who maintains it." },
+    { "area": "workplace", "pattern": "ticket-checklists.**", "level": "read", "why": "The help-desk checklists, to pick one onto an IT ticket. Authoring them stays HR's." },
+    { "area": "settings", "pattern": "settings.asset-tags", "level": "write", "why": "IT setting: tag format, stickers, custody policy." }
+  ],
+  "allow": [
+    { "area": "workplace", "pattern": "assets.**", "why": "Every asset verb: verify, print and reissue tags, batch create, lifecycle and restore." },
+    { "area": "catalog", "pattern": "asset-categories.**", "why": "Every custom verb on asset categories, including lifecycle and restore." },
+    { "area": "workplace", "pattern": "stocktakes.**", "why": "Open a count, record what was found on the walk, close it (and restore one deleted)." },
+    { "area": "workplace", "pattern": "asset-requests.*.approve", "why": "Decides asset requests org-wide." },
+    { "area": "workplace", "pattern": "asset-requests.*.reject", "why": "Decides asset requests org-wide." },
+    { "area": "workplace", "pattern": "asset-requests.*.issue", "why": "Hand over the actual asset, which is what closes the request." }
+  ],
+  "deny": [],
+  "excluded": [
+    {
+      "pattern": "tickets.**",
+      "why": "A ticket's code is its requester's, so no scope token says 'IT tickets'. A role rule here would reach the HR and payroll desks too. The IT queue comes from the category's servicing roles instead (relies_on)."
+    },
+    {
+      "pattern": "users.** | roles.** | access-rules.** | policy.** | api-keys.** | audit.**",
+      "why": "Platform and security administration stays super admin's."
+    },
+    {
+      "pattern": "settings.access-approval | access-review | payroll-approval | sign-in | ai | attachments",
+      "why": "Governance switches are super admin's, so the people they restrain cannot turn them off."
+    },
+    {
+      "pattern": "settings.ticket-categories | ticket-workflow",
+      "why": "The help-desk catalogue decides which role services which desk, so it stays with HR: IT editing it could hand itself the HR queue."
+    }
+  ]
+}

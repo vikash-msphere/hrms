@@ -340,7 +340,8 @@ const goalWatcherRows = GOAL_WATCHERS.map(([goal, emp]) =>
 // on the working columns, work-type swimlanes) and a scrum board for product (sprints, swimlanes by assignee).
 // bootstrap.sql seeds an empty "General" board so a fresh org has somewhere to drop work; these carry the cards,
 // so the board view, the WIP chips, the sprint burndown and the flow analytics all have something to draw.
-// Board codes start at 02: `01` is the bootstrapped board, and `code` is UNIQUE.
+// Board codes start at ve-02: `ve-01` is the bootstrapped board, and `code` is UNIQUE. Both are in the
+// everyone-works-it segment (domain/boardAccess.ts); sprints and cards are coded under their board.
 type BoardDef = {
   uuid: string; code: string; name: string; description: string; prefix: string;
   mode: "kanban" | "scrum"; columns: typeof DEFAULT_BOARD_COLUMNS;
@@ -349,7 +350,7 @@ type BoardDef = {
   labels: { key: string; label: string; color: string }[];
 };
 const engBoard: BoardDef = {
-  uuid: nid(), code: "02", name: "Engineering delivery", description: "Platform work in flow. Swimlanes are the type of work; the WIP limits are the team's.",
+  uuid: nid(), code: "ve-02", name: "Engineering delivery", description: "Platform work in flow. Swimlanes are the type of work; the WIP limits are the team's.",
   prefix: "ENG", mode: "kanban", columns: DEFAULT_BOARD_COLUMNS, swimlaneMode: "custom",
   swimlanes: [{ key: "feature", label: "Feature" }, { key: "bug", label: "Bug" }, { key: "chore", label: "Chore" }, { key: "tech_debt", label: "Tech debt" }],
   labels: [
@@ -363,7 +364,7 @@ const engBoard: BoardDef = {
   ],
 };
 const prdBoard: BoardDef = {
-  uuid: nid(), code: "03", name: "Product delivery", description: "Two-week sprints. The product backlog is everything not yet pulled into one.",
+  uuid: nid(), code: "ve-03", name: "Product delivery", description: "Two-week sprints. The product backlog is everything not yet pulled into one.",
   prefix: "PRD", mode: "scrum", columns: DEFAULT_SCRUM_COLUMNS, swimlaneMode: "assignee", swimlanes: [],
   labels: [
     { key: "research", label: "Research", color: "#0d9488" },
@@ -379,8 +380,8 @@ const boardRows = BOARDS.map((b) =>
 
 // Sprints on the scrum board: one finished (so velocity has a data point) and one running.
 const SPRINTS: { key: string; code: string; name: string; goal: string; startInDays: number; endInDays: number; state: "planning" | "active" | "completed" }[] = [
-  { key: "s12", code: "01", name: "Sprint 12", goal: "Ship the onboarding checklist and the funnel dashboard.", startInDays: -28, endInDays: -13, state: "completed" },
-  { key: "s13", code: "02", name: "Sprint 13", goal: "First-run experience: empty states, guided tour, and the research behind them.", startInDays: -7, endInDays: 7, state: "active" },
+  { key: "s12", code: `${prdBoard.code}-001`, name: "Sprint 12", goal: "Ship the onboarding checklist and the funnel dashboard.", startInDays: -28, endInDays: -13, state: "completed" },
+  { key: "s13", code: `${prdBoard.code}-002`, name: "Sprint 13", goal: "First-run experience: empty states, guided tour, and the research behind them.", startInDays: -7, endInDays: 7, state: "active" },
 ];
 const sprintIds = new Map(SPRINTS.map((s) => [s.key, nid()]));
 const sprintRows = SPRINTS.map((s) =>
@@ -444,7 +445,6 @@ const cardIds = new Map<string, string>();
 for (const c of CARDS) cardIds.set(c.key, nid());
 const cardSeq: Record<string, number> = {};
 const cardRank: Record<string, number> = {};
-const ownedCardSeq: Record<string, number> = {};
 const cardRows: string[] = [];
 const moveRows: string[] = [];
 for (const c of CARDS) {
@@ -467,8 +467,8 @@ for (const c of CARDS) {
   const seq = (cardSeq[c.board.code] = (cardSeq[c.board.code] ?? 0) + 1);
   const rankKey = `${c.board.code}:${c.column}`;
   const rank = (cardRank[rankKey] = (cardRank[rankKey] ?? 0) + RANK_STEP);
-  const oseq = (ownedCardSeq[owner.code] = (ownedCardSeq[owner.code] ?? 0) + 1);
-  const code = `${owner.code}-${String(oseq).padStart(3, "0")}`;
+  // Coded under the board (domain/boardAccess.ts), leaf = the per-board sequence behind the task key.
+  const code = `${c.board.code}-${String(seq).padStart(3, "0")}`;
   cardRows.push(
     ` (${q(cardIds.get(c.key))},${q(code)},${q(c.board.uuid)},${seq},${q(c.board.prefix)},${c.sprint ? q(sprintIds.get(c.sprint)) : "NULL"},${q(owner.uuid)},${q(owner.deptUuid)},${q(c.column)},${c.lane ? q(c.lane) : "NULL"},${rank},${q(c.title)},${q(c.description ?? null)},${c.assignee == null ? "NULL" : q(employees[c.assignee]!.uuid)},${c.reporter == null ? "NULL" : q(employees[c.reporter]!.uuid)},${q(c.priority)},${q(JSON.stringify(c.labels))},'[]',${num(c.size)},${c.dueInDays == null ? "NULL" : NOW + c.dueInDays * DAY},${c.blocked ? 1 : 0},${q(c.blockReason ?? null)},${c.blockedBy ? q(cardIds.get(c.blockedBy)) : "NULL"},${c.goal ? q(goalIds.get(c.goal)) : "NULL"},${q(c.cadence ?? null)},NULL,${num(committed)},${num(started)},${num(delivered)},${created},${T0})`,
   );

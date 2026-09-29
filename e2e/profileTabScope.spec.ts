@@ -31,8 +31,8 @@ const EXPECTED: Record<string, { subject: Role; shown: string[]; hidden: string[
   payroll: {
     subject: "employee",
     // Payslips + compensation + `employees.*.tax.**`. Performance is here for ONE reason, and it is a grant
-    // rather than an accident: `cards.**` is deliberately all-breadth for everybody (grants.ts OWN_WORK - a
-    // board whose columns show only your own cards is a private to-do list), so the Tasks half is public.
+    // rather than an accident: every employee reads the tasks on the boards everyone works or sees
+    // (`cards.ve-*.**`, `cards.vr-*.**` - domain/boardAccess.ts), so the Tasks half is public.
     // Attendance is here for the requests, not the clock: payroll holds `overtime-requests.**` and
     // `late-early-requests.**` (they are paid and docked on), and those are listed on that tab - it is where the
     // approvals inbox opens one (lib/resourceRoute.ts `requestRoute`).

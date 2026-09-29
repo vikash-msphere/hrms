@@ -19,7 +19,7 @@ import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
 import { applyScope } from "./listScope";
 import { byIdChunks } from "../lib/dbBatch";
-import { SEARCH_INDEX, statusPropOf, type SearchEntry } from "../domain/searchIndex";
+import { SEARCH_INDEX, statusPropOf, statusValuesOf, type SearchEntry } from "../domain/searchIndex";
 import type { RedactionGate } from "../http/fieldAccess";
 import { aiEmbed, aiFeatureOn } from "./ai";
 import { parseVectorId } from "../lib/vector";
@@ -45,7 +45,8 @@ export type SearchHit = {
  * `semantic` is not a ranking detail - it changes which question the field gate has to ask of the row. See
  * the note in `narrowRedacted`.
  */
-// `exact`: found by its human key ("MS-12", `cardsByKey`), not by text - so there is no matched text to re-explain.
+// `exact`: found without matching text - by its human key ("MS-12", `cardsByKey`) or by the filters alone - so
+// there is no matched text to re-explain.
 type ScoredHit = SearchHit & { code: string | null; semantic?: boolean; exact?: boolean };
 
 /** The hit as the route returns it: the decision-time fields dropped, and HOW it was found kept as `related`. */
@@ -192,7 +193,8 @@ function scopePredicate(user: AppUser, collection: string, scope: ListScope): SQ
 }
 
 /** Run the search over the collections the middleware said this caller may list. Returns [] for a query under
- *  two characters, or when the caller may list nothing. */
+ *  two characters, or when the caller may list nothing - except a query of filters alone (no words, some
+ *  narrowing), which lists the newest records those filters name. */
 export async function globalSearch(
   deps: Deps,
   user: AppUser,
@@ -204,11 +206,12 @@ export async function globalSearch(
   narrowing: SearchNarrowing = {},
 ): Promise<SearchHit[]> {
   const q = rawQuery.trim();
-  if (q.length < MIN_QUERY || scopes.size === 0) return [];
-  // The org's own synonym groups ride beside the built-in ones (services/searchSynonyms.ts).
-  const synonyms = await orgSynonymGroups(deps);
-  const match = matchExpression(q, synonyms);
-  if (!match) return [];
+  // Filters with no words (`status:pending`, `in:tickets is:mine`) ask "which records are these", so they are
+  // answered by listing, newest first, rather than by matching text there is none of.
+  const narrowed = !!narrowing.collections?.length || narrowing.ownerId !== undefined || narrowing.after !== undefined
+    || narrowing.before !== undefined || narrowing.status !== undefined;
+  const browse = q.length === 0 && narrowed;
+  if ((!browse && q.length < MIN_QUERY) || scopes.size === 0) return [];
   const only = narrowing.collections?.length ? collectionsNamed(narrowing.collections) : null;
   if (only && only.size === 0) return []; // `in:` named nothing searchable
   const owner = narrowing.ownerId;
@@ -224,6 +227,9 @@ export async function globalSearch(
     if (only && !only.has(entry.collection)) continue; // `in:` asked for other collections
     if (owner && entry.scoping.kind === "flat") continue; // a catalogue row belongs to nobody
     if (status && !statusColumnOf(entry)) continue; // a collection with no status has no row in that status
+    // ...nor does one whose status column cannot hold the value. Answered from the schema, so a half-typed
+    // `status:pen` costs no read at all, rather than a walk of the index for rows that cannot exist.
+    if (status && !statusValuesOf(entry).includes(status)) continue;
     const pred = scopePredicate(user, entry.collection, scope);
     if (pred === null) continue; // provably empty
     // Non-public rows (an unpublished announcement) are indexed but hidden unless the caller holds the
@@ -235,6 +241,11 @@ export async function globalSearch(
     else groups.set(key, { collections: [entry.collection], pred: publicOnly ? and(pred, eq(docs.restricted, false)) : pred });
   }
   if (groups.size === 0) return [];
+  // The org's own synonym groups ride beside the built-in ones (services/searchSynonyms.ts). Loaded only once
+  // some collection is left to search, so a filter that rules everything out reads nothing.
+  const synonyms = browse ? [] : await orgSynonymGroups(deps);
+  const match = browse ? null : matchExpression(q, synonyms);
+  if (!browse && !match) return [];
 
   // The owner narrowing rides INSIDE each branch, so the semantic half's re-read (which reuses `branches`)
   // is narrowed by it too.
@@ -255,6 +266,20 @@ export async function globalSearch(
     return and(inList, g.pred, owner ? eq(docs.ownerId, owner) : undefined, after, before, statusIn(g.collections))!;
   });
 
+  // Filters alone: the same branches, walked newest first down the created_at index, and stopped at the same
+  // cap - so a common filter reads about a page of rows, and none of it touches the FTS index. Nothing was
+  // matched on text, so these rows are `exact`: there are no matched words for the field gate to re-explain.
+  if (browse) {
+    const listed = await deps.db.all<SearchHit & { code: string | null }>(sql`
+      select ${docs.collection} as collection, ${docs.recordId} as id, ${docs.code} as code, ${docs.title} as title, ${docs.subtitle} as subtitle
+      from ${docs}
+      where ${eq(docs.deleted, false)} and (${or(...branches)})
+      order by ${docs.createdAt} desc
+      limit ${sql.raw(String(TOTAL))}
+    `);
+    return gated(deps, listed.map((r) => ({ ...r, exact: true as const })), [], { owner, status }, gate);
+  }
+
   // The boosts, as 0/1 terms. `coalesce` because a row with no owner compares NULL, and a NULL factor would
   // make the whole score NULL - which sorts FIRST in an ascending order.
   const mine = user.employeeId ? sql`coalesce(${docs.ownerId} = ${user.employeeId}, 0)` : sql`0`;
@@ -264,7 +289,7 @@ export async function globalSearch(
   const rows = await deps.db.all<SearchHit & { code: string | null }>(sql`
     select ${docs.collection} as collection, ${docs.recordId} as id, ${docs.code} as code, ${docs.title} as title, ${docs.subtitle} as subtitle
     from "search_fts" join ${docs} on ${docs}."rowid" = "search_fts"."rowid"
-    where "search_fts" match ${match} and ${eq(docs.deleted, false)} and (${or(...branches)})
+    where "search_fts" match ${match!} and ${eq(docs.deleted, false)} and (${or(...branches)})
     order by bm25("search_fts") * (1.0 + ${sql.raw(String(TITLE_BOOST))} * ${inTitle} + ${sql.raw(String(OWN_BOOST))} * ${mine} + ${sql.raw(String(RECENT_BOOST))} * ${recent})
     limit ${sql.raw(String(TOTAL))}
   `);
@@ -288,6 +313,17 @@ export async function globalSearch(
     ? []
     : await semanticHits(deps, q, [...groups.values()].flatMap((g) => g.collections), branches);
   const hits = semantic.length ? appendRelated(keyword, semantic) : keyword;
+  return gated(deps, hits, queryTerms(q, synonyms), { owner, status }, gate);
+}
+
+/** The field gate over a page of hits, however they were found: the narrowing probes, then `narrowRedacted`. */
+async function gated(
+  deps: Deps,
+  hits: ScoredHit[],
+  terms: QueryTerm[],
+  { owner, status }: { owner?: string; status?: string },
+  gate?: RedactionGate,
+): Promise<SearchHit[]> {
   // An owner narrowing is a question about the owner COLUMN. A caller denied that column on a row may still
   // list the row, but must not learn whose it is by asking `@name` and watching it come back.
   // A status narrowing is the same kind of question about the status column.
@@ -301,7 +337,7 @@ export async function globalSearch(
         return !(s && denied.includes(wireOf(s.prop)));
       })
     : hits;
-  return gate ? await narrowRedacted(deps, probed, queryTerms(q, synonyms), gate) : probed.map(toHit);
+  return gate ? await narrowRedacted(deps, probed, terms, gate) : probed.map(toHit);
 }
 
 /**
@@ -459,8 +495,9 @@ async function narrowRedacted(
       if (!hidden(entry.title) && !hidden(entry.subtitle)) out.push(next);
       continue;
     }
-    // A task found by its key was matched on the board prefix and the task's number - neither a redactable
-    // field - so there is no withheld text to re-explain it from. It still shows only what the caller may read.
+    // A task found by its key was matched on the board prefix and the task's number, and a filters-only listing
+    // matched no text at all - neither leans on a redactable field, so there is no withheld text to re-explain
+    // it from. It still shows only what the caller may read.
     if (hit.exact) {
       out.push(next);
       continue;

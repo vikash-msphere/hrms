@@ -379,13 +379,20 @@ export function CommandPalette({
   // Bumped after a decision made from the palette, so the results re-read what that decision changed.
   const [refreshTick, setRefreshTick] = useState(0);
   // Keyed by the whole request, narrowing included: `in:tickets laptop` and `laptop` are different questions.
-  const requestKey = parsed.text.trim().length >= 2 ? searchParams(parsed) : "";
+  // Filters with no words at all are a question too - "which records are these" - which the server answers
+  // with the newest ones; a single stray letter after them is still waited on.
+  const plainWords = parsed.text.trim();
+  const requestKey = plainWords.length >= 2 || (narrowed && !plainWords) ? searchParams(parsed) : "";
   // WHICH request the hits on screen answer. Between a keystroke and the effect below flipping `searching`
   // there is a render where the hits are still the last query's (or none), and anything that concludes
   // "nothing was found" from that render - Did you mean, the nothing-found offers, the spoken count - flashed
   // for a result that had not arrived yet. `settled` is the honest version of "the answer is in".
   const [hitsKey, setHitsKey] = useState("");
   const settled = !searching && hitsKey === requestKey;
+  // A request that failed, by the request it was. Shown as the failure it is: read as "no records", it offered
+  // Did you mean and a ticket for words that were never searched at all.
+  const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
+  const failed = settled && !!requestKey && failure?.key === requestKey;
   useEffect(() => {
     if (!open) return;
     const key = requestKey;
@@ -415,10 +422,11 @@ export function CommandPalette({
             setHitsKey(key);
           }
         })
-        .catch(() => {
+        .catch((e: unknown) => {
           if (seq.current === mine) {
             setHits([]); // never cached: a failure says nothing about the data
             setHitsKey(key);
+            setFailure({ key, message: (e as Error).message || "the request did not go through" });
           }
         })
         .finally(() => {
@@ -603,8 +611,17 @@ export function CommandPalette({
     }
     if (related.length) out.push({ label: "Related", items: related });
 
+    // The records half failed: say so, with the way to ask again. None of the "nothing found" offers below
+    // apply - nothing was searched.
+    if (failed) {
+      out.push({
+        label: `Couldn't search records: ${failure!.message}`,
+        items: [{ key: "search-retry", label: "Search again", badge: "Retry", tone: "action", icon: Search, stay: true, run: () => setRefreshTick((t) => t + 1) }],
+      });
+    }
+
     // Nothing matched a name, and nothing at all came back: offer the people one slip away ("Kpoor").
-    if (!narrowed && settled && people.length === 0 && byCollection.size === 0 && text.length >= 4) {
+    if (!narrowed && settled && !failed && people.length === 0 && byCollection.size === 0 && text.length >= 4) {
       const near = nearPeople(text, directory).map((d) => personItem(d.e));
       if (near.length) out.push({ label: "Did you mean", items: near });
     }
@@ -612,7 +629,7 @@ export function CommandPalette({
     // And when there is still nothing at all, the thing to do next is usually to ask a person: the caller's own
     // "raise a ticket" / "submit a suggestion", started with the words they searched for. Only the actions this
     // caller already has (resolveQuickActionList), so nothing is offered that they cannot do.
-    if (!narrowed && settled && text.length >= 3 && out.every((s) => s.items.length === 0)) {
+    if (!narrowed && settled && !failed && text.length >= 3 && out.every((s) => s.items.length === 0)) {
       const words = parsed.text.trim();
       const offers: Item[] = prefillable.map((a) => ({
         key: `nothing-found:${a.id}`,
@@ -646,7 +663,7 @@ export function CommandPalette({
     // `runAsk` and `acceptFilter` read the same state this memo does, so listing them would only rebuild the
     // list twice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [local, employees, directory, hits, query, parsed, narrowed, frecent, recentQueries, ask, askOn, settled, prefillable, actions, filterOffers]);
+  }, [local, employees, directory, hits, query, parsed, narrowed, frecent, recentQueries, ask, askOn, settled, failed, failure, prefillable, actions, filterOffers]);
 
   const flat = useMemo(() => sections.flatMap((s) => s.items), [sections]);
 

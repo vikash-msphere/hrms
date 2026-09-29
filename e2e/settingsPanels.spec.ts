@@ -139,7 +139,12 @@ async function writeLanded(page: import("@playwright/test").Page) {
   const patched = page
     .waitForResponse((r) => r.request().method() === "PATCH" && r.url().includes("/v1/settings/") && r.status() < 400, { timeout: 10_000 })
     .catch(() => undefined);
-  await Promise.race([said, patched]);
+  // BOTH, not whichever comes first. A panel may write several keys in sequence (defaults saves `probation`,
+  // then `holidays`), and its toast is raised once all of them have landed - so the first PATCH alone let the
+  // reload below go out while the second was still being written, and the fresh page read the value from
+  // before it. A panel that raises no toast costs the toast wait's timeout and nothing else.
+  await patched;
+  await said;
   // The store folds the response back on the next tick; reloading inside that window is the same race again.
   await page.waitForTimeout(500);
 }

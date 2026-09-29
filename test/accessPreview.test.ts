@@ -102,6 +102,19 @@ describe("previewAccess", () => {
     expect(onAlice.get("hala@test.example")!.verb_allowed).toBe(false); // the exact deny covers the verb key
   });
 
+  it("<collection>/me grades a self-acting verb on the key the real /me request decides", async () => {
+    await deps.db.insert(schema.accessRules).values({
+      subject: "employee", subjectKind: "role", namespace: "attendance", pattern: "attendance.me.clockIn", scopeKind: "self", scopeCode: "", effect: "allow",
+    });
+    // The bare collection key has no record token for `me` to match - the verdict that read "cannot clockIn".
+    const bare = byEmail(await previewAccess(deps, { subjects: subj(ids.alice), collection: "attendance", verb: "clockIn" }));
+    expect(bare.get("alice@test.example")!.verb_allowed).toBe(false);
+    const own = byEmail(await previewAccess(deps, { subjects: subj(ids.alice, ids.hala), collection: "attendance", object: "attendance/me", verb: "clockIn" }));
+    expect(own.get("alice@test.example")!.verb_allowed).toBe(true);
+    expect(own.get("hala@test.example")!.verb_allowed).toBe(false); // hr_admin holds no clockIn rule here
+    await expect(previewAccess(deps, { subjects: subj(ids.alice), collection: "attendance", object: "attendance/me", field: "notes" })).rejects.toMatchObject({ httpStatus: 400 });
+  });
+
   it("a disabled account reports all-false with the disabled flag (matches auth reality)", async () => {
     const [dave] = await previewAccess(deps, { subjects: subj(ids.dave), collection: "employees" });
     expect(dave!.disabled).toBe(true);

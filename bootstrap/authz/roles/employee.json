@@ -485,21 +485,57 @@
     },
     {
       "area": "work",
-      "pattern": "boards.**",
+      "pattern": "boards",
       "level": "read",
-      "why": "Read boards. Shape (columns, WIP, swimlanes) stays with managers and HR."
+      "why": "List boards. Which come back is decided by the rules below and each board's sharing (domain/boardAccess.ts)."
     },
     {
       "area": "work",
-      "pattern": "sprints.**",
+      "pattern": "boards.ve-*.**",
       "level": "read",
-      "why": "Read sprints."
+      "why": "Boards everyone works (visibility `edit`, the `ve-` code segment). Shape (columns, WIP, swimlanes) stays with whoever manages the board."
     },
     {
       "area": "work",
-      "pattern": "cards.**",
+      "pattern": "boards.vr-*.**",
+      "level": "read",
+      "why": "Boards everyone sees (visibility `view`, the `vr-` code segment)."
+    },
+    {
+      "area": "work",
+      "pattern": "sprints",
       "level": "write",
-      "why": "Cards are shared work: a board showing only own cards is a to-do list, not a board."
+      "why": "List sprints, and the create gate. Creating one on a board needs write on the board itself (policy references `sprints.board`), which only whoever manages the board holds."
+    },
+    {
+      "area": "work",
+      "pattern": "sprints.ve-*.**",
+      "level": "read",
+      "why": "Sprints on the boards everyone works (coded under their board)."
+    },
+    {
+      "area": "work",
+      "pattern": "sprints.vr-*.**",
+      "level": "read",
+      "why": "Sprints on the boards everyone sees."
+    },
+    {
+      "area": "work",
+      "pattern": "cards",
+      "level": "write",
+      "why": "List tasks, and the create gate. Filing one on a board needs write on that board's cards (policy owner_refs `cards.board`)."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.ve-*.**",
+      "level": "write",
+      "why": "Tasks on the boards everyone works: shared work, so anyone may pick one up (a card is coded under its board)."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.vr-*.**",
+      "level": "read",
+      "why": "Tasks on the boards everyone sees but only their members work."
     },
     {
       "area": "work",
@@ -854,88 +890,113 @@
     },
     {
       "area": "work",
-      "pattern": "boards.*.metrics",
-      "why": "Flow analytics for a board the caller can read."
+      "pattern": "boards.ve-*.metrics",
+      "why": "Flow analytics for a board everyone works."
     },
     {
       "area": "work",
-      "pattern": "cards.*.move",
-      "why": "Card work on a shared board."
+      "pattern": "boards.vr-*.metrics",
+      "why": "Flow analytics for a board everyone sees."
     },
     {
       "area": "work",
-      "pattern": "cards.*.block",
-      "why": "Card work on a shared board."
+      "pattern": "cards.ve-*.move",
+      "why": "Card work on a board everyone works."
     },
     {
       "area": "work",
-      "pattern": "cards.*.unblock",
-      "why": "Card work on a shared board."
+      "pattern": "cards.ve-*.block",
+      "why": "Card work on a board everyone works."
     },
     {
       "area": "work",
-      "pattern": "cards.*.assign",
-      "why": "Card work on a shared board."
+      "pattern": "cards.ve-*.unblock",
+      "why": "Card work on a board everyone works."
     },
     {
       "area": "work",
-      "pattern": "cards.*.prioritize",
-      "why": "Card work on a shared board."
+      "pattern": "cards.ve-*.assign",
+      "why": "Card work on a board everyone works."
     },
     {
       "area": "work",
-      "pattern": "cards.*.comment",
-      "why": "Card work on a shared board."
+      "pattern": "cards.ve-*.prioritize",
+      "why": "Card work on a board everyone works."
     },
     {
       "area": "work",
-      "pattern": "cards.*.addTodos",
+      "pattern": "cards.ve-*.comment",
+      "why": "Card work on a board everyone works."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.ve-*.addTodos",
       "why": "Card checklist."
     },
     {
       "area": "work",
-      "pattern": "cards.*.toggleTodo",
+      "pattern": "cards.ve-*.toggleTodo",
       "why": "Card checklist."
     },
     {
       "area": "work",
-      "pattern": "cards.*.removeTodo",
+      "pattern": "cards.ve-*.removeTodo",
       "why": "Card checklist."
     },
     {
       "area": "work",
-      "pattern": "cards.*.promoteTodo",
+      "pattern": "cards.ve-*.promoteTodo",
       "why": "Turn a checklist item into its own card."
     },
     {
       "area": "work",
-      "pattern": "cards.*.watch",
-      "why": "Follow a card."
-    },
-    {
-      "area": "work",
-      "pattern": "cards.*.unwatch",
-      "why": "Unfollow a card."
-    },
-    {
-      "area": "work",
-      "pattern": "cards.*.flow",
-      "why": "Cycle-time read over cards the caller can list."
-    },
-    {
-      "area": "work",
-      "pattern": "cards.*.triage",
-      "why": "Similar/duplicate read over cards the caller can list."
-    },
-    {
-      "area": "work",
-      "pattern": "cards.*.suggestSteps",
+      "pattern": "cards.ve-*.suggestSteps",
       "why": "Steps comparable delivered cards took (no model call)."
     },
     {
       "area": "work",
-      "pattern": "cards.*.suggestGoal",
+      "pattern": "cards.ve-*.suggestGoal",
       "why": "Goal a card likely serves, decided against the caller's goal scope."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.ve-*.watch",
+      "why": "Follow a card."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.ve-*.unwatch",
+      "why": "Unfollow a card."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.ve-*.flow",
+      "why": "Cycle-time read over cards the caller can list."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.ve-*.triage",
+      "why": "Similar/duplicate read over cards the caller can list."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.vr-*.watch",
+      "why": "Follow a card on a board everyone sees."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.vr-*.unwatch",
+      "why": "Unfollow a card on a board everyone sees."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.vr-*.flow",
+      "why": "Cycle-time read over cards the caller can list."
+    },
+    {
+      "area": "work",
+      "pattern": "cards.vr-*.triage",
+      "why": "Similar/duplicate read over cards the caller can list."
     },
     {
       "area": "work",
@@ -1112,6 +1173,14 @@
       "pattern": "cards.**",
       "lane": "allow",
       "why": "As a verb allow this also grants every card verb added later. The current verbs are named instead, so a new one is withheld until someone grants it."
+    },
+    {
+      "pattern": "boards | cards | sprints .** (any board)",
+      "why": "Would reach private boards (`vp-`), which are seen only by the people and roles they are shared with, their creator and their department's managers (services/boardShares.ts). The two org-visible segments are named instead."
+    },
+    {
+      "pattern": "boards | cards | sprints .me | my-dept | my-reports | my-org .**",
+      "why": "These tokens match by code, and boards, cards and sprints are coded by BOARD (domain/boardAccess.ts): a board-coded row is nobody's employee or department code, and a two-character board segment can spell a department's code. Held by no role."
     },
     {
       "pattern": "org-documents.*.acknowledge",

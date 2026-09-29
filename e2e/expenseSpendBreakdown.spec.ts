@@ -7,10 +7,9 @@ import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
 // ledger page isn't a dashboard by default.
 //
 // Aggregate data in a shared org is not this spec's to total exactly - another run's committed spend lands in
-// the same buckets - so what is provable is the SHAPE: once there is committed (uncategorised, vendor-less)
-// spend, the categories list carries a real row - a proportional bar and a money-formatted total - rather
-// than staying empty. The vendors list is left alone: this spend names no vendor, so THAT list staying on its
-// own empty state is exactly as correct as the categories list leaving it.
+// the same buckets - so what is provable is the SHAPE: once there is committed spend this month, this month's
+// bar is not empty, and the categories list carries real rows - a proportional bar and a money-formatted total.
+// The vendors list is left alone: this spend names no vendor, so what that list shows is not this spec's to say.
 test("committed spend replaces the breakdown's empty state with a real row", async ({ as }) => {
   test.setTimeout(90_000);
   const page = await as("hr");
@@ -35,10 +34,18 @@ test("committed spend replaces the breakdown's empty state with a real row", asy
     await page.getByRole("tab", { name: /^All/ }).click();
     await page.getByRole("button", { name: "Spend breakdown" }).click();
 
-    // A real row: a label, a bar whose width is a real percentage of the category's peak, and a money total -
-    // named by the row's own title (`label: amount`), which is the one place both live together as one
-    // string. "Uncategorised" is what an expense with no category earns, so it is what this spend names.
-    const row = page.locator('div[title^="Uncategorised: ₹"]').first();
+    // This month's bar carries this spend: an undated expense is filed under the month it was created, so the
+    // current month - the last of the six, in the ORG's calendar, which is why it is not computed here - cannot
+    // read ₹0. Named by the bar's own title (`<Mon> <year>: <amount>`).
+    const thisMonth = page.locator('p:has-text("Committed spend") ~ div > div[title*=": ₹"]').last();
+    await expect(thisMonth).toBeVisible({ timeout: 15_000 });
+    await expect(thisMonth).not.toHaveAttribute("title", /: ₹0$/);
+
+    // And the categories list is real rows - a label, a bar whose width is a real percentage of the peak, and
+    // a money total - named by the row's title (`label: amount`). NOT this spend's own row: the list is the
+    // top five by spend, and the seeded ledger alone has five categories bigger than one ₹5,000 expense, so
+    // "Uncategorised" is on it only when other runs' uncategorised spend happens to be too.
+    const row = page.locator('p:has-text("Top categories") + div > div[title*=": ₹"]').first();
     await expect(row).toBeVisible({ timeout: 15_000 });
     const bar = row.locator("span.bg-primary");
     const width = await bar.evaluate((el) => (el as HTMLElement).style.width);

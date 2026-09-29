@@ -29,6 +29,27 @@
       "when": 1790589016887,
       "tag": "0003_release_three",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1790621322043,
+      "tag": "0004_it_admin_role",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1790623098350,
+      "tag": "0005_regularization_recorded_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1790669970335,
+      "tag": "0006_board_access",
+      "breakpoints": true
     }
   ]
 }

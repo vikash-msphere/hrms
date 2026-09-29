@@ -8,7 +8,7 @@ export type Level = "read" | "write" | "admin";
 /**
  * `ownerResource` is the SAME resource path with the id token replaced by the code of the row's OWNER - set by
  * the middleware only for a collection whose rows carry a FLAT code alongside an owner column
- * (services/codeCascade.ts OWNER_COLUMN_COLLECTIONS: `assets`, `users`, and nothing else today).
+ * (lib/authzResolve.ts OWNER_COLUMN_COLLECTIONS: `assets`, `cards`, `users`).
  *
  * WHY A SECOND KEY RATHER THAN A NEW TOKEN. Those collections' two lanes of one grant disagreed. The LIST lane
  * answers "own" fine - `applyScope` binds `eq(owner, ownerId)` - but the ITEM lane asks `isUnder(callerCode, kt)`

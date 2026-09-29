@@ -1,4 +1,4 @@
-import { gotoRoute, test, expect } from "./fixtures";
+import { gotoRoute, test, expect, toast } from "./fixtures";
 
 // The scheduled tasks page, and running one by hand.
 //
@@ -47,8 +47,10 @@ test("server caches are cleared by hand, and the page says every server follows"
   await gotoRoute(page, "settings/operations");
   await expect(page.getByRole("heading", { name: "Server caches" })).toBeVisible();
   await page.getByRole("button", { name: "Clear caches" }).click();
-  await expect(page.getByText("Caches cleared")).toBeVisible();
-  await expect(page.getByText("Every server reloads within about 5 seconds.")).toBeVisible();
+  // The answer is a toast, and Radix repeats its text in a screen-reader announcer: look in the toast itself.
+  const cleared = toast(page, "Caches cleared");
+  await expect(cleared).toBeVisible();
+  await expect(cleared).toContainText("Every server reloads within about 5 seconds.");
   // Still usable afterwards: the page that asked is served by an instance that has just emptied every cache.
   await expect(page.getByRole("button", { name: "Clear caches" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Run now" })).toHaveCount(2);

@@ -11,7 +11,8 @@ import { navigate } from "@/router";
 import { exportTable } from "@/lib/exportTable";
 import { cn, idOf, formatDate } from "@/lib/utils";
 import {
-  summarizeByDay, buildAttendanceRows, statsOf, fmtDay, fmtHM, fmtHM24, fmtDuration, fmtDurationShort, fmtCorrectionTimes,
+  summarizeByDay, buildAttendanceRows, statsOf, fmtDay, fmtHM, fmtHM24, fmtDuration, fmtDurationShort, describeCorrection,
+  seedPunches, punchInstants, punchErrors, keptPunches, isOpenPunch, punchTotal, sameTimes, type PunchRow, type OpenAllowance, type PunchTarget,
   localDay, trackedFromOf, localMinutes, zonedInstant, weekdayOf, hhmmToMin, signedDuration, STATUS_UI, leaveRangeOf, unpaidLeaveTypes,
   type DayStatus, type AttendanceRow, type AttendanceSchedule, type LeaveRange, type WindowStats,
 } from "@/lib/attendance";
@@ -37,6 +38,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+import { PunchFixDialog } from "@/components/common/PunchFixDialog";
 import { confirmDecision } from "@/lib/confirmDecision";
 
 const DAY_MS = 86400000;
@@ -53,10 +55,13 @@ export default function Attendance({ me }: { me: Me }) {
   const [pageLoading, setPageLoading] = useState(true); // history window fetch in flight (skeleton, not "no data")
   const [now, setNow] = useState(Date.now());
   const [correctionBusy, setCorrectionBusy] = useState(false); // a correction submit in flight
-  const [correcting, setCorrecting] = useState<AttendanceRow[] | null>(null); // the day(s) a correction modal is open for
+  // The day(s) a correction modal is open for. With `punch` it is the one-punch fix (PunchFixDialog); without,
+  // the whole-day editor, starting from `initial` when the one-punch fix handed its edit over.
+  const [correcting, setCorrectingState] = useState<{ rows: AttendanceRow[]; punch?: PunchTarget; initial?: PunchRow[] } | null>(null);
+  const setCorrecting = (rows: AttendanceRow[], punch?: PunchTarget) => setCorrectingState({ rows, punch });
   const filedThisDialog = useRef<Set<string>>(new Set()); // days the open correction dialog already filed
   // Closing is the one moment the already-filed set stops being true, so every open starts clean.
-  const closeCorrection = () => { filedThisDialog.current = new Set(); setCorrecting(null); };
+  const closeCorrection = () => { filedThisDialog.current = new Set(); setCorrectingState(null); };
   // Org display switches (Settings → Attendance). Absent means shown, so an org that never touched them keeps
   // the bar; the projection is a sub-toggle of the bar it sits on.
   const showDayProgress = sched.show_day_progress !== false;
@@ -309,7 +314,7 @@ export default function Attendance({ me }: { me: Me }) {
       // `has(day)` test above and both filed the same day.
       filedThisDialog.current.add(day);
       try {
-        const sessions = perDay[day].map((p) => ({ clock_in: zonedInstant(day, p.in, tz), ...(p.out ? { clock_out: zonedInstant(day, p.out, tz) } : {}) }));
+        const sessions = perDay[day].map((p) => punchInstants(day, p, tz));
         await create("attendance-regularizations", { date: day, sessions, reason: reason || undefined });
         filed.push(day);
       } catch (e) {
@@ -602,7 +607,7 @@ export default function Attendance({ me }: { me: Me }) {
             <CardHeader><CardTitle className="text-base">My correction requests</CardTitle></CardHeader>
             <CardContent className="divide-y">
               {myRegs.map((r) => {
-                const times = fmtCorrectionTimes(r.sessions, (iso) => fmtHM(iso, tz));
+                const times = describeCorrection(r.recorded_sessions, r.sessions, (iso) => fmtHM(iso, tz));
                 return (
                   <div key={r.path} className="flex items-start gap-3 py-2.5 first:pt-0 last:pb-0">
                     <div className="min-w-0 flex-1">
@@ -644,10 +649,24 @@ export default function Attendance({ me }: { me: Me }) {
         )}
       </div>
 
-      {correcting && (
+      {correcting?.punch && correcting.rows[0] ? (
+        <PunchFixDialog
+          key={`${correcting.rows[0].day}:${correcting.punch.index}:${correcting.punch.edge}`}
+          row={correcting.rows[0]}
+          punch={correcting.punch}
+          tz={tz}
+          today={orgToday}
+          pendingDays={pendingCorrectionDays}
+          busy={correctionBusy}
+          onClose={closeCorrection}
+          onSubmit={submitCorrection}
+          onWholeDay={(initial) => setCorrectingState({ rows: correcting.rows, initial })}
+        />
+      ) : correcting && (
         <CorrectionDialog
-          key={correcting.map((r) => r.day).join(",")}
-          rows={correcting}
+          key={correcting.rows.map((r) => r.day).join(",")}
+          rows={correcting.rows}
+          initial={correcting.initial}
           tz={tz}
           sched={sched}
           today={orgToday}
@@ -749,7 +768,7 @@ function PendingCorrections({ tz, employees, onDecided }: { tz: string; employee
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">{nameOf(r.employee)} · {formatDate(r.date)}</p>
               <p className="truncate text-xs text-muted-foreground">
-                {fmtCorrectionTimes(r.sessions, (iso) => fmtHM(iso, tz))}
+                {describeCorrection(r.recorded_sessions, r.sessions, (iso) => fmtHM(iso, tz))}
                 {r.reason ? ` · ${r.reason}` : ""}
               </p>
             </div>
@@ -1069,10 +1088,6 @@ function RegStatePill({ state }: { state?: string }) {
   }
 }
 
-// One in/out on the form. `was` is the punch it started as, on a row seeded from the day's record, so the form
-// can mark exactly which time the request changes; it travels with the row, so removing a row above keeps it.
-type PunchRow = { in: string; out: string; was?: { in: string; out: string } };
-
 // Correction request modal: seeded with the day's existing sessions (one row per punch), each editable, with
 // add/remove. Submitting files an attendance-regularization carrying the FULL intended day; on approval the
 // day's punches are superseded and these become the day's sessions. Removing every row clears the day.
@@ -1081,38 +1096,11 @@ type PunchRow = { in: string; out: string; was?: { in: string; out: string } };
 // still at work, and the approval keeps whatever clock-out they punch (services/attendanceRegularizations.ts).
 // Several days at once default to one shared set of times (the "I forgot to clock all week" case) and file one
 // request each; per-day mode gives each selected day its own times, because a real week is rarely identical.
-
-// `now` is today's wall clock ("HH:MM") when the list is for today, which is what lets a row stay open.
-type OpenAllowance = { now: string } | undefined;
-
-// Per-row errors for one day's list. A row needs both times, in order ("HH:MM" compares lexically) - except the
-// latest one on today, which may leave its clock-out blank. Fully-blank rows are dropped, so they never error.
-const punchErrors = (rows: PunchRow[], open: OpenAllowance): (string | undefined)[] => {
-  const latest = rows.reduce((best, r, i) => (r.in && (best < 0 || r.in > rows[best]!.in) ? i : best), -1);
-  return rows.map((r, i) => {
-    if (!r.in && !r.out) return undefined;
-    if (!r.in) return "Add the clock-in time";
-    if (!r.out) {
-      if (!open) return "Add the clock-out time";
-      if (i !== latest) return "Only the latest in/out can be left without a clock-out";
-      if (r.in > open.now) return "Clock-in can't be later than now";
-      return undefined;
-    }
-    if (r.out <= r.in) return "Clock-out must be after clock-in";
-    return undefined;
-  });
-};
-const keptPunches = (rows: PunchRow[]) => rows.filter((r) => r.in || r.out); // rows the user actually filled
-const isOpenPunch = (r: PunchRow) => !!r.in && !r.out;
-// Minutes the rows add up to. An open row counts up to `now`, so a day still in progress totals "so far".
-const punchTotal = (rows: PunchRow[], open: OpenAllowance) => {
-  const errs = punchErrors(rows, open);
-  return rows.reduce((sum, r, i) => (errs[i] || (!r.in && !r.out) ? sum : sum + Math.max(0, hhmmToMin(r.out || open!.now) - hhmmToMin(r.in))), 0);
-};
-const sameTimes = (a: PunchRow[], b: PunchRow[]) => a.map((r) => `${r.in}-${r.out}`).join() === b.map((r) => `${r.in}-${r.out}`).join();
-
-function CorrectionDialog({ rows, tz, sched, today, pendingDays, busy, onClose, onSubmit }: {
+// The form rules (PunchRow, punchErrors, punchTotal, ...) live in lib/attendance.ts, shared with PunchFixDialog.
+function CorrectionDialog({ rows, initial, tz, sched, today, pendingDays, busy, onClose, onSubmit }: {
   rows: AttendanceRow[];
+  // Where to start instead of the recorded day: PunchFixDialog's "Edit the whole day instead" hands its edit over.
+  initial?: PunchRow[];
   tz: string;
   // The org work schedule, so the standard day can be filled in with one click instead of typed twice.
   sched: AttendanceSchedule;
@@ -1127,11 +1115,8 @@ function CorrectionDialog({ rows, tz, sched, today, pendingDays, busy, onClose, 
 }) {
   const guardClose = useDiscardGuard();
   const single = rows.length === 1 ? rows[0] : undefined;
-  const seeded: PunchRow[] = (single?.summary?.sessions ?? []).map((s) => {
-    const was = { in: fmtHM24(s.clock_in, tz), out: s.clock_out ? fmtHM24(s.clock_out, tz) : "" };
-    return { ...was, was };
-  });
-  const [punches, setPunches] = useState<PunchRow[]>(seeded.length ? seeded : [{ in: "", out: "" }]);
+  const seeded = seedPunches(single?.summary?.sessions ?? [], tz);
+  const [punches, setPunches] = useState<PunchRow[]>(initial ?? (seeded.length ? seeded : [{ in: "", out: "" }]));
   // null = every selected day takes the shared times above; a record = each day carries its own.
   const [perDay, setPerDay] = useState<Record<string, PunchRow[]> | null>(null);
   const [reason, setReason] = useState("");

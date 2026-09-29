@@ -193,6 +193,11 @@ npx wrangler d1 execute hrms --remote \
 Do it in the app (Users → set inactive) when you can; the SQL is for when the app is what you have lost
 access to. Revoke their Google Workspace account as well, or they can sign in again and be re-provisioned.
 
+A planned exit needs neither. The day after the last working day on a serving notice period, or on an
+active offboarding, the nightly cron marks the employee terminated and disables their login
+(`exitDueEmployees` in `src/services/noticePeriods.ts`). Disabling an employee record from the Directory
+disables the linked login too.
+
 **Cut off everyone** (suspected `AUTH_SESSION_KEY` compromise, or an unknown session to invalidate):
 
 ```bash
@@ -221,7 +226,8 @@ read (`src/middleware/auth.ts`, `src/services/appLock.ts`), and a browser is ope
 - Wrong PINs: five free tries, then waits of 30 s, 1 min, 5 min, 15 min and one hour per try. The owner is
   notified at the third, and each threshold is audited as `user.pinFailed`.
 - A forgotten PIN is reset by an admin: Settings → Users → Reset app PIN (`POST /v1/users/{id}:resetPin`,
-  super admin by default, grantable in the ACL). It signs the person out everywhere and moves the key their
+  super admin and HR admin by default, grantable in the ACL). HR sees the Users list read-only, with Reset app PIN
+  as its only action. It signs the person out everywhere and moves the key their
   browsers encrypt under. There is no self-service reset, because Google sign-in is usually one click on the
   very machine the lock protects.
 

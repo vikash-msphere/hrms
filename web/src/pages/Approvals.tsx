@@ -23,7 +23,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { fmtCorrectionTimes } from "@/lib/attendance";
+import { describeCorrection } from "@/lib/attendance";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 import { bulkInvoke, mergeBulkResults, bulkSummary } from "@/lib/bulk";
@@ -202,13 +202,13 @@ export default function Approvals({ me }: { me: Me }) {
   // Balance / overlap / reason - the decision aid, shared with the Leaves page's own pending band.
   const leaveContext = (r: LeaveRequest): React.ReactNode => leaveDecisionContext(r, balances, allLeave);
 
-  // Pending items, oldest submission first, minus anything decided in this session.
+  // Pending items, newest submission first, minus anything decided in this session.
   const bySubmitTime = <T extends Approvable>(rows: T[]) =>
-    rows.filter((r) => !decided.has(r.path)).sort((a, b) => (a.create_time ?? "").localeCompare(b.create_time ?? ""));
+    rows.filter((r) => !decided.has(r.path)).sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? ""));
 
   const sumReg = (r: AttendanceRegularization) => {
     const t = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const times = fmtCorrectionTimes(r.sessions, t, "remove punches");
+    const times = describeCorrection(r.recorded_sessions, r.sessions, t, "remove punches");
     return `${formatDate(r.date)} · ${times}${r.reason ? ` · ${r.reason}` : ""}`;
   };
   // Decision context for an attendance correction: the log it is about to rewrite. The times on the row are
@@ -257,8 +257,7 @@ export default function Approvals({ me }: { me: Me }) {
   const sumExpense = (r: Expense) =>
     `${money(r.amount)}${r.reimbursable ? " · employee-fronted" : ""}${r.description ? ` · ${r.description}` : ""}${r.invoice_number ? ` · invoice ${r.invoice_number}` : ""}${r.has_invoice ? "" : " · no invoice attached"}`;
 
-  // One tab per request type, in priority order. Pending items are oldest-first (clear the longest waits
-  // first); the history buckets arrive newest-decided first. Only non-empty tabs render. `leaveContext` (the
+  // One tab per request type, in priority order. Pending items are newest-first; the history buckets arrive newest-decided first. Only non-empty tabs render. `leaveContext` (the
   // balance/overlap decision aid) is pending-only - history needs no decision aid.
   const buildGroups = (b: ApprovalsBuckets, forHistory: boolean): GroupDef[] => {
     const items = <T extends Approvable>(rows: T[]) => (forHistory ? rows : bySubmitTime(rows));
@@ -295,12 +294,12 @@ export default function Approvals({ me }: { me: Me }) {
   const historyTotal = Object.values(history).reduce((n, arr) => n + arr.length, 0);
 
   // The merged queue behind the "All" stream: every visible item across types, tagged with its group. Pending
-  // = oldest first (work the queue down); history = newest-decided first.
+  // = newest submitted first; history = newest-decided first.
   const merged = activeGroups
     .flatMap((g) => g.items.map((r) => ({ g, r })))
     .sort((a, b) => isHistory
       ? (b.r.update_time ?? "").localeCompare(a.r.update_time ?? "")
-      : (a.r.create_time ?? "").localeCompare(b.r.create_time ?? ""));
+      : (b.r.create_time ?? "").localeCompare(a.r.create_time ?? ""));
   // --- bulk selection over the pending queue --------------------------------------------------------------
   // Rows the caller may decide (per-object can hints) are checkbox-selectable; Approve/Reject selected then
   // fan out per collection and only the rows that succeeded disappear (failures stay selected for a retry).

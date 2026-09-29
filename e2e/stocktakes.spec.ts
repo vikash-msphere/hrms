@@ -10,8 +10,8 @@ import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
 // Stocktakes page. The camera path is deliberately out of scope: it needs a device this lane doesn't have.
 test("a count is opened, a tag is logged into it, and closing it leaves a report", async ({ as }) => {
   test.setTimeout(180_000);
-  // Super, not HR: the seeded policy hands HR the asset register but not `stocktakes.create`, so HR sees the
-  // register without the button that opens a walk.
+  // Super, not IT admin: the seeded policy hands it_admin the asset register but not `stocktakes.create`, so it
+  // sees the register without the button that opens a walk.
   const it = await as("super");
   const stamp = Date.now();
   const label = `E2E count ${stamp % 100000}`;

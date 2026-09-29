@@ -71,7 +71,7 @@ export const COLLECTION_META: Record<string, CollectionMeta> = {
     singular: "access rule",
     plural: "access rules",
     allPhrase: "every access rule in the workspace",
-    note: "Managing access itself. Write lets the holder grant and revoke anyone's permissions, including their own, so it is effectively the keys to the workspace. The preview, clone, approve and reject methods are separately grantable.",
+    note: "Managing access itself. Write lets the holder grant and revoke anyone's permissions, including their own, so it is effectively the keys to the workspace. Each of its methods (preview, request access, copy, the access review, scope counts, approve and reject) is granted separately.",
   },
   roles: {
     label: "Roles",

@@ -76,6 +76,7 @@ export const READ_VERBS = new Set([
   "employees:getPhoto", "employees:getSignature", "employees:upcomingCelebrations",
   "employees:downloadIdentityDoc",
   "boards:metrics", // board/flow analytics
+  "boards:sharing", // who may see and work a board - reads the list and the department's managers, writes nothing
   "automations:test", // dry run: evaluates the condition, executes no action
   "batch:run", // GET-only multi-read transport (each sub-request is separately gated + audited)
   "payslips:preview", "payslips:download", "payslips:previewTemplate",

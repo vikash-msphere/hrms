@@ -4,19 +4,13 @@
   "protected": true,
   "provisioned": false,
   "extends": "employee",
-  "description": "A department head: everything an employee holds, plus the department subtree - the team's records, requests to decide, goals, 1:1s, reviews and roster, and the boards they run.",
+  "description": "A department head: everything an employee holds, plus the department subtree - the team's records, requests to decide, goals, 1:1s, reviews and roster. Manages the boards filed under their department (the department's `board-share` rules), and creates boards there.",
   "levels": [
     {
       "area": "work",
-      "pattern": "boards.**",
+      "pattern": "boards",
       "level": "write",
-      "why": "Own the team's work surface: create, rename and archive boards (the shape verbs are below). Everyone else reads boards and works the cards."
-    },
-    {
-      "area": "work",
-      "pattern": "sprints.**",
-      "level": "write",
-      "why": "Plan and run the team's sprints (activate/complete are the verbs below)."
+      "why": "Create a board. It must be filed under a department the manager manages (services/boardShares.ts assertMayFileUnder), and managing it - and every board filed under their department or one below it - comes from `board-share` rules written for that department's managers, not from a role rule."
     },
     {
       "area": "attendance",
@@ -106,7 +100,7 @@
       "area": "workplace",
       "pattern": "asset-requests.my-dept.**",
       "level": "read",
-      "why": "dept's asset requests (to review; handing the kit over is HR/IT's step)"
+      "why": "dept's asset requests (to review; handing the kit over is IT's step)"
     },
     {
       "area": "attendance",
@@ -240,7 +234,7 @@
     {
       "area": "workplace",
       "pattern": "asset-requests.my-dept.approve",
-      "why": "Decide the team's asset requests. Scoped my-dept, never `*`: a manager decides only their own department's. Handing the kit over stays HR's (`issue`)."
+      "why": "Decide the team's asset requests. Scoped my-dept, never `*`: a manager decides only their own department's. Handing the kit over stays IT's (`issue`, it_admin)."
     },
     {
       "area": "workplace",
@@ -324,16 +318,6 @@
     },
     {
       "area": "work",
-      "pattern": "boards.**",
-      "why": "configure the board's shape (columns, WIP limits, swimlanes, labels) + restore"
-    },
-    {
-      "area": "work",
-      "pattern": "sprints.**",
-      "why": "activate/complete the team's sprints + restore"
-    },
-    {
-      "area": "work",
       "pattern": "goal-templates.*.apply",
       "why": "stamp a blueprint onto a report or the whole team"
     },
@@ -373,8 +357,8 @@
       "why": "The team's bank, identity, personal-info and tax sub-resources stay with HR and payroll."
     },
     {
-      "pattern": "boards.** write (any board)",
-      "why": "NOT narrowed, and worth knowing: boards carry no department scope (flat codes), so a manager's board write reaches every department's board. Narrowing it needs board ownership in the data model first."
+      "pattern": "boards.** | sprints.** write, boards.** | sprints.** verbs (any board)",
+      "why": "A manager manages the boards filed under their department and the departments below it, through `board-share` rules services/boardShares.ts keeps in step with each department's managers - never every board in the org. Boards with no department are managed by their creator, their sharing list, super admin and the project manager."
     }
   ]
 }

@@ -395,11 +395,99 @@ export function buildAttendanceRows(opts: {
 
 export const fmtHM = (iso: string, tz: string) => dateFormat(undefined, HM_12(tz)).format(new Date(iso));
 
+// ---- The correction form ------------------------------------------------------------------------------------
+// Shared by the whole-day CorrectionDialog (pages/Attendance.tsx) and the one-punch PunchFixDialog: both edit
+// the same list of wall-clock "HH:MM" pairs, which is filed as the day's full intended set of sessions.
+
+// One in/out on the form. `was` is the punch it started as, on a row seeded from the day's record, so the form
+// can mark exactly which time the request changes; it travels with the row, so removing a row above keeps it.
+// `was.at` holds the recorded instants themselves, so a time left alone goes back up exactly as punched,
+// seconds included, rather than rounded to the minute the form shows.
+export type PunchRow = { in: string; out: string; was?: { in: string; out: string; at: { clock_in: string; clock_out?: string } } };
+
+// The instants a form row files: a time left as recorded keeps its recorded instant; an edited one is the
+// typed wall-clock time on `day` in `tz`. A blank clock-out stays absent (today's session, still running).
+export const punchInstants = (day: string, r: PunchRow, tz: string): { clock_in: string; clock_out?: string } => {
+  const clockIn = r.was && r.in === r.was.in ? r.was.at.clock_in : zonedInstant(day, r.in, tz);
+  const clockOut = !r.out ? undefined : r.was?.at.clock_out && r.out === r.was.out ? r.was.at.clock_out : zonedInstant(day, r.out, tz);
+  return { clock_in: clockIn, ...(clockOut ? { clock_out: clockOut } : {}) };
+};
+
+// `now` is today's wall clock ("HH:MM") when the list is for today, which is what lets a row stay open.
+export type OpenAllowance = { now: string } | undefined;
+
+// One punch of a day's log: the `index`-th session (earliest first) and which end of it.
+export type PunchTarget = { index: number; edge: "in" | "out" };
+
+// The day's recorded sessions as form rows, each remembering what it was.
+export const seedPunches = (sessions: readonly { clock_in: string; clock_out?: string }[], tz: string): PunchRow[] =>
+  sessions.map((s) => {
+    const shown = { in: fmtHM24(s.clock_in, tz), out: s.clock_out ? fmtHM24(s.clock_out, tz) : "" };
+    return { ...shown, was: { ...shown, at: { clock_in: s.clock_in, ...(s.clock_out ? { clock_out: s.clock_out } : {}) } } };
+  });
+
+// Per-row errors for one day's list. A row needs both times, in order ("HH:MM" compares lexically) - except the
+// latest one on today, which may leave its clock-out blank. Fully-blank rows are dropped, so they never error.
+export const punchErrors = (rows: PunchRow[], open: OpenAllowance): (string | undefined)[] => {
+  const latest = rows.reduce((best, r, i) => (r.in && (best < 0 || r.in > rows[best]!.in) ? i : best), -1);
+  return rows.map((r, i) => {
+    if (!r.in && !r.out) return undefined;
+    if (!r.in) return "Add the clock-in time";
+    if (!r.out) {
+      if (!open) return "Add the clock-out time";
+      if (i !== latest) return "Only the latest in/out can be left without a clock-out";
+      if (r.in > open.now) return "Clock-in can't be later than now";
+      return undefined;
+    }
+    if (r.out <= r.in) return "Clock-out must be after clock-in";
+    return undefined;
+  });
+};
+export const keptPunches = (rows: PunchRow[]) => rows.filter((r) => r.in || r.out); // rows the user actually filled
+export const isOpenPunch = (r: PunchRow) => !!r.in && !r.out;
+// Minutes the rows add up to. An open row counts up to `now`, so a day still in progress totals "so far".
+export const punchTotal = (rows: PunchRow[], open: OpenAllowance) => {
+  const errs = punchErrors(rows, open);
+  return rows.reduce((sum, r, i) => (errs[i] || (!r.in && !r.out) ? sum : sum + Math.max(0, hhmmToMin(r.out || open!.now) - hhmmToMin(r.in))), 0);
+};
+export const sameTimes = (a: PunchRow[], b: PunchRow[]) => a.map((r) => `${r.in}-${r.out}`).join() === b.map((r) => `${r.in}-${r.out}`).join();
+
 // The times an attendance correction asks for: "9:00 AM–1:00 PM, 2:00 PM–still clocked in". A pair with no
 // clock-out is today's last session left open, filed while the person was still at work. Every list of
 // correction requests reads through this, so an open one never renders as a broken time.
 export const fmtCorrectionTimes = (sessions: readonly { clock_in: string; clock_out?: string }[], hm: (iso: string) => string, empty = "Remove all punches") =>
   sessions.length === 0 ? empty : sessions.map((s) => `${hm(s.clock_in)}–${s.clock_out ? hm(s.clock_out) : "still clocked in"}`).join(", ");
+
+type Punches = readonly { clock_in: string; clock_out?: string }[];
+// Whole minutes of each instant, as the times are printed, so the total's difference matches the times shown.
+const minuteOf = (iso: string) => Math.floor(+new Date(iso) / 60000);
+const closedMinutes = (ss: Punches) => ss.reduce((sum, s) => sum + (s.clock_out ? minuteOf(s.clock_out) - minuteOf(s.clock_in) : 0), 0);
+
+// What an attendance correction CHANGES, against the day as it was recorded when it was filed: "Clock-in
+// 11:02 AM → 9:00 AM (+2h 2m)", "Added clock-out 6:30 PM". Times are compared as `hm` prints them, so the
+// seconds a real punch carries never read as an edit. When the request is not a set of edits to the recorded
+// punches (punches added or removed, or a request filed before the day was recorded with it) it reads as the
+// whole new day, which is what it is.
+export function describeCorrection(recorded: Punches | undefined, requested: Punches, hm: (iso: string) => string, empty = "Remove all punches"): string {
+  if (!recorded || !requested.length || recorded.length !== requested.length) return fmtCorrectionTimes(requested, hm, empty);
+  const changes: string[] = [];
+  for (let i = 0; i < requested.length; i++) {
+    const was = recorded[i]!;
+    const now = requested[i]!;
+    if (hm(was.clock_in) !== hm(now.clock_in)) changes.push(`Clock-in ${hm(was.clock_in)} → ${hm(now.clock_in)}`);
+    if (was.clock_out && now.clock_out) {
+      if (hm(was.clock_out) !== hm(now.clock_out)) changes.push(`Clock-out ${hm(was.clock_out)} → ${hm(now.clock_out)}`);
+    } else if (now.clock_out) {
+      changes.push(`Added clock-out ${hm(now.clock_out)}`);
+    } else if (was.clock_out) {
+      return fmtCorrectionTimes(requested, hm, empty); // re-opening a closed session is not an edit to read as one
+    }
+  }
+  if (!changes.length) return "No change to the recorded times";
+  // The worked-time difference, when both sides are whole days; a session still running has no total yet.
+  const delta = recorded.every((s) => s.clock_out) && requested.every((s) => s.clock_out) ? closedMinutes(requested) - closedMinutes(recorded) : 0;
+  return `${changes.join(", ")}${delta ? ` (${signedDuration(delta)})` : ""}`;
+}
 
 export const fmtDuration = (min: number) => `${Math.floor(min / 60)}h ${min % 60}m`;
 

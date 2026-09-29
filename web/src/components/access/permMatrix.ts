@@ -69,13 +69,19 @@ export function groupOf(collection: string): string {
 
 export const labelOf = (c: string) => metaFor(c).label;
 
+/** Narrows a rules read to what one editor is about (GET /v1/access-rules `collection`, `subject_kind` + `subject`). */
+export type AccessRuleFilter = { collection?: string } | { subject_kind: "role" | "user"; subject: string };
+
 // Page through ALL access-rules (the server caps a page at 100 and there can be more), so a matrix/editor
-// reflects every rule rather than just the first page.
-export async function fetchAllAccessRules(): Promise<AccessRule[]> {
+// reflects every rule rather than just the first page. An org holds thousands, so an editor about ONE
+// collection or ONE subject passes `filter` and pages through only those: the whole table is dozens of
+// sequential pages, which left the editor showing the pre-edit state for seconds after every change.
+export async function fetchAllAccessRules(filter: AccessRuleFilter = {}): Promise<AccessRule[]> {
   const all: AccessRule[] = [];
   let token: string | undefined;
   do {
     const params = new URLSearchParams({ max_page_size: "100" });
+    for (const [k, v] of Object.entries(filter)) if (v) params.set(k, v);
     if (token) params.set("page_token", token);
     const page = await api<{ results: AccessRule[]; next_page_token?: string }>(`/access-rules?${params.toString()}`);
     all.push(...page.results);

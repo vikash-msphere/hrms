@@ -84,7 +84,7 @@ describe("a 2-token verb DENY revokes the capability (it must not fail open)", (
 });
 
 // The wildcard-verb rule (access rule verb:"*") is how a role is granted "every custom method of this
-// collection" in one line - it is what hr_admin holds on assets in the seed. A collection-level verb has to be
+// collection" in one line - it is what it_admin holds on assets in the seed. A collection-level verb has to be
 // inside it, or adding one (`assets:batchCreate`) silently 403s the role that was granted everything.
 describe("the wildcard-verb rule covers a collection-level custom method", () => {
   const all = rulesToGrant([rule("assets.**", "allow")]);

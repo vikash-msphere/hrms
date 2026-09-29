@@ -8,6 +8,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { usePresence } from "@/hooks/usePresence";
 import { get, patch } from "@/api";
 import { cn, formatDate, formatMonthYear, humanize, idOf, probationLabel, reportsUnder, tenureDuration } from "@/lib/utils";
+import { hasExited, isCurrentEmployee } from "@/lib/employees";
 import { navigate } from "@/router";
 import { fireIntent, useIntent } from "@/lib/intent";
 import { usePermission, useCanSeeActivity, subjectScopesOf, SubjectScopesContext } from "@/lib/perm";
@@ -33,6 +34,7 @@ import { localDay, trackedFromOf } from "@/lib/attendance";
 import { ActivityFeed } from "@/components/common/ActivityFeed";
 import { EmployeeBonuses } from "@/components/common/EmployeeBonuses";
 import { EmployeeAssets } from "@/components/common/EmployeeAssets";
+import { DecisionButtons, RejectDialog, type RejectTarget } from "@/components/common/ApprovalRow";
 import { EmployeeRequests, FOCUSED_ROW, useFocusedRequest, useScrollToFocused, type EmployeeRequestKind } from "@/components/common/EmployeeRequests";
 import { EmployeeSettlement } from "@/components/common/EmployeeSettlement";
 import { EmployeePayslips } from "@/components/common/EmployeePayslips";
@@ -267,6 +269,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   // history below and scrolled to.
   const focusedLeave = useFocusedRequest("leave-requests");
   const focusedLeaveRef = useScrollToFocused(focusedLeave, sub === "leave" && myLeaves.length > 0);
+  const [rejectingLeave, setRejectingLeave] = useState<RejectTarget | null>(null);
 
   const onProbation = !!emp?.probation_end_date && Date.parse(emp.probation_end_date) >= Date.now();
 
@@ -302,11 +305,14 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   const setTab = (v: string) => navigate(v === "profile" ? base : `${base}/${v}`);
 
   // Org relations + prev/next stepping, all from the already-cached employees collection.
+  // Stepping and the team are the people still here (lib/employees.ts); the cycle guard below walks everyone
+  // not deleted, because a reporting line that runs through a leaver is still a line the server checks.
   const liveEmployees = useMemo(() => employees.filter((e) => !e.delete_time), [employees]);
-  const empIdx = liveEmployees.findIndex((e) => idOf(e.path) === id);
-  const prevEmp = empIdx > 0 ? liveEmployees[empIdx - 1] : undefined;
-  const nextEmp = empIdx >= 0 ? liveEmployees[empIdx + 1] : undefined;
-  const directReports = useMemo(() => liveEmployees.filter((e) => e.manager && idOf(e.manager) === id), [liveEmployees, id]);
+  const currentEmployees = useMemo(() => employees.filter(isCurrentEmployee), [employees]);
+  const empIdx = currentEmployees.findIndex((e) => idOf(e.path) === id);
+  const prevEmp = empIdx > 0 ? currentEmployees[empIdx - 1] : undefined;
+  const nextEmp = empIdx >= 0 ? currentEmployees[empIdx + 1] : undefined;
+  const directReports = useMemo(() => currentEmployees.filter((e) => e.manager && idOf(e.manager) === id), [currentEmployees, id]);
   /** Everyone under this person - the manager picker must not offer any of them (see `reportsUnder`). */
   const managerCycleIds = useMemo(() => reportsUnder(liveEmployees, id), [liveEmployees, id]);
   // The same team, in the shape the hover panel takes. Memoized so hovering the cell
@@ -486,7 +492,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                     rather than the pager disappearing. */}
                 <ArrowLeft className="h-4 w-4" /> <span className="hidden sm:inline">Back to directory</span><span className="sm:hidden">Back</span>
               </Button>
-              {empIdx >= 0 && liveEmployees.length > 1 && (
+              {empIdx >= 0 && currentEmployees.length > 1 && (
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
                   {/* Named for a screen reader, hinted by name for a pointer: the tooltip says WHO is next,
                       which the label cannot (it would read the person's name as the button's purpose). */}
@@ -498,7 +504,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                   >
                     <ChevronLeft className="h-4 w-4" />
                   </Button>
-                  <span className="tabular-nums">{empIdx + 1} of {liveEmployees.length}</span>
+                  <span className="tabular-nums">{empIdx + 1} of {currentEmployees.length}</span>
                   <Button
                     variant="ghost" size="sm" className="h-7 px-1.5" disabled={!nextEmp}
                     aria-label="Next employee"
@@ -612,7 +618,11 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                   {/* Derived reachability, and the record's own exception states. Different questions, so
                       both can be true at once: someone on probation can also be on leave today. */}
                   <PresencePill presence={presence} />
-                  {emp.disabled && <Badge variant="secondary">Inactive</Badge>}
+                  {hasExited(emp) ? (
+                    <Badge variant="secondary">Exited{emp.end_date ? ` · ${formatDate(emp.end_date)}` : ""}</Badge>
+                  ) : (
+                    emp.disabled && <Badge variant="secondary">Inactive</Badge>
+                  )}
                   {!emp.disabled && onProbation && <Badge variant="warning" data-sentry-mask>{probationLabel(emp.probation_end_date!) || "On probation"}</Badge>}
                 </>
               }
@@ -813,7 +823,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                         <div className="scroll-shadow-x [--scroll-ground:hsl(var(--card))] overflow-x-auto">
                           {/* Five columns of dates: a labelled block per request on a phone. */}
                           <table className="table-stack w-full text-sm">
-                            <thead><tr className="border-b text-left text-muted-foreground"><th className="py-2 pr-3 font-medium">Type</th><th className="py-2 pr-3 font-medium">From</th><th className="py-2 pr-3 font-medium">To</th><th className="py-2 pr-3 text-right font-medium">Days</th><th className="py-2 font-medium">Status</th></tr></thead>
+                            <thead><tr className="border-b text-left text-muted-foreground"><th className="py-2 pr-3 font-medium">Type</th><th className="py-2 pr-3 font-medium">From</th><th className="py-2 pr-3 font-medium">To</th><th className="py-2 pr-3 text-right font-medium">Days</th><th className="py-2 pr-3 font-medium">Status</th><th className="py-2 font-medium"><span className="sr-only">Actions</span></th></tr></thead>
                             <tbody>
                               {myLeaves.map((l) => (
                                 <tr
@@ -826,7 +836,19 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                                   <td data-label="From" className="py-1.5 pr-3 tabular-nums">{formatDate(l.start_date)}</td>
                                   <td data-label="To" className="py-1.5 pr-3 tabular-nums">{formatDate(l.end_date)}</td>
                                   <td data-label="Days" className="py-1.5 pr-3 text-right tabular-nums">{l.days}</td>
-                                  <td data-label="Status" className="py-1.5"><StatusBadge state={l.state} /></td>
+                                  <td data-label="Status" className="py-1.5 pr-3"><StatusBadge state={l.state} /></td>
+                                  {/* The inbox's decision, here too: the balances it is weighed against are the card above. */}
+                                  <td className="py-1.5">
+                                    <div className="flex items-center justify-end gap-1.5">
+                                      <DecisionButtons
+                                        collection="leave-requests"
+                                        row={l}
+                                        what={`${emp.first_name} ${emp.last_name}'s leave`}
+                                        onRejectClick={() => setRejectingLeave({ collection: "leave-requests", row: l, name: `${emp.first_name} ${emp.last_name}`, summary: `${typeName(l.leave_type)} · ${formatDate(l.start_date)} – ${formatDate(l.end_date)}` })}
+                                        buttonClassName="coarse:h-10"
+                                      />
+                                    </div>
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>
@@ -835,7 +857,8 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                       </CardContent>
                     </Card>
                   )}
-                  {leaveRequestKinds.map((k) => <EmployeeRequests key={k} employeeId={id} kind={k} />)}
+                  <RejectDialog target={rejectingLeave} onClose={() => setRejectingLeave(null)} onRejected={() => {}} />
+                  {leaveRequestKinds.map((k) => <EmployeeRequests key={k} employeeId={id} employeeName={`${emp.first_name} ${emp.last_name}`} kind={k} />)}
                 </TabsContent>
               )}
 
@@ -866,7 +889,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                     emptyText={`No attendance recorded for ${emp.first_name} yet.`}
                   />}
                   {/* What they asked for about their days: corrections, late/early, remote, overtime, time. */}
-                  {attendanceRequestKinds.map((k) => <EmployeeRequests key={k} employeeId={id} kind={k} />)}
+                  {attendanceRequestKinds.map((k) => <EmployeeRequests key={k} employeeId={id} employeeName={`${emp.first_name} ${emp.last_name}`} kind={k} />)}
                 </TabsContent>
               )}
 
@@ -938,7 +961,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                   {canPayslips && <EmployeePayslips employeeId={id} />}
                   {canSettlement && <EmployeeSettlement employeeId={id} canEdit={canSettlementEdit} />}
                   {/* Money they asked for: claims to be repaid and loans or advances against their pay. */}
-                  {compRequestKinds.map((k) => <EmployeeRequests key={k} employeeId={id} kind={k} />)}
+                  {compRequestKinds.map((k) => <EmployeeRequests key={k} employeeId={id} employeeName={`${emp.first_name} ${emp.last_name}`} kind={k} />)}
                 </TabsContent>
               )}
               {canDocs && (

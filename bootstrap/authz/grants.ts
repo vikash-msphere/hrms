@@ -16,6 +16,8 @@ import managerFile from "./roles/manager.json" with { type: "json" };
 import hrAdminFile from "./roles/hr_admin.json" with { type: "json" };
 import payrollAdminFile from "./roles/payroll_admin.json" with { type: "json" };
 import superAdminFile from "./roles/super_admin.json" with { type: "json" };
+import itAdminFile from "./roles/it_admin.json" with { type: "json" };
+import projectManagerFile from "./roles/project_manager.json" with { type: "json" };
 
 type Rule = { area?: string; pattern: string; why: string };
 export type RoleFile = {
@@ -33,8 +35,9 @@ export type RoleFile = {
 };
 
 // Seed order: `everyone` first, then the assignable roles narrowest-first. It is also the order the compiled
-// rules are numbered in, so appending a role never renumbers the ones before it.
-export const ROLE_FILES: readonly RoleFile[] = [everyoneFile, employeeFile, teamLeadFile, managerFile, hrAdminFile, payrollAdminFile, superAdminFile] as RoleFile[];
+// rules are numbered in, so appending a role never renumbers the ones before it - which is why it_admin and
+// project_manager, added after the rest, sit after super admin rather than beside the roles they resemble.
+export const ROLE_FILES: readonly RoleFile[] = [everyoneFile, employeeFile, teamLeadFile, managerFile, hrAdminFile, payrollAdminFile, superAdminFile, itAdminFile, projectManagerFile] as RoleFile[];
 
 const LEVELS: ReadonlySet<string> = new Set(["read", "write", "admin"]);
 
@@ -82,6 +85,8 @@ export const GRANTS = {
   hr_admin: grantOf(fileOf("hr_admin")),
   payroll_admin: grantOf(fileOf("payroll_admin")),
   super_admin: grantOf(fileOf("super_admin")),
+  it_admin: grantOf(fileOf("it_admin")),
+  project_manager: grantOf(fileOf("project_manager")),
 } satisfies Record<string, Grant>;
 
 // `everyone` is a rule subject, never a role a user holds, so it stays out of GRANTS and nothing that walks the

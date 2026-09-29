@@ -140,7 +140,7 @@ export default function Onboarding({ me }: { me: Me }) {
   }
   async function transitionAct(tr: Transition, verb: string, body?: Record<string, unknown>) {
     // Completing an offboarding terminates the employee + disables their login - confirm first.
-    if (verb === "complete" && tr.kind === "offboarding" && !(await confirm({ title: "Complete offboarding?", description: `This marks ${empName(tr.employee)} as terminated and disables their login.`, destructive: true, confirmLabel: "Complete" }))) return;
+    if (verb === "complete" && tr.kind === "offboarding" && !(await confirm({ title: "Complete offboarding?", description: `This closes the checklist and, unless they have already exited, marks ${empName(tr.employee)} as terminated and disables their login.`, destructive: true, confirmLabel: "Complete" }))) return;
     if (acting) return;
     setActing(`${tr.path}:${verb}`);
     try { await invoke(`transitions/${idOf(tr.path)}`, verb, undefined, body); reloadAll(); }

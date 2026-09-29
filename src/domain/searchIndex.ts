@@ -235,11 +235,14 @@ export const statusPropOf = (entry: SearchEntry): string | undefined => entry.ma
  * free text, or that has none, answers no statuses.
  */
 export function searchVocabulary(listable: ReadonlySet<string>): { collection: string; statuses: string[] }[] {
-  return SEARCH_INDEX.filter((e) => listable.has(e.collection)).map((e) => {
-    const prop = statusPropOf(e);
-    const values = prop ? ((e.table as Record<string, { enumValues?: readonly string[] }>)[prop]?.enumValues ?? []) : [];
-    return { collection: e.collection, statuses: [...new Set(values.map((v) => v.toLowerCase()))] };
-  });
+  return SEARCH_INDEX.filter((e) => listable.has(e.collection)).map((e) => ({ collection: e.collection, statuses: statusValuesOf(e) }));
+}
+
+/** The values the entry's status column can hold, lower-cased; empty when it has none or it is free text. */
+export function statusValuesOf(entry: SearchEntry): string[] {
+  const prop = statusPropOf(entry);
+  const values = prop ? ((entry.table as Record<string, { enumValues?: readonly string[] }>)[prop]?.enumValues ?? []) : [];
+  return [...new Set(values.map((v) => v.toLowerCase()))];
 }
 
 /**

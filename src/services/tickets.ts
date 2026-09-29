@@ -19,11 +19,12 @@ import { getSettingValue, getDefaultDepartmentId } from "./settings";
 import { assertUploadSize, isAllowedUpload, storedContentType } from "./documentsCommon";
 import { parseAttachments, safeAttachmentName, MAX_TICKET_ATTACHMENTS, type TicketAttachment } from "../domain/ticketAttachments";
 import { DEFAULT_TICKET_WORKFLOW, transitionFor } from "../domain/stateMachines";
-import { shareTicketWith, grantTicketRead, revokeTicketRead, usersForEmployees } from "./ticketShares";
+import { shareTicketWith, grantTicketRead, revokeTicketRead, usersForEmployees, serviceTicketsByRole, unserviceTicketsByRole } from "./ticketShares";
+import { EVERYONE_ROLE } from "../domain/grants";
 
 // The shape and the starter list live in domain/tickets.ts, so bootstrap can seed the settings row from the
 // same constant this falls back to. See the note there on why the two must not drift.
-import { DEFAULT_TICKET_CATEGORIES, MAX_TICKET_RECORDINGS, REPLAY_ID_RE, parseRecordings, type TicketCategoriesConfig } from "../domain/tickets";
+import { DEFAULT_TICKET_CATEGORIES, MAX_TICKET_RECORDINGS, REPLAY_ID_RE, parseRecordings, rolesByCategory, type TicketCategoriesConfig } from "../domain/tickets";
 import { runBatch, insertBatches, byIdChunks } from "../lib/dbBatch";
 export type { TicketCategory, TicketCategoriesConfig } from "../domain/tickets";
 
@@ -135,6 +136,66 @@ async function categoryViewers(deps: Deps, key?: string | null): Promise<string[
   return [...new Set(refs.map((r) => idFromPath(r)!).filter(Boolean))];
 }
 
+// The roles that service every ticket in a category (their holders work the queue, see services/ticketShares.ts).
+async function categoryRoles(deps: Deps, key?: string | null): Promise<string[]> {
+  if (!key) return [];
+  const cfg = await getSettingValue<TicketCategoriesConfig>(deps, "ticket-categories", DEFAULT_TICKET_CATEGORIES);
+  return rolesByCategory(cfg).get(key) ?? [];
+}
+
+/**
+ * Refuse a `ticket-categories` value whose `roles` name a role the org does not have, or `everyone`. A servicing
+ * role gets write and every verb on each ticket in the desk, so a typo must not save as a rule nobody holds, and
+ * `everyone` would hand every account every ticket filed there - including the one it is about.
+ */
+export async function assertCategoryRoles(deps: Deps, value: unknown) {
+  const named = [...new Set([...rolesByCategory(value).values()].flat())];
+  if (!named.length) return;
+  if (named.includes(EVERYONE_ROLE)) throw invalidArgument("a ticket category cannot be serviced by everyone; name the role that works the desk");
+  const known = new Set((await deps.db.select({ name: schema.roles.name }).from(schema.roles).where(inArray(schema.roles.name, named))).map((r) => r.name));
+  const unknown = named.filter((r) => !known.has(r));
+  if (unknown.length) throw invalidArgument(`these ticket category roles do not exist: ${unknown.join(", ")}`);
+}
+
+/**
+ * The `ticket-categories` value as stored right now, read straight from the row (not the cached settings list,
+ * which may be a few seconds old), or the default the service falls back to when there is no row or it is not
+ * JSON. What a save is about to replace, for syncCategoryServiceRoles.
+ */
+export async function storedTicketCategories(deps: Deps): Promise<unknown> {
+  const row = (await deps.db.select({ value: schema.settings.value }).from(schema.settings).where(eq(schema.settings.key, "ticket-categories")).limit(1))[0];
+  if (!row) return DEFAULT_TICKET_CATEGORIES;
+  try {
+    return JSON.parse(row.value);
+  } catch {
+    return DEFAULT_TICKET_CATEGORIES;
+  }
+}
+
+/**
+ * Re-share the existing queue after a `ticket-categories` save changed which roles service a desk: a role added
+ * to a category gets every ticket already filed there, and a role taken off loses them. New tickets are shared at
+ * create. `before` is the stored value the save replaced.
+ *
+ * Every role the category now names is granted again, not only the added ones - granting is idempotent, so a
+ * save that was cut off halfway is completed by the next save of that category.
+ */
+export async function syncCategoryServiceRoles(deps: Deps, actor: AppUser, before: unknown, after: unknown) {
+  const was = rolesByCategory(before);
+  const now = rolesByCategory(after);
+  for (const key of new Set([...was.keys(), ...now.keys()])) {
+    const prev = was.get(key) ?? [];
+    const next = now.get(key) ?? [];
+    const removed = prev.filter((r) => !next.includes(r));
+    if (!removed.length && next.every((r) => prev.includes(r))) continue;
+    const codes = (await deps.db.select({ code: schema.tickets.code }).from(schema.tickets).where(eq(schema.tickets.category, key)))
+      .map((r) => r.code)
+      .filter((c): c is string => !!c);
+    for (const role of next) await serviceTicketsByRole(deps, actor, codes, role);
+    for (const role of removed) await unserviceTicketsByRole(deps, actor, codes, role);
+  }
+}
+
 // The category's configured default servicing department (uuid), or null.
 async function categoryDepartment(deps: Deps, key?: string | null): Promise<string | null> {
   if (!key) return null;
@@ -205,6 +266,10 @@ export async function createTicket(deps: Deps, actor: AppUser, input: TicketInpu
   // managers. The requester is excluded - they already see their own ticket via the owner scope.
   const viewers = [...new Set([...(await categoryViewers(deps, categoryKey)), ...(await departmentManagers(deps, departmentId))])].filter((e) => e !== employeeId);
   await shareTicketWith(deps, actor, row.code!, viewers);
+  // And hand it to the roles that service the desk. A ticket's category never changes after this, so create is
+  // the only per-ticket moment; a change to the category's roles re-shares the existing queue from the settings
+  // write (routes/settings.ts).
+  for (const role of await categoryRoles(deps, categoryKey)) await serviceTicketsByRole(deps, actor, [row.code!], role);
   await audit(deps, actor, "ticket.create", "tickets", row.uuid, createdMeta(row, "tickets"), row);
   await emitEvent(deps, actor, "ticket.created", { subject: `tickets/${row.uuid}`, employeeId, payload: { category: categoryKey, priority } });
   // Nudge whoever services this ticket (its assignee + category members + the servicing department's managers -

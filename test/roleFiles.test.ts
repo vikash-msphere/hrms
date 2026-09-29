@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { GRANTS, EVERYONE_GRANT, ROLE_FILES } from "../bootstrap/authz/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
-import { mergeGrants } from "../src/domain/compileGrants";
+import { compileGrant, mergeGrants } from "../src/domain/compileGrants";
+import { MAX_CLONE_RULES } from "../src/services/accessRules";
 
 // The seeded roles are one JSON file each (bootstrap/authz/roles/). The loader already refuses a malformed file;
 // this pins what the least-privilege review of the employee role decided, so a later edit that quietly undoes
@@ -14,8 +15,16 @@ const can = (m: string, p: string) => decide(employee, resolveRequest(m, p, fals
 
 describe("role files", () => {
   it("one file per seeded role, exactly one given to new accounts, and it is assignable", () => {
-    expect(ROLE_FILES.map((f) => f.role)).toEqual(["everyone", "employee", "team_lead", "manager", "hr_admin", "payroll_admin", "super_admin"]);
+    expect(ROLE_FILES.map((f) => f.role)).toEqual(["everyone", "employee", "team_lead", "manager", "hr_admin", "payroll_admin", "super_admin", "it_admin", "project_manager"]);
     expect(ROLE_FILES.filter((f) => f.provisioned).map((f) => f.role)).toEqual(["employee"]);
+  });
+
+  it("every seeded role can be cloned: the role editor's \"Start from\" copies one in a single request", () => {
+    // The seeded ROWS, which is what a clone reads: a role file inherits (a manager is an employee plus the
+    // department), so the compiled grant is larger than the file's own list.
+    for (const [role, grant] of Object.entries({ ...GRANTS, everyone: EVERYONE_GRANT })) {
+      expect(compileGrant(grant).length, `${role} holds more rules than cloneAccessRules copies`).toBeLessThanOrEqual(MAX_CLONE_RULES);
+    }
   });
 
   it("a manager is an employee plus the department: every employee rule reaches a manager", () => {
@@ -123,6 +132,75 @@ describe("team lead: leads their direct reports on goals and 1:1s, decides none 
     const mgrSelf = { employeeCode: "04-1c-0a9" };
     for (const [m, p] of [["PATCH", `/v1/goals/${REPORT}`], ["POST", `/v1/goals/${REPORT}:approve`], ["PATCH", `/v1/check-ins/${REPORT}`]] as const) {
       expect(decide(mgr, resolveRequest(m, p, false), mgrSelf).allow, `${m} ${p}`).toBe(true);
+    }
+  });
+});
+
+describe("project manager: runs boards and sprints, and the direct reports' goals", () => {
+  // The PM is 04-1c-0a9; 04-1c-0b2 reports to them; 04-1c-0c3 is in the same department and does not.
+  const self = { employeeCode: "04-1c-0a9", reportCodes: ["04-1c-0b2"] };
+  const pm = mergeGrants(GRANTS.project_manager, EVERYONE_GRANT);
+  const ok = (m: string, p: string) => decide(pm, resolveRequest(m, p, false), self).allow;
+  const REPORT = "04-1c-0b2-0";
+  const PEER = "04-1c-0c3-0";
+
+  it("is an employee first", () => {
+    expect(ROLE_FILES.find((f) => f.role === "project_manager")!.extends).toBe("employee");
+    for (const p of GRANTS.employee.allow) expect(GRANTS.project_manager.allow, p).toContain(p);
+  });
+  it("manages every board, private ones included, which a plain employee cannot", () => {
+    for (const [m, p] of [["POST", "/v1/boards"], ["PATCH", "/v1/boards/ve-0a"], ["PATCH", "/v1/boards/vp-0a"], ["POST", "/v1/boards/vp-0a:share"], ["POST", "/v1/sprints/ve-0a-001:activate"], ["POST", "/v1/sprints/vp-0a-001:complete"]] as const) {
+      expect(ok(m, p), `${m} ${p}`).toBe(true);
+      expect(can(m, p), `employee ${m} ${p}`).toBe(false);
+    }
+    expect(ok("POST", "/v1/cards/vp-0a-001:move")).toBe(true);
+    expect(ok("GET", "/v1/cards/vp-0a-001")).toBe(true);
+  });
+  it("sets, agrees and coaches a report's goals - a report's, not a department peer's", () => {
+    for (const [m, p] of [["PATCH", `/v1/goals/${REPORT}`], ["POST", `/v1/goals/${REPORT}:approve`], ["POST", `/v1/goals/${REPORT}:requestChanges`], ["POST", `/v1/goals/${REPORT}:comment`]] as const) {
+      expect(ok(m, p), `${m} ${p}`).toBe(true);
+      expect(ok(m, p.replace(REPORT, PEER)), `${m} ${p} for a non-report`).toBe(false);
+    }
+  });
+  it("approves no request, runs no 1:1 or review, and credits no contributor", () => {
+    for (const col of ["leave-requests", "attendance-regularizations", "overtime-requests", "remote-work-requests", "late-early-requests", "asset-requests", "time-entries", "expenses"]) {
+      expect(ok("POST", `/v1/${col}/${REPORT}:approve`), `${col} approve`).toBe(false);
+    }
+    expect(ok("PATCH", `/v1/check-ins/${REPORT}`)).toBe(false);
+    expect(ok("GET", `/v1/reviews/${REPORT}`)).toBe(false);
+    expect(ok("POST", `/v1/goals/${REPORT}:setContributors`)).toBe(false);
+  });
+});
+
+describe("boards: visibility is the code segment, and nobody but super admin and the PM reaches a private one", () => {
+  const as = (role: keyof typeof GRANTS) => (m: string, p: string) => decide(mergeGrants(GRANTS[role], EVERYONE_GRANT), resolveRequest(m, p, false), SELF).allow;
+
+  it("everyone sees and works an edit board, sees a view board, and reaches no private one", () => {
+    expect(can("GET", "/v1/boards/ve-0a")).toBe(true);
+    expect(can("POST", "/v1/cards/ve-0a-001:move")).toBe(true);
+    expect(can("PATCH", "/v1/cards/ve-0a-001")).toBe(true);
+    expect(can("GET", "/v1/boards/vr-0a")).toBe(true);
+    expect(can("GET", "/v1/cards/vr-0a-001")).toBe(true);
+    expect(can("POST", "/v1/cards/vr-0a-001:move")).toBe(false);
+    expect(can("PATCH", "/v1/cards/vr-0a-001")).toBe(false);
+    for (const p of ["/v1/boards/vp-0a", "/v1/cards/vp-0a-001", "/v1/sprints/vp-0a-001"]) expect(can("GET", p), p).toBe(false);
+  });
+  it("HR and managers create boards but manage none by role, and see no private board", () => {
+    for (const role of ["hr_admin", "manager"] as const) {
+      const ok = as(role);
+      expect(ok("POST", "/v1/boards"), `${role} create`).toBe(true);
+      expect(ok("PATCH", "/v1/boards/ve-0a"), `${role} rename`).toBe(false);
+      expect(ok("POST", "/v1/boards/ve-0a:configure"), `${role} configure`).toBe(false);
+      expect(ok("POST", "/v1/sprints/ve-0a-001:activate"), `${role} sprint`).toBe(false);
+      expect(ok("GET", "/v1/boards/vp-0a"), `${role} private`).toBe(false);
+    }
+  });
+  it("no role holds a self or team token on boards, cards or sprints - they match by code, and these are board codes", () => {
+    for (const f of ROLE_FILES) {
+      for (const r of [...f.levels, ...f.allow, ...f.deny]) {
+        const [ns, scope] = r.pattern.split(".");
+        if (["boards", "cards", "sprints"].includes(ns!)) expect(["me", "my-dept", "my-reports", "my-org"], `${f.role} ${r.pattern}`).not.toContain(scope);
+      }
     }
   });
 });

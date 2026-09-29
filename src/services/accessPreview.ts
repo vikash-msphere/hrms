@@ -25,7 +25,7 @@ const MAX_SUBJECTS = 100;
 export type PreviewBody = {
   subjects: string[]; // "users/<uuid>" or "employees/<uuid>" (wire ids already decoded at the edge)
   collection?: string; // optional ONLY with include_capabilities (capability-set-only call)
-  object?: string; // "<collection>/<uuid>", must match `collection`
+  object?: string; // "<collection>/<uuid>", or "<collection>/me" for each subject's own record; must match `collection`
   field?: string; // requires `object` (field keys are object-anchored in the engine)
   verb?: string; // custom method to check alongside the standard ladder
   // Also return capabilitiesOf(broad grant) per subject - the same scope-stripped set /users/me carries,
@@ -140,6 +140,15 @@ async function resolveTarget(deps: Deps, t: PreviewTarget): Promise<{ collection
     const slash = t.object.indexOf("/");
     const objCollection = slash > 0 ? t.object.slice(0, slash) : "";
     if (objCollection !== collection) throw invalidArgument("object does not belong to the target collection");
+    // `<collection>/me` is each subject's OWN record, decided on the literal key `<collection>.me` - the key a
+    // self-acting request (`POST /v1/attendance/me:clockIn`) is decided on, since lib/authzResolve.ts leaves
+    // `me` in the path unresolved. A record-level verb asked of the bare collection is decided on
+    // `<collection>.<verb>` instead, which no `me`/`my-dept`/object rule can match, so it reported "cannot
+    // clockIn" for every employee who could. There is no row behind `me`, so no object exceptions overlay it.
+    if (t.object.slice(slash + 1) === "me") {
+      if (field !== undefined) throw invalidArgument("a field target needs an object id");
+      return { collection, resource: `${collection}.me`, code: null, ...(verb !== undefined ? { verb } : {}) };
+    }
     if (!tableFor(collection)) throw invalidArgument("collection has no addressable objects");
     code = await uuidToCode(deps, collection, t.object.slice(slash + 1));
     if (!code) throw notFound("target object not found");

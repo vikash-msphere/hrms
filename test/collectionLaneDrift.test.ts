@@ -162,7 +162,10 @@ describe("every collection is built by the factory", () => {
     // shared one (`setDisabled`); what the collection claims is what happens AROUND it.
     // `suggestions:restore` is the same case on the other wall: the soft-delete stamp is both an author's own
     // withdrawal and moderation's hide, so the collection owns whether a restore is allowed to happen at all.
-    expect(shadowed.sort()).toEqual(["announcements:enable", "automations:disable", "automations:enable", "payrollRuns:publish", "suggestions:restore"]);
+    // `employees:disable/enable` keep the shared column write too (`setDisabled`) and add what an employee's
+    // state means around it: disabling switches off the linked login, and enabling someone who exited sets
+    // them back to `active` (services/employees.ts).
+    expect(shadowed.sort()).toEqual(["announcements:enable", "automations:disable", "automations:enable", "employees:disable", "employees:enable", "payrollRuns:publish", "suggestions:restore"]);
   });
 
   // The generic list binds the caller's scope (services/crud.ts), and these tables are FLAT catalogs: a `code`
@@ -178,7 +181,7 @@ describe("every collection is built by the factory", () => {
     const GENERIC_LIST = [
       "asset-categories", "benefit-plans", "compliance-rules", "expense-categories", "goal-templates", "holidays", "leave-types",
       "letter-templates", "letterheads", "pay-components", "pay-grades", "pay-periods", "projects", "reimbursement-categories",
-      "access-rules", "salary-structures", "shifts", "vendors", "card-transactions", "work-patterns",
+      "salary-structures", "shifts", "vendors", "card-transactions", "work-patterns",
     ];
     const genericListFiles = entries.filter((e) => usesFactory(e.src) && !/^\s*list:/m.test(e.src)).map((e) => e.name);
     expect(genericListFiles.length, `these list through crud.ts: ${genericListFiles.join(", ")} - keep GENERIC_LIST in step`).toBe(GENERIC_LIST.length);

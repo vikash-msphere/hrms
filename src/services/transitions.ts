@@ -1,4 +1,4 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, ne } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
@@ -231,12 +231,24 @@ export async function setTransitionState(deps: Deps, actor: AppUser, id: string,
   return updated;
 }
 
-// Mark an employee as terminated (status + disabled + end date) and disable any linked login. Idempotent.
-// Called when an offboarding completes (transition complete, or a linked notice-period marked exited).
-export async function terminateForOffboarding(deps: Deps, actor: AppUser, employeeId: string, endDate: Date) {
-  await deps.db.update(schema.employees).set({ status: "terminated", disabled: true, endDate, updatedAt: new Date() }).where(eq(schema.employees.uuid, employeeId));
+// Mark an employee as terminated (status + disabled + end date) and disable any linked login. Called when an
+// offboarding completes (transition complete, or a linked notice-period marked exited) and by the nightly exit
+// sweep (noticePeriods.ts exitDueEmployees) once the last working day has passed.
+//
+// IDEMPOTENT BY GUARD, not by rewriting the same values: the sweep and a later manual "Complete" both reach the
+// same person, and the second must not stamp a new end date, disable a login HR has since switched back on, or
+// write a second `employee.terminate` entry. Only the call that actually flips the row does the rest. Returns
+// whether it did.
+export async function terminateForOffboarding(deps: Deps, actor: AppUser | "system", employeeId: string, endDate: Date): Promise<boolean> {
+  const flipped = await deps.db
+    .update(schema.employees)
+    .set({ status: "terminated", disabled: true, endDate, updatedAt: new Date() })
+    .where(and(eq(schema.employees.uuid, employeeId), ne(schema.employees.status, "terminated")))
+    .returning({ uuid: schema.employees.uuid });
+  if (!flipped.length) return false;
   await deps.db.update(schema.users).set({ status: "disabled", updatedAt: new Date() }).where(eq(schema.users.employeeId, employeeId));
   await audit(deps, actor, "employee.terminate", "employees", employeeId, { via: "offboarding" });
+  return true;
 }
 
 // Add an ad-hoc task to a transition (assignee is a concrete employee ref, defaulting to the subject).

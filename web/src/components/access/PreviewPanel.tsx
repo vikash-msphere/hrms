@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Combobox } from "@/components/ui/combobox";
 import type { AccessTargetRef } from "./AccessModeProvider";
 import { fetchSubjectOptions } from "./subjectOptions";
+import { isCollectionMethod } from "./customMethods";
 
 // "View as": ask the ENGINE (POST /v1/access-rules:preview) what a chosen person can actually do on the
 // modal's current target, and show the verdict. This is the ground truth the whole modal edits toward -
@@ -65,6 +66,10 @@ export function PreviewPanel({ target, activeVerb, createMode, rulesVersion = 0 
   // The verb dimension: a concrete method target (or drilled-in chip) previews that method; the wildcard
   // "all methods" rule has no single key to ask the engine about, so it falls back to the ladder.
   const verb = activeVerb && activeVerb !== "*" ? activeVerb : undefined;
+  // A record-level method (`attendance/me:clockIn`, `leave-requests/<id>:approve`) on the whole-collection target
+  // has no record to ask about, and the bare `<collection>.<verb>` key matches no `me`/`my-dept` rule, so the
+  // engine said "cannot clockIn" to everyone who could. Ask about the person's OWN record instead and say so.
+  const ownRecord = !!verb && !target.objectPath && !!target.collection && !isCollectionMethod(target.collection, verb);
 
   React.useEffect(() => {
     if (open && subjects === null) fetchSubjectOptions().then(setSubjects).catch(() => setSubjects([]));
@@ -86,7 +91,7 @@ export function PreviewPanel({ target, activeVerb, createMode, rulesVersion = 0 
     setError("");
     try {
       const [v] = await fetchPreview(
-        { collection: target.collection, object: target.objectPath, field: target.field, verb },
+        { collection: target.collection, object: ownRecord ? `${target.collection}/me` : target.objectPath, field: target.field, verb },
         [subject],
       );
       setVerdict(v ?? null);
@@ -141,7 +146,7 @@ export function PreviewPanel({ target, activeVerb, createMode, rulesVersion = 0 
           {verdict.disabled ? (
             <Badge variant="destructive" className="gap-1"><ShieldOff className="h-3 w-3" /> account disabled</Badge>
           ) : verb ? (
-            yes(verdict.verb_allowed === true, `can ${verb}`, `cannot ${verb}`)
+            yes(verdict.verb_allowed === true, `can ${verb}${ownRecord ? " on own record" : ""}`, `cannot ${verb}${ownRecord ? " on own record" : ""}`)
           ) : createMode ? (
             yes(verdict.write, "can create", "cannot create")
           ) : (

@@ -26,7 +26,7 @@ import type { Department, Employee, User } from "@/types";
 type ScopeCount = { count: number; capped: boolean };
 import type { AccessTargetRef } from "./AccessModeProvider";
 import { ruleScopeFor, ruleMatchesTarget } from "./accessRuleScope";
-import { customMethodsFor } from "./customMethods";
+import { customMethodsFor, isCollectionMethod } from "./customMethods";
 import { scopesForCollection, fetchScopeCapabilities, fetchConditionFields, fetchWindowFields } from "./permMatrix";
 import { metaFor } from "./collectionMeta";
 import { verbInfo } from "./verbMeta";
@@ -99,6 +99,9 @@ export function AclModal({
   const { toast } = useToast();
   const confirm = useConfirm();
   const [rules, setRules] = React.useState<AccessRule[]>([]);
+  // The collection `rules` was read for. Until it matches the target, the summary line has nothing to count and
+  // would announce "Nobody but full admins can see this" about a collection whose rules are still arriving.
+  const [rulesFor, setRulesFor] = React.useState<string | null>(null);
   const [users, setUsers] = React.useState<User[]>([]);
   // employees/{id} -> display name, so the people picker reads "Priya Nair · priya.nair@acme.com" rather than a
   // column of raw addresses. Every employee has an account (services/employees.ts provisions one at create), so
@@ -179,7 +182,10 @@ export function AclModal({
   // Scope chips apply to object/collection, field, and verb targets alike - a field rule is scoped exactly like
   // an object one (this object / own / dept / all), the field token just rides along. Only the create gate has a
   // fixed scope. Narrowest first, so the default selection is the tightest available.
-  const scopeOpts = !createMode ? scopesForCollection(collection ?? "", hasObject, scopeCaps) : [];
+  // ...except a method that acts on the collection as a whole (`access-rules:requestAccess`): it has no record to
+  // scope to, so only an org-wide rule can match it and every narrower chip would author a rule that never applies.
+  const collectionMethod = verbMode && isCollectionMethod(collection ?? "", activeVerb);
+  const scopeOpts = createMode ? [] : collectionMethod ? [{ value: "all", label: "Org-wide" }] : scopesForCollection(collection ?? "", hasObject, scopeCaps);
   // Default to the narrowest scope when the target identity changes (new icon opened) or the caps finish
   // loading; keep the current selection if it's still a valid option (don't yank a choice mid-edit).
   React.useEffect(() => {
@@ -236,11 +242,32 @@ export function AclModal({
   const showRoles = canManageRoles;
   const defaultTab = (hasObject && showUsers) || !showRoles ? "users" : "roles";
 
+  // The rules on this target - re-read after every edit, since that is what an edit changes.
   const reload = React.useCallback(async () => {
     if (!target) return;
     setBusy(true);
     try {
-      const tasks: Promise<unknown>[] = [fetchAllAccessRules().then((r) => setRules(r as AccessRule[]))];
+      // This collection's rules and the `**` ones, not the org's whole table: every check below is about one
+      // collection, and the whole table is dozens of pages that kept the pre-edit state on screen meanwhile.
+      const r = await fetchAllAccessRules({ collection: target.collection });
+      setRules(r);
+      setRulesFor(target.collection);
+      // Every rule mutation funnels through reload(), so this counter is the modal's "rules changed" signal -
+      // it re-runs the preview panel's check for whoever is on screen (a stale verdict misreports the edit).
+      setRulesVersion((v) => v + 1);
+    } catch (e) {
+      toast({ variant: "destructive", title: "Could not load access", description: String((e as Error).message) });
+    } finally {
+      setBusy(false);
+    }
+  }, [target, toast]);
+
+  // Who the rules are ABOUT - the org's people and roles. Read when a target opens, not after every rule edit:
+  // an edit changes none of them, and re-listing all of them after each press held every dropdown disabled for
+  // several more page walks.
+  const loadSubjects = React.useCallback(async () => {
+    try {
+      const tasks: Promise<unknown>[] = [];
       if (showUsers) {
         tasks.push(listAll<User>("users").then(setUsers));
         tasks.push(
@@ -259,24 +286,22 @@ export function AclModal({
           }),
         );
       await Promise.all(tasks);
-      // Every rule mutation funnels through reload(), so this counter is the modal's "rules changed" signal -
-      // it re-runs the preview panel's check for whoever is on screen (a stale verdict misreports the edit).
-      setRulesVersion((v) => v + 1);
     } catch (e) {
       toast({ variant: "destructive", title: "Could not load access", description: String((e as Error).message) });
-    } finally {
-      setBusy(false);
     }
-  }, [target, showUsers, showRoles, toast]);
+  }, [showUsers, showRoles, toast]);
 
   React.useEffect(() => {
-    if (target) void reload();
+    if (target) {
+      void reload();
+      void loadSubjects();
+    }
     setFocusVerb(undefined);
     setAddUsers([]);
     setAddExpires("");
     setAnchorPath(""); // a department picked for the last target must never carry into the next one
     setShowHistory(false);
-  }, [target, reload]);
+  }, [target, reload, loadSubjects]);
 
   // Provenance for the rules on screen: the audit trail already records every access-rule write, so "who
   // added this and when" is a read, not new bookkeeping. Scoped to this collection by the free-text `q`
@@ -514,7 +539,7 @@ export function AclModal({
       }
       undoable(`Updated ${roleLabel(name)}${gate ? " · also given access to open the list" : ""}`, async () => {
         if (gate) await remove(gate);
-        for (const r of (await fetchAllAccessRules()).filter((x) => x.subject_kind === "role" && x.subject === name && matchesTarget(x) && !x.verb)) await remove(r.path, r.etag);
+        for (const r of (await fetchAllAccessRules({ subject_kind: "role", subject: name })).filter((x) => matchesTarget(x) && !x.verb)) await remove(r.path, r.etag);
         for (const r of before) await recreate(r);
       });
     } catch (e) {
@@ -555,7 +580,7 @@ export function AclModal({
       }
       if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...verbBody(v, value as "allow" | "deny"), ...(value === "deny" ? {} : { ...expiryBody(), ...guardBody() }) });
       undoable(`Updated ${roleLabel(name)} · ${v}`, async () => {
-        for (const r of (await fetchAllAccessRules()).filter((x) => x.subject_kind === "role" && x.subject === name && matchesTarget(x) && x.verb === v)) await remove(r.path, r.etag);
+        for (const r of (await fetchAllAccessRules({ subject_kind: "role", subject: name })).filter((x) => matchesTarget(x) && x.verb === v)) await remove(r.path, r.etag);
         for (const r of before) await recreate(r);
       });
     } catch (e) {
@@ -741,7 +766,9 @@ export function AclModal({
   const scopeNote = createMode
     ? `creating a new ${singular}`
     : verbMode
-    ? `${activeVerb === ALL_VERBS ? "all methods" : `"${verbInfo(collection ?? "", activeVerb!).label}"`} on ${whereNote}`
+    ? collectionMethod
+      ? `"${verbInfo(collection ?? "", activeVerb!).label}"`
+      : `${activeVerb === ALL_VERBS ? "all methods" : `"${verbInfo(collection ?? "", activeVerb!).label}"`} on ${whereNote}`
     : hasField
     ? `the "${target?.label ?? field}" field of ${whereNote}`
     : whereNote;
@@ -791,7 +818,9 @@ export function AclModal({
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
           <span className="inline-flex items-center gap-1.5 font-medium">
             <Users className="h-3.5 w-3.5 text-muted-foreground" />
-            {holders.everyone ? (
+            {rulesFor !== collection ? (
+              <span className="text-muted-foreground">Reading who can {canDoWhat}…</span>
+            ) : holders.everyone ? (
               <span className="text-indigo-700 dark:text-indigo-300">Everyone can {canDoWhat}</span>
             ) : holders.roles + holders.people === 0 ? (
               <span className="text-muted-foreground">Nobody but full admins can {canDoWhat}</span>
@@ -905,6 +934,8 @@ export function AclModal({
           (() => {
             const [value, why] = createMode
               ? ["org-wide", `creating applies to the whole ${meta.label.toLowerCase()} collection.`]
+              : collectionMethod
+                ? ["org-wide", `this method acts on ${plural} as a whole, not on individual records, so it has no narrower tiers.`]
               : meta.kind === "virtual"
                 ? ["org-wide", "this is an app-wide capability with no narrower tiers."]
                 : meta.kind === "settings" && !hasObject

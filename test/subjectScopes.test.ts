@@ -85,11 +85,27 @@ describe("subjectScopes - the answer correlates with WHO the subject is", () => 
   });
 
   it("read and write are separate answers", () => {
-    const s = subjectScopes(grant({ "goals.my-dept.**": "read", "cards.my-dept.**": "write" }), self(), TEAMMATE, ["goals", "cards"]);
+    const s = subjectScopes(grant({ "goals.my-dept.**": "read", "check-ins.my-dept.**": "write" }), self(), TEAMMATE, ["goals", "check-ins"]);
     expect(s.read).toContain("goals");
     expect(s.write).not.toContain("goals"); // a read grant is not a write one
-    expect(s.read).toContain("cards"); // write implies read down the ladder
-    expect(s.write).toContain("cards");
+    expect(s.read).toContain("check-ins"); // write implies read down the ladder
+    expect(s.write).toContain("check-ins");
+  });
+
+  // A card is filed under its BOARD's code (domain/boardAccess.ts), never a person's, so an owner probe would
+  // match nothing for anybody and a colleague's Tasks would be hidden from everyone who can see their boards.
+  it("board-coded rows reach the caller by the boards they see, whoever the person is", () => {
+    const orgBoards = grant({ cards: "write", "cards.ve-*.**": "write", "cards.vr-*.**": "read" });
+    for (const who of [ME, TEAMMATE, OUTSIDER]) {
+      const s = subjectScopes(orgBoards, self(), who, ["cards"]);
+      expect(s.read, who).toContain("cards");
+      expect(s.write, who).toContain("cards");
+    }
+    const oneShare = grant({ cards: "read", "cards.vp-0a-*.**": "read" });
+    expect(subjectScopes(oneShare, self(), OUTSIDER, ["cards"]).read).toContain("cards");
+    expect(subjectScopes(oneShare, self(), OUTSIDER, ["cards"]).write).not.toContain("cards");
+    expect(subjectScopes(grant({ cards: "read" }), self(), TEAMMATE, ["cards"]).read, "the list gate alone reaches no board").not.toContain("cards");
+    expect(subjectScopes(grant({ "cards.**": "read" }), self(), TEAMMATE, ["cards"]).read).toContain("cards");
   });
 
   it("the employee sub-resources are their own gate, reached by no grant on the base record", () => {

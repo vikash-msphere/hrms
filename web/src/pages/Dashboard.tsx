@@ -35,6 +35,7 @@ import { useCelebrations, useCelebrationLeadDays } from "@/hooks/useCelebrations
 import { useSortable } from "@/hooks/useSortable";
 import { useVisibleRegions } from "@/hooks/useInView";
 import { usePermission, useCapabilities, hasCapability } from "@/lib/perm";
+import { DASHBOARD_SUMMARY_KPIS, type DashboardSummaryKey } from "../../../src/domain/dashboardSummary";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { get, invoke } from "@/api";
 import { fmtDuration, DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
@@ -112,10 +113,9 @@ const DASH_SECTIONS: { key: SectionKey; label: string }[] = [
   { key: "board", label: "Board & announcements" },
 ];
 
-// KPI keys GET /v1/dashboard-summary can aggregate server-side. Must stay in step with the server registry
-// (src/services/dashboardSummary.ts); an unknown key is simply absent from the response and falls back to
-// the row fetch.
-const SUMMARY_KEYS = [
+// The KPI wall's keys that GET /v1/dashboard-summary aggregates server-side, typed against the server's own
+// key map (src/domain/dashboardSummary.ts) so a key it does not answer does not compile.
+const SUMMARY_KEYS: DashboardSummaryKey[] = [
   "open_tickets", "expenses_pending", "recurring_expenses_due",
   "compliance_due", "compliance_week", "compliance_overdue",
   "assets_assigned", "goals_active", "loans_outstanding",
@@ -367,7 +367,7 @@ export default function Dashboard({ me }: { me: Me }) {
     // that rides along (assets_pending_scan). Each aggregate is a scoped COUNT server-side, so this one
     // request replaces a page of rows per card - but it is still work, and an off-screen wall doesn't need it.
     if (!wantKpis && !wantMyDay) return;
-    const wanted = new Set(SUMMARY_KEYS.filter((k) => kpiVisible(k)));
+    const wanted = new Set<string>(SUMMARY_KEYS.filter((k) => kpiVisible(k)));
     // Not-clocked-in is arithmetic over three other numbers, so it needs all three even when their own cards
     // are hidden: the headcount denominator, plus who is legitimately away (remote / on leave).
     if (kpiVisible("not_clocked_in")) for (const k of ["headcount", "remote_today", "on_leave"]) wanted.add(k);
@@ -394,10 +394,12 @@ export default function Dashboard({ me }: { me: Me }) {
   // org that shows "Background checks open" to everyone was sending every employee's browser after rows it may
   // not list: a 403 and an access-denied audit row per card per load, and a zero on screen. So a card also needs
   // its collection to be readable. A summary key answers that itself - the server counts only collections the
-  // caller may list, so a key it left out is one they cannot. A card counted from rows asks the capability set.
+  // caller may list, so a key it left out is one they cannot. A card counted from rows asks the capability set,
+  // and so does a summary key when the summary FAILED: there is no answer to read then, and treating every key
+  // as reachable sent each employee's browser after every module list a visible card names.
   const kpiReachable = (key: string) => {
-    if (SUMMARY_KEY_SET.has(key)) return summaryState !== "ready" || !!summary?.[key];
-    const collection = ROW_KPI_COLLECTION[key];
+    if (SUMMARY_KEY_SET.has(key) && summaryState !== "error") return summaryState !== "ready" || !!summary?.[key];
+    const collection = ROW_KPI_COLLECTION[key] ?? DASHBOARD_SUMMARY_KPIS[key as DashboardSummaryKey];
     return !collection || hasCapability(caps, `${collection}.read`);
   };
   const wantRows = (key: string) => wantKpis && kpiVisible(key) && kpiReachable(key) && needRows(key);
@@ -595,12 +597,13 @@ export default function Dashboard({ me }: { me: Me }) {
       ...approvals.loans.map((r) => item("loans", r.kind === "advance" ? "Advance" : "Loan")(r, money(r.principal))),
       ...approvals.timeEntries.map((r) => item("time-entries", "Timesheet")(r, `${r.hours}h`)),
     ];
-    return items.sort((a, b) => (a.when ?? "").localeCompare(b.when ?? ""));
+    return items.sort((a, b) => (b.when ?? "").localeCompare(a.when ?? ""));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [approvals, org.default_currency]);
-  // How long the oldest item awaiting the caller's decision has been waiting (for the approvals KPI hint).
+  // How long the oldest item awaiting the caller's decision has been waiting (for the approvals KPI hint). The
+  // list is newest first, so the oldest is the last item.
   const oldestPendingDays = useMemo(() => {
-    const t = approvalItems[0]?.when;
+    const t = approvalItems[approvalItems.length - 1]?.when;
     return t ? Math.max(0, Math.floor((Date.now() - new Date(t).getTime()) / 86_400_000)) : 0;
   }, [approvalItems]);
   // The server count covers queues this page doesn't read, so it can exceed what the card holds - never the
@@ -921,7 +924,7 @@ export default function Dashboard({ me }: { me: Me }) {
     // --- Needs attention ---
     pending: isApprover
       // Approvers: the full cross-type approvals queue (same number as the sidebar badge), not just leave.
-      // "Oldest waiting" reads `approvalItems[0]`, which only holds the queues this page fetches - so with a
+      // "Oldest waiting" reads the last of `approvalItems`, which only holds the queues this page fetches - so with a
       // non-zero total and no loaded rows (a count made up of expenses or asset requests, or a queue still in
       // flight) it rendered "Oldest waiting 0d". Say where the items are instead.
       ? { label: "Pending approvals", value: approvals.total, tone: approvals.total > 0 ? "warning" : "muted", hint: approvals.total === 0 ? "All clear" : approvalItems.length === 0 ? "In the approvals inbox" : `Oldest waiting ${oldestPendingDays}d`, target: { collection: "leave-requests", label: "Leave requests" }, onClick: () => navigate("approvals") }
@@ -1412,7 +1415,7 @@ export default function Dashboard({ me }: { me: Me }) {
         </div>
       ))}
 
-      {/* Needs-you first: everything awaiting the caller's decision, across every request type, oldest first,
+      {/* Needs-you first: everything awaiting the caller's decision, across every request type, newest first,
           with one-click approve and a confirm-first reject right here. */}
       {/* Awaiting-your-decision rows come from the shared approvals provider (count first, then rows only for
           the queues the count says are non-empty), so this card has nothing of its own to defer. Its probe is

@@ -31,8 +31,7 @@ test("a compliance item is added, shows on the calendar, and is filed - and a se
   // (`markFiled`'s plain PATCH) from the one below.
   const row = page.locator("tbody tr").filter({ hasText: title });
   await expect(row).toBeVisible({ timeout: 30_000 });
-  await row.getByRole("button", { name: "Actions" }).click();
-  await page.getByRole("menuitem", { name: "Mark filed" }).click();
+  await rowAction(page, row, "Mark filed");
   await expect(toast(page, "Marked filed")).toBeVisible({ timeout: 30_000 });
   // Server-side auto-stamps today's filed_date when none is sent, so the badge reads "Filed <date>" - with a
   // leading space in the DOM (the icon and the text are siblings: `<Check/> Filed{date}`), which
@@ -63,8 +62,7 @@ test("a compliance item is added, shows on the calendar, and is filed - and a se
 
   const waivedRow = page.locator("tbody tr").filter({ hasText: waivedTitle });
   await expect(waivedRow).toBeVisible({ timeout: 30_000 });
-  await waivedRow.getByRole("button", { name: "Actions" }).click();
-  await page.getByRole("menuitem", { name: "Edit" }).click();
+  await rowAction(page, waivedRow, "Edit");
   const editDialog = page.getByRole("dialog");
   await editDialog.getByLabel("Status").click();
   await page.getByRole("option", { name: "Waived / N/A" }).click();
@@ -75,20 +73,39 @@ test("a compliance item is added, shows on the calendar, and is filed - and a se
   // Deleting the waived item - a soft delete (`useSoftDelete`), so no confirmation and no success toast of
   // its own beyond the shared one; never pressed by any compliance spec before this. Doubles as this item's
   // own cleanup.
-  await waivedRow.getByRole("button", { name: "Actions" }).click();
-  await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await rowAction(page, waivedRow, "Delete");
   await expect(toast(page, "Compliance event deleted")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("tbody tr").filter({ hasText: waivedTitle })).toHaveCount(0, { timeout: 30_000 });
 
   await purge(page, await eventPath(page, title));
 });
 
-/** The wire path of the compliance item this spec added. */
+/**
+ * Choose one of a row's actions: open its menu, then take the item by KEYBOARD.
+ *
+ * A pointer press needs the item on screen, and the menu is drawn next to its row - which other specs move,
+ * as the compliance items they add (a recurring rule fills the calendar with a dozen) arrive in the list above
+ * it. The menu follows its row off the bottom of the window, and a fixed-position menu is not something
+ * scrolling can bring back, so the press waited out its whole timeout on a menu that was open and correct.
+ * Focus and Enter is how a keyboard user takes the same item, and it does not care where the menu is drawn.
+ */
+async function rowAction(page: import("@playwright/test").Page, row: import("@playwright/test").Locator, name: string) {
+  await row.getByRole("button", { name: "Actions" }).click();
+  const item = page.getByRole("menuitem", { name, exact: true });
+  await item.focus();
+  await page.keyboard.press("Enter");
+}
+
+/** The wire path of the compliance item this spec added - every page, since other specs add items too. */
 async function eventPath(page: import("@playwright/test").Page, title: string): Promise<string> {
-  const res = await page.request.get("/v1/compliance-events?page_size=100");
-  expect(res.status(), await res.text()).toBe(200);
-  const { results = [] } = (await res.json()) as { results?: { path: string; title?: string; display_name?: string }[] };
-  const row = results.find((e) => (e.title ?? e.display_name) === title);
-  if (!row) throw new Error(`e2e: the compliance item "${title}" is not in the collection`);
-  return row.path;
+  let token: string | undefined;
+  do {
+    const res = await page.request.get(`/v1/compliance-events?max_page_size=100${token ? `&page_token=${encodeURIComponent(token)}` : ""}`);
+    expect(res.status(), await res.text()).toBe(200);
+    const body = (await res.json()) as { results?: { path: string; title?: string; display_name?: string }[]; next_page_token?: string };
+    const row = (body.results ?? []).find((e) => (e.title ?? e.display_name) === title);
+    if (row) return row.path;
+    token = body.next_page_token;
+  } while (token);
+  throw new Error(`e2e: the compliance item "${title}" is not in the collection`);
 }

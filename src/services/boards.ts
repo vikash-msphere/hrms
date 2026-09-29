@@ -1,5 +1,9 @@
 import { and, eq, inArray, isNull, type SQL } from "drizzle-orm";
-import { allocFlatCode, withFreshCode } from "./codeAlloc";
+import { allocUnderPrefix, withFreshCode } from "./codeAlloc";
+import { BOARD_VISIBILITIES, VISIBILITY_SEG, visibilityOfCode, type BoardMember, type BoardVisibility } from "../domain/boardAccess";
+import { assertMayFileUnder, departmentManagerUsers, normalizeMembers, parseMembers, recodeBoard, resolveMemberAccounts, syncBoardShares } from "./boardShares";
+import { oneOf } from "../lib/errors";
+import { freshBoardAccessLevel } from "../lib/objectAccess";
 import { chunk, ID_CHUNK } from "../lib/dbBatch";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
@@ -22,6 +26,9 @@ import { checkEtag, updateAtVersion } from "./versionGuard";
 export type BoardInput = {
   name?: string;
   description?: string | null;
+  department?: string | null;
+  visibility?: BoardVisibility;
+  members?: unknown;
   task_prefix?: string;
   mode?: "kanban" | "scrum";
   columns?: unknown;
@@ -76,6 +83,21 @@ export async function cardCountsFor(deps: Deps, boardIds: string[]): Promise<Map
   return map;
 }
 
+// Every member names a real account or role: a share on a subject that does not exist grants nothing and would
+// sit in the list looking like access somebody has.
+async function assertMembersExist(deps: Deps, members: BoardMember[]) {
+  const users = members.filter((m) => m.kind === "user").map((m) => m.subject);
+  const roles = members.filter((m) => m.kind === "role").map((m) => m.subject);
+  if (users.length) {
+    const found = new Set((await deps.db.select({ uuid: schema.users.uuid }).from(schema.users).where(inArray(schema.users.uuid, users))).map((r) => r.uuid));
+    if (users.some((u) => !found.has(u))) throw invalidArgument("a member names a user that does not exist");
+  }
+  if (roles.length) {
+    const found = new Set((await deps.db.select({ name: schema.roles.name }).from(schema.roles).where(inArray(schema.roles.name, roles))).map((r) => r.name));
+    if (roles.some((r) => !found.has(r))) throw invalidArgument("a member names a role that does not exist");
+  }
+}
+
 export async function createBoard(deps: Deps, actor: AppUser, input: BoardInput, id?: string) {
   if (!input.name?.trim()) throw invalidArgument("name is required");
   const name = input.name.trim();
@@ -83,13 +105,28 @@ export async function createBoard(deps: Deps, actor: AppUser, input: BoardInput,
   if (!SWIMLANE_MODES.includes(mode)) throw invalidArgument("swimlane_mode is invalid");
   const columns = input.columns != null ? asArgError(() => normalizeColumns(input.columns)) : input.mode === "scrum" ? DEFAULT_SCRUM_COLUMNS : DEFAULT_BOARD_COLUMNS;
   const swimlanes = asArgError(() => normalizeSwimlanes(input.swimlanes ?? []));
+  const departmentId = idFromPath(input.department) ?? null;
+  await assertMayFileUnder(deps, actor, departmentId, true);
+  // Seen and worked by everyone unless the creator says otherwise - what every board was before visibility.
+  const visibility = input.visibility ? oneOf(input.visibility, BOARD_VISIBILITIES, "visibility must be edit, view or private") : "edit";
+  // The creator manages what they made: without this a creator who manages no department (HR) could not so
+  // much as rename their own board. They are an ordinary entry, removable in Sharing like any other. Only a real
+  // account is put on the list - a system actor (an automation) has none to share with.
+  const creatorIsAccount = !!actor.uuid && !!(await deps.db.select({ uuid: schema.users.uuid }).from(schema.users).where(eq(schema.users.uuid, actor.uuid)).limit(1))[0];
+  const members = normalizeMembers([
+    ...(input.members == null ? [] : await resolveMemberAccounts(deps, normalizeMembers(input.members))),
+    ...(creatorIsAccount ? [{ kind: "user" as const, subject: actor.uuid, level: "manage" as const }] : []),
+  ]);
+  await assertMembersExist(deps, members);
   // The code is allocated inside the retry, so a board created at the same moment as somebody else's takes
   // the next number instead of failing (services/codeAlloc.ts withFreshCode).
-  const row = (await withFreshCode(async () => deps.db
+  const row = (await withFreshCode(async (attempt) => deps.db
     .insert(schema.boards)
     .values({
-      code: await allocFlatCode(deps, schema.boards),
+      code: await allocUnderPrefix(deps, schema.boards, VISIBILITY_SEG[visibility], undefined, attempt > 1),
       ...(id ? { uuid: id } : {}),
+      departmentId,
+      sharesJson: JSON.stringify(members),
       name,
       description: input.description?.trim() || null,
       taskPrefix: input.task_prefix != null ? normalizePrefix(input.task_prefix) : derivePrefix(name),
@@ -100,8 +137,10 @@ export async function createBoard(deps: Deps, actor: AppUser, input: BoardInput,
       labelsJson: JSON.stringify(input.labels != null ? asArgError(() => normalizeLabels(input.labels)) : []),
     })
     .returning()))[0]!;
+  await syncBoardShares(deps, actor, row.uuid);
   await audit(deps, actor, "board.create", "boards", row.uuid, createdMeta(row, "boards"), row);
-  return row;
+  // The creator's manage rules were written just now, after the request loaded their grant.
+  return Object.assign(row, { _myAccess: await freshBoardAccessLevel(deps, actor, row.code) });
 }
 
 export async function updateBoard(deps: Deps, actor: AppUser, id: string, patch: BoardInput, ifMatch?: string) {
@@ -117,9 +156,84 @@ export async function updateBoard(deps: Deps, actor: AppUser, id: string, patch:
   if (has("description")) set.description = patch.description?.trim() || null;
   if (has("task_prefix")) set.taskPrefix = normalizePrefix(patch.task_prefix);
   if (has("mode")) set.mode = patch.mode === "scrum" ? "scrum" : "kanban";
+  // Moving the board to another department moves who manages it. Clearing it is allowed (whoever manages the
+  // board through its sharing list keeps it); naming one is held to the rule a create is.
+  const moved = has("department") && (idFromPath(patch.department) ?? null) !== row.departmentId;
+  if (moved) {
+    const next = idFromPath(patch.department) ?? null;
+    await assertMayFileUnder(deps, actor, next, false);
+    set.departmentId = next;
+  }
   const updated = await updateAtVersion(deps, schema.boards, "board", row, set);
+  if (moved) await syncBoardShares(deps, actor, id);
   await audit(deps, actor, "board.update", "boards", id, diffMeta(row, updated, set, "boards"), updated);
-  return updated;
+  // A department move may have added or taken away the caller's own manage rules.
+  return moved ? Object.assign(updated, { _myAccess: await freshBoardAccessLevel(deps, actor, updated.code) }) : updated;
+}
+
+/**
+ * The `share` verb: who may see and work the board. `visibility` moves the board to another code segment
+ * (edit = everyone works it, view = everyone sees it, private = only its list); `members` replaces the sharing
+ * list. Either may be sent alone. Held by whoever manages the board.
+ */
+export async function shareBoard(deps: Deps, actor: AppUser, id: string, input: { visibility?: BoardVisibility; members?: unknown }) {
+  const row = (await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, id)).limit(1))[0];
+  if (!row || row.deleteTime) throw notFound("board not found");
+  const before = { visibility: visibilityOfCode(row.code), members: parseMembers(row.sharesJson).length };
+  if (input.members !== undefined) {
+    const members = await resolveMemberAccounts(deps, normalizeMembers(input.members));
+    await assertMembersExist(deps, members);
+    await deps.db.update(schema.boards).set({ sharesJson: JSON.stringify(members), updatedAt: new Date() }).where(eq(schema.boards.uuid, id));
+  }
+  if (input.visibility !== undefined) await recodeBoard(deps, row, oneOf(input.visibility, BOARD_VISIBILITIES, "visibility must be edit, view or private"));
+  await syncBoardShares(deps, actor, id);
+  const updated = (await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, id)).limit(1))[0]!;
+  await audit(deps, actor, "board.share", "boards", id, {
+    visibility: { from: before.visibility, to: visibilityOfCode(updated.code) },
+    members: { from: before.members, to: parseMembers(updated.sharesJson).length },
+  }, updated);
+  // The caller may have just added or dropped themselves, or moved the board out of a segment they reach.
+  return Object.assign(updated, { _myAccess: await freshBoardAccessLevel(deps, actor, updated.code) });
+}
+
+/**
+ * The `sharing` verb: the board's sharing as its managers see it - visibility, the list with names, and who
+ * manages it through its department (read-only here; it follows the department's managers).
+ */
+export async function boardSharing(deps: Deps, _actor: AppUser, id: string) {
+  const row = await getBoard(deps, _actor, id);
+  const members = parseMembers(row.sharesJson);
+  const userIds = members.filter((m) => m.kind === "user").map((m) => m.subject);
+  const managerUsers = await departmentManagerUsers(deps, row.departmentId);
+  const people = [...new Set([...userIds, ...managerUsers])];
+  const named = people.length
+    ? await deps.db
+      .select({ uuid: schema.users.uuid, email: schema.users.email, employeeId: schema.users.employeeId, first: schema.employees.firstName, last: schema.employees.lastName })
+      .from(schema.users)
+      .leftJoin(schema.employees, eq(schema.employees.uuid, schema.users.employeeId))
+      .where(inArray(schema.users.uuid, people))
+    : [];
+  const byUser = new Map(named.map((u) => [u.uuid, u]));
+  const nameOf = (uuid: string) => {
+    const u = byUser.get(uuid);
+    return u ? ([u.first, u.last].filter(Boolean).join(" ") || u.email) : uuid;
+  };
+  const roleNames = members.filter((m) => m.kind === "role").map((m) => m.subject);
+  const roles = roleNames.length ? await deps.db.select({ name: schema.roles.name, label: schema.roles.label }).from(schema.roles).where(inArray(schema.roles.name, roleNames)) : [];
+  const labelOf = new Map(roles.map((r) => [r.name, r.label]));
+  return {
+    visibility: visibilityOfCode(row.code),
+    department: row.departmentId ? `departments/${row.departmentId}` : null,
+    // Shaped as `share` takes them back (a user as a `users/<id>` ref), so the dialog can edit the list in place.
+    members: members.map((m) => (m.kind === "user"
+      ? { kind: "user", subject: `users/${m.subject}`, employee: byUser.get(m.subject)?.employeeId ? `employees/${byUser.get(m.subject)!.employeeId}` : null, name: nameOf(m.subject), level: m.level }
+      : { kind: "role", subject: m.subject, name: labelOf.get(m.subject) ?? m.subject, level: m.level })),
+    managers: managerUsers.map((u) => ({
+      user: `users/${u}`,
+      employee: byUser.get(u)?.employeeId ? `employees/${byUser.get(u)!.employeeId}` : null,
+      name: nameOf(u),
+    })),
+  };
 }
 
 // The `configure` verb: replace the board's structural config (columns / WIP / policies / swimlanes / classes /

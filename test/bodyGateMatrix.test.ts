@@ -270,15 +270,18 @@ describe("declared references: every entry in REFERENCES, on both JSON content t
     for (const [field, spec] of Object.entries(refs)) {
       it(`${collection}.${field} needs ${spec.level} on the referenced ${spec.collection}`, async () => {
         // The create gate alone: the caller may create in `<collection>` but holds nothing on the ref target,
-        // so the only thing that can deny is the reference gate.
+        // so the only thing that can deny is the reference gate. A field that is ALSO an owner ref (a card's
+        // board) has the owner gate on it as well, which the allow set satisfies so this case asks about the
+        // reference alone - section 4 below asks about the owner.
         const create: Rule[] = [[collection, "write"]];
+        const owner: Rule[] = OWNER_REFS[collection]?.[field] ? [[`${collection}.**`, "write"]] : [];
         await assertGate({
           method: "POST",
           path: `/v1/${collection}`,
           withField: { [field]: `${spec.collection}/${fixture[spec.collection]}` },
           withoutField: {},
           denyRules: create,
-          allowRules: [...create, [`${spec.collection}.**`, spec.level]],
+          allowRules: [...create, ...owner, [`${spec.collection}.**`, spec.level]],
         });
       });
     }
@@ -339,24 +342,33 @@ describe("custom-method bodies reach the body gate", () => {
 // ---- 4. Owner on create --------------------------------------------------------------------------------
 
 describe("owner refs: every entry in OWNER_REFS, on both JSON content types", () => {
-  it("every owner ref targets employees (the fixture this table assumes)", () => {
+  // What each owner target names, and what the caller holds that must NOT be enough. An employee owner: a
+  // self-scoped write, while the body names a sibling employee (04-002, not under the caller's 04-001). A board
+  // owner (a card is coded under its board): the create gate alone, nothing on the board's rows.
+  const OWNER_TARGET: Record<string, { id: () => string; deny: (collection: string) => Rule[] }> = {
+    employees: { id: () => otherEmployeeId, deny: (c) => [[c, "write"], [`${c}.me.**`, "write"]] },
+    boards: { id: () => fixture.boards!, deny: (c) => [[c, "write"]] },
+  };
+
+  it("every owner ref targets a collection this table has a fixture for", () => {
     const targets = [...new Set(Object.values(OWNER_REFS).flatMap((o) => Object.values(o).map((r) => r.collection)))];
-    expect(targets).toEqual(["employees"]);
+    expect(targets.filter((t) => !OWNER_TARGET[t])).toEqual([]);
   });
 
   for (const [collection, owners] of Object.entries(OWNER_REFS)) {
-    for (const field of Object.keys(owners)) {
+    for (const [field, spec] of Object.entries(owners)) {
       it(`${collection}.${field} may not name an owner the caller cannot write under`, async () => {
-        // Self-scoped write: the caller may create their OWN rows in this collection. The body names a sibling
-        // employee (04-002, not under the caller's 04-001), so creating on their behalf must be refused.
-        const own: Rule[] = [[collection, "write"], [`${collection}.me.**`, "write"]];
+        const target = OWNER_TARGET[spec.collection]!;
+        // Any declared REFERENCE on the same field is satisfied in both sets, so only the owner gate decides.
+        const ref = REFERENCES[collection]?.[field];
+        const refRule: Rule[] = ref ? [[`${ref.collection}.**`, ref.level]] : [];
         await assertGate({
           method: "POST",
           path: `/v1/${collection}`,
-          withField: { [field]: `employees/${otherEmployeeId}` },
+          withField: { [field]: `${spec.collection}/${target.id()}` },
           withoutField: {},
-          denyRules: own,
-          allowRules: [[collection, "write"], [`${collection}.**`, "write"]],
+          denyRules: [...target.deny(collection), ...refRule],
+          allowRules: [[collection, "write"], [`${collection}.**`, "write"], ...refRule],
         });
       });
     }

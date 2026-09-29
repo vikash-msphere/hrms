@@ -362,11 +362,6 @@
       "why": "verify/reject + proof upload/download"
     },
     {
-      "area": "work",
-      "pattern": "cards.**",
-      "why": "every card verb (move/assign/block/comment/todos/watch) on the shared board surface"
-    },
-    {
       "area": "money",
       "pattern": "pay-components.**",
       "why": "Lifecycle verbs and restore on pay components."

@@ -69,6 +69,27 @@ test.describe("the back button", () => {
     expect(page.url()).toBe(at);
   });
 
+  // The entry a dialog pushes is dropped again when it is closed from its own button, and only ONE is pushed
+  // per opening. React's StrictMode mounts every effect twice, and the second push used to bury the first:
+  // the deferred drop saw a newer token and stood down, so each dialog opened left a dead entry behind and
+  // Back straight after confirming a decision stayed on the page.
+  test("a dialog opened and closed from its own button costs no back press", async ({ as }) => {
+    const page = await as("employee");
+    // The phone geometry, where "Sort & filter" is a sheet - the same layer primitive every dialog uses.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoRoute(page, "dashboard");
+    await gotoRoute(page, "employees", "Directory");
+
+    await page.getByRole("button", { name: "Sort & filter" }).first().click();
+    const sheet = page.getByRole("dialog").filter({ hasText: "Sort & filter" });
+    await expect(sheet).toBeVisible({ timeout: 30_000 });
+    await sheet.getByRole("button", { name: "Close" }).first().click();
+    await expect(sheet).toBeHidden({ timeout: 30_000 });
+
+    await page.goBack();
+    await expect.poll(() => page.url(), { timeout: 30_000 }).toContain("/dashboard");
+  });
+
   test("a settings key that redirects to its host page does not trap the reader", async ({ as }) => {
     const page = await as("super");
     await gotoRoute(page, "dashboard");

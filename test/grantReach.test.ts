@@ -29,7 +29,7 @@ import type { Role } from "../src/env";
 const rawIndex = import.meta.glob("../src/index.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const rawEmployeeRoutes = import.meta.glob("../src/routes/employees.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
-const NON_SUPER: Role[] = ["employee", "manager", "hr_admin", "payroll_admin"];
+const NON_SUPER: Role[] = ["employee", "manager", "hr_admin", "payroll_admin", "it_admin", "project_manager"];
 // Three object codes: the caller's own, a member of their department, and a flat-coded row - so a `me`,
 // `my-dept` or `*` rule each get a chance to match. Reachable under any of them is reachable.
 const SELF = { employeeCode: "04-1c-0a9" };
@@ -48,7 +48,8 @@ const WITHHELD_COLLECTIONS: Record<string, string> = {
   "payroll-debit-accounts": "the employer's own bank account, which the bank file is drawn on: super-only, grantable through the ACL",
   "tax-verifications": "the prior-employer verification queue rides the `tax` capability, decided per employee sub-resource",
   moderation: "the flagged-post queue quotes public posts in full and is deliberately NOT narrowed per holder (moderating is an org-wide job), so the capability is the whole access decision - granted to a named moderator through the ACL, never seeded to a role",
-  users: "the login directory (role and status per account). Changing who can sign in and as what is super's act; delegated through the ACL, never seeded",
+  // users left this list when HR was given the account list, read-only, to reset a forgotten app PIN from it.
+  // Changing who can sign in and as what is still super's act (users.write, PROTECTED_FIELDS).
   // letterheads (HR), leave-adjustments (HR, and each person's own read), payroll-openings, payroll-budgets and
   // card-transactions (payroll) were here until the least-privilege review of the role files: each is the named
   // role's own job, and the stated risk (salary figures, named people's spending) is data that role already

@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect } from "./fixtures";
+import { gotoRoute, patchSettings, test, expect } from "./fixtures";
 
 // The calendar somebody subscribes to once and never thinks about again.
 //
@@ -20,7 +20,7 @@ test("the holiday page offers a personal feed URL that really serves a calendar"
   // all - so with nothing done first, `me` carries no feed URL, the page draws no subscribe affordance, and
   // this spec is testing whether some OTHER spec happened to turn the switch on. Thrown here, put back after.
   const before = await holidaysPolicy(admin);
-  await setHolidaysPolicy(admin, { ...before, feed_enabled: true });
+  await patchSettings(admin, "holidays", (now) => ({ ...now, feed_enabled: true }));
 
   try {
     await gotoRoute(page, "holidays", "Holiday Calendar");
@@ -48,9 +48,9 @@ test("the holiday page offers a personal feed URL that really serves a calendar"
     // last-write-wins on purpose (src/services/settings.ts). So restoring the opening snapshot verbatim
     // reverted whatever another spec had saved to a different field in the meantime - `settingsPanels.spec.ts`
     // flipping the comp-off toggle, which then read its own change back missing and reported the panel as one
-    // that does not save.
-    const now = await holidaysPolicy(admin);
-    await setHolidaysPolicy(admin, { ...now, feed_enabled: before.feed_enabled ?? false });
+    // that does not save. Re-reading just before the write narrowed that window without closing it, so both
+    // writes are compare-and-swap on the row's etag (fixtures.ts patchSettings), retried on a 409.
+    await patchSettings(admin, "holidays", (now) => ({ ...now, feed_enabled: before.feed_enabled ?? false }));
   }
 });
 
@@ -63,10 +63,4 @@ async function holidaysPolicy(page: Page): Promise<Policy> {
   if (res.status() === 404) return {};
   expect(res.status(), await res.text()).toBe(200);
   return ((await res.json()) as { value?: Policy }).value ?? {};
-}
-
-/** Put the policy back the way it was. Writing `{}` is what "no row" means to every reader of this key. */
-async function setHolidaysPolicy(page: Page, value: Policy) {
-  const res = await page.request.patch("/v1/settings/holidays", { headers: SPA_HEADERS, data: { value } });
-  expect(res.status(), await res.text()).toBe(200);
 }

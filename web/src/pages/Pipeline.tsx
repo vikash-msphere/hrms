@@ -50,8 +50,12 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
   // label, so it reads neither - the same rule the offers read below already follows. COMPLETE, not the first
   // page: pages are the hundred NEWEST rows, so a card whose candidate applied a few months ago would label
   // itself "Candidate" with no role - a record that reads as missing a name rather than as unloaded.
-  const { rows: candidates } = useCollection<Candidate>("candidates", { enabled: apps.length > 0, all: true });
-  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { enabled: apps.length > 0, all: true });
+  // They are ALSO the New application dialog's two pickers, so opening it reads them on an empty board too -
+  // gated on the cards alone, the first application an org ever filed offered "No candidates" and no jobs.
+  const [dialog, setDialog] = useState(false);
+  const needLists = apps.length > 0 || dialog;
+  const { rows: candidates, state: candidatesState } = useCollection<Candidate>("candidates", { enabled: needLists, all: true });
+  const { rows: reqs, state: reqsState } = useCollection<JobRequisition>("job-requisitions", { enabled: needLists, all: true });
   const cfg = useAtsConfig();
   // Offers are read only once a card is actually at the offer stage or past it: on a board of early-stage
   // candidates there is nothing to say, and an unconditional read would spend a D1 page for nothing. When they
@@ -61,7 +65,6 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
   const { toast } = useToast();
   const confirm = useConfirm();
   const [reqFilter, setReqFilter] = useState("all");
-  const [dialog, setDialog] = useState(false);
   const [rejecting, setRejecting] = useState<Application[] | null>(null);
   const [advancing, setAdvancing] = useState<string | null>(null);
   // The hired card's one action converts the candidate first when nobody accepted an offer, so it can spin.
@@ -516,6 +519,7 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
       {dialog && (
         <ApplicationDialog
           candidates={candidates}
+          loading={{ candidates: candidatesState === "loading", reqs: reqsState === "loading" }}
           apps={apps}
           reqs={openReqs}
           stages={cfg.stages}
@@ -563,8 +567,10 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
 }
 
 
-function ApplicationDialog({ candidates, apps, reqs, stages, sources, defaultReq, onClose, onSaved }: {
+function ApplicationDialog({ candidates, loading, apps, reqs, stages, sources, defaultReq, onClose, onSaved }: {
   candidates: Candidate[];
+  /** Which picker's list is still arriving - an empty picker then says so, rather than "add some first". */
+  loading: { candidates: boolean; reqs: boolean };
   apps: Application[];
   reqs: JobRequisition[];
   stages: { key: string; label: string }[];
@@ -667,7 +673,7 @@ function ApplicationDialog({ candidates, apps, reqs, stages, sources, defaultReq
           options={options}
           placeholder="Pick a candidate"
           searchPlaceholder="Search the pool…"
-          emptyText="No candidates. Add them on the Candidates page first."
+          emptyText={loading.candidates ? "Loading candidates…" : "No candidates. Add them on the Candidates page first."}
           autoFocus
         />
       </Field>
@@ -692,7 +698,7 @@ function ApplicationDialog({ candidates, apps, reqs, stages, sources, defaultReq
           options={jobOptions}
           placeholder="Pick a job"
           searchPlaceholder="Search jobs…"
-          emptyText="No jobs to apply to. Open a requisition first."
+          emptyText={loading.reqs ? "Loading jobs…" : "No jobs to apply to. Open a requisition first."}
         />
       </Field>
       {chosenReq && chosenReq.status !== "open" && (

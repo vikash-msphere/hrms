@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import {
   KanbanSquare, Plus, BarChart3, Ban, X, ChevronUp, ChevronDown, ChevronsUp, ChevronLeft, ChevronRight,
   AlertTriangle, Trash2, Flag, Target, Search, Tag, Info, MessageSquare, CalendarDays, History, Building2, ListChecks, AlignLeft,
-  MoreHorizontal, List as ListIcon, UserRound, FileText, ExternalLink, Link2, SquareKanban, Pencil, Eye,
+  MoreHorizontal, List as ListIcon, UserRound, FileText, ExternalLink, Link2, SquareKanban, Pencil, Eye, Lock,
 } from "lucide-react";
 import { create, get, invoke, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -20,6 +20,7 @@ import { daysSince, fmtDaysCount } from "@/lib/tableDerive";
 import { BLANK } from "@/lib/tableFilter";
 import { allScope, mineColumn, mineScope, scopesOf, valueScope } from "@/lib/tableScope";
 import { useCanSeeActivity } from "@/lib/perm";
+import { VISIBILITY_OPTIONS, managedDepartments, type BoardVisibility } from "@/lib/boardAccess";
 import type { Me, Board, BoardMode, Card as CardT, CardComment, CardTodo, TicketChecklist, BoardColumn, WipScope, SwimlaneMode, Employee, Goal, Department, BoardMetrics, Sprint } from "@/types";
 import type { Wire } from "@/wire";
 import { resourceRoute } from "@/lib/resourceRoute";
@@ -483,7 +484,14 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
               <Select value={selectedId ?? undefined} onValueChange={selectBoard}>
                 <SelectTrigger className="w-56"><SelectValue placeholder="Pick a board" /></SelectTrigger>
                 <SelectContent>
-                  {boards.map((b) => <SelectItem key={b.path} value={idOf(b.path)}>{b.name}</SelectItem>)}
+                  {boards.map((b) => (
+                    <SelectItem key={b.path} value={idOf(b.path)}>
+                      <span className="inline-flex items-center gap-1.5">
+                        {b.visibility === "private" && <Lock className="h-3.5 w-3.5 text-muted-foreground" aria-label="Private board" />}
+                        {b.name}
+                      </span>
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             )}
@@ -525,7 +533,7 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
         )}
       </DataState>
 
-      {newBoard && <NewBoardDialog existing={boards} onClose={() => setNewBoard(false)} onSaved={(id) => { setSelectedId(id); reload(); }} />}
+      {newBoard && <NewBoardDialog me={me} existing={boards} onClose={() => setNewBoard(false)} onSaved={(id) => { setSelectedId(id); reload(); }} />}
     </div>
   );
 }
@@ -539,7 +547,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const [addTo, setAddTo] = useState<string | null>(null); // column key for the full "add card" dialog
   const [quick, setQuick] = useState<string | null>(null); // column key with the inline title composer open
   // "+ New → Create a task" quick action: open the full composer on this board's first column.
-  useIntent("new-card", () => { const k = board.columns[0]?.key; if (k) setAddTo(k); });
+  useIntent("new-card", () => { const k = board.columns[0]?.key; if (k && worksTasks(board)) setAddTo(k); });
   const dragId = useRef<string | null>(null);
   const { ref: fillRef, height: fillH } = useFillHeight();
   const pendingRank = useRef<number | null>(null); // rank computed from the hovered gap, for precise insertion
@@ -819,9 +827,11 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                   <Badge variant={overWip ? "destructive" : "secondary"} className={atWip && !overWip ? "border-warning text-warning" : ""} title={perAssignee && col.wipLimit != null ? `Max ${col.wipLimit} per assignee` : undefined}>
                     {count}{col.wipLimit != null ? (perAssignee ? ` (≤${col.wipLimit}/ea)` : ` / ${col.wipLimit}`) : ""}
                   </Badge>
-                  <AccessAction collection="cards" create label="Add a task">
-                    <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label={`Add a task to ${col.label}`} className="h-6 w-6 text-muted-foreground coarse:h-9 coarse:w-9" onClick={() => setQuick((k) => (k === col.key ? null : col.key))}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
-                  </AccessAction>
+                  {worksTasks(board) && (
+                    <AccessAction collection="cards" create label="Add a task">
+                      <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label={`Add a task to ${col.label}`} className="h-6 w-6 text-muted-foreground coarse:h-9 coarse:w-9" onClick={() => setQuick((k) => (k === col.key ? null : col.key))}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
+                    </AccessAction>
+                  )}
                   <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label={`Collapse ${col.label}`} className="h-6 w-6 text-muted-foreground coarse:h-9 coarse:w-9" onClick={() => toggleCollapse(col.key)}><ChevronLeft className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Collapse</TooltipContent></Tooltip>
                 </div>
               </div>
@@ -2063,12 +2073,24 @@ function previewPrefix(name: string, prefix: string): string {
   return normalize(base) || "TASK";
 }
 
-const BLANK_BOARD = { mode: "kanban" as BoardMode, name: "", prefix: "", description: "", copyFrom: "" };
+// May the caller add and work tasks on this board? A viewer sees the board and its tasks and changes nothing, so
+// the add-task affordances are not rendered for them (the server decides every request regardless).
+const worksTasks = (board: Board) => board.my_access === "edit" || board.my_access === "manage";
 
-function NewBoardDialog({ existing, onClose, onSaved }: { existing: Board[]; onClose: () => void; onSaved: (id: string) => void }) {
+const BLANK_BOARD = { mode: "kanban" as BoardMode, name: "", prefix: "", description: "", copyFrom: "", department: "", visibility: "edit" as BoardVisibility };
+
+function NewBoardDialog({ me, existing, onClose, onSaved }: { me: Me; existing: Board[]; onClose: () => void; onSaved: (id: string) => void }) {
   const { toast } = useToast();
+  const { rows: departments } = useCollection<Department>("departments", { all: true });
+  // A manager files their board under a department they manage (or one below it), and must pick one: its
+  // managers are who manage the board. Someone who manages no department may leave it out; the server refuses a
+  // department they may not name, and says so.
+  const mine = useMemo(() => managedDepartments(departments, me.employee_id), [departments, me.employee_id]);
+  const deptOptions = mine.length ? mine : departments.filter((d) => !d.delete_time);
   const [form, setForm] = useState(BLANK_BOARD);
   const set = (patch: Partial<typeof BLANK_BOARD>) => setForm((f) => ({ ...f, ...patch }));
+  const department = form.department || (mine.length === 1 ? mine[0]!.path : "");
+  const visibility = VISIBILITY_OPTIONS.find((v) => v.value === form.visibility)!;
 
   const dupName = useMemo(() => {
     const n = form.name.trim().toLowerCase();
@@ -2085,6 +2107,8 @@ function NewBoardDialog({ existing, onClose, onSaved }: { existing: Board[]; onC
       name: form.name.trim(),
       description: form.description.trim(),
       mode: source ? source.mode : form.mode,
+      visibility: form.visibility,
+      ...(department ? { department: `departments/${idOf(department)}` } : {}),
       ...(form.prefix.trim() ? { task_prefix: prefix } : {}),
       // Structure only. Cards, sprints and who the board is shared with are deliberately not copied: the first
       // is somebody else's work, and the last would hand a new team an access list nobody asked for.
@@ -2099,13 +2123,13 @@ function NewBoardDialog({ existing, onClose, onSaved }: { existing: Board[]; onC
       open
       onClose={onClose}
       title="New board"
-      description="A board is one team's work, as columns it moves across. Only you can see it until you share it."
+      description="A board is one team's work, as columns it moves across. You manage the boards you create."
       collection="boards"
       guardLabel="board"
       form={form}
       submitLabel="Create board"
-      canSubmit={!!form.name.trim()}
-      whyNot="Give the board a name."
+      canSubmit={!!form.name.trim() && (!mine.length || !!department)}
+      whyNot={form.name.trim() ? "Choose the department the board belongs to." : "Give the board a name."}
       onSubmit={save}
       submitAccess={(b) => <AccessAction collection="boards" create label="Create a board">{b}</AccessAction>}
     >
@@ -2140,6 +2164,25 @@ function NewBoardDialog({ existing, onClose, onSaved }: { existing: Board[]; onC
         hint={form.name.trim() ? `Tasks will be keyed ${previewPrefix(form.name, form.prefix)}-1, ${previewPrefix(form.name, form.prefix)}-2, …` : "For task keys like MS-12. Blank auto-derives from the name."}
       >
         <Input value={form.prefix} onChange={(e) => set({ prefix: e.target.value })} placeholder="auto (e.g. MS)" className="w-40 uppercase" maxLength={6} />
+      </Field>
+      <Field
+        label={mine.length ? "Department" : "Department (optional)"}
+        hint="Its managers, and the managers of the departments above it, manage the board."
+      >
+        <Combobox
+          value={department}
+          onValueChange={(v) => set({ department: v })}
+          options={[...(mine.length ? [] : [{ value: "", label: "No department" }]), ...deptOptions.map((d) => ({ value: d.path, label: d.display_name }))]}
+          placeholder={mine.length ? "Choose one of your departments" : "No department"}
+        />
+      </Field>
+      <Field label="Who can see it" hint={visibility.hint}>
+        <Select value={form.visibility} onValueChange={(v) => set({ visibility: v as BoardVisibility })}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {VISIBILITY_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+          </SelectContent>
+        </Select>
       </Field>
       <Field label="Description (optional)"><Textarea value={form.description} onChange={(e) => set({ description: e.target.value })} rows={2} placeholder="What this board covers, so the right work lands on it." /></Field>
       <p className="text-xs text-muted-foreground">
@@ -2582,7 +2625,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const [addBacklog, setAddBacklog] = useState(false);
   const [quickBacklog, setQuickBacklog] = useState(false); // inline title composer on the backlog column
   // "+ New → Create a task" quick action: open the backlog composer (scrum boards).
-  useIntent("new-card", () => setAddBacklog(true));
+  useIntent("new-card", () => { if (worksTasks(board)) setAddBacklog(true); });
   const [newSprint, setNewSprint] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -2752,9 +2795,11 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
         {sprint && <Badge variant={sprint.state === "active" ? "default" : sprint.state === "completed" ? "secondary" : "outline"}>{sprint.state}</Badge>}
         {sprint?.state === "planning" && canA.includes("activate") && <AccessAction collection="sprints" objectPath={sprint.path} verb="activate" can={canA} label="Who can start sprints"><Button size="sm" onClick={() => sprintAct("activate")} loading={busy}>Start sprint</Button></AccessAction>}
         {sprint?.state === "active" && canA.includes("complete") && <AccessAction collection="sprints" objectPath={sprint.path} verb="complete" can={canA} label="Who can complete sprints"><Button size="sm" variant="outline" onClick={() => sprintAct("complete")} loading={busy}>Complete sprint</Button></AccessAction>}
-        <AccessAction collection="sprints" create label="Create a sprint">
-          <Button size="sm" variant="outline" onClick={() => setNewSprint(true)}><Plus className="h-4 w-4" /> New sprint</Button>
-        </AccessAction>
+        {board.my_access === "manage" && (
+          <AccessAction collection="sprints" create label="Create a sprint">
+            <Button size="sm" variant="outline" onClick={() => setNewSprint(true)}><Plus className="h-4 w-4" /> New sprint</Button>
+          </AccessAction>
+        )}
       </div>
       {sprint && (() => {
         const total = pts(sprintCards);
@@ -2802,9 +2847,11 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
               <span className="text-sm font-medium">Backlog</span>
               <Badge variant="secondary">{backlog.length}</Badge>
             </div>
-            <AccessAction collection="cards" create label="Add a task">
-              <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label="Add a task to the backlog" className="h-6 w-6 text-muted-foreground coarse:h-9 coarse:w-9" onClick={() => setQuickBacklog((v) => !v)}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
-            </AccessAction>
+            {worksTasks(board) && (
+              <AccessAction collection="cards" create label="Add a task">
+                <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label="Add a task to the backlog" className="h-6 w-6 text-muted-foreground coarse:h-9 coarse:w-9" onClick={() => setQuickBacklog((v) => !v)}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
+              </AccessAction>
+            )}
           </div>
           <div className={zoneCls("backlog")}>
             {quickBacklog && <QuickAddCard board={board} column={board.columns[0]?.key ?? ""} onClose={() => setQuickBacklog(false)} onCreated={reload} />}

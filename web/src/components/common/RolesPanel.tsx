@@ -32,9 +32,14 @@ const DORMANT_DAYS = 90;
 
 const NONE = "__none__";
 
-/** User role/status/employee-link management. Restricted to super_admin (the `admin` capability). */
+/**
+ * User role/status/employee-link management, for whoever writes `users` (super admin by default). Also opens,
+ * read-only, for a caller who may only reset app PINs (HR by default): the list and the Reset app PIN action,
+ * with every edit, role and permission control left out.
+ */
 export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLElement | null }) {
   const isAdmin = usePermission("users.write");
+  const canResetPin = usePermission("users.resetPin");
   const canManagePerms = usePermission("access-rules.write");
   // `all`: these rows are not only listed, they are searched. `employeeOptions` below builds the "already
   // linked to <email>" warning out of them, and past one page that hint silently stops appearing - so an admin
@@ -46,7 +51,8 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
   // offers these and nothing else: a user's role is a foreign key to a roles row, so a name that is not in the
   // table cannot be saved, and a role the org created has to be offered or it cannot be given to anyone.
   // `everyone` is a rule subject every caller already holds, never a role a person is assigned.
-  const { rows: roleRows, state: rolesState } = useCollection<{ path: string; name: string; label?: string; provisioned?: boolean }>("roles", { all: true });
+  // Only an editor offers roles, so only an editor reads them; the labels in the list come from `users/me`.
+  const { rows: roleRows, state: rolesState } = useCollection<{ path: string; name: string; label?: string; provisioned?: boolean }>("roles", { all: true, enabled: isAdmin });
   useEffect(() => registerRoleLabels(roleRows), [roleRows]);
   const roleOptions = useMemo(() => roleRows.map((r) => r.name).filter((n) => n !== EVERYONE_ROLE), [roleRows]);
   // The role new accounts are given (the org sets it on the Roles tab). "Privileged" below means anything above
@@ -82,7 +88,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
     ];
   }, [employees, rows, editing]);
 
-  if (!isAdmin) {
+  if (!isAdmin && !canResetPin) {
     return <EmptyState icon={ShieldAlert} title="Restricted" description="Only super admins can manage roles and access." />;
   }
 
@@ -230,7 +236,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => openEdit(u)}><Pencil className="h-4 w-4" /> Edit</DropdownMenuItem>
+            {isAdmin && <DropdownMenuItem onClick={() => openEdit(u)}><Pencil className="h-4 w-4" /> Edit</DropdownMenuItem>}
             {canManagePerms && <DropdownMenuItem onClick={() => setPermUser(u)}><KeyRound className="h-4 w-4" /> Manage permissions</DropdownMenuItem>}
             {/* The only way back from a forgotten app PIN (services/appLock.ts resetPin). */}
             <AccessAction verb="resetPin" collection="users" objectPath={`users/${idOf(u.path)}`} can={(u as User & AepResource).access?.can}>
@@ -253,7 +259,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
   };
   const notYourself = (users: User[]) =>
     users.every((u) => u.email === me.email) ? "You can't change your own role or account this way." : null;
-  const bulkActions: BulkAction<User>[] = [
+  const bulkActions: BulkAction<User>[] = !isAdmin ? [] : [
     ...roleOptions.map((r) => ({
       label: `Set role: ${roleLabel(r)}`,
       disabled: notYourself,

@@ -58,13 +58,19 @@ export function SubjectPermissionsDialog({
   const reload = React.useCallback(async () => {
     setBusy(true);
     try {
-      setRules(await fetchAllAccessRules());
+      // The subject's own rules, and the role a user subject holds - the only two this dialog reads, rather
+      // than paging through every rule in the org to filter down to them.
+      const [own, inherited] = await Promise.all([
+        fetchAllAccessRules({ subject_kind: subjectKind, subject }),
+        viaRole ? fetchAllAccessRules({ subject_kind: "role", subject: viaRole }) : Promise.resolve([]),
+      ]);
+      setRules([...own, ...inherited]);
     } catch (e) {
       toast({ variant: "destructive", title: "Could not load permissions", description: String((e as Error).message) });
     } finally {
       setBusy(false);
     }
-  }, [toast]);
+  }, [toast, subjectKind, subject, viaRole]);
   React.useEffect(() => {
     if (open) void reload();
   }, [open, reload]);

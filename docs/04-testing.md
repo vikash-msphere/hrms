@@ -289,6 +289,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `tablePaging` | the shared table's pager: the arrows move a page at a time with the footer counting where you are, searching from page two lands on page one of what was searched for, and a search that matches nothing offers the way back out instead of a create nobody asked for |
 | `sidebarRail` | the nav's own persisted state: collapsing leaves an icon rail that still navigates and survives a reload, and a folded group hides its pages except the one being read |
 | `orgChartFocus` | `org-chart/<id>` opening on that person's subtree with the trail back out, and the search counting its matches and stepping through them |
+| `exitedLeaveRosters` | an exited manager is gone from the Directory and the org chart while the wire still says `terminated` with an end date, and their report stays in the chart, named in the banner as needing a new manager |
 | `dashboardMyDay` | the self-scoped band of the dashboard: the caller's own tile renders with a number in it, and it drills through to the page it summarises |
 | `postPin` | a pinned post leading the board - an assertion about ORDER, still true after a reload rather than only in the page's copy of the list - and unpinning giving the card back |
 | `routedTabs` | the third URL-state mechanism (after `?focus=` and `?setting=`): a request page's sub-tab written to the hash, read back from cold, and answering the same way on another page of the same shared shell |
@@ -310,6 +311,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `copyEmail` | the app's one clipboard affordance, read back off the real clipboard: hover-revealed, and copying the address alone |
 | `calendarFeed` | the personal holiday subscription: a URL composed against the origin it is served from, offered as selectable text, and really answering with a calendar |
 | `ticketTriage` | the three pickers on a ticket, each its own verb and grant: assigned, routed into a department's queue, prioritised - each committing on its own and read back from cold |
+| `itAdminDesk` | the IT admin works the IT desk through the category's servicing role and cannot open another desk's ticket; HR resets a forgotten app PIN from a read-only Users list |
 | `regularizationCancel` | the requester's own way out: a pending correction withdrawn from their attendance page, asked the way every decision is asked, and the row settling with the affordance gone |
 | `postEdit` | the composer in its second mood: an edit arriving carrying the post, a submit that says "Save changes" rather than "Publish", and the board showing the correction without a reload |
 | `goalCarryOver` | the quarter that ended with work left: one press composing the successor and closing the original, so neither a duplicate nor an orphan is left behind |

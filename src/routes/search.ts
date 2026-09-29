@@ -27,6 +27,7 @@ import { startOfPeriod } from "../domain/searchQuery";
 //   ?after=2026-01[-15]    only rows created on or after the start of that month (or day), UTC
 //   ?before=2026-03[-01]   only rows created before the start of that month (or day), UTC
 //   ?status=pending        only rows whose own state/status column holds that value
+// With any of these and an empty `q`, the answer is the newest rows the narrowing names, not nothing.
 export const search = new Hono<AppEnv>().get("/", async (c) => {
   const user = c.get("user")!;
   const q = c.req.query("q") ?? "";

@@ -13,7 +13,7 @@ import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
 // it really put the asset back in the queue.
 test("reissuing a tag asks first, and puts the asset back in the print queue", async ({ as }) => {
   test.setTimeout(180_000);
-  const page = await as("hr");
+  const page = await as("it");
   const admin = await as("super"); // the hard purge is an admin's to make
   const name = `E2E tagged ${Date.now() % 1_000_000}`;
 

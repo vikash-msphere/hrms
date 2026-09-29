@@ -6,6 +6,7 @@ import { usePermission, useCanReadOthers } from "@/lib/perm";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 import { idOf, cn, tenureLabel } from "@/lib/utils";
+import { isCurrentEmployee } from "@/lib/employees";
 import { daysBetweenYmd, todayStr } from "@/lib/orgDay";
 import { leaveColor } from "@/lib/leaveColors";
 import { readLocal, writeLocal } from "@/lib/localPref";
@@ -115,7 +116,34 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
   const canEditDepts = usePermission("departments.write");
   const canEdit = view === "people" ? canEditPeople : canEditDepts;
 
-  const empById = useMemo(() => new Map(employees.filter((e) => !e.delete_time).map((e) => [idOf(e.path), e] as const)), [employees]);
+  // The chart is of the people still here (lib/employees.ts `isCurrentEmployee`). Everyone not deleted is kept
+  // aside as well, only so a reporting line can be walked THROUGH somebody who has left - see `chartParentOf`.
+  const empById = useMemo(() => new Map(employees.filter(isCurrentEmployee).map((e) => [idOf(e.path), e] as const)), [employees]);
+  const everyoneById = useMemo(() => new Map(employees.filter((e) => !e.delete_time).map((e) => [idOf(e.path), e] as const)), [employees]);
+  // Where a person sits in the chart: under their manager, or - when that manager has left - under the first
+  // manager up the chain who is still here. Nobody edits `manager_id` when a manager exits, so without this
+  // their whole team would surface as top-level roots. The same walk the server does to route a leaver's
+  // reports' notifications (services/notifications.ts firstLiveManagerId), capped and cycle-guarded the same
+  // way. It only DRAWS the line; reassigning is still a drag or a picker, and `viaLeaver` says who needs one.
+  const chartParentOf = useCallback((e: Employee): { parentId: string | null; viaLeaver: boolean } => {
+    const seen = new Set([idOf(e.path)]);
+    let id = e.manager ? idOf(e.manager) : null;
+    let viaLeaver = false;
+    for (let hop = 0; hop < 8 && id && !seen.has(id); hop++) {
+      if (empById.has(id)) return { parentId: id, viaLeaver };
+      seen.add(id);
+      const leaver = everyoneById.get(id);
+      if (!leaver) break;
+      viaLeaver = true;
+      id = leaver.manager ? idOf(leaver.manager) : null;
+    }
+    return { parentId: null, viaLeaver };
+  }, [empById, everyoneById]);
+  // Who reports, on paper, to somebody who has left: the reassignments HR still owes.
+  const reportsToLeaver = useMemo(
+    () => [...empById.values()].filter((e) => chartParentOf(e).viaLeaver),
+    [empById, chartParentOf],
+  );
   const deptById = useMemo(() => new Map(departments.filter((d) => !d.delete_time).map((d) => [idOf(d.path), d] as const)), [departments]);
   // `useCallback` because the tree memo below builds every node's label with them: each one's identity moves
   // with the lookup map it reads, which is what that memo already depends on.
@@ -136,10 +164,9 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     const nodes = new Map<string, TreeNode>();
     if (view === "people") {
       for (const [id, e] of empById) {
-        const mgr = e.manager ? idOf(e.manager) : null;
         nodes.set(id, {
           id,
-          parentId: mgr && empById.has(mgr) ? mgr : null,
+          parentId: chartParentOf(e).parentId,
           label: `${e.first_name} ${e.last_name}`,
           sub: e.job_title ?? "",
           search: `${e.first_name} ${e.last_name} ${e.job_title ?? ""} ${deptName(e.department) ?? ""}`.toLowerCase(),
@@ -164,7 +191,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     for (const n of nodes.values()) n.childIds.sort((a, b) => nodes.get(a)!.search.localeCompare(nodes.get(b)!.search));
     const roots = [...nodes.values()].filter((n) => !n.parentId).map((n) => n.id).sort((a, b) => nodes.get(a)!.search.localeCompare(nodes.get(b)!.search));
     return { nodes, roots };
-  }, [view, empById, deptById, empName, deptName]);
+  }, [view, empById, deptById, empName, deptName, chartParentOf]);
 
   // Total descendants per node (rich rollup), computed once per tree.
   const totalDesc = useMemo(() => {
@@ -483,6 +510,9 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
           {e.manager && empById.has(idOf(e.manager)) && (
             <div className="flex items-center gap-2"><dt className="w-14 shrink-0 text-muted-foreground">Manager</dt><dd><button type="button" className="font-medium hover:underline" onClick={() => { setPeekId(null); locate(idOf(e.manager!)); }}>{empName(e.manager)}</button></dd></div>
           )}
+          {e.manager && !empById.has(idOf(e.manager)) && everyoneById.has(idOf(e.manager)) && (
+            <div className="flex items-center gap-2"><dt className="w-14 shrink-0 text-muted-foreground">Manager</dt><dd className="text-warning">{everyoneById.get(idOf(e.manager))!.first_name} {everyoneById.get(idOf(e.manager))!.last_name}, who has left</dd></div>
+          )}
           {e.start_date && <div className="flex items-center gap-2"><dt className="w-14 shrink-0 text-muted-foreground">Tenure</dt><dd>{tenureLabel(e.start_date)}</dd></div>}
           {n.childIds.length > 0 && <div className="flex items-center gap-2"><dt className="w-14 shrink-0 text-muted-foreground">Team</dt><dd>{n.childIds.length} direct{total !== n.childIds.length ? ` · ${total} total` : ""}</dd></div>}
         </dl>
@@ -741,6 +771,23 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
       />
 
       <TruncationNotice collection="employees" what="people" className="mb-3" />
+
+      {/* People whose manager has left are drawn under the next manager up, so the chart reads right - but
+          their record still names the leaver, and approvals route by the record. Offered to whoever can fix it:
+          each name locates the card, ready to drag onto its real manager. */}
+      {view === "people" && canEditPeople && reportsToLeaver.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm">
+          <span className="text-warning">
+            {reportsToLeaver.length === 1 ? "1 person reports" : `${reportsToLeaver.length} people report`} to someone who has left - shown under the next manager up. Give them a new manager:
+          </span>
+          {reportsToLeaver.slice(0, 8).map((e) => (
+            <button key={e.path} type="button" className="font-medium hover:underline" onClick={() => locate(idOf(e.path))}>
+              {e.first_name} {e.last_name}
+            </button>
+          ))}
+          {reportsToLeaver.length > 8 && <span className="text-muted-foreground">and {reportsToLeaver.length - 8} more</span>}
+        </div>
+      )}
 
       <DataState state={empState} error={empErr} onRetry={reloadEmp}>
         <Card className={cn(full && "fixed inset-0 z-50 overflow-auto rounded-none border-0")}>

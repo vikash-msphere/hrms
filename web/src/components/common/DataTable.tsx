@@ -84,7 +84,7 @@ export type Column<T> = {
   headClassName?: string;
   defaultHidden?: boolean; // hidden until the user enables it in the column selector
   defaultFilter?: string; // seed an initial filter value (e.g. Status = "Active")
-  hideValueByDefault?: string; // exclude rows with this accessor value unless filtered (e.g. "Deleted")
+  hideValueByDefault?: string | string[]; // exclude rows with this accessor value (or any of these) unless filtered (e.g. "Deleted")
   // Extra select-filter values to offer even when no loaded row carries them. For a value whose rows are
   // FETCHED ON DEMAND ("Deleted"): the option has to exist before the fetch, or picking it is impossible and
   // the trash is unreachable. Paired with `onFilterChange` on the table, which is how the page learns to go
@@ -234,6 +234,12 @@ function CellBar({ value }: { value: number | null }) {
   return (
     <span aria-hidden className={cn("pointer-events-none absolute inset-y-0 left-0 rounded-sm", tone)} style={{ width: `${pct}%` }} />
   );
+}
+
+/** Whether a row carries a value its column holds back until somebody filters that column. */
+function isHiddenByDefault<T>(col: Column<T>, r: T): boolean {
+  const v = String(col.accessor!(r) ?? "");
+  return Array.isArray(col.hideValueByDefault) ? col.hideValueByDefault.includes(v) : v === col.hideValueByDefault;
 }
 
 function compare(a: unknown, b: unknown): number {
@@ -674,7 +680,7 @@ export function DataTable<T>({
     // Columns can hide a value by default (e.g. "Deleted") unless the user filters for it.
     for (const col of columns) {
       if (col.hideValueByDefault && col.accessor && !deferredFilters[col.id]) {
-        out = out.filter((r) => String(col.accessor!(r) ?? "") !== col.hideValueByDefault);
+        out = out.filter((r) => !isHiddenByDefault(col, r));
       }
     }
     for (const [colId, value] of Object.entries(deferredFilters)) {
@@ -970,7 +976,7 @@ export function DataTable<T>({
       let out = rows;
       for (const col of Object.values(colById)) {
         if (col.hideValueByDefault && col.accessor && col.id !== colId && !filters[col.id]) {
-          out = out.filter((r) => String(col.accessor!(r) ?? "") !== col.hideValueByDefault);
+          out = out.filter((r) => !isHiddenByDefault(col, r));
         }
       }
       for (const [id, value] of Object.entries(filters)) {

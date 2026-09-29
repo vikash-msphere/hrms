@@ -4,7 +4,9 @@ import { invoke, patch, remove } from "@/api";
 import { useResource } from "@/hooks/useResource";
 import { idOf } from "@/lib/utils";
 import type { Board, BoardColumn, BoardMode, SwimlaneMode, WipScope, Label as BoardLabel } from "@/types";
+import { LABEL_COLORS, DEFAULT_LABEL_COLOR, nextLabelColor } from "@/lib/labelColors";
 import { Field } from "@/components/common/Field";
+import { ColorPicker } from "@/components/common/ColorPicker";
 import { PanelSkeleton } from "@/components/common/Skeletons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,6 +17,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
+import { BoardSharingTab } from "./BoardSharingTab";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "col";
 
@@ -79,6 +82,8 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
     setCols((cs) => cs.map((c, j) => ({ ...c, [flag]: j === i ? on : on ? false : c[flag] })));
 
   const canDelete = (board.access?.can ?? []).includes("delete");
+  // Who may see and work the board is for whoever manages it - the `share` verb.
+  const canShare = (board.access?.can ?? []).includes("share");
 
   async function del() {
     const ok = await confirm({
@@ -185,7 +190,14 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
           <TabsTrigger value="columns">Columns</TabsTrigger>
           <TabsTrigger value="swimlanes">Swimlanes</TabsTrigger>
           <TabsTrigger value="labels">Labels</TabsTrigger>
+          {canShare && <TabsTrigger value="sharing">Sharing</TabsTrigger>}
         </TabsList>
+
+        {canShare && (
+          <TabsContent value="sharing" className="mt-3">
+            <BoardSharingTab board={board} onSaved={onSaved} />
+          </TabsContent>
+        )}
 
         <TabsContent value="details" className="mt-3 space-y-2">
           <Field label="Method" hint="Kanban = continuous flow. Scrum = time-boxed sprints (adds a backlog, sprint board, burndown & velocity).">
@@ -272,12 +284,12 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
 
         <TabsContent value="labels" className="mt-3 space-y-2">
           <div className="flex items-center justify-end">
-            <Button size="sm" variant="outline" onClick={() => setLabelCat((ls) => [...ls, { key: `label_${ls.length + 1}`, label: "New label", color: "#64748b" }])}><Plus className="h-3.5 w-3.5" /> Add label</Button>
+            <Button size="sm" variant="outline" onClick={() => setLabelCat((ls) => [...ls, { key: `label_${ls.length + 1}`, label: "New label", color: nextLabelColor(ls.map((x) => x.color)) }])}><Plus className="h-3.5 w-3.5" /> Add label</Button>
           </div>
           {labelCat.map((l, i) => (
             <div key={i} className="editor-row">
               <Input value={l.label} onChange={(e) => setLabelCat((ls) => ls.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))} className="editor-row-main h-8" placeholder="Label name" />
-              <Input type="color" value={l.color ?? "#64748b"} onChange={(e) => setLabelCat((ls) => ls.map((x, j) => (j === i ? { ...x, color: e.target.value } : x)))} className="h-8 w-14 p-1" />
+              <ColorPicker value={l.color ?? DEFAULT_LABEL_COLOR} presets={LABEL_COLORS} label={`Color for ${l.label || "this label"}`} onChange={(color) => setLabelCat((ls) => ls.map((x, j) => (j === i ? { ...x, color } : x)))} />
               <Button size="icon" variant="ghost" aria-label="Remove this label" className="h-7 w-7 text-destructive" onClick={() => setLabelCat((ls) => ls.filter((_, j) => j !== i))}><X className="h-4 w-4" /></Button>
             </div>
           ))}

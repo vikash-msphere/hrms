@@ -83,8 +83,10 @@ test.describe("deny visibility and presets", () => {
 
       const editor = page.getByRole("dialog");
       await expect(editor.getByRole("heading", { name: /Manage access · Pay grades/ })).toBeVisible({ timeout: 30_000 });
-      // Before: nobody but full admins, which is what the summary line says in so many words.
-      await expect(editor.getByText("Nobody but full admins can", { exact: false })).toBeVisible();
+      // Before: the summary line has read the rules (HR and payroll hold pay grades in the seed) and says
+      // nothing of everyone - which is the part the preset changes.
+      await expect(editor.getByText(/(role|roles|person|people) can see this|Nobody but full admins can see this/)).toBeVisible({ timeout: 30_000 });
+      await expect(editor.getByText("Everyone can see this", { exact: true })).toHaveCount(0);
 
       await editor.getByRole("button", { name: "Everyone can view" }).click();
       const confirm = page.getByRole("dialog").filter({ hasText: "Open pay grades to everyone?" });

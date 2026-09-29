@@ -57,11 +57,13 @@ describe("callerScopes - the breadth a capability string drops", () => {
 
   it("the collections an employee IS granted org-wide report it, so the board stays public", () => {
     const { read } = callerScopes(actorFor("employee"));
-    // Deliberate all-breadth grants (grants.ts COMMON_READ / OWN_WORK): a board whose columns show only your
-    // own cards is a private to-do list, and the announcement feed is the company's.
-    expect(read.cards).toBe("all");
+    // The announcement feed is the company's. Boards and their tasks reach past own rows through the two
+    // org-visible code segments (`boards.ve-*.**`, domain/boardAccess.ts) - subtree rules, which report as
+    // `dept` (a branch of the codes, not the whole org: private boards are not in it). Either way not `own`,
+    // so the board stays public to everyone it is visible to.
+    expect(read.cards).toBe("dept");
     expect(read.announcements).toBe("all");
-    expect(read.boards).toBe("all");
+    expect(read.boards).toBe("dept");
     // The suggestion box is private-by-default - no seeded grant, so no key.
     expect(read.suggestions).toBeUndefined();
   });
@@ -108,10 +110,11 @@ describe("callerScopes - the breadth a capability string drops", () => {
 
   it("a caller with no employee code fails closed on every relative tier", () => {
     const { read } = callerScopes({ grant: grantFor("employee"), employeeCode: null });
-    // Nothing self-relative can match, so only the genuinely org-wide grants survive.
+    // Nothing self-relative can match, so only the grants that name no person survive - the org-visible board
+    // segments among them, which are subtree rules on board codes and need no employee code.
     expect(read.attendance).toBeUndefined();
     expect(read.goals).toBeUndefined();
-    expect(read.cards).toBe("all");
+    expect(read.cards).toBe("dept");
   });
 
   it("`own` is omitted rather than sent, so an absent key is the fail-closed answer", () => {

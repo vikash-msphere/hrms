@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
-import { ensureFetch, subscribe, getSnapshot, patchRows, subscribeAny, collectionHasMore, loadMoreRows } from "@/lib/resourceStore";
+import { ensureFetch, retainReader, subscribe, getSnapshot, patchRows, subscribeAny, collectionHasMore, loadMoreRows } from "@/lib/resourceStore";
 import { usePermission } from "@/lib/perm";
 
 export type LoadState = "loading" | "ready" | "error";
@@ -44,9 +44,14 @@ export function useCollection<T>(
 
   // Trigger a fetch on mount / when the key changes (the store no-ops if fresh or already in flight). Skipped
   // when `enabled` is false so a component can hold off a read it may not need (e.g. a private-by-default
-  // dashboard KPI the viewer can't see - no wasted D1 read).
+  // dashboard KPI the viewer can't see - no wasted D1 read). The same gate decides whether this reader counts
+  // for the store's own refetches (an invalidation, pull-to-refresh, a cache clear): a reader that may not
+  // fetch here must not be fetched for there either.
   useEffect(() => {
-    if (enabled && canRead) void ensureFetch(collection, stableOpts);
+    if (!enabled || !canRead) return;
+    const release = retainReader(collection, stableOpts);
+    void ensureFetch(collection, stableOpts);
+    return release;
   }, [collection, stableOpts, enabled, canRead]);
 
   const reload = useCallback(() => {

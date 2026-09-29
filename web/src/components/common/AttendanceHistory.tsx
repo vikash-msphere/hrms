@@ -13,7 +13,7 @@ import {
   buildAttendanceRows, groupWeeks, statsOf, summarizeByDay,
   fmtDay, fmtDayLong, fmtDuration, fmtDurationShort, fmtHM, fmtMinOfDay, hhmmToMin, localDay, localMinutes,
   signedDuration, monthGridDays, weekdayOrder, CREDIT_LABEL, DOW, STATUS_UI, leaveRangeOf, unpaidLeaveTypes,
-  type AttendanceRow, type AttendanceSchedule, type DayCredit, type DayStatus, type LeaveRange, type WeekGroup, type WindowStats,
+  type AttendanceRow, type AttendanceSchedule, type DayCredit, type DayStatus, type LeaveRange, type PunchTarget, type WeekGroup, type WindowStats,
 } from "@/lib/attendance";
 import type { AttendanceWindow } from "@/hooks/useAttendanceWindow";
 import type { AttendanceDayMark, AttendanceSession, Holiday, LateEarlyRequest, LeaveRequest, LeaveType } from "@/types";
@@ -98,8 +98,9 @@ export function AttendanceHistory({
   /** Approved late arrival / early departure requests the host already holds (they may be everyone's; this
    *  keeps the employee's). Omitted, the history reads its own window of them. */
   lateEarly?: LateEarlyRequest[];
-  /** Omitted on somebody else's record - see the note above. */
-  onCorrect?: (rows: AttendanceRow[]) => void;
+  /** Omitted on somebody else's record - see the note above. With `punch`, the request is about that one
+   *  clock-in or clock-out of the (single) day rather than the whole day. */
+  onCorrect?: (rows: AttendanceRow[], punch?: PunchTarget) => void;
   onLogOvertime?: (row: AttendanceRow) => void;
   /** Ask for a late arrival / early departure to be approved for a day the punches flagged. Omitted wherever
    *  the reader may not file one for this person - the same rule as `onCorrect`. */
@@ -335,6 +336,7 @@ export function AttendanceHistory({
     leaveType: r.status === "on_leave" || r.status === "half_day_leave" ? leaveTypeName(leaveForDay(r.day)?.leave_type) : undefined,
     holiday: r.status === "holiday" ? holidayByDay.get(r.day) : undefined,
     onCorrect: onCorrect ? () => onCorrect([r]) : undefined,
+    onFixPunch: onCorrect ? (punch: PunchTarget) => onCorrect([r], punch) : undefined,
     // Offer the overtime hand-off only for a day that actually ran well past the shift (and only to callers
     // who may file one), so it stays a real signal rather than a button on every row.
     onLogOvertime: onLogOvertime && overtimeMinutes(r) >= 30 ? () => onLogOvertime(r) : undefined,
@@ -1166,9 +1168,36 @@ export function StatusPill({ status, lateBy, earlyBy }: { status: DayStatus; lat
   return <Badge variant={ui.badge}>{label}</Badge>;
 }
 
+// One time in a day's punch log. Where the reader may correct the day it is also the way to fix that one
+// punch: a button that says which punch and which day, with a pencil that shows on hover and focus. Otherwise
+// it is plain text, so nobody is shown a fix they could not file.
+function PunchTime({ dot, time, fixLabel, onFix }: { dot: string; time: string; fixLabel: string; onFix?: () => void }) {
+  const face = (
+    <>
+      <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dot)} aria-hidden />
+      {time}
+    </>
+  );
+  if (!onFix) return <span className="flex w-24 items-center gap-2">{face}</span>;
+  return (
+    <button
+      type="button"
+      onClick={onFix}
+      aria-label={fixLabel}
+      title={fixLabel}
+      // Padded out so the whole cell is the target on touch, and pulled back by the same amount so the column
+      // still lines up with the header above it.
+      className="group/punch -mx-1.5 flex w-[6.75rem] items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:min-h-9"
+    >
+      {face}
+      <Pencil className="ml-auto h-3 w-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/punch:opacity-100 group-focus-visible/punch:opacity-100 coarse:opacity-60" aria-hidden />
+    </button>
+  );
+}
+
 // The unfolded detail for a day: its punch log when there are clock-ins, otherwise why there are none
 // (the leave taken + its reason, the holiday's name, or a plain absent note).
-function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect, onLogOvertime, overtimeMinutes = 0, onRequestLate, onRequestEarly }: {
+function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect, onFixPunch, onLogOvertime, overtimeMinutes = 0, onRequestLate, onRequestEarly }: {
   row: AttendanceRow;
   punches: AttendanceSession[];
   now: number;
@@ -1177,12 +1206,18 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
   leaveType?: LeaveType;
   holiday?: Holiday;
   onCorrect?: () => void;
+  // Fix ONE clock-in or clock-out, from the time itself. Set exactly where `onCorrect` is.
+  onFixPunch?: (punch: PunchTarget) => void;
   onLogOvertime?: () => void;
   overtimeMinutes?: number;
   onRequestLate?: () => void;
   onRequestEarly?: () => void;
 }) {
   if (punches.length > 0) {
+    // A session with no clock-out is running only on today. On any earlier day it is a missed punch-out, and
+    // saying "Open" there reads as if the person were still at work.
+    const isToday = row.day === localDay(new Date(now).toISOString(), tz);
+    const day = formatDate(row.day);
     return (
       <div className="space-y-1.5">
         {/* `max-w-full` and a tighter phone gap: In + Out + Duration at gap-8 comes to 352px inside a 328px
@@ -1206,20 +1241,33 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
                   </div>
                 )}
                 <div className={cn("flex flex-wrap items-center gap-4 py-1.5 sm:gap-8", i > 0 && !gap && "border-t")}>
-                  <span className="flex w-24 items-center gap-2">
-                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" aria-hidden />
-                    {fmtHM(s.clock_in, tz)}
-                  </span>
-                  <span className="flex w-24 items-center gap-2">
-                    {s.clock_out ? (
-                      <>
-                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-muted-foreground/40" aria-hidden />
-                        {fmtHM(s.clock_out, tz)}
-                      </>
-                    ) : (
-                      <span className="flex items-center gap-1.5 text-xs font-medium text-success"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />Open</span>
-                    )}
-                  </span>
+                  <PunchTime
+                    dot="bg-success"
+                    time={fmtHM(s.clock_in, tz)}
+                    fixLabel={`Fix clock-in ${fmtHM(s.clock_in, tz)}, ${day}`}
+                    onFix={onFixPunch && (() => onFixPunch({ index: i, edge: "in" }))}
+                  />
+                  {s.clock_out ? (
+                    <PunchTime
+                      dot="bg-muted-foreground/40"
+                      time={fmtHM(s.clock_out, tz)}
+                      fixLabel={`Fix clock-out ${fmtHM(s.clock_out, tz)}, ${day}`}
+                      onFix={onFixPunch && (() => onFixPunch({ index: i, edge: "out" }))}
+                    />
+                  ) : isToday ? (
+                    <span className="flex w-24 items-center gap-1.5 text-xs font-medium text-success"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />Open</span>
+                  ) : onFixPunch ? (
+                    <button
+                      type="button"
+                      onClick={() => onFixPunch({ index: i, edge: "out" })}
+                      className="-mx-1.5 flex w-[6.75rem] items-center gap-1.5 rounded px-1.5 py-1 text-xs font-medium text-warning hover:bg-warning/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:min-h-9"
+                      aria-label={`Add the missing clock-out, ${day}`}
+                    >
+                      <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden /> No clock-out · Add
+                    </button>
+                  ) : (
+                    <span className="flex w-24 items-center gap-1.5 text-xs font-medium text-warning"><AlertTriangle className="h-3 w-3 shrink-0" aria-hidden />No clock-out</span>
+                  )}
                   <span className={cn("w-16 text-right font-medium", s.clock_out ? "text-foreground" : "text-success")}>{fmtDuration(mins)}</span>
                   {s.source === "correction" && <Badge variant="muted">Corrected</Badge>}
                 </div>
@@ -1230,9 +1278,10 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
         <div className="flex flex-wrap items-center gap-1.5">
           {onCorrect && (
             <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={onCorrect}>
-              <Pencil className="h-3 w-3" /> Wrong times? Request a correction
+              <Pencil className="h-3 w-3" /> {onFixPunch ? "Edit the whole day" : "Wrong times? Request a correction"}
             </Button>
           )}
+          {onFixPunch && <span className="text-xs text-muted-foreground">or pick a time to fix just that punch</span>}
           {onLogOvertime && (
             <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={onLogOvertime}>
               <Zap className="h-3 w-3" /> Log {fmtDurationShort(overtimeMinutes)} past the shift as overtime

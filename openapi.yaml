@@ -587,6 +587,8 @@ components:
         start_date: { type: string, format: date, description: First working day. Drives leave accrual and probation. }
         probation_end_date: { type: string, format: date, description: Last day of probation. Defaults from start_date plus the org probation period. }
         tracked_from: { type: string, format: date, description: "The first day HRMS holds records for this employee. Set for someone who joined before the org started using HRMS: a working day before it with no punches, no mark and no leave is not an absence and is never docked as loss of pay. Absent = records start on start_date. Not in the future." }
+        status: { type: string, readOnly: true, enum: [active, terminated, on_leave], description: "Employment status. Becomes terminated when the person exits: an offboarding is completed, a notice period is marked exited, or the nightly sweep runs the day after their last working day. Enabling the record again sets it back to active." }
+        end_date: { type: string, format: date, readOnly: true, description: "Last working day of someone who has exited. Kept after a reactivation as the record of the earlier exit." }
         epf_enrolled: { type: boolean, description: "EPF is opt-in per employee. When false (default) the PF deduction and employer-share CTC line are skipped." }
         eps_excluded: { type: boolean, description: "EPS (Employees' Pension Scheme) exclusion, HR-declared. True for a member whose pay already exceeded the pension wage ceiling when they first joined EPF: the whole employer PF share stays in EPF instead of 8.33% being diverted to the pension fund. Affects the statutory register and the PF challan split only." }
         photo: { type: string, readOnly: true, description: "Present when the employee has a profile photo. The value is the image's own API path - prefix it with `/v1/` and it is an `<img src>`. The `v=` query parameter is the photo's own version, so the URL changes when the picture is replaced and the answer may be cached until it does." }
@@ -2015,6 +2017,16 @@ components:
             properties:
               clock_in: { type: string, description: ISO 8601 timestamp of the corrected clock-in. }
               clock_out: { type: string, description: ISO 8601 timestamp of the corrected clock-out. Absent on today's last pair means still clocked in. }
+        recorded_sessions:
+          type: array
+          readOnly: true
+          description: The day's punches as recorded when the request was filed, in the same shape as sessions, so the request can be read as a change. Absent on requests filed before it was recorded.
+          items:
+            type: object
+            required: [clock_in]
+            properties:
+              clock_in: { type: string, description: ISO 8601 timestamp of the recorded clock-in. }
+              clock_out: { type: string, description: ISO 8601 timestamp of the recorded clock-out. Absent while that session was open. }
         reason: { type: string }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
         decided_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who approved or rejected the request." }
@@ -2432,6 +2444,15 @@ components:
         patterns:
           - 'goal-templates/{template_id}'
         type: hrms.example.com/goal-template
+    board-member:
+      type: object
+      description: "One entry of a board's sharing list: a person or a role (its name), at a level. A person is sent as `users/{user_id}` or `employees/{employee_id}` (the server finds their account) and always comes back as `users/{user_id}`, with `employee` and `name` filled in; those two are ignored on the way in. `kind`, `subject` and `level` are required on the way in (the :share schema refuses an entry without them)."
+      properties:
+        kind: { type: string, enum: [user, role] }
+        subject: { type: string }
+        level: { type: string, enum: [view, edit, manage] }
+        employee: { type: string, nullable: true, readOnly: true }
+        name: { type: string, readOnly: true }
     board:
       type: object
       required: [path, create_time, update_time, etag, card_count]
@@ -2446,6 +2467,14 @@ components:
         delete_time: { type: string, format: date-time, readOnly: true }
         name: { type: string }
         description: { type: string }
+        department: { type: string, description: "departments/{department_id}. Its managers, and the managers of every department above it, manage the board. Required when a manager creates a board (one of the departments they manage); optional for whoever manages every board." }
+        visibility: { type: string, enum: [edit, view, private], description: "Who may see and work the board: edit = everyone sees it and works its tasks (the default), view = everyone sees it and its members work it, private = only its members, its department's managers, super admin and the project manager see it. Set on create; changed through :share." }
+        members:
+          type: array
+          writeOnly: true
+          description: "Create only: the initial sharing list. The creator is always added at manage. Read and change it through :sharing and :share."
+          items: { $ref: '#/components/schemas/board-member' }
+        my_access: { type: string, enum: [manage, edit, view], readOnly: true, description: "What the caller may do on this board: manage it, work its tasks, or only see it. A hint for the UI; every request is decided on its own." }
         task_prefix: { type: string, description: "Human task-key prefix, e.g. MS -> MS-1, MS-2 (per-board incrementing seq)." }
         mode: { type: string, enum: [kanban, scrum], description: "kanban = continuous flow; scrum = sprint-based." }
         columns:
@@ -5222,7 +5251,7 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
   /v1/users/{user_id}:resetPin:
     post:
-      description: "Custom method resetPin for user. Clears the person's app PIN - the only way back from a forgotten one - signs them out everywhere and moves the key their browsers encrypt stored data under, so nothing those browsers kept can be read again. They are notified. Super admin by default; grantable by name in the ACL."
+      description: "Custom method resetPin for user. Clears the person's app PIN - the only way back from a forgotten one - signs them out everywhere and moves the key their browsers encrypt stored data under, so nothing those browsers kept can be read again. They are notified. Super admin and HR admin by default; grantable by name in the ACL."
       operationId: ":ResetPinUser"
       parameters: [ { in: path, name: user_id, required: true, schema: { type: string } } ]
       responses:
@@ -5421,6 +5450,9 @@ paths:
       parameters:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: collection, description: "Only the rules on this collection, plus the ** rules that bear on every collection.", schema: { type: string } }
+        - { in: query, name: subject_kind, schema: { type: string, enum: [role, user] } }
+        - { in: query, name: subject, description: "Only this subject's rules - a role name, or users/<id>.", schema: { type: string } }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -5520,7 +5552,7 @@ paths:
                   maxItems: 100
                   items: { type: string, description: "users/<id> ref, or employees/<id> (resolves to the linked account; a person with no account yet is graded as the default-role account they would get on first sign-in)" }
                 collection: { type: string, description: "The target collection. Optional only with include_capabilities (capability-set-only call)." }
-                object: { type: string, description: "Optional object ref (<collection>/<id>) to evaluate against one row." }
+                object: { type: string, description: "Optional object ref (<collection>/<id>) to evaluate against one row. <collection>/me evaluates against each subject's own record, the key a self-acting request like attendance/me:clockIn is decided on." }
                 field: { type: string, description: "Optional protected-field/sub-resource key; requires object." }
                 verb: { type: string, description: "Optional custom method to check alongside the standard ladder." }
                 include_capabilities: { type: boolean, description: "Also return each subject's scope-stripped capability set (what /users/me carries) - powers app-wide view-as." }
@@ -7838,6 +7870,62 @@ paths:
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/board' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/boards/{board_id}:share:
+    post:
+      description: "Custom method share: who may see and work the board. `visibility` moves it between edit (everyone sees it and works its tasks), view (everyone sees it; its members work it) and private (only its members, its department's managers, super admin and the project manager see it). `members` REPLACES the sharing list: people (`users/{user_id}`) and roles, each at view, edit or manage. Either may be sent alone. The board's department's managers, and those of every department above it, manage it whatever the list says. Answers with the board."
+      operationId: ":ShareBoard"
+      parameters: [ { in: path, name: board_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                visibility: { type: string, enum: [edit, view, private] }
+                members: { type: array, items: { $ref: '#/components/schemas/board-member' } }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/board' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/boards/{board_id}:sharing:
+    post:
+      description: "Custom method sharing: the board's sharing as its managers see it - visibility, the sharing list with each member's name (shaped as `:share` takes it back), and the people who manage it through its department (read-only: it follows the department's managers)."
+      operationId: ":BoardSharing"
+      parameters: [ { in: path, name: board_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  visibility: { type: string, enum: [edit, view, private] }
+                  department: { nullable: true, type: string }
+                  members: { type: array, items: { $ref: '#/components/schemas/board-member' } }
+                  managers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        user: { type: string }
+                        employee: { nullable: true, type: string }
+                        name: { type: string }
+                      required: [user, employee, name]
+                required: [visibility, department, members, managers]
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/boards/{board_id}:narrate:
@@ -18544,7 +18632,7 @@ paths:
           in: query
           required: false
           schema: { type: string }
-          description: "Search text. Absent, or fewer than 2 characters, returns no results."
+          description: "Search text. Fewer than 2 characters returns no results - except absent or empty alongside a narrowing parameter (in, owner, mine, after, before, status), which lists the newest records that narrowing names."
         - name: in
           in: query
           required: false

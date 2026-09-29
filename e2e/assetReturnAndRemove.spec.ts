@@ -6,7 +6,7 @@ import { SPA_HEADERS, personPath, purge, gotoRoute, test, expect, toast } from "
 // confirm copy says "permanently deleted... there is no undo", and that claim had never been checked.
 test("an assigned asset is returned to stock, and a separate one is removed for good", async ({ as }) => {
   test.setTimeout(120_000);
-  const page = await as("hr");
+  const page = await as("it");
   const stamp = Date.now();
   const returnName = `E2E return asset ${stamp}`;
   const removeName = `E2E remove asset ${stamp}`;

@@ -14,6 +14,8 @@
 // A LEAF ON PURPOSE. This lived privately inside services/notifications.ts, so the surfaces that needed the
 // same rule either imported that whole module (the push sender, the digest queue, the wire-id encoder) or -
 // what actually happened - spelled the rule again and got it wrong. Nothing here but the schema and drizzle.
+//
+// The SPA's rosters apply the same rule to wire rows: `isCurrentEmployee` in web/src/lib/employees.ts.
 import { eq, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
 

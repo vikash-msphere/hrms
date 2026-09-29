@@ -14,7 +14,8 @@
 #                                     #   (bootstrap/demo.sql). Best way to see the product with data in it.
 #
 # Seeded role logins (email -> role):  super@example.com=super_admin  hr@example.com=hr_admin
-#   mgr@example.com=manager  pay@example.com=payroll_admin  emp@example.com=employee
+#   mgr@example.com=manager  pay@example.com=payroll_admin  emp@example.com=employee  it@example.com=it_admin
+#   pm@example.com=project_manager
 #
 # All three processes bind 0.0.0.0, so the SPA is reachable from other devices on the LAN (phone testing).
 # The dev fake-auth bypass is on, so ANYONE who can reach this port is the DEV_FAKE_EMAIL identity - only run

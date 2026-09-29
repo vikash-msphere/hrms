@@ -1,5 +1,5 @@
 import { eq, and, isNull, type SQL } from "drizzle-orm";
-import { allocFlatCode, withFreshCode } from "./codeAlloc";
+import { allocUnderRow, withFreshCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -31,7 +31,7 @@ const dateOrNull = (s?: string | null) => (s ? new Date(Date.parse(s + "T00:00:0
 // middleware/authz.ts for every collection-level list), and `applyScope` is the only thing that binds them, so
 // a per-object deny on a sprint had no effect on the list at all.
 //
-// `sprints` is a flat catalog with a `code` and no owner column, so an own-scoped caller gets nothing -
+// `sprints` is coded under its board with no owner column, so an own-scoped caller gets nothing -
 // fail-closed, the same answer the generic list gives. The board filter moves into SQL with it (there is an
 // index on `board_id`), so a board's sprints cost a seek rather than a read of the table.
 export async function listSprints(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, boardId?: string, showDeleted = false, deletedOnly = false) {
@@ -58,11 +58,12 @@ export async function createSprint(deps: Deps, actor: AppUser, input: SprintInpu
   if (!board || board.deleteTime) throw notFound("board not found");
   for (const k of ["start_date", "end_date"] as const) if (input[k] && Number.isNaN(dayMs(input[k]))) throw invalidArgument(`${k} is invalid`);
   const name = input.name.trim();
-  // Allocated inside the retry (codeAlloc.ts): planning day is several boards starting a sprint at once.
-  const row = (await withFreshCode(async () => deps.db
+  // Allocated inside the retry (codeAlloc.ts): planning day is several boards starting a sprint at once. Coded
+  // under the board (domain/boardAccess.ts), so whoever manages the board runs its sprints.
+  const row = (await withFreshCode(async (attempt) => deps.db
     .insert(schema.sprints)
     .values({
-      code: await allocFlatCode(deps, schema.sprints),
+      code: await allocUnderRow(deps, schema.sprints, schema.sprints.boardId, boardId, board.code!, undefined, attempt > 1),
       ...(id ? { uuid: id } : {}),
       boardId,
       name,

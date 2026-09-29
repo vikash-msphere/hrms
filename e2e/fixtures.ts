@@ -33,6 +33,8 @@ export const ROLES = {
   manager: "mgr@example.com",
   payroll: "pay@example.com",
   employee: "emp@example.com",
+  it: "it@example.com",
+  pm: "pm@example.com",
 } as const;
 
 export type Role = keyof typeof ROLES;
@@ -240,6 +242,7 @@ export const test = base.extend<Fixtures>({
       const context = await signIn(browser, baseURL, email);
       hardenRequest(context.request);
       contexts.push(context);
+      signedIn.set(email, [...(signedIn.get(email) ?? []), context]);
       const page = await context.newPage();
       allowed.set(page, []);
       // `where` is the url the browser blames, and it is reported because without it a failed resource load
@@ -285,6 +288,11 @@ export const test = base.extend<Fixtures>({
 
     await Promise.all(bodiesRead); // whose 500 each one was, before the pages go away
     for (const context of contexts) await context.close();
+    for (const [email, held] of signedIn) {
+      const open = held.filter((c) => !contexts.includes(c));
+      if (open.length) signedIn.set(email, open);
+      else signedIn.delete(email);
+    }
     // Asserted after the test body so a genuine assertion failure is reported first and this never masks it.
     const real = failures.filter((line) => ![...proxyFailed, ...racedPayables].some((url) => line.endsWith(` @ ${url}`)));
     expect(real, "the app logged errors in the browser console").toEqual([]);
@@ -376,14 +384,22 @@ function hardenRequest(req: APIRequestContext) {
  * hard-coded, and matching on a first name is one seeded joiner away from picking the wrong person. The
  * login email is the one thing that identifies a role's person exactly, and it is already the key `ROLES`
  * is written in.
+ *
+ * Walked page by page: a list page holds at most 100 rows (`max_page_size`, src/http/pagination.ts
+ * clampPageSize) and the seed alone has 100 employees, so a login past the first page is only found by
+ * following `next_page_token`.
  */
 export async function personPath(page: Page, role: Role): Promise<string> {
-  const res = await page.request.get("/v1/employees?page_size=200");
-  expect(res.status(), await res.text()).toBe(200);
-  const { results = [] } = (await res.json()) as { results?: { path: string; work_email?: string }[] };
-  const person = results.find((e) => e.work_email === ROLES[role]);
-  if (!person) throw new Error(`e2e: no employee record for ${ROLES[role]}`);
-  return person.path;
+  let token = "";
+  do {
+    const res = await page.request.get(`/v1/employees?max_page_size=100${token ? `&page_token=${encodeURIComponent(token)}` : ""}`);
+    expect(res.status(), await res.text()).toBe(200);
+    const { results = [], next_page_token } = (await res.json()) as { results?: { path: string; work_email?: string }[]; next_page_token?: string };
+    const person = results.find((e) => e.work_email === ROLES[role]);
+    if (person) return person.path;
+    token = next_page_token ?? "";
+  } while (token);
+  throw new Error(`e2e: no employee record for ${ROLES[role]}`);
 }
 
 /** The id half of `personPath` - what a route wants (`employees/<id>`, `org-chart/<id>`). */
@@ -739,8 +755,15 @@ export async function makeThrowawayPerson(page: Page, tag: string): Promise<{ pa
     data: { first_name: "E2E", last_name: last, work_email: email },
   });
   expect(res.status(), await res.text()).toBe(200);
-  return { path: ((await res.json()) as { path: string }).path, email, name: `E2E ${last}` };
+  const path = ((await res.json()) as { path: string }).path;
+  throwawayEmails.set(path, email);
+  return { path, email, name: `E2E ${last}` };
 }
+
+// Who each throwaway person is, and the browsers signed in as anybody (filled by the `as` fixture), so retiring
+// a person can close their pages first. Per worker process, like everything else here.
+const throwawayEmails = new Map<string, string>();
+const signedIn = new Map<string, BrowserContext[]>();
 
 /**
  * Take a throwaway person back out - a soft delete, never `?force=true`.
@@ -750,6 +773,13 @@ export async function makeThrowawayPerson(page: Page, tag: string): Promise<{ pa
  * purge answers 409 and cleans up nothing.
  */
 export async function retireThrowawayPerson(page: Page, path: string): Promise<void> {
+  // Their own pages go first. A page still open on the app keeps writing as them (a theme preference, a read
+  // receipt), and once the account is retired the server rightly refuses it - a 403 in the console of a spec
+  // whose assertions had all passed.
+  const email = throwawayEmails.get(path);
+  for (const context of email ? signedIn.get(email) ?? [] : []) {
+    for (const p of context.pages()) await p.close().catch(() => undefined);
+  }
   const got = await page.request.get(`/v1/${path}`);
   if (!got.ok()) return;
   const { etag } = (await got.json()) as { etag: string };
@@ -767,10 +797,26 @@ export async function userPath(page: Page, email: string): Promise<string> {
 }
 
 /** Every access rule the caller can read - the wire truth behind whatever the ACL modal is drawing. */
-export async function accessRules(page: Page): Promise<AccessRuleRow[]> {
-  const res = await page.request.get("/v1/access-rules?page_size=500");
-  expect(res.status(), await res.text()).toBe(200);
-  return ((await res.json()) as { results?: AccessRuleRow[] }).results ?? [];
+/**
+ * Every access rule, or those on one collection (`?collection=` keeps the `**` rules too).
+ *
+ * EVERY PAGE, not the first: other specs write rules concurrently - a role copy alone lands a couple of hundred
+ * - so a rule this spec wrote a moment ago can already be off the newest page.
+ */
+export async function accessRules(page: Page, collection?: string): Promise<AccessRuleRow[]> {
+  const all: AccessRuleRow[] = [];
+  let token: string | undefined;
+  do {
+    const params = new URLSearchParams({ max_page_size: "100" });
+    if (collection) params.set("collection", collection);
+    if (token) params.set("page_token", token);
+    const res = await page.request.get(`/v1/access-rules?${params.toString()}`);
+    expect(res.status(), await res.text()).toBe(200);
+    const body = (await res.json()) as { results?: AccessRuleRow[]; next_page_token?: string };
+    all.push(...(body.results ?? []));
+    token = body.next_page_token;
+  } while (token);
+  return all;
 }
 
 export type AccessRuleRow = {

@@ -71,7 +71,8 @@ export const HIERARCHICAL_TABLES: HierTable[] = [
   { table: schema.suggestions, collection: "suggestions" },
   { table: schema.notifications, collection: "notifications" },
   { table: schema.goals, collection: "goals" },
-  { table: schema.cards, collection: "cards" },
+  // NOT `cards`: a card is coded under its BOARD (`ve-0a-001`, domain/boardAccess.ts), not under whoever filed
+  // it, so a transfer leaves it where it is. A board's own re-code is services/boardShares.ts recodeBoard.
   { table: schema.reviews, collection: "reviews" },
   { table: schema.reviewFeedback, collection: "review-feedback" },
   { table: schema.transitions, collection: "transitions" },

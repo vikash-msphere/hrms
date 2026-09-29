@@ -34,6 +34,28 @@ describe("ruleSentence", () => {
   it("names the subject the caller passes (the modal's commit line uses an email)", () => {
     expect(ruleSentence(rule({ subject_kind: "user", subject: "users/x" }), "ana@test.example")).toMatch(/^ana@test\.example has read access/);
   });
+
+  // `access-rules:requestAccess` reaches no access rule - it notifies the admins - so "on every access rule in
+  // the workspace" described a power the rule does not grant. An item-level method still names its records.
+  it("names no records for a method that acts on the collection as a whole", () => {
+    const ask = rule({ subject: "everyone", collection: "access-rules", verb: "requestAccess", level: undefined });
+    expect(ruleSentence(ask, "Everyone")).toBe('Everyone can use the "Request access" method');
+    expect(ruleSentence(rule({ verb: "approve", level: undefined }))).toMatch(/ on all leave requests$/);
+  });
+});
+
+describe("ruleFlags - a collection-level method only takes an org-wide rule", () => {
+  // Decided on the two-token key `leave-requests.importHistory`, which `leave-requests.my-dept.importHistory`
+  // can never match: the rule is listed as live and never applies.
+  it("flags a narrower rule for one as never used, and leaves the org-wide rule alone", () => {
+    const dept = rule({ collection: "leave-requests", verb: "importHistory", scope: "dept", level: undefined });
+    const all = rule({ collection: "leave-requests", verb: "importHistory", scope: "all", level: undefined });
+    expect(ruleFlags(dept, [dept]).map((f) => f.kind)).toContain("unscoped");
+    expect(ruleFlags(all, [all]).map((f) => f.kind)).not.toContain("unscoped");
+    // An item-level method at a narrower scope is an ordinary rule.
+    const approve = rule({ verb: "approve", scope: "dept", level: undefined });
+    expect(ruleFlags(approve, [approve]).map((f) => f.kind)).not.toContain("unscoped");
+  });
 });
 
 describe("ruleFlags (dead-rule lint)", () => {
