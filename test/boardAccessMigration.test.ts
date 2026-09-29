@@ -8,26 +8,32 @@ import { compileGrant, rulesToGrant, type CompiledRule } from "../src/domain/com
 import { decide, resolveRequest } from "../src/domain/permissions";
 import { CARD_WORK_VERBS } from "../src/domain/boardAccess";
 
-// Migration 0006 carries board access to a LIVE database: every existing board, card and sprint is re-coded
-// under the visibility segment (everyone keeps seeing and working every board), a per-record rule on an old code
-// follows it, the seeded roles' org-wide board rules become the segment rules the seed now writes, the project
-// manager role arrives, and the policy manifest files cards and sprints under their board. Every other migration
-// is applied first, and 0006's own schema statements once; each test lays down the database as the OLD seed left
-// it and applies 0006's data statements - twice, since a re-run must change nothing.
+// The board access section of migration 0004 carries board access to a LIVE database: every existing board, card
+// and sprint is re-coded under the visibility segment (everyone keeps seeing and working every board), a
+// per-record rule on an old code follows it, the seeded roles' org-wide board rules become the segment rules the
+// seed now writes, the project manager role arrives, and the policy manifest files cards and sprints under their
+// board. Every earlier migration and 0004's earlier sections are applied first, and the section's own schema
+// statements once; each test lays down the database as the OLD seed left it and applies the section's data
+// statements - twice, since a re-run must change nothing. The section runs from its header to the end of 0004.
 const migrations = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const paths = Object.keys(migrations).sort();
-const target = paths.find((p) => p.includes("0006_board_access"))!;
+const release = paths.find((p) => p.includes("0004_release_four"))!;
+const whole = migrations[release]!;
+const start = whole.indexOf("-- Board access: a department on a board, and per-board visibility.");
+if (start < 0) throw new Error("board access section not found in 0004_release_four.sql");
+const section = whole.slice(start);
 const db = (env as unknown as Bindings).DB;
 const statements = (sql: string) => sql.split("--> statement-breakpoint").map((s) => s.trim()).filter(Boolean);
 // A statement is schema when its first line of SQL (past the comment header) alters or indexes a table.
 const isSchema = (s: string) => /^(ALTER TABLE|CREATE INDEX)/m.test(s.replace(/^--.*$/gm, "").trim().split("\n")[0] ?? "");
 const run = async (list: string[]) => { for (const s of list) await db.prepare(s).run(); };
-const migrate = () => run(statements(migrations[target]!).filter((s) => !isSchema(s)));
+const migrate = () => run(statements(section).filter((s) => !isSchema(s)));
 
 beforeAll(async () => {
-  for (const p of paths.filter((p) => p < target)) await run(statements(migrations[p]!));
-  await run(statements(migrations[target]!).filter(isSchema));
-  for (const p of paths.filter((p) => p > target)) await run(statements(migrations[p]!));
+  for (const p of paths.filter((p) => p < release)) await run(statements(migrations[p]!));
+  await run(statements(whole.slice(0, start)));
+  await run(statements(section).filter(isSchema));
+  for (const p of paths.filter((p) => p > release)) await run(statements(migrations[p]!));
 });
 
 beforeEach(async () => {
@@ -95,7 +101,7 @@ const SAMPLE: [string, string][] = [
 ];
 const SELF = { employeeCode: "04-001" };
 
-describe("migration 0006: board access on a live database", () => {
+describe("migration 0004: board access on a live database", () => {
   it("every seeded role decides board requests exactly as the new seed does - and a re-run changes nothing", async () => {
     await seedOldState();
     await migrate();

@@ -9,7 +9,7 @@ import { usePermission, useCanExport, useCanWriteOthers } from "@/lib/perm";
 import { fireIntent, useIntent } from "@/lib/intent";
 import { navigate } from "@/router";
 import { exportTable } from "@/lib/exportTable";
-import { cn, idOf, formatDate } from "@/lib/utils";
+import { cn, idOf, formatDate, formatHHMM } from "@/lib/utils";
 import {
   summarizeByDay, buildAttendanceRows, statsOf, fmtDay, fmtHM, fmtHM24, fmtDuration, fmtDurationShort, describeCorrection,
   seedPunches, punchInstants, punchErrors, keptPunches, isOpenPunch, punchTotal, sameTimes, type PunchRow, type OpenAllowance, type PunchTarget,
@@ -356,7 +356,7 @@ export default function Attendance({ me }: { me: Me }) {
     fireIntent("new-overtime", {
       start_time: zonedInstant(row.day, sched.shift_end, tz),
       end_time: end,
-      reason: `Worked past ${sched.shift_end} on ${row.day}`,
+      reason: `Worked past ${formatHHMM(sched.shift_end)} on ${formatDate(row.day)}`,
     });
   }
 
@@ -460,7 +460,7 @@ export default function Attendance({ me }: { me: Me }) {
     <div>
       <PageHeader
         title="Attendance"
-        description={`Shift ${sched.shift_start}–${sched.shift_end} · ${sched.timezone}`}
+        description={`Shift ${formatHHMM(sched.shift_start)} – ${formatHHMM(sched.shift_end)} · ${sched.timezone}`}
         actions={<PageSettings me={me} host="attendance" />}
       />
       {/* Every time on this page is org-local; on a device in another zone that has to be said, not inferred. */}
@@ -554,7 +554,7 @@ export default function Attendance({ me }: { me: Me }) {
                 worked={todayWorked}
                 full={sched.full_day_minutes}
                 half={sched.half_day_minutes}
-                shift={`${sched.shift_start}–${sched.shift_end}`}
+                shift={`${formatHHMM(sched.shift_start)} – ${formatHHMM(sched.shift_end)}`}
                 projection={
                   !showFinishProjection
                     ? undefined
@@ -1222,7 +1222,7 @@ function CorrectionDialog({ rows, initial, tz, sched, today, pendingDays, busy, 
               </span>
               <span className="flex shrink-0 items-center gap-1">
                 <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={fillScheduled}>
-                  Scheduled day <span className="ml-1 tabular-nums opacity-70">{sched.shift_start}-{sched.shift_end}</span>
+                  Scheduled day <span className="ml-1 tabular-nums opacity-70">{formatHHMM(sched.shift_start)} - {formatHHMM(sched.shift_end)}</span>
                 </Button>
                 {single && edited && <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={restore}>Reset</Button>}
               </span>

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlignCenter, AlignLeft, AlignRight, Award, BarChart3, CalendarClock, Check, ChevronDown, GripVertical, Megaphone, MessageSquare, Plus, RotateCcw, Smile, X } from "lucide-react";
 import { create, invoke, patch } from "@/api";
-import { cn, idOf } from "@/lib/utils";
+import { cn, formatDateTime, idOf } from "@/lib/utils";
 import type { Announcement, Department, Employee, RecipientLayout, StickerLayout } from "@/types";
 import { type BodyValign, DEFAULT_VALIGN, DEFAULT_WRAP, KUDOS_RECIPIENT_LAYOUT, KUDOS_STICKER_LAYOUT, POST_STICKER_LAYOUT, withWrap } from "@/components/common/CardSticker";
 import { FilterChip, filterChipClass } from "@/components/common/FilterChips";
@@ -155,7 +155,7 @@ function toLocalInput(iso?: string | null): string {
 }
 const localInputNow = () => toLocalInput(new Date().toISOString());
 const fromLocalInput = (v: string) => (v ? new Date(v).toISOString() : undefined);
-const whenLabel = (iso?: string) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "");
+const whenLabel = (iso?: string) => (iso ? formatDateTime(iso) : "");
 
 const EMPTY = {
   title: "",

@@ -6,7 +6,7 @@ import { navigate } from "@/router";
 import { useApprovals, APPROVAL_COLLECTIONS } from "@/lib/approvals";
 import { invoke, patch } from "@/api";
 import { describeError, isConflict } from "@/lib/formError";
-import { idOf, formatDate, formatMoney, cn } from "@/lib/utils";
+import { idOf, formatDate, formatHHMM, formatMoney, formatTime, cn } from "@/lib/utils";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { PageHeader } from "@/components/common/PageHeader";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
@@ -207,7 +207,7 @@ export default function Approvals({ me }: { me: Me }) {
     rows.filter((r) => !decided.has(r.path)).sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? ""));
 
   const sumReg = (r: AttendanceRegularization) => {
-    const t = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const t = formatTime;
     const times = describeCorrection(r.recorded_sessions, r.sessions, t, "remove punches");
     return `${formatDate(r.date)} · ${times}${r.reason ? ` · ${r.reason}` : ""}`;
   };
@@ -234,7 +234,7 @@ export default function Approvals({ me }: { me: Me }) {
   // What is being asked, in the words the person used, and the one fact the decider weighs it against: whether it
   // was filed past the monthly allowance the org set.
   const sumLateEarly = (r: LateEarlyRequest) =>
-    `${formatDate(r.date)} · ${KIND_LABEL[r.kind as LateEarlyKind] ?? r.kind} · ${r.kind === "early_departure" ? "leave at" : "in by"} ${r.at} (${fmtMinutes(r.minutes ?? 0)})${r.over_limit ? " · past the monthly allowance" : ""}${r.reason ? ` · ${r.reason}` : ""}`;
+    `${formatDate(r.date)} · ${KIND_LABEL[r.kind as LateEarlyKind] ?? r.kind} · ${r.kind === "early_departure" ? "leave at" : "in by"} ${formatHHMM(r.at)} (${fmtMinutes(r.minutes ?? 0)})${r.over_limit ? " · past the monthly allowance" : ""}${r.reason ? ` · ${r.reason}` : ""}`;
   // The same aid a correction gets: the person's own attendance around the day, one click away.
   const lateEarlyContext = (r: LateEarlyRequest): React.ReactNode => {
     const empId = r.employee ? idOf(r.employee) : undefined;

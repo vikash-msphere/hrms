@@ -3,7 +3,7 @@ import { Search, History, ChevronLeft, ChevronRight } from "lucide-react";
 import { batchGet, get } from "@/api";
 import { navigate } from "@/router";
 import { useCollection } from "@/hooks/useCollection";
-import { idOf } from "@/lib/utils";
+import { formatDate, formatDateTime, formatTime, idOf } from "@/lib/utils";
 import { resourceRoute, opensExactRecord } from "@/lib/resourceRoute";
 import type { Activity, ActivityPage, Employee } from "@/types";
 import { actionIcon, actionLabel, actionTone, TONE_ICON, TONE_LABEL, timeAgo, type ActionTone } from "@/lib/activity";
@@ -42,8 +42,8 @@ function fmtIso(v: string): string | undefined {
   const d = new Date(m[2] ? v : `${m[1]}T00:00:00Z`);
   if (isNaN(+d)) return undefined;
   return !m[2] || /^00:00(:00(\.0+)?)?$/.test(m[2])
-    ? d.toLocaleDateString(undefined, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" })
-    : d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    ? formatDate(m[1]!)
+    : formatDateTime(v);
 }
 
 // One "field: old → new" as a self-contained chip.
@@ -184,7 +184,7 @@ function ActivityDetail({ row, who, record, extras, fmt, onShowAct, onShowSessio
         {typeof row.meta?.authorized_by === "string" && fact("Authorized by", <code className="rounded bg-muted px-1 py-0.5 text-xs">{row.meta.authorized_by}</code>)}
         {fact("Action", actionLabel(row.action))}
         {record && fact("Record", record)}
-        {fact("When", new Date(row.create_time).toLocaleString())}
+        {fact("When", formatDateTime(row.create_time))}
         {/* Where from, on what: only ever in a tooltip before this view existed, which is no place for the two
             facts an incident review needs. Masked from replay - an IP locates a person. */}
         {row.ip && fact("IP address", <span data-sentry-mask className="font-mono text-xs">{row.ip}</span>)}
@@ -448,7 +448,7 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
     if (typeof m.date === "string" && m.date) bits.push(<span key="dt" className="text-muted-foreground">on {m.date}</span>);
     // A set of in/out session pairs (e.g. an attendance correction's requested times) → "09:00–13:00, 14:00–18:10".
     if (Array.isArray(m.sessions)) {
-      const hm = (iso: unknown) => (typeof iso === "string" ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "?");
+      const hm = (iso: unknown) => (typeof iso === "string" ? formatTime(iso) : "?");
       const pairs = m.sessions as { clock_in?: string; clock_out?: string }[];
       const label = pairs.length ? pairs.map((p) => `${hm(p.clock_in)}–${p.clock_out ? hm(p.clock_out) : "still clocked in"}`).join(", ") : "no punches";
       bits.push(<span key="ses" className="text-muted-foreground tabular-nums">{label}</span>);
@@ -660,7 +660,7 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
                 const name = nameOf(a);
                 const t = actionTone(a.action);
                 const ActionIcon = actionIcon(a.action);
-                const title = [new Date(a.create_time).toLocaleString(), a.ip, a.user_agent].filter(Boolean).join(" · ");
+                const title = [formatDateTime(a.create_time), a.ip, a.user_agent].filter(Boolean).join(" · ");
                 // The touched record's destination page (deep record page where supported, else the list page).
                 const route = global && a.entity ? resourceRoute(a.entity, a.entity_ref) : null;
                 // Type glyph for the touched record — the same icon its nav entry / Settings panel uses (via iconOf),

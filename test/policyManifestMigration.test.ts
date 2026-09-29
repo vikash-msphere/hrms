@@ -59,7 +59,7 @@ describe("migration 0002: the manifest row carries what the fallback used to", (
     await setRow(JSON.stringify(older));
     await migrate();
     const after = JSON.parse((await stored())!) as Policy;
-    // What the migration froze, not what the seed says today: 0006 later dropped the `cards` tiers, and an
+    // What the migration froze, not what the seed says today: 0004 later dropped the `cards` tiers, and an
     // applied migration never moves with the seed.
     expect(after.supported_scopes).toEqual(FROZEN.supported_scopes);
     expect(after.protected_fields).toEqual({ users: ["role"] }); // the org's own edit survives

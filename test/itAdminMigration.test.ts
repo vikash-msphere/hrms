@@ -6,13 +6,20 @@ import { GRANTS, grantFor, EVERYONE_GRANT } from "../bootstrap/authz/grants";
 import { compileGrant, mergeGrants, rulesToGrant, type CompiledRule } from "../src/domain/compileGrants";
 import { decide, resolveRequest } from "../src/domain/permissions";
 
-// Migration 0004 adds it_admin to a LIVE database, takes the asset rules off hr_admin, gives HR the PIN reset,
-// and hands the IT ticket desk to the new role. Every other migration is applied first; each test then lays down
-// a database as the seed left it (plus the edits an org could have made since) and applies 0004 - twice, because
-// every statement has to be a no-op the second time.
+// The it_admin section of migration 0004 adds it_admin to a LIVE database, takes the asset rules off hr_admin,
+// gives HR the PIN reset, and hands the IT ticket desk to the new role. Every other migration, and the rest of
+// 0004, is applied first; each test then lays down a database as the seed left it (plus the edits an org could
+// have made since) and applies the section - twice, because every statement has to be a no-op the second time.
+// 0004 carries several changes, one section each (a comment header, then its statements); this one runs from its
+// header to the next section's.
 const migrations = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const paths = Object.keys(migrations).sort();
-const target = paths.find((p) => p.includes("0004_it_admin_role"))!;
+const release = paths.find((p) => p.includes("0004_release_four"))!;
+const whole = migrations[release]!;
+const start = whole.indexOf("-- Adds the IT Admin role on the live database");
+const end = whole.indexOf("-- An attendance regularization keeps", start);
+if (start < 0 || end < 0) throw new Error("it_admin section not found in 0004_release_four.sql");
+const section = whole.slice(start, end);
 const db = (env as unknown as Bindings).DB;
 
 async function runSql(sql: string) {
@@ -21,10 +28,11 @@ async function runSql(sql: string) {
     if (s) await db.prepare(s).run();
   }
 }
-const migrate = () => runSql(migrations[target]!);
+const migrate = () => runSql(section);
 
 beforeAll(async () => {
-  for (const p of paths.filter((p) => p !== target)) await runSql(migrations[p]!);
+  for (const p of paths.filter((p) => p !== release)) await runSql(migrations[p]!);
+  await runSql(whole.slice(0, start) + whole.slice(end));
 });
 
 beforeEach(async () => {

@@ -7,7 +7,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { useServerSearch } from "@/hooks/useServerSearch";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
-import { cn, formatDate, idOf } from "@/lib/utils";
+import { cn, formatDate, formatDateTime, formatTime, idOf } from "@/lib/utils";
 import { addDaysYmd, orgDayOf, todayStr } from "@/lib/orgDay";
 import { leaveColor } from "@/lib/leaveColors";
 import type { Employee, Department, Event, Me } from "@/types";
@@ -338,10 +338,10 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
       const sameDay = e.all_day
         ? e.start_time.slice(0, 10) === e.end_time.slice(0, 10)
         : new Date(e.start_time).toDateString() === new Date(e.end_time).toDateString();
-      const fmt = (iso: string) => (e.all_day ? formatDate(iso) : new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }));
-      const time = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { timeStyle: "short" });
+      const fmt = (iso: string) => (e.all_day ? formatDate(iso) : formatDateTime(iso));
+      const time = formatTime;
       const main = sameDay
-        ? e.all_day ? formatDate(e.start_time) : `${new Date(e.start_time).toLocaleDateString(undefined, { dateStyle: "medium" })}, ${time(e.start_time)} - ${time(e.end_time)}`
+        ? e.all_day ? formatDate(e.start_time) : `${formatDate(e.start_time)}, ${time(e.start_time)} - ${time(e.end_time)}`
         : `${fmt(e.start_time)} - ${fmt(e.end_time)}`;
       const sub = e.all_day
         ? sameDay ? "All day" : `All day · ${durationLabel(e.start_time, e.end_time, true)}`
@@ -795,7 +795,7 @@ function EventMonth({ events, me, onOpen, onAdd, onRsvp, rsvping }: {
                     <span className="min-w-0 flex-1 truncate">{e.title}</span>
                   </button>
                   <p className="mt-0.5 text-xs text-muted-foreground">
-                    {e.all_day ? "All day" : `${new Date(e.start_time).toLocaleTimeString(undefined, { timeStyle: "short" })} - ${new Date(e.end_time).toLocaleTimeString(undefined, { timeStyle: "short" })}`}
+                    {e.all_day ? "All day" : `${formatTime(e.start_time)} - ${formatTime(e.end_time)}`}
                     {" · "}{e.going_count ?? 0} going
                   </p>
                   {mayAnswer && (

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AlarmClock, Banknote, Clock, Coins, Hourglass, House, ReceiptText, Timer, type LucideIcon } from "lucide-react";
 import { useCollection } from "@/hooks/useCollection";
 import { useRoute } from "@/router";
-import { cn, formatDate, formatMoney, idOf } from "@/lib/utils";
+import { cn, formatDate, formatHHMM, formatMoney, formatTime, idOf } from "@/lib/utils";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { REQUEST_PARAM } from "@/lib/resourceRoute";
 import { KIND_LABEL, fmtMinutes, type LateEarlyKind } from "@/lib/lateEarly";
@@ -74,7 +74,7 @@ const SPECS: Record<EmployeeRequestKind, Spec<Row>> = {
     when: (r) => r.date,
     status: (r) => r.state,
     what: (r) =>
-      `${formatDate(r.date)} · ${KIND_LABEL[r.kind as LateEarlyKind] ?? r.kind} · ${r.kind === "early_departure" ? "leave at" : "in by"} ${r.at} (${fmtMinutes(r.minutes ?? 0)})${r.over_limit ? " · past the monthly allowance" : ""}${r.reason ? ` · ${r.reason}` : ""}`,
+      `${formatDate(r.date)} · ${KIND_LABEL[r.kind as LateEarlyKind] ?? r.kind} · ${r.kind === "early_departure" ? "leave at" : "in by"} ${formatHHMM(r.at)} (${fmtMinutes(r.minutes ?? 0)})${r.over_limit ? " · past the monthly allowance" : ""}${r.reason ? ` · ${r.reason}` : ""}`,
   }),
   "attendance-regularizations": spec<AttendanceRegularization>({
     title: "Attendance corrections",
@@ -83,7 +83,7 @@ const SPECS: Record<EmployeeRequestKind, Spec<Row>> = {
     when: (r) => r.date,
     status: (r) => r.state,
     what: (r) => {
-      const t = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const t = formatTime;
       const times = describeCorrection(r.recorded_sessions, r.sessions, t, "remove punches");
       return `${formatDate(r.date)} · ${times}${r.reason ? ` · ${r.reason}` : ""}`;
     },

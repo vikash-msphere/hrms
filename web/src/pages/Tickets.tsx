@@ -7,7 +7,7 @@ import { create, download, get, invoke, upload } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useDebounced } from "@/hooks/useDebounced";
 import { useIntent } from "@/lib/intent";
-import { cn, formatBytes, formatDate, humanize, idOf, initials } from "@/lib/utils";
+import { cn, formatBytes, formatDate, formatDateTime, humanize, idOf, initials } from "@/lib/utils";
 import { useRowKeys } from "@/lib/rowKeys";
 import { setRouteRecord, recordUrl } from "@/router";
 import { timeAgo } from "@/lib/activity";
@@ -88,8 +88,7 @@ const TERMINAL = new Set(["CLOSED", "CANCELLED"]);
 // "Updated since you last opened it" is tracked client-side; the map and its pruning rule live in
 // lib/ticketsSeen.ts, which the boot-time sweep also reaches.
 // Comment/date stamps in the thread need the time of day - several replies can land on the same date.
-const fmtDateTime = (iso?: string) =>
-  iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "-";
+const fmtDateTime = formatDateTime;
 const isActive = (t: Ticket) => !TERMINAL.has(upper(t.state));
 const EMPTY = { category: "", department: "", subject: "", description: "", priority: "medium", todos: [] as string[] };
 // Mirrors MAX_TICKET_ATTACHMENTS in src/domain/ticketAttachments.ts: the server is authoritative, this only
@@ -1506,7 +1505,7 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
                   <div className="min-w-0 flex-1 rounded-lg border bg-muted/20 p-2.5 text-sm">
                     <div className="mb-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
                       <span className="font-medium text-foreground">{who}</span>
-                      <span title={c.create_time ? new Date(c.create_time).toLocaleString() : undefined}>{c.create_time ? timeAgo(c.create_time) : fmtDateTime(c.create_time)}</span>
+                      <span title={c.create_time ? formatDateTime(c.create_time) : undefined}>{c.create_time ? timeAgo(c.create_time) : fmtDateTime(c.create_time)}</span>
                     </div>
                     <RichText source={c.body ?? ""} className="space-y-1.5" />
                   </div>

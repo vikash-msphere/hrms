@@ -1,6 +1,6 @@
 import * as React from "react";
 import { Clock, EyeOff, KeyRound, Lock, LockKeyhole, MonitorSmartphone, ShieldCheck, ShieldOff, TriangleAlert } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, formatDateTime } from "@/lib/utils";
 import { APP_NAME } from "@/lib/brand";
 import { useAppLock, setPin, removePin, setIdleMinutes, lockNow, lockEverywhere, fetchLockStatus, type LockCallError } from "@/lib/appLock";
 import { PinPad } from "@/components/lock/PinPad";
@@ -287,7 +287,7 @@ function AppLockPanel({ onDone, startSetup }: { onDone?: () => void; startSetup?
               <>
                 {pinLengthLabel}{" "}
                 <span className="inline-flex items-center gap-1 text-warning">
-                  <TriangleAlert className="h-3 w-3" /> Wrong PIN entered {new Date(lastFailed).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}.
+                  <TriangleAlert className="h-3 w-3" /> Wrong PIN entered {formatDateTime(lastFailed)}.
                 </span>
               </>
             ) : (

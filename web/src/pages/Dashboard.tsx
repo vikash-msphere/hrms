@@ -43,7 +43,7 @@ import { useClock, useElapsedMinutes } from "@/lib/clock";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
-import { cn, formatDate, formatMoney, idOf } from "@/lib/utils";
+import { cn, formatDate, formatHHMM, formatMoney, formatTime, idOf } from "@/lib/utils";
 import { addDaysYmd, orgDayFromToday, orgDayOf, todayStr, weekStartYmd } from "@/lib/orgDay";
 import { useApprovals } from "@/lib/approvals";
 import { boardTime } from "@/lib/boardOrder";
@@ -591,7 +591,7 @@ export default function Dashboard({ me }: { me: Me }) {
       ...approvals.reimbs.map((r) => item("reimbursements", "Reimbursement")(r, money(r.amount))),
       ...approvals.overtimes.map((r) => item("overtime-requests", "Overtime")(r, `${formatDate(r.date)} · ${Math.round(r.minutes / 6) / 10}h`)),
       ...approvals.remotes.map((r) => item("remote-work-requests", "Remote work")(r, `${formatDate(r.start_date)} to ${formatDate(r.end_date)}`)),
-      ...approvals.lateEarlies.map((r) => item("late-early-requests", r.kind === "early_departure" ? "Early departure" : "Late arrival")(r, `${formatDate(r.date)} · ${r.kind === "early_departure" ? "leave at" : "in by"} ${r.at}${r.over_limit ? " · past the allowance" : ""}`)),
+      ...approvals.lateEarlies.map((r) => item("late-early-requests", r.kind === "early_departure" ? "Early departure" : "Late arrival")(r, `${formatDate(r.date)} · ${r.kind === "early_departure" ? "leave at" : "in by"} ${formatHHMM(r.at)}${r.over_limit ? " · past the allowance" : ""}`)),
       ...approvals.regularizations.map((r) => item("attendance-regularizations", "Attendance")(r, formatDate(r.date))),
       ...approvals.encashments.map((r) => item("leave-encashments", "Encashment")(r, `${r.days} day${r.days === 1 ? "" : "s"}`)),
       ...approvals.loans.map((r) => item("loans", r.kind === "advance" ? "Advance" : "Loan")(r, money(r.principal))),
@@ -1790,7 +1790,7 @@ function ClockWidget({ onClockChange }: { onClockChange?: () => void }) {
           <p className="whitespace-nowrap text-sm font-semibold">{open ? "Clocked in" : "Not clocked in"}</p>
           <p className="whitespace-nowrap text-xs text-muted-foreground">
             {open
-              ? `Since ${new Date(open.clock_in).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · ${fmtDuration(elapsed)}`
+              ? `Since ${formatTime(open.clock_in)} ·${fmtDuration(elapsed)}`
               : "Start your day from here."}
           </p>
         </div>

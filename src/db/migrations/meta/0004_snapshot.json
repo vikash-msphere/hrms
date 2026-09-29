@@ -1,8 +1,8 @@
 {
-  "id": "ca495fd7-c031-42eb-927a-2f7e67ea5979",
-  "prevId": "8ed4c280-58e3-474c-9877-fd6a1d0407e0",
   "version": "6",
   "dialect": "sqlite",
+  "id": "4b926235-cecc-47d1-b708-3979ffd528f1",
+  "prevId": "8ed4c280-58e3-474c-9877-fd6a1d0407e0",
   "tables": {
     "access_rules": {
       "name": "access_rules",
@@ -372,15 +372,15 @@
         "ai_suggestions_decided_by_users_uuid_fk": {
           "name": "ai_suggestions_decided_by_users_uuid_fk",
           "tableFrom": "ai_suggestions",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -544,15 +544,15 @@
         "ai_usage_user_id_users_uuid_fk": {
           "name": "ai_usage_user_id_users_uuid_fk",
           "tableFrom": "ai_usage",
+          "tableTo": "users",
           "columnsFrom": [
             "user_id"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -612,15 +612,15 @@
         "announcement_poll_options_announcement_id_announcements_uuid_fk": {
           "name": "announcement_poll_options_announcement_id_announcements_uuid_fk",
           "tableFrom": "announcement_poll_options",
+          "tableTo": "announcements",
           "columnsFrom": [
             "announcement_id"
           ],
-          "tableTo": "announcements",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -694,41 +694,41 @@
         "announcement_poll_votes_announcement_id_announcements_uuid_fk": {
           "name": "announcement_poll_votes_announcement_id_announcements_uuid_fk",
           "tableFrom": "announcement_poll_votes",
+          "tableTo": "announcements",
           "columnsFrom": [
             "announcement_id"
           ],
-          "tableTo": "announcements",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "announcement_poll_votes_option_id_announcement_poll_options_uuid_fk": {
           "name": "announcement_poll_votes_option_id_announcement_poll_options_uuid_fk",
           "tableFrom": "announcement_poll_votes",
+          "tableTo": "announcement_poll_options",
           "columnsFrom": [
             "option_id"
           ],
-          "tableTo": "announcement_poll_options",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "announcement_poll_votes_employee_id_employees_uuid_fk": {
           "name": "announcement_poll_votes_employee_id_employees_uuid_fk",
           "tableFrom": "announcement_poll_votes",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -788,8 +788,8 @@
             "announcement_id",
             "employee_id"
           ],
-          "where": "\"announcement_reactions\".\"reply_id\" is null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"announcement_reactions\".\"reply_id\" is null"
         },
         "arx_reply_emp_uniq": {
           "name": "arx_reply_emp_uniq",
@@ -797,8 +797,8 @@
             "reply_id",
             "employee_id"
           ],
-          "where": "\"announcement_reactions\".\"reply_id\" is not null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"announcement_reactions\".\"reply_id\" is not null"
         },
         "arx_ann_idx": {
           "name": "arx_ann_idx",
@@ -819,41 +819,41 @@
         "announcement_reactions_announcement_id_announcements_uuid_fk": {
           "name": "announcement_reactions_announcement_id_announcements_uuid_fk",
           "tableFrom": "announcement_reactions",
+          "tableTo": "announcements",
           "columnsFrom": [
             "announcement_id"
           ],
-          "tableTo": "announcements",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "announcement_reactions_reply_id_announcement_replies_uuid_fk": {
           "name": "announcement_reactions_reply_id_announcement_replies_uuid_fk",
           "tableFrom": "announcement_reactions",
+          "tableTo": "announcement_replies",
           "columnsFrom": [
             "reply_id"
           ],
-          "tableTo": "announcement_replies",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "announcement_reactions_employee_id_employees_uuid_fk": {
           "name": "announcement_reactions_employee_id_employees_uuid_fk",
           "tableFrom": "announcement_reactions",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -913,28 +913,28 @@
         "announcement_reads_announcement_id_announcements_uuid_fk": {
           "name": "announcement_reads_announcement_id_announcements_uuid_fk",
           "tableFrom": "announcement_reads",
+          "tableTo": "announcements",
           "columnsFrom": [
             "announcement_id"
           ],
-          "tableTo": "announcements",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "announcement_reads_employee_id_employees_uuid_fk": {
           "name": "announcement_reads_employee_id_employees_uuid_fk",
           "tableFrom": "announcement_reads",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1014,28 +1014,28 @@
         "announcement_replies_announcement_id_announcements_uuid_fk": {
           "name": "announcement_replies_announcement_id_announcements_uuid_fk",
           "tableFrom": "announcement_replies",
+          "tableTo": "announcements",
           "columnsFrom": [
             "announcement_id"
           ],
-          "tableTo": "announcements",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "announcement_replies_author_id_employees_uuid_fk": {
           "name": "announcement_replies_author_id_employees_uuid_fk",
           "tableFrom": "announcement_replies",
+          "tableTo": "employees",
           "columnsFrom": [
             "author_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1306,54 +1306,54 @@
         "announcements_author_employee_id_employees_uuid_fk": {
           "name": "announcements_author_employee_id_employees_uuid_fk",
           "tableFrom": "announcements",
+          "tableTo": "employees",
           "columnsFrom": [
             "author_employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "announcements_recipient_employee_id_employees_uuid_fk": {
           "name": "announcements_recipient_employee_id_employees_uuid_fk",
           "tableFrom": "announcements",
+          "tableTo": "employees",
           "columnsFrom": [
             "recipient_employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "announcements_recipient_department_id_departments_uuid_fk": {
           "name": "announcements_recipient_department_id_departments_uuid_fk",
           "tableFrom": "announcements",
+          "tableTo": "departments",
           "columnsFrom": [
             "recipient_department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "announcements_audience_department_id_departments_uuid_fk": {
           "name": "announcements_audience_department_id_departments_uuid_fk",
           "tableFrom": "announcements",
+          "tableTo": "departments",
           "columnsFrom": [
             "audience_department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1506,28 +1506,28 @@
         "api_keys_owner_user_id_users_uuid_fk": {
           "name": "api_keys_owner_user_id_users_uuid_fk",
           "tableFrom": "api_keys",
+          "tableTo": "users",
           "columnsFrom": [
             "owner_user_id"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         },
         "api_keys_created_by_users_uuid_fk": {
           "name": "api_keys_created_by_users_uuid_fk",
           "tableFrom": "api_keys",
+          "tableTo": "users",
           "columnsFrom": [
             "created_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1638,15 +1638,15 @@
         "app_locks_user_id_users_uuid_fk": {
           "name": "app_locks_user_id_users_uuid_fk",
           "tableFrom": "app_locks",
+          "tableTo": "users",
           "columnsFrom": [
             "user_id"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1806,54 +1806,54 @@
         "applications_candidate_id_candidates_uuid_fk": {
           "name": "applications_candidate_id_candidates_uuid_fk",
           "tableFrom": "applications",
+          "tableTo": "candidates",
           "columnsFrom": [
             "candidate_id"
           ],
-          "tableTo": "candidates",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "applications_requisition_id_job_requisitions_uuid_fk": {
           "name": "applications_requisition_id_job_requisitions_uuid_fk",
           "tableFrom": "applications",
+          "tableTo": "job_requisitions",
           "columnsFrom": [
             "requisition_id"
           ],
-          "tableTo": "job_requisitions",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "applications_referral_id_referrals_uuid_fk": {
           "name": "applications_referral_id_referrals_uuid_fk",
           "tableFrom": "applications",
+          "tableTo": "referrals",
           "columnsFrom": [
             "referral_id"
           ],
-          "tableTo": "referrals",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "applications_hired_employee_id_employees_uuid_fk": {
           "name": "applications_hired_employee_id_employees_uuid_fk",
           "tableFrom": "applications",
+          "tableTo": "employees",
           "columnsFrom": [
             "hired_employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1964,28 +1964,28 @@
         "approval_delegations_delegator_id_employees_uuid_fk": {
           "name": "approval_delegations_delegator_id_employees_uuid_fk",
           "tableFrom": "approval_delegations",
+          "tableTo": "employees",
           "columnsFrom": [
             "delegator_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "approval_delegations_delegate_id_employees_uuid_fk": {
           "name": "approval_delegations_delegate_id_employees_uuid_fk",
           "tableFrom": "approval_delegations",
+          "tableTo": "employees",
           "columnsFrom": [
             "delegate_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2238,54 +2238,54 @@
         "asset_requests_employee_id_employees_uuid_fk": {
           "name": "asset_requests_employee_id_employees_uuid_fk",
           "tableFrom": "asset_requests",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "asset_requests_category_id_asset_categories_uuid_fk": {
           "name": "asset_requests_category_id_asset_categories_uuid_fk",
           "tableFrom": "asset_requests",
+          "tableTo": "asset_categories",
           "columnsFrom": [
             "category_id"
           ],
-          "tableTo": "asset_categories",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "asset_requests_decided_by_users_uuid_fk": {
           "name": "asset_requests_decided_by_users_uuid_fk",
           "tableFrom": "asset_requests",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "asset_requests_issued_asset_id_assets_uuid_fk": {
           "name": "asset_requests_issued_asset_id_assets_uuid_fk",
           "tableFrom": "asset_requests",
+          "tableTo": "assets",
           "columnsFrom": [
             "issued_asset_id"
           ],
-          "tableTo": "assets",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2509,54 +2509,54 @@
         "assets_category_id_asset_categories_uuid_fk": {
           "name": "assets_category_id_asset_categories_uuid_fk",
           "tableFrom": "assets",
+          "tableTo": "asset_categories",
           "columnsFrom": [
             "category_id"
           ],
-          "tableTo": "asset_categories",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "assets_assigned_to_employees_uuid_fk": {
           "name": "assets_assigned_to_employees_uuid_fk",
           "tableFrom": "assets",
+          "tableTo": "employees",
           "columnsFrom": [
             "assigned_to"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "assets_verified_by_employees_uuid_fk": {
           "name": "assets_verified_by_employees_uuid_fk",
           "tableFrom": "assets",
+          "tableTo": "employees",
           "columnsFrom": [
             "verified_by"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "assets_last_stocktake_id_stocktakes_uuid_fk": {
           "name": "assets_last_stocktake_id_stocktakes_uuid_fk",
           "tableFrom": "assets",
+          "tableTo": "stocktakes",
           "columnsFrom": [
             "last_stocktake_id"
           ],
-          "tableTo": "stocktakes",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "set null"
+          "onDelete": "set null",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2660,15 +2660,15 @@
         "attachments_uploaded_by_users_uuid_fk": {
           "name": "attachments_uploaded_by_users_uuid_fk",
           "tableFrom": "attachments",
+          "tableTo": "users",
           "columnsFrom": [
             "uploaded_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2772,23 +2772,23 @@
             "employee_id",
             "date"
           ],
-          "where": "\"attendance_day_marks\".\"delete_time\" is null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"attendance_day_marks\".\"delete_time\" is null"
         }
       },
       "foreignKeys": {
         "attendance_day_marks_employee_id_employees_uuid_fk": {
           "name": "attendance_day_marks_employee_id_employees_uuid_fk",
           "tableFrom": "attendance_day_marks",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2831,6 +2831,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "recorded_sessions": {
+          "name": "recorded_sessions",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "reason": {
@@ -2907,28 +2914,28 @@
         "attendance_regularizations_employee_id_employees_uuid_fk": {
           "name": "attendance_regularizations_employee_id_employees_uuid_fk",
           "tableFrom": "attendance_regularizations",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "attendance_regularizations_decided_by_users_uuid_fk": {
           "name": "attendance_regularizations_decided_by_users_uuid_fk",
           "tableFrom": "attendance_regularizations",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3047,36 +3054,36 @@
           "columns": [
             "employee_id"
           ],
-          "where": "\"attendance_sessions\".\"clock_out\" is null and \"attendance_sessions\".\"superseded_by\" is null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"attendance_sessions\".\"clock_out\" is null and \"attendance_sessions\".\"superseded_by\" is null"
         }
       },
       "foreignKeys": {
         "attendance_sessions_employee_id_employees_uuid_fk": {
           "name": "attendance_sessions_employee_id_employees_uuid_fk",
           "tableFrom": "attendance_sessions",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "attendance_sessions_superseded_by_attendance_regularizations_uuid_fk": {
           "name": "attendance_sessions_superseded_by_attendance_regularizations_uuid_fk",
           "tableFrom": "attendance_sessions",
+          "tableTo": "attendance_regularizations",
           "columnsFrom": [
             "superseded_by"
           ],
-          "tableTo": "attendance_regularizations",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3242,8 +3249,8 @@
             "correlation_id",
             "at"
           ],
-          "where": "\"audit_log\".\"correlation_id\" is not null",
-          "isUnique": false
+          "isUnique": false,
+          "where": "\"audit_log\".\"correlation_id\" is not null"
         },
         "audit_subject_idx": {
           "name": "audit_subject_idx",
@@ -3251,8 +3258,8 @@
             "subject_id",
             "at"
           ],
-          "where": "\"audit_log\".\"subject_id\" is not null",
-          "isUnique": false
+          "isUnique": false,
+          "where": "\"audit_log\".\"subject_id\" is not null"
         },
         "audit_session_idx": {
           "name": "audit_session_idx",
@@ -3260,8 +3267,8 @@
             "session_id",
             "at"
           ],
-          "where": "\"audit_log\".\"session_id\" is not null",
-          "isUnique": false
+          "isUnique": false,
+          "where": "\"audit_log\".\"session_id\" is not null"
         },
         "audit_actor_email_idx": {
           "name": "audit_actor_email_idx",
@@ -3277,8 +3284,8 @@
             "api_key_id",
             "at"
           ],
-          "where": "\"audit_log\".\"api_key_id\" is not null",
-          "isUnique": false
+          "isUnique": false,
+          "where": "\"audit_log\".\"api_key_id\" is not null"
         }
       },
       "foreignKeys": {},
@@ -3430,41 +3437,41 @@
         "automation_runs_automation_id_automations_uuid_fk": {
           "name": "automation_runs_automation_id_automations_uuid_fk",
           "tableFrom": "automation_runs",
+          "tableTo": "automations",
           "columnsFrom": [
             "automation_id"
           ],
-          "tableTo": "automations",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "automation_runs_event_id_event_log_uuid_fk": {
           "name": "automation_runs_event_id_event_log_uuid_fk",
           "tableFrom": "automation_runs",
+          "tableTo": "event_log",
           "columnsFrom": [
             "event_id"
           ],
-          "tableTo": "event_log",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "automation_runs_employee_id_employees_uuid_fk": {
           "name": "automation_runs_employee_id_employees_uuid_fk",
           "tableFrom": "automation_runs",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3618,15 +3625,15 @@
         "automations_created_by_users_uuid_fk": {
           "name": "automations_created_by_users_uuid_fk",
           "tableFrom": "automations",
+          "tableTo": "users",
           "columnsFrom": [
             "created_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3781,41 +3788,41 @@
         "background_checks_employee_id_employees_uuid_fk": {
           "name": "background_checks_employee_id_employees_uuid_fk",
           "tableFrom": "background_checks",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "background_checks_transition_id_transitions_uuid_fk": {
           "name": "background_checks_transition_id_transitions_uuid_fk",
           "tableFrom": "background_checks",
+          "tableTo": "transitions",
           "columnsFrom": [
             "transition_id"
           ],
-          "tableTo": "transitions",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "background_checks_document_id_personal_documents_uuid_fk": {
           "name": "background_checks_document_id_personal_documents_uuid_fk",
           "tableFrom": "background_checks",
+          "tableTo": "personal_documents",
           "columnsFrom": [
             "document_id"
           ],
-          "tableTo": "personal_documents",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3934,28 +3941,28 @@
         "benefit_enrollments_employee_id_employees_uuid_fk": {
           "name": "benefit_enrollments_employee_id_employees_uuid_fk",
           "tableFrom": "benefit_enrollments",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "benefit_enrollments_plan_id_benefit_plans_uuid_fk": {
           "name": "benefit_enrollments_plan_id_benefit_plans_uuid_fk",
           "tableFrom": "benefit_enrollments",
+          "tableTo": "benefit_plans",
           "columnsFrom": [
             "plan_id"
           ],
-          "tableTo": "benefit_plans",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4101,6 +4108,21 @@
           "notNull": false,
           "autoincrement": false
         },
+        "department_id": {
+          "name": "department_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "shares_json": {
+          "name": "shares_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'[]'"
+        },
         "name": {
           "name": "name",
           "type": "text",
@@ -4223,9 +4245,30 @@
             "uuid"
           ],
           "isUnique": false
+        },
+        "boards_department_idx": {
+          "name": "boards_department_idx",
+          "columns": [
+            "department_id"
+          ],
+          "isUnique": false
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "boards_department_id_departments_uuid_fk": {
+          "name": "boards_department_id_departments_uuid_fk",
+          "tableFrom": "boards",
+          "tableTo": "departments",
+          "columnsFrom": [
+            "department_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -4392,49 +4435,49 @@
             "cycle_id",
             "employee_id"
           ],
-          "where": "\"bonuses\".\"cycle_id\" is not null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"bonuses\".\"cycle_id\" is not null"
         }
       },
       "foreignKeys": {
         "bonuses_employee_id_employees_uuid_fk": {
           "name": "bonuses_employee_id_employees_uuid_fk",
           "tableFrom": "bonuses",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "bonuses_cycle_id_review_cycles_uuid_fk": {
           "name": "bonuses_cycle_id_review_cycles_uuid_fk",
           "tableFrom": "bonuses",
+          "tableTo": "review_cycles",
           "columnsFrom": [
             "cycle_id"
           ],
-          "tableTo": "review_cycles",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "bonuses_paid_run_id_payroll_runs_uuid_fk": {
           "name": "bonuses_paid_run_id_payroll_runs_uuid_fk",
           "tableFrom": "bonuses",
+          "tableTo": "payroll_runs",
           "columnsFrom": [
             "paid_run_id"
           ],
-          "tableTo": "payroll_runs",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4645,15 +4688,15 @@
         "candidates_referral_id_referrals_uuid_fk": {
           "name": "candidates_referral_id_referrals_uuid_fk",
           "tableFrom": "candidates",
+          "tableTo": "referrals",
           "columnsFrom": [
             "referral_id"
           ],
-          "tableTo": "referrals",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4726,28 +4769,28 @@
         "card_comments_card_id_cards_uuid_fk": {
           "name": "card_comments_card_id_cards_uuid_fk",
           "tableFrom": "card_comments",
+          "tableTo": "cards",
           "columnsFrom": [
             "card_id"
           ],
-          "tableTo": "cards",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "card_comments_author_id_employees_uuid_fk": {
           "name": "card_comments_author_id_employees_uuid_fk",
           "tableFrom": "card_comments",
+          "tableTo": "employees",
           "columnsFrom": [
             "author_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4827,28 +4870,28 @@
         "card_movements_card_id_cards_uuid_fk": {
           "name": "card_movements_card_id_cards_uuid_fk",
           "tableFrom": "card_movements",
+          "tableTo": "cards",
           "columnsFrom": [
             "card_id"
           ],
-          "tableTo": "cards",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "card_movements_board_id_boards_uuid_fk": {
           "name": "card_movements_board_id_boards_uuid_fk",
           "tableFrom": "card_movements",
+          "tableTo": "boards",
           "columnsFrom": [
             "board_id"
           ],
-          "tableTo": "boards",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4915,15 +4958,15 @@
         "card_todos_card_id_cards_uuid_fk": {
           "name": "card_todos_card_id_cards_uuid_fk",
           "tableFrom": "card_todos",
+          "tableTo": "cards",
           "columnsFrom": [
             "card_id"
           ],
-          "tableTo": "cards",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5075,28 +5118,28 @@
         "card_transactions_employee_id_employees_uuid_fk": {
           "name": "card_transactions_employee_id_employees_uuid_fk",
           "tableFrom": "card_transactions",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "card_transactions_expense_id_expenses_uuid_fk": {
           "name": "card_transactions_expense_id_expenses_uuid_fk",
           "tableFrom": "card_transactions",
+          "tableTo": "expenses",
           "columnsFrom": [
             "expense_id"
           ],
-          "tableTo": "expenses",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5163,28 +5206,28 @@
         "card_watchers_card_id_cards_uuid_fk": {
           "name": "card_watchers_card_id_cards_uuid_fk",
           "tableFrom": "card_watchers",
+          "tableTo": "cards",
           "columnsFrom": [
             "card_id"
           ],
-          "tableTo": "cards",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "card_watchers_employee_id_employees_uuid_fk": {
           "name": "card_watchers_employee_id_employees_uuid_fk",
           "tableFrom": "card_watchers",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5506,114 +5549,114 @@
             "column_key",
             "rank"
           ],
-          "where": "\"cards\".\"delete_time\" is null",
-          "isUnique": false
+          "isUnique": false,
+          "where": "\"cards\".\"delete_time\" is null"
         }
       },
       "foreignKeys": {
         "cards_board_id_boards_uuid_fk": {
           "name": "cards_board_id_boards_uuid_fk",
           "tableFrom": "cards",
+          "tableTo": "boards",
           "columnsFrom": [
             "board_id"
           ],
-          "tableTo": "boards",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "cards_sprint_id_sprints_uuid_fk": {
           "name": "cards_sprint_id_sprints_uuid_fk",
           "tableFrom": "cards",
+          "tableTo": "sprints",
           "columnsFrom": [
             "sprint_id"
           ],
-          "tableTo": "sprints",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "cards_employee_id_employees_uuid_fk": {
           "name": "cards_employee_id_employees_uuid_fk",
           "tableFrom": "cards",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "cards_department_id_departments_uuid_fk": {
           "name": "cards_department_id_departments_uuid_fk",
           "tableFrom": "cards",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "cards_assignee_id_employees_uuid_fk": {
           "name": "cards_assignee_id_employees_uuid_fk",
           "tableFrom": "cards",
+          "tableTo": "employees",
           "columnsFrom": [
             "assignee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "cards_reporter_id_employees_uuid_fk": {
           "name": "cards_reporter_id_employees_uuid_fk",
           "tableFrom": "cards",
+          "tableTo": "employees",
           "columnsFrom": [
             "reporter_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "cards_blocked_by_id_cards_uuid_fk": {
           "name": "cards_blocked_by_id_cards_uuid_fk",
           "tableFrom": "cards",
+          "tableTo": "cards",
           "columnsFrom": [
             "blocked_by_id"
           ],
-          "tableTo": "cards",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "cards_goal_id_goals_uuid_fk": {
           "name": "cards_goal_id_goals_uuid_fk",
           "tableFrom": "cards",
+          "tableTo": "goals",
           "columnsFrom": [
             "goal_id"
           ],
-          "tableTo": "goals",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5759,28 +5802,28 @@
         "check_ins_employee_id_employees_uuid_fk": {
           "name": "check_ins_employee_id_employees_uuid_fk",
           "tableFrom": "check_ins",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "check_ins_counterpart_id_employees_uuid_fk": {
           "name": "check_ins_counterpart_id_employees_uuid_fk",
           "tableFrom": "check_ins",
+          "tableTo": "employees",
           "columnsFrom": [
             "counterpart_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5917,28 +5960,28 @@
         "comp_off_credits_employee_id_employees_uuid_fk": {
           "name": "comp_off_credits_employee_id_employees_uuid_fk",
           "tableFrom": "comp_off_credits",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "comp_off_credits_holiday_id_holidays_uuid_fk": {
           "name": "comp_off_credits_holiday_id_holidays_uuid_fk",
           "tableFrom": "comp_off_credits",
+          "tableTo": "holidays",
           "columnsFrom": [
             "holiday_id"
           ],
-          "tableTo": "holidays",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -6114,62 +6157,62 @@
           "columns": [
             "employee_id"
           ],
-          "where": "\"compensation\".\"effective_to\" is null and \"compensation\".\"delete_time\" is null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"compensation\".\"effective_to\" is null and \"compensation\".\"delete_time\" is null"
         }
       },
       "foreignKeys": {
         "compensation_employee_id_employees_uuid_fk": {
           "name": "compensation_employee_id_employees_uuid_fk",
           "tableFrom": "compensation",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "compensation_pay_grade_id_pay_grades_uuid_fk": {
           "name": "compensation_pay_grade_id_pay_grades_uuid_fk",
           "tableFrom": "compensation",
+          "tableTo": "pay_grades",
           "columnsFrom": [
             "pay_grade_id"
           ],
-          "tableTo": "pay_grades",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "compensation_structure_id_salary_structures_uuid_fk": {
           "name": "compensation_structure_id_salary_structures_uuid_fk",
           "tableFrom": "compensation",
+          "tableTo": "salary_structures",
           "columnsFrom": [
             "structure_id"
           ],
-          "tableTo": "salary_structures",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "compensation_arrears_paid_run_id_payroll_runs_uuid_fk": {
           "name": "compensation_arrears_paid_run_id_payroll_runs_uuid_fk",
           "tableFrom": "compensation",
+          "tableTo": "payroll_runs",
           "columnsFrom": [
             "arrears_paid_run_id"
           ],
-          "tableTo": "payroll_runs",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -6336,41 +6379,41 @@
         "compliance_events_document_id_org_documents_uuid_fk": {
           "name": "compliance_events_document_id_org_documents_uuid_fk",
           "tableFrom": "compliance_events",
+          "tableTo": "org_documents",
           "columnsFrom": [
             "document_id"
           ],
-          "tableTo": "org_documents",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "compliance_events_assignee_id_employees_uuid_fk": {
           "name": "compliance_events_assignee_id_employees_uuid_fk",
           "tableFrom": "compliance_events",
+          "tableTo": "employees",
           "columnsFrom": [
             "assignee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "compliance_events_rule_id_compliance_rules_uuid_fk": {
           "name": "compliance_events_rule_id_compliance_rules_uuid_fk",
           "tableFrom": "compliance_events",
+          "tableTo": "compliance_rules",
           "columnsFrom": [
             "rule_id"
           ],
-          "tableTo": "compliance_rules",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -6496,15 +6539,15 @@
         "compliance_rules_assignee_id_employees_uuid_fk": {
           "name": "compliance_rules_assignee_id_employees_uuid_fk",
           "tableFrom": "compliance_rules",
+          "tableTo": "employees",
           "columnsFrom": [
             "assignee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -6733,15 +6776,15 @@
         "departments_parent_id_departments_uuid_fk": {
           "name": "departments_parent_id_departments_uuid_fk",
           "tableFrom": "departments",
+          "tableTo": "departments",
           "columnsFrom": [
             "parent_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -6846,15 +6889,15 @@
         "dependents_employee_id_employees_uuid_fk": {
           "name": "dependents_employee_id_employees_uuid_fk",
           "tableFrom": "dependents",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -6982,49 +7025,49 @@
             "employee_id",
             "version"
           ],
-          "where": "\"document_acknowledgements\".\"delete_time\" is null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"document_acknowledgements\".\"delete_time\" is null"
         }
       },
       "foreignKeys": {
         "document_acknowledgements_employee_id_employees_uuid_fk": {
           "name": "document_acknowledgements_employee_id_employees_uuid_fk",
           "tableFrom": "document_acknowledgements",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "document_acknowledgements_document_id_org_documents_uuid_fk": {
           "name": "document_acknowledgements_document_id_org_documents_uuid_fk",
           "tableFrom": "document_acknowledgements",
+          "tableTo": "org_documents",
           "columnsFrom": [
             "document_id"
           ],
-          "tableTo": "org_documents",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "document_acknowledgements_signed_doc_id_personal_documents_uuid_fk": {
           "name": "document_acknowledgements_signed_doc_id_personal_documents_uuid_fk",
           "tableFrom": "document_acknowledgements",
+          "tableTo": "personal_documents",
           "columnsFrom": [
             "signed_doc_id"
           ],
-          "tableTo": "personal_documents",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -7348,28 +7391,28 @@
         "employees_department_id_departments_uuid_fk": {
           "name": "employees_department_id_departments_uuid_fk",
           "tableFrom": "employees",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "employees_manager_id_employees_uuid_fk": {
           "name": "employees_manager_id_employees_uuid_fk",
           "tableFrom": "employees",
+          "tableTo": "employees",
           "columnsFrom": [
             "manager_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -7499,28 +7542,28 @@
         "event_log_actor_id_users_uuid_fk": {
           "name": "event_log_actor_id_users_uuid_fk",
           "tableFrom": "event_log",
+          "tableTo": "users",
           "columnsFrom": [
             "actor_id"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "event_log_employee_id_employees_uuid_fk": {
           "name": "event_log_employee_id_employees_uuid_fk",
           "tableFrom": "event_log",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -7601,28 +7644,28 @@
         "event_responses_event_id_events_uuid_fk": {
           "name": "event_responses_event_id_events_uuid_fk",
           "tableFrom": "event_responses",
+          "tableTo": "events",
           "columnsFrom": [
             "event_id"
           ],
-          "tableTo": "events",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "event_responses_employee_id_employees_uuid_fk": {
           "name": "event_responses_employee_id_employees_uuid_fk",
           "tableFrom": "event_responses",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -7843,41 +7886,41 @@
         "expense_allocations_expense_id_expenses_uuid_fk": {
           "name": "expense_allocations_expense_id_expenses_uuid_fk",
           "tableFrom": "expense_allocations",
+          "tableTo": "expenses",
           "columnsFrom": [
             "expense_id"
           ],
-          "tableTo": "expenses",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "expense_allocations_department_id_departments_uuid_fk": {
           "name": "expense_allocations_department_id_departments_uuid_fk",
           "tableFrom": "expense_allocations",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "expense_allocations_category_id_expense_categories_uuid_fk": {
           "name": "expense_allocations_category_id_expense_categories_uuid_fk",
           "tableFrom": "expense_allocations",
+          "tableTo": "expense_categories",
           "columnsFrom": [
             "category_id"
           ],
-          "tableTo": "expense_categories",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -8010,28 +8053,28 @@
         "expense_budgets_department_id_departments_uuid_fk": {
           "name": "expense_budgets_department_id_departments_uuid_fk",
           "tableFrom": "expense_budgets",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "expense_budgets_category_id_expense_categories_uuid_fk": {
           "name": "expense_budgets_category_id_expense_categories_uuid_fk",
           "tableFrom": "expense_budgets",
+          "tableTo": "expense_categories",
           "columnsFrom": [
             "category_id"
           ],
-          "tableTo": "expense_categories",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -8463,119 +8506,119 @@
         "expenses_employee_id_employees_uuid_fk": {
           "name": "expenses_employee_id_employees_uuid_fk",
           "tableFrom": "expenses",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "expenses_vendor_id_vendors_uuid_fk": {
           "name": "expenses_vendor_id_vendors_uuid_fk",
           "tableFrom": "expenses",
+          "tableTo": "vendors",
           "columnsFrom": [
             "vendor_id"
           ],
-          "tableTo": "vendors",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "expenses_category_id_expense_categories_uuid_fk": {
           "name": "expenses_category_id_expense_categories_uuid_fk",
           "tableFrom": "expenses",
+          "tableTo": "expense_categories",
           "columnsFrom": [
             "category_id"
           ],
-          "tableTo": "expense_categories",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "expenses_department_id_departments_uuid_fk": {
           "name": "expenses_department_id_departments_uuid_fk",
           "tableFrom": "expenses",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "expenses_reimbursement_id_reimbursements_uuid_fk": {
           "name": "expenses_reimbursement_id_reimbursements_uuid_fk",
           "tableFrom": "expenses",
+          "tableTo": "reimbursements",
           "columnsFrom": [
             "reimbursement_id"
           ],
-          "tableTo": "reimbursements",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "expenses_decided_by_users_uuid_fk": {
           "name": "expenses_decided_by_users_uuid_fk",
           "tableFrom": "expenses",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "expenses_first_approved_by_users_uuid_fk": {
           "name": "expenses_first_approved_by_users_uuid_fk",
           "tableFrom": "expenses",
+          "tableTo": "users",
           "columnsFrom": [
             "first_approved_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "expenses_paid_by_users_uuid_fk": {
           "name": "expenses_paid_by_users_uuid_fk",
           "tableFrom": "expenses",
+          "tableTo": "users",
           "columnsFrom": [
             "paid_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "expenses_template_id_expenses_uuid_fk": {
           "name": "expenses_template_id_expenses_uuid_fk",
           "tableFrom": "expenses",
+          "tableTo": "expenses",
           "columnsFrom": [
             "template_id"
           ],
-          "tableTo": "expenses",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -8641,28 +8684,28 @@
         "goal_comments_goal_id_goals_uuid_fk": {
           "name": "goal_comments_goal_id_goals_uuid_fk",
           "tableFrom": "goal_comments",
+          "tableTo": "goals",
           "columnsFrom": [
             "goal_id"
           ],
-          "tableTo": "goals",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "goal_comments_author_id_employees_uuid_fk": {
           "name": "goal_comments_author_id_employees_uuid_fk",
           "tableFrom": "goal_comments",
+          "tableTo": "employees",
           "columnsFrom": [
             "author_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -8744,28 +8787,28 @@
         "goal_contributors_goal_id_goals_uuid_fk": {
           "name": "goal_contributors_goal_id_goals_uuid_fk",
           "tableFrom": "goal_contributors",
+          "tableTo": "goals",
           "columnsFrom": [
             "goal_id"
           ],
-          "tableTo": "goals",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "goal_contributors_employee_id_employees_uuid_fk": {
           "name": "goal_contributors_employee_id_employees_uuid_fk",
           "tableFrom": "goal_contributors",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -8911,15 +8954,15 @@
         "goal_templates_department_id_departments_uuid_fk": {
           "name": "goal_templates_department_id_departments_uuid_fk",
           "tableFrom": "goal_templates",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -8986,28 +9029,28 @@
         "goal_watchers_goal_id_goals_uuid_fk": {
           "name": "goal_watchers_goal_id_goals_uuid_fk",
           "tableFrom": "goal_watchers",
+          "tableTo": "goals",
           "columnsFrom": [
             "goal_id"
           ],
-          "tableTo": "goals",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "goal_watchers_employee_id_employees_uuid_fk": {
           "name": "goal_watchers_employee_id_employees_uuid_fk",
           "tableFrom": "goal_watchers",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -9263,80 +9306,80 @@
         "goals_employee_id_employees_uuid_fk": {
           "name": "goals_employee_id_employees_uuid_fk",
           "tableFrom": "goals",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "goals_parent_id_goals_uuid_fk": {
           "name": "goals_parent_id_goals_uuid_fk",
           "tableFrom": "goals",
+          "tableTo": "goals",
           "columnsFrom": [
             "parent_id"
           ],
-          "tableTo": "goals",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "goals_cycle_id_review_cycles_uuid_fk": {
           "name": "goals_cycle_id_review_cycles_uuid_fk",
           "tableFrom": "goals",
+          "tableTo": "review_cycles",
           "columnsFrom": [
             "cycle_id"
           ],
-          "tableTo": "review_cycles",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "goals_agreed_by_id_employees_uuid_fk": {
           "name": "goals_agreed_by_id_employees_uuid_fk",
           "tableFrom": "goals",
+          "tableTo": "employees",
           "columnsFrom": [
             "agreed_by_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "goals_blocked_by_id_goals_uuid_fk": {
           "name": "goals_blocked_by_id_goals_uuid_fk",
           "tableFrom": "goals",
+          "tableTo": "goals",
           "columnsFrom": [
             "blocked_by_id"
           ],
-          "tableTo": "goals",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "goals_department_id_departments_uuid_fk": {
           "name": "goals_department_id_departments_uuid_fk",
           "tableFrom": "goals",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -9411,28 +9454,28 @@
         "holiday_selections_employee_id_employees_uuid_fk": {
           "name": "holiday_selections_employee_id_employees_uuid_fk",
           "tableFrom": "holiday_selections",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "holiday_selections_holiday_id_holidays_uuid_fk": {
           "name": "holiday_selections_holiday_id_holidays_uuid_fk",
           "tableFrom": "holiday_selections",
+          "tableTo": "holidays",
           "columnsFrom": [
             "holiday_id"
           ],
-          "tableTo": "holidays",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -9759,28 +9802,28 @@
         "interview_feedback_interview_id_interviews_uuid_fk": {
           "name": "interview_feedback_interview_id_interviews_uuid_fk",
           "tableFrom": "interview_feedback",
+          "tableTo": "interviews",
           "columnsFrom": [
             "interview_id"
           ],
-          "tableTo": "interviews",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "interview_feedback_author_id_employees_uuid_fk": {
           "name": "interview_feedback_author_id_employees_uuid_fk",
           "tableFrom": "interview_feedback",
+          "tableTo": "employees",
           "columnsFrom": [
             "author_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -9912,15 +9955,15 @@
         "interviews_application_id_applications_uuid_fk": {
           "name": "interviews_application_id_applications_uuid_fk",
           "tableFrom": "interviews",
+          "tableTo": "applications",
           "columnsFrom": [
             "application_id"
           ],
-          "tableTo": "applications",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -10073,41 +10116,41 @@
         "job_requisitions_department_id_departments_uuid_fk": {
           "name": "job_requisitions_department_id_departments_uuid_fk",
           "tableFrom": "job_requisitions",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "job_requisitions_hiring_manager_id_employees_uuid_fk": {
           "name": "job_requisitions_hiring_manager_id_employees_uuid_fk",
           "tableFrom": "job_requisitions",
+          "tableTo": "employees",
           "columnsFrom": [
             "hiring_manager_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "job_requisitions_pay_grade_id_pay_grades_uuid_fk": {
           "name": "job_requisitions_pay_grade_id_pay_grades_uuid_fk",
           "tableFrom": "job_requisitions",
+          "tableTo": "pay_grades",
           "columnsFrom": [
             "pay_grade_id"
           ],
-          "tableTo": "pay_grades",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -10239,28 +10282,28 @@
         "jobs_created_by_users_uuid_fk": {
           "name": "jobs_created_by_users_uuid_fk",
           "tableFrom": "jobs",
+          "tableTo": "users",
           "columnsFrom": [
             "created_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "jobs_employee_id_employees_uuid_fk": {
           "name": "jobs_employee_id_employees_uuid_fk",
           "tableFrom": "jobs",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -10418,36 +10461,36 @@
             "date",
             "kind"
           ],
-          "where": "\"late_early_requests\".\"state\" in ('PENDING', 'APPROVED')",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"late_early_requests\".\"state\" in ('PENDING', 'APPROVED')"
         }
       },
       "foreignKeys": {
         "late_early_requests_employee_id_employees_uuid_fk": {
           "name": "late_early_requests_employee_id_employees_uuid_fk",
           "tableFrom": "late_early_requests",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "late_early_requests_decided_by_users_uuid_fk": {
           "name": "late_early_requests_decided_by_users_uuid_fk",
           "tableFrom": "late_early_requests",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -10595,49 +10638,49 @@
             "leave_type_id",
             "opening_seq"
           ],
-          "where": "\"leave_adjustments\".\"kind\" = 'opening'",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"leave_adjustments\".\"kind\" = 'opening'"
         }
       },
       "foreignKeys": {
         "leave_adjustments_employee_id_employees_uuid_fk": {
           "name": "leave_adjustments_employee_id_employees_uuid_fk",
           "tableFrom": "leave_adjustments",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "leave_adjustments_leave_type_id_leave_types_uuid_fk": {
           "name": "leave_adjustments_leave_type_id_leave_types_uuid_fk",
           "tableFrom": "leave_adjustments",
+          "tableTo": "leave_types",
           "columnsFrom": [
             "leave_type_id"
           ],
-          "tableTo": "leave_types",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "leave_adjustments_created_by_users_uuid_fk": {
           "name": "leave_adjustments_created_by_users_uuid_fk",
           "tableFrom": "leave_adjustments",
+          "tableTo": "users",
           "columnsFrom": [
             "created_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -10764,28 +10807,28 @@
         "leave_balances_employee_id_employees_uuid_fk": {
           "name": "leave_balances_employee_id_employees_uuid_fk",
           "tableFrom": "leave_balances",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "leave_balances_leave_type_id_leave_types_uuid_fk": {
           "name": "leave_balances_leave_type_id_leave_types_uuid_fk",
           "tableFrom": "leave_balances",
+          "tableTo": "leave_types",
           "columnsFrom": [
             "leave_type_id"
           ],
-          "tableTo": "leave_types",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -10933,54 +10976,54 @@
         "leave_encashments_employee_id_employees_uuid_fk": {
           "name": "leave_encashments_employee_id_employees_uuid_fk",
           "tableFrom": "leave_encashments",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "leave_encashments_leave_type_id_leave_types_uuid_fk": {
           "name": "leave_encashments_leave_type_id_leave_types_uuid_fk",
           "tableFrom": "leave_encashments",
+          "tableTo": "leave_types",
           "columnsFrom": [
             "leave_type_id"
           ],
-          "tableTo": "leave_types",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "leave_encashments_decided_by_users_uuid_fk": {
           "name": "leave_encashments_decided_by_users_uuid_fk",
           "tableFrom": "leave_encashments",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "leave_encashments_paid_run_id_payroll_runs_uuid_fk": {
           "name": "leave_encashments_paid_run_id_payroll_runs_uuid_fk",
           "tableFrom": "leave_encashments",
+          "tableTo": "payroll_runs",
           "columnsFrom": [
             "paid_run_id"
           ],
-          "tableTo": "payroll_runs",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -11144,41 +11187,41 @@
         "leave_requests_employee_id_employees_uuid_fk": {
           "name": "leave_requests_employee_id_employees_uuid_fk",
           "tableFrom": "leave_requests",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "leave_requests_leave_type_id_leave_types_uuid_fk": {
           "name": "leave_requests_leave_type_id_leave_types_uuid_fk",
           "tableFrom": "leave_requests",
+          "tableTo": "leave_types",
           "columnsFrom": [
             "leave_type_id"
           ],
-          "tableTo": "leave_types",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "leave_requests_decided_by_users_uuid_fk": {
           "name": "leave_requests_decided_by_users_uuid_fk",
           "tableFrom": "leave_requests",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -11633,49 +11676,49 @@
           "columns": [
             "reimbursement_id"
           ],
-          "where": "\"loan_repayments\".\"reimbursement_id\" is not null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"loan_repayments\".\"reimbursement_id\" is not null"
         }
       },
       "foreignKeys": {
         "loan_repayments_loan_id_loans_uuid_fk": {
           "name": "loan_repayments_loan_id_loans_uuid_fk",
           "tableFrom": "loan_repayments",
+          "tableTo": "loans",
           "columnsFrom": [
             "loan_id"
           ],
-          "tableTo": "loans",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "loan_repayments_run_id_payroll_runs_uuid_fk": {
           "name": "loan_repayments_run_id_payroll_runs_uuid_fk",
           "tableFrom": "loan_repayments",
+          "tableTo": "payroll_runs",
           "columnsFrom": [
             "run_id"
           ],
-          "tableTo": "payroll_runs",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "loan_repayments_reimbursement_id_reimbursements_uuid_fk": {
           "name": "loan_repayments_reimbursement_id_reimbursements_uuid_fk",
           "tableFrom": "loan_repayments",
+          "tableTo": "reimbursements",
           "columnsFrom": [
             "reimbursement_id"
           ],
-          "tableTo": "reimbursements",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -11827,28 +11870,28 @@
         "loans_employee_id_employees_uuid_fk": {
           "name": "loans_employee_id_employees_uuid_fk",
           "tableFrom": "loans",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "loans_decided_by_users_uuid_fk": {
           "name": "loans_decided_by_users_uuid_fk",
           "tableFrom": "loans",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -11974,49 +12017,49 @@
             "employee_id",
             "pay_period_id"
           ],
-          "where": "\"lop_adjustments\".\"paid_run_id\" is null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"lop_adjustments\".\"paid_run_id\" is null"
         }
       },
       "foreignKeys": {
         "lop_adjustments_employee_id_employees_uuid_fk": {
           "name": "lop_adjustments_employee_id_employees_uuid_fk",
           "tableFrom": "lop_adjustments",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "lop_adjustments_pay_period_id_pay_periods_uuid_fk": {
           "name": "lop_adjustments_pay_period_id_pay_periods_uuid_fk",
           "tableFrom": "lop_adjustments",
+          "tableTo": "pay_periods",
           "columnsFrom": [
             "pay_period_id"
           ],
-          "tableTo": "pay_periods",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "lop_adjustments_paid_run_id_payroll_runs_uuid_fk": {
           "name": "lop_adjustments_paid_run_id_payroll_runs_uuid_fk",
           "tableFrom": "lop_adjustments",
+          "tableTo": "payroll_runs",
           "columnsFrom": [
             "paid_run_id"
           ],
-          "tableTo": "payroll_runs",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -12247,28 +12290,28 @@
         "notice_periods_employee_id_employees_uuid_fk": {
           "name": "notice_periods_employee_id_employees_uuid_fk",
           "tableFrom": "notice_periods",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "notice_periods_transition_id_transitions_uuid_fk": {
           "name": "notice_periods_transition_id_transitions_uuid_fk",
           "tableFrom": "notice_periods",
+          "tableTo": "transitions",
           "columnsFrom": [
             "transition_id"
           ],
-          "tableTo": "transitions",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -12341,15 +12384,15 @@
         "notification_digest_queue_recipient_id_employees_uuid_fk": {
           "name": "notification_digest_queue_recipient_id_employees_uuid_fk",
           "tableFrom": "notification_digest_queue",
+          "tableTo": "employees",
           "columnsFrom": [
             "recipient_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -12517,28 +12560,28 @@
         "notifications_recipient_id_employees_uuid_fk": {
           "name": "notifications_recipient_id_employees_uuid_fk",
           "tableFrom": "notifications",
+          "tableTo": "employees",
           "columnsFrom": [
             "recipient_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "notifications_actor_id_employees_uuid_fk": {
           "name": "notifications_actor_id_employees_uuid_fk",
           "tableFrom": "notifications",
+          "tableTo": "employees",
           "columnsFrom": [
             "actor_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -12691,54 +12734,54 @@
         "offers_application_id_applications_uuid_fk": {
           "name": "offers_application_id_applications_uuid_fk",
           "tableFrom": "offers",
+          "tableTo": "applications",
           "columnsFrom": [
             "application_id"
           ],
-          "tableTo": "applications",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "offers_approver_id_employees_uuid_fk": {
           "name": "offers_approver_id_employees_uuid_fk",
           "tableFrom": "offers",
+          "tableTo": "employees",
           "columnsFrom": [
             "approver_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "offers_created_employee_id_employees_uuid_fk": {
           "name": "offers_created_employee_id_employees_uuid_fk",
           "tableFrom": "offers",
+          "tableTo": "employees",
           "columnsFrom": [
             "created_employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "offers_transition_id_transitions_uuid_fk": {
           "name": "offers_transition_id_transitions_uuid_fk",
           "tableFrom": "offers",
+          "tableTo": "transitions",
           "columnsFrom": [
             "transition_id"
           ],
-          "tableTo": "transitions",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -13063,41 +13106,41 @@
         "overtime_requests_employee_id_employees_uuid_fk": {
           "name": "overtime_requests_employee_id_employees_uuid_fk",
           "tableFrom": "overtime_requests",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "overtime_requests_decided_by_users_uuid_fk": {
           "name": "overtime_requests_decided_by_users_uuid_fk",
           "tableFrom": "overtime_requests",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "overtime_requests_paid_run_id_payroll_runs_uuid_fk": {
           "name": "overtime_requests_paid_run_id_payroll_runs_uuid_fk",
           "tableFrom": "overtime_requests",
+          "tableTo": "payroll_runs",
           "columnsFrom": [
             "paid_run_id"
           ],
-          "tableTo": "payroll_runs",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -13597,15 +13640,15 @@
         "payroll_budgets_department_id_departments_uuid_fk": {
           "name": "payroll_budgets_department_id_departments_uuid_fk",
           "tableFrom": "payroll_budgets",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -13755,36 +13798,36 @@
             "employee_id",
             "financial_year"
           ],
-          "where": "\"payroll_openings\".\"delete_time\" is null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"payroll_openings\".\"delete_time\" is null"
         }
       },
       "foreignKeys": {
         "payroll_openings_employee_id_employees_uuid_fk": {
           "name": "payroll_openings_employee_id_employees_uuid_fk",
           "tableFrom": "payroll_openings",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "payroll_openings_created_by_users_uuid_fk": {
           "name": "payroll_openings_created_by_users_uuid_fk",
           "tableFrom": "payroll_openings",
+          "tableTo": "users",
           "columnsFrom": [
             "created_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -13951,41 +13994,41 @@
         "payroll_run_items_run_id_payroll_runs_uuid_fk": {
           "name": "payroll_run_items_run_id_payroll_runs_uuid_fk",
           "tableFrom": "payroll_run_items",
+          "tableTo": "payroll_runs",
           "columnsFrom": [
             "run_id"
           ],
-          "tableTo": "payroll_runs",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "payroll_run_items_employee_id_employees_uuid_fk": {
           "name": "payroll_run_items_employee_id_employees_uuid_fk",
           "tableFrom": "payroll_run_items",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "payroll_run_items_department_id_departments_uuid_fk": {
           "name": "payroll_run_items_department_id_departments_uuid_fk",
           "tableFrom": "payroll_run_items",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -14144,62 +14187,62 @@
           "columns": [
             "pay_period_id"
           ],
-          "where": "\"payroll_runs\".\"state\" in ('APPROVED', 'PUBLISHED')",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"payroll_runs\".\"state\" in ('APPROVED', 'PUBLISHED')"
         }
       },
       "foreignKeys": {
         "payroll_runs_pay_period_id_pay_periods_uuid_fk": {
           "name": "payroll_runs_pay_period_id_pay_periods_uuid_fk",
           "tableFrom": "payroll_runs",
+          "tableTo": "pay_periods",
           "columnsFrom": [
             "pay_period_id"
           ],
-          "tableTo": "pay_periods",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "payroll_runs_created_by_users_uuid_fk": {
           "name": "payroll_runs_created_by_users_uuid_fk",
           "tableFrom": "payroll_runs",
+          "tableTo": "users",
           "columnsFrom": [
             "created_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "payroll_runs_submitted_by_users_uuid_fk": {
           "name": "payroll_runs_submitted_by_users_uuid_fk",
           "tableFrom": "payroll_runs",
+          "tableTo": "users",
           "columnsFrom": [
             "submitted_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "payroll_runs_approved_by_users_uuid_fk": {
           "name": "payroll_runs_approved_by_users_uuid_fk",
           "tableFrom": "payroll_runs",
+          "tableTo": "users",
           "columnsFrom": [
             "approved_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -14357,41 +14400,41 @@
         "payslips_run_id_payroll_runs_uuid_fk": {
           "name": "payslips_run_id_payroll_runs_uuid_fk",
           "tableFrom": "payslips",
+          "tableTo": "payroll_runs",
           "columnsFrom": [
             "run_id"
           ],
-          "tableTo": "payroll_runs",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "payslips_run_item_id_payroll_run_items_uuid_fk": {
           "name": "payslips_run_item_id_payroll_run_items_uuid_fk",
           "tableFrom": "payslips",
+          "tableTo": "payroll_run_items",
           "columnsFrom": [
             "run_item_id"
           ],
-          "tableTo": "payroll_run_items",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "payslips_employee_id_employees_uuid_fk": {
           "name": "payslips_employee_id_employees_uuid_fk",
           "tableFrom": "payslips",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -14662,41 +14705,41 @@
         "personal_documents_employee_id_employees_uuid_fk": {
           "name": "personal_documents_employee_id_employees_uuid_fk",
           "tableFrom": "personal_documents",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "personal_documents_source_doc_id_org_documents_uuid_fk": {
           "name": "personal_documents_source_doc_id_org_documents_uuid_fk",
           "tableFrom": "personal_documents",
+          "tableTo": "org_documents",
           "columnsFrom": [
             "source_doc_id"
           ],
-          "tableTo": "org_documents",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "personal_documents_ack_id_document_acknowledgements_uuid_fk": {
           "name": "personal_documents_ack_id_document_acknowledgements_uuid_fk",
           "tableFrom": "personal_documents",
+          "tableTo": "document_acknowledgements",
           "columnsFrom": [
             "ack_id"
           ],
-          "tableTo": "document_acknowledgements",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -14859,36 +14902,36 @@
           "columns": [
             "employee_id"
           ],
-          "where": "\"positions\".\"effective_to\" is null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"positions\".\"effective_to\" is null"
         }
       },
       "foreignKeys": {
         "positions_employee_id_employees_uuid_fk": {
           "name": "positions_employee_id_employees_uuid_fk",
           "tableFrom": "positions",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "positions_department_id_departments_uuid_fk": {
           "name": "positions_department_id_departments_uuid_fk",
           "tableFrom": "positions",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -14969,15 +15012,15 @@
         "preferences_user_id_users_uuid_fk": {
           "name": "preferences_user_id_users_uuid_fk",
           "tableFrom": "preferences",
+          "tableTo": "users",
           "columnsFrom": [
             "user_id"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -15080,15 +15123,15 @@
         "projects_goal_id_goals_uuid_fk": {
           "name": "projects_goal_id_goals_uuid_fk",
           "tableFrom": "projects",
+          "tableTo": "goals",
           "columnsFrom": [
             "goal_id"
           ],
-          "tableTo": "goals",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -15271,54 +15314,54 @@
         "referrals_referrer_id_employees_uuid_fk": {
           "name": "referrals_referrer_id_employees_uuid_fk",
           "tableFrom": "referrals",
+          "tableTo": "employees",
           "columnsFrom": [
             "referrer_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "referrals_department_id_departments_uuid_fk": {
           "name": "referrals_department_id_departments_uuid_fk",
           "tableFrom": "referrals",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "referrals_hired_employee_id_employees_uuid_fk": {
           "name": "referrals_hired_employee_id_employees_uuid_fk",
           "tableFrom": "referrals",
+          "tableTo": "employees",
           "columnsFrom": [
             "hired_employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "referrals_bonus_id_bonuses_uuid_fk": {
           "name": "referrals_bonus_id_bonuses_uuid_fk",
           "tableFrom": "referrals",
+          "tableTo": "bonuses",
           "columnsFrom": [
             "bonus_id"
           ],
-          "tableTo": "bonuses",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -15572,67 +15615,67 @@
         "reimbursements_employee_id_employees_uuid_fk": {
           "name": "reimbursements_employee_id_employees_uuid_fk",
           "tableFrom": "reimbursements",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "reimbursements_category_id_reimbursement_categories_uuid_fk": {
           "name": "reimbursements_category_id_reimbursement_categories_uuid_fk",
           "tableFrom": "reimbursements",
+          "tableTo": "reimbursement_categories",
           "columnsFrom": [
             "category_id"
           ],
-          "tableTo": "reimbursement_categories",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "reimbursements_decided_by_users_uuid_fk": {
           "name": "reimbursements_decided_by_users_uuid_fk",
           "tableFrom": "reimbursements",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "reimbursements_advance_id_loans_uuid_fk": {
           "name": "reimbursements_advance_id_loans_uuid_fk",
           "tableFrom": "reimbursements",
+          "tableTo": "loans",
           "columnsFrom": [
             "advance_id"
           ],
-          "tableTo": "loans",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "reimbursements_paid_run_id_payroll_runs_uuid_fk": {
           "name": "reimbursements_paid_run_id_payroll_runs_uuid_fk",
           "tableFrom": "reimbursements",
+          "tableTo": "payroll_runs",
           "columnsFrom": [
             "paid_run_id"
           ],
-          "tableTo": "payroll_runs",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -15781,28 +15824,28 @@
         "remote_work_requests_employee_id_employees_uuid_fk": {
           "name": "remote_work_requests_employee_id_employees_uuid_fk",
           "tableFrom": "remote_work_requests",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "remote_work_requests_decided_by_users_uuid_fk": {
           "name": "remote_work_requests_decided_by_users_uuid_fk",
           "tableFrom": "remote_work_requests",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -16052,41 +16095,41 @@
         "review_feedback_review_id_reviews_uuid_fk": {
           "name": "review_feedback_review_id_reviews_uuid_fk",
           "tableFrom": "review_feedback",
+          "tableTo": "reviews",
           "columnsFrom": [
             "review_id"
           ],
-          "tableTo": "reviews",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "review_feedback_reviewee_id_employees_uuid_fk": {
           "name": "review_feedback_reviewee_id_employees_uuid_fk",
           "tableFrom": "review_feedback",
+          "tableTo": "employees",
           "columnsFrom": [
             "reviewee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "review_feedback_author_id_employees_uuid_fk": {
           "name": "review_feedback_author_id_employees_uuid_fk",
           "tableFrom": "review_feedback",
+          "tableTo": "employees",
           "columnsFrom": [
             "author_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -16255,41 +16298,41 @@
         "reviews_cycle_id_review_cycles_uuid_fk": {
           "name": "reviews_cycle_id_review_cycles_uuid_fk",
           "tableFrom": "reviews",
+          "tableTo": "review_cycles",
           "columnsFrom": [
             "cycle_id"
           ],
-          "tableTo": "review_cycles",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "reviews_employee_id_employees_uuid_fk": {
           "name": "reviews_employee_id_employees_uuid_fk",
           "tableFrom": "reviews",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "reviews_reviewer_id_employees_uuid_fk": {
           "name": "reviews_reviewer_id_employees_uuid_fk",
           "tableFrom": "reviews",
+          "tableTo": "employees",
           "columnsFrom": [
             "reviewer_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -16350,8 +16393,8 @@
           "columns": [
             "provisioned"
           ],
-          "where": "\"roles\".\"provisioned\" = 1",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"roles\".\"provisioned\" = 1"
         }
       },
       "foreignKeys": {},
@@ -16959,15 +17002,15 @@
         "settlements_employee_id_employees_uuid_fk": {
           "name": "settlements_employee_id_employees_uuid_fk",
           "tableFrom": "settlements",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -17094,36 +17137,36 @@
             "employee_id",
             "date"
           ],
-          "where": "\"shift_assignments\".\"delete_time\" is null",
-          "isUnique": true
+          "isUnique": true,
+          "where": "\"shift_assignments\".\"delete_time\" is null"
         }
       },
       "foreignKeys": {
         "shift_assignments_employee_id_employees_uuid_fk": {
           "name": "shift_assignments_employee_id_employees_uuid_fk",
           "tableFrom": "shift_assignments",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "shift_assignments_shift_id_shifts_uuid_fk": {
           "name": "shift_assignments_shift_id_shifts_uuid_fk",
           "tableFrom": "shift_assignments",
+          "tableTo": "shifts",
           "columnsFrom": [
             "shift_id"
           ],
-          "tableTo": "shifts",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -17359,15 +17402,15 @@
         "sprints_board_id_boards_uuid_fk": {
           "name": "sprints_board_id_boards_uuid_fk",
           "tableFrom": "sprints",
+          "tableTo": "boards",
           "columnsFrom": [
             "board_id"
           ],
-          "tableTo": "boards",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -17514,28 +17557,28 @@
         "stocktakes_started_by_employees_uuid_fk": {
           "name": "stocktakes_started_by_employees_uuid_fk",
           "tableFrom": "stocktakes",
+          "tableTo": "employees",
           "columnsFrom": [
             "started_by"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "stocktakes_closed_by_employees_uuid_fk": {
           "name": "stocktakes_closed_by_employees_uuid_fk",
           "tableFrom": "stocktakes",
+          "tableTo": "employees",
           "columnsFrom": [
             "closed_by"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -17603,28 +17646,28 @@
         "suggestion_votes_suggestion_id_suggestions_uuid_fk": {
           "name": "suggestion_votes_suggestion_id_suggestions_uuid_fk",
           "tableFrom": "suggestion_votes",
+          "tableTo": "suggestions",
           "columnsFrom": [
             "suggestion_id"
           ],
-          "tableTo": "suggestions",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "suggestion_votes_employee_id_employees_uuid_fk": {
           "name": "suggestion_votes_employee_id_employees_uuid_fk",
           "tableFrom": "suggestion_votes",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -17779,41 +17822,41 @@
         "suggestions_submitter_id_employees_uuid_fk": {
           "name": "suggestions_submitter_id_employees_uuid_fk",
           "tableFrom": "suggestions",
+          "tableTo": "employees",
           "columnsFrom": [
             "submitter_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "suggestions_responded_by_id_users_uuid_fk": {
           "name": "suggestions_responded_by_id_users_uuid_fk",
           "tableFrom": "suggestions",
+          "tableTo": "users",
           "columnsFrom": [
             "responded_by_id"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "suggestions_merged_into_id_suggestions_uuid_fk": {
           "name": "suggestions_merged_into_id_suggestions_uuid_fk",
           "tableFrom": "suggestions",
+          "tableTo": "suggestions",
           "columnsFrom": [
             "merged_into_id"
           ],
-          "tableTo": "suggestions",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -17945,15 +17988,15 @@
         "table_views_owner_id_employees_uuid_fk": {
           "name": "table_views_owner_id_employees_uuid_fk",
           "tableFrom": "table_views",
+          "tableTo": "employees",
           "columnsFrom": [
             "owner_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -18101,28 +18144,28 @@
         "tax_declarations_employee_id_employees_uuid_fk": {
           "name": "tax_declarations_employee_id_employees_uuid_fk",
           "tableFrom": "tax_declarations",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "tax_declarations_decided_by_users_uuid_fk": {
           "name": "tax_declarations_decided_by_users_uuid_fk",
           "tableFrom": "tax_declarations",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -18271,28 +18314,28 @@
         "ticket_comments_ticket_id_tickets_uuid_fk": {
           "name": "ticket_comments_ticket_id_tickets_uuid_fk",
           "tableFrom": "ticket_comments",
+          "tableTo": "tickets",
           "columnsFrom": [
             "ticket_id"
           ],
-          "tableTo": "tickets",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "ticket_comments_author_id_employees_uuid_fk": {
           "name": "ticket_comments_author_id_employees_uuid_fk",
           "tableFrom": "ticket_comments",
+          "tableTo": "employees",
           "columnsFrom": [
             "author_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -18359,15 +18402,15 @@
         "ticket_todos_ticket_id_tickets_uuid_fk": {
           "name": "ticket_todos_ticket_id_tickets_uuid_fk",
           "tableFrom": "ticket_todos",
+          "tableTo": "tickets",
           "columnsFrom": [
             "ticket_id"
           ],
-          "tableTo": "tickets",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -18552,41 +18595,41 @@
         "tickets_employee_id_employees_uuid_fk": {
           "name": "tickets_employee_id_employees_uuid_fk",
           "tableFrom": "tickets",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "tickets_department_id_departments_uuid_fk": {
           "name": "tickets_department_id_departments_uuid_fk",
           "tableFrom": "tickets",
+          "tableTo": "departments",
           "columnsFrom": [
             "department_id"
           ],
-          "tableTo": "departments",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "tickets_assignee_id_employees_uuid_fk": {
           "name": "tickets_assignee_id_employees_uuid_fk",
           "tableFrom": "tickets",
+          "tableTo": "employees",
           "columnsFrom": [
             "assignee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -18749,54 +18792,54 @@
         "time_entries_employee_id_employees_uuid_fk": {
           "name": "time_entries_employee_id_employees_uuid_fk",
           "tableFrom": "time_entries",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "time_entries_project_id_projects_uuid_fk": {
           "name": "time_entries_project_id_projects_uuid_fk",
           "tableFrom": "time_entries",
+          "tableTo": "projects",
           "columnsFrom": [
             "project_id"
           ],
-          "tableTo": "projects",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "time_entries_card_id_cards_uuid_fk": {
           "name": "time_entries_card_id_cards_uuid_fk",
           "tableFrom": "time_entries",
+          "tableTo": "cards",
           "columnsFrom": [
             "card_id"
           ],
-          "tableTo": "cards",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "time_entries_decided_by_users_uuid_fk": {
           "name": "time_entries_decided_by_users_uuid_fk",
           "tableFrom": "time_entries",
+          "tableTo": "users",
           "columnsFrom": [
             "decided_by"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -18963,67 +19006,67 @@
         "transition_tasks_transition_id_transitions_uuid_fk": {
           "name": "transition_tasks_transition_id_transitions_uuid_fk",
           "tableFrom": "transition_tasks",
+          "tableTo": "transitions",
           "columnsFrom": [
             "transition_id"
           ],
-          "tableTo": "transitions",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "transition_tasks_subject_id_employees_uuid_fk": {
           "name": "transition_tasks_subject_id_employees_uuid_fk",
           "tableFrom": "transition_tasks",
+          "tableTo": "employees",
           "columnsFrom": [
             "subject_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "transition_tasks_assignee_id_employees_uuid_fk": {
           "name": "transition_tasks_assignee_id_employees_uuid_fk",
           "tableFrom": "transition_tasks",
+          "tableTo": "employees",
           "columnsFrom": [
             "assignee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "transition_tasks_background_check_id_background_checks_uuid_fk": {
           "name": "transition_tasks_background_check_id_background_checks_uuid_fk",
           "tableFrom": "transition_tasks",
+          "tableTo": "background_checks",
           "columnsFrom": [
             "background_check_id"
           ],
-          "tableTo": "background_checks",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "transition_tasks_document_id_personal_documents_uuid_fk": {
           "name": "transition_tasks_document_id_personal_documents_uuid_fk",
           "tableFrom": "transition_tasks",
+          "tableTo": "personal_documents",
           "columnsFrom": [
             "document_id"
           ],
-          "tableTo": "personal_documents",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -19135,15 +19178,15 @@
         "transitions_employee_id_employees_uuid_fk": {
           "name": "transitions_employee_id_employees_uuid_fk",
           "tableFrom": "transitions",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -19181,28 +19224,28 @@
         "user_roles_user_id_users_uuid_fk": {
           "name": "user_roles_user_id_users_uuid_fk",
           "tableFrom": "user_roles",
+          "tableTo": "users",
           "columnsFrom": [
             "user_id"
           ],
-          "tableTo": "users",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         },
         "user_roles_role_roles_name_fk": {
           "name": "user_roles_role_roles_name_fk",
           "tableFrom": "user_roles",
+          "tableTo": "roles",
           "columnsFrom": [
             "role"
           ],
-          "tableTo": "roles",
           "columnsTo": [
             "name"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -19328,28 +19371,28 @@
         "users_role_roles_name_fk": {
           "name": "users_role_roles_name_fk",
           "tableFrom": "users",
+          "tableTo": "roles",
           "columnsFrom": [
             "role"
           ],
-          "tableTo": "roles",
           "columnsTo": [
             "name"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "users_employee_id_employees_uuid_fk": {
           "name": "users_employee_id_employees_uuid_fk",
           "tableFrom": "users",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -19495,15 +19538,15 @@
         "vendors_default_category_id_expense_categories_uuid_fk": {
           "name": "vendors_default_category_id_expense_categories_uuid_fk",
           "tableFrom": "vendors",
+          "tableTo": "expense_categories",
           "columnsFrom": [
             "default_category_id"
           ],
-          "tableTo": "expense_categories",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -19635,28 +19678,28 @@
         "work_pattern_assignments_employee_id_employees_uuid_fk": {
           "name": "work_pattern_assignments_employee_id_employees_uuid_fk",
           "tableFrom": "work_pattern_assignments",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "work_pattern_assignments_pattern_id_work_patterns_uuid_fk": {
           "name": "work_pattern_assignments_pattern_id_work_patterns_uuid_fk",
           "tableFrom": "work_pattern_assignments",
+          "tableTo": "work_patterns",
           "columnsFrom": [
             "pattern_id"
           ],
-          "tableTo": "work_patterns",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -19893,28 +19936,28 @@
         "workflow_instances_automation_id_automations_uuid_fk": {
           "name": "workflow_instances_automation_id_automations_uuid_fk",
           "tableFrom": "workflow_instances",
+          "tableTo": "automations",
           "columnsFrom": [
             "automation_id"
           ],
-          "tableTo": "automations",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "workflow_instances_employee_id_employees_uuid_fk": {
           "name": "workflow_instances_employee_id_employees_uuid_fk",
           "tableFrom": "workflow_instances",
+          "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
           ],
-          "tableTo": "employees",
           "columnsTo": [
             "uuid"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -19925,9 +19968,9 @@
   "views": {},
   "enums": {},
   "_meta": {
-    "columns": {},
     "schemas": {},
-    "tables": {}
+    "tables": {},
+    "columns": {}
   },
   "internal": {
     "indexes": {}

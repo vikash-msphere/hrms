@@ -1,6 +1,7 @@
 import * as React from "react";
 import { ChevronLeft, ChevronRight, Loader2, CheckCircle2, XCircle, HelpCircle, ShieldQuestion } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { formatDateTime } from "@/lib/utils";
 import { verifyPdfSignatures, type SignatureResult, type SignatureValidity } from "@/lib/pdfSignature";
 import { openPdf } from "@/lib/pdfjs";
 
@@ -32,7 +33,7 @@ function StampCard({ r, compact }: { r: SignatureResult; compact?: boolean }) {
             an invisible signature that fails coverage is exactly as serious as a visible one that does. */}
         {r.note && <p className={`text-[10px] ${s.cls}`}>{r.note}</p>}
         {r.signerName && <p className="truncate text-[10px] text-foreground/80">Digitally signed by {r.signerName}</p>}
-        {r.signingTime && <p className="text-[10px] text-muted-foreground">Date: {new Date(r.signingTime).toLocaleString()}</p>}
+        {r.signingTime && <p className="text-[10px] text-muted-foreground">Date: {formatDateTime(r.signingTime)}</p>}
         {!compact && r.reason && <p className="truncate text-[10px] text-muted-foreground">Reason: {r.reason}</p>}
         {!compact && r.location && <p className="truncate text-[10px] text-muted-foreground">Location: {r.location}</p>}
       </div>

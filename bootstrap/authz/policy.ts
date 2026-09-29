@@ -190,9 +190,9 @@ export const OWNER_REFS: Record<string, Record<string, OwnerRef>> = {
   settlements: { employee: { collection: "employees" } },
   "leave-encashments": { employee: { collection: "employees" } },
   // A ledger row moves the balance of the employee it names, so naming somebody is exactly the thing a narrow
-  // grant must not reach past. Carried onto the live manifest by migration 0005.
+  // grant must not reach past. Carried onto the live manifest by migration 0002.
   "leave-adjustments": { employee: { collection: "employees" } },
-  // Pay and tax paid before HRMS, about the employee it names. Carried onto the live manifest by migration 0006.
+  // Pay and tax paid before HRMS, about the employee it names. Carried onto the live manifest by migration 0002.
   "payroll-openings": { employee: { collection: "employees" } },
   // A delegation says whose approvals somebody else is covering, and `delegator` is the owner: the row is
   // scoped by `delegator_id` (lib/authzResolve.ts) and `activeDelegatesFor` reads it to decide who gets a copy

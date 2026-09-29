@@ -13,7 +13,7 @@
 // (`attendance.credit_minutes`).
 import { invalidArgument } from "../lib/errors";
 import { isUntracked, leaveCover, localMinutes, lopDayUnits, type DayCredit, type LeaveRange } from "./attendance";
-import { hhmmOf, minOfDay, shiftSpanMinutes, type DaySchedule, type DayScheduleOf } from "./workSchedule";
+import { clockOf, minOfDay, shiftSpanMinutes, type DaySchedule, type DayScheduleOf } from "./workSchedule";
 
 // The org's own window and the helpers that read it live in domain/workSchedule.ts now, beside the resolver
 // that layers a roster entry and a work pattern over them. Re-exported here because these rules are where
@@ -544,8 +544,8 @@ export function checkFiling(ctx: {
   const noun = KIND_LABEL[kind].toLowerCase();
   const startMin = sched.startMin;
   const endMin = sched.endMin;
-  const startAt = hhmmOf(startMin);
-  const endAt = hhmmOf(endMin);
+  const startAt = clockOf(startMin);
+  const endAt = clockOf(endMin);
   const atMin = minOfDay(at);
   const minutes = requestMinutes(kind, at, sched);
 
@@ -576,7 +576,7 @@ export function checkFiling(ctx: {
   if (r.before_time) {
     const cutoff = kind === "late_arrival" ? startMin : atMin;
     if (date < todayYmd || (date === todayYmd && nowMin >= cutoff)) {
-      errors.push(kind === "late_arrival" ? `A late arrival has to be requested before the shift starts at ${startAt}.` : `An early departure has to be requested before you leave at ${at}.`);
+      errors.push(kind === "late_arrival" ? `A late arrival has to be requested before the shift starts at ${startAt}.` : `An early departure has to be requested before you leave at ${clockOf(atMin)}.`);
     }
   }
   if (r.reason_required && !reason?.trim()) errors.push("Say why - the policy asks for a reason.");

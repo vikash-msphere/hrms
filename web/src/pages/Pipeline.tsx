@@ -3,7 +3,7 @@ import { AlertTriangle, KanbanSquare, Plus, ChevronRight, ChevronLeft, X, Users,
 import { create, get, invoke, patch, download } from "@/api";
 import type { ListResponse } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { cn, formatDate, idOf } from "@/lib/utils";
+import { cn, formatDate, formatDateTime, idOf } from "@/lib/utils";
 import { todayStr } from "@/lib/orgDay";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { fireIntent } from "@/lib/intent";
@@ -1061,7 +1061,7 @@ function ApplicationDrawer({ app, me, candidate, req, stages, criteria, siblings
                       <div className="flex flex-wrap items-baseline gap-x-2">
                         <button type="button" className="font-medium hover:underline" onClick={() => { onClose(); navigate(`interviews/${idOf(i.path)}`); }}>{i.title}</button>
                         <span className="text-xs text-muted-foreground">
-                          {[i.scheduled_start_time ? new Date(i.scheduled_start_time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "not scheduled", i.mode, i.location].filter(Boolean).join(" · ")}
+                          {[i.scheduled_start_time ? formatDateTime(i.scheduled_start_time) : "not scheduled", i.mode, i.location].filter(Boolean).join(" · ")}
                         </span>
                         <Badge variant={i.status === "done" ? "success" : i.status === "cancelled" ? "destructive" : "secondary"} className="ml-auto text-[10px]">{i.status}</Badge>
                       </div>

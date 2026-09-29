@@ -237,7 +237,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   // to be shown where HR is already looking. Which of them the caller may open is decided per panel by
   // SettingsMenu itself (it renders nothing when none is theirs), so there is no page-level settings gate here.
   const { rows: depts } = useCollection<Department>("departments", { all: true });
-  const { rows: employees } = useCollection<Employee>("employees", { all: true });
+  const { rows: employees, hasMore: employeesPartial } = useCollection<Employee>("employees", { all: true });
   const { rows: types } = useCollection<LeaveType>("leave-types", { enabled: canLeave });
   // This person's balances, narrowed server-side. Filtering a page of the whole collection in the browser was
   // both dearer and blind to anything past the cursor.
@@ -492,7 +492,10 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                     rather than the pager disappearing. */}
                 <ArrowLeft className="h-4 w-4" /> <span className="hidden sm:inline">Back to directory</span><span className="sm:hidden">Back</span>
               </Button>
-              {empIdx >= 0 && currentEmployees.length > 1 && (
+              {/* Not until the directory walk has finished: `all: true` arrives a page at a time, and a pager
+                  drawn off the first page says "8 of 100" about a directory of 104, and has no Next for the
+                  person at the foot of that page. */}
+              {!employeesPartial && empIdx >= 0 && currentEmployees.length > 1 && (
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
                   {/* Named for a screen reader, hinted by name for a pointer: the tooltip says WHO is next,
                       which the label cannot (it would read the person's name as the button's purpose). */}

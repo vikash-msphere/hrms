@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { EyeOff, ShieldCheck, ShieldAlert, Undo2 } from "lucide-react";
 import { get, invoke } from "@/api";
 import { navigate } from "@/router";
-import { idOf } from "@/lib/utils";
+import { formatDateTime, idOf } from "@/lib/utils";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 import { useToast } from "@/components/ui/use-toast";
@@ -260,8 +260,8 @@ export default function Moderation() {
                     ) : (
                       <span>Posted anonymously</span>
                     )}
-                    <span>Flagged {new Date(row.flagged_time).toLocaleString()}</span>
-                    {row.decided_time && <span>Decided {new Date(row.decided_time).toLocaleString()}</span>}
+                    <span>Flagged {formatDateTime(row.flagged_time)}</span>
+                    {row.decided_time && <span>Decided {formatDateTime(row.decided_time)}</span>}
                     {/* Only meaningful for a post that is UP: a held post is the same text nobody has read,
                         so "edited since" would be a warning about a discrepancy that cannot matter yet. */}
                     {row.edited_since_flag && !row.held && <span className="text-warning">Edited since it was flagged - the quote above is what the model read</span>}

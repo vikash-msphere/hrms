@@ -12,7 +12,7 @@ import { DEFAULT_PUNCTUALITY, judgeDay, leaveHalves, type DayExcusal, type Punct
 // And the rule for WHOSE day a day is: which days are worked at all, and how many minutes earn a full or half
 // one. The grid drawing a rest day as an absence, or a four-hour shift as "Under hours", is the same drift
 // again - the person is told they missed work the payroll build never asked them for.
-import { orgScheduleOf, type DaySchedule, type DayScheduleOf } from "../../../src/domain/workSchedule";
+import { clockOf, orgScheduleOf, type DaySchedule, type DayScheduleOf } from "../../../src/domain/workSchedule";
 export type { DaySchedule, DayScheduleOf };
 // Every attendance surface describes the same window of days, so the range type travels with the rule that
 // reads it rather than being restated per page.
@@ -393,7 +393,8 @@ export function buildAttendanceRows(opts: {
   return rows.sort((a, b) => b.day.localeCompare(a.day));
 }
 
-export const fmtHM = (iso: string, tz: string) => dateFormat(undefined, HM_12(tz)).format(new Date(iso));
+// Pinned to en-US, not the viewer's locale, so it reads "09:05 AM" in every browser (see TIME_LOCALE in lib/utils.ts).
+export const fmtHM = (iso: string, tz: string) => dateFormat("en-US", HM_12(tz)).format(new Date(iso));
 
 // ---- The correction form ------------------------------------------------------------------------------------
 // Shared by the whole-day CorrectionDialog (pages/Attendance.tsx) and the one-punch PunchFixDialog: both edit
@@ -498,12 +499,7 @@ export const fmtDurationShort = (min: number) => {
 };
 
 // Minutes-since-midnight as a wall clock ("9:12 AM") - for averaged times, which are minutes, not instants.
-export const fmtMinOfDay = (min: number) => {
-  const m = ((Math.round(min) % 1440) + 1440) % 1440;
-  const h24 = Math.floor(m / 60);
-  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
-  return `${h12}:${String(m % 60).padStart(2, "0")} ${h24 < 12 ? "AM" : "PM"}`;
-};
+export const fmtMinOfDay = clockOf;
 
 // ---- Calendar arithmetic (all UTC, since a "YYYY-MM-DD" is a calendar date, not an instant) ----
 export const monthStartOf = (ymd: string) => `${ymd.slice(0, 7)}-01`;

@@ -1,6 +1,6 @@
 import * as React from "react";
 import { Lock, LockOpen, LogOut, WifiOff } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, formatTime } from "@/lib/utils";
 import { APP_NAME } from "@/lib/brand";
 import { loginUrl } from "@/api";
 import { useAppLock, settleLockScreen, unlock, enterApp, fmtWait } from "@/lib/appLock";
@@ -109,7 +109,7 @@ export function LockScreen() {
 
       <div className="relative flex flex-col items-center text-center">
         <p className="text-6xl font-semibold tabular-nums tracking-tight sm:text-7xl">
-          {now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+          {formatTime(now)}
         </p>
         <p className="mt-1 text-sm text-muted-foreground sm:text-base">{now.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })}</p>
       </div>
@@ -138,6 +138,7 @@ export function LockScreen() {
           shake={shake}
           keypad
           autoFocus
+          keepFocus
           tone={phase.kind === "opening" ? "success" : phase.kind === "wrong" ? "error" : "default"}
         />
 

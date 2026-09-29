@@ -260,7 +260,9 @@ test.describe("attendance views", () => {
     // Any day the grid drew - which day it is does not matter, only that it is one with a standing. Stepping
     // back a month rather than asserting against whatever today happens to be, the way the bulk-correction
     // read above does.
-    const days = panel.getByRole("button", { name: /·/ }).filter({ hasNotText: /Tick|Untick/ });
+    // Inside the grid: the KPI tiles above it are buttons with a "·" in their names as soon as the person has
+    // a clock-in, and the first of those is "On time", whose press switches the history to a filtered list.
+    const days = panel.getByRole("group", { name: "Days of the month" }).getByRole("button", { name: /·/ }).filter({ hasNotText: /Tick|Untick/ });
     let opened = false;
     for (let back = 0; back < 6 && !opened; back++) {
       if (await days.count()) { await days.first().click(); opened = true; break; }

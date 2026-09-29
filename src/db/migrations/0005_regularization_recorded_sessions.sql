@@ -1,1 +1,0 @@
-ALTER TABLE `attendance_regularizations` ADD `recorded_sessions` text;

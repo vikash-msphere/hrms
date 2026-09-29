@@ -13,7 +13,7 @@ import { DataTable, type BulkAction, type Column } from "@/components/common/Dat
 import { type TableInsight } from "@/components/common/TableInsights";
 import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from "@/components/ui/dropdown-menu";
-import { idOf, cn, initials } from "@/lib/utils";
+import { idOf, cn, formatDateTime, initials } from "@/lib/utils";
 import { useRowKeys } from "@/lib/rowKeys";
 import { todayStr, addDaysYmd, weekdayOf, daysBetweenYmd } from "@/lib/orgDay";
 import { daysSince, fmtDaysCount } from "@/lib/tableDerive";
@@ -1972,7 +1972,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                     <div className="min-w-0 flex-1 rounded-md bg-muted/40 p-2 text-sm">
                       <div className="flex items-baseline justify-between gap-2">
                         <span className="text-xs font-medium">{commenterName(cm)}</span>
-                        {cm.create_time && <span className="text-[11px] text-muted-foreground" title={new Date(cm.create_time).toLocaleString()}>{timeAgo(cm.create_time)}</span>}
+                        {cm.create_time && <span className="text-[11px] text-muted-foreground" title={formatDateTime(cm.create_time)}>{timeAgo(cm.create_time)}</span>}
                       </div>
                       <RichText source={cm.body ?? ""} className="space-y-1.5 leading-snug" />
                     </div>

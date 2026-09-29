@@ -63,6 +63,14 @@ export const minOfDay = (hhmm: string): number => {
 };
 /** A minutes-since-midnight as "HH:MM". */
 export const hhmmOf = (min: number): string => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+/** A minutes-since-midnight as a person reads it: "6:30 PM". Times are shown 12-hour everywhere; "HH:MM" is the
+ * stored form. Wraps past midnight, so an averaged or offset time never prints "25:10". The web shows it too. */
+export const clockOf = (min: number): string => {
+  const m = ((Math.round(min) % 1440) + 1440) % 1440;
+  const h24 = Math.floor(m / 60);
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h12}:${String(m % 60).padStart(2, "0")} ${h24 < 12 ? "AM" : "PM"}`;
+};
 
 /**
  * The day's grace allowance: the org's, widened by a grace exception, or Infinity when the exception waives the

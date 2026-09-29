@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Bell, BellOff, BellRing, CheckCheck, ChevronDown, Clock } from "lucide-react";
 import { useNotifications, sortNotifications, groupNotifications, actionLabel, type NotifGroup } from "@/lib/notifications";
 import { metaForType, categoryOf, CATEGORY_META } from "@/lib/notificationMeta";
-import { cn, formatDate } from "@/lib/utils";
+import { cn, formatDate, formatTime } from "@/lib/utils";
 import { navigate } from "@/router";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -46,7 +46,7 @@ const BUCKET_ORDER = ["Today", "Yesterday", "Earlier this week", "Older"];
 // (which actually differentiates the rows); older rows keep the date.
 const whenLabel = (n: Notification, bucket: string) =>
   bucket === "Today" || bucket === "Yesterday"
-    ? new Date(n.create_time ?? 0).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+    ? formatTime(n.create_time ?? 0)
     : formatDate(n.create_time);
 
 // A collapsed run of same-actor-same-category notifications (e.g. a kudos burst). Shows one summary row that

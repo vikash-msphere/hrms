@@ -18,7 +18,6 @@ import {
 import type { AttendanceWindow } from "@/hooks/useAttendanceWindow";
 import type { AttendanceDayMark, AttendanceSession, Holiday, LateEarlyRequest, LeaveRequest, LeaveType } from "@/types";
 import { excusalsFor, usePunctualityPolicy, type LateEarlyKind } from "@/lib/lateEarly";
-import { hhmmOf } from "../../../../src/domain/punctuality";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Field } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -990,7 +989,9 @@ function MonthGrid({ monthYmd, rowByDay, orgToday, workDays, weekStart, selected
             </div>
           ))}
         </div>
-        <div className="grid grid-cols-7">
+        {/* Named, so the day buttons are one findable set: the page's KPI tiles are buttons with a "·" in
+            their names too ("On time … in 9:02 AM · out 6:10 PM"). */}
+        <div className="grid grid-cols-7" role="group" aria-label="Days of the month">
           {cells.map((day, i) => {
             const inMonth = day.slice(0, 7) === month;
             const r = inMonth ? rowByDay.get(day) : undefined;
@@ -1140,8 +1141,8 @@ function MarkBadge({ credit }: { credit: DayCredit }) {
 /** The approved window a day was judged against, as words: "In by 10:30 approved", "Out at 16:00 approved". */
 function approvedLabel(s?: { approvedLateUntil?: number; approvedEarlyFrom?: number }): string | undefined {
   const parts = [
-    s?.approvedLateUntil != null ? `In by ${hhmmOf(s.approvedLateUntil)}` : null,
-    s?.approvedEarlyFrom != null ? `out at ${hhmmOf(s.approvedEarlyFrom)}` : null,
+    s?.approvedLateUntil != null ? `In by ${fmtMinOfDay(s.approvedLateUntil)}` : null,
+    s?.approvedEarlyFrom != null ? `out at ${fmtMinOfDay(s.approvedEarlyFrom)}` : null,
   ].filter(Boolean) as string[];
   if (!parts.length) return undefined;
   const text = parts.join(", ");

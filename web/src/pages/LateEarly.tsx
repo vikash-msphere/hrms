@@ -5,7 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useClock } from "@/lib/clock";
-import { cn, formatDate, idOf, personIndex, personName } from "@/lib/utils";
+import { cn, formatDate, formatHHMM, idOf, personIndex, personName } from "@/lib/utils";
 import { orgDayFromToday, thisMonthStr, todayStr } from "@/lib/orgDay";
 import { localMinutes } from "@/lib/attendance";
 import { orgScheduleOf } from "../../../src/domain/workSchedule";
@@ -164,7 +164,7 @@ export default function LateEarly({ me }: { me: Me }) {
     },
     {
       id: "at", header: "Time", accessor: (r) => r.at ?? "",
-      cell: (r) => <span className="tabular-nums">{r.kind === "early_departure" ? "Leave at " : "In by "}{r.at}</span>,
+      cell: (r) => <span className="tabular-nums">{r.kind === "early_departure" ? "Leave at " : "In by "}{formatHHMM(r.at)}</span>,
     },
     { id: "minutes", header: "Minutes", align: "right", filter: "number", aggregate: "sum", accessor: (r) => r.minutes, cell: (r) => <span className="tabular-nums">{fmtMinutes(r.minutes ?? 0)}</span> },
     {
@@ -314,7 +314,7 @@ export default function LateEarly({ me }: { me: Me }) {
           <Field label="Day"><Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
           <Field
             label={form.kind === "late_arrival" ? "I'll be in by" : "I'll leave at"}
-            hint={form.kind === "late_arrival" ? `The shift starts at ${sched.shift_start}.` : `The shift ends at ${sched.shift_end}.`}
+            hint={form.kind === "late_arrival" ? `The shift starts at ${formatHHMM(sched.shift_start)}.` : `The shift ends at ${formatHHMM(sched.shift_end)}.`}
           >
             <Input type="time" value={form.at} onChange={(e) => setForm({ ...form, at: e.target.value })} />
           </Field>

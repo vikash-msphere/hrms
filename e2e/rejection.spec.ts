@@ -11,6 +11,10 @@ import { SPA_HEADERS, allowConsoleErrors, fileLeave, gotoRoute, inDays, nextWeek
 //
 // One spec across several collections on purpose: the failure this protects against is in the shared row, so
 // covering one collection and trusting the rest is how the other eleven break quietly.
+
+// The project the time-entries kind logs against, made by the test before any kind runs.
+let ownProject: string | undefined;
+
 const KINDS: {
   collection: string; label: string; tab: string; note: boolean;
   // Who actually holds approve/reject on this collection - a manager for everything dept-owned (the default),
@@ -166,19 +170,15 @@ const KINDS: {
     note: false,
     stateField: "status",
     make: async (page, mark) => {
-      const projects = await page.request.get("/v1/projects?page_size=50");
-      const { results = [] } = (await projects.json()) as { results?: { path: string; name?: string; status?: string }[] };
-      // A SEEDED project, never another spec's fixture. "The first active project" was taking whichever
-      // `E2E ...` project a concurrent spec had just created for itself - and an entry logged against it then
-      // shows up in THAT spec's own "awaiting your approval" band, which reads its rows by project name: it
-      // waits for a row it cannot clear (this one is not its to decide) and re-presses Approve on an entry
-      // already decided, which is where the 409s came from. A seeded project belongs to nobody in particular.
-      const usable = results.filter((p) => p.status !== "archived");
-      const active = usable.find((p) => !(p.name ?? "").startsWith("E2E ")) ?? usable[0] ?? results[0];
-      if (!active) throw new Error("e2e: no projects seeded");
+      // This spec's OWN project, made up front. Never another spec's fixture: "the first active project" took
+      // whichever `E2E ...` project a concurrent spec had just created, so the entry landed in THAT spec's
+      // "awaiting your approval" band (read by project name) and it re-pressed Approve on a row not its to
+      // decide - the 409s. And nothing is seeded to fall back on, so borrowing one also meant that spec could
+      // purge it between here and the POST ("no projects seeded").
+      if (!ownProject) throw new Error("e2e: the spec's own project was not created");
       const made = await page.request.post("/v1/time-entries", {
         headers: SPA_HEADERS,
-        data: { project: active.path, date: inDays(-2), hours: 2, description: `E2E time entry to reject ${mark}` },
+        data: { project: ownProject, date: inDays(-2), hours: 2, description: `E2E time entry to reject ${mark}` },
       });
       expect(made.status(), await made.text()).toBe(200);
       const row = (await made.json()) as { path: string };
@@ -212,16 +212,16 @@ test("a request of each kind is rejected from the inbox, with the reason it take
     expect(madeCat.status(), await madeCat.text()).toBe(200);
   }
 
-  // Same story for projects: nothing seeded, and the employee has no write on the catalog - the time-entries
-  // kind needs one to log against.
-  const existingProjects = await employee.request.get("/v1/projects?page_size=1");
-  if (!((await existingProjects.json()) as { results?: unknown[] }).results?.length) {
+  // Projects: nothing is seeded and the employee has no write on the catalog, so an admin makes this spec its
+  // own one for the time-entries kind to log against (see that kind for why it is never a borrowed one).
+  {
     const admin = await as("super");
     const madeProject = await admin.request.post("/v1/projects", {
       headers: SPA_HEADERS,
       data: { name: `E2E rejection project ${Date.now()}` },
     });
     expect(madeProject.status(), await madeProject.text()).toBe(200);
+    ownProject = ((await madeProject.json()) as { path: string }).path;
   }
 
   for (const kind of KINDS) {

@@ -6,7 +6,7 @@ import { isCurrentEmployee } from "@/lib/employees";
 import { useCollection } from "@/hooks/useCollection";
 import { useScheduleView } from "@/hooks/useScheduleView";
 import { excusalsByEmployee, usePunctualityPolicy } from "@/lib/lateEarly";
-import { hhmmOf } from "../../../../src/domain/punctuality";
+import { clockOf } from "../../../../src/domain/workSchedule";
 import { todayStr } from "@/lib/orgDay";
 import { listAllSessionsPaged } from "@/lib/clock";
 import { leaveColor } from "@/lib/leaveColors";
@@ -456,7 +456,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
         <TipRow>{fmtDuration(s.workedMinutes)} worked</TipRow>
         {(s.approvedLateUntil != null || s.approvedEarlyFrom != null) && (
           <TipRow icon={Clock}>
-            Approved {[s.approvedLateUntil != null ? `in by ${hhmmOf(s.approvedLateUntil)}` : null, s.approvedEarlyFrom != null ? `out at ${hhmmOf(s.approvedEarlyFrom)}` : null].filter(Boolean).join(", ")}
+            Approved {[s.approvedLateUntil != null ? `in by ${clockOf(s.approvedLateUntil)}` : null, s.approvedEarlyFrom != null ? `out at ${clockOf(s.approvedEarlyFrom)}` : null].filter(Boolean).join(", ")}
           </TipRow>
         )}
         {(s.late || s.leftEarly) && (
