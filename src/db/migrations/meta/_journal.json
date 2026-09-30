@@ -43,6 +43,13 @@
       "when": 1790749033948,
       "tag": "0005_release_five",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1790789084910,
+      "tag": "0006_fast_tick_probe_indexes",
+      "breakpoints": true
     }
   ]
 }

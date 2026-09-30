@@ -83,10 +83,14 @@ export async function createRegularization(deps: Deps, actor: AppUser, input: Re
   const date = dayMs(input.date);
   if (Number.isNaN(date)) throw invalidArgument("date is required");
   if (!Array.isArray(input.sessions)) throw invalidArgument("sessions is required (an empty array clears the day)");
-  // The org's today costs a settings read, so it is asked only by a request that leaves a session open.
+  // A correction fixes a day that has been worked. One filed for a day still ahead was approved and wrote
+  // punches onto tomorrow, which every attendance view then showed as worked - a "9h on a holiday" nobody had
+  // clocked yet.
+  const today = await orgToday(deps);
+  if (input.date! > today) throw invalidArgument("that day hasn't happened yet - a correction fixes a day already worked");
   const leavesOpen = input.sessions.some((s) => s?.clock_out == null);
   const now = +deps.clock.now();
-  const sessions = normalizeSessions(input.sessions, { today: leavesOpen && input.date === (await orgToday(deps)), now });
+  const sessions = normalizeSessions(input.sessions, { today: leavesOpen && input.date === today, now });
   // Default the employee to the caller's own record unless an admin files on someone's behalf.
   const employeeId = idFromPath(input.employee) ?? actor.employeeId;
   if (!employeeId) throw invalidArgument("employee is required");

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Contact } from "lucide-react";
 import { get, patch } from "@/api";
 import { isConflict } from "@/lib/formError";
+import { changedFields } from "@/lib/mergePatch";
 import type { PersonalDetails } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -46,19 +47,22 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
     void load();
   }, [load]);
 
+  // What the form was filled with when it opened: the save sends only what differs from it (lib/mergePatch.ts).
+  const shown = useRef<PersonalDetails>({});
   function openEdit() {
-    setForm(data ?? {});
+    shown.current = data ?? {};
+    setForm(shown.current);
     setOpen(true);
   }
   const set = (patch: Partial<PersonalDetails>) => setForm((f) => ({ ...f, ...patch }));
 
   async function save() {
-    // Save the full record so emergency fields (edited in the emergency modal) are preserved - and send the
-    // version it was read at, because "the full record" is exactly what makes an unversioned write dangerous:
-    // an employee editing their emergency contact on /profile while HR corrects an address here are two
-    // whole-blob writes racing, and without If-Match the later one silently wins.
+    // Only the keys changed here, with the version it was read at. The emergency fields on this same blob are
+    // preserved because a merge patch leaves omitted keys alone - the whole form used to go, and after a 409
+    // "save again" wrote the emergency contact as this dialog first read it over the one somebody had just
+    // saved. If-Match stays: two people editing the same field at once is a race the server has to decide.
     try {
-      const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form, data?.etag);
+      const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, changedFields(form, shown.current), data?.etag);
       writes.current++;
       setData(updated);
       toast({ title: "Contact details saved", variant: "success" });

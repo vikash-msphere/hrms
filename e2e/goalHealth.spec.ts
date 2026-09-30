@@ -40,15 +40,15 @@ test("an owner flags a goal off track, and the page starts saying so", async ({ 
     // The owner's own call, through the narrow verb - no edit form, no full edit rights needed.
     await detail.getByRole("button", { name: "Off track", exact: true }).click();
     await expect(toast(page, "Marked off track")).toBeVisible({ timeout: 30_000 });
+
+    // Closed by Escape WITH "Marked off track" still on screen, on purpose. A toast is a dismissable layer of
+    // its own and the newest one, so the first Escape used to take the TOAST and leave the drawer exactly where
+    // it was; focus is in the drawer, so the press now belongs to the drawer (components/ui/toast.tsx).
+    await page.keyboard.press("Escape");
+    await expect(detail).toHaveCount(0, { timeout: 30_000 });
     await expect.poll(async () => (await goalOf(page, goalPath))?.confidence, { timeout: 30_000 }).toBe("off_track");
 
     // Back on the wall of cards: the flag rides the card, and the filter finds it by name.
-    //
-    // Closed by its own button rather than by Escape, because a toast is a dismissable layer of its own (radix
-    // toast wraps each one in `DismissableLayer.Root`) and it is the newest - so with "Marked off track" still
-    // on screen the first Escape takes the TOAST and the drawer stays exactly where it was.
-    await detail.getByRole("button", { name: "Close" }).click();
-    await expect(detail).toHaveCount(0, { timeout: 30_000 });
     await gotoRoute(page, "goals", "Goals");
     const card = page.locator("div").filter({ hasText: title }).last();
     await expect(card.getByText("Off track")).toBeVisible({ timeout: 30_000 });

@@ -12,7 +12,7 @@ import { cn, idOf, formatDate } from "@/lib/utils";
 import {
   buildAttendanceRows, groupWeeks, statsOf, summarizeByDay,
   fmtDay, fmtDayLong, fmtDuration, fmtDurationShort, fmtHM, fmtMinOfDay, hhmmToMin, localDay, localMinutes,
-  signedDuration, monthGridDays, weekdayOrder, CREDIT_LABEL, DOW, STATUS_UI, leaveRangeOf, unpaidLeaveTypes,
+  signedDuration, monthGridDays, weekdayOrder, CREDIT_LABEL, DOW, STATUS_UI, leaveRangeOf, orgDaysWindow, owesDay, unpaidLeaveTypes,
   type AttendanceRow, type AttendanceSchedule, type DayCredit, type DayStatus, type LeaveRange, type PunchTarget, type WeekGroup, type WindowStats,
 } from "@/lib/attendance";
 import type { AttendanceWindow } from "@/hooks/useAttendanceWindow";
@@ -146,13 +146,13 @@ export function AttendanceHistory({
     let live = true;
     setOwnLoading(true);
     void listAllSessions(
-      `attendance?employee=employees/${employeeId}&from=${encodeURIComponent(`${fromYmd}T00:00:00.000Z`)}&to=${encodeURIComponent(`${toYmd}T23:59:59.999Z`)}`,
+      `attendance?employee=employees/${employeeId}&${orgDaysWindow(fromYmd, toYmd, tz)}`,
     )
       .then((s) => { if (live) setOwnSessions(s); })
       .catch(() => { if (live) setOwnSessions([]); })
       .finally(() => { if (live) setOwnLoading(false); });
     return () => { live = false; };
-  }, [fetching, employeeId, fromYmd, toYmd, refreshKey]);
+  }, [fetching, employeeId, fromYmd, toYmd, tz, refreshKey]);
 
   // Whoever supplied the punches, they are filtered to this employee here: the page hands over everyone's.
   const sessions = useMemo(
@@ -286,7 +286,7 @@ export function AttendanceHistory({
     void (async () => {
       try {
         const prev = await listAllSessions(
-          `attendance?employee=employees/${employeeId}&from=${encodeURIComponent(`${prevWindow.from}T00:00:00.000Z`)}&to=${encodeURIComponent(`${prevWindow.to}T23:59:59.999Z`)}`,
+          `attendance?employee=employees/${employeeId}&${orgDaysWindow(prevWindow.from, prevWindow.to, tz)}`,
         );
         if (!live) return;
         setPrevStats(statsOf(buildRows(prev, { from: prevWindow.from, to: prevWindow.to }), tz, schedOf, orgToday));
@@ -334,8 +334,10 @@ export function AttendanceHistory({
     leave: r.status === "on_leave" || r.status === "half_day_leave" ? leaveForDay(r.day) : undefined,
     leaveType: r.status === "on_leave" || r.status === "half_day_leave" ? leaveTypeName(leaveForDay(r.day)?.leave_type) : undefined,
     holiday: r.status === "holiday" ? holidayByDay.get(r.day) : undefined,
-    onCorrect: onCorrect ? () => onCorrect([r]) : undefined,
-    onFixPunch: onCorrect ? (punch: PunchTarget) => onCorrect([r], punch) : undefined,
+    // Only a day that has happened: the window also draws the holidays and leave still ahead in it, and a
+    // correction for tomorrow is refused (services/attendanceRegularizations.ts).
+    onCorrect: onCorrect && r.day <= orgToday ? () => onCorrect([r]) : undefined,
+    onFixPunch: onCorrect && r.day <= orgToday ? (punch: PunchTarget) => onCorrect([r], punch) : undefined,
     // Offer the overtime hand-off only for a day that actually ran well past the shift (and only to callers
     // who may file one), so it stays a real signal rather than a button on every row.
     onLogOvertime: onLogOvertime && overtimeMinutes(r) >= 30 ? () => onLogOvertime(r) : undefined,
@@ -553,7 +555,9 @@ export function AttendanceHistory({
                       {selectedRow.mark && <MarkBadge credit={selectedRow.mark} />}
                     </div>
                     <div className="flex items-center gap-2">
-                      {canMark && (
+                      {/* Kept on a day already marked, owed or not, so a mark that predates a holiday being
+                          added can still be withdrawn. */}
+                      {canMark && (owesDay(selectedRow.status) || !!selectedRow.mark) && (
                         <AccessAction collection="attendance-day-marks" create label="Count this day as">
                           <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={() => setMarking(selectedRow)}>
                             <Scale className="h-3 w-3" /> Counts as
@@ -565,7 +569,7 @@ export function AttendanceHistory({
                           {selectedRow.summary.arrival ? fmtHM(selectedRow.summary.arrival, tz) : "-"} – {selectedRow.summary.departure ? fmtHM(selectedRow.summary.departure, tz) : selectedRow.summary.open ? "open" : "-"} · {fmtDuration(selectedRow.summary.workedMinutes)}
                         </span>
                       )}
-                      {onCorrect && (
+                      {onCorrect && selectedRow.day <= orgToday && (
                         <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={() => onCorrect([selectedRow])}>
                           <Pencil className="h-3 w-3" /> Correct
                         </Button>
@@ -646,7 +650,7 @@ export function AttendanceHistory({
                               </td>
                               <td className="py-1.5 text-right">
                                 <span className="flex items-center justify-end gap-1">
-                                  {canMark && (
+                                  {canMark && (owesDay(r.status) || !!r.mark) && (
                                     <button
                                       type="button"
                                       onClick={(e) => { e.stopPropagation(); setMarking(r); }}
@@ -657,7 +661,7 @@ export function AttendanceHistory({
                                       <Scale className="h-3.5 w-3.5" />
                                     </button>
                                   )}
-                                  {onCorrect && (
+                                  {onCorrect && r.day <= orgToday && (
                                     <button
                                       type="button"
                                       onClick={(e) => { e.stopPropagation(); onCorrect([r]); }}
@@ -1042,7 +1046,7 @@ function MonthGrid({ monthYmd, rowByDay, orgToday, workDays, weekStart, selected
                   aria-pressed={isSel}
                 />
                 <div className="pointer-events-none relative">{body}</div>
-                {onTick && (
+                {onTick && day <= orgToday && (
                   <button
                     type="button"
                     onClick={() => onTick(day)}

@@ -54,3 +54,4 @@ web/src/web/dummy-non-existing-folder/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+bootstrap/demo.sql

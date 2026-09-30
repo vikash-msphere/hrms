@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { keysetPage } from "../services/keysetPage";
@@ -19,6 +19,10 @@ import { toCronRunResource } from "../http/serialize";
 // The middleware's decided scope is bound here too - see the note in routes/eventLog.ts for what ignoring it
 // cost. `cron_runs` carries no owner column, so a breadth it cannot satisfy answers no rows rather than the
 // whole table (services/listScope.ts).
+//
+// `?cron=<expression>` narrows the list to one trigger's runs. The Operations page asks each card's latest run
+// that way, off `cron_runs_cron_started_idx`: the five-minute triggers record far more runs than the daily one,
+// so a shared window of the newest runs would hold only their last few hours and none of its.
 export const cronRuns = collectionRoutes({
   table: schema.cronRuns,
   collection: "cron-runs",
@@ -26,16 +30,18 @@ export const cronRuns = collectionRoutes({
   notFound: "cron run not found",
   param: "cron_run",
   serialize: toCronRunResource,
-  list: async (c, page) =>
-    keysetPage<typeof schema.cronRuns.$inferSelect>(
+  list: async (c, page) => {
+    const cron = c.req.query("cron");
+    return keysetPage<typeof schema.cronRuns.$inferSelect>(
       c.get("deps"),
       schema.cronRuns,
       "cron-runs",
-      applyScope(c.get("scope"), schema.cronRuns.code, undefined),
+      and(applyScope(c.get("scope"), schema.cronRuns.code, undefined), cron ? eq(schema.cronRuns.cron, cron) : undefined),
       {
         max: page.maxPageSize,
         pageToken: page.pageToken,
         order: { expr: sql`${schema.cronRuns.startedAt}`, value: (r) => +new Date(r.startedAt) },
       },
-    ),
+    );
+  },
 });

@@ -22,7 +22,14 @@ test("an employee asks for a wrong day to be corrected, and their manager approv
   // Every day in the month list carries its own correction affordance, named after the day it fixes - so a
   // request can never be filed against the row above the one that was clicked.
   const correct = employee.getByRole("button", { name: /^Request a correction for/ });
-  await expect(correct.first()).toBeAttached();
+  // Only days that have happened carry one (a correction for tomorrow is refused), so on the 1st - when the
+  // month's only rows can be the holidays still ahead in it - the month before is where the days are.
+  const previous = employee.getByRole("button", { name: "Previous month" });
+  await expect(previous).toBeVisible({ timeout: 30_000 });
+  await expect(async () => {
+    if (!(await correct.count())) await previous.click();
+    await expect(correct.first()).toBeAttached({ timeout: 5_000 });
+  }).toPass({ timeout: 45_000 });
   await correct.first().click();
 
   const dialog = employee.getByRole("dialog");

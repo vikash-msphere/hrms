@@ -17,9 +17,9 @@ import { buildIcs, downloadIcs } from "@/lib/ics";
 import { DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
 import {
   addDays, awayPerDay, coverOf, daysApart, dmy, expandByDay, gridCells, groupRuns, halfLabel, longDate,
-  monthDaysOf, monthLabelOf, monthStart, shortName, thinDays, ymOf, ymdUtc, type CalEntry,
+  monthDaysOf, monthLabelOf, monthOf, monthStart, shortName, thinDays, ymOf, ymdUtc, type CalEntry,
 } from "@/lib/leaveCalendar";
-import { todayStr } from "@/lib/orgDay";
+import { thisMonthStr, todayStr } from "@/lib/orgDay";
 import type { Me, Employee, Department, LeaveRequest, LeaveType, LeaveBalance, Holiday, Event, Celebration, RemoteWorkRequest } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -72,7 +72,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
     // holiday calendar's "open this day" is one), and a day names its month - without this those links
     // landed on the CURRENT month, which is never the month the reader clicked.
     const m = readUrlQuery("m") ?? readUrlQuery("d")?.slice(0, 7);
-    return m && /^\d{4}-\d{2}$/.test(m) ? new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7) - 1, 1)) : monthStart(new Date());
+    return monthOf(m && /^\d{4}-\d{2}$/.test(m) ? m : thisMonthStr());
   });
   const [dept, setDept] = useState(() => readUrlQuery("dept") ?? "all");
   const [typeFilter, setTypeFilter] = useState(() => readUrlQuery("type") ?? "all");
@@ -300,14 +300,14 @@ export default function LeaveCalendar({ me }: { me: Me }) {
   const selectDay = useCallback((ymd: string | null) => {
     setSelected(ymd);
     // A day outside the visible month brings the month with it, so the panel never describes an off-screen day.
-    if (ymd && ymd.slice(0, 7) !== ymOf(cursor) && view !== "quarter") setCursor(new Date(Date.UTC(+ymd.slice(0, 4), +ymd.slice(5, 7) - 1, 1)));
+    if (ymd && ymd.slice(0, 7) !== ymOf(cursor) && view !== "quarter") setCursor(monthOf(ymd));
   }, [cursor, view]);
   const goMonth = useCallback((delta: number) => {
     const next = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + delta, 1));
     setCursor(next);
     setSelected(today.slice(0, 7) === ymOf(next) ? today : ymdUtc(next));
   }, [cursor, today]);
-  const goToday = () => { setCursor(monthStart(new Date())); setSelected(today); };
+  const goToday = () => { setCursor(monthOf(today)); setSelected(today); };
   const requestFor = (from: string, to: string) => setDraft({ from, to });
 
   // ---- Thin cover, as an alert list rather than a month of strips to eyeball ------------------------------

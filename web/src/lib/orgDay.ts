@@ -77,6 +77,11 @@ export const todayStr = (): string => localDay(new Date().toISOString(), orgTz);
 export const orgDayOf = (at: Date | number | string): string =>
   localDay(typeof at === "string" ? at : new Date(at).toISOString(), orgTz);
 
+/** `orgDayOf` for a row's optional timestamp (`create_time`, `update_time`): "" when there is none. Not
+ *  `stamp.slice(0, 10)` - that is the UTC day, which east of UTC is yesterday for the first hours of every day
+ *  and files the first hours of every month under the month before. */
+export const stampDay = (stamp?: string | null): string => (stamp ? orgDayOf(stamp) : "");
+
 /** The org-local day `offsetDays` from today. Negative looks back. */
 export const orgDayFromToday = (offsetDays: number): string =>
   localDay(new Date(Date.now() + offsetDays * 86_400_000).toISOString(), orgTz);

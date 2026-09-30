@@ -49,8 +49,12 @@ test("an approved absence is drawn on the calendar, filtered, and exported", asy
   await hr.getByRole("button", { name: "Next month" }).click();
   await hr.getByRole("button", { name: "Today", exact: true }).click();
   // `exact`: the page also carries a print-only "Leave · <month>" caption, which is hidden on screen.
-  const thisMonth = new Date().toLocaleString("en-US", { month: "long", year: "numeric" });
-  await expect(hr.getByText(thisMonth, { exact: true })).toBeVisible();
+  // "Today" is the ORG's day (lib/orgDay), in a timezone this spec does not own - neither the machine's clock
+  // nor UTC names its month in the hours either side of a month end. So the month it lands on must be one it
+  // is "now" in somewhere on Earth (UTC-12 to UTC+14), which is every org's month and never last month's.
+  const monthIn = (timeZone: string) => new Date().toLocaleString("en-US", { month: "long", year: "numeric", timeZone });
+  const nowMonths = [...new Set([monthIn("Etc/GMT+12"), monthIn("Pacific/Kiritimati")])];
+  await expect(hr.getByText(new RegExp(`^(${nowMonths.join("|")})$`))).toBeVisible();
 
   // Cancelled, not purged: a filed request is never deleted (services/leaveRequests.ts - the three decisions
   // consume or release the balance a create reserved), so `purge` could only ever be a 403 here, and the

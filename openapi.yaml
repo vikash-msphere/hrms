@@ -5956,6 +5956,10 @@ paths:
       parameters:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
+        - in: query
+          name: cron
+          schema: { type: string }
+          description: "One trigger's runs only, named by its cron expression exactly as registered (for example `0 2 * * *`)."
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }

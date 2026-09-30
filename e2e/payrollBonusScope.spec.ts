@@ -72,8 +72,16 @@ test("switching a bonus's scope recomputes who it reaches and what it costs, bef
   // "Award" inside the dialog; "Award bonus" is the page button that opened it.
   await form.getByRole("button", { name: "Award", exact: true }).click();
   const confirmDialog = page.getByRole("dialog").filter({ hasText: /Award this bonus to/ });
-  await expect(confirmDialog.getByText(`Award this bonus to ${deptCount} ${deptCount === 1 ? "person" : "people"}?`)).toBeVisible({ timeout: 15_000 });
-  await expect(confirmDialog.getByText(`₹${(1000 * deptCount).toLocaleString("en-US")} in total`)).toBeVisible();
+  // Read off the checkpoint itself, and held to the department's size rather than to the number read a
+  // moment ago: both are counted off the live roster, and a hiring spec filing into this department between
+  // the two moves them together (11 on the form, 12 by the confirm, once). What must hold is that it is this
+  // department's headcount - not the company's - and that the total is that headcount times the amount.
+  const heading = confirmDialog.getByRole("heading", { name: /^Award this bonus to \d+ (person|people)\?$/ });
+  await expect(heading).toBeVisible({ timeout: 15_000 });
+  const confirmed = Number(/to (\d+)/.exec(await heading.innerText())![1]);
+  expect(Math.abs(confirmed - deptCount), "the checkpoint counts the department the form counted").toBeLessThanOrEqual(2);
+  expect(confirmed).toBeLessThan(companyCount);
+  await expect(confirmDialog.getByText(`₹${(1000 * confirmed).toLocaleString("en-US")} in total`)).toBeVisible();
   await confirmDialog.getByRole("button", { name: "Cancel", exact: true }).click();
 
   // One employee: the per-person preview line disappears entirely rather than reading "× 1 person" - a

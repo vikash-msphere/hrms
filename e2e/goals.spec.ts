@@ -9,7 +9,7 @@ import { gotoRoute, purge, test, expect, toast } from "./fixtures";
 test("a goal is created, its progress moved, and it completes", async ({ as }) => {
   // Longer than the retry near the end budgets itself - a default 30s test timeout shorter than that inner
   // window kills it mid-retry and reports it as the whole TEST timing out.
-  test.setTimeout(90_000);
+  test.setTimeout(150_000);
   const page = await as("manager");
   const title = `E2E goal ${Date.now()}`;
 
@@ -53,13 +53,18 @@ test("a goal is created, its progress moved, and it completes", async ({ as }) =
   await expect(detail.getByText(/Completed|100%/).first()).toBeVisible();
 
   await page.keyboard.press("Escape");
+  await expect(detail).toHaveCount(0, { timeout: 30_000 });
+  // The closed drawer drops its history entry with an async `history.back()`, and a reload issued before that
+  // lands can come up on the entry UNDER it - `/goals/<id>`, which opens the drawer again. So wait for the
+  // drop, and read from cold by address rather than by reloading whichever entry happens to be current.
+  await expect.poll(() => page.evaluate(() => (history.state as { hrmsDialog?: boolean } | null)?.hrmsDialog === true), { timeout: 30_000 }).toBe(false);
   // And the closed goal reads as complete on the page behind it - read from cold, not trusted to the list's
   // own in-place update: closing the detail can leave the row behind it showing an in-flight optimistic state
   // from partway through the two saves above rather than the settled one, under load.
   await expect(async () => {
-    await page.reload();
+    await gotoRoute(page, "goals", "Goals");
     await expect(page.locator("div.shadow-card, tbody tr, li").filter({ hasText: title }).last()).toContainText(/Completed|100%/, { timeout: 10_000 });
-  }).toPass({ timeout: 30_000 });
+  }).toPass({ timeout: 60_000 });
   await purge(page, await goalPath(page, title));
 });
 
