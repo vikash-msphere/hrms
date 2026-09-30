@@ -96,12 +96,21 @@ function useFillHeight() {
 // Opening writes the id into the route path, so the task on screen has a URL to paste at somebody: the inbound
 // half of that contract (`useDeepOpen`, `/boards/<cardId>` from the activity feed and notifications) has
 // always existed, while nothing ever wrote it, which is why no task in this app has been linkable.
-function useOpenCard(openId: string | undefined, cards: CardT[]) {
+//
+// A saved edit's answer goes straight into the store before the reload. Without it the tile kept the etag from
+// before the save until the re-read landed, so moving the task in that window (edit, then plan it into the
+// sprint from the tile's menu) was refused with a 409 for a row nobody else had touched.
+function useOpenCard(openId: string | undefined, cards: CardT[], setRows: (updater: (prev: CardT[]) => CardT[]) => void, reload: () => void) {
   const [editing, setEditing] = useState<CardT | null>(null);
   const openCard = useCallback((c: CardT) => { setEditing(c); setRouteRecord(idOf(c.path)); }, []);
   const closeCard = useCallback(() => { setEditing(null); setRouteRecord(null); }, []);
+  const savedCard = useCallback((saved?: CardT) => {
+    closeCard();
+    if (saved) setRows((prev) => prev.map((c) => (c.path === saved.path ? saved : c)));
+    reload();
+  }, [closeCard, setRows, reload]);
   useDeepOpen(openId, cards, openCard);
-  return { editing, openCard, closeCard };
+  return { editing, openCard, closeCard, savedCard };
 }
 
 const NONE = "__none"; // lane key for cards with no assignee/goal/class/swimlane
@@ -570,7 +579,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   };
 
   const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
-  const { editing, openCard, closeCard } = useOpenCard(openId, cards);
+  const { editing, openCard, closeCard, savedCard } = useOpenCard(openId, cards, setRows, reload);
   // The three REFERENCE lists a board draws labels from, read only once the cards prove they are needed. A
   // grid whose cards carry no goal never names a goal, so the goals list is not worth a page of rows; the same
   // holds for assignees and departments. The card composer is the exception - it must offer everyone, every
@@ -895,7 +904,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
           empty list - could never render on the one dialog they were for. Without the second, "Me" was missing
           from the Assignee row exactly where somebody files work they are about to pick up. */}
       {addTo && <CardDialog board={board} column={addTo} employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onClose={() => setAddTo(null)} onSaved={() => { setAddTo(null); reload(); }} />}
-      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} queue={screenQueue} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
+      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} queue={screenQueue} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={savedCard} />}
     </TooltipProvider>
   );
 }
@@ -1111,11 +1120,14 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   /** The caller, for "assign to me". */
   meId?: string | null;
   onClose: () => void;
-  onSaved: () => void;
+  /** `saved` is the row an edit's PATCH answered with (absent for a create or a delete): the caller puts it in
+   *  the store so the tile holds the new etag at once, not only after the reload lands. */
+  onSaved: (saved?: CardT) => void;
 }) {
   const { toast } = useToast();
   const confirm = useConfirm();
   const editing = !!card;
+  const savedRow = useRef<CardT | undefined>(undefined);
   // Named off the employee list the dialog already holds for its pickers - no read for one line of text.
   const reporterName = useMemo(() => {
     const id = card?.reporter ? idOf(card.reporter) : "";
@@ -1412,6 +1424,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
         // Same reason as act(): a second Save from a dialog left open would otherwise send the etag from
         // before the first one.
         setEtag(saved.etag);
+        savedRow.current = saved;
         setConflict(null); // the save went through; whatever the banner was showing is now the past
       } else {
         await create<CardT>("cards", { board: board.path, column_key: column, ...body, ...(initialTodos.length ? { initial_todos: initialTodos } : {}) });
@@ -1547,7 +1560,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
       canSubmit={!!title.trim() && canEdit}
       whyNot={!canEdit ? "You don't have access to change this task." : "Give the task a title."}
       onSubmit={save}
-      onSaved={onSaved}
+      onSaved={() => onSaved(savedRow.current)}
       cancelLabel={editing ? "Close" : "Cancel"}
       submitAccess={(b) => (editing ? <AccessAction label="Edit task" can={can}>{b}</AccessAction> : <AccessAction create label="Create a task">{b}</AccessAction>)}
       footerStart={editing ? (
@@ -2362,11 +2375,11 @@ function CfdChart({ metrics }: { metrics: BoardMetrics }) {
 // views, URL state, mobile cards, and cursor-following "Load more". Row click opens the same task dialog.
 
 function BoardListTab({ board, me }: { board: Board; me: Me }) {
-  const { rows: allCards, reload, hasMore, loadMore } = useCollection<CardT>("cards");
+  const { rows: allCards, setRows, reload, hasMore, loadMore } = useCollection<CardT>("cards");
   const { toast } = useToast();
   const boardId = idOf(board.path);
   const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
-  const { editing, openCard, closeCard } = useOpenCard(undefined, cards);
+  const { editing, openCard, closeCard, savedCard } = useOpenCard(undefined, cards, setRows, reload);
   // What ‹ › and j/k walk in the dialog: the rows the TABLE is showing, in the order it sorted them. The
   // filtering and the sort live inside DataTable, so the page cannot work this out for itself - it is handed
   // over. Without it the dialog stepped through every card on the board, in read order, while the table in
@@ -2603,7 +2616,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
         emptyTitle="No tasks on this board"
         emptyDescription="Tasks you add on the Board tab show up here as a sortable, exportable list."
       />
-      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} queue={tableRows} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
+      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} queue={tableRows} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={savedCard} />}
     </TooltipProvider>
   );
 }
@@ -2630,7 +2643,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const [busy, setBusy] = useState(false);
 
   const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
-  const { editing, openCard, closeCard } = useOpenCard(openId, cards);
+  const { editing, openCard, closeCard, savedCard } = useOpenCard(openId, cards, setRows, reload);
   // Reference lists on the same rule as the board grid: read when the cards or the composer actually need them.
   const composing = addBacklog || !!editing;
   const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: composing || cards.some((c) => c.assignee) });
@@ -2972,7 +2985,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
       {/* `boardCards` and `meId` on the create path for the reason the kanban grid gives: the duplicate-title
           warning, the WIP note and the "Me" shortcut are all for the moment a task is filed. */}
       {addBacklog && <CardDialog board={board} column={board.columns[0]?.key} employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onClose={() => setAddBacklog(false)} onSaved={() => { setAddBacklog(false); reload(); }} />}
-      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} queue={screenQueue} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
+      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} queue={screenQueue} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={savedCard} />}
     </TooltipProvider>
   );
 }

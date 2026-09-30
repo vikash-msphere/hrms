@@ -79,6 +79,14 @@ describe("keyset pagination walks an index", () => {
     expect(p, `${table} by ${owner} planned as: ${p}`).not.toMatch(/TEMP B-TREE/);
   });
 
+  // One trigger's runs (routes/cronRuns.ts `cron`): how the Operations page reads each card's latest run, among
+  // many more runs of the other triggers.
+  it("cron_runs pages one trigger's runs without sorting", async () => {
+    const p = await plan("select * from `cron_runs` where `cron` = 'x' order by `started_at` desc, `uuid` desc limit 2");
+    expect(p, `cron_runs by cron planned as: ${p}`).not.toMatch(/TEMP B-TREE/);
+    expect(p).toMatch(/cron_runs_cron_started_idx/);
+  });
+
   // A month of one person's attendance is the shape the app asks for most on that table, and the one that
   // grows without bound: every punch they have ever made used to be read and sorted to render one month.
   it("attendance reads a date window as a range, not a scan of the person's whole history", async () => {

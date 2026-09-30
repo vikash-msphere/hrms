@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { UserRound } from "lucide-react";
 import { get, patch } from "@/api";
 import { isConflict } from "@/lib/formError";
+import { changedFields } from "@/lib/mergePatch";
 import type { PersonalDetails } from "@/types";
 import { formatDate } from "@/lib/utils";
 import { todayStr } from "@/lib/orgDay";
@@ -64,18 +65,21 @@ export function EmployeeProfilePersonal({ employeeId, canEdit, onSaved }: { empl
     void load();
   }, [load]);
 
+  // What the form was filled with when it opened: the save sends only what differs from it (lib/mergePatch.ts).
+  const shown = useRef<PersonalDetails>({});
   function openEdit() {
-    setForm(data ?? {});
+    shown.current = data ?? {};
+    setForm(shown.current);
     setOpen(true);
   }
   const set = (patch: Partial<PersonalDetails>) => setForm((f) => ({ ...f, ...patch }));
 
   async function save() {
-    // Save the full record so the sibling contact/emergency fields are preserved - with the version it was
-    // read at, so a whole-record write cannot quietly undo whatever the other dialog on this person wrote
-    // while this one was open.
+    // Only the keys changed here, with the version it was read at - the sibling contact/emergency fields are
+    // preserved by the merge patch leaving omitted keys alone, not by writing them back (see
+    // EmployeePersonalDetails for what the whole-record write did after a 409).
     try {
-      const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form, data?.etag);
+      const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, changedFields(form, shown.current), data?.etag);
       writes.current++;
       setData(updated);
       toast({ title: "Personal details saved", variant: "success" });

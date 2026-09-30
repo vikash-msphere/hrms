@@ -147,6 +147,16 @@ describe("attendance regularization: whole-day correction supersedes existing pu
       ],
     })).rejects.toThrow();
   });
+
+  // A correction fixes a day already worked. Accepted for a day still ahead, its approval wrote punches onto
+  // tomorrow and every attendance view showed a day nobody had clocked as worked.
+  it("refuses a correction for a day that has not happened yet", async () => {
+    const actor = await seedActor();
+    await expect(createRegularization(deps, actor, {
+      date: "2099-01-01",
+      sessions: [{ clock_in: "2099-01-01T03:30:00.000Z", clock_out: "2099-01-01T12:30:00.000Z" }],
+    })).rejects.toThrow(/hasn't happened yet/);
+  });
 });
 
 // The date window and the page are both decided in SQL now. They used to be applied in JS over the whole

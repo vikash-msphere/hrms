@@ -92,9 +92,19 @@ test("a missing section is nudged, jumped to, filled in, and the nudge goes away
   // what you finish makes it impossible to see that you are nearly done - so what proves the save landed is
   // the tile's own state and the score, not the tile disappearing.
   await expect(page.getByRole("button", { name: "Emergency contact" }).getByText("Added")).toBeVisible({ timeout: 30_000 });
+  // And the score moved WITH it: the meter agrees with the tiles under it. Not "higher than before" - other
+  // specs fill and empty other sections of this same seeded person while this runs (identity, contact), so
+  // the score taken at the top can move either way for reasons that are not this save.
   const after = page.getByRole("progressbar", { name: "Profile completeness" });
   if (await after.count()) {
-    expect(Number((await after.getAttribute("aria-valuenow")) ?? "-1")).toBeGreaterThan(scored);
+    const card = page.locator("div").filter({ has: after }).filter({ has: page.getByRole("button", { name: "Emergency contact" }) }).last();
+    await expect.poll(async () => {
+      const tiles = card.getByRole("button").filter({ hasText: /Added|Set up|Not added yet|Not set up yet/ });
+      const total = await tiles.count();
+      const done = await tiles.filter({ hasText: /Added$|Set up$/ }).filter({ hasNotText: /Not / }).count();
+      const shown = Number((await after.getAttribute("aria-valuenow")) ?? "-1");
+      return total > 0 && shown === Math.round((done / total) * 100);
+    }, { timeout: 30_000 }).toBe(true);
   } else {
     // Nothing left to nudge about: the meter hides itself rather than sitting at 100%, which is the other
     // correct answer here.

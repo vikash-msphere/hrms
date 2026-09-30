@@ -3,7 +3,7 @@ import { allocFlatCode, allocOwnedCode } from "./services/codeAlloc";
 // whether it landed before the claim is released. Same shape as services/cards.ts#rollRecurringCards.
 import { genId } from "./lib/idCodec";
 import { systemActor } from "./lib/systemActor";
-import { asc, eq, and, or, ne, isNull, isNotNull, lte, lt, gte, sql, inArray } from "drizzle-orm";
+import { asc, eq, and, or, ne, isNull, isNotNull, lte, lt, gte, sql, inArray, type SQL } from "drizzle-orm";
 import * as schema from "./db/schema";
 import type { Deps } from "./deps";
 import { processPayslipRunJob } from "./services/payroll";
@@ -66,20 +66,47 @@ const FAST_TICK_MS = 5 * 60_000;
 /**
  * Which of the fast tick's subtasks have anything to do, from ONE statement. Most ticks are idle, and an idle
  * subtask still costs CPU to build its queries and map their empty results. The predicates are the ones each
- * subtask selects on, so a `false` here is a subtask that would have found nothing; a `true` only means it
- * runs and decides for itself (a disabled due post, say, is still skipped inside the publish loop).
+ * subtask acts on, so a `false` here is a subtask that would have found nothing; a `true` only means it runs
+ * and decides for itself (a due post can still be held for moderation inside the publish loop). A disabled draft
+ * is left out here because the publish loop skips it, and a probe that counted it would call every tick busy for
+ * as long as it sits there - and a busy tick is a recorded one (runScheduled).
+ *
+ * An idle tick is also the case where every EXISTS here finds nothing, and an EXISTS that finds nothing has read
+ * every row its plan can reach. So each one is answered from a partial index holding only the rows it asks about -
+ * `announcements_due_idx` (drafts waiting to go out), `jobs_queued_idx` (the queue), `cron_runs_running_idx` (runs
+ * in flight) - and an idle tick reads a handful of index entries however large those tables grow, which
+ * test/fastTickProbe.test.ts measures. The terms are spelled exactly as the indexes' own, because SQLite uses a
+ * partial index only for a query that repeats them.
+ *
+ * The due-job check is three EXISTS: `run_after is null or run_after <= now` cannot bound an index range, so as one
+ * predicate it reads every queued job, delayed ones included, while each half alone is a seek. Separate EXISTS are
+ * planned separately, so one costly-looking check cannot push the planner into scanning the table for all three.
  */
-async function fastTickWork(deps: Deps): Promise<{ announcements: boolean; jobs: boolean; stuckRuns: boolean }> {
-  const now = +deps.clock.now();
+export function fastTickProbe(now: number): SQL {
   const a = schema.announcements;
   const j = schema.jobs;
   const c = schema.cronRuns;
-  const [row] = await deps.db.all<{ announcements: number; jobs: number; stuckRuns: number }>(sql`select
-    exists(select 1 from ${a} where ${a.published} = 0 and ${a.deleteTime} is null and ${a.heldAt} is null and ${a.publishTime} <= ${now}) as announcements,
-    exists(select 1 from ${j} where (${j.status} = 'queued' and (${j.runAfter} is null or ${j.runAfter} <= ${now}))
-      or (${j.status} = 'running' and ${j.updatedAt} < ${now - STALE_RUNNING_MS})) as jobs,
-    exists(select 1 from ${c} where ${c.status} = 'running' and ${c.startedAt} < ${now - STUCK_CRON_RUN_MS}) as stuckRuns`);
-  return { announcements: !!row?.announcements, jobs: !!row?.jobs, stuckRuns: !!row?.stuckRuns };
+  return sql`select
+    exists(select 1 from ${a} where ${a.published} = 0 and ${a.deleteTime} is null and ${a.heldAt} is null and ${a.publishTime} <= ${now} and ${a.disabled} = 0) as announcements,
+    (exists(select 1 from ${j} where ${j.status} = 'queued' and ${j.runAfter} is null)
+      or exists(select 1 from ${j} where ${j.status} = 'queued' and ${j.runAfter} <= ${now})
+      or exists(select 1 from ${j} where ${j.status} = 'running' and ${j.updatedAt} < ${now - STALE_RUNNING_MS})) as jobs,
+    exists(select 1 from ${c} where ${c.status} = 'running' and ${c.startedAt} < ${now - STUCK_CRON_RUN_MS}) as stuckRuns`;
+}
+
+/** Which of the fast tick's subtasks have work (see fastTickProbe). */
+type FastTickWork = { announcements: boolean; jobs: boolean; stuckRuns: boolean };
+
+// A failed probe reports work everywhere: the tick then records itself and runs every subtask, which is the tick
+// as it would be with no probe at all.
+async function fastTickWork(deps: Deps): Promise<FastTickWork> {
+  try {
+    const [row] = await deps.db.all<{ announcements: number; jobs: number; stuckRuns: number }>(fastTickProbe(+deps.clock.now()));
+    return { announcements: !!row?.announcements, jobs: !!row?.jobs, stuckRuns: !!row?.stuckRuns };
+  } catch (err) {
+    console.error("cron fast-tick probe failed (running every subtask)", err);
+    return { announcements: true, jobs: true, stuckRuns: true };
+  }
 }
 
 // A run still `running` this long after it started was killed without throwing: the only way out of
@@ -97,9 +124,10 @@ async function reclaimStuckCronRuns(deps: Deps): Promise<number> {
   return rows.length;
 }
 
-// Each tick records a cron_runs row (running -> done/error + duration + summary) so the schedule is
-// observable. Split into start/finish so the manual trigger can return the "running" row immediately and
-// finish the (potentially long, all-employees) work in the background via ctx.waitUntil.
+// A tick records a cron_runs row (running -> done/error + duration + summary) so the schedule is observable;
+// runScheduled says which ticks record none. Split into start/finish so the manual trigger can return the
+// "running" row immediately and finish the (potentially long, all-employees) work in the background via
+// ctx.waitUntil.
 
 // Create the cron_runs row in "running" state and return its id + start time. Cheap; safe to await in-request.
 export async function startCronRun(cron: string, deps: Deps): Promise<{ runId: string; start: number }> {
@@ -112,10 +140,11 @@ export async function startCronRun(cron: string, deps: Deps): Promise<{ runId: s
 }
 
 // Run the actual work for an already-started run and stamp done/error. Safe to run detached (waitUntil): it
-// swallows nothing silently - the error is recorded on the row - but it does not rethrow when detached.
-export async function finishCronRun(cron: string, deps: Deps, runId: string, start: number, rethrow = true): Promise<void> {
+// swallows nothing silently - the error is recorded on the row - but it does not rethrow when detached. `work` is
+// the fast tick's probe answer when the caller already asked (runScheduled does, to decide whether to record).
+export async function finishCronRun(cron: string, deps: Deps, runId: string, start: number, rethrow = true, work?: FastTickWork): Promise<void> {
   try {
-    const { summary, failures } = await dispatchCron(cron, deps);
+    const { summary, failures } = await dispatchCron(cron, deps, work);
     const end = +deps.clock.now();
     // A tick that lost a subtask is NOT a good tick. Every subtask is best-effort (one failure must not cost
     // the other twelve), which used to mean a failed accrual still stamped `done` with a zero count - green in
@@ -143,14 +172,23 @@ export async function finishCronRun(cron: string, deps: Deps, runId: string, sta
 }
 
 // Scheduled-handler entry point: start + finish, fully awaited (the platform gives the scheduled worker its
-// own lifetime). Returns the row id.
-export async function runScheduled(cron: string, deps: Deps): Promise<string> {
+// own lifetime). Returns the row id, or null for a five-minute tick that had nothing to do.
+//
+// A FIVE-MINUTE TICK WITH NOTHING TO DO RECORDS NOTHING. Most of them find nothing, and a recorded tick writes
+// about a dozen rows (the run, its index entries, a code, the change stamp on insert and again on finish) and moves
+// every list's ETag (http/listEtag.ts), all to say that nothing happened. So the probe is asked first, and the tick
+// records itself only when there is work. Only a tick doing work can be stopped part-way through it, so the
+// `running` row the stuck-run reclaim depends on still exists whenever it matters. A failed probe counts as work
+// (fastTickWork), and a manual `cron-runs:run` is always recorded (routes/cronTrigger.ts).
+export async function runScheduled(cron: string, deps: Deps): Promise<string | null> {
+  const work = cron === FAST_CRON ? await fastTickWork(deps) : undefined;
+  if (work && !work.announcements && !work.jobs && !work.stuckRuns) return null;
   const { runId, start } = await startCronRun(cron, deps);
   // The tick names itself for the whole run: every audit entry it writes is a scheduled job's, not a person's,
   // and one trace ties the night's writes together the way a request's does for a human act.
   deps.actingAs = { kind: "cron", name: cron, ref: `cron-runs/${runId}` };
   deps.trace ??= runId;
-  await finishCronRun(cron, deps, runId, start);
+  await finishCronRun(cron, deps, runId, start, true, work);
   return runId;
 }
 
@@ -182,14 +220,11 @@ function subtasks(deps: Deps) {
   return { run, failures };
 }
 
-async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record<string, number>; failures: string[] }> {
+async function dispatchCron(cron: string, deps: Deps, probed?: FastTickWork): Promise<{ summary: Record<string, number>; failures: string[] }> {
   const { run, failures } = subtasks(deps);
   if (cron === FAST_CRON) {
-    // A failed probe runs everything, which is the tick as it was before the probe existed.
-    const work = await fastTickWork(deps).catch((err) => {
-      console.error("cron fast-tick probe failed (running every subtask)", err);
-      return { announcements: true, jobs: true, stuckRuns: true };
-    });
+    // A scheduled tick has asked already (runScheduled); a manual run asks here.
+    const work = probed ?? (await fastTickWork(deps));
     // Scheduled board posts ride the fast tick, not the nightly one: an announcement set for 09:00 has to land
     // at 09:00, give or take the tick. Best-effort - a failure here must not stop the job queue draining.
     const announcementsPublished = work.announcements ? await run("publishDueAnnouncements", () => publishDueAnnouncements(deps)) : 0;

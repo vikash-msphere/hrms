@@ -87,11 +87,35 @@ const toastVariants = cva(
   }
 );
 
+/**
+ * Escape belongs to the layer the reader is IN.
+ *
+ * Radix wraps every toast in a dismissable layer, and a toast mounts after whatever dialog is open, so it is the
+ * highest layer and takes the first Escape. Nothing the reader did asked for that: the bell's "10 new
+ * notifications" arrives on its own clock, and Escape pressed from inside a dialog then dismissed the toast
+ * and left the dialog exactly where it was. So when focus is inside a dialog or sheet, the press goes to that
+ * layer's own close button (the `[data-history-close]` the Back press uses too - useHistoryClose.ts), which
+ * reaches the same onOpenChange(false), guards included, and the toast is left to expire on its timer. A
+ * layer with no such button, or focus anywhere else, keeps the library's behaviour.
+ */
+function escapeToFocusedLayer(event: KeyboardEvent) {
+  const layer = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('[role="dialog"], [role="alertdialog"]');
+  const close = layer?.querySelector<HTMLElement>("[data-history-close]");
+  if (!close) return;
+  event.preventDefault();
+  close.click();
+}
+
 const Toast = React.forwardRef<
   React.ElementRef<typeof ToastPrimitives.Root>,
   React.ComponentPropsWithoutRef<typeof ToastPrimitives.Root> & VariantProps<typeof toastVariants>
->(({ className, variant, ...props }, ref) => (
-  <ToastPrimitives.Root ref={ref} className={cn(toastVariants({ variant }), className)} {...props} />
+>(({ className, variant, onEscapeKeyDown, ...props }, ref) => (
+  <ToastPrimitives.Root
+    ref={ref}
+    className={cn(toastVariants({ variant }), className)}
+    onEscapeKeyDown={(e) => { onEscapeKeyDown?.(e); if (!e.defaultPrevented) escapeToFocusedLayer(e); }}
+    {...props}
+  />
 ));
 Toast.displayName = ToastPrimitives.Root.displayName;
 

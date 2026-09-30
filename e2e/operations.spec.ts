@@ -17,6 +17,8 @@ test("a scheduled task is run by hand, and the page reads back the tick", async 
   // The job drainer: the safest task to force, and the one whose absence explains most "where is my PDF"
   // questions - it is what turns a published payroll run into downloadable payslips.
   await expect(page.getByText("Job drainer")).toBeVisible();
+  // Each card reads its own latest run, so the count below waits until all three have answered.
+  await expect(page.getByText("Last run", { exact: true })).toHaveCount(3);
   const neverRun = page.getByText("Never run");
   const unrunBefore = await neverRun.count();
   const drainer = page.getByRole("button", { name: "Run now" }).first();
@@ -34,8 +36,8 @@ test("a scheduled task is run by hand, and the page reads back the tick", async 
   await expect(page.getByText("Daily maintenance")).toBeVisible();
   await expect(page.getByRole("button", { name: "Run now" })).toHaveCount(3);
 
-  // Refresh re-reads both lists in place - the page never navigates, so a broken reload looks like a page
-  // that simply never updates again.
+  // Refresh re-reads every card's run and the job list in place - the page never navigates, so a broken reload
+  // looks like a page that simply never updates again.
   await page.getByRole("button", { name: "Refresh" }).first().click();
   await expect(page.getByText("Scheduled tasks")).toBeVisible();
 });

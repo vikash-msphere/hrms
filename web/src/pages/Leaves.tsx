@@ -8,7 +8,7 @@ import { useApprovals } from "@/lib/approvals";
 import { leaveBalanceOf, leaveDecisionContext, leaveOverlapCount, leaveSummary } from "@/lib/leaveApproval";
 import { useIntent } from "@/lib/intent";
 import { formatDate, idOf, cn, personIndex, personName, round2 } from "@/lib/utils";
-import { todayStr, daysBetweenYmd } from "@/lib/orgDay";
+import { stampDay, todayStr, daysBetweenYmd } from "@/lib/orgDay";
 import { daysSince, fmtDaysCount, monthKey, monthLabel, ymd } from "@/lib/tableDerive";
 import { leaveColor } from "@/lib/leaveColors";
 import { readUrlQuery, writeUrlQuery } from "@/lib/urlQuery";
@@ -699,11 +699,11 @@ export default function Leaves({ me }: { me: Me }) {
       const state = upper(r.state);
       // The reserve happens when the request is FILED, so that is the date the balance moved.
       if ((r.create_time ?? "") >= yearStart) {
-        entries.push({ on: (r.create_time ?? "").slice(0, 10), label: `Requested ${shortRange(r.start_date, r.end_date)}`, days: -(r.days || 0) });
+        entries.push({ on: stampDay(r.create_time), label: `Requested ${shortRange(r.start_date, r.end_date)}`, days: -(r.days || 0) });
       }
       // …and comes back when the request is refused or withdrawn.
       if ((state === "REJECTED" || state === "CANCELLED") && (r.update_time ?? "") >= yearStart) {
-        entries.push({ on: (r.update_time ?? "").slice(0, 10), label: `${state === "REJECTED" ? "Rejected" : "Cancelled"} ${shortRange(r.start_date, r.end_date)}`, days: r.days || 0 });
+        entries.push({ on: stampDay(r.update_time), label: `${state === "REJECTED" ? "Rejected" : "Cancelled"} ${shortRange(r.start_date, r.end_date)}`, days: r.days || 0 });
       }
     }
     for (const e of encashments) {
@@ -711,13 +711,13 @@ export default function Leaves({ me }: { me: Me }) {
       if (!e.employee || !me.employee_id || idOf(e.employee) !== me.employee_id) continue;
       // An encashment debits on APPROVAL (not when it is filed), so pending ones have not moved the balance.
       if (["APPROVED", "PAID"].includes(upper(e.state)) && (e.update_time ?? "") >= yearStart) {
-        entries.push({ on: (e.update_time ?? "").slice(0, 10), label: "Encashed", days: -(e.days || 0) });
+        entries.push({ on: stampDay(e.update_time), label: "Encashed", days: -(e.days || 0) });
       }
     }
     const mine = myAdjustments.filter((a) => a.leave_type && idOf(a.leave_type) === typeId);
     for (const a of mine) {
       if (a.kind === "correction" && (a.create_time ?? "") >= yearStart) {
-        entries.push({ on: (a.create_time ?? "").slice(0, 10), label: a.reason ? `Adjusted by HR: ${a.reason}` : "Adjusted by HR", days: a.days ?? 0 });
+        entries.push({ on: stampDay(a.create_time), label: a.reason ? `Adjusted by HR: ${a.reason}` : "Adjusted by HR", days: a.days ?? 0 });
       }
     }
     // An OPENING this year is where the history starts: the balance brought over from the system before HRMS,

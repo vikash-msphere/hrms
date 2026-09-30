@@ -104,8 +104,16 @@ test.describe("attendance views", () => {
 
     // The comparison is opt-in because it costs a second window of attendance - it is not read until it is
     // asked for, and the control says which window it would be comparing against.
+    //
+    // The strip only draws for a window with more than one day in it, so early in a month (the 1st has at most
+    // today) it is correctly absent - step back to a month that has days rather than asserting on the calendar.
     const compare = page.getByRole("button", { name: /^Compare with / });
-    await expect(compare).toBeVisible({ timeout: 30_000 });
+    const history = page.getByRole("button", { name: "Previous month" });
+    await expect(history).toBeVisible({ timeout: 30_000 });
+    await expect(async () => {
+      if (!(await compare.count())) await history.click();
+      await expect(compare).toBeVisible({ timeout: 5_000 });
+    }).toPass({ timeout: 45_000 });
     await expect(compare).toHaveAttribute("aria-pressed", "false");
     await compare.click();
     await expect(page.getByRole("button", { name: "Hide comparison" })).toBeVisible({ timeout: 30_000 });
@@ -262,7 +270,12 @@ test.describe("attendance views", () => {
     // read above does.
     // Inside the grid: the KPI tiles above it are buttons with a "·" in their names as soon as the person has
     // a clock-in, and the first of those is "On time", whose press switches the history to a filtered list.
-    const days = panel.getByRole("group", { name: "Days of the month" }).getByRole("button", { name: /·/ }).filter({ hasNotText: /Tick|Untick/ });
+    // And a day that OWES something: a holiday or a day off is not markable (the server refuses it, so the app
+    // offers no "Counts as" there) - the grid's first day was 2 Oct, Gandhi Jayanti, once the month turned.
+    const days = panel
+      .getByRole("group", { name: "Days of the month" })
+      .getByRole("button", { name: /^(?!.*· (Holiday|Worked - not a working day)\b).*·/ })
+      .filter({ hasNotText: /Tick|Untick/ });
     let opened = false;
     for (let back = 0; back < 6 && !opened; back++) {
       if (await days.count()) { await days.first().click(); opened = true; break; }

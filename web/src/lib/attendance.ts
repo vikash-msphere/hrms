@@ -160,6 +160,20 @@ export function zonedInstant(ymd: string, hhmm: string, tz: string): string {
   return new Date(drift === 0 ? first : first - drift * 60000).toISOString();
 }
 
+/**
+ * The `from=&to=` of a punch read covering ORG days `fromYmd`..`toYmd` inclusive: org midnight to the instant
+ * before the next org midnight. The reads used to bound the window at UTC midnights, which are not the org's -
+ * in Asia/Kolkata the first 5h30m of every window fell into the one before it, so a punch at 00:30 on the 1st
+ * (and every early punch on a window's first day) vanished from the history it belongs to, and the last
+ * day's took the next window's early hours instead.
+ */
+export function orgDaysWindow(fromYmd: string, toYmd: string, tz: string): string {
+  const dayAfter = new Date(Date.parse(`${toYmd}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+  const from = zonedInstant(fromYmd, "00:00", tz);
+  const to = new Date(Date.parse(zonedInstant(dayAfter, "00:00", tz)) - 1).toISOString();
+  return `from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+}
+
 export type DaySummary = {
   day: string;
   sessions: AttendanceSession[];
@@ -289,6 +303,11 @@ export function enumerateDays(fromYmd: string, toYmd: string): string[] {
 // (`trackedFromYmd`). It is not an absence, but it is still a row, so a correction or a day mark can be filed
 // against it from the grid.
 export type DayStatus = "open" | "present" | "late" | "left_early" | "late_early" | "half_day" | "insufficient" | "on_leave" | "half_day_leave" | "holiday" | "worked_off_day" | "absent" | "untracked";
+
+/** Whether a day OWES anything, so a day mark can re-value it. A holiday and a day off (worked or not) owe
+ *  nothing, and the server refuses a mark on either (services/attendanceDayMarks.ts#assertOwedDay) - so the
+ *  "Counts as" action is not offered on them, rather than offered and then refused. */
+export const owesDay = (status: DayStatus): boolean => status !== "holiday" && status !== "worked_off_day";
 /**
  * `status` is what the PUNCHES say the day was; `mark` is what HR decided it COUNTS as, where they have
  * decided. Both are kept, and the UI shows both, because a marked day is exactly the day somebody will later

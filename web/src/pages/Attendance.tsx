@@ -13,7 +13,7 @@ import { cn, idOf, formatDate, formatHHMM } from "@/lib/utils";
 import {
   summarizeByDay, buildAttendanceRows, statsOf, fmtDay, fmtHM, fmtHM24, fmtDuration, fmtDurationShort, describeCorrection,
   seedPunches, punchInstants, punchErrors, keptPunches, isOpenPunch, punchTotal, sameTimes, type PunchRow, type OpenAllowance, type PunchTarget,
-  localDay, trackedFromOf, localMinutes, zonedInstant, weekdayOf, hhmmToMin, signedDuration, STATUS_UI, leaveRangeOf, unpaidLeaveTypes,
+  localDay, orgDaysWindow, trackedFromOf, localMinutes, zonedInstant, weekdayOf, hhmmToMin, signedDuration, STATUS_UI, leaveRangeOf, unpaidLeaveTypes,
   type DayStatus, type AttendanceRow, type AttendanceSchedule, type LeaveRange, type WindowStats,
 } from "@/lib/attendance";
 import { useAttendanceWindow } from "@/hooks/useAttendanceWindow";
@@ -261,7 +261,7 @@ export default function Attendance({ me }: { me: Me }) {
   const loadPage = useCallback(async () => {
     const gen = ++pageGen.current;
     try {
-      const sessions = await listAllSessions(`attendance?from=${encodeURIComponent(`${fromYmd}T00:00:00.000Z`)}&to=${encodeURIComponent(`${toYmd}T23:59:59.999Z`)}`);
+      const sessions = await listAllSessions(`attendance?${orgDaysWindow(fromYmd, toYmd, tz)}`);
       if (gen !== pageGen.current) return false;
       setPageSessions(sessions);
     } catch (e) {
@@ -270,7 +270,7 @@ export default function Attendance({ me }: { me: Me }) {
       toast({ title: "Couldn't load attendance history", description: (e as Error).message, variant: "destructive" });
     }
     return true;
-  }, [fromYmd, toYmd, toast]);
+  }, [fromYmd, toYmd, tz, toast]);
 
   useEffect(() => { void loadRecent(); }, [loadRecent]);
   // Skeleton only when the window changes; the silent refresh after a clock action goes through loadPage

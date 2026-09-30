@@ -10,7 +10,7 @@ import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useRoute } from "@/router";
 import { formatDate, formatMoney, idOf, cn, round2 } from "@/lib/utils";
-import { addDaysYmd, orgDayOf, thisMonthStr, todayStr } from "@/lib/orgDay";
+import { addDaysYmd, orgDayOf, stampDay, thisMonthStr, todayStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { useTabActivity, markTabSeen } from "@/lib/tabActivity";
@@ -1309,7 +1309,8 @@ export default function Expenses({ me }: { me: Me }) {
     const byCat = new Map<string, number>();
     const byVendor = new Map<string, number>();
     for (const r of counted) {
-      const key = (r.incurred_on ?? r.create_time ?? "").slice(0, 7);
+      // `incurred_on` is already an org date; an undated expense files under the ORG day it was created.
+      const key = (r.incurred_on ?? stampDay(r.create_time)).slice(0, 7);
       const m = byMonth.get(key);
       if (m) m.total += r.amount || 0;
       const cat = r.category ? catName(r.category) : "Uncategorised";

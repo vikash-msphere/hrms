@@ -14,7 +14,8 @@ const bodySchema = z.object({ cron: z.string() }).strict();
 // queue now instead of waiting for the next tick). Mounted at the full colon path in index.ts (Hono's
 // collection mount does not bind a `:verb` without a preceding id). Super-only: the authz middleware
 // resolves this to the custom key `cron-runs.run`, which no role's grant names, so only super_admin
-// reaches it via the `**` wildcard. The same recording (a cron_runs row) happens as a real tick.
+// reaches it via the `**` wildcard. A manual run is always recorded (a cron_runs row), even when it finds
+// nothing to do: somebody asked for it and is waiting to see what happened.
 export const cronTrigger = new Hono<AppEnv>().post("/", async (c) => {
   const parsed = bodySchema.safeParse(await jsonBody(c));
   if (!parsed.success) throw invalidArgument("body must be { cron }");

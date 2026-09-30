@@ -40,19 +40,23 @@ let selfPops = 0;
 export const isSelfPop = (): boolean => selfPops > 0;
 
 // One settle per outstanding `back()`, oldest first: each popstate answers exactly one of them.
-const pendingBacks: (() => void)[] = [];
+const pendingBacks: ((landed: boolean) => void)[] = [];
 let listening = false;
-const onPop = () => pendingBacks[0]?.();
+const onPop = () => pendingBacks[0]?.(true);
 
-/** `history.back()`, announced - see `isSelfPop`. */
-function selfBack(): void {
+// How long an announced `back()` may take to land before it is given up on. Long on purpose - see selfBack.
+const BACK_DEADLINE_MS = 30_000;
+
+/** `history.back()`, announced - see `isSelfPop`. `onLanded` runs inside the popstate the step produces. */
+function selfBack(onLanded?: () => void): void {
   selfPops += 1;
   let settled = false;
-  const settle = () => {
+  const settle = (landed: boolean) => {
     if (settled) return;
     settled = true;
     clearTimeout(deadline);
     pendingBacks.splice(pendingBacks.indexOf(settle), 1);
+    if (landed) onLanded?.();
     // Lowered AFTER the whole dispatch, not inside it. Listeners run in the order they were added, and a
     // dialog that opened while the traversal was in flight - the rotated key's secret, minted by the press
     // that closed the confirm - added its listener after this one. Lowering the flag here handed that dialog
@@ -65,12 +69,14 @@ function selfBack(): void {
     window.addEventListener("popstate", onPop);
     listening = true;
   }
-  // A back() with nothing to go back to fires no popstate at all; without this the flag would stay up and a
-  // real back press would stop closing dialogs for the rest of the session. Generous, because it is not the
-  // normal path: every caller steps back off an entry `pushDialogEntry` added, so there is always one below
-  // and the pop always comes - but under load it can come late, and a deadline that expires first turns the
-  // app's own back into the reader's.
-  const deadline = setTimeout(settle, 3000);
+  // A back() with nothing to go back to fires no popstate at all, and without a deadline the flag would stay
+  // up until the reader's next press, which it would then swallow. That is not the normal path: every caller
+  // steps back off an entry `pushDialogEntry` added, so there is always one below and the pop always comes -
+  // but under load it comes LATE, and a deadline that expires first turns the app's own back into the
+  // reader's. It was 3s, and a busy browser took longer: the pop of a sprint form closed a moment earlier
+  // reached the task dialog opened after it, unflagged, and closed that as though Back had been pressed. So the
+  // deadline is sized for the missing pop, which costs one swallowed press at worst, never for the late one.
+  const deadline = setTimeout(() => settle(false), BACK_DEADLINE_MS);
   window.history.back();
 }
 
@@ -145,20 +151,13 @@ export function dropDialogEntry(token: number): void {
     // only when the app has moved off it; anything else - the reader navigated while the dialog was open, a
     // later popstate this listener happens to catch - is a real destination and is left alone.
     const wanted = window.location.href;
-    if (stale && stale !== wanted) {
-      // Detached on a deadline as well as on the pop, for the reason `selfBack` keeps its own timer: a
-      // `back()` with nothing to go back to fires no popstate at all. A `{ once: true }` listener then never
-      // runs and never unregisters - it simply waits, and rewrites the address on whatever popstate comes
-      // next, which by then is a navigation the reader asked for.
-      const correct = () => {
-        clearTimeout(deadline);
-        window.removeEventListener("popstate", correct);
-        if (window.location.href === stale) window.history.replaceState(window.history.state, "", wanted);
-      };
-      const deadline = setTimeout(() => window.removeEventListener("popstate", correct), 500);
-      window.addEventListener("popstate", correct);
-    }
-    selfBack();
+    // Run by `selfBack` on the pop THIS step produced, however late it lands, and never on any other: a
+    // listener of its own either waits on whatever popstate comes next (a `back()` with nothing to go back to
+    // fires none, and the next one is a navigation the reader asked for) or, on a short timer, misses a slow
+    // pop and leaves the reopened record in the address.
+    selfBack(stale && stale !== wanted
+      ? () => { if (window.location.href === stale) window.history.replaceState(window.history.state, "", wanted); }
+      : undefined);
   }, 0);
   // Visible to pushDialogEntry until it runs, so a layer that mounts again first takes this entry over.
   pendingDrop = { token, timer };

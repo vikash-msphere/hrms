@@ -906,7 +906,15 @@ export const announcements = sqliteTable("announcements", {
   points: integer("points").notNull().default(0),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({
+  // THE DRAFTS WAITING TO GO OUT, and nothing else. Every five-minute tick asks whether one is due (cron.ts
+  // `fastTickProbe`, then `publishDueAnnouncements`), nearly always to find none - and a lookup that finds nothing
+  // reads every row its plan can reach, which on the board's own rows is every post, poll and kudos ever written.
+  // Partial on the terms both queries spell out, so a published, deleted or held row is not in it and a post
+  // published straight away never writes to it. SQLite uses a partial index only for a query that repeats these
+  // terms, so the probe spells them the same way; test/fastTickProbe.test.ts measures the rows it reads.
+  dueIdx: index("announcements_due_idx").on(t.publishTime).where(sql`${t.published} = 0 and ${t.deleteTime} is null and ${t.heldAt} is null`),
+}));
 
 // A read receipt: one row the first time an employee opens a board item. Like ticket_comments it's a
 // sub-resource reached only through the announcement's routes (not a directly-addressable wire collection),
@@ -1908,10 +1916,18 @@ export const jobs = sqliteTable("jobs", {
   runAfter: integer("run_after", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ pageIdx: index("jobs_page_idx").on(t.createdAt, t.uuid), statusIdx: index("jobs_status_idx").on(t.status) }));
+}, (t) => ({
+  pageIdx: index("jobs_page_idx").on(t.createdAt, t.uuid),
+  // Lookups by any status but `queued`: the stale-job reclaim and the probe's stale-job test read `running` here.
+  statusIdx: index("jobs_status_idx").on(t.status),
+  // THE QUEUE: only `queued` rows, ordered by when each may run, so "is any job due" (cron.ts `fastTickProbe`,
+  // every five minutes) is a seek on `run_after` rather than a read of every queued row - a workflow timer or a
+  // retry waiting hours or days ahead included. `status` leads although every row here has the same one: without
+  // planner statistics SQLite rates `jobs_status_idx`'s equality above a range on a `run_after`-only index and
+  // reads every queued row through it, while this index matches the equality and the range together, and wins.
+  queuedIdx: index("jobs_queued_idx").on(t.status, t.runAfter).where(sql`${t.status} = 'queued'`),
+}));
 
-// One row per scheduled (cron) tick, written by runScheduled: makes "did it run / when / how long / did it
-// fail" observable (the crons themselves are stateless Cloudflare triggers that record nothing). Admin-only.
 // One row per write a client sent with an `Idempotency-Key` (middleware/idempotency.ts): the answer it got, so
 // a retry of the same write is handed that answer instead of doing the write twice. `status` 0 marks a write
 // still in flight. Keyed per principal, because a key is only unique within the client that minted it. Swept
@@ -1927,6 +1943,10 @@ export const idempotencyKeys = sqliteTable("idempotency_keys", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 }, (t) => ({ pk: primaryKey({ columns: [t.principal, t.key] }), createdIdx: index("idempotency_keys_created_idx").on(t.createdAt) }));
 
+// One row per scheduled tick, written by runScheduled, and one per manual `cron-runs:run`: makes "did it run /
+// when / how long / did it fail" observable (the crons themselves are stateless Cloudflare triggers that record
+// nothing). The exception is a five-minute tick its probe finds idle, which records nothing (cron.ts
+// `runScheduled`). Admin-only.
 export const cronRuns = sqliteTable("cron_runs", {
   uuid: pk(),
   code: codeCol(),
@@ -1939,7 +1959,18 @@ export const cronRuns = sqliteTable("cron_runs", {
   summaryJson: text("summary_json"), // per-tick result, e.g. {"drained":3} or {"accrued":12,"reminders":4}
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ pageIdx: index("cron_runs_page_idx").on(t.createdAt, t.uuid), cronIdx: index("cron_runs_cron_idx").on(t.cron), startedIdx: index("cron_runs_started_idx").on(t.startedAt) }));
+}, (t) => ({
+  pageIdx: index("cron_runs_page_idx").on(t.createdAt, t.uuid),
+  // One trigger's runs, newest first: the Operations page asks for each card's latest run this way
+  // (routes/cronRuns.ts `cron`), which is a seek however many runs the other triggers have recorded since.
+  cronStartedIdx: index("cron_runs_cron_started_idx").on(t.cron, t.startedAt, t.uuid),
+  startedIdx: index("cron_runs_started_idx").on(t.startedAt),
+  // ONLY THE RUNS IN FLIGHT: the tick running now, and any run killed before it could record a result. Every
+  // five-minute tick looks for the second kind (cron.ts `fastTickProbe`, then `reclaimStuckCronRuns`), and this
+  // table keeps every run it records, so the lookup has to touch the few rows it asks about rather than the
+  // history around them. A run leaves this index the moment it finishes or is reclaimed.
+  runningIdx: index("cron_runs_running_idx").on(t.startedAt).where(sql`${t.status} = 'running'`),
+}));
 
 // ---- AI layer ----
 // One row per inference, written whether the call succeeded or not. Two jobs, and the second is the reason

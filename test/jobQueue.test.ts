@@ -138,12 +138,23 @@ describe("job queue: a failure retries before it becomes a dead letter", () => {
   it("runs the AI drains on their own trigger, not the fast tick", async () => {
     const summaryOf = async (cron: string) => {
       const id = await runScheduled(cron, deps);
-      const run = (await deps.db.select().from(schema.cronRuns).where(eq(schema.cronRuns.uuid, id)))[0]!;
+      expect(id, cron).not.toBeNull();
+      const run = (await deps.db.select().from(schema.cronRuns).where(eq(schema.cronRuns.uuid, id!)))[0]!;
       expect(run.status).toBe("done");
       return Object.keys(JSON.parse(run.summaryJson!)).sort();
     };
+    await seedJob(); // work for the fast tick, which records itself only when it has some
     expect(await summaryOf(FAST_CRON)).toEqual(["announcementsPublished", "cronRunsReclaimed", "drained"]);
     expect(await summaryOf(AI_CRON)).toEqual(["embedded", "moderated"]);
+  });
+
+  it("records nothing for a five-minute tick with nothing to do", async () => {
+    // Most ticks find nothing, and a recorded one writes its row, the row's index entries, a code and two change
+    // stamps to say so.
+    expect(await runScheduled(FAST_CRON, deps)).toBeNull();
+    expect(await deps.db.select().from(schema.cronRuns)).toEqual([]);
+    // The AI trigger is recorded every time: its drains find out whether they are idle only by running.
+    expect(await runScheduled(AI_CRON, deps)).not.toBeNull();
   });
 
   it("dispatches exactly the triggers every wrangler config registers", () => {
@@ -158,7 +169,7 @@ describe("job queue: a failure retries before it becomes a dead letter", () => {
   it("leaves a backed-off job alone until its delay has passed", async () => {
     const id = await seedJob({ runAfter: new Date(Date.now() + 60 * 60_000) });
 
-    await runScheduled("*/5 * * * *", deps); // drains the queue
+    await runScheduled("*/5 * * * *", deps); // nothing is due, so the tick finds nothing to do
     expect((await jobRow(id)).attempts).toBe(0); // not touched
 
     await deps.db.update(schema.jobs).set({ runAfter: new Date(Date.now() - 1000) }).where(eq(schema.jobs.uuid, id));
@@ -217,6 +228,8 @@ describe("job queue: at most one runner per job", () => {
   it("declines a job the drain finds in any state but queued", async () => {
     for (const status of ["running", "done", "error"] as const) {
       const id = await seedJob({ status });
+      // A due job beside it, so the tick has work and really drains: a tick with nothing to do never reads the queue.
+      await seedJob();
 
       await runScheduled("*/5 * * * *", deps); // a whole drain, which selects only `queued` rows
 

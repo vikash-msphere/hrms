@@ -6,6 +6,7 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf } from "@/lib/utils";
 import { daysBetweenYmd, thisMonthStr, todayStr } from "@/lib/orgDay";
+import { monthOf } from "@/lib/leaveCalendar";
 import { daysSince, fmtDaysCount } from "@/lib/tableDerive";
 import { countBy } from "@/lib/tableSignals";
 import { allScope, mineColumn, mineScope, scopesOf, unassignedScope } from "@/lib/tableScope";
@@ -747,7 +748,6 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
 
 const DAY_MS = 86400000;
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const monthStart = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
 // Colour a due date by its filing status: filed=green, waived=slate, overdue=red, pending=amber.
 const statusColor = (c: ComplianceEvent) => (c.status === "filed" ? "#10b981" : c.status === "waived" ? "#94a3b8" : c.overdue ? "#ef4444" : "#f59e0b");
 
@@ -763,7 +763,8 @@ function MonthView({ events, onOpen, onAdd, onMove }: {
   onAdd?: (day: string) => void;
   onMove?: (c: ComplianceEvent, day: string) => void;
 }) {
-  const [cursor, setCursor] = useState(() => monthStart(new Date()));
+  // The ORG's month (lib/leaveCalendar.ts#monthOf), like every day this page dates.
+  const [cursor, setCursor] = useState(() => monthOf(thisMonthStr()));
   const [dragOver, setDragOver] = useState<string | null>(null);
   const dragging = useRef<ComplianceEvent | null>(null);
   const byDay = useMemo(() => {
@@ -791,7 +792,7 @@ function MonthView({ events, onOpen, onAdd, onMove }: {
             on the narrowest screens rather than pushing the calendar sideways. */}
         <div className="flex flex-wrap items-center gap-2 border-b p-3">
           <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCursor((c) => new Date(Date.UTC(c.getUTCFullYear(), c.getUTCMonth() - 1, 1)))} aria-label="Previous month"><ChevronLeft className="h-4 w-4" /></Button>
-          <Button variant="outline" size="sm" className="h-8" onClick={() => setCursor(monthStart(new Date()))}>Today</Button>
+          <Button variant="outline" size="sm" className="h-8" onClick={() => setCursor(monthOf(thisMonthStr()))}>Today</Button>
           <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCursor((c) => new Date(Date.UTC(c.getUTCFullYear(), c.getUTCMonth() + 1, 1)))} aria-label="Next month"><ChevronRight className="h-4 w-4" /></Button>
           <span className="ml-1 flex items-center gap-2 text-base font-semibold"><CalendarRange className="h-4 w-4 text-primary" />{monthLabel}</span>
           {/* Status legend for the coloured due-date dots. */}

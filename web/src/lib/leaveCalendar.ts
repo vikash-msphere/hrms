@@ -13,6 +13,10 @@ export const parseYmd = (s: string) => Date.parse(s.slice(0, 10) + "T00:00:00Z")
 // `todayYmd` used to live here, answering the VIEWER's calendar date. Today is not this module's to define -
 // it belongs to the org, and lib/orgDay owns it. Callers import `todayStr` from there.
 export const monthStart = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+/** The first of the month a "YYYY-MM" (or "YYYY-MM-DD") names. The month a grid opens on is
+ *  `monthOf(thisMonthStr())` - the ORG's month. `monthStart(new Date())` is the UTC month instead, which in
+ *  the hours after an org east of UTC turns the month showed the one just gone, under a "today" in the new one. */
+export const monthOf = (ym: string) => new Date(Date.UTC(+ym.slice(0, 4), +ym.slice(5, 7) - 1, 1));
 export const ymOf = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 // Re-exported under this module's own names rather than reimplemented: one calendar-step, in lib/orgDay.
 export const addDays = addDaysYmd;

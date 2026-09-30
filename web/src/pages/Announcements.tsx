@@ -10,7 +10,7 @@ import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useKudosLevels, useKudosCategories } from "@/lib/kudosLevels";
 import { cn, colorFromString, formatDate, formatDateTime, idOf, relativeFuture } from "@/lib/utils";
-import { todayStr, thisMonthStr } from "@/lib/orgDay";
+import { stampDay, todayStr, thisMonthStr } from "@/lib/orgDay";
 import type { Announcement, Department, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { FilterChip } from "@/components/common/FilterChips";
@@ -599,7 +599,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     return {
       total: kudos.length,
       people: topSlices(recent, (a) => empName(a.recipient), (a) => a.points || 1, 8),
-      months: monthlyTotals(kudos.map((a) => ({ date: (a.create_time ?? "").slice(0, 10), value: 1 })), 12, todayStr()),
+      months: monthlyTotals(kudos.map((a) => ({ date: stampDay(a.create_time), value: 1 })), 12, todayStr()),
     };
   }, [kudosRows, empName]);
   // Pressing either chart narrows the board to the kudos it counted: one person's, or one month's.
@@ -612,7 +612,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     month: {
       keys: kudosCharts.months.keys,
       label: (k) => `kudos in ${kudosCharts.months.labels[kudosCharts.months.keys.indexOf(k)] ?? k}`,
-      match: (a, k) => (a.create_time ?? "").slice(0, 7) === k,
+      match: (a, k) => stampDay(a.create_time).slice(0, 7) === k,
     },
   });
 
@@ -787,7 +787,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   const leaderboard = useMemo(() => {
     const m = thisMonth();
     const by = new Map<string, number>();
-    for (const a of kudosRows) if (a.recipient && (a.create_time ?? "").slice(0, 7) === m) by.set(a.recipient, (by.get(a.recipient) ?? 0) + (a.points || 1));
+    for (const a of kudosRows) if (a.recipient && stampDay(a.create_time).slice(0, 7) === m) by.set(a.recipient, (by.get(a.recipient) ?? 0) + (a.points || 1));
     return [...by.entries()].map(([e, n]) => ({ employee: e, count: n })).sort((a, b) => b.count - a.count).slice(0, 3);
   }, [kudosRows]);
 

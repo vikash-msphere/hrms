@@ -2498,7 +2498,10 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
   // landing, on failure by `save` below, so a write that did not go through is still offered.
   const [sent, setSent] = useState<number | null>(null);
   useEffect(() => { setSent(null); }, [goal.path, goal.progress]);
-  const dirty = prog !== (goal.progress ?? 0) && prog !== sent;
+  // Only while the slider is ON SCREEN (`canProgress`): a goal that has just closed at 100% swaps its slider
+  // for the retro, and a `prog` left one render behind the row that closed it asked "Discard this progress
+  // change? The slider has moved" about a slider that was no longer there, on a goal already saved.
+  const dirty = canProgress && prog !== (goal.progress ?? 0) && prog !== sent;
   const save = async () => {
     if (!dirty) return;
     setSent(prog);

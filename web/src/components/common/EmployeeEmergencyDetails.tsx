@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { HeartPulse } from "lucide-react";
 import { get, patch } from "@/api";
 import { isConflict } from "@/lib/formError";
+import { changedFields } from "@/lib/mergePatch";
 import type { PersonalDetails } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -52,8 +53,11 @@ export function EmployeeEmergencyDetails({ employeeId, canEdit, onSaved }: { emp
     void load();
   }, [load]);
 
+  // What the form was filled with when it opened: the save sends only what differs from it (lib/mergePatch.ts).
+  const shown = useRef<PersonalDetails>({});
   function openEdit() {
-    setForm(data ?? {});
+    shown.current = data ?? {};
+    setForm(shown.current);
     setOpen(true);
   }
   const set = (patch: Partial<PersonalDetails>) => setForm((f) => ({ ...f, ...patch }));
@@ -69,12 +73,12 @@ export function EmployeeEmergencyDetails({ employeeId, canEdit, onSaved }: { emp
     // write on fields nobody touched, and a single per-field deny refuses a save that changed something else
     // entirely. If-Match stays on regardless: two people editing this record at once is a race the server has
     // to decide, not this dialog.
-    const before = (data ?? {}) as Record<string, unknown>;
-    const changed = Object.fromEntries(
-      Object.entries(form as Record<string, unknown>).filter(([k, v]) => k !== "etag" && k !== "path" && v !== before[k]),
-    ) as PersonalDetails;
+    //
+    // Diffed against what the form was OPENED with, not against `data`: a 409 reloads `data`, and diffed
+    // against the reloaded record the form's untouched fields read as "changed" wherever somebody else had
+    // just saved, so the second press wrote the old values back over theirs.
     try {
-      const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, changed, data?.etag);
+      const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, changedFields(form, shown.current), data?.etag);
       writes.current++;
       setData(updated);
       toast({ title: "Emergency details saved", variant: "success" });
