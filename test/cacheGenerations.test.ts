@@ -11,6 +11,7 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { clearCache } from "../src/lib/cache";
 import { generational, readGenerations, bumpAllGenerations, CURRENT_KEY, type Generations } from "../src/lib/cacheGenerations";
+import { loadRoleGrant } from "../src/lib/policyLoad";
 
 // The counters every long-held server cache is checked against (migration 0003). What matters is that each
 // write moves EXACTLY the counter whose caches it changes: one it misses leaves a cache serving the old answer
@@ -162,5 +163,73 @@ describe("generational(): held until its own counter moves", () => {
     expect(await generational(deps, "t:norow", ["roles"], async () => ++loads)).toBe(1);
     await bumpAllGenerations(deps);
     expect(await readGenerations(deps)).toEqual({ roleRules: 1, aclRules: 1, userRoles: 1, policy: 1, roles: 1, org: 1, codes: 1, automations: 1 });
+  });
+});
+
+// A fresh isolate is `clearCache()`: nothing in memory, the database as every other instance left it.
+describe("generational() with persist: one packed row shared between instances", () => {
+  const pack = async (key: string) => (await deps.db.select().from(schema.cachePacks).where(eq(schema.cachePacks.key, key)))[0];
+
+  it("a fresh instance reads the pack, not the source", async () => {
+    let loads = 0;
+    const load = async () => ({ n: ++loads });
+    const persist = { counter: "roles" as const };
+    expect(await generational(deps, "t:pack", ["roles"], load, persist)).toEqual({ n: 1 });
+    expect(await pack("t:pack")).toMatchObject({ gen: (await counters()).roles, valueJson: '{"n":1}' });
+    clearCache();
+    expect(await generational(deps, "t:pack", ["roles"], load, persist)).toEqual({ n: 1 });
+    expect(loads).toBe(1);
+  });
+
+  it("once its counter moves, the old pack is ignored and replaced", async () => {
+    let loads = 0;
+    const load = async () => ++loads;
+    const persist = { counter: "roles" as const };
+    await generational(deps, "t:pack-moves", ["roles"], load, persist);
+    await deps.db.update(schema.roles).set({ label: "Employee" }).where(eq(schema.roles.name, "employee"));
+    clearCache();
+    expect(await generational(deps, "t:pack-moves", ["roles"], load, persist)).toBe(2);
+    expect(await pack("t:pack-moves")).toMatchObject({ gen: (await counters()).roles, valueJson: "2" });
+    clearCache();
+    expect(await generational(deps, "t:pack-moves", ["roles"], load, persist)).toBe(2);
+  });
+
+  it("revive restores what JSON flattened, on a pack hit", async () => {
+    const at = new Date(1_800_000_000_000);
+    const persist = { counter: "roles" as const, revive: (v: { at: Date }) => ({ at: new Date(v.at) }) };
+    await generational(deps, "t:pack-revive", ["roles"], async () => ({ at }), persist);
+    clearCache();
+    const hit = await generational(deps, "t:pack-revive", ["roles"], async () => ({ at: new Date(0) }), persist);
+    expect(hit.at).toBeInstanceOf(Date);
+    expect(+hit.at).toBe(+at);
+  });
+
+  it("an unreadable pack is read from the source again, and replaced", async () => {
+    await deps.db.insert(schema.cachePacks).values({ key: "t:pack-bad", gen: (await counters()).roles, valueJson: "{not json" });
+    expect(await generational(deps, "t:pack-bad", ["roles"], async () => "fresh", { counter: "roles" })).toBe("fresh");
+    expect((await pack("t:pack-bad"))?.valueJson).toBe('"fresh"');
+  });
+
+  it("without the counters row nothing is packed (nothing to file it under)", async () => {
+    await deps.db.delete(schema.cacheGenerations);
+    let loads = 0;
+    expect(await generational(deps, "t:pack-norow", ["roles"], async () => ++loads, { counter: "roles" })).toBe(1);
+    expect(await pack("t:pack-norow")).toBeUndefined();
+  });
+
+  it("without the table it still answers from the source", async () => {
+    await b.DB.prepare("DROP TABLE cache_packs").run();
+    expect(await generational(deps, "t:pack-notable", ["roles"], async () => "source", { counter: "roles" })).toBe("source");
+  });
+
+  it("a role grant served from its pack still lets an expiring rule lapse on the caller's clock", async () => {
+    const expiresAt = +deps.clock.now() + 60_000;
+    await deps.db.insert(schema.accessRules).values(rule({ expiresAt: new Date(expiresAt) }));
+    const canRead = async (d: Deps) => Boolean((await loadRoleGrant(d, "employee")).levels?.["leave-requests.**"]);
+    expect(await canRead(deps)).toBe(true);
+    expect(await pack("grant:employee")).toBeTruthy();
+    clearCache();
+    expect(await canRead({ ...deps, clock: { now: () => new Date(expiresAt + 1000) } })).toBe(false);
+    expect(await canRead(deps)).toBe(true);
   });
 });

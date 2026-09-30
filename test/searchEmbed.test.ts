@@ -274,6 +274,38 @@ describe("the sweep makes progress across ticks", () => {
     expect((await drainSearchEmbeddings(deps)).embedded).toBe(1);
     expect(index().get(vectorIdOf("tickets", row.recordId))!.values).not.toEqual(before);
   });
+
+  it("leaves a collection alone until it is written again, except on the full sweep", async () => {
+    // In production a `search_docs` row changes only through its source table's triggers, and those writes
+    // bump the collection's stamp. Here the docs are written directly, so the stamp is set by hand.
+    const stampAt = (at: Date) =>
+      deps.db.insert(schema.collectionVersions).values({ collection: "tickets", at })
+        .onConflictDoUpdate({ target: schema.collectionVersions.collection, set: { at } });
+    const row = doc();
+    await deps.db.insert(schema.searchDocs).values(row);
+    await drainSearchEmbeddings(deps);
+    const checkedAt = async () => +(await deps.db.select().from(schema.searchVectors))[0]!.checkedAt;
+
+    try {
+      // Nothing written to tickets for an hour: the row is not even read, so it is not re-stamped.
+      await stampAt(new Date(Date.now() - 60 * 60_000));
+      const before = await checkedAt();
+      await new Promise((r) => setTimeout(r, 5));
+      await drainSearchEmbeddings(deps);
+      expect(await checkedAt()).toBe(before);
+
+      // The hourly full sweep reads it regardless.
+      await drainSearchEmbeddings(deps, { fullSweep: true });
+      expect(await checkedAt()).toBeGreaterThan(before);
+
+      // A write to tickets makes it due again, and the edit is embedded.
+      await deps.db.update(schema.searchDocs).set({ title: "Laptop will not charge" }).where(eq(schema.searchDocs.recordId, row.recordId));
+      await stampAt(new Date());
+      expect((await drainSearchEmbeddings(deps)).embedded).toBe(1);
+    } finally {
+      await deps.db.delete(schema.collectionVersions).where(eq(schema.collectionVersions.collection, "tickets"));
+    }
+  });
 });
 
 describe("removal", () => {

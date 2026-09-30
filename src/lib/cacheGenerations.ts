@@ -22,7 +22,16 @@
 //
 // FAIL-SAFE. When the row cannot be read (the migration has not run, or the row was deleted) every cached value
 // falls back to expiring after CHECK_MS, which is exactly the old behaviour: more reads, never staler data.
-import { eq, sql } from "drizzle-orm";
+//
+// SHARED BETWEEN INSTANCES (`persist`). An instance's memory only helps the requests that land on it, and
+// isolates are started and dropped all the time, so a value that is large at the source (a role's grant is a few
+// hundred `access_rules` rows) was read again by every fresh isolate. With `persist`, the loaded value is also
+// written to ONE `cache_packs` row, filed under the counter value read before it was loaded - so, by the same
+// argument as above, the packed value is at least as new as its `gen`. A fresh isolate whose current counter is
+// <= that `gen` reads the one row instead of the source. The first instance after a change finds only an older
+// pack, reads the source and writes the new one. A missing table, an unreadable row or a failed write all fall
+// back to reading the source: more reads, never staler data.
+import { and, eq, gte, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { cached } from "./cache";
@@ -84,11 +93,65 @@ export const currentGenerations = (deps: Deps): Promise<Generations | null> => c
 type Held<T> = { at: Generations | null; loadedAt: number; value: T };
 
 /**
+ * Also keep the value in `cache_packs` for other instances (see SHARED BETWEEN INSTANCES). `counter` must be the
+ * one counter the value depends on. `revive` restores what JSON cannot carry (a `Date` comes back as a string).
+ */
+export type Persist<T> = { counter: Generation; revive?: (value: T) => T };
+
+const packs = schema.cachePacks;
+
+/** The packed value under `key` filed at `gen` or later, or undefined when there is none to use. */
+async function readPack<T>(deps: Deps, key: string, gen: number, persist: Persist<T>): Promise<T | undefined> {
+  let row: { v: string } | undefined;
+  try {
+    row = (await deps.db.select({ v: packs.valueJson }).from(packs).where(and(eq(packs.key, key), gte(packs.gen, gen))).limit(1))[0];
+  } catch (e) {
+    if (!/no such table/i.test(messages(e))) throw e;
+    return undefined;
+  }
+  if (!row) return undefined;
+  try {
+    const value = JSON.parse(row.v) as T;
+    return persist.revive ? persist.revive(value) : value;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * File `value` under `gen`, unless a pack filed LATER is already there (another instance saw a newer counter).
+ * An equal `gen` is overwritten: both values are at least that new, and it is how an unreadable pack is replaced.
+ */
+async function writePack(deps: Deps, key: string, gen: number, value: unknown): Promise<void> {
+  try {
+    await deps.db
+      .insert(packs)
+      .values({ key, gen, valueJson: JSON.stringify(value) })
+      .onConflictDoUpdate({ target: packs.key, set: { gen: sql`excluded.gen`, valueJson: sql`excluded.value_json` }, setWhere: sql`excluded.gen >= ${packs.gen}` });
+  } catch (e) {
+    console.error(`[cacheGenerations] could not write cache pack ${key}: ${messages(e)}`);
+  }
+}
+
+/** `load()`'s value through the shared pack: the pack when it is new enough, else the source (and a new pack). */
+async function loadPacked<T>(deps: Deps, key: string, gen: number, persist: Persist<T>, load: () => Promise<T>): Promise<T> {
+  const packed = await readPack(deps, key, gen, persist);
+  if (packed !== undefined) return packed;
+  const value = await load();
+  // The response does not wait on the write, and a failed one only costs the next fresh isolate a source read.
+  const write = writePack(deps, key, gen, value);
+  if (deps.defer) deps.defer(write);
+  else await write;
+  return value;
+}
+
+/**
  * `load()`'s value, held under `key` until one of the counters in `on` moves.
  *
- * `load` must read only data those counters cover, or a change to the rest will not reload it.
+ * `load` must read only data those counters cover, or a change to the rest will not reload it. With `persist`,
+ * the value is shared with other instances through `cache_packs` (see SHARED BETWEEN INSTANCES).
  */
-export async function generational<T>(deps: Deps, key: string, on: readonly Generation[], load: () => Promise<T>): Promise<T> {
+export async function generational<T>(deps: Deps, key: string, on: readonly Generation[], load: () => Promise<T>, persist?: Persist<T>): Promise<T> {
   const current = await currentGenerations(deps);
   const held = await cached<Held<T>>(
     deps,
@@ -97,7 +160,9 @@ export async function generational<T>(deps: Deps, key: string, on: readonly Gene
     async () => {
       // FIRST, and in this request's session - see "WHY IT CANNOT SERVE A CHANGE LATE".
       const at = await readGenerations(deps);
-      return { at, loadedAt: Date.now(), value: await load() };
+      // No counters, no pack: nothing to file it under or to judge it by, so read the source (FAIL-SAFE).
+      const value = persist && at ? await loadPacked(deps, key, at[persist.counter], persist, load) : await load();
+      return { at, loadedAt: Date.now(), value };
     },
     (h) => {
       const at = h.at;

@@ -37,11 +37,12 @@ compatibility_flags = ["nodejs_compat"]
 # gate (src/http/staticSite.ts), which serve the whole bundle to anyone. Nothing here uses preview URLs (the
 # deploy path is `wrangler deploy`), and a setting left unset is whatever the dashboard last held.
 preview_urls = false
-
-# Persist Workers Logs so console.error (500s, non-fatal event/automation/esign failures) survives beyond a
-# live `wrangler tail`. Without this a production 500 leaves no trace to debug.
-[observability]
-enabled = true
+# Minified. Unminified, the Worker is about 6.3MB, and a fresh isolate compiles whatever a tick or request
+# touches for the first time inside that invocation's CPU allowance - 10ms on the free plan. Function and
+# class names are kept (wrangler's default `keep_names`), so `.name` checks in dependencies still hold.
+# Stack traces stay readable through the source maps the deploy workflow uploads to Sentry
+# (.github/workflows/deploy.yml, "Worker source maps").
+minify = true
 
 # The built SPA (web/dist), served in two tiers so a signed-out browser never receives the app's code:
 #   - CODE (the shell, every JS/CSS chunk, every client-side route, the API) reaches the Worker FIRST, which
@@ -90,15 +91,17 @@ run_worker_first = ["/*", "!/favicon.svg", "!/apple-touch-icon.png", "!/icon-*.p
 # subtasks in ONE invocation on the nightly schedule - accrual, carry-forward, reminders, digests, five kinds of
 # recurrence roll - each doing several reads of its own, so the night comfortably exceeds 50 and fits inside 1000.
 #
-# The FIVE-MINUTE tick is now in the same position, which it was not when this said "the nightly tick". It runs
-# four subtasks, and the moderation scan alone spends about six statements per post it looks at (the budget
+# The frequent work is split across two triggers so each invocation gets its own allowance: the five-minute
+# tick (scheduled posts, the job queue) and the AI trigger two minutes after it, which runs ONE of the embedding
+# reconcile and the moderation scan per tick. Both AI drains read only rows written since their last look, bar
+# an hourly full window. The moderation scan still spends about six statements per post it reads (the budget
 # read, the cache lookup, the inference, the usage row, the scan stamp, the flag) against a ceiling of
-# `BUDGET.moderationsPerDrain` posts - so a busy wall puts that one subtask near 50 before the job drain, the
-# announcement publish and the embedding reconcile have run at all.
+# `BUDGET.moderationsPerDrain` posts, so a busy wall can still put that tick near 50.
 #
-# Both are best-effort per subtask and record what failed on the `cron_runs` row, so overrunning goes red rather
-# than silent. The honest statement is: BOTH CRON TICKS NEED THE PAID BUDGET. Running this app on the free plan
-# means splitting them across several scheduled triggers first, and lowering `moderationsPerDrain`.
+# Every subtask is best-effort and records what failed on the `cron_runs` row, and a tick killed outright is
+# marked `error` by the next fast tick, so overrunning goes red rather than silent. The honest statement is
+# still: the nightly tick needs the paid budget, and the frequent ones fit the free plan only while idle work
+# stays near zero.
 # [limits]
 # cpu_ms = 60000
 
@@ -213,6 +216,35 @@ migrations_dir = "src/db/migrations"
 binding = "DOCS"
 bucket_name = "hrms"
 
-# Drain async jobs (LRO) every 5 min; nightly accrual/reminders at 02:00 UTC.
+# Drain async jobs (LRO) every 5 min; the AI drains (search embeddings, moderation) two minutes after each,
+# on a trigger of their own so each gets its own CPU allowance; nightly accrual/reminders at 02:00 UTC. Must
+# match KNOWN_CRONS in src/cron.ts. The free plan allows five cron triggers per ACCOUNT, and this is three.
 [triggers]
-crons = ["*/5 * * * *", "0 2 * * *"]
+crons = ["*/5 * * * *", "2,7,12,17,22,27,32,37,42,47,52,57 * * * *", "0 2 * * *"]
+
+
+# Persist Workers Logs so console.error (500s, non-fatal event/automation/esign failures) survives beyond a
+# live `wrangler tail`. Without this a production 500 leaves no trace to debug.
+#
+# Query strings are redacted from every logged and traced URL. Wrangler's default keeps them, and they carry the
+# Google sign-in callback's `code` and `state` and whatever people type into search - a credential and personal
+# data in logs kept for days. The method, path and status are still logged.
+[observability]
+enabled = true
+head_sampling_rate = 1
+redact_query_string = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+# Traces sampled at 5%. Each span is one observability event, and spans share the account's daily event
+# allowance with the logs above (200,000 a day on the free plan). Every D1 query in a request is its own span,
+# so tracing every request would spend the allowance the error logs need. Sentry already traces 20% of
+# requests (src/index.ts `tracesSampler`).
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.05
+persist = true

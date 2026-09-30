@@ -497,6 +497,16 @@ const handler = {
   },
 };
 
+// 0.2 matches the SPA's rate so a distributed trace is not sampled in on one side and out on the other.
+// The frequent cron ticks are never traced: a traced tick records a span per D1 query and serializes them at
+// flush, all inside the free plan's 10ms CPU limit, for a trace nobody reads. Checked BEFORE the parent's
+// decision, because consecutive ticks in one isolate share a trace and would otherwise inherit it. Errors are
+// still captured; the nightly run keeps its trace and its monitor. Declared out here with its parameter typed,
+// because an untyped arrow inside the options callback stops TypeScript inferring `withSentry`'s handler type.
+function tracesSampler(ctx: { name: string; inheritOrSampleWith: (fallbackSampleRate: number) => number }): number {
+  return ctx.name.startsWith("Scheduled Cron") && !ctx.name.includes(NIGHTLY_CRON) ? 0 : ctx.inheritOrSampleWith(0.2);
+}
+
 // Wrapped LAST, around the finished handler: `withSentry` initializes the SDK per request and instruments
 // both `fetch` and `scheduled`, so an unhandled throw anywhere in the Worker becomes an issue instead of a
 // bare 500 nobody sees. It also continues the trace the SPA started - the browser sends `sentry-trace` on
@@ -512,8 +522,7 @@ export default Sentry.withSentry(
           dsn: env.SENTRY_DSN,
           release: env.SENTRY_RELEASE,
           environment: env.SENTRY_ENVIRONMENT ?? "production",
-          // Matches the SPA's rate so a distributed trace is not sampled in on one side and out on the other.
-          tracesSampleRate: 0.2,
+          tracesSampler,
           // The server half of the same rule the browser follows: this is an HR system, and request bodies
           // are payroll and personal data. Nothing here needs them to report an error.
           sendDefaultPii: false,

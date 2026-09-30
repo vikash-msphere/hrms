@@ -51,9 +51,51 @@ import { refLeaveTypes, refHolidays } from "./lib/refData";
 
 // The scheduled triggers this Worker handles (must mirror wrangler.toml `crons`). Exported so the manual
 // trigger (cron-runs:run) can validate the requested expression against the real, dispatchable set.
-export const KNOWN_CRONS = ["*/5 * * * *", "0 2 * * *"] as const;
+export const KNOWN_CRONS = ["*/5 * * * *", "2,7,12,17,22,27,32,37,42,47,52,57 * * * *", "0 2 * * *"] as const;
+/** The fast tick: scheduled posts, the job queue, stuck-run cleanup. */
+export const FAST_CRON = "*/5 * * * *";
+/** The AI drains, on their own trigger two minutes after each fast tick. Every scheduled invocation gets its own
+ *  CPU allowance (10ms on the free plan), and these two were what pushed a combined tick past it. Spelled as a
+ *  list rather than `2-59/5` because the Operations page's cron matcher reads lists and not stepped ranges. */
+export const AI_CRON = "2,7,12,17,22,27,32,37,42,47,52,57 * * * *";
 /** The nightly run (accrual, reminders, digests) - the one with a Sentry cron monitor on it (src/index.ts). */
 export const NIGHTLY_CRON = "0 2 * * *";
+/** Both frequent triggers' period, for work that takes turns across ticks. */
+const FAST_TICK_MS = 5 * 60_000;
+
+/**
+ * Which of the fast tick's subtasks have anything to do, from ONE statement. Most ticks are idle, and an idle
+ * subtask still costs CPU to build its queries and map their empty results. The predicates are the ones each
+ * subtask selects on, so a `false` here is a subtask that would have found nothing; a `true` only means it
+ * runs and decides for itself (a disabled due post, say, is still skipped inside the publish loop).
+ */
+async function fastTickWork(deps: Deps): Promise<{ announcements: boolean; jobs: boolean; stuckRuns: boolean }> {
+  const now = +deps.clock.now();
+  const a = schema.announcements;
+  const j = schema.jobs;
+  const c = schema.cronRuns;
+  const [row] = await deps.db.all<{ announcements: number; jobs: number; stuckRuns: number }>(sql`select
+    exists(select 1 from ${a} where ${a.published} = 0 and ${a.deleteTime} is null and ${a.heldAt} is null and ${a.publishTime} <= ${now}) as announcements,
+    exists(select 1 from ${j} where (${j.status} = 'queued' and (${j.runAfter} is null or ${j.runAfter} <= ${now}))
+      or (${j.status} = 'running' and ${j.updatedAt} < ${now - STALE_RUNNING_MS})) as jobs,
+    exists(select 1 from ${c} where ${c.status} = 'running' and ${c.startedAt} < ${now - STUCK_CRON_RUN_MS}) as stuckRuns`);
+  return { announcements: !!row?.announcements, jobs: !!row?.jobs, stuckRuns: !!row?.stuckRuns };
+}
+
+// A run still `running` this long after it started was killed without throwing: the only way out of
+// finishCronRun that records nothing is the invocation itself stopping, which on the free plan is almost always
+// the CPU limit. Past the nightly run's own 30-minute Sentry `maxRuntime`, so a slow but live run is left alone.
+const STUCK_CRON_RUN_MS = 60 * 60_000;
+
+async function reclaimStuckCronRuns(deps: Deps): Promise<number> {
+  const cutoff = new Date(+deps.clock.now() - STUCK_CRON_RUN_MS);
+  const rows = await deps.db
+    .update(schema.cronRuns)
+    .set({ status: "error", error: "did not finish: the invocation stopped before recording a result (most likely the Worker's CPU limit)" })
+    .where(and(eq(schema.cronRuns.status, "running"), lt(schema.cronRuns.startedAt, cutoff)))
+    .returning({ uuid: schema.cronRuns.uuid });
+  return rows.length;
+}
 
 // Each tick records a cron_runs row (running -> done/error + duration + summary) so the schedule is
 // observable. Split into start/finish so the manual trigger can return the "running" row immediately and
@@ -142,26 +184,44 @@ function subtasks(deps: Deps) {
 
 async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record<string, number>; failures: string[] }> {
   const { run, failures } = subtasks(deps);
-  if (cron === "*/5 * * * *") {
+  if (cron === FAST_CRON) {
+    // A failed probe runs everything, which is the tick as it was before the probe existed.
+    const work = await fastTickWork(deps).catch((err) => {
+      console.error("cron fast-tick probe failed (running every subtask)", err);
+      return { announcements: true, jobs: true, stuckRuns: true };
+    });
     // Scheduled board posts ride the fast tick, not the nightly one: an announcement set for 09:00 has to land
     // at 09:00, give or take the tick. Best-effort - a failure here must not stop the job queue draining.
-    const announcementsPublished = await run("publishDueAnnouncements", () => publishDueAnnouncements(deps));
+    const announcementsPublished = work.announcements ? await run("publishDueAnnouncements", () => publishDueAnnouncements(deps)) : 0;
     // The drain runs jobs authored by other people's rules, so it gets its own budget too rather than
     // inheriting whatever the announcement publish spent.
-    const drained = await run("drainJobs", () => drainJobs(deps, 20));
+    const drained = work.jobs ? await run("drainJobs", () => drainJobs(deps, 20)) : 0;
+    // A run killed at the CPU limit never reaches finishCronRun, so its row would read `running` forever.
+    const cronRunsReclaimed = work.stuckRuns ? await run("reclaimStuckCronRuns", () => reclaimStuckCronRuns(deps)) : 0;
+    return { summary: { drained, announcementsPublished, cronRunsReclaimed }, failures };
+  }
+  if (cron === AI_CRON) {
+    // The two AI drains take turns, one per tick, so neither shares an invocation with the other. Each runs
+    // every ten minutes; both are rotations that catch up on their next turn.
+    const now = +deps.clock.now();
+    const aiTurn = Math.floor(now / FAST_TICK_MS) % 2;
+    // Both drains normally look only at rows written since their last look (the `collection_versions` stamps).
+    // Once an hour - each drain's first turn after the hour - they take a full window regardless, which is what
+    // notices a change no row write explains: a deploy that changes how the embedded or scanned text is built.
+    const fullSweep = new Date(now).getUTCMinutes() < 10;
     // Reconcile the semantic search index against `search_docs`: embed what changed, drop what no longer has
-    // a row. On the FAST tick rather than the nightly one because a search index a day behind is a search
-    // index people stop trusting - somebody who just filed a ticket expects to find it. Bounded per tick by
+    // a row. Every ten minutes rather than nightly because a search index a day behind is a search index people
+    // stop trusting - somebody who just filed a ticket expects to find it. Bounded per tick by
     // the neuron budget, so a first-run backfill spreads over several ticks instead of spending the day at
     // once, and it no-ops entirely on a deployment with no model or no index bound.
-    const embedded = await run("drainSearchEmbeddings", async () => (await drainSearchEmbeddings(deps)).embedded);
-    // Scan the public walls for content a guard model objects to. On the FAST tick rather than the nightly
-    // one because the queue is only useful while the post is still the thing people are reading; a flag that
+    const embedded = aiTurn === 0 ? await run("drainSearchEmbeddings", async () => (await drainSearchEmbeddings(deps, { fullSweep })).embedded) : 0;
+    // Scan the public walls for content a guard model objects to. Every ten minutes rather than nightly
+    // because the queue is only useful while the post is still the thing people are reading; a flag that
     // arrives the next morning is a flag about a conversation that already happened. Bounded hard by
     // `BUDGET.moderationsPerDrain` - it is a generation call, unlike the embed drain above - and it no-ops
     // entirely with no model bound or the feature switched off.
-    const moderated = await run("drainModeration", async () => (await drainModeration(deps)).flagged);
-    return { summary: { drained, announcementsPublished, embedded, moderated }, failures };
+    const moderated = aiTurn === 1 ? await run("drainModeration", async () => (await drainModeration(deps, { fullSweep })).flagged) : 0;
+    return { summary: { embedded, moderated }, failures };
   }
   if (cron === NIGHTLY_CRON) {
     // Carry-forward runs BEFORE accrual so it caps last year's balance before the new year accrues on top.

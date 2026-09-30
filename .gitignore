@@ -12,6 +12,8 @@ web/tsconfig.tsbuildinfo
 .edge-key.*.json
 .edge-rule.*.txt
 .wrangler
+# The Worker as the deploy workflow builds it, before upload (.github/workflows/deploy.yml).
+/dist-worker
 src/http/openapi.d.ts
 CLAUDE.md
 
@@ -52,3 +54,4 @@ web/src/web/dummy-non-existing-folder/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+bootstrap/demo.sql

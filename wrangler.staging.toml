@@ -29,9 +29,14 @@ compatibility_flags = ["nodejs_compat"]
 # Off, as in production and for the same reason: each uploaded version would otherwise stay reachable at its
 # own preview address, pre-gate builds included. See the note in wrangler.toml.
 preview_urls = false
+# Minified, as in production. See the note in wrangler.toml.
+minify = true
 
 [observability]
 enabled = true
+# Query strings redacted from logs, as in production. See the note in wrangler.toml. Traces stay off here: the
+# free plan's daily event allowance is the account's, so staging's spans would spend production's.
+redact_query_string = true
 
 # The SAME CPU envelope as production. Staging exists to rehearse a release, and a rehearsal under a different
 # limit does not rehearse it: without this, staging ran on the platform default (30s) while production has 60s,
@@ -116,4 +121,4 @@ binding = "DOCS"
 bucket_name = "hrms-staging"
 
 [triggers]
-crons = ["*/5 * * * *", "0 2 * * *"]
+crons = ["*/5 * * * *", "2,7,12,17,22,27,32,37,42,47,52,57 * * * *", "0 2 * * *"]

@@ -187,13 +187,20 @@ export async function signedInCaller(c: Context<AppEnv>, deps: Deps): Promise<{ 
  * somebody's role set changes - the failure mode a per-role cache of a per-user answer would have.
  */
 async function loadAuthority(deps: Deps, user: UserRow): Promise<{ grant: Grant; policy: Policy; roles: string[]; guards: GuardIndex }> {
-  const [primary, extraRoles, userGrant, policy, userGuards] = await Promise.all([
+  const loads = [
     loadRoleGrant(deps, user.role),
     loadUserRoles(deps, user.uuid),
     loadUserGrant(deps, user.uuid),
     loadManifest(deps),
     loadUserGuards(deps, user.uuid),
-  ]);
+  ] as const;
+  // One refusal (a missing manifest) must not answer while its siblings are still working: a loader can be
+  // mid-write (a role's `cache_packs` row, awaited wherever there is no execution context to defer it to), and
+  // that write would then outlive the request that started it. So the refusal waits for the rest to settle.
+  const [primary, extraRoles, userGrant, policy, userGuards] = await Promise.all(loads).catch(async (err: unknown) => {
+    await Promise.allSettled(loads);
+    throw err;
+  });
   // The primary can also appear in the join table (an admin ticking the box they already hold); holding a role
   // twice must not mean loading it twice, and the set is what `roleSubjects` fans out over downstream.
   const roles = [...new Set([user.role, ...extraRoles])];

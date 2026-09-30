@@ -8,7 +8,7 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
-import { runJob, runScheduled } from "../src/cron";
+import { AI_CRON, FAST_CRON, KNOWN_CRONS, runJob, runScheduled } from "../src/cron";
 import { genId } from "../src/lib/idCodec";
 
 // The job queue's failure contract: a job that throws is retried on a widening delay and only becomes a
@@ -115,6 +115,44 @@ describe("job queue: a failure retries before it becomes a dead letter", () => {
     expect(job.attempts).toBe(1);
     expect(job.runAfter).toBeNull();
     expect(job.lastError).toContain("JSON");
+  });
+
+  it("marks a run killed mid-tick as an error instead of leaving it running", async () => {
+    // What a tick stopped at the CPU limit leaves behind: a `running` row nothing will ever finish.
+    const stuck = genId();
+    const live = genId();
+    await deps.db.insert(schema.cronRuns).values([
+      { uuid: stuck, code: genId().slice(0, 6), cron: "*/5 * * * *", status: "running", startedAt: new Date(Date.now() - 2 * 60 * 60_000) },
+      { uuid: live, code: genId().slice(0, 6), cron: "0 2 * * *", status: "running", startedAt: new Date(Date.now() - 5 * 60_000) },
+    ]);
+
+    await runScheduled("*/5 * * * *", deps);
+
+    const row = async (uuid: string) => (await deps.db.select().from(schema.cronRuns).where(eq(schema.cronRuns.uuid, uuid)))[0]!;
+    expect((await row(stuck)).status).toBe("error");
+    expect((await row(stuck)).error).toContain("CPU limit");
+    // A run that may still be going is left alone.
+    expect((await row(live)).status).toBe("running");
+  });
+
+  it("runs the AI drains on their own trigger, not the fast tick", async () => {
+    const summaryOf = async (cron: string) => {
+      const id = await runScheduled(cron, deps);
+      const run = (await deps.db.select().from(schema.cronRuns).where(eq(schema.cronRuns.uuid, id)))[0]!;
+      expect(run.status).toBe("done");
+      return Object.keys(JSON.parse(run.summaryJson!)).sort();
+    };
+    expect(await summaryOf(FAST_CRON)).toEqual(["announcementsPublished", "cronRunsReclaimed", "drained"]);
+    expect(await summaryOf(AI_CRON)).toEqual(["embedded", "moderated"]);
+  });
+
+  it("dispatches exactly the triggers every wrangler config registers", () => {
+    // A trigger registered but not dispatched runs nothing, silently; one dispatched but not registered never fires.
+    const configs = import.meta.glob("../wrangler*.toml", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+    for (const [file, toml] of Object.entries(configs)) {
+      const line = toml.split("\n").find((l) => l.startsWith("crons = "));
+      expect(JSON.parse(line!.slice("crons = ".length)), file).toEqual([...KNOWN_CRONS]);
+    }
   });
 
   it("leaves a backed-off job alone until its delay has passed", async () => {

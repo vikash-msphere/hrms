@@ -20,7 +20,7 @@
 // `apiCall` is a privileged action kind and only a super admin may author or arm one. So the property is
 // "nothing hides a post unless a super admin wires a rule that does", not an absolute. See
 // `domain/moderation.ts`.
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -74,7 +74,7 @@ export type ModerationDrainResult = { scanned: number; flagged: number; skipped?
  * One scan pass. Never throws: it runs inside the cron dispatch, where one subtask failing must not take the
  * tick down, and a wall that is five minutes behind is not an incident.
  */
-export async function drainModeration(deps: Deps): Promise<ModerationDrainResult> {
+export async function drainModeration(deps: Deps, opts: { fullSweep?: boolean } = {}): Promise<ModerationDrainResult> {
   if (!deps.ai) return { scanned: 0, flagged: 0, skipped: "no ai binding" };
   // The org's switch gates the SCANNING, not just the queue. Sending every post through a model for a feature
   // nobody enabled would be the opt-in in name only - the text would already have been read by the time
@@ -89,7 +89,8 @@ export async function drainModeration(deps: Deps): Promise<ModerationDrainResult
   // pass permanently exempt from a conduct pass they had never had.
   const scanModel = scanIdentity(conductOn);
 
-  const candidates = await dueForScan(deps, BUDGET.moderationsPerDrain);
+  // `fullSweep` takes the window whether or not the walls were written since (see `dueSince`).
+  const candidates = await dueForScan(deps, BUDGET.moderationsPerDrain, opts.fullSweep ? undefined : scanModel);
   if (candidates.length === 0) return { scanned: 0, flagged: 0 };
 
   let scanned = 0;
@@ -463,7 +464,8 @@ type Candidate = {
  * so scanning them would spend a generation call on text nobody can read - and, worse, would put a flag on
  * the queue for a post that is already invisible.
  */
-async function dueForScan(deps: Deps, limit: number): Promise<Candidate[]> {
+/** `scanModel` narrows the window to rows that could have changed (`dueSince`); without it every row is. */
+async function dueForScan(deps: Deps, limit: number, scanModel?: string): Promise<Candidate[]> {
   // THE ORG'S SCOPE IS APPLIED IN THE QUERY, not after it. A wall that is `off` is not read at all, and a
   // wall narrowed to `anonymous` narrows its own SQL - so the tick's budget is spent on posts somebody
   // actually asked to have read, rather than on rows this would then throw away. Filtering afterwards would
@@ -475,13 +477,13 @@ async function dueForScan(deps: Deps, limit: number): Promise<Candidate[]> {
   // refuses - "anonymous only" on a wall with no anonymous posts means "none" - so this is what a blob
   // written by hand gets, and it agrees with the words rather than quietly scanning everything.
   const rows = [
-    ...(moderationCovers(scope, "announcements", { anonymous: false }) ? await announcementCandidates(deps, { limit }) : []),
-    ...(moderationCovers(scope, "announcement-replies", { anonymous: false }) ? await replyCandidates(deps, { limit }) : []),
+    ...(moderationCovers(scope, "announcements", { anonymous: false }) ? await announcementCandidates(deps, { limit, scanModel }) : []),
+    ...(moderationCovers(scope, "announcement-replies", { anonymous: false }) ? await replyCandidates(deps, { limit, scanModel }) : []),
     // The suggestion box is the wall where `anonymous` narrows rather than empties, so the narrowing goes
     // into its query.
     ...(scope?.suggestions === "off"
       ? []
-      : await suggestionCandidates(deps, { limit }, { anonymousOnly: scope?.suggestions === "anonymous" })),
+      : await suggestionCandidates(deps, { limit, scanModel }, { anonymousOnly: scope?.suggestions === "anonymous" })),
   ];
 
   // All three surfaces are merged and re-ordered on the same rule, so one busy one cannot starve the others:
@@ -509,11 +511,11 @@ async function dueForScan(deps: Deps, limit: number): Promise<Candidate[]> {
  * a wall, and a flag about a post nobody can read is a queue item nobody can act on. Two copies of that
  * predicate is how the immediate path would come to scan a draft the cron pass correctly skips.
  */
-type Window = { limit: number } | { ids: string[]; includeHidden?: boolean };
+type Window = { limit: number; scanModel?: string } | { ids: string[]; includeHidden?: boolean };
 const byWindow = (w: Window) =>
   "ids" in w
-    ? { ids: w.ids, limit: undefined, includeHidden: w.includeHidden === true }
-    : { ids: undefined, limit: w.limit, includeHidden: false };
+    ? { ids: w.ids, limit: undefined, scanModel: undefined, includeHidden: w.includeHidden === true }
+    : { ids: undefined, limit: w.limit, scanModel: w.scanModel, includeHidden: false };
 
 /**
  * NEVER-SCANNED, NEWEST FIRST. The second half of that is not a tidy-up: among never-scanned rows every
@@ -529,10 +531,38 @@ const dueOrder = (scans: typeof schema.moderationScans, createdAt: AnySQLiteColu
   sql`${createdAt} desc`,
 ];
 
+/**
+ * How long after a wall's last write its rows stay due. Covers a tick that read a post just before an edit
+ * and stamped it just after (the stamp time would otherwise land past the edit and hide it), plus any skew
+ * between the Worker's clock and D1's. One tick's length: a post scanned inside it is read once more.
+ */
+const QUIET_MARGIN_MS = 5 * 60_000;
+
+/**
+ * Only rows that could have changed since their last scan are due: never scanned, scanned under a different
+ * identity, or on a wall written since. `wall` is the `collection_versions` key its triggers bump - replies,
+ * reactions, poll options and the parent's own visibility all stamp `announcements` (db/changeDdl.ts), which
+ * also covers a restored post bringing its flag back.
+ *
+ * WHY THIS IS HERE. Without it the rotation re-read, re-hashed and re-stamped a full window of unchanged
+ * posts every five minutes forever, and on the free plan that fixed cost was enough to push the fast tick
+ * past its 10ms CPU limit. A quiet wall now costs three reads that return nothing. A missing stamp row
+ * reads as "changed", so the fallback is the old full rotation, never a skipped post. What no row write
+ * explains - a deploy that changes `scanText` - is caught by the hourly ungated window (cron.ts `fullSweep`).
+ */
+const dueSince = (scans: typeof schema.moderationScans, wall: string, scanModel: string) => {
+  const cv = schema.collectionVersions;
+  return or(
+    isNull(scans.uuid),
+    ne(scans.model, scanModel),
+    sql`${scans.scannedAt} < coalesce((select ${cv.at} from ${cv} where ${cv.collection} = ${wall}), ${Number.MAX_SAFE_INTEGER}) + ${QUIET_MARGIN_MS}`,
+  );
+};
+
 async function announcementCandidates(deps: Deps, w: Window): Promise<SweepRow[]> {
   const scans = schema.moderationScans;
   const a = schema.announcements;
-  const { ids, limit, includeHidden } = byWindow(w);
+  const { ids, limit, scanModel, includeHidden } = byWindow(w);
   let q = deps.db
     .select({
       recordId: a.uuid,
@@ -554,6 +584,7 @@ async function announcementCandidates(deps: Deps, w: Window): Promise<SweepRow[]
       // unpublished today, but the sweep must not depend on that to stay off the gate's rows.
       ...(includeHidden ? [] : [eq(a.published, true), eq(a.disabled, false), notHeld(a)!]),
       ...(ids ? [inArray(a.uuid, ids)] : []),
+      ...(scanModel ? [dueSince(scans, "announcements", scanModel)!] : []),
     ))
     .$dynamic();
   if (limit !== undefined) q = q.orderBy(...dueOrder(scans, a.createdAt)).limit(limit);
@@ -583,7 +614,7 @@ async function replyCandidates(deps: Deps, w: Window): Promise<SweepRow[]> {
   const scans = schema.moderationScans;
   const a = schema.announcements;
   const rep = schema.announcementReplies;
-  const { ids, limit, includeHidden } = byWindow(w);
+  const { ids, limit, scanModel, includeHidden } = byWindow(w);
   let q = deps.db
     .select({
       recordId: rep.uuid,
@@ -610,6 +641,8 @@ async function replyCandidates(deps: Deps, w: Window): Promise<SweepRow[]> {
       eq(a.published, true),
       eq(a.disabled, false),
       ...(ids ? [inArray(rep.uuid, ids)] : []),
+      // Replies stamp `announcements`, not a collection of their own.
+      ...(scanModel ? [dueSince(scans, "announcements", scanModel)!] : []),
     ))
     .$dynamic();
   if (limit !== undefined) q = q.orderBy(...dueOrder(scans, rep.createdAt)).limit(limit);
@@ -639,7 +672,7 @@ async function replyCandidates(deps: Deps, w: Window): Promise<SweepRow[]> {
 async function suggestionCandidates(deps: Deps, w: Window, opts: { anonymousOnly?: boolean } = {}): Promise<SweepRow[]> {
   const scans = schema.moderationScans;
   const s = schema.suggestions;
-  const { ids, limit, includeHidden } = byWindow(w);
+  const { ids, limit, scanModel, includeHidden } = byWindow(w);
   let q = deps.db
     .select({
       recordId: s.uuid,
@@ -662,6 +695,7 @@ async function suggestionCandidates(deps: Deps, w: Window, opts: { anonymousOnly
       ...(includeHidden ? [] : [isNull(s.deleteTime), notHeld(s)!]),
       ...(ids ? [inArray(s.uuid, ids)] : []),
       ...(opts.anonymousOnly ? [eq(s.anonymous, true)] : []),
+      ...(scanModel ? [dueSince(scans, "suggestions", scanModel)!] : []),
     ))
     .$dynamic();
   if (limit !== undefined) q = q.orderBy(...dueOrder(scans, s.createdAt)).limit(limit);

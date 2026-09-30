@@ -1,5 +1,4 @@
 import { drizzle } from "drizzle-orm/d1";
-import * as schema from "./db/schema";
 import type { Bindings } from "./env";
 import { makeEncryptor } from "./lib/crypto";
 import { parseIpAllowList } from "./lib/ipAllow";
@@ -16,7 +15,8 @@ import { makePushSender } from "./lib/webPush";
 import type { EsignSecrets } from "./domain/esign";
 import { makeDispatch, type Dispatch } from "./services/internalDispatch";
 
-export type DB = ReturnType<typeof drizzle<typeof schema>>;
+// No schema generic, so `db.query.*` (drizzle's relational API) does not exist: see makeDeps.
+export type DB = ReturnType<typeof drizzle>;
 // `webhook` is optional: automation egress is OFF unless an operator wires a sender (allowlisted destinations).
 // `dispatch` runs an automation `apiCall` action through the app's own middleware as the system principal.
 // `automationBudget` bounds the TOTAL automation dispatches per originating action - a request, or one cron
@@ -138,7 +138,11 @@ export function makeDeps(env: Bindings): Deps {
   const encryptor = makeEncryptor(env.FIELD_ENCRYPTION_KEY);
   // Off unless the deployment says otherwise (wrangler.toml `D1_SESSIONS`): a read replica is an
   // optimisation, so the wrong default costs latency rather than correctness.
-  const db = drizzle(sessionBinding(env.DB, env.D1_SESSIONS === "true"), { schema });
+  // WITHOUT `{ schema }`. Passing it builds drizzle's relational-query config over every table on each call -
+  // about 1.6ms of CPU in a fresh isolate and 0.2ms after that (measured in Node), on every request and every
+  // cron tick, against a free-plan ceiling of 10ms. Nothing uses the relational API; every query is built from
+  // the table objects directly.
+  const db = drizzle(sessionBinding(env.DB, env.D1_SESSIONS === "true"));
   // A model on this machine, when one is configured. Built ONCE, before the bindings are considered, because
   // both halves of the AI layer have to come from the same place: a local model writing into the production
   // Vectorize index would be the worst of both.

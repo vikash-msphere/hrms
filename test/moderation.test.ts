@@ -301,6 +301,33 @@ describe("the scan", () => {
     expect((await flagFor("announcements", id))?.state).toBe("superseded");
   });
 
+  it("reads nothing on a wall nobody has written to since its last scan, and picks up the next edit", async () => {
+    const author = await seedPerson("Ana");
+    const id = await seedAnnouncement(author);
+    const model = scriptedModel(() => "safe");
+    deps.ai = model;
+    await drainModeration(deps);
+    expect(model.calls).toBe(1);
+
+    // The wall's last write is now well before the scan, which is what an idle board looks like an hour on.
+    const scanOf = () => deps.db.select().from(schema.moderationScans).where(eq(schema.moderationScans.recordId, id)).get();
+    await deps.db.update(schema.collectionVersions).set({ at: new Date(Date.now() - 60 * 60_000) }).where(eq(schema.collectionVersions.collection, "announcements"));
+    const before = (await scanOf())!.scannedAt;
+    await drainModeration(deps);
+    // Not re-stamped: the post never entered the window, so the tick did no hashing and no writes for it.
+    expect((await scanOf())!.scannedAt).toEqual(before);
+    // The hourly full sweep reads it anyway, and spends nothing: the text is unchanged.
+    await new Promise((r) => setTimeout(r, 5));
+    await drainModeration(deps, { fullSweep: true });
+    expect(+(await scanOf())!.scannedAt).toBeGreaterThan(+before);
+    expect(model.calls).toBe(1);
+
+    // An edit bumps the wall's stamp through its trigger, so the post is due again.
+    await deps.db.update(schema.announcements).set({ body: "Edited later." }).where(eq(schema.announcements.uuid, id));
+    await drainModeration(deps);
+    expect(model.calls).toBe(2);
+  });
+
   it("ignores posts that are not on a wall", async () => {
     const author = await seedPerson("Ana");
     await seedAnnouncement(author, { published: false });

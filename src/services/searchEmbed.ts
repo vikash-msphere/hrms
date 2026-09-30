@@ -18,7 +18,7 @@
 //
 // BUDGET. Bounded per tick by `BUDGET.embedsPerDrain` and by the daily neuron ceiling in services/ai.ts, so a
 // first-run backfill of a large database spreads over several ticks instead of spending the day in one.
-import { and, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, notInArray, or, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { BUDGET, INDEXABLE, MODELS, isIndexable } from "../domain/aiPolicy";
@@ -31,7 +31,7 @@ export type EmbedDrainResult = { embedded: number; removed: number; pending: num
 
 /** One reconciliation pass. Never throws: this runs inside the cron dispatch, where one subtask failing must
  *  not take the tick down, and a search index that is a few minutes behind is not an incident. */
-export async function drainSearchEmbeddings(deps: Deps): Promise<EmbedDrainResult> {
+export async function drainSearchEmbeddings(deps: Deps, opts: { fullSweep?: boolean } = {}): Promise<EmbedDrainResult> {
   if (!deps.ai || !deps.vectors) return { embedded: 0, removed: 0, pending: 0, skipped: "no ai or vector binding" };
   const collections = [...INDEXABLE];
 
@@ -55,9 +55,13 @@ export async function drainSearchEmbeddings(deps: Deps): Promise<EmbedDrainResul
   if (!(await aiFeatureOn(deps, "search.semantic"))) return { embedded: 0, removed, pending: 0, skipped: "search.semantic is off" };
   if (collections.length === 0) return { embedded: 0, removed, pending: 0 };
 
-  const { embedded, pending } = await embedPending(deps, collections);
+  const { embedded, pending } = await embedPending(deps, collections, opts.fullSweep === true);
   return { embedded, removed, pending };
 }
+
+/** How long after a collection's last write its rows stay due - the same margin, for the same race, as
+ *  services/moderation.ts `QUIET_MARGIN_MS`. */
+const QUIET_MARGIN_MS = 5 * 60_000;
 
 // ---------------------------------------------------------------------------------------------------------
 
@@ -69,9 +73,10 @@ export async function drainSearchEmbeddings(deps: Deps): Promise<EmbedDrainResul
  * whose state makes it non-public per `STATE_VISIBILITY`, and indexing it would put text in the semantic
  * index that the keyword index deliberately leaves out.
  */
-async function embedPending(deps: Deps, collections: string[]): Promise<{ embedded: number; pending: number }> {
+async function embedPending(deps: Deps, collections: string[], fullSweep: boolean): Promise<{ embedded: number; pending: number }> {
   const docs = schema.searchDocs;
   const vecs = schema.searchVectors;
+  const cv = schema.collectionVersions;
 
   // ORDER MATTERS HERE, and getting it wrong is silent.
   //
@@ -108,6 +113,17 @@ async function embedPending(deps: Deps, collections: string[]): Promise<{ embedd
       // ORDER BY, reached a different way. The TITLE, not title-or-subtitle: `embedText` embeds nothing for a
       // row without one, so this is that same rule said in SQL.
       sql`trim(coalesce(${docs.title}, '')) <> ''`,
+      // ONLY ROWS THAT COULD HAVE CHANGED, unless this is the hourly full sweep: never embedded, embedded by
+      // another model, or in a collection written since the row was last checked. A `search_docs` row is
+      // rewritten only by triggers on its own source table, and the same writes bump that collection's
+      // `collection_versions` stamp (db/changeDdl.ts), so an unmoved stamp means unchanged text. Without this
+      // the rotation hashed and re-stamped a full window every tick on an idle database, which was CPU the
+      // free plan's 10ms limit could not spare. A collection with no stamp row reads as changed.
+      ...(fullSweep ? [] : [or(
+        isNull(vecs.uuid),
+        ne(vecs.model, MODELS.embed),
+        sql`${vecs.checkedAt} < coalesce((select ${cv.at} from ${cv} where ${cv.collection} = ${docs.collection}), ${Number.MAX_SAFE_INTEGER}) + ${QUIET_MARGIN_MS}`,
+      )!]),
     ))
     // Never-embedded first, then longest-unchecked. No `nulls first` clause: the case expression already puts
     // the un-joined rows ahead of everything, and NULLS FIRST is a newer SQLite grammar than this needs.

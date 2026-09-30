@@ -29,9 +29,10 @@ test("a scheduled task is run by hand, and the page reads back the tick", async 
   if (unrunBefore > 0) await expect(neverRun).toHaveCount(unrunBefore - 1, { timeout: 30_000 });
   await expect(page.getByRole("button", { name: "Run now" }).first()).toBeEnabled({ timeout: 30_000 });
 
-  // And the second task is still offered rather than the page turning into a one-shot.
+  // And the other tasks are still offered rather than the page turning into a one-shot.
+  await expect(page.getByText("AI drains")).toBeVisible();
   await expect(page.getByText("Daily maintenance")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Run now" })).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "Run now" })).toHaveCount(3);
 
   // Refresh re-reads both lists in place - the page never navigates, so a broken reload looks like a page
   // that simply never updates again.
@@ -53,5 +54,5 @@ test("server caches are cleared by hand, and the page says every server follows"
   await expect(cleared).toContainText("Every server reloads within about 5 seconds.");
   // Still usable afterwards: the page that asked is served by an instance that has just emptied every cache.
   await expect(page.getByRole("button", { name: "Clear caches" })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Run now" })).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "Run now" })).toHaveCount(3);
 });
