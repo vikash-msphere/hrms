@@ -225,11 +225,14 @@ crons = ["*/5 * * * *", "2,7,12,17,22,27,32,37,42,47,52,57 * * * *", "0 2 * * *"
 
 # Persist Workers Logs so console.error (500s, non-fatal event/automation/esign failures) survives beyond a
 # live `wrangler tail`. Without this a production 500 leaves no trace to debug.
-
+#
+# Query strings are redacted from every logged and traced URL. Wrangler's default keeps them, and they carry the
+# Google sign-in callback's `code` and `state` and whatever people type into search - a credential and personal
+# data in logs kept for days. The method, path and status are still logged.
 [observability]
 enabled = true
 head_sampling_rate = 1
-redact_query_string = false
+redact_query_string = true
 
 [observability.logs]
 enabled = true
@@ -237,7 +240,11 @@ head_sampling_rate = 1
 invocation_logs = true
 persist = true
 
+# Traces sampled at 5%. Each span is one observability event, and spans share the account's daily event
+# allowance with the logs above (200,000 a day on the free plan). Every D1 query in a request is its own span,
+# so tracing every request would spend the allowance the error logs need. Sentry already traces 20% of
+# requests (src/index.ts `tracesSampler`).
 [observability.traces]
 enabled = true
-head_sampling_rate = 1
+head_sampling_rate = 0.05
 persist = true

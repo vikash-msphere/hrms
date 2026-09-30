@@ -34,6 +34,9 @@ minify = true
 
 [observability]
 enabled = true
+# Query strings redacted from logs, as in production. See the note in wrangler.toml. Traces stay off here: the
+# free plan's daily event allowance is the account's, so staging's spans would spend production's.
+redact_query_string = true
 
 # The SAME CPU envelope as production. Staging exists to rehearse a release, and a rehearsal under a different
 # limit does not rehearse it: without this, staging ran on the platform default (30s) while production has 60s,
