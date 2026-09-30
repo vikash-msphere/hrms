@@ -3815,6 +3815,18 @@ export const cacheGenerations = sqliteTable("cache_generations", {
   automations: integer("automations").notNull().default(0),
 });
 
+// A cached value SHARED by every Worker instance, filed under the counter it was loaded under
+// (lib/cacheGenerations.ts `persist`). The in-memory cache is per isolate, and isolates come and go, so on its own
+// every fresh isolate re-read each role's whole rule set (a few hundred rows per role). Packed here, a fresh
+// isolate reads one row instead. `gen` is the counter value read BEFORE the value was loaded, so the value is at
+// least that new, and any reader whose current counter is <= `gen` may use it. A derived copy only: a missing or
+// stale row just means the source is read again.
+export const cachePacks = sqliteTable("cache_packs", {
+  key: text("key").primaryKey(),
+  gen: integer("gen").notNull(),
+  valueJson: text("value_json").notNull(),
+});
+
 export const searchDocs = sqliteTable("search_docs", {
   collection: text("collection").notNull(), // wire collection = the authz namespace
   recordId: text("record_id").notNull(), // the source row's uuid

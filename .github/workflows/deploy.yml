@@ -83,15 +83,35 @@ jobs:
           SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
       # Idempotent: wrangler skips migrations already recorded in the remote D1.
       - run: npm run db:migrate:remote
-      # Uploads Worker + web/dist assets, registers crons.
+      # The Worker is built ONCE, given Sentry debug IDs, and that exact file is what gets uploaded. The build
+      # is minified (wrangler.toml `minify`), so without maps a production stack trace is one long line; a
+      # debug ID ties each frame to its map whatever path the runtime reports, which release-plus-filename
+      # matching cannot promise for a Worker. Injecting is local and needs no token, so it always runs, and
+      # the bundle ships the same whether or not the maps upload.
+      - name: Build the Worker
+        run: npx wrangler deploy --config wrangler.toml --dry-run --outdir dist-worker
+      - name: Inject Sentry debug IDs
+        run: npx sentry-cli sourcemaps inject dist-worker
+      # Uploads the Worker built above + web/dist assets, registers crons. `--no-bundle` so wrangler ships the
+      # injected file instead of rebuilding from src (which would drop the debug IDs).
       #
-      # `--config` is left off deliberately: wrangler.toml IS production, and staging is a separate file
-      # (wrangler.staging.toml) that this workflow must never reach. That is what replaced the `--env=""`
-      # this line used to carry - with no named environments left in the config, there is no default to get
-      # wrong and nothing for wrangler to warn about.
+      # `--config wrangler.toml` because a script path given on the command line makes wrangler look for its
+      # config next to that script. wrangler.toml IS production, and staging is a separate file
+      # (wrangler.staging.toml) that this workflow must never reach.
       #
       # `--var` MERGES with the `[vars]` block rather than replacing it (verified against
       # `wrangler deploy --dry-run`: every configured var survives alongside this one), which is what makes
       # this the right place for the release. wrangler.toml deliberately does NOT carry SENTRY_RELEASE - a
       # literal there is the same string for every deploy, which is how every release ended up tagged "0.1.0".
-      - run: npx wrangler deploy --var SENTRY_RELEASE:"$RELEASE"
+      - run: npx wrangler deploy dist-worker/index.js --config wrangler.toml --no-bundle --var SENTRY_RELEASE:"$RELEASE"
+      # After the deploy and allowed to fail: a missing map costs readable stack traces, never the release.
+      # Skipped without the secret, like the SPA's upload in build:web.
+      - name: Worker source maps
+        continue-on-error: true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+        run: |
+          if [ -z "$SENTRY_AUTH_TOKEN" ]; then echo "SENTRY_AUTH_TOKEN not set - Worker source maps not uploaded"; exit 0; fi
+          npx sentry-cli sourcemaps upload --release "$RELEASE" dist-worker

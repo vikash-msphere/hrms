@@ -388,6 +388,7 @@ PROTECT=(
   /node_modules /.husky/_              # npm ci, and its `prepare: husky`
   /web/dist /src/http/openapi.d.ts /web/tsconfig.tsbuildinfo   # build:web, api:types, tsc -p web
   /.wrangler /test-results* /playwright-report                 # wrangler and test run state
+  /dist-worker                         # the deploy workflow's Worker build
   /.dev.vars /.vapid.json              # local secrets, if anyone keeps them next to a checkout
   .DS_Store
 )

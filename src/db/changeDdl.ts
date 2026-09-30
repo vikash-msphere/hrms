@@ -142,6 +142,9 @@ export const UNSTAMPED_TABLES: Record<string, string> = {
   // The server's own cache counters (lib/cacheGenerations.ts). Bumped by triggers on the tables it counts, which
   // are stamped for clients in their own right; nothing over the wire carries these numbers.
   cache_generations: "server cache counters, never read over the wire",
+  // Server cache values shared between instances (lib/cacheGenerations.ts `persist`), derived from tables that are
+  // stamped in their own right; nothing over the wire reads them.
+  cache_packs: "server cache values shared between instances, never read over the wire",
   // Read through `GET /v1/activity`, which pages on the audit row's own `at` and stores nothing client-side.
   audit_log: "paged by its own timestamp; never cached as a collection",
   // Allocation counters behind owned codes. Never read over the wire.

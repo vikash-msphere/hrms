@@ -4,7 +4,9 @@
 // Read budget: every load below is held in the instance's memory and checked against the cache counters
 // (lib/cacheGenerations.ts), so a warm decision reads no rules at all and a change still reaches every instance
 // within a few seconds. The cache is correctness-independent (a cold instance reconstructs the same Grant from the
-// same rows). A caller's per-object rules are loaded once and sliced per request (objectRulesFor).
+// same rows). A caller's per-object rules are loaded once and sliced per request (objectRulesFor). A role's broad
+// rules, the one large set, are also packed into one `cache_packs` row that every instance shares, so a fresh
+// isolate reads that row instead of the role's few hundred rules.
 import { and, eq, gte, inArray, isNull, isNotNull, or } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -159,9 +161,16 @@ const roleRulesQuery = (deps: Deps, role: string) => {
     );
 };
 const roleRulesUncached = async (deps: Deps, role: string) => (await roleRulesQuery(deps, role)) as StoredRoleRule[];
+// A packed copy comes back through JSON, where `expires_at` is a string: `isLive` would read either, but the rows
+// are handed on as the query's own shape.
+const reviveRuleDates = (rows: StoredRoleRule[]): StoredRoleRule[] =>
+  rows.map((r) => (r.expiresAt === null ? r : { ...r, expiresAt: new Date(r.expiresAt) }));
 // Held until the `roleRules` counter moves: only a change to some role's broad rules does that, never a ticket
-// share or a user's own rule.
-const roleRules = (deps: Deps, role: string) => generational(deps, `grant:${role}`, ["roleRules"], () => roleRulesUncached(deps, role));
+// share or a user's own rule. This is the read that dominates the database's bill (a few hundred rows per role, on
+// the auth path of every request), so it is also shared between instances through `cache_packs`: a fresh isolate
+// reads one packed row per role instead of the role's rules.
+const roleRules = (deps: Deps, role: string) =>
+  generational(deps, `grant:${role}`, ["roleRules"], () => roleRulesUncached(deps, role), { counter: "roleRules", revive: reviveRuleDates });
 
 /** The grant those rows amount to AT `now` - the liveness cut and the `everyone` union, over cached rows. */
 function roleGrantFrom(rows: StoredRoleRule[], role: string, now: Date | number): Grant {

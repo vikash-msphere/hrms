@@ -214,8 +214,11 @@ npm run deploy            # preflight -> verify -> build -> wrangler deploy
 CF_PLAN=free npm run deploy   # same, on the free plan (see Prerequisites)
 ```
 
-This uploads the Worker + static assets and registers the cron triggers (`*/5 * * * *` LRO drain,
-`0 2 * * *` nightly accrual/reminders) from `wrangler.toml`.
+This uploads the Worker + static assets and registers the cron triggers (`*/5 * * * *` LRO drain and
+scheduled posts, `2,7,…,57 * * * *` AI drains, `0 2 * * *` nightly accrual/reminders) from `wrangler.toml`.
+The CI deploy (`.github/workflows/deploy.yml`) builds the Worker first, injects Sentry debug IDs and uploads
+that file with `--no-bundle`, so the minified Worker's stack traces map back to source; a local
+`npm run deploy` ships the same minified build without the maps.
 
 The first two steps are gates, not formalities:
 
