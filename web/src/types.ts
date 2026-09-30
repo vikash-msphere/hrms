@@ -204,6 +204,8 @@ export type GoalCounts = {
   states: Partial<Record<string, number>> & { all?: number };
   /** Per owner, over their OPEN goals in that set. `progress` is the shared weighting rule, not a plain mean. */
   owners: { employee: string; active: number; overdue: number; weight: number; progress: number }[];
+  /** With `?scope_counts=true`: what pressing Mine / My team / Everyone would list, every other filter kept. */
+  scopes?: { mine: number; team: number; all: number };
 };
 export type GoalConfidence = "on_track" | "at_risk" | "off_track";
 export type GoalStage = "DRAFT" | "PROPOSED" | "AGREED";

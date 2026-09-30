@@ -1,3 +1,4 @@
+import type { Locator } from "@playwright/test";
 import { allowConsoleErrors, gotoRoute, test, expect } from "./fixtures";
 
 // The details somebody keeps about themselves: where post reaches them, and who to call.
@@ -14,6 +15,9 @@ test("somebody keeps their own contact and emergency details", async ({ as }) =>
   // (complianceRuleDelete.spec.ts et al.). The details this test saves and reads back are what it proves; a
   // console line from a request retried behind that is not its failure.
   allowConsoleErrors(page, /status of 503|status of 500/i);
+  // The 409 `saveThroughConflict` answers is a refusal the app is supposed to make, but the browser logs every
+  // non-2xx fetch as a console error regardless.
+  allowConsoleErrors(page, /status of 409 \(Conflict\)/);
   const stamp = Date.now() % 100000;
   const address = `${stamp} E2E Lane, Bengaluru`;
 
@@ -33,7 +37,7 @@ test("somebody keeps their own contact and emergency details", async ({ as }) =>
   await expect(form.getByText("Edit contact details")).toBeVisible();
   await form.getByLabel("Personal phone").fill("+91 90000 00000");
   await form.getByLabel("Communication address").fill(address);
-  await form.getByRole("button", { name: "Save", exact: true }).click();
+  await saveThroughConflict(form, panel.getByText(address));
   await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
 
   // On the card, and again from cold: a contact detail that lives only in the form is a person nobody can
@@ -54,7 +58,22 @@ test("somebody keeps their own contact and emergency details", async ({ as }) =>
   // `.first()`: the form carries a second contact with the same three labels under the first.
   await second.getByLabel("Name").first().fill(contact);
   await second.getByLabel("Phone").first().fill("+91 90000 00002");
-  await second.getByRole("button", { name: "Save", exact: true }).click();
+  await saveThroughConflict(second, panel.getByText(contact));
   await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
   await expect(panel.getByText(contact)).toBeVisible({ timeout: 30_000 });
 });
+
+/**
+ * Save, and save again through the CONFLICT. Both editors are a compare-and-swap over the whole personal-info
+ * blob, and `profileNudges.spec.ts` writes the emergency contact on this same seeded person at the same time.
+ * Losing that race is the app being right: the dialog stays open with what was typed still in it, re-reads the
+ * record and says "check them and save again" - so this does what the message asks, the way profileNudges does.
+ */
+async function saveThroughConflict(dialog: Locator, saved: Locator) {
+  const conflict = dialog.getByText(/Somebody else changed these details/);
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(async () => {
+    if (await conflict.count()) await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(saved).toBeVisible({ timeout: 10_000 });
+  }).toPass({ timeout: 60_000 });
+}

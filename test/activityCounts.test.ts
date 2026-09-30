@@ -47,6 +47,10 @@ const own = (ownerId: string): ListScope => ({ breadth: "own", deptCode: null, o
 
 const DAY = 86_400_000;
 
+// An ask as parseTabs builds it: the token is the collection, optionally `@others`.
+const ask = (collection: string, since: number, others = false) =>
+  ({ key: others ? `${collection}@others` : collection, collection, others, since });
+
 async function seed(now: number) {
   await deps.db.insert(schema.employees).values([
     { uuid: A.uuid, code: A.code, firstName: "A", lastName: "A", workEmail: "a@x.test", status: "active" },
@@ -73,10 +77,7 @@ describe("activity counts", () => {
     await seed(now);
     const since = now - DAY;
     const scopes = new Map<string, ListScope>([["tickets", all()], ["boards", all()]]);
-    const out = await activityCounts(deps, user(A.uuid), scopes, [
-      { collection: "tickets", since },
-      { collection: "boards", since },
-    ]);
+    const out = await activityCounts(deps, user(A.uuid), scopes, [ask("tickets", since), ask("boards", since)]);
     expect(out.tickets).toBe(3); // A's two new + B's one; the old one and the soft-deleted one excluded
     expect(out.boards).toBe(1); // the 30-day-old board is not news
   });
@@ -84,9 +85,7 @@ describe("activity counts", () => {
   it("binds each count to that collection's own list scope", async () => {
     const now = Date.now();
     await seed(now);
-    const out = await activityCounts(deps, user(B.uuid), new Map([["tickets", own(B.uuid)]]), [
-      { collection: "tickets", since: now - DAY },
-    ]);
+    const out = await activityCounts(deps, user(B.uuid), new Map([["tickets", own(B.uuid)]]), [ask("tickets", now - DAY)]);
     expect(out.tickets).toBe(1); // B's own new ticket only - A's are not theirs to count
   });
 
@@ -94,8 +93,8 @@ describe("activity counts", () => {
     const now = Date.now();
     await seed(now);
     const out = await activityCounts(deps, user(A.uuid), new Map([["boards", all()]]), [
-      { collection: "tickets", since: now - DAY },
-      { collection: "boards", since: now - DAY },
+      ask("tickets", now - DAY),
+      ask("boards", now - DAY),
     ]);
     expect(out.tickets).toBeUndefined(); // absent from the scopes map -> never queried
     expect(out.boards).toBe(1);
@@ -104,24 +103,41 @@ describe("activity counts", () => {
   it("reports nothing new when the reference moment is now", async () => {
     const now = Date.now();
     await seed(now);
-    const out = await activityCounts(deps, user(A.uuid), new Map([["tickets", all()]]), [
-      { collection: "tickets", since: now },
-    ]);
+    const out = await activityCounts(deps, user(A.uuid), new Map([["tickets", all()]]), [ask("tickets", now)]);
     expect(out.tickets).toBe(0);
+  });
+
+  // Goals and Team goals are two tabs over one collection. Keyed by collection, both badges were one number
+  // measured from whichever tab's moment was asked first.
+  it("answers two tabs over one collection separately, the others one without the caller's own rows", async () => {
+    const now = Date.now();
+    await seed(now);
+    const out = await activityCounts(deps, user(A.uuid), new Map([["tickets", all()]]), [
+      ask("tickets", now - 45_000),
+      ask("tickets", now - DAY, true),
+    ]);
+    expect(out.tickets).toBe(2); // A's newer one + B's, since 45s ago
+    expect(out["tickets@others"]).toBe(1); // B's only: A's own are not news to A
+  });
+
+  it("counts every row as somebody else's for a caller with no employee record", async () => {
+    const now = Date.now();
+    await seed(now);
+    const none = await activityCounts(deps, user(null), new Map([["tickets", all()]]), [ask("tickets", now - DAY, true)]);
+    expect(none["tickets@others"]).toBe(3);
   });
 
   describe("parseTabs", () => {
     it("takes well-formed pairs and drops the rest", () => {
-      expect(parseTabs("tickets:1000,boards:2000")).toEqual([
-        { collection: "tickets", since: 1000 },
-        { collection: "boards", since: 2000 },
-      ]);
+      expect(parseTabs("tickets:1000,boards:2000")).toEqual([ask("tickets", 1000), ask("boards", 2000)]);
       expect(parseTabs(undefined)).toEqual([]);
       expect(parseTabs("tickets")).toEqual([]); // no timestamp
       expect(parseTabs("tickets:abc")).toEqual([]); // not a number
       expect(parseTabs("tickets:-5")).toEqual([]); // not a moment
       expect(parseTabs("not-a-collection:1000")).toEqual([]); // unknown collection
-      expect(parseTabs("tickets:1000,tickets:2000")).toEqual([{ collection: "tickets", since: 1000 }]); // first wins
+      expect(parseTabs("not-a-collection@others:1000")).toEqual([]); // unknown collection, qualified
+      expect(parseTabs("tickets:1000,tickets:2000")).toEqual([ask("tickets", 1000)]); // first wins
+      expect(parseTabs("goals:1000,goals@others:2000")).toEqual([ask("goals", 1000), ask("goals", 2000, true)]); // two tokens
     });
 
     it("caps how many collections one request can ask about", () => {

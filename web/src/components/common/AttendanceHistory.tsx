@@ -1179,7 +1179,7 @@ function PunchTime({ dot, time, fixLabel, onFix }: { dot: string; time: string; 
       {time}
     </>
   );
-  if (!onFix) return <span className="flex w-24 items-center gap-2">{face}</span>;
+  if (!onFix) return <span className="flex w-[6.5rem] items-center gap-2 whitespace-nowrap">{face}</span>;
   return (
     <button
       type="button"
@@ -1188,7 +1188,7 @@ function PunchTime({ dot, time, fixLabel, onFix }: { dot: string; time: string; 
       title={fixLabel}
       // Padded out so the whole cell is the target on touch, and pulled back by the same amount so the column
       // still lines up with the header above it.
-      className="group/punch -mx-1.5 flex w-[6.75rem] items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:min-h-9"
+      className="group/punch -mx-1.5 flex w-[7.25rem] items-center gap-2 whitespace-nowrap rounded px-1.5 py-1 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:min-h-9"
     >
       {face}
       <Pencil className="ml-auto h-3 w-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/punch:opacity-100 group-focus-visible/punch:opacity-100 coarse:opacity-60" aria-hidden />
@@ -1221,12 +1221,13 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
     const day = formatDate(row.day);
     return (
       <div className="space-y-1.5">
-        {/* `max-w-full` and a tighter phone gap: In + Out + Duration at gap-8 comes to 352px inside a 328px
-            content column, and the box is `w-fit`, so it would size to the columns and push the page. */}
+        {/* `max-w-full` and a tighter phone gap: In + Out + Duration at gap-8 comes to 362px inside a 328px
+            content column, and the box is `w-fit`, so it would size to the columns and push the page. A time
+            column is 6.5rem so "12:45 PM" with its dot and fix pencil stays on one line. */}
         <div className="w-fit max-w-full rounded-lg border bg-background px-3 py-1 text-sm tabular-nums sm:px-4">
-          <div className="flex items-center gap-4 border-b py-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground sm:gap-8">
-            <span className="flex w-24 items-center gap-2"><span className="h-1.5 w-1.5 shrink-0" aria-hidden />In</span>
-            <span className="flex w-24 items-center gap-2"><span className="h-1.5 w-1.5 shrink-0" aria-hidden />Out</span>
+          <div className="flex items-center gap-3 border-b py-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground sm:gap-8">
+            <span className="flex w-[6.5rem] items-center gap-2"><span className="h-1.5 w-1.5 shrink-0" aria-hidden />In</span>
+            <span className="flex w-[6.5rem] items-center gap-2"><span className="h-1.5 w-1.5 shrink-0" aria-hidden />Out</span>
             <span className="w-16 text-right">Duration</span>
           </div>
           {punches.map((s, i) => {
@@ -1241,7 +1242,7 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
                     <Coffee className="h-3 w-3" aria-hidden /> {fmtDurationShort(gap)} break
                   </div>
                 )}
-                <div className={cn("flex flex-wrap items-center gap-4 py-1.5 sm:gap-8", i > 0 && !gap && "border-t")}>
+                <div className={cn("flex flex-wrap items-center gap-3 py-1.5 sm:gap-8", i > 0 && !gap && "border-t")}>
                   <PunchTime
                     dot="bg-success"
                     time={fmtHM(s.clock_in, tz)}
@@ -1256,20 +1257,20 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
                       onFix={onFixPunch && (() => onFixPunch({ index: i, edge: "out" }))}
                     />
                   ) : isToday ? (
-                    <span className="flex w-24 items-center gap-1.5 text-xs font-medium text-success"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />Open</span>
+                    <span className="flex w-[6.5rem] items-center gap-1.5 text-xs font-medium text-success"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />Open</span>
                   ) : onFixPunch ? (
                     <button
                       type="button"
                       onClick={() => onFixPunch({ index: i, edge: "out" })}
-                      className="-mx-1.5 flex w-[6.75rem] items-center gap-1.5 rounded px-1.5 py-1 text-xs font-medium text-warning hover:bg-warning/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:min-h-9"
+                      className="-mx-1.5 flex min-w-[7.25rem] items-center gap-1.5 whitespace-nowrap rounded px-1.5 py-1 text-xs font-medium text-warning hover:bg-warning/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:min-h-9"
                       aria-label={`Add the missing clock-out, ${day}`}
                     >
                       <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden /> No clock-out · Add
                     </button>
                   ) : (
-                    <span className="flex w-24 items-center gap-1.5 text-xs font-medium text-warning"><AlertTriangle className="h-3 w-3 shrink-0" aria-hidden />No clock-out</span>
+                    <span className="flex w-[6.5rem] items-center gap-1.5 whitespace-nowrap text-xs font-medium text-warning"><AlertTriangle className="h-3 w-3 shrink-0" aria-hidden />No clock-out</span>
                   )}
-                  <span className={cn("w-16 text-right font-medium", s.clock_out ? "text-foreground" : "text-success")}>{fmtDuration(mins)}</span>
+                  <span className={cn("w-16 whitespace-nowrap text-right font-medium", s.clock_out ? "text-foreground" : "text-success")}>{fmtDuration(mins)}</span>
                   {s.source === "correction" && <Badge variant="muted">Corrected</Badge>}
                 </div>
               </Fragment>

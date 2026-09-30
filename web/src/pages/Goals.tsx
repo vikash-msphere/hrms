@@ -192,8 +192,9 @@ const quickDue = (): { label: string; value: string }[] => {
 export default function Goals({ me, openId, scope: forcedScope }: {
   me: Me;
   openId?: string;
-  /** The scope this ROUTE is about. `/team-goals` is this page with `team` pinned; `/goals` lets the reader
-   *  choose. The sidebar keeps both entries, and both land on one surface rather than two that overlap. */
+  /** The scope this ROUTE is about. `/team-goals` is this page with `all` pinned (every team the reader can see,
+   *  grouped by team); `/goals` lets the reader choose. The sidebar keeps both entries, and both land on one
+   *  surface rather than two that overlap. */
   scope?: GoalScope;
 }) {
   // WHAT THIS PAGE IS SHOWING LIVES IN THE ADDRESS, AND IT NARROWS THE READ.
@@ -255,7 +256,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
   // When the code needs a paragraph to tell two surfaces apart, nobody using it can.
   //
   // So the reader says WHOSE goals they are looking at, and the page answers that one question. It is also the
-  // read: `mine` is `?employee=me`, `team` is `?manager=me` (the people who report to them), `all` is
+  // read: `mine` is `?employee=me`, `team` is `?manager=me` (the people who report to them and everyone in the departments they manage), `all` is
   // everything their scope allows. The switcher is hidden entirely for somebody whose grant reaches no further
   // than their own rows - the same gate the sidebar puts on the Team goals tab - and their scope is `mine`,
   // which is the honest name for what they were always seeing.
@@ -312,8 +313,11 @@ export default function Goals({ me, openId, scope: forcedScope }: {
     else if (activeScope === "team" && me.employee_id) p.manager = `employees/${me.employee_id}`;
     if (deptFilter !== "all") p.department = deptFilter;
     if (settledQ.length >= 2) p.q = settledQ;
+    // The numbers on the Mine / My team / Everyone chips. Only asked for by a reader who sees those chips: in
+    // Mine or My team it costs the server one more pass over everything the reader can list.
+    if (canSeeOthers) p.scope_counts = "true";
     return p;
-  }, [cycleFilter, filter, ownerFilter, settledQ, activeScope, deptFilter, me.employee_id]);
+  }, [cycleFilter, filter, ownerFilter, settledQ, activeScope, deptFilter, me.employee_id, canSeeOthers]);
   const { rows, state, error, reload, hasMore, loadMore, meta } = useCollection<Goal>("goals", { params });
   /** The chip numbers and the team rollup, over the whole filtered set. Absent until the first read lands. */
   const counts = (meta as { counts?: GoalCounts } | undefined)?.counts;
@@ -1178,9 +1182,9 @@ export default function Goals({ me, openId, scope: forcedScope }: {
           would read as the wrong one having opened. */}
       <PageHeader
         accessCollection="goals"
-        title={forcedScope === "team" ? "Team goals" : "Goals"}
-        description={forcedScope === "team"
-          ? "Open goals owned by the people who report to you, worst first."
+        title={forcedScope ? "Team goals" : "Goals"}
+        description={forcedScope
+          ? "Goals across every team you can see, grouped by team."
           : "Set and track performance goals."}
         actions={<>{createBtn}<PageSettings me={me} host="goals" /></>}
       />
@@ -1221,7 +1225,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
         <div className="mb-4 flex flex-wrap items-center gap-1.5">
           <span className="text-xs text-muted-foreground">Showing</span>
           {SCOPES.map((sc) => (
-            <FilterChip key={sc.value} active={activeScope === sc.value} onClick={() => setScope(sc.value)}>{sc.label}</FilterChip>
+            <FilterChip key={sc.value} active={activeScope === sc.value} count={counts?.scopes?.[sc.value]} onClick={() => setScope(sc.value)}>{sc.label}</FilterChip>
           ))}
           {/* The triage layout for the same goals: one row per goal, worst first, with agree and
               ask-for-an-update on the row. It lands on Needs attention, which is the set being chased. */}
@@ -1250,7 +1254,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
               illustration="goals"
               icon={Users}
               title="No goals under you"
-              description="Nobody who reports to you has a goal yet. People are listed here by their manager on the employee record."
+              description="Nobody on your team has a goal yet. Your team is the people who report to you, plus everyone in the departments that list you as a manager, sub-departments included."
               action={<Button variant="outline" onClick={() => setScope("all")}>Show everyone</Button>}
             />
           ) : activeScope === "all" ? (
@@ -1535,7 +1539,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                     {/* The two questions a wall of cards cannot answer: which goals roll up to nothing, and
                         who has not set one. Counted over the rows already on screen. */}
                     <GoalCoverage goals={picked} employees={employees} onOpen={openDetail} />
-                    <TeamTriage goals={picked} employees={employees} me={me} deptName={deptName} onChanged={reload} onOpen={openDetail} />
+                    <TeamTriage goals={picked} employees={employees} departments={departments} me={me} deptName={deptName} onChanged={reload} onOpen={openDetail} />
                   </>
                 ) : picked.length > 0
                   // The owner's face rides on the card in any scope but `mine`, where every card is the

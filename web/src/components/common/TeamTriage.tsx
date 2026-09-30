@@ -14,7 +14,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
-import type { Employee, Goal, Me } from "@/types";
+import type { Department, Employee, Goal, Me } from "@/types";
 
 /**
  * Other people's goals as a chasing pass: one row per goal, grouped by person, worst first.
@@ -31,10 +31,12 @@ import type { Employee, Goal, Me } from "@/types";
  * Everything that DECIDES which goals these are - the scope, the chips, the cycle, the team, the search, the
  * counts, the paging - belongs to the page. This takes the rows it is given.
  */
-export function TeamTriage({ goals, employees, me, deptName, onChanged, onOpen }: {
+export function TeamTriage({ goals, employees, departments = [], me, deptName, onChanged, onOpen }: {
   /** The rows to draw, already scoped and filtered by the page. */
   goals: Goal[];
   employees: Employee[];
+  /** The department tree, to head each team's people with the team's full path. Empty draws one ungrouped list. */
+  departments?: Department[];
   me: Me;
   deptName: (ref?: string | null) => string | undefined;
   /** Re-read after a verb lands, so the row it changed stops being in the state that put it here. */
@@ -89,6 +91,39 @@ export function TeamTriage({ goals, employees, me, deptName, onChanged, onOpen }
       })
       .sort((a, b) => b.inTrouble - a.inTrouble || a.name.localeCompare(b.name));
   }, [goals, employees]);
+
+  // People under their TEAM, when the list spans more than one.
+  //
+  // Team goals is every team the reader can see, and "My team" reaches into the sub-departments of the ones they
+  // manage - so a flat run of people answers "who is sliding" and not "which team is". A person's team is their
+  // department; the ownerless block's is the team that owns its goals. Headed by the full path ("Engineering ›
+  // Platform"), so a sub-department is placed under its parent, and sorted by it, which keeps each subtree
+  // together. Inside a team the people keep the worst-first order above. One team, or no department data, draws
+  // the flat list with no heading - a heading over everything says nothing.
+  const byTeam = useMemo(() => {
+    const byId = new Map(departments.filter((d) => !d.delete_time).map((d) => [idOf(d.path), d]));
+    const pathOf = (id: string) => {
+      const names: string[] = [];
+      let at = byId.get(id);
+      // Bounded, so a corrupt cycle in the tree cannot spin.
+      for (let i = 0; at && i < 32; i++) {
+        names.unshift(at.display_name);
+        at = at.parent ? byId.get(idOf(at.parent)) : undefined;
+      }
+      return names.join(" › ");
+    };
+    const groups = new Map<string, { label: string; blocks: typeof byPerson }>();
+    for (const block of byPerson) {
+      const ref = block.person ? block.person.department : block.goals.find((g) => g.department)?.department;
+      const id = ref ? idOf(ref) : "";
+      const label = (id && pathOf(id)) || "No team";
+      const key = label === "No team" ? "" : id;
+      (groups.get(key) ?? groups.set(key, { label, blocks: [] }).get(key)!).blocks.push(block);
+    }
+    return [...groups.entries()]
+      .map(([key, g]) => ({ key, ...g }))
+      .sort((a, b) => (a.key === "" ? 1 : b.key === "" ? -1 : a.label.localeCompare(b.label)));
+  }, [byPerson, departments]);
 
   async function act(g: Goal, verb: "comment" | "approve", body?: Record<string, unknown>, okMsg?: string) {
     setBusy(`${verb}:${g.path}`);
@@ -156,9 +191,7 @@ export function TeamTriage({ goals, employees, me, deptName, onChanged, onOpen }
     }
   }
 
-  return (
-    <div className="space-y-4">
-      {byPerson.map(({ id, person, inTrouble, avg, goals: list }) => {
+  const renderPerson = ({ id, person, inTrouble, avg, goals: list }: (typeof byPerson)[number]) => {
         // `id` is "" for every goal with no owner (a department-owned goal filed without a lead), so they all
         // land in one block. It used to be headed "Someone", which names a person and implies the rest of the
         // block is theirs - one card looking like one colleague's workload when it is in fact a pile of
@@ -278,7 +311,22 @@ export function TeamTriage({ goals, employees, me, deptName, onChanged, onOpen }
             </ul>
           </Card>
         );
-      })}
+  };
+
+  if (byTeam.length <= 1) return <div className="space-y-4">{byPerson.map(renderPerson)}</div>;
+  return (
+    <div className="space-y-6">
+      {byTeam.map((team) => (
+        <section key={team.key || "none"} aria-label={team.label} className="space-y-3">
+          <h3 className="flex items-baseline gap-2 text-sm font-semibold">
+            {team.label}
+            <span className="text-xs font-normal tabular-nums text-muted-foreground">
+              {team.blocks.length} {team.blocks.length === 1 ? "person" : "people"}
+            </span>
+          </h3>
+          <div className="space-y-4">{team.blocks.map(renderPerson)}</div>
+        </section>
+      ))}
     </div>
   );
 }
