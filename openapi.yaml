@@ -7277,8 +7277,9 @@ paths:
         - { in: query, name: department, schema: { type: string }, description: "departments/{department_id} to list the goals one team OWNS, or `none` for the goals that belong to a person rather than a team. The named employee stays the accountable lead either way." }
         - { in: query, name: burnup, schema: { type: boolean }, description: "With `cycle`, also return that cycle's weighted attainment week by week (`burnup`), computed over the goals this caller may see." }
         - { in: query, name: state, schema: { type: string, enum: [active, due_soon, overdue, at_risk, quiet, unagreed, trouble, not_started, in_progress, completed, cancelled] }, description: "Narrow to one health state, computed by the server from the same rules the serializer reports per goal: `overdue` past its date, `due_soon` landing within a week, `at_risk` behind its pace or flagged by its owner, `quiet` untouched for three weeks, `unagreed` still in the goal-setting handshake, `trouble` any of overdue/at_risk/quiet. Server-side because \"how many are at risk\" is a question about every goal, not about the page a browser holds." }
-        - { in: query, name: manager, schema: { type: string }, description: "employees/{employee_id} to list the goals of the people who report to them - a team's set as a question about every goal rather than about one page." }
+        - { in: query, name: manager, schema: { type: string }, description: "employees/{employee_id} to list their team's goals: the people who report to them, plus everybody in the departments that list them as a manager, sub-departments included. Their own goals are left out. A team's set as a question about every goal rather than about one page." }
         - { in: query, name: counts, schema: { type: boolean }, description: "Also return `counts`: one number per health state over the whole filtered set, plus a per-owner rollup. The state filter itself is excluded from what is counted, so each number says what pressing that chip would show." }
+        - { in: query, name: scope_counts, schema: { type: boolean }, description: "With `counts`, also return `counts.scopes`: `mine` (the caller's own goals), `team` (their team, as `manager` reads it) and `all` (everything their scope allows), each over every other filter including state, and ignoring `employee`/`manager`. So each number says what pressing that scope chip would show." }
         - { in: query, name: q, schema: { type: string }, description: "Text search over the whole collection through the shared index - title, description and status - rather than over the page the client holds." }
         - { in: query, name: show_deleted, schema: { type: boolean } }
       responses:
@@ -18743,7 +18744,7 @@ paths:
           in: query
           required: false
           schema: { type: string }
-          description: "Comma-separated `<collection>:<sinceEpochMs>` pairs, e.g. `boards:1712000000000,goals:1712000000000`. Unknown collections and malformed pairs are ignored; at most 24 pairs are answered."
+          description: "Comma-separated `<collection>[@others]:<sinceEpochMs>` pairs, e.g. `boards:1712000000000,goals:1712000000000,goals@others:1712000000000`. `@others` leaves out rows the caller owns, so one collection can be asked twice. Unknown collections and malformed pairs are ignored; at most 24 pairs are answered."
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -18760,7 +18761,7 @@ paths:
                   counts:
                     type: object
                     additionalProperties: { type: integer }
-                    description: "Wire collection -> number of rows created after the given moment. Absent means nothing new, or nothing the caller may list."
+                    description: "Pair token as asked (`goals`, `goals@others`) -> number of rows created after the given moment. Absent means nothing new, or nothing the caller may list."
                 x-aep-resource:
                   singular: activity-count-set
                   plural: activity-count-sets

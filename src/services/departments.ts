@@ -25,6 +25,34 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const managerIdsJson = (managers?: string[] | null) =>
   JSON.stringify(Array.from(new Set((managers ?? []).map((m) => idFromPath(m)).filter((x): x is string => !!x))));
 
+/**
+ * The codes of the live departments that list this employee among their managers (`manager_ids`). A
+ * department's sub-departments, their people and those people's rows all have codes under its own (codes nest
+ * by department), so each code here stands for its whole subtree: `code GLOB '<code>-*'` reaches all of it.
+ * The same notion of "the departments I manage" as `managedDepartments` in services/boardShares.ts.
+ *
+ * The department table is small, so it is read whole and the JSON arrays are parsed here rather than trusted to
+ * `json_each` (which throws on a malformed array instead of skipping it).
+ */
+export async function managedDepartmentCodes(deps: Deps, employeeId: string): Promise<string[]> {
+  if (!employeeId) return [];
+  const rows = await deps.db
+    .select({ code: schema.departments.code, managerIds: schema.departments.managerIds, deleteTime: schema.departments.deleteTime })
+    .from(schema.departments);
+  const codes: string[] = [];
+  for (const d of rows) {
+    if (d.deleteTime || !d.code || !d.managerIds) continue;
+    try {
+      const ids = JSON.parse(d.managerIds);
+      if (Array.isArray(ids) && ids.includes(employeeId)) codes.push(d.code);
+    } catch {
+      /* a malformed array names nobody */
+    }
+  }
+  // A managed department under another managed one is already inside that one's subtree.
+  return codes.filter((c) => !codes.some((o) => o !== c && c.startsWith(`${o}-`)));
+}
+
 // Honors the middleware-decided list scope: `departments` defines a `subtree` read tier, so a scoped grant
 // must not see the whole tree. Departments have no employee owner, so the hierarchy `code` is both the scope
 // key and the owner column. `all`-breadth callers get no filter (unchanged); a narrower grant is enforced.

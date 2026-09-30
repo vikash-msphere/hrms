@@ -590,7 +590,7 @@ export default function App() {
         return <LeaveCalendar me={gme} />;
       // KEYED, because `/goals` and `/team-goals` render the same component in the same slot of this tree.
       // Without a key React reuses the instance across the switch, and everything this page decides at mount -
-      // the scope (`scope="team"` is read in a `useState` initialiser), the chip, the search, the layout, all
+      // the scope (`scope="all"` is read in a `useState` initialiser), the chip, the search, the layout, all
       // of which also read the address - simply never re-runs. So the sidebar's "Team goals", pressed from
       // Goals, opened a page headed Team goals showing the reader's OWN goals, and a link carrying `?filter=`
       // (the Chase up button's) was ignored because the initialiser that reads it had already run.
@@ -671,9 +671,10 @@ export default function App() {
       // The same page as `/goals`, with the scope the sidebar entry names. It used to be its own component
       // over nearly the same rows, with its own filters and its own copy explaining how it differed from the
       // grid on Goals - two surfaces for one question, which is what the scope switcher replaced.
-      // Keyed apart from `/goals` above - see the note there.
+      // Keyed apart from `/goals` above - see the note there. Every team the reader can see, not only the people
+      // who report to them: "My team" on `/goals` is that narrower question.
       case "team-goals":
-        return <Goals key="team-goals" me={gme} scope="team" />;
+        return <Goals key="team-goals" me={gme} scope="all" />;
       // `tables/<id>` opens that grid in place: a saved table is a record people link to, not a dialog.
       case "tables":
         return <TableBuilder me={gme} openId={route.id ?? undefined} />;

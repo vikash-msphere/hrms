@@ -16,6 +16,7 @@ import { notify, notifyMany, managerIdOf } from "./notifications";
 import { notifyMentions } from "./mentions";
 import { deleteStateFilter, softDeleteRow, restoreRow } from "./softDelete";
 import { searchFilter } from "./searchFilter";
+import { managedDepartmentCodes } from "./departments";
 import { STALE_AFTER_DAYS } from "../domain/goals";
 import { orgToday, dayStartMs } from "./orgDay";
 import { getSettingValue } from "./settings";
@@ -394,8 +395,12 @@ export type GoalListFilters = {
   department?: string;
   /** One of the health states above - the chip the reader pressed, answered by the READ rather than in the browser. */
   state?: string;
-  /** `?manager=employees/{id}`: the goals of the people who report to them. `employees.manager_id`, indexed. */
+  /** `?manager=employees/{id}`: their team's goals - see `teamOf`. */
   manager?: string;
+  /** Resolved by `listGoals`, not read off the query: the department codes `manager` manages (`managedDepartmentCodes`). */
+  managerDepts?: string[];
+  /** Resolved by `listGoals`: the department codes `scopeCountsFor` manages, for the My team chip. */
+  scopeTeamDepts?: string[];
   /** `?q=`: a text search over the whole collection through the shared FTS index, not over one page of it. */
   q?: string;
   showDeleted?: boolean;
@@ -403,6 +408,8 @@ export type GoalListFilters = {
   withBurnup?: boolean;
   /** `?counts=true`: the chip numbers and the per-owner rollup, over the whole filtered set. See `goalCounts`. */
   withCounts?: boolean;
+  /** `?scope_counts=true`: the caller's employee id, to count the Mine / My team / Everyone chips. See `goalCounts`. */
+  scopeCountsFor?: string;
 };
 
 /**
@@ -430,10 +437,9 @@ export function goalListConds(scope: ListScope, f: GoalListFilters, today: Date,
   // WHOLE set rather than a page of the org's: rebalancing weights across the owner's open goals is arithmetic
   // whose answer is wrong, not merely short, if a goal is missing from it.
   if (f.employee) conds.push(eq(schema.goals.employeeId, idFromPath(f.employee)!));
-  // `?manager=employees/{id}`: everything owned by somebody who reports to them - "my team's goals" as a
-  // question about every goal rather than about the page this browser holds. A subquery on the indexed
-  // `manager_id` rather than a join, so the keyset page stays a plain select over `goals`.
-  if (f.manager) conds.push(reportsOf(idFromPath(f.manager)!));
+  // `?manager=employees/{id}`: their team's goals (`teamOf`) - "my team's goals" as a question about every goal
+  // rather than about the page this browser holds.
+  if (f.manager) conds.push(teamOf(idFromPath(f.manager)!, f.managerDepts ?? []));
   // `?department=departments/{id}` narrows to the goals one team OWNS, and `?department=none` to the ones
   // that belong to a person rather than a team. Server-side for the same reason `cycle` is: "which goals does
   // Engineering own" is a question about every goal, not about the page of them a browser happens to hold,
@@ -454,6 +460,20 @@ const reportsOf = (managerId: string): SQL =>
   sql`${schema.goals.employeeId} in (select ${schema.employees.uuid} from ${schema.employees} where ${schema.employees.managerId} = ${managerId} and ${schema.employees.deleteTime} is null)`;
 
 /**
+ * A manager's TEAM: the people who report to them, and everybody in the departments they manage - sub-departments
+ * included. Their own goals are Mine, not the team's, so they are left out.
+ *
+ * `depts` are the managed department codes (`managedDepartmentCodes`). Codes nest by department, so a goal is in
+ * a department's tree exactly when its code sits under that department's code - one indexed GLOB range per
+ * department, the same boundary-safe `'<code>-*'` form `applyScope` binds a subtree with.
+ */
+const teamOf = (managerId: string, depts: string[]): SQL =>
+  and(
+    ne(schema.goals.employeeId, managerId),
+    or(reportsOf(managerId), ...depts.map((c) => sql`${schema.goals.code} glob ${`${c}-*`}`)),
+  )!;
+
+/**
  * One clock for a whole answer: the org's calendar day at UTC midnight, and the request instant.
  *
  * Both, and passed down rather than read per predicate, for the reason `services/dashboardSummary.ts` gives: in
@@ -469,6 +489,13 @@ export async function listGoals(deps: Deps, scope: ListScope, maxPageSize: numbe
   // Resolved once and shared with the counts below: one FTS lookup per request, and the same matched set
   // behind the rows and the numbers.
   const text = await searchFilter(deps, "goals", filters.q, schema.goals.uuid);
+  // The departments a team is drawn from, read once: the page asks `?manager=` and `?scope_counts=` for the same
+  // person, so the second is usually the first's answer.
+  const managerId = filters.manager ? idFromPath(filters.manager)! : undefined;
+  const managerDepts = managerId ? await managedDepartmentCodes(deps, managerId) : undefined;
+  const me = filters.scopeCountsFor;
+  const scopeTeamDepts = me ? (me === managerId ? managerDepts : await managedDepartmentCodes(deps, me)) : undefined;
+  filters = { ...filters, managerDepts, scopeTeamDepts };
   const conds = goalListConds(scope, filters, today, now, text);
   const page = await keysetPage(deps, schema.goals, "goals", and(...conds), { max: maxPageSize, pageToken });
   const extra: Record<string, unknown> = {};
@@ -488,6 +515,8 @@ export type GoalCounts = {
   states: Record<GoalState | "all", number>;
   /** Per owner, for the team overview: how many are in flight, how many are late, and their weights' total. */
   owners: { employee: string; active: number; overdue: number; weight: number; progress: number }[];
+  /** Per scope chip, when asked: what pressing Mine / My team / Everyone would list, every other filter kept. */
+  scopes?: { mine: number; team: number; all: number };
 };
 
 /** How many owners the rollup reports. A page-sized set of people is a summary; a thousand is a second list. */
@@ -512,13 +541,40 @@ export async function goalCounts(deps: Deps, scope: ListScope, filters: GoalList
   const base = goalListConds(scope, { ...filters, state: undefined }, today, now, text);
   const where = and(...base);
   const cond = (c: SQL | undefined) => sql<number>`coalesce(sum(case when ${c ?? sql`0`} then 1 else 0 end), 0)`;
+
+  // THE SCOPE CHIPS: what pressing Mine / My team / Everyone would list. Every other filter is kept, the state
+  // chip included, because switching scope keeps it; the owner filters are what a scope REPLACES (pressing one
+  // also clears a picked person), so they are left out. In the Everyone view that wide set IS the set the totals
+  // below already scan, so the three numbers ride that query as extra sums and cost no rows. In Mine or My team
+  // it is a wider set than the page's, so it costs one more pass over what the caller can list.
+  // Empty for a caller with no employee record: they have no goals of their own and no reports, so Mine and My
+  // team count nothing and Everyone is still counted.
+  const me = filters.scopeCountsFor;
+  const asked = me !== undefined;
+  const stateCond = isGoalState(filters.state) ? goalStateSql(filters.state, today, now) : undefined;
+  const scopeSums: Record<string, SQL<number>> = asked
+    ? {
+        scope_all: cond(stateCond ?? sql`1`),
+        scope_mine: me ? cond(and(stateCond, eq(schema.goals.employeeId, me))) : sql<number>`0`,
+        scope_team: me ? cond(and(stateCond, teamOf(me, filters.scopeTeamDepts ?? []))) : sql<number>`0`,
+      }
+    : {};
+  const folded = asked && !filters.employee && !filters.manager;
+
   const [totals] = (await deps.db
     .select({
       all: sql<number>`count(*)`,
       ...Object.fromEntries(GOAL_STATES.map((s) => [s, cond(goalStateSql(s, today, now))])),
+      ...(folded ? scopeSums : {}),
     })
     .from(schema.goals)
     .where(where)) as unknown as Record<string, number>[];
+  const [scoped] = asked && !folded
+    ? ((await deps.db
+        .select(scopeSums)
+        .from(schema.goals)
+        .where(and(...goalListConds(scope, { ...filters, state: undefined, employee: undefined, manager: undefined }, today, now, text)))) as unknown as Record<string, number>[])
+    : [totals];
 
   // The per-person rollup the team overview draws, over their OPEN goals.
   //
@@ -548,7 +604,10 @@ export async function goalCounts(deps: Deps, scope: ListScope, filters: GoalList
   const states = Object.fromEntries(
     ["all", ...GOAL_STATES].map((k) => [k, Number(totals?.[k] ?? 0)]),
   ) as GoalCounts["states"];
-  return { states, owners: owners.map((o) => ({ ...o, employee: `employees/${o.employee}` })) };
+  const scopes = asked
+    ? { mine: Number(scoped?.scope_mine ?? 0), team: Number(scoped?.scope_team ?? 0), all: Number(scoped?.scope_all ?? 0) }
+    : undefined;
+  return { states, owners: owners.map((o) => ({ ...o, employee: `employees/${o.employee}` })), ...(scopes ? { scopes } : {}) };
 }
 
 export type BurnupPoint = { at: string; attained: number; expected: number };

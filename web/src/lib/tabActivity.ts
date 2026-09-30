@@ -134,7 +134,12 @@ export async function syncTabSeenFromServer() {
 // One badge target: a stable storage `key`, the `collection` to read, and an optional `filter` to count only
 // matching rows (e.g. tickets assigned to me). Keys must be globally unique across pages - namespace in-page
 // sub-tabs like "tickets:assigned" so they don't collide with a workspace route key.
-export type TabSpec = { key: string; collection?: string; filter?: (row: any) => boolean };
+// `others` is NavTab's: a page about other people (Team goals), whose badge leaves out the caller's own rows - and
+// is asked as its own token, so it is not the sibling tab's number over the same collection.
+export type TabSpec = { key: string; collection?: string; others?: string; filter?: (row: any) => boolean };
+
+/** The wire token for a plain tab: `goals`, or `goals@others` for a page about other people. */
+const askToken = (t: TabSpec) => (t.others ? `${t.collection}@others` : t.collection!);
 
 /**
  * New-item counts for a set of tabs, keyed by spec key. A tab never seen before is baselined to now, so its
@@ -155,7 +160,7 @@ export type TabSpec = { key: string; collection?: string; filter?: (row: any) =>
  */
 export function useTabActivity(tabs: TabSpec[], deps: unknown[] = []): Record<string, number> {
   const [counts, setCounts] = useState<Record<string, number>>({});
-  const key = tabs.map((t) => `${t.key}:${t.collection ?? ""}:${t.filter ? "f" : ""}`).join(",");
+  const key = tabs.map((t) => `${t.key}:${t.collection ?? ""}:${t.others ? "o" : ""}:${t.filter ? "f" : ""}`).join(",");
   useEffect(() => {
     const withColl = tabs.filter((t) => t.collection);
     // Baseline any tab we have no reference for, so the first encounter doesn't badge the whole backlog.
@@ -217,13 +222,13 @@ export function useTabActivity(tabs: TabSpec[], deps: unknown[] = []): Record<st
     // the page's own batch rather than adding a round trip.
     if (remote.length) {
       const since = Object.fromEntries(remote.map((t) => [t.key, Math.floor(seen[t.key] ?? 0)]));
-      const ask = remote.map((t) => `${t.collection}:${since[t.key]}`).join(",");
+      const ask = remote.map((t) => `${askToken(t)}:${since[t.key]}`).join(",");
       get<{ counts?: Record<string, number> }>(`activity-counts?tabs=${encodeURIComponent(ask)}`)
         .then((r) => {
           if (!live) return;
-          // Back from collection to tab key: the request asked per collection, the badge is per tab.
-          const byCollection = r.counts ?? {};
-          fromServer = Object.fromEntries(remote.map((t) => [t.key, byCollection[t.collection!] ?? 0]));
+          // Back from token to tab key: the request asked per token, the badge is per tab.
+          const byToken = r.counts ?? {};
+          fromServer = Object.fromEntries(remote.map((t) => [t.key, byToken[askToken(t)] ?? 0]));
           askedFrom = since;
           recompute();
         })

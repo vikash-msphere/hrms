@@ -139,6 +139,8 @@ export const goals = collectionRoutes<GoalInput, typeof schema.goals>({
     deletedOnly: page.deletedOnly,
     withBurnup: c.req.query("burnup") === "true",
     withCounts: c.req.query("counts") === "true",
+    // The caller's own id, or "" when they have no employee record (Mine and My team then count nothing).
+    scopeCountsFor: c.req.query("scope_counts") === "true" ? (c.get("user")?.employeeId ?? "") : undefined,
   }),
   verbs: {
     updateProgress: { schema: progressSchema, run: (deps, user, id, body) => updateGoalProgress(deps, user, id, body.progress, body.status, body.note) },
