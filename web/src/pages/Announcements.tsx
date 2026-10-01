@@ -1300,12 +1300,12 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
                             who can edit their own. `AccessAction` reads that from the caller's own
                             capabilities - the page tests nothing. */}
                         <AccessAction collection="moderation" verb="hide" label="Take this post off the wall">
-                          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void hideByHand(a)} aria-label="Take off the wall" title="Take this post off the wall (moderation)">
+                          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => hideByHand(a)} aria-label="Take off the wall" title="Take this post off the wall (moderation)">
                             <EyeOff className="h-3.5 w-3.5" />
                           </Button>
                         </AccessAction>
                         {can.includes("delete") && (
-                          <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => void deletePost(a)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>
+                          <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => deletePost(a)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>
                         )}
                       </div>
                       {/* The whole card is clickable for a mouse, but a click target is not an affordance a
@@ -1483,7 +1483,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
                                           post's own control. */}
                                       {rep.id && (
                                         <AccessAction collection="moderation" verb="hide" label="Take this reply off the thread">
-                                          <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => void hideReply(rep.id!)} aria-label="Take off the thread" title="Take this reply off the thread (moderation)">
+                                          <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => hideReply(rep.id!)} aria-label="Take off the thread" title="Take this reply off the thread (moderation)">
                                             <EyeOff className="h-3 w-3" />
                                           </Button>
                                         </AccessAction>

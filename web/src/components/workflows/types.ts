@@ -41,7 +41,7 @@ export type AudienceSpec =
   | { kind: "capability"; capability: string };
 
 // Recurrence for a time-driven rule (trigger_type === SCHEDULE_TRIGGER). Mirrors src/domain/automations.ts.
-export type ScheduleFreq = "daily" | "weekly" | "monthly";
+export type ScheduleFreq = "daily" | "weekly" | "monthly" | "manual";
 export type ScheduleScope = "once" | "perEmployee";
 export type Schedule = { freq: ScheduleFreq; day?: number; scope?: ScheduleScope };
 export const SCHEDULE_TRIGGER = "schedule.recurring";

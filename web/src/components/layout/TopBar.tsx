@@ -1,4 +1,4 @@
-import { Search, ChevronRight, Plus, LifeBuoy, Ticket, LogIn, CircleDot, Bug, Menu } from "lucide-react";
+import { Search, ChevronRight, Plus, LifeBuoy, Ticket, LogIn, CircleDot, Bug, Menu, Loader2 } from "lucide-react";
 import { navBreadcrumb } from "@/nav";
 import { navigate } from "@/router";
 import { cn, humanize } from "@/lib/utils";
@@ -275,6 +275,7 @@ function ClockChip() {
     <button
       onClick={() => void clock.punch(on ? "clockOut" : "clockIn")}
       disabled={clock.busy}
+      aria-busy={clock.busy || undefined}
       aria-label={on ? `${label} (clocked in for ${fmtDuration(elapsed)})` : label}
       title={on ? `Clocked in for ${fmtDuration(elapsed)} - clock out` : label}
       className={cn(
@@ -285,7 +286,7 @@ function ClockChip() {
         on ? "border-success/40 bg-success/10 text-success hover:bg-success/20" : "bg-card text-foreground hover:bg-accent hover:text-accent-foreground",
       )}
     >
-      {on ? <CircleDot className="h-4 w-4 shrink-0 animate-pulse" /> : <LogIn className="h-4 w-4 shrink-0" />}
+      {clock.busy ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : on ? <CircleDot className="h-4 w-4 shrink-0 animate-pulse" /> : <LogIn className="h-4 w-4 shrink-0" />}
       <span className="hidden lg:inline">{label}</span>
     </button>
   );

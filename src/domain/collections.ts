@@ -112,8 +112,8 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   "activity",
   // Virtual capability (no table, no data of its own): `tax-verifications.read` gates GET /v1/tax-verifications,
   // the HR/payroll queue of prior-employer tax declarations awaiting verification (assembled by scanning the
-  // encrypted per-employee tax blob). Sensitive (exposes declared prior salary), so private-by-default: super
-  // via `**`, widened to hr/payroll via the ACL. The verify/reject action rides the existing employees.tax write.
+  // encrypted per-employee tax blob). Sensitive (exposes declared prior salary): super via `**` and the seeded
+  // payroll_admin role, anyone else through the ACL. The verify/reject action rides the existing employees.tax write.
   "tax-verifications",
   // Virtual capability (no table of its own): `moderation.read` gates GET /v1/moderation, the queue of public
   // posts a guard model objected to, and `moderation.decide` gates acting on one. Assembled from the

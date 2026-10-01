@@ -287,6 +287,20 @@ export const accessRules = sqliteTable("access_rules", {
   // The list's keyset order (created_at desc, uuid desc). Without it every 100-row page scanned and sorted the
   // whole table, so paging through all rules read it once per page.
   created: index("ar_created_idx").on(t.createdAt, t.uuid),
+  // The narrowed lists (services/accessRules.ts listAccessRules), each in the same keyset order so a page is one
+  // seek and about a page of index steps. Without them a subject editor's page reads ALL the subject's rules and
+  // sorts them (hr_admin: 369 a page), the ACL modal's collection read walks `ar_created_idx` until it has a page
+  // of matches - the whole table for any collection holding fewer than 100 rules - and access mode's deny tint,
+  // which only wants the denies, pages through every rule in the org on each app load. In D1 a subject's page
+  // reads 101 rows and the denies read themselves; test/accessRuleListRowsRead.test.ts holds each to its cost.
+  subjCreated: index("ar_subject_created_idx").on(t.subject, t.subjectKind, t.createdAt, t.uuid),
+  // The collection read is `namespace IN (c, '*')`, served a namespace at a time, so SQLite still sorts the page
+  // it collects and D1 bills each of those rows into the temp B-tree and out again: about two pages of rows a page
+  // (208 measured), and a collection of a few dozen rules costs twice its rules, not the table.
+  nsCreated: index("ar_namespace_created_idx").on(t.namespace, t.createdAt, t.uuid),
+  // Partial, because denies are the rare row. It leads with `effect` although every row in it holds the same
+  // value: without planner statistics SQLite only prefers it to `ar_created_idx` when it constrains a column.
+  denyCreated: index("ar_deny_created_idx").on(t.effect, t.createdAt, t.uuid).where(sql`${t.effect} = 'deny'`),
 }));
 
 // Comp-off earned by working on a holiday: one row per (employee, worked day). The row IS the idempotency
@@ -421,6 +435,11 @@ export const leaveTypes = sqliteTable("leave_types", {
   // How the annual rate is credited: "monthly" (annual/12 once a month) or "semi_monthly" (annual/24 on the
   // 1st and 16th). Same yearly total; semi-monthly just credits in two installments.
   accrualFrequency: text("accrual_frequency").notNull().default("monthly"),
+  // The most a balance of this type may ACCRUE to (null = uncapped). A credit that would take the balance past
+  // it is cut to what fits, and the rest is not credited; the period still counts as credited, so the days are
+  // forfeited rather than owed. A balance already above the cap (a manual grant, an opening balance, a
+  // carry-forward) is left where it is and simply accrues nothing until it is spent below the cap.
+  accrualCapDays: real("accrual_cap_days"),
   paid: integer("paid", { mode: "boolean" }).notNull().default(true),
   color: text("color"), // hex (e.g. "#8b5cf6") for calendar/timeline pills; null = auto-assigned by index
 
@@ -1402,7 +1421,14 @@ export const cards = sqliteTable("cards", {
   // equality columns leading and `rank` next, the min/max optimisation turns it into one backward seek
   // (verified: SeekLE/Prev rather than Next). PARTIAL on the same predicate the query carries, so it indexes
   // only live cards - which is also what the WIP-limit read filters on.
-  boardColRankIdx: index("card_board_col_rank_idx").on(t.boardId, t.columnKey, t.rank).where(sql`${t.deleteTime} is null`) }));
+  boardColRankIdx: index("card_board_col_rank_idx").on(t.boardId, t.columnKey, t.rank).where(sql`${t.deleteTime} is null`),
+  // One board's cards, newest first: the Boards page's `GET /v1/cards?board=` walk, one keyset page at a time.
+  // The equality column leads and the page order follows, so each page is one seek to the cursor (keysetPage
+  // binds it as a row value) and a page of index steps. Without it SQLite reads the board's whole range through
+  // card_board_col_rank_idx and sorts it, for EVERY page of the walk: measured in D1 on a board of 588 live
+  // cards, 1,153 rows read for the first page and 1,053 for the second, against 101 and 102 with this index,
+  // with and without ANALYZE. Partial on the same predicate as the list's soft-delete filter, like the index above.
+  boardCreatedIdx: index("card_board_created_idx").on(t.boardId, t.createdAt, t.uuid).where(sql`${t.deleteTime} is null`) }));
 
 // Append-only movement log: one row per column transition of a card. INTERNAL (not a wire collection / route):
 // written only by the card `move` verb and read only server-side by the board analytics roll-up, so it needs no

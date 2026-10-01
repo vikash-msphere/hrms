@@ -286,6 +286,14 @@ const TRANSIENT = new Set([502, 503, 504]);
 // have landed before the gateway gave up on the response, and repeating it is how one expense becomes two.
 const READ_ATTEMPTS = 3;
 const settle = (attempt: number) => new Promise((r) => setTimeout(r, 150 * attempt));
+// A write still in flight when its page goes away (a reload, a navigation, a closed tab) is cancelled with the
+// document unless it was sent `keepalive`. The board moves a card and the checklist ticks on screen BEFORE the
+// server answers, so a reload a moment after the press drew the old state back with no error anywhere - the
+// write had simply never arrived. Writes travel keepalive so they outlive the page that sent them. The browser
+// caps all keepalive bodies in flight at 64KB together and refuses the fetch past it, so only small bodies
+// ride it (a long description or an import goes the ordinary way), and a refused one is re-sent without it.
+const KEEPALIVE_MAX_CHARS = 4_000; // ≤ 12KB of UTF-8, so a handful in flight at once stay inside the cap
+const keepaliveFits = (body: RequestInit["body"]) => body == null || (typeof body === "string" && body.length <= KEEPALIVE_MAX_CHARS);
 
 /**
  * Is this a gateway saying "not right now", for a READ?
@@ -372,6 +380,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   const keyed = !isRead && !isDelete;
   const idemKey = keyed ? crypto.randomUUID() : undefined;
   const attempts = isRead || isDelete || keyed ? READ_ATTEMPTS : 1;
+  let keepalive = init.keepalive ?? (!isRead && keepaliveFits(init.body));
   let tries = 0;
   for (let attempt = 1; ; attempt++) {
     tries = attempt;
@@ -380,6 +389,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
         (attempt === 1 ? prefetched : undefined) ??
         (await fetch(`/v1${path}`, {
           ...init,
+          keepalive,
           headers: {
             "Content-Type": "application/json",
             "X-Requested-By": "hrms-spa",
@@ -391,6 +401,8 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
         }));
     } catch {
       // The request never reached anybody: worth another go for a read, and the offline banner for the rest.
+      // A keepalive refusal (other writes already hold the 64KB) looks the same, so the next copy goes without.
+      keepalive = false;
       if (attempt >= attempts) throw networkError();
       await settle(attempt);
       continue;

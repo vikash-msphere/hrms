@@ -25,6 +25,7 @@ import type { Action, Automation, EvalContext, RecipientSpec, WaitArm, Schedule,
 import type { EmailAttachment } from "../ports";
 import { evalCondition, hasPrivilegedAction, privilegedActionKinds, resolveField, scheduleDueOn, SCHEDULE_TRIGGER } from "../domain/automations";
 import { computeEmployeeMetrics, NEVER_TAKEN_LEAVE, type EmployeeMetrics } from "./scheduledMetrics";
+import { missingProfileItems } from "./profileCompleteness";
 import { orgToday, dayStartMs } from "./orgDay";
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
 import { buildBankFile } from "./bankFile";
@@ -783,6 +784,37 @@ function scheduledPayload(base: { weekday: number; dayOfMonth: number }, m: Empl
   };
 }
 
+// The profile checklist fields (profileMissing / profileMissingSteps) cost a decrypt of three profile blobs per
+// person, so a firing carries them only when its rule mentions them, in the condition or in a message.
+const PROFILE_FIELD = /\bprofileMissing/;
+const usesProfileFields = (a: Automation): boolean => PROFILE_FIELD.test(JSON.stringify([a.condition, a.actions]));
+
+// What each employee in a fan-out slice still has to fill in on their profile, by checklist label. One read
+// of the slice's rows, not the roster's: the slice is what this pass fires for. Best-effort like the rest of
+// the fan-out - a failure leaves the fields off the payload, so a condition on them does not match.
+async function profileGaps(deps: Deps, slice: { uuid: string }[], metrics: Map<string, EmployeeMetrics>): Promise<Map<string, string[]> | null> {
+  if (!slice.length) return new Map();
+  try {
+    const rows = await deps.db
+      .select({
+        uuid: schema.employees.uuid,
+        photoKey: schema.employees.photoKey,
+        signatureKey: schema.employees.signatureKey,
+        personalDetailsEnc: schema.employees.personalDetailsEnc,
+        bankDetailsEnc: schema.employees.bankDetailsEnc,
+        identityDetailsEnc: schema.employees.identityDetailsEnc,
+      })
+      .from(schema.employees)
+      .where(inArray(schema.employees.uuid, slice.map((e) => e.uuid)));
+    const gaps = new Map<string, string[]>();
+    for (const r of rows) gaps.set(r.uuid, await missingProfileItems(deps, r, metrics.get(r.uuid)?.appPinMissing === 1));
+    return gaps;
+  } catch (e) {
+    console.error("[automationEngine] profile checklist for a scheduled fan-out failed (fields left off)", e);
+    return null;
+  }
+}
+
 // Daily scanner: fire the time-driven ("schedule.recurring") rules whose recurrence matches today. Called
 // from the cron day-tick. Each rule is claimed with a guarded per-day stamp so a re-run of the tick can't
 // double-fire it. A `perEmployee` rule fans out one firing per active employee, carrying derived metrics in
@@ -801,15 +833,9 @@ export async function runScheduledAutomations(deps: Deps): Promise<number> {
   // UTC-derived day therefore ran every "every Monday" rule on Sunday for those orgs. `todayStr` is also the
   // per-day claim stamp, so it has to name the same day the rule was judged against.
   const todayStr = await orgToday(deps);
-  const today = new Date(dayStartMs(todayStr));
   const scheduled = (await loadEnabled(deps)).filter((r) => r.triggerType === SCHEDULE_TRIGGER && r.scheduleJson);
   let fired = 0;
-  // The org-level payroll calendar, shared across every `once` rule due tonight and computed lazily for the
-  // same reason the roster is: most ticks have no scheduled rule at all.
-  let payrollMetrics: Record<string, unknown> | null = null;
-  // Metrics + roster are shared across perEmployee rules and computed lazily (only if one is actually due).
-  let roster: { uuid: string; managerId: string | null }[] | null = null;
-  let metrics: Awaited<ReturnType<typeof computeEmployeeMetrics>> | null = null;
+  const shared: ScheduledShared = { payrollMetrics: null, roster: null, metrics: null };
 
   for (const row of scheduled) {
     let automation: Automation;
@@ -821,60 +847,105 @@ export async function runScheduledAutomations(deps: Deps): Promise<number> {
       console.error(`[automationEngine] scheduled rule ${row.uuid} malformed (skipped)`, e);
       continue;
     }
-    if (!scheduleDueOn(schedule, today)) continue;
-    // Atomically claim the day: the guarded update wins at most once per rule per date.
-    const claimed = await deps.db
-      .update(schema.automations)
-      .set({ lastScheduledOn: todayStr, updatedAt: new Date() })
-      .where(and(eq(schema.automations.uuid, row.uuid), or(isNull(schema.automations.lastScheduledOn), ne(schema.automations.lastScheduledOn, todayStr))))
-      .returning({ uuid: schema.automations.uuid });
-    if (!claimed.length) continue;
-
-    const base = { weekday: today.getUTCDay(), dayOfMonth: today.getUTCDate() };
-
-    if ((schedule.scope ?? "once") === "once") {
-      // The payroll calendar rides the ORG-level firing, and only this one. These are facts about the company's
-      // month - how far off the pay date is, whether the run is built - so fanning them out per employee would
-      // tell the whole roster that payroll has not been started. Computed once for the tick and shared across
-      // however many `once` rules are due, because a nightly tick with three payroll reminders in it should
-      // read the calendar once. Best-effort: a reminder that cannot compute its numbers must not take down the
-      // automation tick that also runs everything else.
-      if (!payrollMetrics) {
-        try {
-          payrollMetrics = await payrollScheduleMetrics(deps, today);
-        } catch (e) {
-          console.error("[automationEngine] payroll schedule metrics failed (scheduled rules see none)", e);
-          payrollMetrics = {};
-        }
-      }
-      fired += await runScheduledFiring(deps, row, automation, { type: SCHEDULE_TRIGGER, subject: null, actorId: null, employeeId: null, payload: { ...base, ...payrollMetrics }, occurredAt: now });
-      continue;
-    }
-
-    // perEmployee: compute the roster + metrics once, then fan out one firing per active employee - a slice of
-    // them per invocation, with the rest queued.
-    if (!roster) roster = await fanOutRoster(deps);
-    if (!metrics) metrics = await computeEmployeeMetrics(deps, roster);
-    // ENQUEUED BEFORE THE SLICE RUNS, not after. The whole failure this bound exists to stop is an invocation
-    // that runs out of subrequests part-way through the fan-out; a continuation enqueued afterwards is exactly
-    // the write that would not happen. Two calls now buy the rest of the roster a retry even if this pass dies.
-    if (roster.length > SCHEDULED_EMPLOYEE_BATCH) {
-      try {
-        await deps.db.insert(schema.jobs).values({
-          code: await allocFlatCode(deps, schema.jobs),
-          kind: SCHEDULED_FAN_OUT_JOB,
-          payload: JSON.stringify({ automationId: row.uuid, day: todayStr, offset: SCHEDULED_EMPLOYEE_BATCH, correlationId: deps.trace }),
-        });
-        console.warn(`[automationEngine] scheduled rule ${row.uuid} queued for ${roster.length - SCHEDULED_EMPLOYEE_BATCH} more employee(s): the roster outran one invocation`);
-      } catch (e) {
-        // Best-effort like the rest of this function. A continuation that cannot be enqueued is the old
-        // behaviour (this pass's slice only), not a reason to abandon the slice as well.
-        console.error(`[automationEngine] could not queue the scheduled fan-out continuation for ${row.uuid}`, e);
-      }
-    }
-    fired += await fanOutSlice(deps, row, automation, roster.slice(0, SCHEDULED_EMPLOYEE_BATCH), metrics, base, now);
+    if (!scheduleDueOn(schedule, new Date(dayStartMs(todayStr)))) continue;
+    if (!(await claimScheduledDay(deps, row.uuid, todayStr))) continue;
+    fired += (await fireClaimedRule(deps, row, automation, schedule, todayStr, now, shared)).fired;
   }
   return fired;
+}
+
+/**
+ * Run one scheduled or manual rule NOW, for `automations/{id}:run`. It is today's firing of the rule, taken
+ * through the same per-day claim the nightly scanner uses, so a rule fires at most once per org day whichever
+ * of the two starts it: a second press the same day, or the scanner reaching a rule already run by hand,
+ * finds the day claimed. Returns null when it was. A `perEmployee` rule runs its first slice of the roster in
+ * this request and queues the rest exactly as the nightly fan-out does; `queued` is how many are still owed.
+ * The caller (services/automations.ts) has already checked the rule is enabled, scheduled and theirs to run.
+ */
+export async function runAutomationNow(deps: Deps, row: AutomationRow): Promise<{ fired: number; queued: number } | null> {
+  const automation = parseAutomation(row);
+  const schedule = JSON.parse(row.scheduleJson!) as Schedule;
+  const todayStr = await orgToday(deps);
+  if (!(await claimScheduledDay(deps, row.uuid, todayStr))) return null;
+  return fireClaimedRule(deps, row, automation, schedule, todayStr, deps.clock.now(), { payrollMetrics: null, roster: null, metrics: null });
+}
+
+// Atomically claim a rule's org day: the guarded update wins at most once per rule per date.
+async function claimScheduledDay(deps: Deps, uuid: string, todayStr: string): Promise<boolean> {
+  const claimed = await deps.db
+    .update(schema.automations)
+    .set({ lastScheduledOn: todayStr, updatedAt: new Date() })
+    .where(and(eq(schema.automations.uuid, uuid), or(isNull(schema.automations.lastScheduledOn), ne(schema.automations.lastScheduledOn, todayStr))))
+    .returning({ uuid: schema.automations.uuid });
+  return claimed.length > 0;
+}
+
+// What the scheduled firings of one pass share, computed on first need: most ticks have no scheduled rule at
+// all, and a tick with several due should read the payroll calendar, the roster and the metrics once.
+type ScheduledShared = {
+  payrollMetrics: Record<string, unknown> | null;
+  roster: { uuid: string; managerId: string | null }[] | null;
+  metrics: Map<string, EmployeeMetrics> | null;
+};
+
+// Fire a rule whose day is already claimed: one org-level firing for `once`, the per-employee fan-out for
+// `perEmployee`. `queued` is how many employees the queued continuation still owes.
+async function fireClaimedRule(
+  deps: Deps,
+  row: AutomationRow,
+  automation: Automation,
+  schedule: Schedule,
+  todayStr: string,
+  now: Date,
+  shared: ScheduledShared,
+): Promise<{ fired: number; queued: number }> {
+  const today = new Date(dayStartMs(todayStr));
+  const base = { weekday: today.getUTCDay(), dayOfMonth: today.getUTCDate() };
+
+  if ((schedule.scope ?? "once") === "once") {
+    // The payroll calendar rides the ORG-level firing, and only this one. These are facts about the company's
+    // month - how far off the pay date is, whether the run is built - so fanning them out per employee would
+    // tell the whole roster that payroll has not been started. Computed once for the tick and shared across
+    // however many `once` rules are due, because a nightly tick with three payroll reminders in it should
+    // read the calendar once. Best-effort: a reminder that cannot compute its numbers must not take down the
+    // automation tick that also runs everything else.
+    if (!shared.payrollMetrics) {
+      try {
+        shared.payrollMetrics = await payrollScheduleMetrics(deps, today);
+      } catch (e) {
+        console.error("[automationEngine] payroll schedule metrics failed (scheduled rules see none)", e);
+        shared.payrollMetrics = {};
+      }
+    }
+    const fired = await runScheduledFiring(deps, row, automation, { type: SCHEDULE_TRIGGER, subject: null, actorId: null, employeeId: null, payload: { ...base, ...shared.payrollMetrics }, occurredAt: now });
+    return { fired, queued: 0 };
+  }
+
+  // perEmployee: compute the roster + metrics once, then fan out one firing per active employee - a slice of
+  // them per invocation, with the rest queued.
+  const roster = (shared.roster ??= await fanOutRoster(deps));
+  const metrics = (shared.metrics ??= await computeEmployeeMetrics(deps, roster));
+  let queued = 0;
+  // ENQUEUED BEFORE THE SLICE RUNS, not after. The whole failure this bound exists to stop is an invocation
+  // that runs out of subrequests part-way through the fan-out; a continuation enqueued afterwards is exactly
+  // the write that would not happen. Two calls now buy the rest of the roster a retry even if this pass dies.
+  if (roster.length > SCHEDULED_EMPLOYEE_BATCH) {
+    try {
+      await deps.db.insert(schema.jobs).values({
+        code: await allocFlatCode(deps, schema.jobs),
+        kind: SCHEDULED_FAN_OUT_JOB,
+        payload: JSON.stringify({ automationId: row.uuid, day: todayStr, offset: SCHEDULED_EMPLOYEE_BATCH, correlationId: deps.trace }),
+      });
+      queued = roster.length - SCHEDULED_EMPLOYEE_BATCH;
+      console.warn(`[automationEngine] scheduled rule ${row.uuid} queued for ${queued} more employee(s): the roster outran one invocation`);
+    } catch (e) {
+      // Best-effort like the rest of this function. A continuation that cannot be enqueued is the old
+      // behaviour (this pass's slice only), not a reason to abandon the slice as well.
+      console.error(`[automationEngine] could not queue the scheduled fan-out continuation for ${row.uuid}`, e);
+    }
+  }
+  const fired = await fanOutSlice(deps, row, automation, roster.slice(0, SCHEDULED_EMPLOYEE_BATCH), metrics, base, now);
+  return { fired, queued };
 }
 
 // One firing: evaluate the rule's condition against the event, run its actions, record the run. Returns 1 if
@@ -909,13 +980,18 @@ async function fanOutSlice(
   now: Date,
 ): Promise<number> {
   let fired = 0;
+  const profiles = usesProfileFields(automation) ? await profileGaps(deps, slice, metrics) : null;
   for (const emp of slice) {
+    const gaps = profiles?.get(emp.uuid);
     fired += await runScheduledFiring(deps, row, automation, {
       type: SCHEDULE_TRIGGER,
       subject: `employees/${emp.uuid}`,
       actorId: null,
       employeeId: emp.uuid,
-      payload: scheduledPayload(base, metrics.get(emp.uuid)),
+      payload: {
+        ...scheduledPayload(base, metrics.get(emp.uuid)),
+        ...(gaps ? { profileMissing: gaps.length, profileMissingSteps: gaps.join(", ") } : {}),
+      },
       occurredAt: now,
     });
   }

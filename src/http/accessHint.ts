@@ -111,7 +111,7 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   "interview-feedback": ["update", "delete"],
   offers: ["update", "delete", "approve", "extend", "accept", "decline", "rescind", "letter"],
   expenses: ["update", "delete", "submit", "approve", "reject", "cancel", "pay", "upload", "download", "extractReceipt"],
-  automations: ["update", "delete", "enable", "disable", "test"],
+  automations: ["update", "delete", "enable", "disable", "test", "run"],
   "access-rules": ["update", "delete", "preview", "requestAccess", "approve", "reject", "clone", "review", "scopeCounts"],
   // The flagged-post queue. Listed so `decide` is offerable BY NAME in the ACL modal: the capability is
   // private by default and granted deliberately, so the one action on it should be grantable just as
@@ -189,7 +189,7 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "sign", // in-place e-signature of a generated letter/contract (personal-documents, owner-only)
   "refreshEsign", // poll an e-sign vendor for a pending document's status and apply it (personal-documents)
   "remindAck", // nudge whoever still owes a signature on a policy's current version (org-documents)
-  "run", // run a queued job (operations) or fire a cron tick on demand (cron-runs)
+  "run", // run a queued job (operations), fire a cron tick on demand (cron-runs), or fire a scheduled/manual rule now (automations)
   "clearCache", // collection-level: make every server instance reload its in-memory caches (operations)
   "uploadTemplate", // upload a bank's blank bulk-payment .xlsx (bank-formats)
   "uploadImage", "image", "deleteImage", // upload / read / remove one of a letterhead's images (letterheads)

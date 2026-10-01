@@ -243,10 +243,10 @@ export function SubjectPermissionsDialog({
                   // "approve permission changes" without handing out the write that queues them.
                   <span className="flex gap-1">
                     <AccessAction verb="approve" collection="access-rules" label="Approve permission changes">
-                      <Button size="sm" variant="outline" className="h-7" disabled={busy} onClick={() => void decide(r, "approve")}>Approve</Button>
+                      <Button size="sm" variant="outline" className="h-7" disabled={busy} onClick={() => decide(r,"approve")}>Approve</Button>
                     </AccessAction>
                     <AccessAction verb="reject" collection="access-rules" label="Reject permission changes">
-                      <Button size="sm" variant="ghost" className="h-7 text-destructive" disabled={busy} onClick={() => void decide(r, "reject")}>Reject</Button>
+                      <Button size="sm" variant="ghost" className="h-7 text-destructive" disabled={busy} onClick={() => decide(r,"reject")}>Reject</Button>
                     </AccessAction>
                   </span>
                 )}

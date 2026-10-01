@@ -1,4 +1,4 @@
-import { allowConsoleErrors, gotoRoute, test, expect } from "./fixtures";
+import { allowConsoleErrors, collectConsole, gotoRoute, test, expect } from "./fixtures";
 
 // Every tab on every page, opened.
 //
@@ -64,25 +64,18 @@ test("every tab on every page mounts, draws something and logs nothing", async (
   // app failing: another spec writing the same collection while this reads it raises a 409 in whichever
   // browser lost the race. Excused here for the same reason the sweep's own filter excuses it below.
   allowConsoleErrors(page, /status of 409/i);
-  // Where the walk is, so an error caught here names the panel that logged it. Telemetry delivery is filtered
-  // for the reason IGNORED_CONSOLE gives in fixtures.ts.
-  let current = "";
-  const logged: string[] = [];
-  page.on("console", (m) => {
-    // 429: telemetry delivery, filtered for the reason IGNORED_CONSOLE gives in fixtures.ts.
-    // 409: a lost race with another spec writing the same collection while this walk reads it. This sweep is
-    // about whether a panel MOUNTS, and a conflict raised by a parallel writer says nothing about that -
-    // `writeDialog` is where a lost race is the subject.
-    if (m.type() !== "error" || /status of (429|409)/i.test(m.text())) return;
-    logged.push(`${current}: ${m.text().slice(0, 200)}`);
-  });
-  page.on("pageerror", (e) => logged.push(`${current}: threw ${e.message}`));
+  // Where the walk is, so an error caught here names the panel that logged it.
+  // 429: telemetry delivery, filtered for the reason IGNORED_CONSOLE gives in fixtures.ts.
+  // 409: a lost race with another spec writing the same collection while this walk reads it. This sweep is
+  // about whether a panel MOUNTS, and a conflict raised by a parallel writer says nothing about that -
+  // `writeDialog` is where a lost race is the subject.
+  const consoleLog = collectConsole(page, /status of (429|409)/i);
 
   const failures: string[] = [];
   let opened = 0;
 
   for (const { route, heading } of PAGES) {
-    current = route;
+    consoleLog.at(route);
     try {
       await gotoRoute(page, route, heading);
     } catch (e) {
@@ -98,7 +91,7 @@ test("every tab on every page mounts, draws something and logs nothing", async (
     for (let i = 0; i < count; i++) {
       const tab = tabs.nth(i);
       const name = ((await tab.textContent()) ?? `tab ${i + 1}`).trim() || `tab ${i + 1}`;
-      current = `${route} · ${name}`;
+      consoleLog.at(`${route} · ${name}`);
       try {
         // Re-pressed on a miss, not trusted to one press: these pages re-render as their reads land, and a
         // click that arrives while the tab bar is being replaced selects nothing - which then reads as the
@@ -127,6 +120,6 @@ test("every tab on every page mounts, draws something and logs nothing", async (
 
   // A walk that opened no tabs anywhere is a broken sweep, not a tabless app.
   expect(opened, "no tab was opened on any page").toBeGreaterThan(0);
-  const problems = [...failures, ...logged];
+  const problems = [...failures, ...(await consoleLog.problems())];
   expect(problems, `tabs with problems:\n${problems.join("\n")}`).toEqual([]);
 });

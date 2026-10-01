@@ -20,6 +20,21 @@ export function roundToIncrement(value: number, increment: number): number {
   return round2(v);
 }
 
+/**
+ * An accrual credit, cut to what fits under the leave type's accrual cap (null = uncapped).
+ *
+ * Only a CREDIT is capped: a negative `add` is the exit claw-back (computeAccrual) and passes through. The cap
+ * is taken down to the rounding increment first, so the rounded balance can never land above it - rounding a
+ * value at or below a cap that is itself on the increment grid cannot pass the cap, where a 10.3 cap with
+ * half-day rounding would otherwise round every capped balance up to 10.5. A balance already at or above the
+ * cap gets nothing; it is never reduced to the cap.
+ */
+export function capAccrual(balance: number, add: number, capDays: number | null | undefined, increment = 0): number {
+  if (add <= 0 || capDays == null) return add;
+  const cap = increment > 0 ? Math.floor(capDays / increment + 1e-9) * increment : capDays;
+  return round2(Math.max(0, Math.min(add, cap - balance)));
+}
+
 const DAY_MS = 86_400_000;
 const ymdUtc = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 

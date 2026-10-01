@@ -38,7 +38,9 @@ test.describe("access administration", () => {
     // The org-wide matrix gains a COLUMN for the new role (collections are the rows), and every cell there
     // is a way INTO the per-collection editor - a grid that could only set one number would be a dead end.
     await gotoRoute(page, "settings/permissions", "Permissions");
-    await expect(page.getByRole("columnheader", { name: `E2E Role ${id}` }).first()).toBeVisible();
+    // 30s like every first paint after a cold load: the role columns land on their own read, beside the
+    // users and rules walks the same page starts.
+    await expect(page.getByRole("columnheader", { name: `E2E Role ${id}` }).first()).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole("button", { name: /^Manage access for/ }).first()).toBeVisible();
 
     await purgeNamed(page, "roles", id);

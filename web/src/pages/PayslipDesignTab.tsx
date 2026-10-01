@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, Eye, Plus, RotateCcw, Save, Trash2 } from "lucide-react";
 import { blobUrl, get, patch } from "@/api";
 import { cn } from "@/lib/utils";
+import { isConflict } from "@/lib/formError";
 import { useOrg } from "@/lib/org";
 import {
   ALIGNABLE_KINDS, ATTENDANCE_CELL_LABELS, DEFAULT_PAYSLIP_TEMPLATE, MAX_PAYSLIP_BLOCKS, PAYSLIP_ATTENDANCE_CELLS,
@@ -117,7 +118,19 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
       setSaved(JSON.stringify(template));
       toast({ title: "Payslip design saved", description: "Applies to payslips generated from now on.", variant: "success" });
     } catch (e) {
-      toast({ title: "Couldn't save the design", description: (e as Error).message, variant: "destructive" });
+      // Another admin saved the design while it was open here. Take THEIR etag so the next press goes through:
+      // keeping the stale one refused every Save after this, identically, until the page was reloaded.
+      if (isConflict(e)) {
+        const fresh = await get<{ etag?: string }>("settings/payslip").catch(() => null);
+        if (fresh) setEtag(fresh.etag);
+        toast({
+          title: "Somebody else changed the design",
+          description: "Another admin saved the payslip design while you had it open. Your version is still on screen: press Save again to replace theirs, or reload the page to see what they changed first.",
+          variant: "destructive",
+        });
+      } else {
+        toast({ title: "Couldn't save the design", description: (e as Error).message, variant: "destructive" });
+      }
     } finally {
       setSaving(false);
     }

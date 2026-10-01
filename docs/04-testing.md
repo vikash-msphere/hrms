@@ -148,6 +148,14 @@ clean up after themselves where a rerun would otherwise collide (the leave spec 
 upcoming leave first, because the form refuses an overlapping range and a retry would fail on its own
 leftovers). The suite passes three times in a row against one un-reset database.
 
+Every API request is delayed 20-150ms at the dev server, drawn per request, so the browser sees round trips
+and out-of-order answers the way it does in production rather than localhost's instant, in-order replies
+(`apiLatency` in `web/vite.config.ts`). That is what exposes a spec - or a page - that reloads or navigates
+while a write is still in flight. `E2E_API_LATENCY_MS` overrides it (`80`, or another range like `50-300`);
+`E2E_API_LATENCY_MS=0` turns it off. A spec that reloads must first wait for the write's OUTCOME (the row in
+the list, the composer emptied, the button no longer `aria-busy`), never for something that is true the moment
+the button is pressed.
+
 **What the specs assert.** Only what a browser is required to observe. Business logic belongs in the vitest
 suite, where it is cheaper and stricter, and is deliberately not re-asserted here.
 
@@ -212,7 +220,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `payroll` | the run state machine end to end - quick run, build, review the numbers, submit, approve - and the approval withheld from the person who ran it |
 | `overtime` | the shared start/end range control: a day, a start, a quick-set chip that moves the end, and the live duration between them |
 | `remoteWork` | the form counting the days it is asking for, and recounting when an end is halved |
-| `attendanceCorrection` | a wrong day carries its own correction affordance, seeded with what the day says now |
+| `attendanceCorrection` | an unpunched day carries its own correction affordance, which adds the day's in/out and refuses to file without both |
 | `holidays` | the clash guard on the date field, an optional holiday taken and given back (which asks first), and the calendar leaving as a real `.ics` |
 | `schedule` | the roster grid: an empty cell names its person and day, a shift is minted from inside the dialog that assigns it, and the cell reads it back |
 | `timesheets` | the week grid: a cell knows its project and day, the quarter-hour steppers, the week total, and submitting FREEZING the cells |
@@ -273,7 +281,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `teamTimeline` | the dashboard's heaviest widget: mounted only when scrolled to, a filed leave on the person's row, and the fortnight paged |
 | `sprints` | the scrum board: planned out of the backlog, started, the burndown drawn once tasks are estimated, and completing it returning the unfinished work |
 | `postSticker` | the picture on a post: suggestions matched to the words, the two dials, the catalogue behind Browse, and the art on the card |
-| `attendanceViews` | the same window as a list or a month grid, several days ticked for ONE correction, the view remembered, the manager's team panel and the per-person log it drills into, the attendance tab on an employee's record (read-only, and the chart `everyChart` cannot reach), and HR marking what a day counts as - set, changed, read back and withdrawn, with the employee able to read the decision and not make one |
+| `attendanceViews` | the same window as a list or a month grid, the grid saying a day is fixed one time at a time, the view remembered, the manager's team panel and the per-person log it drills into, the attendance tab on an employee's record (read-only, and the chart `everyChart` cannot reach), and HR marking what a day counts as - set, changed, read back and withdrawn, with the employee able to read the decision and not make one |
 | `workflowLog` | the read-only half of Workflows - runs, waiting workflows and the event log, each its own lazy read - and an action taken now appearing in the log on Refresh |
 | `pendingCorrections` | the correction queue drawn on the approver's OWN attendance page: named, dated, asking first, and gone when answered - and absent for somebody who decides nothing |
 | `announcementDraft` | a post staged rather than sent: the publishing chips rename the submit, the draft lands on its own list, and it is invisible to everyone else until Publish is pressed |
@@ -355,6 +363,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `documentAccessGates` | one shelf, two collections, three gates: Upload follows `org-documents.write` and Generate letter follows `personal-documents.write` for every role, and an employee cannot list a colleague's file |
 | `rowActionGates` | the finest gate there is, two cards on one board for one reader: the author's own kudo carries edit and delete, a colleague's post carries neither, the row hint the UI read says the same, and the edit is refused when asked for by path |
 | `permissionsMatrix` | the org-wide grid is a control, not a read-out: a cell writes the same rule the modal writes, reads back, opens that collection's editor from the key beside it, and takes the access away again |
+| `permissionsEditRule` | a rule changed in place from the "All rules" list: the dialog opens with nothing to save, a new level and expiry land, and exactly one rule is left on the wire - the replacement, not the old one beside it |
 | `aclDenyTintAndPresets` | the two things the access UI draws purely to be looked at - the red key (and its tooltip) appearing over a target an explicit deny covers and going again when it is lifted, and a one-press preset authoring the whole Everyone bundle, readable and reversible as an ordinary rule |
 | `quickActionGates` | the "+" menu offers nobody an action they cannot perform (checked one-directionally, since the org also configures the menu), and every row on it is a registry action |
 

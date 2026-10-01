@@ -237,11 +237,14 @@ export const SCHEDULE_TRIGGER = "schedule.recurring";
 //   freq "daily"   - every day.
 //   freq "weekly"  - on `day` (0=Sun..6=Sat).
 //   freq "monthly" - on `day` (1..28; capped so every month has it).
+//   freq "manual"  - never by the daily scanner; only when an admin runs it (`automations/{id}:run`).
+// Any scheduled rule can also be run on demand with `:run`; that firing takes the same per-day claim the
+// scanner does, so a rule fires at most once per org day however it is started.
 // `scope` decides who each firing is about:
 //   "once"        - a single firing with no bound employee (for notifyAudience / apiCall broadcasts).
 //   "perEmployee" - one firing PER active employee, with employeeId + subject bound (notify / notifyManager
 //                   work, and the engine enriches derived metrics into the payload for smart conditions).
-export const SCHEDULE_FREQS = ["daily", "weekly", "monthly"] as const;
+export const SCHEDULE_FREQS = ["daily", "weekly", "monthly", "manual"] as const;
 export type ScheduleFreq = (typeof SCHEDULE_FREQS)[number];
 export type ScheduleScope = "once" | "perEmployee";
 export type Schedule = { freq: ScheduleFreq; day?: number; scope?: ScheduleScope };
@@ -251,7 +254,7 @@ export const isScheduled = (a: { triggerType: string }): boolean => a.triggerTyp
 // Validate a recurrence spec (pushes into a shared error list, mirroring validateAutomation's style).
 export function validateSchedule(s: Schedule | null | undefined, errors: string[]): void {
   if (!s) { errors.push("scheduled rule needs a schedule"); return; }
-  if (!SCHEDULE_FREQS.includes(s.freq)) { errors.push(`schedule.freq "${s.freq}" is not daily/weekly/monthly`); return; }
+  if (!SCHEDULE_FREQS.includes(s.freq)) { errors.push(`schedule.freq "${s.freq}" is not daily/weekly/monthly/manual`); return; }
   if (s.freq === "weekly" && (typeof s.day !== "number" || s.day < 0 || s.day > 6)) errors.push("weekly schedule needs day 0-6 (Sun-Sat)");
   if (s.freq === "monthly" && (typeof s.day !== "number" || s.day < 1 || s.day > 28)) errors.push("monthly schedule needs day 1-28");
   if (s.scope && s.scope !== "once" && s.scope !== "perEmployee") errors.push(`schedule.scope "${s.scope}" is not once/perEmployee`);
@@ -259,8 +262,9 @@ export function validateSchedule(s: Schedule | null | undefined, errors: string[
 
 // Does this recurrence fire on the given date? `date` is a UTC instant; weekday/day-of-month read in UTC to
 // match the cron tick's clock. Monthly `day` is clamped to the month's last day so day=28..31 still fire in
-// short months (a rule set to "the 31st" fires on Feb 28).
+// short months (a rule set to "the 31st" fires on Feb 28). A manual rule is never due: only `:run` fires it.
 export function scheduleDueOn(s: Schedule, date: Date): boolean {
+  if (s.freq === "manual") return false;
   if (s.freq === "daily") return true;
   if (s.freq === "weekly") return date.getUTCDay() === (s.day ?? 1);
   // monthly

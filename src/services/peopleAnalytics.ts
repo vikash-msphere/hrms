@@ -9,6 +9,7 @@ import type { ListScope } from "../domain/access";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
 import { chunk } from "../lib/dbBatch";
+import { photoMarker } from "../http/serialize";
 import { localDay, type AttendanceConfig } from "../domain/attendance";
 import { orgScheduleOf } from "../domain/workSchedule";
 import { scheduleCtxWith } from "./workSchedule";
@@ -88,6 +89,7 @@ export type PersonRow = {
   name: string;
   employee_number: string | null;
   job_title: string | null;
+  photo: string | null; // the employee's photo marker (http/serialize.ts#photoMarker)
   department: string | null; // "departments/<id>"
   manager: string | null; // "employees/<id>"
   values: Record<string, number | null>;
@@ -189,6 +191,8 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     startDate: t.employees.startDate,
     endDate: t.employees.endDate,
     trackedFrom: t.employees.trackedFrom,
+    photoKey: t.employees.photoKey,
+    photoAt: t.employees.photoAt,
   };
   const rosterWhere = (extra?: SQL) => and(...([
     applyScope(empScope, t.employees.code, t.employees.uuid),
@@ -744,6 +748,7 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
       name: `${p.firstName} ${p.lastName}`.trim(),
       employee_number: p.employeeNumber ?? null,
       job_title: p.jobTitle ?? null,
+      photo: photoMarker(p) ?? null,
       department: p.departmentId ? `departments/${p.departmentId}` : null,
       manager: p.managerId ? `employees/${p.managerId}` : null,
       values,

@@ -358,7 +358,7 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
                           the box on their own judgement - the author is told, it is recorded under Flagged
                           posts, and it can be put back. Two different acts, two different grants. */}
                       <AccessAction collection="moderation" verb="hide" label="Take this suggestion off the box">
-                        <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => void hideByHand(s)}><EyeOff className="h-3.5 w-3.5" /> Hide</Button>
+                        <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => hideByHand(s)}><EyeOff className="h-3.5 w-3.5" /> Hide</Button>
                       </AccessAction>
                       {/* Pop this one out onto a page of its own: the suggestion, its votes and the response,
                           with no board behind it. Same tab - the back button returns to the board. Not

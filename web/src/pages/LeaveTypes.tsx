@@ -53,7 +53,7 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<LeaveType | null>(null);
-  const EMPTY_FORM = { name: "", accrual: "0", frequency: "monthly", paid: true, probation: true, probationAccrual: "0", probationCap: "", encashable: false, encashCap: "", minRetained: "0", carryForward: false, carryForwardCap: "", color: "" };
+  const EMPTY_FORM = { name: "", accrual: "0", frequency: "monthly", accrualCap: "", paid: true, probation: true, probationAccrual: "0", probationCap: "", encashable: false, encashCap: "", minRetained: "0", carryForward: false, carryForwardCap: "", color: "" };
   const [form, setForm] = useState(EMPTY_FORM);
   // The type's own policy overrides, edited as the blob they are stored as. Held beside `form` rather than
   // inside it because `form` is a flat map of strings that WriteDialog diffs for its unsaved-changes guard.
@@ -86,6 +86,7 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
       name: lt.display_name,
       accrual: String(lt.accrual_days_per_year ?? 0),
       frequency: lt.accrual_frequency ?? "monthly",
+      accrualCap: lt.accrual_cap_days == null ? "" : String(lt.accrual_cap_days),
       paid: lt.paid,
       probation: lt.available_during_probation ?? true,
       probationAccrual: String(lt.probation_accrual_days_per_year ?? 0),
@@ -110,6 +111,7 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
       // `null` - which is the same non-nullable-field contract violation as sending a literal null (api.ts).
       accrual_days_per_year: Number(form.accrual) || 0,
       accrual_frequency: form.frequency as "monthly" | "semi_monthly",
+      accrual_cap_days: form.accrualCap.trim() === "" ? null : Number(form.accrualCap),
       paid: form.paid,
       available_during_probation: form.probation,
       probation_accrual_days_per_year: Number(form.probationAccrual) || 0,
@@ -144,7 +146,7 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
     const accrual = Number(form.accrual) || 0;
     const parts: string[] = [
       accrual > 0
-        ? `${accrual} day${accrual === 1 ? "" : "s"} a year, credited ${form.frequency === "semi_monthly" ? `${Math.round((accrual / 24) * 100) / 100} on the 1st and the 16th` : `${Math.round((accrual / 12) * 100) / 100} on the 1st of each month`}`
+        ? `${accrual} day${accrual === 1 ? "" : "s"} a year, credited ${form.frequency === "semi_monthly" ? `${Math.round((accrual / 24) * 100) / 100} on the 1st and the 16th` : `${Math.round((accrual / 12) * 100) / 100} on the 1st of each month`}${form.accrualCap.trim() ? `, up to a balance of ${form.accrualCap.trim()}` : ""}`
         : "no accrual (balance is granted manually)",
       form.paid ? "paid" : "unpaid",
     ];
@@ -193,7 +195,7 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
         {lt.display_name}
       </span>
     ) },
-    { id: "accrual", header: "Accrual / year", filter: "number", formatTotal: (n) => `${n} days`, accessor: (lt) => lt.accrual_days_per_year ?? 0, cell: (lt) => `${lt.accrual_days_per_year ?? 0} days` },
+    { id: "accrual", header: "Accrual / year", filter: "number", formatTotal: (n) => `${n} days`, accessor: (lt) => lt.accrual_days_per_year ?? 0, cell: (lt) => `${lt.accrual_days_per_year ?? 0} days${lt.accrual_days_per_year && lt.accrual_cap_days != null ? ` (≤${lt.accrual_cap_days})` : ""}` },
     ...(canRequests ? [{
       // How much each type is actually used. A leave catalogue only ever grows, and the type nobody has
       // booked in a year is indistinguishable from the one half the company lives on until somebody counts.
@@ -391,9 +393,12 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
               <Input id="leave-type-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Annual Leave" autoFocus />
             </div>
           </Field>
-          <FieldRow>
+          <FieldRow className="sm:grid-cols-3">
             <Field label="Accrual days per year" info="Days added to balance over a full year.">
               <Input type="number" min={0} value={form.accrual} onChange={(e) => setForm({ ...form, accrual: e.target.value })} />
+            </Field>
+            <Field label="Accrual cap (days)" info="The most the balance can accrue to. Credits that would pass it are not added. A balance already above it stays, and accrues again once it drops below. Blank = no cap.">
+              <Input type="number" min={0} value={form.accrualCap} disabled={!(Number(form.accrual) > 0)} placeholder="No cap" onChange={(e) => setForm({ ...form, accrualCap: e.target.value })} />
             </Field>
             <Field label="Accrual frequency" info={form.frequency === "semi_monthly" ? "Half the monthly amount credited on the 1st and 16th." : "The full month's amount credited on the 1st."}>
               <Select value={form.frequency} onValueChange={(v) => setForm({ ...form, frequency: v })}>

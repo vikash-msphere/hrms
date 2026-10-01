@@ -31,7 +31,7 @@ import { scopesForCollection, fetchScopeCapabilities, fetchConditionFields, fetc
 import { metaFor } from "./collectionMeta";
 import { verbInfo } from "./verbMeta";
 import { PreviewPanel, fetchPreview } from "./PreviewPanel";
-import { restoreAccessRules } from "./cloneRules";
+import { restoreAccessRules, ruleBody } from "./cloneRules";
 import { usePermission } from "@/lib/perm";
 
 // The rule shape is the shared one (permMatrix) - roles and users are the same primitive, and the matrix,
@@ -471,19 +471,8 @@ export function AclModal({
   }
 
   // Re-author an existing rule from its serialized form - the inverse of a delete, and the building block of
-  // every Undo below. Field-for-field, so an undone rule is identical to the one that was there.
-  const recreate = (r: AccessRule) =>
-    create("access-rules", {
-      subject_kind: r.subject_kind,
-      subject: r.subject,
-      collection: r.collection,
-      scope: r.scope,
-      ...(r.scope_ref ? { scope_ref: r.scope_ref } : {}),
-      ...(r.field ? { field: r.field } : {}),
-      ...(r.verb ? { verb: r.verb } : r.level ? { level: r.level } : {}),
-      ...(r.effect === "deny" ? { effect: "deny" } : {}),
-      ...(r.expire_time ? { expire_time: r.expire_time } : {}),
-    });
+  // every Undo below. Field-for-field, guards included, so an undone rule is identical to the one that was there.
+  const recreate = (r: AccessRule) => create("access-rules", ruleBody(r));
 
   // Every rule change is one click from being taken back. Permissions are exactly the kind of edit where the
   // wrong pick is noticed one second later, and an 8s Undo beats reconstructing the previous rule by hand.
@@ -954,10 +943,10 @@ export function AclModal({
         {showRoles && !hasObject && !hasField && !verbMode && !createMode && (
           <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-dashed bg-muted/20 p-2">
             <span className="mr-1 text-xs font-medium text-muted-foreground">Presets:</span>
-            <Button variant="outline" size="sm" className="h-7" disabled={busy} title="Everyone can read all entries." onClick={() => void applyPreset("view")}>Everyone can view</Button>
-            <Button variant="outline" size="sm" className="h-7" disabled={busy} title="Everyone can create, and read every entry (open wall)." onClick={() => void applyPreset("openBox")}>Everyone adds + sees all</Button>
+            <Button variant="outline" size="sm" className="h-7" disabled={busy} title="Everyone can read all entries." onClick={() => applyPreset("view")}>Everyone can view</Button>
+            <Button variant="outline" size="sm" className="h-7" disabled={busy} title="Everyone can create, and read every entry (open wall)." onClick={() => applyPreset("openBox")}>Everyone adds + sees all</Button>
             {scopeOpts.some((o) => o.value === "self") && (
-              <Button variant="outline" size="sm" className="h-7" disabled={busy} title="Everyone can create, and read/edit only their own entries (self-service)." onClick={() => void applyPreset("selfService")}>Everyone adds + sees own</Button>
+              <Button variant="outline" size="sm" className="h-7" disabled={busy} title="Everyone can create, and read/edit only their own entries (self-service)." onClick={() => applyPreset("selfService")}>Everyone adds + sees own</Button>
             )}
           </div>
         )}

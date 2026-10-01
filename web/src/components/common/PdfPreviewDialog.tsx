@@ -166,7 +166,7 @@ export function PdfPreviewDialog({ source, onClose }: { source: PdfSource | null
                   </DropdownMenuContent>
                 </DropdownMenu>
               ) : (
-                <Button onClick={() => void save("screen")} disabled={!url}>
+                <Button onClick={() => save("screen")} disabled={!url}>
                   <Download className="h-4 w-4" /> Save PDF
                 </Button>
               ))}

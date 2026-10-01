@@ -8,7 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Sheet, SheetContent, SheetHeader, SheetBody, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { CopyEmail } from "@/components/common/CopyEmail";
-import { PersonAvatar } from "@/components/common/PersonAvatar";
+import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { useMedia } from "@/hooks/useMedia";
 import { cn } from "@/lib/utils";
 
@@ -45,7 +45,7 @@ import { cn } from "@/lib/utils";
 
 const WIDE = "(min-width: 1024px)";
 
-type Viewer = { name: string | null; email: string; write: boolean; why?: string };
+type Viewer = { name: string | null; email: string; write: boolean; why?: string; photo?: string };
 type Area = { key: string; group: string; label: string; hint: string; records?: number; viewers: Viewer[] };
 type Group = { key: string; label: string; hint: string };
 type Report = { groups: Group[]; areas: Area[]; roster: number; complete: boolean };
@@ -127,7 +127,7 @@ export function MyViewers({ selfPath }: { selfPath: string }) {
               engine that decides every request - not a guess.
             </p>
           </div>
-          <Button size="sm" variant="outline" className="shrink-0" disabled={busy} onClick={() => void load()}>
+          <Button size="sm" variant="outline" className="shrink-0" disabled={busy} onClick={() => load()}>
             <Eye className="h-4 w-4" /> {busy ? "Checking…" : data ? "Refresh" : "Check"}
           </Button>
         </div>
@@ -362,7 +362,7 @@ function AreaDetail({ area, heading = true }: { area: Area; heading?: boolean })
         <ul className="max-h-[22rem] space-y-1 overflow-y-auto pr-1">
           {area.viewers.map((v) => (
             <li key={v.email} className="flex items-center gap-2 rounded-lg px-1 py-1">
-              <PersonAvatar name={v.name || v.email} className="h-7 w-7" />
+              <PhotoAvatar employeeId="" name={v.name || v.email} photo={v.photo} className="h-7 w-7 text-xs" />
               <span className="min-w-0 flex-1">
                 {v.name && <span className="block truncate text-xs font-medium">{v.name}</span>}
                 <CopyEmail email={v.email} className="text-[11px] text-muted-foreground" />

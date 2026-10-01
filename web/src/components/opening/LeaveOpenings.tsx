@@ -109,7 +109,7 @@ export function LeaveOpenings() {
 
   function downloadTemplate() {
     const { headers, rows } = openingTemplate(employees, types);
-    void exportTable("opening-leave-balances", headers, rows, "csv", "leave-adjustments");
+    return exportTable("opening-leave-balances", headers, rows, "csv", "leave-adjustments");
   }
 
   const applied = answer && !answer.dry_run;
@@ -165,7 +165,7 @@ export function LeaveOpenings() {
         )}
         <div className="flex flex-wrap items-center gap-2">
           <AccessAction collection="leave-adjustments" verb="importOpenings" label="Bring in opening leave balances">
-            <Button variant="outline" loading={busy === "preview"} disabled={!items.length || !!busy} onClick={() => void preview()}>Preview</Button>
+            <Button variant="outline" loading={busy === "preview"} disabled={!items.length || !!busy} onClick={() => preview()}>Preview</Button>
           </AccessAction>
           {progress && <span className="text-xs text-muted-foreground tabular-nums">{progress}…</span>}
         </div>
@@ -222,7 +222,7 @@ export function LeaveOpenings() {
             {!applied && answer.counts.applied > 0 && (
               <div className="flex justify-end">
                 <AccessAction collection="leave-adjustments" verb="importOpenings" label="Bring in opening leave balances">
-                  <Button loading={busy === "apply"} disabled={!!busy} onClick={() => void apply()}>
+                  <Button loading={busy === "apply"} disabled={!!busy} onClick={() => apply()}>
                     Apply {answer.counts.applied} balance{answer.counts.applied === 1 ? "" : "s"}
                   </Button>
                 </AccessAction>

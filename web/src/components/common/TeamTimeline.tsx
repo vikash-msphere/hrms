@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, ChevronUp, Cake, PartyPopper, UserPlus, ShieldCheck, CalendarRange, Clock, CalendarDays, Info, Users, type LucideIcon } from "lucide-react";
-import type { Employee, LeaveRequest, LeaveType, Holiday, Celebration, AttendanceSession, Event, LateEarlyRequest, Me } from "@/types";
-import { cn, idOf } from "@/lib/utils";
+import { ChevronLeft, ChevronRight, ChevronUp, Cake, PartyPopper, UserPlus, ShieldCheck, CalendarRange, Clock, CalendarDays, Info, Users, LogIn, LogOut, Home, type LucideIcon } from "lucide-react";
+import type { Employee, LeaveRequest, LeaveType, Holiday, Celebration, AttendanceSession, Event, LateEarlyRequest, RemoteWorkRequest, Me } from "@/types";
+import { cn, formatHHMM, idOf } from "@/lib/utils";
 import { isCurrentEmployee } from "@/lib/employees";
 import { useCollection } from "@/hooks/useCollection";
 import { useScheduleView } from "@/hooks/useScheduleView";
-import { excusalsByEmployee, usePunctualityPolicy } from "@/lib/lateEarly";
+import { excusalsByEmployee, fmtMinutes, usePunctualityPolicy } from "@/lib/lateEarly";
 import { clockOf } from "../../../../src/domain/workSchedule";
 import { todayStr } from "@/lib/orgDay";
 import { listAllSessionsPaged } from "@/lib/clock";
 import { leaveColor } from "@/lib/leaveColors";
 import { usePermission } from "@/lib/perm";
 import { navigate } from "@/router";
+import { attendanceRoute } from "@/lib/resourceRoute";
 import type { LeaveDraft } from "@/lib/leaveDraft";
 import { RequestLeaveDialog } from "@/components/common/RequestLeaveDialog";
 import { summarizeByDay, buildAttendanceRows, trackedFromOf, fmtHM, fmtDuration, localDay, localMinutes, enumerateDays, weekdayOf, DEFAULT_SCHEDULE, leaveRangeOf, unpaidLeaveTypes, type AttendanceSchedule, type DayStatus, type AttendanceRow } from "@/lib/attendance";
@@ -25,6 +26,8 @@ import { getSetting } from "@/lib/settingsStore";
 import { useMedia } from "@/hooks/useMedia";
 
 type TipPerson = { id: string; name: string; photo?: string };
+// A dated span with optional half-day ends: a leave request, and a remote-work request.
+type DayRange = { start_date: string; end_date: string; start_session?: number | null; end_session?: number | null };
 
 // Wrap any single element so it shows a rich tooltip card on hover/focus (the timeline's one affordance for
 // every event). `asChild` keeps the wrapped element as the DOM node, so grid placement/styles are preserved.
@@ -33,7 +36,8 @@ function Tip({ label, children }: { label: ReactNode; children: ReactElement }) 
   return (
     <Tooltip>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent className="overflow-hidden rounded-lg border bg-popover p-0 text-popover-foreground shadow-lg">{label}</TooltipContent>
+      {/* In dark mode `--border` and `--popover` are the same step, so the stock border drew no edge at all. */}
+      <TooltipContent className="overflow-hidden rounded-lg border bg-popover p-0 text-popover-foreground shadow-lg dark:border-foreground/10">{label}</TooltipContent>
     </Tooltip>
   );
 }
@@ -153,6 +157,9 @@ const STATUS_TEXT: Record<DayStatus, string> = {
   untracked: "text-muted-foreground",
 };
 const upper = (s?: string) => (s ?? "").toUpperCase();
+// Live requests only: approved (solid) and pending (dashed, behind the same toggle as pending leave). Rejected
+// and cancelled ones are history, not part of anybody's day.
+const liveReq = (state?: string) => upper(state) === "APPROVED" || upper(state) === "PENDING";
 const parseYmd = (s: string) => Date.parse(s.slice(0, 10) + "T00:00:00Z");
 // Format an ISO "YYYY-MM-DD" as "dd/mm/yyyy" for tooltips.
 const dmy = (s?: string) => {
@@ -265,12 +272,13 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     return () => { live = false; };
   }, [startMs, endMs, refreshKey]);
 
-  // Approved late arrivals / early departures in the window: each moves its day's start or end, so a dot for a
-  // day somebody was approved to start late does not say "late" about the approved part. Gated like every
-  // collection read - a caller who cannot see these requests fires nothing and sees the org's window.
+  // Late arrivals / early departures in the window, two jobs from one read. The APPROVED ones move their day's
+  // start or end, so a dot for a day somebody was approved to start late does not say "late" about the approved
+  // part (`excusalsByEmployee` keeps only those). Approved and pending alike are drawn as the day's in/out chips.
+  // Gated like every collection read - a caller who cannot see these requests fires nothing.
   const { rows: lateEarly } = useCollection<LateEarlyRequest>("late-early-requests", {
     all: true,
-    params: { from: new Date(startMs).toISOString().slice(0, 10), to: new Date(endMs).toISOString().slice(0, 10), state: "APPROVED" },
+    params: { from: new Date(startMs).toISOString().slice(0, 10), to: new Date(endMs).toISOString().slice(0, 10) },
   });
   const excusalsByEmp = useMemo(() => excusalsByEmployee(lateEarly), [lateEarly]);
   const punctuality = usePunctualityPolicy();
@@ -289,6 +297,33 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   // Which marker categories this viewer's role may see is decided by the dashboard's role config and passed in
   // as `hiddenMarkers` (the categories to hide). Leaves/holidays/weekends are the core schedule, never gated.
   const showCat = (k: string) => !hiddenMarkers.includes(k);
+
+  // The in/out chips: one per late-arrival / early-departure request, on its day's morning or evening edge.
+  const timeReqsByEmp = useMemo(() => {
+    const m = new Map<string, LateEarlyRequest[]>();
+    for (const r of lateEarly) {
+      if (!r.employee || !r.date || !r.kind || !r.at || !liveReq(r.state)) continue;
+      const k = idOf(r.employee);
+      (m.get(k) ?? m.set(k, []).get(k)!).push(r);
+    }
+    return m;
+  }, [lateEarly]);
+  // Remote work: a pill in the leave lane, but in the brand colour - the person is working, just not here.
+  // Read only when the viewer's role shows the marker at all.
+  const { rows: remote } = useCollection<RemoteWorkRequest>("remote-work-requests", {
+    all: true,
+    enabled: showCat("remote"),
+    params: { from: new Date(startMs).toISOString().slice(0, 10), to: new Date(endMs).toISOString().slice(0, 10) },
+  });
+  const remoteByEmp = useMemo(() => {
+    const m = new Map<string, RemoteWorkRequest[]>();
+    for (const r of remote) {
+      if (!r.employee || !r.start_date || !r.end_date || !liveReq(r.state)) continue;
+      const k = idOf(r.employee);
+      (m.get(k) ?? m.set(k, []).get(k)!).push(r);
+    }
+    return m;
+  }, [remote]);
   const cols = useMemo(() => Array.from({ length: DAYS }, (_, i) => new Date(startMs + i * DAY_MS)), [startMs]);
   // `useCallback`: four memos below map instants onto columns with this, and its identity moves with the
   // window's start - which is exactly what those memos were restating as `startMs` by hand.
@@ -514,6 +549,34 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     );
   };
 
+  const timeReqTip = (person: TipPerson, r: LateEarlyRequest): ReactNode => {
+    const late = r.kind === "late_arrival";
+    const pending = upper(r.state) === "PENDING";
+    return (
+      <TipCard person={person} icon={late ? LogIn : LogOut} iconClass="text-warning" title={`${late ? "Late arrival" : "Early departure"}${pending ? " · Pending" : ""}`} accent="text-warning" eta={relDay(r.date)}>
+        <TipRow icon={Clock}>{late ? "In by" : "Leaving at"} {formatHHMM(r.at)}</TipRow>
+        {r.minutes != null && <TipRow>{fmtMinutes(r.minutes)} {late ? "after the shift starts" : "before the shift ends"}</TipRow>}
+        {(r.auto_approved || r.over_limit) && (
+          <TipChips>
+            {r.auto_approved && <TipChip tone="bg-success/15 text-success">Approved automatically</TipChip>}
+            {r.over_limit && <TipChip tone="bg-warning/15 text-warning">Past the monthly allowance</TipChip>}
+          </TipChips>
+        )}
+      </TipCard>
+    );
+  };
+  const remoteTip = (person: TipPerson, r: RemoteWorkRequest): ReactNode => {
+    const start = r.start_date.slice(0, 10), end = r.end_date.slice(0, 10);
+    const todayY = todayStr();
+    const eta = todayY < start ? relDay(start) : todayY <= end ? "Ongoing" : relDay(end);
+    return (
+      <TipCard person={person} icon={Home} iconClass="text-primary" title={`Remote work${upper(r.state) === "PENDING" ? " · Pending" : ""}`} accent="text-primary" eta={eta}>
+        <TipRow icon={CalendarDays}>{leaveRange(r.start_date, r.end_date)}</TipRow>
+        {r.days != null && <TipRow>{r.days} day{r.days === 1 ? "" : "s"}</TipRow>}
+      </TipCard>
+    );
+  };
+
   const celebsByEmp = useMemo(() => {
     const m = new Map<string, Celebration[]>();
     for (const c of celebrations) { const k = idOf(c.employee); const arr = m.get(k); if (arr) arr.push(c); else m.set(k, [c]); }
@@ -521,8 +584,8 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   }, [celebrations]);
 
   // Day-unit span [lu, ru) for each leave (half-day boundaries shave 0.5 off the start/end day); clamped to
-  // the visible window. Shared by approved + pending pill rows.
-  const toSegs = useCallback((list: LeaveRequest[]) =>
+  // the visible window. Shared by approved + pending pill rows, and by remote work, which has the same shape.
+  const toSegs = useCallback(<T extends DayRange,>(list: T[]) =>
     list
       .map((l) => ({ l, aRaw: colOf(parseYmd(l.start_date)), bRaw: colOf(parseYmd(l.end_date)) }))
       .filter((s) => s.bRaw >= 0 && s.aRaw < DAYS)
@@ -564,11 +627,19 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     return live.sort((a, b) => Number(idOf(b.path) === me.employee_id) - Number(idOf(a.path) === me.employee_id));
   }, [employees, me.employee_id]);
 
-  // Pending leaves that land inside the visible window - the count on the header's "Pending leave" toggle, so
-  // the chip says how much it is hiding before you press it.
+  // Pending requests that land inside the visible window - leave, and the late/early and remote markers the
+  // viewer's role shows - the count on the header's "Awaiting approval" toggle, so the chip says how much it
+  // is hiding before you press it.
+  const showLateEarly = showCat("lateEarly");
+  const showRemote = showCat("remote");
   const pendingInView = useMemo(
-    () => rows.reduce((n, e) => n + toSegs(pendingByEmp.get(idOf(e.path)) ?? []).length, 0),
-    [rows, pendingByEmp, toSegs],
+    () => rows.reduce((n, e) => {
+      const eid = idOf(e.path);
+      const timeReqs = showLateEarly ? (timeReqsByEmp.get(eid) ?? []).filter((r) => { const c = colOf(parseYmd(r.date!)); return upper(r.state) === "PENDING" && c >= 0 && c < DAYS; }).length : 0;
+      const remotes = showRemote ? toSegs((remoteByEmp.get(eid) ?? []).filter((r) => upper(r.state) === "PENDING")).length : 0;
+      return n + toSegs(pendingByEmp.get(eid) ?? []).length + timeReqs + remotes;
+    }, 0),
+    [rows, pendingByEmp, timeReqsByEmp, remoteByEmp, showLateEarly, showRemote, toSegs, colOf],
   );
 
   // Per-day team load: who's away (approved leave or at an event) on each visible day. Drives the "N away"
@@ -738,7 +809,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
         ) : (
           <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-5 rounded-full" style={{ backgroundColor: ONE_LEAVE_COLOR }} /> Leave</span>
         )}
-        <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-5 rounded-full border border-dashed border-muted-foreground" /> Leave awaiting approval</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-5 rounded-full border border-dashed border-muted-foreground" /> Awaiting approval</span>
         <span className="flex items-center gap-1.5"><span className="inline-block h-4 w-3 rounded-[2px] bg-violet-200 dark:bg-violet-900" /> Holiday</span>
         <span className="flex items-center gap-1.5"><span className="inline-block h-4 w-3 rounded-[2px] bg-brand-neutral-200 dark:bg-brand-neutral-700" /> Weekend</span>
       </div>
@@ -748,6 +819,9 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
         {showCat("anniversaries") && <span className="flex items-center gap-1.5"><PartyPopper className="h-3.5 w-3.5 text-amber-500" /> Anniversary</span>}
         {showCat("joiners") && <span className="flex items-center gap-1.5"><UserPlus className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> New joiner</span>}
         {showCat("probation") && <span className="flex items-center gap-1.5"><ShieldCheck className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" /> Probation ends</span>}
+        {showLateEarly && <span className="flex items-center gap-1.5"><LogIn className="h-3.5 w-3.5 text-warning" /> Coming in late (morning edge)</span>}
+        {showLateEarly && <span className="flex items-center gap-1.5"><LogOut className="h-3.5 w-3.5 text-warning" /> Leaving early (evening edge)</span>}
+        {showRemote && <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-5 rounded-full bg-primary/20 ring-1 ring-primary/50" /> Remote work</span>}
       </div>
       <div className="flex flex-col gap-1.5 border-t pt-2">
         <span className="flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-400" /> Full day</span>
@@ -809,7 +883,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
                 {pendingInView > 0 && <span className="shrink-0 rounded-full bg-foreground/10 px-1 font-semibold tabular-nums">{pendingInView}</span>}
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{showPending ? "Hide" : "Show"} leave requests awaiting approval</TooltipContent>
+            <TooltipContent>{showPending ? "Hide" : "Show"} requests awaiting approval</TooltipContent>
           </Tooltip>
           {/* tapToOpen: this button IS the legend - it has no other action, so without it the key to every
               colour on the timeline was hover-only, i.e. absent on the device the timeline is hardest to read on. */}
@@ -902,6 +976,10 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
               const isSelf = eid === me.employee_id;
               // Approved pills (solid) + pending pills (dashed, toggled); pending are drawn under the same lane.
               const segs = [...toSegs(leavesByEmp.get(eid) ?? []), ...(showPending ? toSegs(pendingByEmp.get(eid) ?? []) : [])];
+              // Remote work rides the same lane as leave, drawn first so a leave on the same day sits on top.
+              const remoteSegs = showRemote ? toSegs((remoteByEmp.get(eid) ?? []).filter((r) => showPending || upper(r.state) !== "PENDING")) : [];
+              const timeReqs = showLateEarly ? (timeReqsByEmp.get(eid) ?? []).filter((r) => showPending || upper(r.state) !== "PENDING") : [];
+              const isOffCol = (i: number) => holByCol.has(i) || !workDays.includes(cols[i]!.getUTCDay());
               // Event bands span the covered day columns (the band marks the dates; exact times live in the
               // tooltip), clamped to the visible window.
               // Day-unit span [lu, ru) per event. All-day -> the covered day columns; timed -> placed by
@@ -935,28 +1013,36 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
                     {idx % 2 === 1 && <span className="pointer-events-none absolute inset-0 bg-muted/25" />}
                     <span className="pointer-events-none absolute inset-0 transition-colors group-hover:bg-accent/40" />
                     {hasCeleb && <ConfettiBg />}
-                    <span className="relative z-[1] shrink-0">
-                      <PhotoAvatar employeeId={person.id} name={person.name} photo={person.photo} className={cn("text-sm", isPhone ? "h-9 w-9" : "h-10 w-10")} />
-                    </span>
-                    <span className="relative z-[1] min-w-0">
-                      <span className="block truncate text-sm font-medium">{person.name}</span>
-                      {/* Live presence subtitle: today's derived status (in-at time while clocked in). Only
-                          renders while today is in the visible window; paging away drops it, by design. */}
-                      {(() => {
-                        const t = statusByEmp.get(eid)?.get(todayYmd);
-                        if (!t) return null;
-                        const dotCls = STATUS_DOT[t.status];
-                        const text = t.status === "open" && t.summary?.arrival
-                          ? `In since ${fmtHM(t.summary.arrival, tz)}`
-                          : STATUS_LABEL[t.status];
-                        return (
-                          <span className="flex items-center gap-1 text-[11px] leading-tight text-muted-foreground">
-                            <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotCls ?? "bg-muted-foreground/50")} />
-                            <span className="truncate">{text}</span>
-                          </span>
-                        );
-                      })()}
-                    </span>
+                    {/* The person opens on their attendance: a profile's Attendance tab, or one's own page. */}
+                    <button
+                      type="button"
+                      onClick={() => navigate(attendanceRoute(eid, me.employee_id))}
+                      title="Open attendance"
+                      className="relative z-[1] flex min-w-0 items-center gap-2 rounded-md text-left hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <span className="shrink-0">
+                        <PhotoAvatar employeeId={person.id} name={person.name} photo={person.photo} className={cn("text-sm", isPhone ? "h-9 w-9" : "h-10 w-10")} />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium">{person.name}</span>
+                        {/* Live presence subtitle: today's derived status (in-at time while clocked in). Only
+                            renders while today is in the visible window; paging away drops it, by design. */}
+                        {(() => {
+                          const t = statusByEmp.get(eid)?.get(todayYmd);
+                          if (!t) return null;
+                          const dotCls = STATUS_DOT[t.status];
+                          const text = t.status === "open" && t.summary?.arrival
+                            ? `In since ${fmtHM(t.summary.arrival, tz)}`
+                            : STATUS_LABEL[t.status];
+                          return (
+                            <span className="flex items-center gap-1 text-[11px] leading-tight text-muted-foreground">
+                              <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotCls ?? "bg-muted-foreground/50")} />
+                              <span className="truncate">{text}</span>
+                            </span>
+                          );
+                        })()}
+                      </span>
+                    </button>
                   </div>
                   {cols.map((d, i) => {
                     const hol = holByCol.get(i);
@@ -1029,12 +1115,40 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
                         </div>
                       </Tip>
                     ))}
+                    {remoteSegs.flatMap(({ l: r, lu, ru }, k) => {
+                      const pending = upper(r.state) === "PENDING";
+                      const bars = splitRuns(lu, ru, isOffCol);
+                      return bars.map(([bl, br], j) => {
+                        const capL = j === 0, capR = j === bars.length - 1;
+                        const padL = capL ? 2 : 0, padR = capR ? 2 : 0;
+                        return (
+                          <Tip key={`r${k}-${j}`} label={remoteTip(person, r)}>
+                            <div
+                              style={{ left: `calc(${pctAt(bl)}% + ${padL}px)`, width: `calc(${pctAt(br) - pctAt(bl)}% - ${padL + padR}px)` }}
+                              className={cn(
+                                "pointer-events-auto absolute top-[48px] flex h-5 items-center gap-1 overflow-hidden px-1.5 text-xs font-semibold text-primary shadow-sm",
+                                capL && "rounded-l-full", capR && "rounded-r-full",
+                                // The tint is laid over an opaque card ground rather than being see-through, so
+                                // the row stripe and today's amber column don't bleed into it - muddy on dark.
+                                pending
+                                  ? "border border-dashed border-primary bg-card/80"
+                                  : "bg-card ring-1 ring-inset ring-primary/40 [background-image:linear-gradient(hsl(var(--primary)/0.15),hsl(var(--primary)/0.15))] dark:ring-primary/60 dark:[background-image:linear-gradient(hsl(var(--primary)/0.2),hsl(var(--primary)/0.2))]",
+                                !capL && "border-l-0", !capR && "border-r-0",
+                              )}
+                            >
+                              {j === 0 && <Home className="h-3 w-3 shrink-0" />}
+                              {j === 0 && br - bl >= 1 && <span className="truncate">Remote</span>}
+                            </div>
+                          </Tip>
+                        );
+                      });
+                    })}
                     {segs.flatMap(({ l, lu, ru }, k) => {
                       const pending = upper(l.state) === "PENDING";
                       const color = colorOf(l.leave_type);
                       // Split at weekend/holiday columns so the bar renders as separate runs, leaving those cells
                       // (and their separators) untouched. Approved = solid pill; pending = dashed translucent.
-                      const bars = splitRuns(lu, ru, (i) => holByCol.has(i) || !workDays.includes(cols[i]!.getUTCDay()));
+                      const bars = splitRuns(lu, ru, isOffCol);
                       return bars.map(([bl, br], j) => {
                         // Only the leave's true ends get a rounded cap + 2px inset; edges landing on a
                         // weekend/holiday boundary stay square and butt the cell, so the runs read as one
@@ -1067,6 +1181,33 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
                         </div>
                       </Tip>
                     ))}
+                    {/* Late arrival / early departure: a chip on the day's MORNING edge for coming in late, its
+                        EVENING edge for leaving early, so the side of the cell says which before the tooltip
+                        does. Approved = solid, pending = dashed (same language as the leave pills). */}
+                    {timeReqs.map((r) => {
+                      const col = colOf(parseYmd(r.date!));
+                      if (col < 0 || col >= DAYS) return null;
+                      const late = r.kind === "late_arrival";
+                      const Icon = late ? LogIn : LogOut;
+                      return (
+                        <Tip key={r.path} label={timeReqTip(person, r)}>
+                          <div
+                            style={late ? { left: `calc(${pctAt(col)}% + 3px)` } : { left: `calc(${pctAt(col + 1)}% - 3px)`, transform: "translateX(-100%)" }}
+                            className={cn(
+                              "pointer-events-auto absolute top-[26px] flex h-5 w-5 items-center justify-center rounded-full shadow-sm",
+                              // Approved is solid amber in light; on a dark row that is the loudest thing on
+                              // the screen, so dark keeps it filled but as a tint with a ring, still clearly
+                              // apart from the dashed pending one.
+                              upper(r.state) === "PENDING"
+                                ? "border border-dashed border-warning bg-card text-warning"
+                                : "bg-warning text-warning-foreground dark:bg-card dark:text-warning dark:ring-1 dark:ring-inset dark:ring-warning/70 dark:[background-image:linear-gradient(hsl(var(--warning)/0.22),hsl(var(--warning)/0.22))]",
+                            )}
+                          >
+                            <Icon className="h-3 w-3" />
+                          </div>
+                        </Tip>
+                      );
+                    })}
                     {joinCol >= 0 && showCat("joiners") && (
                       <Tip label={<TipCard person={person} icon={UserPlus} iconClass="text-emerald-600" title="New joiner" accent="text-emerald-600 dark:text-emerald-400" eta={relDay(e.start_date)}><TipRow icon={CalendarDays}>Joined {dmy(e.start_date)}</TipRow></TipCard>}>
                         <div style={markerAt(joinCol, -22)} className="pointer-events-auto absolute top-[24px] flex h-6 w-6 items-center justify-center rounded-full bg-card shadow-sm ring-1 ring-border"><UserPlus className="h-4 w-4 text-emerald-600 dark:text-emerald-400" /></div>

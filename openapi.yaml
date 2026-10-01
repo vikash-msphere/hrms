@@ -278,16 +278,16 @@ components:
           description: Ordered action list (notify / notifyManager / notifyAudience / apiCall / emitEvent / wait / waitFor / webhook).
         schedule:
           type: [object, 'null']
-          description: "Recurrence for a scheduled rule (trigger_type schedule.recurring), or null for an event-triggered rule. Scanned daily by the recurring-rule scanner."
+          description: "Recurrence for a scheduled rule (trigger_type schedule.recurring), or null for an event-triggered rule. Scanned daily by the recurring-rule scanner; a manual rule is never due on its own and fires only through :run."
           required: [freq]
           properties:
-            freq: { type: string, enum: [daily, weekly, monthly] }
-            day: { type: integer, description: "weekly: day of week (0 = Sunday). monthly: day of month. Ignored for daily." }
+            freq: { type: string, enum: [daily, weekly, monthly, manual] }
+            day: { type: integer, description: "weekly: day of week (0 = Sunday). monthly: day of month. Ignored for daily and manual." }
             scope:
               type: string
               enum: [once, perEmployee]
               description: "once = a single firing. perEmployee = one firing per active employee, with the employee bound into the payload."
-        last_scheduled_on: { type: string, format: date, readOnly: true, description: "Idempotency stamp: the last date the daily scanner fired this scheduled rule." }
+        last_scheduled_on: { type: string, format: date, readOnly: true, description: "Idempotency stamp: the last date this scheduled rule fired, by the daily scanner or by :run." }
         enabled:
           type: boolean
           description: Whether the rule fires (authoring on/off switch, distinct from the disabled lifecycle flag).
@@ -1608,6 +1608,7 @@ components:
         display_name: { type: string }
         accrual_days_per_year: { type: number }
         accrual_frequency: { type: string, enum: [monthly, semi_monthly], description: "How the annual rate is credited: monthly (annual/12 once a month) or semi_monthly (annual/24 on the 1st and 16th)." }
+        accrual_cap_days: { type: number, nullable: true, minimum: 0, description: "The most a balance of this type may accrue to (null = uncapped). A credit that would pass it is cut to what fits and the rest is forfeited; a balance already above it is left as it is and accrues nothing until it is spent below the cap." }
         paid: { type: boolean }
         color: { type: string, nullable: true, description: "Hex colour (e.g. #8b5cf6) for calendar/timeline pills; null = auto-assigned." }
         available_during_probation: { type: boolean, description: When false this leave type cannot be requested during an employee's probation. }
@@ -2223,6 +2224,7 @@ components:
         action: { type: string, readOnly: true, description: "CTA verb the recipient should take (e.g. sign, acknowledge); absent = informational." }
         actor: { type: string, readOnly: true, description: "Display name of the person who caused this (drives the avatar + attribution); absent for system/broadcast events." }
         actor_id: { type: string, readOnly: true, description: "Resource path: employees/{employee_id} of the actor, for a profile deep-link." }
+        actor_photo: { type: string, readOnly: true, description: "The actor's photo path, present on a list read when they have one. Identical to `employee.photo` - prefix with `/v1/` for an `<img src>`." }
         subject: { type: string, readOnly: true, description: "Resource path this notification is about (e.g. overtime-requests/{id}); flags the matching row New." }
         read_time: { type: string, format: date-time, readOnly: true }
         read: { type: boolean, description: "Set true to mark the notification read, false to mark it unread." }
@@ -2975,6 +2977,8 @@ components:
         counterpart: { type: string, description: "Resource path: employees/{employee_id} - the other attendee. Defaults to the report's manager." }
         employee_name: { type: string, readOnly: true, description: "The report's name, served with the row: an employee can read only their own employee record, so a client cannot resolve it." }
         counterpart_name: { type: string, readOnly: true, description: "The other attendee's name, served for the same reason as employee_name." }
+        employee_photo: { type: string, readOnly: true, description: "The report's photo path, present when they have one. Identical to `employee.photo` - prefix with `/v1/` for an `<img src>`." }
+        counterpart_photo: { type: string, readOnly: true, description: "The other attendee's photo path, present when they have one. Identical to `employee.photo`." }
         meeting_date: { type: string, format: date }
         notes: { type: string, description: "Shared notes (both attendees may edit)." }
         action_items:
@@ -4929,7 +4933,11 @@ components:
           description: >-
             active | pending | pending_delete. With four-eyes approval on (settings key access-approval), a
             new rule lands `pending` (inert) and a removal marks the rule `pending_delete` (still enforcing)
-            until a SECOND access admin approves it via :approve / :reject.
+            until a SECOND access admin approves it via :approve / :reject. The requester withdraws their own
+            request by deleting a `pending` rule, or by re-creating a `pending_delete` rule exactly as it stands,
+            which puts it back to `active`; deleting a `pending_delete` rule again is refused with 409. A rule on
+            its way out is not a duplicate of a different rule on the same pattern, so an edit (delete + create)
+            queues both halves.
         requested_by: { type: string, readOnly: true, description: "users/{user_id} that requested the pending change; that person may not approve it." }
       x-aep-resource:
         singular: access-rule
@@ -5453,6 +5461,7 @@ paths:
         - { in: query, name: collection, description: "Only the rules on this collection, plus the ** rules that bear on every collection.", schema: { type: string } }
         - { in: query, name: subject_kind, schema: { type: string, enum: [role, user] } }
         - { in: query, name: subject, description: "Only this subject's rules - a role name, or users/<id>.", schema: { type: string } }
+        - { in: query, name: effect, description: "Only the allow rules, or only the deny rules.", schema: { type: string, enum: [allow, deny] } }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -6208,6 +6217,27 @@ paths:
                       type: object
                       properties:
                         kind: { type: string }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/automations/{automation_id}:run:
+    post:
+      description: "Custom method run: fire a scheduled or manual rule now, for real. It is the rule's firing for today, so a rule that already fired today (by hand or by the daily scanner) answers 409, as do an event-triggered rule and a disabled one. A perEmployee rule fires for the first slice of the roster in this request and queues the rest."
+      operationId: ":RunAutomation"
+      parameters: [ { in: path, name: automation_id, required: true, schema: { type: string } } ]
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fired: { type: integer, description: "Firings whose condition matched and whose actions ran in this request." }
+                  queued: { type: integer, description: "Employees still owed a firing, run by the job queue over the next passes." }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/automation-runs:
     get:
@@ -18221,6 +18251,7 @@ paths:
                               email: { type: string }
                               write: { type: boolean, description: "True when they can also change it, not only read it." }
                               why: { type: string, description: "Present only when this record was shared with them specifically. Deliberately absent for every other reason: the reader's role, and the breadth their access runs to (a department, a branch of the org, the whole company), are facts about how powerful that person is, and this report must not publish the org's access shape to every employee." }
+                              photo: { type: string, description: "Their photo path, present when they have one. Identical to `employee.photo` - prefix with `/v1/` for an `<img src>`." }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/employees:upcomingCelebrations:
@@ -18871,6 +18902,7 @@ paths:
                         name: { type: string }
                         employee_number: { type: string, nullable: true }
                         job_title: { type: string, nullable: true }
+                        photo: { type: string, nullable: true, description: "The photo's API path, present when the employee has one. Identical to `employee.photo` - prefix with `/v1/` for an `<img src>`." }
                         department: { type: string, nullable: true, description: "`departments/{id}`" }
                         manager: { type: string, nullable: true, description: "`employees/{id}`" }
                         values:

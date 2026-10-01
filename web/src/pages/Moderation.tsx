@@ -290,12 +290,12 @@ export default function Moderation() {
                                 restore simply stays gone. A reply and a suggestion have no draft state, so
                                 there is one button and it says where the post actually lands. */}
                             {row.collection === "announcements" && (
-                              <Button size="sm" variant="outline" disabled={busy === row.host} onClick={() => void putBack(row, "draft")}>
+                              <Button size="sm" variant="outline" disabled={busy === row.host} onClick={() => putBack(row, "draft")}>
                                 <Undo2 className="mr-1.5 h-3.5 w-3.5" />
                                 Put it back as a draft
                               </Button>
                             )}
-                            <Button size="sm" variant="outline" disabled={busy === row.host} onClick={() => void putBack(row, "publish")}>
+                            <Button size="sm" variant="outline" disabled={busy === row.host} onClick={() => putBack(row, "publish")}>
                               <Undo2 className="mr-1.5 h-3.5 w-3.5" />
                               Put it back on the wall
                             </Button>
@@ -319,7 +319,7 @@ export default function Moderation() {
                           size="sm"
                           variant={row.held ? "default" : "outline"}
                           disabled={busy === row.host}
-                          onClick={() => void decide(row, "dismiss")}
+                          onClick={() => decide(row, "dismiss")}
                         >
                           {row.held ? "Release it" : "Leave it up"}
                         </Button>
@@ -327,7 +327,7 @@ export default function Moderation() {
                           size="sm"
                           variant={row.held ? "outline" : "destructive"}
                           disabled={busy === row.host}
-                          onClick={() => void decide(row, "hide")}
+                          onClick={() => decide(row, "hide")}
                         >
                           <EyeOff className="mr-1.5 h-3.5 w-3.5" />
                           {row.held ? "Keep it hidden" : "Hide it"}
@@ -341,7 +341,7 @@ export default function Moderation() {
                         Announcements only: a reply and a suggestion have no draft to go back to. */}
                     {row.held && row.collection === "announcements" && (
                       <AccessAction verb="unhide" collection="moderation" label="Put a hidden post back">
-                        <Button size="sm" variant="ghost" disabled={busy === row.host} onClick={() => void putBack(row, "draft")}>
+                        <Button size="sm" variant="ghost" disabled={busy === row.host} onClick={() => putBack(row, "draft")}>
                           <Undo2 className="mr-1.5 h-3.5 w-3.5" />
                           Put it back as a draft
                         </Button>

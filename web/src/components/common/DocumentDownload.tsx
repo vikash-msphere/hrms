@@ -73,7 +73,7 @@ export function DocumentDownload({
 
   if (!hasPrint(doc)) {
     return (
-      <Button variant={variant} size={size} className={className} disabled={busy} onClick={() => void run(doc, "screen")}>
+      <Button variant={variant} size={size} className={className} disabled={busy} onClick={() => run(doc, "screen")}>
         {icon} Download
       </Button>
     );

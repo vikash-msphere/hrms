@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Camera, Upload } from "lucide-react";
 import { api } from "@/api";
-import { colorFromString, initials } from "@/lib/utils";
+import { cn, colorFromString, initials } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -195,7 +195,9 @@ export function PhotoAvatar({
   return (
     <>
       <div className="relative">
-        <Avatar className={className}>
+        {/* The initials size is set on the circle, so a caller's `text-[10px]` in `className` reaches them; the
+            fallback inherits it. Set on the fallback itself, it overrode every caller's size. */}
+        <Avatar className={cn("text-lg", className)}>
           {/* A plain `<img>`, NOT Radix's AvatarImage: that one tracks its load state through `new Image()`,
               which fetches eagerly and would defeat `loading="lazy"` - and a directory is the one screen where
               only the rows on screen should be fetched. The initials sit underneath and show through until
@@ -214,7 +216,7 @@ export function PhotoAvatar({
               className="absolute inset-0 aspect-square h-full w-full object-cover"
             />
           )}
-          <AvatarFallback className="text-lg" style={{ backgroundColor: colorFromString(name) }}>{initials(name)}</AvatarFallback>
+          <AvatarFallback className="text-[length:inherit]" style={{ backgroundColor: colorFromString(name) }}>{initials(name)}</AvatarFallback>
         </Avatar>
         {editable && (
           <button

@@ -4011,7 +4011,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
                   className="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-2 p-2 sm:grid-cols-[1fr_auto_auto_auto_auto]"
                 >
                   <Input value={f.label} placeholder="e.g. Passport number" onChange={(e) => update(i, { label: e.target.value })} />
-                  <Button variant="ghost" size="icon" className="h-8 w-8 sm:hidden" onClick={() => void remove(i)} aria-label="Remove field">
+                  <Button variant="ghost" size="icon" className="h-8 w-8 sm:hidden" onClick={() => remove(i)} aria-label="Remove field">
                     <Trash2 className="h-4 w-4" />
                   </Button>
                   {/* One checkbox per flag either way - only the caption comes and goes. Below `sm` the
@@ -4034,7 +4034,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
                     <option value="allowed">Allowed</option>
                     <option value="required">Required</option>
                   </select>
-                  <Button variant="ghost" size="icon" className="hidden h-8 w-8 sm:inline-flex" onClick={() => void remove(i)} aria-label="Remove field">
+                  <Button variant="ghost" size="icon" className="hidden h-8 w-8 sm:inline-flex" onClick={() => remove(i)} aria-label="Remove field">
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>

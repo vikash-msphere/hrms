@@ -528,6 +528,7 @@ export function toLeaveTypeResource(r: any): Wire<"leave-type"> {
     display_name: r.name,
     accrual_days_per_year: r.accrualDaysPerYear ?? undefined,
     accrual_frequency: r.accrualFrequency ?? "monthly",
+    accrual_cap_days: r.accrualCapDays ?? undefined,
     paid: r.paid,
     color: r.color ?? undefined,
     available_during_probation: r.availableDuringProbation,
@@ -949,6 +950,8 @@ export function toCheckInResource(r: any, user?: AppUser): Wire<"check-in"> {
     // the person they met as "-". Decorated by the service (see checkInSpec.decorate).
     employee_name: r.employeeName ?? undefined,
     counterpart_name: r.counterpartName ?? undefined,
+    employee_photo: r.employeePhoto ?? undefined,
+    counterpart_photo: r.counterpartPhoto ?? undefined,
     meeting_date: r.meetingDate ? iso(r.meetingDate).slice(0, 10) : undefined,
     notes: r.notes ?? undefined,
     action_items: jsonOr<Wire<"check-in">["action_items"]>(r.actionItemsJson, []),
@@ -1568,6 +1571,7 @@ export function toNotificationResource(r: any): Wire<"notification"> {
     // system/broadcast events.
     actor: r.actorName ?? undefined,
     actor_id: r.actorId ? ref("employees", r.actorId) : undefined,
+    actor_photo: r.actorPhoto ?? undefined,
     snooze_until_time: r.snoozeUntil ? iso(r.snoozeUntil) : undefined,
     read_time: r.readTime ? iso(r.readTime) : undefined,
     read: !!r.readTime,

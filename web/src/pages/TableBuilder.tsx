@@ -497,10 +497,10 @@ function TableList() {
             <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Open" onClick={() => navigate(`tables/${idOf(r.path)}`)}><Pencil className="h-3.5 w-3.5" /></Button>
           </AccessAction>
           <AccessAction create label="Table">
-            <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Duplicate ${r.display_name}`} title="Duplicate" onClick={(e) => { e.stopPropagation(); void duplicate(r); }}><Copy className="h-3.5 w-3.5" /></Button>
+            <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Duplicate ${r.display_name}`} title="Duplicate" onClick={(e) => { e.stopPropagation(); return duplicate(r); }}><Copy className="h-3.5 w-3.5" /></Button>
           </AccessAction>
           <AccessAction objectPath={r.path} can={r.access?.can} verb="delete" label={r.display_name}>
-            <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" aria-label="Delete" onClick={() => void del(r)}><Trash2 className="h-3.5 w-3.5" /></Button>
+            <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" aria-label="Delete" onClick={() => del(r)}><Trash2 className="h-3.5 w-3.5" /></Button>
           </AccessAction>
         </div>
       ),
@@ -1109,7 +1109,7 @@ function OneTable({ id }: { id: string }) {
               <Button variant="outline" onClick={openEdit}><Pencil className="h-4 w-4" /> Edit</Button>
             </AccessAction>
             <AccessAction create label="Table">
-              <Button variant="outline" onClick={() => void duplicate()}><Copy className="h-4 w-4" /> Duplicate</Button>
+              <Button variant="outline" onClick={() => duplicate()}><Copy className="h-4 w-4" /> Duplicate</Button>
             </AccessAction>
             <Button variant="outline" onClick={() => setReloadKey((k) => k + 1)}><RefreshCw className="h-4 w-4" /> Refresh</Button>
           </div>
@@ -1612,7 +1612,7 @@ function FilterSortSheet({ open, onClose, columns, filters, sort, onSave }: {
           </span>
           <div className="flex gap-2">
             <Button variant="outline" onClick={onClose}>Cancel</Button>
-            <Button onClick={() => void save()} disabled={saving || incomplete}>{saving ? "Saving…" : "Save"}</Button>
+            <Button onClick={() => save()} disabled={saving || incomplete}>{saving ? "Saving…" : "Save"}</Button>
           </div>
         </div>
       </SheetContent>

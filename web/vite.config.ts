@@ -385,6 +385,34 @@ function prepareForPrism(proxyReq: ClientRequest) {
   proxyReq.setHeader("Cf-Access-Jwt-Assertion", "dev");
 }
 
+// Production-like latency on the dev server's way to the worker. Over localhost every answer lands in a few
+// milliseconds and in the order it was asked, which hides the races a real network exposes: a list read
+// overtaking the write before it, a dialog closing before its save lands. `HRMS_API_LATENCY_MS` holds a fixed
+// delay ("80") or a range ("20-150") drawn per request, so two requests in flight can come back in either
+// order, the way they do from an edge Worker in front of D1. Unset, nothing is delayed. Dev server only: a
+// build has no proxy, and production has the real network.
+function apiLatency(): Plugin {
+  const spec = process.env.HRMS_API_LATENCY_MS?.match(/^(\d+)(?:-(\d+))?$/);
+  const lo = Number(spec?.[1] ?? 0);
+  const hi = Number(spec?.[2] ?? lo);
+  // The same prefixes the proxy below sends away: /v1 and the worker's own routes. Module and asset requests
+  // are Vite's to serve and stay instant, so only the API pays.
+  const proxied = /^\/(v1|auth|esign|found|calendar|diag|__scheduled)(\/|$)/;
+  return {
+    name: "api-latency",
+    apply: "serve",
+    configureServer(server) {
+      if (!spec || hi === 0) return;
+      server.config.logger.info(`  ➜  API latency: ${lo === hi ? `${lo}ms` : `${lo}-${hi}ms`} per request`);
+      // Installed before Vite's own middlewares, so the delay lands ahead of the proxy.
+      server.middlewares.use((req, _res, next) => {
+        if (!proxied.test(req.url ?? "")) return next();
+        setTimeout(next, lo + Math.floor(Math.random() * (hi - lo + 1)));
+      });
+    },
+  };
+}
+
 // This directory (`<repo>/web/`), resolved from the CONFIG FILE rather than from the current working
 // directory. `root: "./web"` read correctly only when the build was started from the repo root; started from
 // inside `web/` it resolved to `web/web`, and because Rollup runs `closeBundle` even on a FAILED build, the
@@ -420,6 +448,7 @@ export default defineConfig(({ mode }) => ({
     dropFinderJunk(),
     react(),
     pwaManifest(mode),
+    apiLatency(),
     // Source maps, uploaded to the error tracker and then DELETED from the build.
     //
     // Without them a production stack trace is `index-a1b2c3.js:1:48213`, which names nothing - every issue

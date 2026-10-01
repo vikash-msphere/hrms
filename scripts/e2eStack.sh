@@ -126,9 +126,16 @@ echo "→ [e2e] lane $LANE  ·  SPA http://127.0.0.1:$WEB_PORT  ·  Prism :$PRIS
 # and `replayMasking` and nothing else. Those two stub `/diag` in the page, so nothing is sent anywhere. Plain
 # `=1` here would arm all ~350 specs, and the rest stub nothing - their errors would be relayed to the live
 # Sentry project, and the outbound subrequests would load the Worker the suite is timing.
+#
+# Every API request is delayed at the dev server by 20-150ms, drawn per request (the `apiLatency` plugin in
+# web/vite.config.ts), so the specs run against production-like round trips instead of localhost's instant,
+# in-order answers - the setting that exposes a reload or navigation racing a write still in flight.
+# `E2E_API_LATENCY_MS` overrides it ("80", or another range); set it to "0" to run without any delay.
+API_LATENCY_MS="${E2E_API_LATENCY_MS:-20-150}"
 VITE_SENTRY_IN_DEV=opt-in \
 HRMS_WORKER_ORIGIN="http://127.0.0.1:$WORKER_PORT" \
 HRMS_PRISM_ORIGIN="http://127.0.0.1:$PRISM_PORT" \
+HRMS_API_LATENCY_MS="$API_LATENCY_MS" \
   npx vite --config web/vite.config.ts --host 127.0.0.1 --port "$WEB_PORT" --strictPort \
   > "$WEB_LOG" 2>&1 & PIDS+=($!)
 

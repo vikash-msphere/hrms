@@ -194,6 +194,42 @@ export function landedResponse(page: Page, match: (r: import("@playwright/test")
   return page.waitForResponse(async (r) => match(r) && !(r.status() === 500 && (await notTheApps500(r))), { timeout });
 }
 
+/**
+ * A sweep's own console collector: every error the page logs, labelled with where the walk was (`at`), so one
+ * report names each page or panel that logged. The sweeps keep their own list rather than leaning on the
+ * shared watchdog because the label is the point.
+ *
+ * A 500 the APP did not write (`notTheApps500` - a connection the dev runtime dropped, which the app's retry
+ * absorbs) is left out, by the same rule the watchdog applies. Without it one dropped `batch:run` anywhere in a
+ * forty-page walk failed the sweep about a page that drew perfectly well. The app's own 500 still counts.
+ * `ignore` is matched against the console text, for whatever else the sweep excuses (429 telemetry, 409 races).
+ */
+export function collectConsole(page: Page, ignore: RegExp) {
+  let where = "";
+  const logged: { line: string; url: string }[] = [];
+  const dropped = new Set<string>();
+  const judged: Promise<void>[] = [];
+  page.on("response", (res) => {
+    if (res.status() === 500) judged.push(notTheApps500(res).then((infra) => void (infra && dropped.add(res.url()))));
+  });
+  page.on("console", (m) => {
+    if (m.type() !== "error" || ignore.test(m.text())) return;
+    logged.push({ line: `${where}: ${m.text().slice(0, 200)}`, url: m.location()?.url ?? "" });
+  });
+  page.on("pageerror", (e) => logged.push({ line: `${where}: threw ${e.message}`, url: "" }));
+  return {
+    /** Name what the walk is on now; later lines are attributed to it. */
+    at(label: string) {
+      where = label;
+    },
+    /** Every line logged so far, minus the dropped connections - once each 500 has been judged. */
+    async problems(): Promise<string[]> {
+      await Promise.all(judged);
+      return logged.filter((l) => !l.url || !dropped.has(l.url)).map((l) => l.line);
+    },
+  };
+}
+
 export async function enableTelemetry(page: Page) {
   await page.addInitScript(() => {
     (window as unknown as { __hrmsSentryOptIn?: boolean }).__hrmsSentryOptIn = true;
@@ -244,6 +280,7 @@ export const test = base.extend<Fixtures>({
       contexts.push(context);
       signedIn.set(email, [...(signedIn.get(email) ?? []), context]);
       const page = await context.newPage();
+      settleBeforeReload(page);
       allowed.set(page, []);
       // `where` is the url the browser blames, and it is reported because without it a failed resource load
       // says only its status: "the server responded with a status of 500" names no request, so working out
@@ -352,6 +389,34 @@ export async function apiPost(page: Page, path: string, data: unknown): Promise<
  * that arrived while the first was still running. Every other status is the server's verdict and comes back
  * unchanged, so a spec asserting a refusal still sees it.
  */
+/**
+ * `page.reload()` waits out a closed dialog's history drop first.
+ *
+ * A dialog pushes a history entry while it is open and, once it has closed, steps off it with an async
+ * `history.back()` (web/src/lib/dialogHistory.ts). A reload issued in that window races the traversal: either
+ * the reload is aborted (`net::ERR_ABORTED; maybe frame was detached?`) or the back lands on the NEW page and
+ * closes whatever dialog opens there. Nobody presses reload inside those milliseconds; specs do, right after
+ * a dialog closes, and with production-like latency (E2E_API_LATENCY_MS) the window is wide enough to
+ * hit. "Pending" is a dialog entry on top with no dialog left on screen - a reload made deliberately WITH a
+ * dialog open (a record deep link that should land back on it) is not held up. Bounded: a drop that never
+ * comes is the app's problem to show, not this helper's to hang on.
+ */
+function settleBeforeReload(page: Page) {
+  const reload = page.reload.bind(page);
+  page.reload = async (options) => {
+    await page
+      .waitForFunction(
+        () =>
+          (history.state as { hrmsDialog?: boolean } | null)?.hrmsDialog !== true ||
+          !!document.querySelector('[role="dialog"], [role="alertdialog"]'),
+        undefined,
+        { timeout: 10_000 },
+      )
+      .catch(() => undefined);
+    return reload(options);
+  };
+}
+
 function hardenRequest(req: APIRequestContext) {
   const laneMadeUp = async (res: APIResponse) => {
     if (res.status() === 503) return true;

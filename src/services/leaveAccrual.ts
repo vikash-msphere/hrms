@@ -1,7 +1,7 @@
 import { and, eq, gte, isNotNull, isNull, or } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import { computeAccrual, roundToIncrement } from "../domain/leave";
+import { capAccrual, computeAccrual, roundToIncrement } from "../domain/leave";
 import { mergeRestrictions, type LeaveRestrictions } from "../domain/leaveRestrictions";
 import { allocOwnedCodeRuns } from "./codeAlloc";
 import { getSettingValue } from "./settings";
@@ -184,7 +184,10 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
         // (services/settlements.ts writes `max(0, …)` for the same reason): the employee may already have SPENT
         // those days, and a negative balance is not a thing this schema means anything by - the claw-back can
         // remove days that are still there and no more.
-        const newBalance = Math.max(0, roundToIncrement(existing.balanceDays + add, inc));
+        //
+        // The accrual cap applies to the credit only (domain/leave.ts capAccrual): a balance at the cap keeps
+        // its marker moving and its days where they are.
+        const newBalance = Math.max(0, roundToIncrement(existing.balanceDays + capAccrual(existing.balanceDays, add, lt.accrualCapDays, inc), inc));
         // The WINDOW counts as a change even when nothing else moved. A correction whose days round away to the
         // same balance still has to be recorded, or the row keeps claiming it was priced against the old window
         // and the same correction is computed again on every tick from here on.
@@ -226,7 +229,7 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
         planned.push({
           employeeId: emp.uuid,
           leaveTypeId: lt.uuid,
-          balanceDays: roundToIncrement(add, inc),
+          balanceDays: roundToIncrement(capAccrual(0, add, lt.accrualCapDays, inc), inc),
           lastAccrualYm: newLastYm,
           pricedStart: pricedStartMs != null ? new Date(pricedStartMs) : null,
           pricedEnd: pricedEndMs != null ? new Date(pricedEndMs) : null,

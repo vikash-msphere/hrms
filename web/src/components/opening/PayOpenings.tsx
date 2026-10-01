@@ -129,7 +129,7 @@ export function PayOpenings() {
 
   function downloadTemplate() {
     const { headers, rows } = payOpeningTemplate(employees);
-    void exportTable(`pay-before-hrms-${fy}`, headers, rows, "csv", "payroll-openings");
+    return exportTable(`pay-before-hrms-${fy}`, headers, rows, "csv", "payroll-openings");
   }
 
   const applied = answer && !answer.dry_run;
@@ -190,7 +190,7 @@ export function PayOpenings() {
         )}
         <div className="flex flex-wrap items-center gap-2">
           <AccessAction collection="payroll-openings" verb="importOpenings" label="Bring in pay and tax so far">
-            <Button variant="outline" loading={busy === "preview"} disabled={!items.length || !!busy} onClick={() => void preview()}>Preview</Button>
+            <Button variant="outline" loading={busy === "preview"} disabled={!items.length || !!busy} onClick={() => preview()}>Preview</Button>
           </AccessAction>
           {progress && <span className="text-xs text-muted-foreground tabular-nums">{progress}…</span>}
         </div>
@@ -251,7 +251,7 @@ export function PayOpenings() {
             {!applied && toApply > 0 && (
               <div className="flex justify-end">
                 <AccessAction collection="payroll-openings" verb="importOpenings" label="Bring in pay and tax so far">
-                  <Button loading={busy === "apply"} disabled={!!busy} onClick={() => void apply()}>
+                  <Button loading={busy === "apply"} disabled={!!busy} onClick={() => apply()}>
                     Apply for {toApply} {toApply === 1 ? "person" : "people"}
                   </Button>
                 </AccessAction>
@@ -287,7 +287,7 @@ export function PayOpenings() {
                       <td data-label="ESI" className="px-3 py-2">{r.esi_contributing ? "Yes" : "No"}</td>
                       <td data-label="" className="px-3 py-2 text-right">
                         <AccessAction collection="payroll-openings" objectPath={r.path} verb="delete" can={r.access?.can} label="Remove pay before HRMS">
-                          <Button size="sm" variant="ghost" onClick={() => void removeEntry(r)}>Remove</Button>
+                          <Button size="sm" variant="ghost" onClick={() => removeEntry(r)}>Remove</Button>
                         </AccessAction>
                       </td>
                     </tr>

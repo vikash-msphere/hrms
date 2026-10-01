@@ -6,7 +6,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { notFound, aborted, AppError } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
-import { etagOf } from "../http/serialize";
+import { etagOf, photoMarker } from "../http/serialize";
 import { getSettingValue } from "./settings";
 import { DEFAULT_NOTIFICATION_CONFIG, eventConfig, isMutedByUser, isDigestible, parseNotificationPrefs, type NotificationConfig, type NotificationPriority } from "../domain/notificationConfig";
 import { queueForDigest, queueManyForDigest } from "./notificationDigest";
@@ -464,7 +464,8 @@ export async function listNotifications(
     conds.push(isNotNull(schema.notifications.snoozeUntil));
     conds.push(gt(schema.notifications.snoozeUntil, now));
     // Newest first (a notification feed reads top-down).
-    return keysetPage(deps, schema.notifications, "notifications", and(...(conds.filter(Boolean) as any)), { dir: "desc", max: maxPageSize, pageToken: opts.pageToken });
+    const sleeping = await keysetPage(deps, schema.notifications, "notifications", and(...(conds.filter(Boolean) as any)), { dir: "desc", max: maxPageSize, pageToken: opts.pageToken });
+    return { ...sleeping, items: await withActorPhotos(deps, sleeping.items) };
   }
   if (opts.unread) conds.push(isNull(schema.notifications.readTime));
   // A snoozed row stays hidden until its wake time passes, then resurfaces (still unread) - so include rows
@@ -480,7 +481,21 @@ export async function listNotifications(
       .from(schema.notifications)
       .where(and(eq(schema.notifications.recipientId, scope.ownerId ?? ""), isNull(schema.notifications.dismissedTime), isNotNull(schema.notifications.snoozeUntil), gt(schema.notifications.snoozeUntil, now)))
   )[0]?.c ?? 0;
-  return { ...page, snoozedCount };
+  return { ...page, items: await withActorPhotos(deps, page.items), snoozedCount };
+}
+
+// The actor's photo marker, for the avatar on each row. Read at list time rather than stored with the row like
+// `actorName`: the marker carries the photo's version, so a stored copy would point at a replaced picture. One
+// primary-key read per distinct actor on the page.
+async function withActorPhotos<R extends { actorId: string | null }>(deps: Deps, items: R[]): Promise<(R & { actorPhoto?: string })[]> {
+  const ids = [...new Set(items.map((r) => r.actorId).filter((x): x is string => !!x))];
+  if (ids.length === 0) return items;
+  const people = await deps.db
+    .select({ uuid: schema.employees.uuid, photoKey: schema.employees.photoKey, photoAt: schema.employees.photoAt })
+    .from(schema.employees)
+    .where(inArray(schema.employees.uuid, ids));
+  const photo = new Map(people.map((p) => [p.uuid, photoMarker(p)]));
+  return items.map((r) => (r.actorId && photo.get(r.actorId) ? { ...r, actorPhoto: photo.get(r.actorId) } : r));
 }
 
 export async function getNotification(deps: Deps, _actor: AppUser, id: string) {

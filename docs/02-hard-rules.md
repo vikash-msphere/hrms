@@ -74,6 +74,10 @@ breaking the rule fails `npm run verify` rather than waiting for review.
   (`.editor-row`), and give a `flex-1` wrapper `min-w-0` so the `truncate` inside it can fire. Anything
   deliberately wider needs its own `overflow-x-auto` and a `scroll-shadow-x` to say so. `html` clips
   horizontal overflow as a backstop, which means content past the edge is unreachable, not just off screen.
+- **Return the promise from a `<Button>`'s onClick** (`onClick={() => save()}`, never `() => void save()`).
+  The button stays disabled with a spinner in place of its leading icon until that promise settles, so an
+  action cannot be fired twice while its request is in flight. `loading` is for state the button cannot see,
+  such as a save started by a keyboard shortcut. Gated by `test/buttonPendingCoverage.test.ts`.
 - **Run `npm run verify`** before calling anything done. It is `api:lint` at `--fail-severity=warn`, then
   `typecheck` (including the web project), then the full test suite.
 

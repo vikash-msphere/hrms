@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
-import { cn, idOf, initials } from "@/lib/utils";
+import { cn, idOf } from "@/lib/utils";
+import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { collapseMentions, expandMentions, nameCandidates, type PickedMention } from "@/lib/mentionText";
 import type { Employee } from "@/types";
 
@@ -184,7 +185,7 @@ export function useMentions({
           onMouseEnter={() => setActive(i)}
           className={cn("flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm", i === active ? "bg-accent" : "hover:bg-accent/60")}
         >
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground">{initials(`${e.first_name} ${e.last_name}`)}</span>
+          <PhotoAvatar employeeId={idOf(e.path)} name={`${e.first_name} ${e.last_name}`} photo={e.photo} className="h-6 w-6 shrink-0 text-[10px]" />
           <span className="min-w-0 truncate">{e.first_name} {e.last_name}</span>
           {e.job_title && <span className="ml-auto shrink-0 truncate text-xs text-muted-foreground">{e.job_title}</span>}
         </button>

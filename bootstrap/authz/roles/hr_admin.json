@@ -457,12 +457,6 @@
       "why": "visibility only; decisions are payroll's verbs"
     },
     {
-      "area": "workplace",
-      "pattern": "suggestions.**",
-      "level": "read",
-      "why": "triage visibility (the box itself opens via the `everyone` ACL)"
-    },
-    {
       "area": "money",
       "pattern": "pay-grades.**",
       "level": "read",

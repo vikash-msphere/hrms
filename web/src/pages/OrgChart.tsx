@@ -846,8 +846,8 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
                 <Button size="sm" variant="outline" className="h-7" onClick={expandAll}>Expand all</Button>
                 <Button size="sm" variant="outline" className="h-7" onClick={collapseAll}>Collapse all</Button>
                 <Button size="sm" variant="outline" className="h-7 w-7 p-0" onClick={() => setFull((f) => !f)} title={full ? "Exit full screen (Esc)" : "Full screen"}>{full ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}</Button>
-                <Button size="sm" variant="outline" className="h-7 w-7 p-0" disabled={exporting} onClick={() => void exportChart("png")} title="Download as PNG"><ImageDown className="h-3.5 w-3.5" /></Button>
-                <Button size="sm" variant="outline" className="h-7 w-7 p-0" disabled={exporting} onClick={() => void exportChart("print")} title="Print"><Printer className="h-3.5 w-3.5" /></Button>
+                <Button size="sm" variant="outline" className="h-7 w-7 p-0" disabled={exporting} onClick={() => exportChart("png")} title="Download as PNG"><ImageDown className="h-3.5 w-3.5" /></Button>
+                <Button size="sm" variant="outline" className="h-7 w-7 p-0" disabled={exporting} onClick={() => exportChart("print")} title="Print"><Printer className="h-3.5 w-3.5" /></Button>
               </div>
             </div>
 

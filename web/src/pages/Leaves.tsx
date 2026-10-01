@@ -653,7 +653,7 @@ export default function Leaves({ me }: { me: Me }) {
       <div className="flex items-center justify-end gap-1">
         {lr.source === "import" && upper(lr.state) === "APPROVED" && lr.employee && idOf(lr.employee) !== me.employee_id && (
           <AccessAction collection="leave-requests" objectPath={lr.path} verb="cancel" can={lr.access?.can} label="Remove imported leave">
-            <Button size="sm" variant="ghost" onClick={() => void removeImported(lr)}><Ban className="h-4 w-4" /> Remove</Button>
+            <Button size="sm" variant="ghost" onClick={() => removeImported(lr)}><Ban className="h-4 w-4" /> Remove</Button>
           </AccessAction>
         )}
         <RowActivityButton resource={lr.path} />
@@ -1350,7 +1350,7 @@ export default function Leaves({ me }: { me: Me }) {
               {canDecide && isPending(detailRow) && !isOwn(detailRow) && (
                 <>
                   <AccessAction collection="leave-requests" objectPath={detailRow.path} verb="approve" can={detailRow.access?.can} label="Approve">
-                    <Button variant="success" onClick={() => { const r = detailRow; setDetailPath(null); void approveRequest(r); }}>
+                    <Button variant="success" onClick={() => { const r = detailRow; setDetailPath(null); return approveRequest(r); }}>
                       <Check className="h-4 w-4" /> Approve
                     </Button>
                   </AccessAction>
@@ -1363,14 +1363,14 @@ export default function Leaves({ me }: { me: Me }) {
               )}
               {isCancellable(detailRow) && canRequest && (
                 <AccessAction collection="leave-requests" objectPath={detailRow.path} verb="cancel" can={detailRow.access?.can} label="Reschedule">
-                  <Button variant="outline" onClick={() => { const r = detailRow; setDetailPath(null); void rescheduleRequest(r); }}>
+                  <Button variant="outline" onClick={() => { const r = detailRow; setDetailPath(null); return rescheduleRequest(r); }}>
                     <CalendarSync className="h-4 w-4" /> Move
                   </Button>
                 </AccessAction>
               )}
               {isCancellable(detailRow) && (
                 <AccessAction collection="leave-requests" objectPath={detailRow.path} verb="cancel" can={detailRow.access?.can} label="Cancel">
-                  <Button variant="destructive" onClick={() => { const r = detailRow; setDetailPath(null); void cancelRequest(r); }}>
+                  <Button variant="destructive" onClick={() => { const r = detailRow; setDetailPath(null); return cancelRequest(r); }}>
                     <Ban className="h-4 w-4" /> Cancel leave
                   </Button>
                 </AccessAction>

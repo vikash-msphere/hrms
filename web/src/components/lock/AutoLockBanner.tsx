@@ -27,7 +27,7 @@ export function AutoLockBanner() {
       <Button size="sm" variant="outline" onClick={() => markActive(true)}>
         Stay unlocked
       </Button>
-      <Button size="sm" onClick={() => void lockNow()}>
+      <Button size="sm" onClick={() => lockNow()}>
         Lock now
       </Button>
     </div>

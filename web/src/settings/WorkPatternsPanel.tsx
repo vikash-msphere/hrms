@@ -215,7 +215,7 @@ export default function WorkPatternsPanel({ openId }: { openId?: string }) {
                       </div>
                       <div className="flex shrink-0 gap-1">
                         <Button variant="ghost" size="icon" className="h-7 w-7" aria-label={`Edit ${p.name}`} onClick={() => openEdit(p)}><Pencil className="h-3.5 w-3.5" /></Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" aria-label={`Retire ${p.name}`} onClick={() => void del(p)}><Trash2 className="h-3.5 w-3.5" /></Button>
+                        <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" aria-label={`Retire ${p.name}`} onClick={() => del(p)}><Trash2 className="h-3.5 w-3.5" /></Button>
                       </div>
                     </div>
                     {/* The cycle as it reads, so a name is never the only thing distinguishing two schedules. */}

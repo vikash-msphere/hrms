@@ -64,8 +64,8 @@ describe("callerScopes - the breadth a capability string drops", () => {
     expect(read.cards).toBe("dept");
     expect(read.announcements).toBe("all");
     expect(read.boards).toBe("dept");
-    // The suggestion box is private-by-default - no seeded grant, so no key.
-    expect(read.suggestions).toBeUndefined();
+    // The suggestion box is the company's too (the everyone role reads every suggestion).
+    expect(read.suggestions).toBe("all");
   });
 
   it("a manager reaches their department, and only where the grant says so", () => {

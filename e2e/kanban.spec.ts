@@ -67,3 +67,40 @@ test("a card moves column through the actions menu and stays moved", async ({ as
   await purge(page, filed.path);
   await purge(page, board.path);
 });
+
+// A deep link names a CARD (`/boards/<cardId>`, what the activity feed and search hand out), never its board, and
+// each board view reads only its own board's cards. So the page reads that one card to learn its board, shows
+// that board, and opens the card on it. The reader was last on ANOTHER board, which the page would otherwise
+// reopen (Boards.tsx, the last-viewed key), so landing on the card's board is the link being followed.
+test("a deep link to a card opens the card on its own board", async ({ as }) => {
+  const page = await as("super");
+  const stamp = Date.now();
+  const make = async (name: string) => {
+    const res = await page.request.post("/v1/boards", { headers: SPA_HEADERS, data: { name } });
+    expect(res.status(), await res.text()).toBe(200);
+    return (await res.json()) as { path: string };
+  };
+  const home = await make(`E2E link board ${stamp}`);
+  const elsewhere = await make(`E2E other board ${stamp}`);
+  const title = `E2E linked card ${stamp}`;
+  const cardRes = await page.request.post("/v1/cards", {
+    headers: SPA_HEADERS,
+    data: { board: home.path, title, column_key: "backlog" },
+  });
+  expect(cardRes.status(), await cardRes.text()).toBe(200);
+  const filed = (await cardRes.json()) as { path: string };
+
+  await gotoRoute(page, `boards?board=${elsewhere.path.split("/")[1]}`);
+  await expect(page.getByRole("main")).toBeVisible();
+
+  await gotoRoute(page, `boards/${filed.path.split("/")[1]}`);
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Title")).toHaveValue(title, { timeout: 30_000 });
+  // And the board behind it is the card's, not the one the reader was last on. `includeHidden`: the open dialog
+  // marks everything behind it aria-hidden, and the question is what is drawn there, not what is focusable.
+  await expect(page.getByRole("group", { name: "Backlog", exact: true, includeHidden: true }).getByText(title)).toBeAttached();
+
+  await purge(page, filed.path);
+  await purge(page, home.path);
+  await purge(page, elsewhere.path);
+});

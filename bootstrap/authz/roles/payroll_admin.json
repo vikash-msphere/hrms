@@ -44,6 +44,12 @@
     },
     {
       "area": "money",
+      "pattern": "tax-verifications",
+      "level": "read",
+      "why": "The Approvals inbox queue of prior-employer declarations awaiting verification. A virtual capability of its own, so the employees.*.tax write above (which the Verify/Reject PATCH rides) does not reach it."
+    },
+    {
+      "area": "money",
       "pattern": "compensation.**",
       "level": "write",
       "why": "Authors everyone's compensation."
@@ -425,10 +431,6 @@
     {
       "pattern": "settings.payroll-approval",
       "why": "The switch that requires a second approver on the payroll commit is super admin's, so the operator it restrains cannot turn it off."
-    },
-    {
-      "pattern": "tax-verifications",
-      "why": "The verification queue is reached through the `tax` capability (employees.*.tax, which payroll holds), decided per employee sub-resource - a collection grant here would be a second gate for one question."
     }
   ]
 }

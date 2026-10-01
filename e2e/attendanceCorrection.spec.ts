@@ -3,12 +3,12 @@ import { allowConsoleErrors, gotoRoute, test, expect, toast } from "./fixtures";
 // Fixing a day that was clocked wrong.
 //
 // A correction is NOT a ticket and not an edit: it is an `attendance-regularizations` row that an approver
-// decides, and the flow only exists on the attendance page - the day whose times are wrong carries the
-// affordance, the dialog is seeded with what the day currently says, and it offers the scheduled day as the
-// usual replacement. `test/attendanceRegularizationFlow.test.ts` owns what approval does to the day. What
-// only a browser shows is that the wrong day can be FOUND and the request composed from it: the dialog reads
-// the day's own punches, shows the difference the request would make, and refuses to file without times.
-test("an employee asks for a wrong day to be corrected, and their manager approves it", async ({ as }) => {
+// decides, and the flow only exists on the attendance page. A day with punches is fixed one time at a time,
+// from the time itself (`attendanceFixOnePunch.spec.ts`); a day with NO punches carries its own affordance,
+// which adds the day's in/out. `test/attendanceRegularizationFlow.test.ts` owns what approval does to the
+// day. What only a browser shows is that the unpunched day can be FOUND and the request composed for it: the
+// dialog shows the difference the request would make, and refuses to file without both times.
+test("an employee adds the punches a day is missing, and their manager approves it", async ({ as }) => {
   const employee = await as("employee");
   const manager = await as("manager");
 
@@ -19,8 +19,8 @@ test("an employee asks for a wrong day to be corrected, and their manager approv
   const reason = `E2E correction ${Date.now()}`;
   await gotoRoute(employee, "attendance", "Attendance");
 
-  // Every day in the month list carries its own correction affordance, named after the day it fixes - so a
-  // request can never be filed against the row above the one that was clicked.
+  // Every unpunched day in the month list carries its own correction affordance, named after the day it fixes
+  // - so a request can never be filed against the row above the one that was clicked.
   const correct = employee.getByRole("button", { name: /^Request a correction for/ });
   // Only days that have happened carry one (a correction for tomorrow is refused), so on the 1st - when the
   // month's only rows can be the holidays still ahead in it - the month before is where the days are.
@@ -33,13 +33,16 @@ test("an employee asks for a wrong day to be corrected, and their manager approv
   await correct.first().click();
 
   const dialog = employee.getByRole("dialog");
-  await expect(dialog.getByRole("heading", { name: /^Correct attendance/ })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: /^Add missing punches/ })).toBeVisible();
   const submit = dialog.getByRole("button", { name: "Submit request" });
+  await expect(submit).toBeDisabled();
 
-  // The scheduled day is the replacement people actually want, offered as one press rather than four typed
-  // times.
-  await dialog.getByRole("button", { name: /^Scheduled day/ }).click();
-  await expect(dialog.getByText(/Day totals/)).toBeVisible();
+  // A past day needs both ends: a clock-in alone would leave a session open on a day that is over.
+  await dialog.getByLabel("Clock in", { exact: true }).fill("09:00");
+  await expect(dialog.getByText("Add the clock-out time")).toBeVisible();
+  await expect(submit).toBeDisabled();
+  await dialog.getByLabel("Clock out", { exact: true }).fill("18:00");
+  await expect(dialog.getByText(/worked time$/)).toBeVisible();
 
   await dialog.getByLabel("Reason").fill(reason);
   await submit.click();

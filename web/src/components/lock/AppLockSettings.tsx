@@ -248,7 +248,7 @@ function AppLockPanel({ onDone, startSetup }: { onDone?: () => void; startSetup?
           </SettingRow>
         </Form>
         <div className="flex flex-wrap gap-2 pt-4">
-          <Button onClick={() => void lockNow()}>
+          <Button onClick={() => lockNow()}>
             <Lock className="h-4 w-4" /> Lock now
           </Button>
           <Button variant="outline" onClick={() => { go({ kind: "view" }); onDone?.(); }}>

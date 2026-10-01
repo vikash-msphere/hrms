@@ -351,7 +351,17 @@ async function columnCards(deps: Deps, boardId: string, columnKey: string) {
 }
 
 export async function listCards(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, boardId?: string, showDeleted = false, deletedOnly = false, assigneeId?: string) {
-  const conds = [applyScope(scope, schema.cards.code, schema.cards.employeeId)];
+  // The scope ORs whole visibility classes: the employee role's `cards.ve-*.**` and `cards.vr-*.**` grants put
+  // every card on every org-visible board into it, beside the caller's own cards. Left to itself SQLite answers
+  // that OR from the code index branch by branch, which reads EVERY card the caller can see and sorts them all
+  // before the LIMIT, on every page. Measured in D1 over 1,200 cards, about 1,050 of them visible: 2,293 rows
+  // read for the first page of 101 and 2,191 for the second. `multiIndexOr: false` makes each page walk
+  // cards_page_idx newest-first from the cursor and stop at the page instead: 110 rows. The walk costs the page
+  // size over the share of cards the caller can see, so a caller who sees few of them (an org whose boards are
+  // mostly private) reads more than the union would - in a model with no org-visible board at all, 1,673 rows
+  // visited against 210. That is bounded by the index and the same order as the union's usual case. With a
+  // `board` or `assignee` filter that column's own index leads either way. services/listScope.ts has the mechanism.
+  const conds = [applyScope(scope, schema.cards.code, schema.cards.employeeId, { multiIndexOr: false })];
   if (boardId) conds.push(eq(schema.cards.boardId, boardId));
   // The work one person is doing, across every board - the profile's Performance tab. Filtered on the
   // ASSIGNEE, not on `employee_id`: the owner is who the row is authz-scoped by, and on a task a manager filed

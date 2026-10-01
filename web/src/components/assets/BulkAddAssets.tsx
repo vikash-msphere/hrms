@@ -330,7 +330,7 @@ function SerialList({ text, onText, scanning, onScanning, parsed, serialOwner }:
                 <ScanPauseButton scanner={scanner} className="flex-1" />
               </>
             ) : (
-              <Button type="button" size="sm" variant="outline" className="flex-1" loading={cameraState === "starting"} onClick={() => void startCamera()}><Camera className="h-4 w-4" /> Start camera</Button>
+              <Button type="button" size="sm" variant="outline" className="flex-1" loading={cameraState === "starting"} onClick={() => startCamera()}><Camera className="h-4 w-4" /> Start camera</Button>
             )}
             <Button type="button" size="sm" variant="outline" className="flex-1" onClick={() => fileRef.current?.click()}><ImageUp className="h-4 w-4" /> Upload photos</Button>
             <input

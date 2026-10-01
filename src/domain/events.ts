@@ -302,6 +302,11 @@ export const EVENT_TYPES: EventTypeDef[] = [
     { name: "teamGoalSettingMissing", type: "number", label: "Reports who have set no goals" },
     // 1 when their active sign-in account has no app PIN (never set, turned off, or reset by an admin).
     { name: "appPinMissing", type: "number", label: "Has not set an app PIN (1 = yes)" },
+    // The profile checklist /profile shows (services/profileCompleteness.ts): how many items are still empty,
+    // and their names joined for a message ("Profile photo, Bank details"). Decrypting the profile costs CPU
+    // per person, so the engine fills these only for a rule that mentions them.
+    { name: "profileMissing", type: "number", label: "Profile items still missing" },
+    { name: "profileMissingSteps", type: "string", label: "Profile items still missing (names)" },
     // THE PAYROLL CALENDAR, and these are the only fields here that arrive on an ORG-LEVEL ("once") firing
     // rather than a per-employee one - they are facts about the company's month, not about a person, and a
     // perEmployee rule would announce to the whole roster that payroll is unbuilt. Together they are what lets

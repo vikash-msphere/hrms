@@ -571,6 +571,12 @@ A `WHERE` runs in the data layer, but the **decision** it encodes is made in the
   breadth and for **every** share and deny - and denies apply even at `all` breadth, so an admin's list scanned
   too. `GLOB` is case-sensitive where `LIKE` was not, which is strictly tighter and changes no result: codes come
   from the lowercase Crockford alphabet, so no code has a case variant to match.
+  The other side of that index: because every branch of the OR can seek one, SQLite answers it as a
+  `MULTI-INDEX OR`, which reads every row any branch matches before it sorts and applies a LIMIT. That suits
+  narrow branches, and not a newest-first page whose branches cover most of the table. A list whose branches are
+  broad passes `applyScope(..., { multiIndexOr: false })`, which binds the OR as `+( ... )` (SQLite's unary plus:
+  the same rows, kept out of index selection), so the page walks its `(created_at, uuid)` index and stops at the
+  LIMIT. The cards list does this, because the employee role's `ve`/`vr` subtrees are every org-visible board.
   A denied subtree removes its rows even under `all` (deny-wins). Codes are server-generated base32 + `-`
   (no glob metacharacters - no `*`, `?` or `[`), so the pattern needs no escaping; `test/listScope.test.ts`
   covers the collision case and asserts the operator, since which operator is emitted is the whole point.

@@ -1169,12 +1169,12 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                     known to the person who did it - a manager two projects away is guessing at a list. */}
                 {mine && can.includes("suggestFeedback") && review.state !== "SHARED" && review.state !== "ACKNOWLEDGED" && (
                   <AccessAction verb="suggestFeedback" can={can} label="Suggest who saw your work">
-                    <Button variant="outline" size="sm" onClick={() => (setSuggesting(true), void loadCollaborators())}><UserPlus className="h-3.5 w-3.5" /> Suggest peers</Button>
+                    <Button variant="outline" size="sm" onClick={() => { setSuggesting(true); return loadCollaborators(); }}><UserPlus className="h-3.5 w-3.5" /> Suggest peers</Button>
                   </AccessAction>
                 )}
                 {can.includes("nominate") && (
                   <AccessAction verb="nominate" can={can} label="Request 360 feedback">
-                    <Button variant="outline" size="sm" onClick={() => (setNominating(true), void loadCollaborators())}><UserPlus className="h-3.5 w-3.5" /> Request feedback</Button>
+                    <Button variant="outline" size="sm" onClick={() => { setNominating(true); return loadCollaborators(); }}><UserPlus className="h-3.5 w-3.5" /> Request feedback</Button>
                   </AccessAction>
                 )}
               </span>

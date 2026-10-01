@@ -121,6 +121,8 @@ export const MARKER_DEFS: { key: string; label: string }[] = [
   { key: "anniversaries", label: "Work anniversaries" },
   { key: "joiners", label: "New joiners" },
   { key: "probation", label: "Probation ends" },
+  { key: "lateEarly", label: "Late arrivals & early departures" },
+  { key: "remote", label: "Remote work" },
 ];
 
 // Visible to a viewer given a stored audience. An ABSENT audience (undefined) is unconfigured - `unconfiguredVisible`

@@ -1,4 +1,4 @@
-import { computeAccrual, hrmsPricingStartMs, ymOf, type AccrualFrequency } from "../../../src/domain/leave";
+import { capAccrual, computeAccrual, hrmsPricingStartMs, ymOf, type AccrualFrequency } from "../../../src/domain/leave";
 import { splitCarryForward } from "../../../src/domain/carryForward";
 import type { Employee, LeaveBalance, LeaveType } from "@/types";
 import { todayStr } from "@/lib/orgDay";
@@ -136,7 +136,12 @@ export function forecastBalance(
       }).add
     : 0;
 
-  const yearEnd = Math.round((balance.balance_days + remaining) * 100) / 100;
+  // Both cut at the accrual cap, as the cron will cut them (domain/leave.ts capAccrual). Every credit still to
+  // come is positive, so capping their sum once is the same as capping each in turn.
+  const cap = type.accrual_cap_days ?? null;
+  const capped = capAccrual(balance.balance_days, remaining, cap);
+  const nextCapped = capAccrual(balance.balance_days, nextDays, cap);
+  const yearEnd = Math.round((balance.balance_days + capped) * 100) / 100;
   // Cumulative mode shares ONE cap across every eligible type, so a per-type figure would be a guess - say
   // nothing about the excess rather than mis-state it. Per-type mode is the server's default.
   const excess =
@@ -144,6 +149,6 @@ export function forecastBalance(
       ? 0
       : splitCarryForward(yearEnd, !!type.carry_forward, type.carry_forward_cap_days ?? null).excess;
 
-  if (!nextDays && !excess) return null;
-  return { next: nextDays ? { days: nextDays, on: nextOn } : null, yearEnd, excess, excessFate: caps.excess };
+  if (!nextCapped && !excess) return null;
+  return { next: nextCapped ? { days: nextCapped, on: nextOn } : null, yearEnd, excess, excessFate: caps.excess };
 }

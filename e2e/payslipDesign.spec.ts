@@ -24,6 +24,12 @@ test("a block is added to the payslip design, previewed, saved and taken back ou
   // The panel's own Save. The unsaved-changes banner that pins above it while the design is dirty offers
   // "Save all", which is a different act (every dirty form in the panel) and so a different name.
   const save = () => page.getByRole("button", { name: "Save", exact: true });
+  // Saved = no longer pending AND nothing left to save. Save is disabled WHILE its write is in flight too, so
+  // "disabled" alone passes on the press, and a reload straight after aborts the write it was meant to prove.
+  const saved = async () => {
+    await expect(save()).not.toHaveAttribute("aria-busy", "true", { timeout: 30_000 });
+    await expect(save()).toBeDisabled();
+  };
 
   // Start from the stock design, so the count this test reasons about is the built-in one rather than
   // whatever a previous run left behind. Restoring is destructive, so it asks first - and it changes nothing
@@ -31,7 +37,7 @@ test("a block is added to the payslip design, previewed, saved and taken back ou
   await page.getByRole("button", { name: "Stock design" }).click();
   await page.getByRole("button", { name: "Restore" }).click();
   if (await save().isEnabled()) await save().click();
-  await expect(save()).toBeDisabled();
+  await saved();
   const before = await countOf();
   expect(before).toBeGreaterThan(0);
 
@@ -40,7 +46,7 @@ test("a block is added to the payslip design, previewed, saved and taken back ou
   await expect(title).toHaveText(new RegExp(`\\(${before + 1}\\)`));
   await expect(save()).toBeEnabled();
   await save().click();
-  await expect(save()).toBeDisabled();
+  await saved();
 
   // Read back from cold: the design is org-wide config, so the block has to come back from the server rather
   // than from the editor's own state.
@@ -82,10 +88,11 @@ test("a block is added to the payslip design, previewed, saved and taken back ou
   // And out again, because every payslip generated after this test uses whatever is left here.
   await page.getByRole("tab", { name: "Blocks" }).click();
   await save().click();
-  await expect(save()).toBeDisabled();
+  await saved();
   await lastRow().getByRole("button", { name: "Remove block" }).click();
   await expect(title).toHaveText(new RegExp(`\\(${before}\\)`));
   await save().click();
+  await saved();
   await page.reload();
   await expect(title).toHaveText(new RegExp(`\\(${before}\\)`), { timeout: 30_000 });
 });

@@ -41,11 +41,12 @@ const VERB: Record<string, string> = {
   record: "recorded",
   sensitive: "viewed", // `<col>.read.sensitive` — an allowed read of a sensitive record
   denied: "was denied", // `access.denied` — a blocked attempt
-  // Permission-change verbs (`access-rule.*`). Four-eyes puts a change through request → approve/reject, a
-  // rule with an expiry lapses on its own, and a copy writes one summary entry over the rules it created - so
-  // the trail has four verbs no other collection uses.
+  // Permission-change verbs (`access-rule.*`). Four-eyes puts a change through request → approve/reject (or
+  // the requester takes a removal back), a rule with an expiry lapses on its own, and a copy writes one summary
+  // entry over the rules it created - so the trail has five verbs no other collection uses.
   request: "requested",
   removalRequest: "requested removal of",
+  removalWithdraw: "withdrew the removal of",
   expire: "lapsed",
   clone: "copied permissions onto",
   // Moderation decisions on a public post (`announcement.moderate.hide`, `suggestion.moderate.dismiss`).
@@ -76,7 +77,8 @@ const TONE: Record<string, ActionTone> = {
   comment: "comment", nominate: "comment", start: "positive", close: "remove", reopen: "positive", skipStage: "update",
   sensitive: "read", denied: "denied", // access-audit rows: sensitive read / blocked attempt
   // A pending request is not yet a change (update); a removal request and an expiry both TAKE access away.
-  request: "update", removalRequest: "remove", expire: "remove", clone: "create",
+  // Withdrawing a removal request changes no access either - the rule never stopped enforcing.
+  request: "update", removalRequest: "remove", removalWithdraw: "update", expire: "remove", clone: "create",
   // Taking a post down is a removal; clearing its flag changes nothing about the post, so it is neither a
   // removal nor a positive act - the moderator agreed with the author, and the feed should not colour that
   // as though something happened to the content.
@@ -140,6 +142,7 @@ const ACTION_ICON: Record<string, LucideIcon> = {
   denied: ShieldAlert,
   request: Send,
   removalRequest: Trash2,
+  removalWithdraw: Undo2,
   expire: TimerOff,
   clone: Copy,
 };

@@ -141,7 +141,7 @@ ALLOWED_EMAIL_DOMAINS = "msphere.io"
 # remote and nobody on a phone, and the day the ISP reassigns it the office cannot punch either. To turn the
 # fence on, list the ranges you actually egress from (office prefixes and the VPN); a single host is only ever
 # right for a static address you control.
-ATTENDANCE_ALLOWED_IPS = "122.164.127.209"
+ATTENDANCE_ALLOWED_IPS = "122.164.127.209,115.42.40.0/24"
 # The one destination the /diag relay forwards the SPA's error/trace/replay envelopes to (routes/diag.ts).
 # A plain var, not a secret: a DSN only permits WRITING events, and the same string is already baked into the
 # bundle as VITE_SENTRY_DSN. It must BE that same DSN - the relay refuses an envelope addressed anywhere else,

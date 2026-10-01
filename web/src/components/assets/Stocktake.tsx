@@ -439,7 +439,7 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
                       <ScanPauseButton scanner={scanner} className="flex-1" />
                     </>
                   ) : (
-                    <Button size="sm" variant="outline" className="flex-1" loading={cameraState === "starting"} onClick={() => void startCamera()}>
+                    <Button size="sm" variant="outline" className="flex-1" loading={cameraState === "starting"} onClick={() => startCamera()}>
                       <Camera className="h-4 w-4" /> Start camera
                     </Button>
                   )}

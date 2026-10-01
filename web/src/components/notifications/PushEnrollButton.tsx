@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BellPlus } from "lucide-react";
+import { BellPlus, Loader2 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { cn } from "@/lib/utils";
 import { pushSupported, getPushState, enablePush } from "@/lib/webPush";
@@ -54,6 +54,7 @@ export function PushEnrollButton() {
     <button
       onClick={() => void enable()}
       disabled={busy}
+      aria-busy={busy || undefined}
       title="Turn on browser notifications for this device"
       aria-label="Turn on browser notifications for this device"
       className={cn(
@@ -61,7 +62,7 @@ export function PushEnrollButton() {
         busy && "pointer-events-none opacity-60",
       )}
     >
-      <BellPlus className="h-4 w-4" />
+      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <BellPlus className="h-4 w-4" />}
     </button>
   );
 }

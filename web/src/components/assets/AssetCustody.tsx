@@ -162,7 +162,7 @@ export function AssetCustodyDialog({
                   <ScanPauseButton scanner={scanner} className="flex-1" />
                 </>
               ) : (
-                <Button size="sm" variant="outline" className="flex-1" loading={cameraState === "starting"} onClick={() => void startCamera()}><Camera className="h-4 w-4" /> Start camera</Button>
+                <Button size="sm" variant="outline" className="flex-1" loading={cameraState === "starting"} onClick={() => startCamera()}><Camera className="h-4 w-4" /> Start camera</Button>
               )}
               <Button size="sm" variant="outline" className="flex-1" onClick={() => fileRef.current?.click()}><ImageUp className="h-4 w-4" /> Upload photo</Button>
               <input

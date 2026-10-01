@@ -51,7 +51,11 @@ One resource - `access-rules` - expresses everything. A rule is
   - **Four-eyes approval** (opt-in, settings key `access-approval`): while on, a new rule lands `pending`
     (inert) and a removal marks the rule `pending_delete` (still enforcing) until a DIFFERENT access admin
     calls `access-rules:approve` / `:reject`. A pending change never applies itself in either direction. The
-    requester may withdraw their own pending row; a one-admin org unblocks by turning the setting off.
+    requester may withdraw their own request: deleting a pending grant drops it, and re-creating a rule
+    exactly as it stands puts its pending removal back to `active` (audited `access-rule.removalWithdraw`).
+    Deleting a rule already marked for removal is refused, since that would be the removal applied unapproved.
+    A rule on its way out does not block a different rule on the same pattern, so an edit (removal + create)
+    queues both halves. A one-admin org unblocks by turning the setting off.
 
 ## Where affordances come from (coverage by construction)
 
@@ -367,14 +371,21 @@ Every layer that shows or fetches is capability-gated, each at ONE central place
   app, so the grid is mostly empty by construction: "Only collections with access" drops every column no
   visible user has anything on, and says how many it hid. Off by default, like "Only rows with access" on the
   roles side, because a matrix that hides most of itself on arrival makes a different claim about the data.
+- **All rules**: every rule as a sentence with the dead-rule lint, filterable by subject, collection, scope,
+  permission and state. Each row is edited in place - scope, field, level or method, effect, expiry, and the
+  limit / window / network fence where the collection takes one - or removed. The API has no in-place rewrite
+  of a grant, so an edit replaces the rule (`cloneRules.ts` `replaceAccessRule`): the new rule is created
+  first, which doubles as the dry run because the server checks a body before it looks for a duplicate, and
+  only a body that keeps the old rule's pattern takes that rule out first, putting it back if the create
+  still fails. An object-anchored rule keeps its object for as long as it keeps its scope.
 - **Pending changes queue**: everything awaiting four-eyes approval across every collection, with the
   approve/reject buttons (each a grantable verb target of its own) and the switch that turns the
   requirement on.
 - **Compare roles**: two roles side by side, differing collections first, with one-click copy of either
   role's rules onto the other. The copy is `POST /v1/access-rules:clone` (`{from, to}`, each
   `{subject_kind, subject}`) - one request, own fail-closed verb (`access-rules.clone`, so bulk copying is
-  grantable apart from authoring single rules), and ACTIVE rules only. The server authors each rule through
-  the normal create path (same validation, same four-eyes queue, one audit entry each) and parks one
+  grantable apart from authoring single rules), and ACTIVE rules only. The server authors each rule, guards
+  included, through the normal create path (same validation, same four-eyes queue, one audit entry each) and parks one
   correlation id on all of them plus an `access-rule.clone` summary entry, so the whole copy replays as a
   single act in the activity feed; the response returns that `correlation_id` with `added`/`skipped`/
   `failed`. One notification covers the batch instead of one per rule.

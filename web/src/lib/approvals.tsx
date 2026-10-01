@@ -220,15 +220,22 @@ function ActiveProvider({ queues, withHistory, selfEmployeeId, children }: { que
 
   // Tax verifications are a bespoke endpoint, not a collection, and it scans the employees it decides on - so
   // the ROWS are read only where the inbox lists them. The badge counts them through the summary above.
-  const wantTax = wants.has(TAX_VERIFICATIONS_QUEUE);
+  //
+  // The summary carries a `tax-verifications` count (zero included) only for a caller who holds
+  // `tax-verifications.read`, so its presence is the capability. Asking without it is a 403 the server records
+  // as an access denial, once per inbox visit for every employee and manager.
+  const wantTax = wants.has(TAX_VERIFICATIONS_QUEUE) && counts?.[TAX_VERIFICATIONS_QUEUE] !== undefined;
   const [taxVerifications, setTaxVerifications] = useState<TaxVerification[]>([]);
   const loadTax = useCallback(async () => {
-    if (!wantTax) return;
+    if (!wantTax) {
+      setTaxVerifications([]);
+      return;
+    }
     try {
       const r = await get<{ results: TaxVerification[] }>("tax-verifications");
       setTaxVerifications(r.results ?? []);
     } catch {
-      setTaxVerifications([]); // a caller without the capability gets 403 -> the section stays hidden
+      setTaxVerifications([]);
     }
   }, [wantTax]);
   useEffect(() => { void loadTax(); }, [loadTax]);

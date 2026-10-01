@@ -106,6 +106,7 @@ const NOT_MONEY: Record<string, string> = {
   "leaveEncashments.days": "leave days",
   "leaveRequests.days": "leave days",
   "leaveTypes.accrualDaysPerYear": "leave policy, in days",
+  "leaveTypes.accrualCapDays": "leave policy, in days",
   "leaveTypes.carryForwardCapDays": "leave policy, in days",
   "leaveTypes.encashmentCapDaysPerYear": "leave policy, in days",
   "leaveTypes.minBalanceRetainedDays": "leave policy, in days",
