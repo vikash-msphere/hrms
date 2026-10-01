@@ -679,7 +679,7 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
                     {/* First cell = the row's title on a phone, so it carries no data-label. */}
                     <td className="py-2 pr-3">
                       <span className="flex items-center gap-2">
-                        {e ? <PhotoAvatar employeeId={idOf(e.path)} name={name} className="h-6 w-6 shrink-0 text-[10px]" /> : <PersonAvatar name={name} className="h-6 w-6 shrink-0 text-[10px]" />}
+                        {e ? <PhotoAvatar employeeId={idOf(e.path)} name={name} photo={e.photo} className="h-6 w-6 shrink-0 text-[10px]" /> : <PersonAvatar name={name} className="h-6 w-6 shrink-0 text-[10px]" />}
                         <span className="font-medium">{name}</span>
                       </span>
                     </td>

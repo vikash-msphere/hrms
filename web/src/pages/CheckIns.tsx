@@ -16,7 +16,7 @@ import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { useKpiFocus } from "@/lib/kpiFocus";
-import { PersonAvatar } from "@/components/common/PersonAvatar";
+import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { MakeTaskDialog } from "@/components/common/MakeTaskDialog";
 import { Field, FieldRow } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -85,6 +85,7 @@ export default function CheckIns({ me }: { me: Me }) {
   // on their own 1:1 - which is why the server serves both names with the row.
   const otherParty = (c: CheckIn) =>
     (idOf(c.employee ?? "") === me.employee_id ? c.counterpart_name : c.employee_name) || empName(otherRef(c));
+  const otherPhoto = (c: CheckIn) => (idOf(c.employee ?? "") === me.employee_id ? c.counterpart_photo : c.employee_photo);
 
   // Everyone the caller has 1:1s with, plus cadence health: days since the last logged 1:1, and
   // whether a next one is already on the calendar (scheduled pairs don't need the overdue nudge).
@@ -280,6 +281,8 @@ export default function CheckIns({ me }: { me: Me }) {
       key={c.path}
       checkIn={c}
       withName={otherParty(c) || "-"}
+      withId={idOf(otherRef(c) ?? "")}
+      withPhoto={otherPhoto(c)}
       startCollapsed={opts?.collapsed}
       carryCount={opts?.collapsed ? 0 : (openByPerson.get(idOf(otherRef(c) ?? "")) ?? []).reduce((s, x) => s + x.items.length, 0)}
       onBringForward={() => bringForward(c)}
@@ -435,9 +438,11 @@ const CADENCE_LABEL: Record<string, string> = { weekly: "Weekly", biweekly: "Eve
 // What each pulse number means, so "3" isn't left to interpretation on either side of the table.
 const PULSE_LABEL: Record<number, string> = { 1: "Rough", 2: "Off", 3: "Fine", 4: "Good", 5: "Great" };
 
-function CheckInCard({ checkIn: c, withName, startCollapsed, carryCount, mine, isSubject, onBringForward, onReschedule, onSetCadence, onSaveNotes, onSavePrivate, onSetPulse, onSaveItems, onMakeTask, onDelete, onScheduleNext }: {
+function CheckInCard({ checkIn: c, withName, withId, withPhoto, startCollapsed, carryCount, mine, isSubject, onBringForward, onReschedule, onSetCadence, onSaveNotes, onSavePrivate, onSetPulse, onSaveItems, onMakeTask, onDelete, onScheduleNext }: {
   checkIn: CheckIn;
   withName: string;
+  withId: string;
+  withPhoto?: string;
   startCollapsed?: boolean;
   carryCount: number;
   /** The caller is one of the two people in this 1:1 - the only ones with a private note of their own. */
@@ -495,7 +500,7 @@ function CheckInCard({ checkIn: c, withName, startCollapsed, carryCount, mine, i
   };
   const toggle = (i: number) => commitItems(items.map((it, j) => (j === i ? { ...it, done: !it.done } : it)));
   const removeItem = (i: number) => commitItems(items.filter((_, j) => j !== i));
-  const addItem = () => { if (newItem.trim()) { void commitItems([...items, { text: newItem.trim(), done: false }]); setNewItem(""); } };
+  const addItem = () => { if (!newItem.trim()) return; setNewItem(""); return commitItems([...items, { text: newItem.trim(), done: false }]); };
   const saveNotes = async () => {
     setNotesBusy(true);
     try { await onSaveNotes(notes.trim()); } finally { setNotesBusy(false); }
@@ -506,7 +511,7 @@ function CheckInCard({ checkIn: c, withName, startCollapsed, carryCount, mine, i
     return (
       <Card className="p-0 transition-colors hover:border-primary/40">
         <button type="button" onClick={() => setOpen(true)} aria-expanded={false} className="flex w-full items-center gap-3 p-3 text-left">
-          <PersonAvatar name={withName} className="h-8 w-8 shrink-0" />
+          <PhotoAvatar employeeId={withId} name={withName} photo={withPhoto} className="h-8 w-8 shrink-0 text-xs" />
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-baseline gap-x-2">
               <span className="text-sm font-medium">{withName}</span>
@@ -531,12 +536,12 @@ function CheckInCard({ checkIn: c, withName, startCollapsed, carryCount, mine, i
           {startCollapsed ? (
             <button type="button" onClick={() => setOpen(false)} aria-expanded className="flex min-w-0 items-center gap-2 text-left">
               <ChevronRight className="h-4 w-4 shrink-0 rotate-90 text-muted-foreground transition-transform" />
-              <PersonAvatar name={withName} className="h-8 w-8 shrink-0" />
+              <PhotoAvatar employeeId={withId} name={withName} photo={withPhoto} className="h-8 w-8 shrink-0 text-xs" />
               <span className="font-semibold">1:1 with {withName}</span>
             </button>
           ) : (
             <>
-              <PersonAvatar name={withName} className="h-8 w-8 shrink-0" />
+              <PhotoAvatar employeeId={withId} name={withName} photo={withPhoto} className="h-8 w-8 shrink-0 text-xs" />
               <span className="font-semibold">1:1 with {withName}</span>
             </>
           )}
@@ -724,7 +729,7 @@ function CheckInCard({ checkIn: c, withName, startCollapsed, carryCount, mine, i
           </div>
           {canEdit && (
             <div className="mt-2 flex items-center gap-2">
-              <Input value={newItem} onChange={(e) => setNewItem(e.target.value)} placeholder="Add an action item…" className="h-8" onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addItem(); } }} />
+              <Input value={newItem} onChange={(e) => setNewItem(e.target.value)} placeholder="Add an action item…" className="h-8" onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void addItem(); } }} />
               <Button size="sm" variant="outline" onClick={addItem} loading={itemsBusy} disabled={!newItem.trim()}><Plus className="h-3.5 w-3.5" /> Add</Button>
             </div>
           )}
@@ -931,7 +936,7 @@ function NewDialog({ me, employees, initial, existing, nameOf, onClose, onCreate
               {/* An agenda built from what is actually going on beats a blank box and beats four fixed
                   headings: their open goals, what was left unfinished last time, when you last met. The goals
                   are fetched only when this is pressed - a 1:1 form must not cost a goals read to open. */}
-              <Button type="button" variant="ghost" size="sm" className="h-6 text-xs text-muted-foreground" loading={building} onClick={() => void buildAgenda()}>
+              <Button type="button" variant="ghost" size="sm" className="h-6 text-xs text-muted-foreground" loading={building} onClick={() => buildAgenda()}>
                 <Sparkles className="h-3.5 w-3.5" /> Build agenda
               </Button>
               <Button type="button" variant="ghost" size="sm" className="h-6 text-xs text-muted-foreground" onClick={() => setForm({ ...form, notes: NOTES_TEMPLATE })}>

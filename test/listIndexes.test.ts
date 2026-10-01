@@ -87,6 +87,15 @@ describe("keyset pagination walks an index", () => {
     expect(p).toMatch(/cron_runs_cron_started_idx/);
   });
 
+  // One board's live cards (`GET /v1/cards?board=`): the Boards page walks a whole board this way, so a board's
+  // range read and sorted for every page would be paid once per page. Partial on the live predicate, so the
+  // query carries it, as the cards list does. test/cardListRowsRead.test.ts holds the rows it reads.
+  it("cards pages one board's live cards without sorting", async () => {
+    const p = await plan("select * from `cards` where `board_id` = 'x' and `delete_time` is null order by `created_at` desc, `uuid` desc limit 101");
+    expect(p, `cards by board planned as: ${p}`).not.toMatch(/TEMP B-TREE/);
+    expect(p).toMatch(/card_board_created_idx/);
+  });
+
   // A month of one person's attendance is the shape the app asks for most on that table, and the one that
   // grows without bound: every punch they have ever made used to be read and sorted to render one month.
   it("attendance reads a date window as a range, not a scan of the person's whole history", async () => {

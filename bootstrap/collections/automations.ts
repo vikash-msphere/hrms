@@ -1497,6 +1497,19 @@ export const AUTOMATIONS: AutomationSeed[] = [
     condition: { field: "appPinMissing", op: "gte", value: 1 },
     actions: [{ kind: "notify", recipient: { of: "subject" }, type: "security.pin_reminder", title: "Set an app PIN", body: "Protect your HR data with an app PIN. Set one up from My Profile › Privacy.", link: "profile/privacy" }],
   },
+
+  // Profile: an HR-run chase, not a recurring one. `manual` never fires on the daily scan; HR presses Run now
+  // when a push is wanted (after a hiring wave, before a payroll that needs bank details). Per person, and the
+  // condition skips anyone whose checklist is already complete, so only the people with gaps hear about it -
+  // and the message names their own gaps, the same tiles /profile shows them.
+  {
+    name: "Remind people to complete their profile",
+    description: "Run by hand. Tells each active employee whose profile is incomplete which items are still missing (photo, personal or contact details, emergency contact, app PIN, identity, bank details, signature). People with a complete profile get nothing.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "manual", scope: "perEmployee" },
+    condition: { field: "profileMissing", op: "gte", value: 1 },
+    actions: [{ kind: "notify", recipient: { of: "subject" }, title: "Finish your profile", body: "Still missing: {{profileMissingSteps}}. Add them from My Profile.", link: "profile" }],
+  },
 ];
 
 export function automations(ctx: Ctx): string {

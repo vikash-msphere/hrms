@@ -234,6 +234,61 @@ describe("four-eyes approval", () => {
     expect(await roleCanRead()).toBe(true);
   });
 
+  // An edit is a removal plus a create. Under four-eyes the removal only MARKS the old row, so the create has to
+  // land beside it as a request of its own, not be refused as a duplicate of a rule that is on its way out.
+  it("on: an edit that keeps the pattern queues the new rule beside the old one's removal", async () => {
+    const old = await createAccessRule(deps, ana(), grantEmployeeRead());
+    await setApproval(true);
+    await deleteAccessRule(deps, ana(), old.uuid);
+    const next = await createAccessRule(deps, ana(), grantEmployeeRead({ level: "write" }));
+    expect(next.status).toBe("pending");
+    clearCachePrefix("");
+    expect(await roleCanRead()).toBe(true); // the old rule enforces until its removal is decided
+
+    await decideAccessRule(deps, bo(), next.uuid, "approve");
+    await decideAccessRule(deps, bo(), old.uuid, "approve");
+    const left = await deps.db.select().from(schema.accessRules);
+    expect(left.map((r) => [r.uuid, r.level, r.status])).toEqual([[next.uuid, "write", "active"]]);
+  });
+
+  // How a failed edit and an undo put a rule back while approval is on: the requester re-creating the rule
+  // exactly as it stands is that request taken back, not a second copy for somebody to approve.
+  it("on: re-creating a rule as it stands withdraws your own request to remove it", async () => {
+    const rule = await createAccessRule(deps, ana(), grantEmployeeRead());
+    await setApproval(true);
+    await deleteAccessRule(deps, ana(), rule.uuid);
+    const back = await createAccessRule(deps, ana(), grantEmployeeRead());
+    expect(back.uuid).toBe(rule.uuid);
+    expect(back.status).toBe("active");
+    expect(await deps.db.select().from(schema.accessRules)).toHaveLength(1);
+    expect((await deps.db.select().from(schema.auditLog)).map((r) => r.action)).toContain("access-rule.removalWithdraw");
+  });
+
+  it("on: anyone but the requester re-creating it is told it exists, and the request stands", async () => {
+    const rule = await createAccessRule(deps, ana(), grantEmployeeRead());
+    await setApproval(true);
+    await deleteAccessRule(deps, ana(), rule.uuid);
+    await expect(createAccessRule(deps, bo(), grantEmployeeRead())).rejects.toThrow(/already exists/);
+    expect((await deps.db.select().from(schema.accessRules)).map((r) => r.status)).toEqual(["pending_delete"]);
+  });
+
+  // A row already marked for removal is still authority. Deleting it again would be the removal itself, applied
+  // with nobody's approval - two presses of the same button standing in for the second pair of eyes.
+  it("on: deleting a rule whose removal is already awaiting approval is refused", async () => {
+    const rule = await createAccessRule(deps, ana(), grantEmployeeRead());
+    await setApproval(true);
+    await deleteAccessRule(deps, ana(), rule.uuid);
+    await expect(deleteAccessRule(deps, ana(), rule.uuid)).rejects.toThrow(/already awaiting approval/);
+    clearCachePrefix("");
+    expect(await roleCanRead()).toBe(true);
+    expect((await deps.db.select().from(schema.accessRules)).map((r) => r.status)).toEqual(["pending_delete"]);
+  });
+
+  it("off: a rule that keeps another's pattern is still a duplicate", async () => {
+    await createAccessRule(deps, ana(), grantEmployeeRead());
+    await expect(createAccessRule(deps, ana(), grantEmployeeRead({ level: "write" }))).rejects.toThrow(/already exists/);
+  });
+
   it("the preview reports what the engine sees, so a pending grant does not read as granted", async () => {
     await setApproval(true);
     await createAccessRule(deps, ana(), { subject_kind: "user", subject: `users/${ids.bo}`, collection: "leave-requests", scope: "all", level: "read" });
@@ -367,6 +422,25 @@ describe("copying one subject's rules onto another", () => {
     expect(again).toMatchObject({ added: 0, skipped: 1, failed: 0 });
   });
 
+  // Each guard only subtracts from what its pattern grants, so a copy without them would hand the target more
+  // than the subject it was copied from holds.
+  it("copies each rule with its guards", async () => {
+    await createAccessRule(deps, ana(), {
+      ...employee(),
+      collection: "expenses",
+      scope: "all",
+      verb: "approve",
+      condition: { field: "amount", op: "lte", value: 50_000 },
+      window: { field: "incurred_on", within_days: 30 },
+      from_ip: "198.51.100.0/24",
+    });
+    await cloneAccessRules(deps, ana(), { from: employee(), to: manager() });
+    const [copy] = (await deps.db.select().from(schema.accessRules)).filter((r) => r.subject === "manager");
+    expect(JSON.parse(copy!.condition!)).toEqual({ field: "amount", op: "lte", value: 50_000 });
+    expect(JSON.parse(copy!.window!)).toEqual({ field: "incurred_on", within_days: 30 });
+    expect(copy!.fromIp).toBe("198.51.100.0/24");
+  });
+
   it("copies nothing that is still awaiting approval", async () => {
     await setApproval(true);
     await createAccessRule(deps, ana(), grantEmployeeRead()); // lands `pending`
@@ -411,6 +485,14 @@ describe("listing rules narrowed to a collection or a subject", () => {
   it("a subject keeps only its own rules", async () => {
     expect(await patterns({ subjectKind: "role", subject: "employee" })).toEqual(["employee:attendance.**", "employee:leave-requests.**"]);
     await expect(patterns({ subjectKind: "group" })).rejects.toThrow(/subject_kind/);
+  });
+
+  it("an effect keeps only the rules with that effect", async () => {
+    // Access mode's deny tint reads `effect=deny` and nothing else.
+    await deps.db.insert(schema.accessRules).values({ uuid: genId(), subject: "manager", subjectKind: "role", namespace: "attendance", pattern: "attendance.**", scopeKind: "all", effect: "deny", status: "active" });
+    expect(await patterns({ effect: "deny" })).toEqual(["manager:attendance.**"]);
+    expect((await patterns({ effect: "allow" })).length).toBe(4);
+    await expect(patterns({ effect: "block" })).rejects.toThrow(/effect/);
   });
 
   it("with no filter it is every rule, as before", async () => {

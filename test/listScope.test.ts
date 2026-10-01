@@ -114,3 +114,36 @@ describe("applyScope - subtree grants", () => {
     expect(sqlOf(applyScope(scope({ breadth: "own", ownerId: "emp-1", subtrees: ["07"] }), undefined, owner))).toContain("1 = 0");
   });
 });
+
+// `multiIndexOr: false` is a choice of PLAN, never of rows: the same predicate, bound as one `+( ... )` term so
+// SQLite cannot answer the OR branch by branch from the code index and then sort everything it found. The rows
+// it selects are pinned against real D1 in test/cardListRowsRead.test.ts. These pin the SQL it emits.
+describe("applyScope - multiIndexOr: false", () => {
+  const broad = scope({ breadth: "own", ownerId: "emp-1", subtrees: ["ve", "vr"], shares: ["vp-07"] });
+
+  it("wraps the OR in unary plus around exactly the predicate it would otherwise bind, with the same values", () => {
+    const plain = dialect.sqlToQuery(applyScope(broad, code, owner)!);
+    const walked = dialect.sqlToQuery(applyScope(broad, code, owner, { multiIndexOr: false })!);
+    expect(walked.sql).toBe(`+(${plain.sql})`);
+    expect(walked.params).toEqual(plain.params);
+  });
+
+  it("leaves a lone branch as it was: with nothing OR'd in there is no union to keep out of the index", () => {
+    const own = scope({ breadth: "own", ownerId: "emp-1" });
+    expect(sqlOf(applyScope(own, code, owner, { multiIndexOr: false }))).toBe(sqlOf(applyScope(own, code, owner)));
+    const dept = scope({ breadth: "dept", deptCode: "04-002" });
+    expect(sqlOf(applyScope(dept, code, owner, { multiIndexOr: false }))).toBe(sqlOf(applyScope(dept, code, owner)));
+  });
+
+  it("changes nothing at `all` breadth, and a deny still applies outside the wrap", () => {
+    expect(applyScope(scope({ breadth: "all", subtrees: ["ve"] }), code, owner, { multiIndexOr: false })).toBeUndefined();
+    const sql = sqlOf(applyScope({ ...broad, denies: ["ve-0a"] }, code, owner, { multiIndexOr: false }))!;
+    expect(sql.startsWith("(+(")).toBe(true);
+    expect(sql).toMatch(/\) and not \(/);
+  });
+
+  it("is off unless asked for: the default binds the OR seekable, as every other list does", () => {
+    expect(sqlOf(applyScope(broad, code, owner))).not.toMatch(/^\+\(/);
+    expect(sqlOf(applyScope(broad, code, owner, {}))).toBe(sqlOf(applyScope(broad, code, owner)));
+  });
+});

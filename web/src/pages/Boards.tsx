@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { create, get, invoke, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
+import { useResource } from "@/hooks/useResource";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { useRefetchOnFocus } from "@/hooks/useRefetchOnFocus";
 import { useRoute, setQueryParam, setRouteRecord, recordUrl } from "@/router";
@@ -299,7 +300,7 @@ function useCardFilter(meId?: string | null, storageKey?: string) {
 type CardFilter = ReturnType<typeof useCardFilter>;
 
 // The board toolbar: search + assignee/priority/label filters + "My tasks". Options come from the cards present.
-function BoardToolbar({ filter, board, cards, empName, deptName }: { filter: CardFilter; board: Board; cards: CardT[]; empName: (ref?: string) => string; deptName: (ref?: string) => string }) {
+function BoardToolbar({ filter, board, cards, empName, empPhoto, deptName }: { filter: CardFilter; board: Board; cards: CardT[]; empName: (ref?: string) => string; empPhoto: (ref?: string) => string | undefined; deptName: (ref?: string) => string }) {
   const shown = useMemo(() => cards.filter(filter.match).length, [cards, filter]);
   const assigneeOpts = useMemo(() => {
     const ids = new Set<string>();
@@ -355,7 +356,7 @@ function BoardToolbar({ filter, board, cards, empName, deptName }: { filter: Car
                   aria-pressed={filter.assignees.has(a.id)}
                   className={cn("rounded-full transition-transform hover:z-10 hover:-translate-y-0.5", filter.assignees.has(a.id) && "z-10 ring-2 ring-primary")}
                 >
-                  <PhotoAvatar employeeId={a.id} name={a.name} className="h-7 w-7 border-2 border-background text-[10px]" />
+                  <PhotoAvatar employeeId={a.id} name={a.name} photo={empPhoto(`employees/${a.id}`)} className="h-7 w-7 border-2 border-background text-[10px]" />
                 </button>
               </TooltipTrigger>
               <TooltipContent>{a.name} · {a.n} open task{a.n === 1 ? "" : "s"}</TooltipContent>
@@ -367,7 +368,7 @@ function BoardToolbar({ filter, board, cards, empName, deptName }: { filter: Car
         {assigneeOpts.hasUnassigned && <Row on={filter.assignees.has(NONE)} onClick={() => filter.toggleAssignee(NONE)}>Unassigned</Row>}
         {assigneeOpts.list.map((a) => (
           <Row key={a.id} on={filter.assignees.has(a.id)} onClick={() => filter.toggleAssignee(a.id)}>
-            <PhotoAvatar employeeId={a.id} name={a.name} className="h-5 w-5 text-[9px]" /> <span className="truncate">{a.name}</span>
+            <PhotoAvatar employeeId={a.id} name={a.name} photo={empPhoto(`employees/${a.id}`)} className="h-5 w-5 text-[9px]" /> <span className="truncate">{a.name}</span>
           </Row>
         ))}
       </FilterPopover>
@@ -412,7 +413,19 @@ function BoardToolbar({ filter, board, cards, empName, deptName }: { filter: Car
 // Namespaced to the caller, like every other per-person key. Under a shared key B landed on the board A was
 // last looking at (degraded to the first board by `valid()`, but still not theirs).
 const LAST_BOARD_KEY = () => userKey("boards:last");
-const CARD_FETCH_CAP = 500; // follow the cards cursor up to here; past it the TruncationNotice takes over
+const CARD_FETCH_CAP = 500; // follow one board's cards cursor up to here; past it the view's TruncationNotice takes over
+
+// ONE board's live cards. The grid, the List tab and the scrum view all read this same key, so they share one
+// walk. Filtered by the SERVER (`?board=`, which card_board_created_idx answers a page per seek). The page used to
+// read every board's cards up to the cap and keep this board's, which cost up to 500 cards from across the org
+// to draw one board and left a board whose cards were older than the org's newest few hundred half-drawn. `all`
+// follows the cursor to the cap: a board's columns are only right once the whole board is in, so this is not a
+// window a reader pages through. Past the cap `hasMore` stays true, and each view says so: `capped`, because
+// short of the cap a cursor only means the walk has not finished yet.
+function useBoardCards(board: Board) {
+  const read = useCollection<CardT>("cards", { params: { board: board.path }, all: true, allCap: CARD_FETCH_CAP });
+  return { ...read, capped: read.hasMore && read.rows.length >= CARD_FETCH_CAP };
+}
 
 export default function Boards({ me, openId }: { me: Me; openId?: string }) {
   // `all: true`: every consumer on this page treats `boards` as the complete catalogue - the switcher below,
@@ -421,19 +434,13 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
   // reader on somebody else's board with the URL still naming theirs. The residual ALL_CAP is admitted by the
   // TruncationNotice below.
   const { rows: boards, state, error, reload, hasMore: boardsHasMore } = useCollection<Board>("boards", { all: true });
-  // Shared cache with the view below (no extra read) — used only to map a deep-linked card id to its board.
-  const { rows: navCards, hasMore: cardsHasMore, loadMore: loadMoreCards } = useCollection<CardT>("cards");
+  // A deep link names a card, and the page has to find its board before any board's cards are read. That is one
+  // record by id, and only when there is a link to follow.
+  const { row: linkedCard } = useResource<CardT>("cards", openId);
   const route = useRoute();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [newBoard, setNewBoard] = useState(false);
   const [tab, setTab] = useState("board");
-
-  // The server caps a list page at 100 rows; boards are the likeliest collection to exceed it. Follow the
-  // cursor (one page per response, the store dedups in-flight) until the board data is complete or the cap is
-  // hit - reads stay proportional to actual board size and only happen while this page is open.
-  useEffect(() => {
-    if (cardsHasMore && navCards.length < CARD_FETCH_CAP) void loadMoreCards();
-  }, [cardsHasMore, navCards.length, loadMoreCards]);
 
   // Which board to show: `?board=` in the URL (shareable deep link) > last viewed (localStorage) > first.
   // Falls back to the first board whenever the current choice stops being valid (deleted, access lost).
@@ -443,38 +450,47 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
     const fromUrl = valid(route.query.board);
     if (fromUrl && fromUrl !== selectedId) { setSelectedId(fromUrl); return; }
     if (valid(selectedId)) return;
+    const lastKey = LAST_BOARD_KEY();
+    const last = lastKey ? readLocal(lastKey) : null;
     // "Not in the rows we hold" is only "deleted, access lost" once the rows ARE the collection. While the
-    // walk is still short of it, a requested board that has not arrived keeps its place instead of being
-    // replaced by somebody else's board under a URL that still names theirs.
-    if (boardsHasMore && (route.query.board || selectedId)) {
-      if (route.query.board && route.query.board !== selectedId) setSelectedId(route.query.board);
+    // walk is still short of it, a requested or remembered board that has not arrived keeps its place instead
+    // of being replaced by somebody else's board (under a URL that still names theirs, or overwriting the
+    // remembered one with the first board on the page).
+    if (boardsHasMore && (route.query.board || selectedId || last)) {
+      const wanted = route.query.board || selectedId || last;
+      if (wanted !== selectedId) setSelectedId(wanted);
       return;
     }
-    const lastKey = LAST_BOARD_KEY();
     // The id here is a SELECTION, not a label: it picks which board to show and never reaches the screen, so
     // the "a ref reads as a word" rule is not the one that applies.
     // eslint-disable-next-line no-restricted-syntax
-    setSelectedId(fromUrl ?? valid(lastKey ? readLocal(lastKey) : null) ?? idOf(boards[0]!.path));
+    setSelectedId(fromUrl ?? valid(last) ?? idOf(boards[0]!.path));
   }, [boards, selectedId, route.query.board, boardsHasMore]);
 
-  // Remember the selection and keep the URL shareable. Written in place rather than pushed: which board is on
-  // screen is view state, not a step the reader took, so it has no business spending a back press - and the
-  // unsaved-changes guard ignores query-only changes either way.
+  // Keep the URL shareable. Written in place rather than pushed: which board is on screen is view state, not a
+  // step the reader took, so it has no business spending a back press - and the unsaved-changes guard ignores
+  // query-only changes either way.
   function selectBoard(id: string) {
     setSelectedId(id);
-    const lastKey = LAST_BOARD_KEY();
-    if (lastKey) writeLocal(lastKey, id);
     setQueryParam("board", id, { replace: true });
   }
 
   // Deep link `/boards/<cardId>` (from the activity feed): select that card's board so the view can open it.
   useEffect(() => {
-    if (!openId) return;
-    const c = navCards.find((x) => idOf(x.path) === openId);
-    if (c?.board) setSelectedId(idOf(c.board));
-  }, [openId, navCards]);
+    if (!openId || !linkedCard?.board) return;
+    setSelectedId(idOf(linkedCard.board));
+  }, [openId, linkedCard]);
 
   const board = boards.find((b) => idOf(b.path) === selectedId) ?? null;
+  const boardId = board ? idOf(board.path) : null;
+
+  // Remember whichever board is on screen, however it got there - picked in the switcher, opened from a
+  // `?board=` or card link, or just created - so a bare /boards reopens it. Only a board that resolved is
+  // written: an id still waiting on the boards walk is not yet known to exist.
+  useEffect(() => {
+    const lastKey = LAST_BOARD_KEY();
+    if (boardId && lastKey) writeLocal(lastKey, boardId);
+  }, [boardId]);
 
   const newBtn = (
     <AccessAction collection="boards" create label="Create a board">
@@ -510,7 +526,8 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
         }
       />
 
-      <TruncationNotice collection={["boards", "cards"]} what="boards and cards" className="mb-3" />
+      {/* Boards only: whether a board's cards all arrived is that board's own read, reported by its view. */}
+      <TruncationNotice collection="boards" what="boards" className="mb-3" />
       <DataState state={state} error={error} onRetry={reload}>
         {boards.length === 0 ? (
           <EmptyState icon={KanbanSquare} title="No boards yet" description="Create a board to start tracking work with columns, WIP limits and swimlanes." action={newBtn} />
@@ -550,7 +567,7 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
 // ---- Board view: columns x swimlanes, native HTML5 drag-and-drop, WIP + policy on the header ----------------
 
 function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: string }) {
-  const { rows: allCards, setRows, reload } = useCollection<CardT>("cards");
+  const { rows: boardRows, setRows, reload, capped } = useBoardCards(board);
   const { toast } = useToast();
   const boardId = idOf(board.path);
   const [addTo, setAddTo] = useState<string | null>(null); // column key for the full "add card" dialog
@@ -578,7 +595,9 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     writeLocalJson(`boards:collapsed:${boardId}`, [...n]);
   };
 
-  const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
+  // The server already sent only this board's live cards. The filter is for the optimistic edits made to that
+  // cached copy, so a card deleted here leaves the grid before the refetch lands.
+  const cards = useMemo(() => boardRows.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [boardRows, boardId]);
   const { editing, openCard, closeCard, savedCard } = useOpenCard(openId, cards, setRows, reload);
   // The three REFERENCE lists a board draws labels from, read only once the cards prove they are needed. A
   // grid whose cards carry no goal never names a goal, so the goals list is not worth a page of rows; the same
@@ -598,7 +617,11 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     const m = new Map(departments.map((d) => [idOf(d.path), d.display_name]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Department" : "");
   }, [departments]);
-  const assigneeOf = (c: CardT) => (c.assignee ? { id: idOf(c.assignee), name: empName(c.assignee) } : null);
+  const empPhoto = useMemo(() => {
+    const m = new Map(employees.map((e) => [idOf(e.path), e.photo]));
+    return (ref?: string) => (ref ? m.get(idOf(ref)) : undefined);
+  }, [employees]);
+  const assigneeOf = (c: CardT) => (c.assignee ? { id: idOf(c.assignee), name: empName(c.assignee), photo: empPhoto(c.assignee) } : null);
   const goalTitle = useMemo(() => {
     const m = new Map(goals.map((g) => [idOf(g.path), g.title]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Goal" : "");
@@ -767,7 +790,8 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
 
   return (
     <TooltipProvider delayDuration={150}>
-      <BoardToolbar filter={filter} board={board} cards={cards} empName={empName} deptName={deptName} />
+      <TruncationNotice hasMore={capped} what="tasks on this board" className="mb-3" />
+      <BoardToolbar filter={filter} board={board} cards={cards} empName={empName} empPhoto={empPhoto} deptName={deptName} />
 
       {/* Swipe-a-column-at-a-time on a phone. Without snapping, dragging a board sideways leaves you parked
           between two columns reading half of each; with it, every swipe settles on a column edge. Snapping is
@@ -828,7 +852,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                     // tapToOpen: a ringed avatar is the whole warning; who it is and why it is ringed is here.
                     <Tooltip key={id} tapToOpen>
                       <TooltipTrigger asChild>
-                        <span className="rounded-full ring-2 ring-destructive"><PhotoAvatar employeeId={id} name={empName(`employees/${id}`)} className="h-5 w-5 text-[9px]" /></span>
+                        <span className="rounded-full ring-2 ring-destructive"><PhotoAvatar employeeId={id} name={empName(`employees/${id}`)} photo={empPhoto(`employees/${id}`)} className="h-5 w-5 text-[9px]" /></span>
                       </TooltipTrigger>
                       <TooltipContent>{empName(`employees/${id}`)}: {n} here — over the {col.wipLimit}-per-person limit</TooltipContent>
                     </Tooltip>
@@ -911,7 +935,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
 
 const STALE_AFTER_DAYS = 7; // aging signal: card untouched this long (and not delivered) gets a quiet dot
 
-function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, menu, onDragStart, onClick }: { card: CardT; assignee: { id: string; name: string } | null; catalog: BoardLabel[]; goalName?: string; blockerKey?: string; deptLabel?: string; menu?: ReactNode; onDragStart: () => void; onClick: () => void }) {
+function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, menu, onDragStart, onClick }: { card: CardT; assignee: { id: string; name: string; photo?: string } | null; catalog: BoardLabel[]; goalName?: string; blockerKey?: string; deptLabel?: string; menu?: ReactNode; onDragStart: () => void; onClick: () => void }) {
   // Due chip: red when overdue, amber when due within 3 days, quiet otherwise. Hidden once delivered.
   //
   // DAYS, NOT INSTANTS. `due_date` is a date-only value, so `new Date(due_date)` is that day at UTC midnight,
@@ -979,7 +1003,7 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, me
         {(card.documents?.length ?? 0) > 0 && <Tooltip><TooltipTrigger asChild><span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-muted-foreground"><FileText className="h-3 w-3" />{card.documents!.length}</span></TooltipTrigger><TooltipContent>{card.documents!.length} linked document{card.documents!.length === 1 ? "" : "s"}</TooltipContent></Tooltip>}
         <span className="ml-auto">
           {assignee ? (
-            <Tooltip><TooltipTrigger asChild><span><PhotoAvatar employeeId={assignee.id} name={assignee.name} className="h-6 w-6 text-[10px]" /></span></TooltipTrigger><TooltipContent>{assignee.name}</TooltipContent></Tooltip>
+            <Tooltip><TooltipTrigger asChild><span><PhotoAvatar employeeId={assignee.id} name={assignee.name} photo={assignee.photo} className="h-6 w-6 text-[10px]" /></span></TooltipTrigger><TooltipContent>{assignee.name}</TooltipContent></Tooltip>
           ) : (
             <span className="block h-6 w-6 rounded-full border border-dashed border-muted-foreground/40" title="Unassigned" />
           )}
@@ -1375,6 +1399,10 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   const commenterName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
     return (cm: CardComment) => (cm.author ? m.get(idOf(cm.author)) ?? "Someone" : cm.author_email ?? "Someone");
+  }, [employees]);
+  const commenterPhoto = useMemo(() => {
+    const m = new Map(employees.map((e) => [idOf(e.path), e.photo]));
+    return (cm: CardComment) => (cm.author ? m.get(idOf(cm.author)) : undefined);
   }, [employees]);
 
   async function addComment() {
@@ -1915,7 +1943,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                 {/* Enter always stops here: unswallowed it reaches the dialog's Enter-submits handler and saves
                     the whole task while the reader is still building its checklist. */}
                 <Input className="h-8" placeholder="Add a checklist item…" value={newTodo} onChange={(e) => setNewTodo(e.target.value)} onKeyDown={(e) => { if (e.key !== "Enter") return; e.preventDefault(); if (newTodo.trim()) { void todoAct("addTodos", { texts: [newTodo.trim()] }); setNewTodo(""); } }} />
-                <Button size="sm" variant="outline" loading={busy} disabled={!newTodo.trim()} onClick={() => { const v = newTodo.trim(); if (v) { void todoAct("addTodos", { texts: [v] }); setNewTodo(""); } }}><Plus className="h-4 w-4" /> Add</Button>
+                <Button size="sm" variant="outline" loading={busy} disabled={!newTodo.trim()} onClick={() => { const v = newTodo.trim(); if (!v) return; setNewTodo(""); return todoAct("addTodos", { texts: [v] }); }}><Plus className="h-4 w-4" /> Add</Button>
               </div>
             )}
           </div>
@@ -1980,7 +2008,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                 {comments.map((cm, i) => (
                   <li key={i} className="flex gap-2">
                     {cm.author
-                      ? <PhotoAvatar employeeId={idOf(cm.author)} name={commenterName(cm)} className="mt-0.5 h-7 w-7 shrink-0 text-[10px]" />
+                      ? <PhotoAvatar employeeId={idOf(cm.author)} name={commenterName(cm)} photo={commenterPhoto(cm)} className="mt-0.5 h-7 w-7 shrink-0 text-[10px]" />
                       : <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground">{initials(commenterName(cm))}</span>}
                     <div className="min-w-0 flex-1 rounded-md bg-muted/40 p-2 text-sm">
                       <div className="flex items-baseline justify-between gap-2">
@@ -2375,10 +2403,10 @@ function CfdChart({ metrics }: { metrics: BoardMetrics }) {
 // views, URL state, mobile cards, and cursor-following "Load more". Row click opens the same task dialog.
 
 function BoardListTab({ board, me }: { board: Board; me: Me }) {
-  const { rows: allCards, setRows, reload, hasMore, loadMore } = useCollection<CardT>("cards");
+  const { rows: boardRows, setRows, reload, hasMore, loadMore } = useBoardCards(board);
   const { toast } = useToast();
   const boardId = idOf(board.path);
-  const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
+  const cards = useMemo(() => boardRows.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [boardRows, boardId]);
   const { editing, openCard, closeCard, savedCard } = useOpenCard(undefined, cards, setRows, reload);
   // What ‹ › and j/k walk in the dialog: the rows the TABLE is showing, in the order it sorted them. The
   // filtering and the sort live inside DataTable, so the page cannot work this out for itself - it is handed
@@ -2624,7 +2652,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
 // ---- Scrum view: product backlog + the sprint board + burndown/velocity ------------------------------------
 
 function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: string }) {
-  const { rows: allCards, setRows, reload } = useCollection<CardT>("cards");
+  const { rows: boardRows, setRows, reload, capped } = useBoardCards(board);
   const { rows: allSprints, reload: reloadSprints } = useCollection<Sprint>("sprints");
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -2642,7 +2670,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const [newSprint, setNewSprint] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
+  const cards = useMemo(() => boardRows.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [boardRows, boardId]);
   const { editing, openCard, closeCard, savedCard } = useOpenCard(openId, cards, setRows, reload);
   // Reference lists on the same rule as the board grid: read when the cards or the composer actually need them.
   const composing = addBacklog || !!editing;
@@ -2670,7 +2698,11 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     const m = new Map(departments.map((d) => [idOf(d.path), d.display_name]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Department" : "");
   }, [departments]);
-  const assigneeOf = (c: CardT) => (c.assignee ? { id: idOf(c.assignee), name: empName(c.assignee) } : null);
+  const empPhoto = useMemo(() => {
+    const m = new Map(employees.map((e) => [idOf(e.path), e.photo]));
+    return (ref?: string) => (ref ? m.get(idOf(ref)) : undefined);
+  }, [employees]);
+  const assigneeOf = (c: CardT) => (c.assignee ? { id: idOf(c.assignee), name: empName(c.assignee), photo: empPhoto(c.assignee) } : null);
   const goalTitle = useMemo(() => {
     const m = new Map(goals.map((g) => [idOf(g.path), g.title]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Goal" : "");
@@ -2795,6 +2827,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
 
   return (
     <TooltipProvider delayDuration={150}>
+      <TruncationNotice hasMore={capped} what="tasks on this board" className="mb-3" />
       {/* Sprint bar */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
         {sprints.length > 0 && (
@@ -2838,7 +2871,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
         );
       })()}
 
-      <BoardToolbar filter={filter} board={board} cards={cards} empName={empName} deptName={deptName} />
+      <BoardToolbar filter={filter} board={board} cards={cards} empName={empName} empPhoto={empPhoto} deptName={deptName} />
 
       {/* Swipe-a-column-at-a-time on a phone. Without snapping, dragging a board sideways leaves you parked
           between two columns reading half of each; with it, every swipe settles on a column edge. Snapping is
@@ -2935,7 +2968,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                         {offenders.map(([id, n]) => (
                           <Tooltip key={id}>
                             <TooltipTrigger asChild>
-                              <span className="rounded-full ring-2 ring-destructive"><PhotoAvatar employeeId={id} name={empName(`employees/${id}`)} className="h-5 w-5 text-[9px]" /></span>
+                              <span className="rounded-full ring-2 ring-destructive"><PhotoAvatar employeeId={id} name={empName(`employees/${id}`)} photo={empPhoto(`employees/${id}`)} className="h-5 w-5 text-[9px]" /></span>
                             </TooltipTrigger>
                             <TooltipContent>{empName(`employees/${id}`)}: {n} here — over the {col.wipLimit}-per-person limit</TooltipContent>
                           </Tooltip>

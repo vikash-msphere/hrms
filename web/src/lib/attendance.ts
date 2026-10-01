@@ -416,8 +416,8 @@ export function buildAttendanceRows(opts: {
 export const fmtHM = (iso: string, tz: string) => dateFormat("en-US", HM_12(tz)).format(new Date(iso));
 
 // ---- The correction form ------------------------------------------------------------------------------------
-// Shared by the whole-day CorrectionDialog (pages/Attendance.tsx) and the one-punch PunchFixDialog: both edit
-// the same list of wall-clock "HH:MM" pairs, which is filed as the day's full intended set of sessions.
+// What PunchFixDialog edits: the day's list of wall-clock "HH:MM" pairs with one time changed (or, on a day
+// with no punches, one pair added), filed as the day's full intended set of sessions.
 
 // One in/out on the form. `was` is the punch it started as, on a row seeded from the day's record, so the form
 // can mark exactly which time the request changes; it travels with the row, so removing a row above keeps it.
@@ -463,14 +463,11 @@ export const punchErrors = (rows: PunchRow[], open: OpenAllowance): (string | un
     return undefined;
   });
 };
-export const keptPunches = (rows: PunchRow[]) => rows.filter((r) => r.in || r.out); // rows the user actually filled
-export const isOpenPunch = (r: PunchRow) => !!r.in && !r.out;
 // Minutes the rows add up to. An open row counts up to `now`, so a day still in progress totals "so far".
 export const punchTotal = (rows: PunchRow[], open: OpenAllowance) => {
   const errs = punchErrors(rows, open);
   return rows.reduce((sum, r, i) => (errs[i] || (!r.in && !r.out) ? sum : sum + Math.max(0, hhmmToMin(r.out || open!.now) - hhmmToMin(r.in))), 0);
 };
-export const sameTimes = (a: PunchRow[], b: PunchRow[]) => a.map((r) => `${r.in}-${r.out}`).join() === b.map((r) => `${r.in}-${r.out}`).join();
 
 // The times an attendance correction asks for: "9:00 AM–1:00 PM, 2:00 PM–still clocked in". A pair with no
 // clock-out is today's last session left open, filed while the person was still at work. Every list of

@@ -55,10 +55,12 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // nothing in it. Everything that reads `busy` - the disabled cells, the matrix's own placeholder - would
   // otherwise spend that first frame claiming the org has no roles and offering editors over it.
   const [busy, setBusy] = React.useState(true);
-  // Compare reads ITS two roles' rules itself, keyed by the pair they were read for. It cannot wait on the
-  // org-wide walk: the roles arrive first (see reload), so Compare opens while the walk is still paging, and
-  // over an empty rule set every role holds "none" everywhere - announced as "0 of 98 collections differ", a
-  // verdict about two roles nothing had read yet.
+  // Whether the org-wide walk has landed at least once, so `rules` holds every subject's rules.
+  const [rulesLoaded, setRulesLoaded] = React.useState(false);
+  // Until then, Compare reads ITS two roles' rules itself, keyed by the pair they were read for. It cannot wait
+  // on the org-wide walk: the roles arrive first (see reload), so Compare opens while the walk is still paging,
+  // and over an empty rule set every role holds "none" everywhere - announced as "0 of 98 collections differ", a
+  // verdict about two roles nothing had read yet. Once the walk is in, the pair is answered from `rules`.
   const [comparePool, setComparePool] = React.useState<{ a: string; b: string; rules: AccessRule[] } | null>(null);
   const [subjectKind, setSubjectKind] = React.useState<"role" | "user">("role");
   const [view, setView] = React.useState<"matrix" | "rules">("matrix");
@@ -140,7 +142,8 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     try {
       await invoke("access-rules", decision, undefined, { rule: r.path });
       toast({ title: decision === "approve" ? "Change approved" : "Change rejected", variant: "success" });
-      await reload();
+      // A decision moves one rule, so only its subject's rules are re-read (reloadSubject says why), not the org's.
+      await reloadSubject(r.subject_kind, r.subject);
     } catch (e) {
       toast({ variant: "destructive", title: `Couldn't ${decision}`, description: String((e as Error).message) });
       setBusy(false);
@@ -172,7 +175,10 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
           setRoles(ro);
         }),
         listAll<User>("users").then((us) => setUsers(us.map((u) => ({ path: u.path, email: u.email })))),
-        fetchAllAccessRules().then(setRules),
+        fetchAllAccessRules().then((r) => {
+          setRules(r);
+          setRulesLoaded(true);
+        }),
       ]);
     } catch (e) {
       toast({ variant: "destructive", title: "Could not load permissions", description: String((e as Error).message) });
@@ -202,10 +208,12 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     [toast],
   );
 
-  // The compare view's two roles, re-read when the pair changes and whenever the held rules do (a copy lands
-  // through reloadSubject, which replaces them) - two subject reads, a page or so each.
+  // The compare view's two roles, read for themselves only while the org-wide walk is still paging - two subject
+  // reads, a page or so each. Once the walk has landed `rules` holds both roles and stays current (a copy lands
+  // through reloadSubject, which replaces the target's rules), so the pair is answered from it rather than
+  // fetched again on every change of `rules`.
   React.useEffect(() => {
-    if (!compare) return;
+    if (!compare || rulesLoaded) return;
     const { a, b } = compare;
     let live = true;
     Promise.all([fetchAllAccessRules({ subject_kind: "role", subject: a }), fetchAllAccessRules({ subject_kind: "role", subject: b })])
@@ -218,7 +226,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     return () => {
       live = false;
     };
-  }, [compare, rules, toast]);
+  }, [compare, rulesLoaded, toast]);
 
   type Kind = "role" | "user";
   // Collections to show as matrix columns/rows: the curated base + any collection a rule already targets.
@@ -644,8 +652,12 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
           )}
         </div>
         {(() => {
-          if (comparePool?.a !== compare.a || comparePool.b !== compare.b) return <p className="text-xs text-muted-foreground">Reading the two roles' rules…</p>;
-          const pool = comparePool.rules;
+          const pool = rulesLoaded
+            ? rules.filter((r) => r.subject_kind === "role" && (r.subject === compare.a || r.subject === compare.b))
+            : comparePool?.a === compare.a && comparePool.b === compare.b
+              ? comparePool.rules
+              : null;
+          if (!pool) return <p className="text-xs text-muted-foreground">Reading the two roles' rules…</p>;
           const rows = collectionsForRules([...rules, ...pool])
             .map((c) => ({ c, a: valueOf("role", compare.a, c, pool), b: valueOf("role", compare.b, c, pool) }))
             .sort((x, y) => Number(x.a === x.b) - Number(y.a === y.b) || groupOf(x.c).localeCompare(groupOf(y.c)) || x.c.localeCompare(y.c));
@@ -724,7 +736,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
               </SelectContent>
             </Select>
           </div>
-          <Button disabled={busy || !template.subject} onClick={() => void applyTemplate(template.kind, template.subject, template.key)}>Apply</Button>
+          <Button disabled={busy || !template.subject} onClick={() => applyTemplate(template.kind, template.subject, template.key)}>Apply</Button>
         </div>
         {(() => {
           const t = ROLE_TEMPLATES.find((x) => x.key === template.key);

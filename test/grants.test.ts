@@ -281,11 +281,10 @@ describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purp
     "access-rules:approve", "access-rules:clone", "access-rules:preview", "access-rules:reject",
     "access-rules:requestAccess", "access-rules:review", "access-rules:scopeCounts", "api-keys:revoke",
     "cron-runs:run", "operations:run", "operations:clearCache",
-    "referrals:award", "suggestions:downvote", "suggestions:merge", "suggestions:upvote",
+    "referrals:award", "suggestions:merge",
     // `similar` exists to serve `merge` - it shows which suggestions are the same ask so they can be folded
-    // together. Merging is already ACL-only (right above), so the thing that tells somebody what to merge is
-    // withheld on exactly the same terms: granting one without the other would be offering an answer nobody
-    // can act on.
+    // together. Merging is ACL-only (right above), so the thing that tells somebody what to merge is withheld
+    // on exactly the same terms: granting one without the other would be offering an answer nobody can act on.
     "suggestions:similar",
     // Company/department-wide group award (one bonus row per in-scope employee). HR's `bonuses.**` LEVEL
     // covers recording a single award; this collection-level verb is left to the ACL for now, deliberately,

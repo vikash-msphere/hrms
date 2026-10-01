@@ -131,8 +131,8 @@ function Step({ n, title, desc, action, children }: { n: number; title: string; 
   );
 }
 
-// Recurrence controls for a time-driven rule: how often, which day, and whether it fires once (a broadcast) or
-// once per employee (with derived metrics available to the condition).
+// Recurrence controls for a time-driven rule: how often (or only when run by hand), which day, and whether it
+// fires once (a broadcast) or once per employee (with derived metrics available to the condition).
 function RecurrenceEditor({ value, onChange }: { value: Schedule; onChange: (s: Schedule) => void }) {
   const set = (patch: Partial<Schedule>) => onChange({ ...value, ...patch });
   return (
@@ -140,11 +140,12 @@ function RecurrenceEditor({ value, onChange }: { value: Schedule; onChange: (s: 
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <span className="text-muted-foreground">Run</span>
         <Select value={value.freq} onValueChange={(f) => set({ freq: f as ScheduleFreq, day: f === "weekly" ? (value.day ?? 1) : f === "monthly" ? (value.day ?? 1) : undefined })}>
-          <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="daily">every day</SelectItem>
             <SelectItem value="weekly">every week</SelectItem>
             <SelectItem value="monthly">every month</SelectItem>
+            <SelectItem value="manual">only when run by hand</SelectItem>
           </SelectContent>
         </Select>
         {value.freq === "weekly" && (
@@ -178,8 +179,9 @@ function RecurrenceEditor({ value, onChange }: { value: Schedule; onChange: (s: 
       </div>
       <p className="text-xs text-muted-foreground">
         {value.scope === "perEmployee"
-          ? "Runs for each active employee. The condition can use per-person metrics: pending approvals, days since last leave, leave balance."
+          ? "Runs for each active employee. The condition can use per-person metrics: pending approvals, days since last leave, leave balance, profile items still missing."
           : "Runs once, with no specific employee - use an audience notification or an API call."}
+        {value.freq === "manual" && " It never runs on its own: use Run now on the rule's menu, at most once a day."}
       </p>
     </div>
   );

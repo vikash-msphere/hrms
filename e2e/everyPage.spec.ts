@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { allowConsoleErrors, gotoRoute, test, expect } from "./fixtures";
+import { allowConsoleErrors, collectConsole, gotoRoute, test, expect } from "./fixtures";
 
 // Every page in the app, opened.
 //
@@ -102,23 +102,17 @@ test.describe("every page", () => {
     allowConsoleErrors(page, /status of 409|status of 503/i);
     // Which route the walk is on, so a console error the fixture catches at teardown can be traced to the
     // page that logged it rather than to "somewhere in fifty-odd routes".
-    let current = "";
-    const logged: string[] = [];
     // Telemetry delivery is filtered out for the same reason the shared watchdog filters it (see
     // IGNORED_CONSOLE in fixtures.ts): every browser in the lane posts through the `/diag` relay to the real
     // Sentry project, and a rate-limited send is not this page failing to render. A 409/503 is the same rare
     // dev-Worker-restart-or-concurrent-write hiccup documented elsewhere in this suite
     // (complianceRuleDelete.spec.ts et al.) landing on one of fifty-odd navigations in one run - a page that
     // genuinely fails to render still fails via `failures` below regardless of what its console logged.
-    page.on("console", (m) => {
-      if (m.type() !== "error" || /status of 429|status of 409|status of 503/i.test(m.text())) return;
-      logged.push(`${current}: ${m.text().slice(0, 200)}`);
-    });
-    page.on("pageerror", (e) => logged.push(`${current}: threw ${e.message}`));
+    const consoleLog = collectConsole(page, /status of 429|status of 409|status of 503/i);
 
     const failures: string[] = [];
     for (const { route, heading } of PAGES) {
-      current = route;
+      consoleLog.at(route);
       await gotoRoute(page, route);
       const h1 = page.locator("h1").first();
       try {
@@ -135,7 +129,7 @@ test.describe("every page", () => {
 
     // One list, so a walk that hits several pages reports all of them rather than the first - and so a
     // console error is attributed to the route that logged it.
-    const problems = [...failures, ...logged];
+    const problems = [...failures, ...(await consoleLog.problems())];
     expect(problems, `pages with problems:\n${problems.join("\n")}`).toEqual([]);
   });
 

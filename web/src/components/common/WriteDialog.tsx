@@ -220,14 +220,14 @@ export function WriteDialog<T>({
                 )}
                 <Button type="button" variant="outline" onClick={() => guard.onOpenChange(false)}>{cancelLabel}</Button>
                 {addAnother && (
-                  <Button type="button" variant="secondary" onClick={() => void run("again")} disabled={busy || !canSubmit}>
+                  <Button type="button" variant="secondary" onClick={() => run("again")} disabled={busy || !canSubmit}>
                     {addAnotherLabel}
                   </Button>
                 )}
                 {((button: React.ReactNode) => (submitAccess ? submitAccess(button) : button))(
                   <Button
                     type="button"
-                    onClick={() => void run("close")}
+                    onClick={() => run("close")}
                     loading={busy}
                     disabled={!canSubmit}
                     aria-describedby={!canSubmit && blockers.length > 0 ? reasonId : undefined}

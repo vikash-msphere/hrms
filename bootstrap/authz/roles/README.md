@@ -8,7 +8,7 @@ only; a live one needs a migration or an edit in the UI.
 
 | File | Role |
 |---|---|
-| `everyone.json` | The reserved subject unioned into every caller except super admin. Never assignable. Only what every account needs whatever its role: the app shell (`users/me`, own preferences, own operations, `batch:run`), own notifications, and the assets the caller holds. |
+| `everyone.json` | The reserved subject unioned into every caller except super admin. Never assignable. Only what every account needs whatever its role: the app shell (`users/me`, own preferences, own operations, `batch:run`), own notifications, the assets the caller holds, and the two company-wide walls: the board (read, post, poll, kudos, react, reply, vote; official announcements stay HR's) and the suggestion box (read, submit, edit own, up/downvote; triage stays HR's). |
 | `employee.json` | The least-privilege baseline, and the role new accounts are given (`provisioned`). |
 | `team_lead.json` | `extends: employee`, plus goals and 1:1s for their direct reports (`my-reports`). Decides no requests. |
 | `manager.json` | `extends: employee`, plus the department subtree. |

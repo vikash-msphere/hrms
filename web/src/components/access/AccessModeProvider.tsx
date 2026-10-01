@@ -141,11 +141,12 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
     setTarget(t);
   }, []);
 
-  // Rules cache for the deny tint: loaded when the mode turns on, and re-read when the modal closes only if an
-  // access rule was written meanwhile - by this tab or a sibling one (the resource store's invalidations report
-  // both). The read pages through every rule in the org, and re-reading it on EVERY close repainted a tint that
-  // had not changed at the cost of the whole table, on a database billed per row read. Failure -> empty (no
-  // tint, mode still works), and the next close tries again.
+  // Deny cache for the tint: loaded when the mode turns on, and re-read when the modal closes only if an access
+  // rule was written meanwhile - by this tab or a sibling one (the resource store's invalidations report both).
+  // It reads the DENIES alone (`effect=deny`), because `denyFor` below discards every other rule. The mode's
+  // toggle is remembered, so this load runs on each app load of an admin who leaves the mode on: unfiltered it
+  // would page through every rule in the org each time, and re-read on EVERY close it would repaint a tint that
+  // had not changed. Failure -> empty (no tint, mode still works), and the next close tries again.
   const [rules, setRules] = React.useState<AccessRule[]>([]);
   const on = enabled && available;
   const rulesStale = React.useRef(true);
@@ -156,7 +157,7 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
       }),
     [],
   );
-  // A superseded load is dropped. The read pages through every rule, so it can take several round trips, and
+  // A superseded load is dropped. The read follows the cursor, so it can take more than one round trip, and
   // turning the mode off and on (or closing the modal) starts a fresh one while an older one is still paging:
   // left alone, the OLDER answer could land last and put back the rules from before the change - a deny just
   // written, untinted, until the next reload. A load dropped before it landed leaves the copy stale, so the
@@ -170,7 +171,7 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
     rulesStale.current = false;
     let live = true;
     let landed = false;
-    fetchAllAccessRules()
+    fetchAllAccessRules({ effect: "deny" })
       .then((r) => {
         landed = true;
         if (live) setRules(r);

@@ -59,6 +59,7 @@ import { StatCard } from "@/components/common/StatCard";
 import { StatRow } from "@/components/common/StatRow";
 import { CARD_CAPS, TILE_CAPS, ACTION_CAPS } from "@/lib/statRows";
 import { TeamTimeline } from "@/components/common/TeamTimeline";
+import { PunctualityPulse } from "@/components/common/PunctualityPulse";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { kudosCardArtUrl, ART_DIECUT_SM } from "@/lib/kudosArt";
 import { AccessTarget } from "@/components/access/AccessTarget";
@@ -99,7 +100,7 @@ const REJECT_NOTE = new Set(["overtime-requests", "remote-work-requests", "late-
 // The dashboard's movable sections, in default order. The viewer drags them into order, or hides them, in the
 // "Customize layout" popover (hero row); the choice persists per user via preferences/dashboard. Rendering uses CSS
 // `order` on a flex column, so a reorder never remounts a section (the team timeline keeps its state).
-type SectionKey = "shortcuts" | "myday" | "needsyou" | "kpis" | "approvals" | "timeline" | "calendar" | "board";
+type SectionKey = "shortcuts" | "myday" | "needsyou" | "kpis" | "approvals" | "punctuality" | "timeline" | "calendar" | "board";
 const DASH_SECTIONS: { key: SectionKey; label: string }[] = [
   { key: "shortcuts", label: "Shortcuts" },
   { key: "myday", label: "My day" },
@@ -108,6 +109,7 @@ const DASH_SECTIONS: { key: SectionKey; label: string }[] = [
   { key: "needsyou", label: "Needs you" },
   { key: "kpis", label: "KPI cards" },
   { key: "approvals", label: "Awaiting your approval" },
+  { key: "punctuality", label: "Arrivals & departures" },
   { key: "timeline", label: "Team timeline" },
   { key: "calendar", label: "Holidays & celebrations" },
   { key: "board", label: "Board & announcements" },
@@ -207,12 +209,13 @@ export default function Dashboard({ me }: { me: Me }) {
   const wantTimeline = seen("timeline");
   const wantCalendar = seen("calendar");
   const wantBoard = seen("board");
+  const wantPunctuality = seen("punctuality");
 
   // Shared reads, each gated on the union of the sections that actually consume it. Generous by design: a
   // section listed here fetches the collection the moment it is on screen, so no widget can render a number
   // computed from rows it never asked for.
   //  holidays    - the holidays card, "is today a holiday" (not-clocked-in), timeline day shading, my-day.
-  const { rows: holidays, state: holidaysState } = useCollection<Holiday>("holidays", { enabled: wantCalendar || wantKpis || wantTimeline || wantMyDay, all: true });
+  const { rows: holidays, state: holidaysState } = useCollection<Holiday>("holidays", { enabled: wantCalendar || wantKpis || wantTimeline || wantMyDay || wantPunctuality, all: true });
   const { rows: announcements, state: announcementsState } = useCollection<Announcement>("announcements", { enabled: wantBoard });
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types", { enabled: wantMyDay || wantTimeline });
   // Org events (private-by-default; yields [] for callers without events.read). Marked as bands on the timeline.
@@ -232,6 +235,9 @@ export default function Dashboard({ me }: { me: Me }) {
   const { rows: celebrations, loading: celebsLoading } = useCelebrations(leadDays ?? 0, wantCelebrations && typeof leadDays === "number");
 
   const canTimeline = usePermission("timeline.read");
+  // Arrivals & departures is about OTHER people's punches, so it needs attendance read breadth beyond the
+  // caller's own rows (dept / all) - the capability set can't say that, every employee reads their own.
+  const canPunctuality = !!me.scopes.read.attendance;
   // Events are private by default, so the events card is dropped entirely for callers without the grant
   // rather than shown reading a permanent zero (an absent kpiData entry hides the card - see allBands).
   const canEvents = usePermission("events.read");
@@ -417,7 +423,7 @@ export default function Dashboard({ me }: { me: Me }) {
   // gets the same treatment here as it does in the summary request above.
   const forNotClockedIn = (key: string) => wantKpis && kpiVisible("not_clocked_in") && kpiReachable(key) && needRows(key);
   const readEmployees =
-    wantTimeline || wantApprovals || wantBoard ||
+    wantTimeline || wantApprovals || wantBoard || wantPunctuality ||
     wantRows("headcount") || wantRows("joiners") || wantRows("probation_ending") || forNotClockedIn("headcount");
   const { rows: employees, state: employeesState } = useCollection<Employee>("employees", { all: true, enabled: readEmployees });
   // Leave: the timeline's away bands, my-day's next time off, and - for a caller who decides nothing - their
@@ -1517,6 +1523,17 @@ export default function Dashboard({ me }: { me: Me }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Under flexible hours nobody is late or early by definition, so there is nothing for this to draw. */}
+      {showSection("punctuality") && canPunctuality && !schedule.flexible_hours && (
+        <div ref={regionRef("punctuality")} style={sectionStyle("punctuality")} className="mb-6">
+          {wantPunctuality ? (
+            <PunctualityPulse employees={employees} holidays={holidays} schedule={schedule} selfId={me.employee_id} refreshKey={attendanceRefresh} />
+          ) : (
+            <Skeleton className="h-64 w-full rounded-xl" />
+          )}
+        </div>
+      )}
 
       {showSection("timeline") && canTimeline && (
         <div ref={regionRef("timeline")} style={sectionStyle("timeline")} className="mb-6">

@@ -69,7 +69,7 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   "interview-feedback": [],
   offers: ["approve", "extend", "accept", "decline", "rescind", "letter"],
   expenses: ["submit", "approve", "reject", "cancel", "pay", "upload", "download", "extractReceipt"],
-  automations: ["enable", "disable", "test"],
+  automations: ["enable", "disable", "test", "run"],
   "access-rules": ["preview", "requestAccess", "approve", "reject", "clone", "review", "scopeCounts"],
 };
 

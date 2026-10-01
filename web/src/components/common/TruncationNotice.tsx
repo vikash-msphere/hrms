@@ -17,14 +17,19 @@ import { cn } from "@/lib/utils";
 // and the entry still holds a `next_page_token` when it does - so the walk narrows the window from a hundred
 // rows to a thousand without ever closing it, and a card grid that presents a thousand as the whole catalog
 // is telling the same lie as one presenting a hundred.
-export function TruncationNotice({ collection, what, className }: { collection: string | string[]; what?: string; className?: string }) {
-  const hasMore = useCollectionHasMore(collection);
-  if (!hasMore) return null;
+//
+// `hasMore` is for a view that reads ONE FILTERED key of a collection (one board's cards): pass that read's own
+// `hasMore` and leave `collection` out. The collection-wide answer is true whenever ANY cached read of the
+// collection holds a cursor, and an unfiltered first page that another page cached says nothing about whether
+// this board arrived whole.
+export function TruncationNotice({ collection, hasMore, what, className }: { collection?: string | string[]; hasMore?: boolean; what?: string; className?: string }) {
+  const anyTruncated = useCollectionHasMore(collection);
+  if (!(hasMore ?? anyTruncated)) return null;
   return (
     <div className={cn("flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300", className)}>
       <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
       <span>
-        Only some {what ?? "records"} are loaded here — more exist than this view is showing, so it is incomplete.
+        Only some {what ?? "records"} are loaded here: more exist than this view is showing, so it is incomplete.
         Use search (⌘K) to find a specific record.
       </span>
     </div>

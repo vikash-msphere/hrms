@@ -16,6 +16,10 @@ import { activeDelegatesFor } from "../src/services/approvalDelegations";
 import { SCHEDULE_TRIGGER, type Schedule, type Condition, type Action } from "../src/domain/automations";
 import { genId } from "../src/lib/idCodec";
 import { AUTOMATIONS } from "../bootstrap/collections/automations";
+import { runAutomation } from "../src/services/automations";
+import { SUPER_GRANT } from "../src/domain/grants";
+import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
+import type { AppUser } from "../src/env";
 
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 let deps: Deps;
@@ -273,6 +277,63 @@ describe("scheduled metrics", () => {
       expect(rows.map((r) => [r.type, r.link])).toEqual([["security.pin_reminder", "profile/privacy"]]);
     }
     for (const id of [hasPin, disabled, noAccount]) expect(await notifsFor(id)).toEqual([]);
+  });
+});
+
+describe("manual rules and :run", () => {
+  const seed = AUTOMATIONS.find((a) => a.name === "Remind people to complete their profile")!;
+  const enc = (o: Record<string, string>) => deps.encryptor.encrypt(JSON.stringify(o));
+  // The system principal's shape, with the policy given rather than read: this database seeds no `policy` row.
+  const admin = { uuid: "system", email: "system@automation", role: "system", roles: ["system"], status: "active", employeeId: null, employeeCode: null, name: "System", grant: SUPER_GRANT, policy: DEFAULT_POLICY } as unknown as AppUser;
+  const ruleId = async () => (await deps.db.select({ uuid: schema.automations.uuid }).from(schema.automations))[0]!.uuid;
+
+  it("the daily scanner never fires a manual rule", async () => {
+    await seedEmployee();
+    await seedScheduledRule({ schedule: seed.schedule!, condition: seed.condition, actions: seed.actions });
+    expect(await runScheduledAutomations(deps)).toBe(0);
+  });
+
+  it("the seeded profile reminder tells each person their own missing items, and skips a complete profile", async () => {
+    const complete = await seedEmployee({
+      photoKey: "p", signatureKey: "s",
+      personalDetailsEnc: await enc({ date_of_birth: "1990-01-01", gender: "Other", personal_phone: "1", permanent_address: "x", emergency_name: "A", emergency_phone: "2" }),
+      identityDetailsEnc: await enc({ pan: "ABCDE1234F" }),
+      bankDetailsEnc: await enc({ account_number: "123", ifsc_code: "HDFC0001" }),
+    });
+    const photoOnly = await seedEmployee({ photoKey: "p" });
+    await seedScheduledRule({ schedule: seed.schedule!, condition: seed.condition, actions: seed.actions });
+
+    expect(await runAutomation(deps, admin, await ruleId())).toEqual({ fired: 1, queued: 0 });
+    expect(await notifsFor(complete)).toEqual([]);
+    // No sign-in account, so no app PIN is owed: it is not on the list.
+    expect((await notifsFor(photoOnly)).map((n) => [n.title, n.body, n.link])).toEqual([[
+      "Finish your profile",
+      "Still missing: Personal details, Contact details, Emergency contact, Identity, Bank details, Signature. Add them from My Profile.",
+      "profile",
+    ]]);
+  });
+
+  it("runs once per org day: a second run is refused and the nightly scanner finds the day claimed", async () => {
+    const emp = await seedEmployee();
+    await seedScheduledRule({ schedule: { freq: "daily", scope: "perEmployee" }, condition: seed.condition, actions: seed.actions });
+    const actor = admin;
+    expect((await runAutomation(deps, actor, await ruleId())).fired).toBe(1);
+    await expect(runAutomation(deps, actor, await ruleId())).rejects.toMatchObject({ httpStatus: 409 });
+    expect(await runScheduledAutomations(deps)).toBe(0);
+    expect((await notifsFor(emp)).length).toBe(1);
+  });
+
+  it("refuses a disabled rule and an event-triggered one", async () => {
+    await seedEmployee();
+    const actor = admin;
+    await seedScheduledRule({ schedule: seed.schedule!, condition: seed.condition, actions: seed.actions, enabled: false });
+    await expect(runAutomation(deps, actor, await ruleId())).rejects.toMatchObject({ httpStatus: 409 });
+    await deps.db.delete(schema.automations);
+    await deps.db.insert(schema.automations).values({
+      uuid: genId(), code: `aut-${genId().slice(0, 4)}`, name: "evt", description: "", triggerType: "employee.created",
+      actionsJson: JSON.stringify([{ kind: "notifyManager", noun: "x" }]),
+    });
+    await expect(runAutomation(deps, actor, await ruleId())).rejects.toMatchObject({ httpStatus: 409 });
   });
 });
 

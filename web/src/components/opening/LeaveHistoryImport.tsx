@@ -104,7 +104,7 @@ export function LeaveHistoryImport() {
 
   function downloadTemplate() {
     const { headers, rows } = historyTemplate();
-    void exportTable("leave-before-hrms", headers, rows, "csv", "leave-requests");
+    return exportTable("leave-before-hrms", headers, rows, "csv", "leave-requests");
   }
 
   const applied = answer && !answer.dry_run;
@@ -161,7 +161,7 @@ export function LeaveHistoryImport() {
         )}
         <div className="flex flex-wrap items-center gap-2">
           <AccessAction collection="leave-requests" verb="importHistory" label="Bring in leave from before HRMS">
-            <Button variant="outline" loading={busy === "preview"} disabled={!items.length || !!busy} onClick={() => void preview()}>Preview</Button>
+            <Button variant="outline" loading={busy === "preview"} disabled={!items.length || !!busy} onClick={() => preview()}>Preview</Button>
           </AccessAction>
           {progress && <span className="text-xs text-muted-foreground tabular-nums">{progress}…</span>}
         </div>
@@ -221,7 +221,7 @@ export function LeaveHistoryImport() {
             {!applied && answer.counts.created > 0 && (
               <div className="flex justify-end">
                 <AccessAction collection="leave-requests" verb="importHistory" label="Bring in leave from before HRMS">
-                  <Button loading={busy === "apply"} disabled={!!busy} onClick={() => void apply()}>
+                  <Button loading={busy === "apply"} disabled={!!busy} onClick={() => apply()}>
                     Bring in {answer.counts.created} leave{answer.counts.created === 1 ? "" : "s"}
                   </Button>
                 </AccessAction>

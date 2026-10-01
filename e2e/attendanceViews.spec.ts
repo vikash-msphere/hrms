@@ -5,13 +5,12 @@ import { SPA_HEADERS, allowConsoleErrors, gotoRoute, personId, test, expect } fr
 // `clock.spec.ts` owns punching, `attendanceCorrection.spec.ts` owns fixing one day, and `test/` owns the
 // arithmetic. What is left is the page itself, which is the densest read-only surface in the app and is
 // entirely a rendering problem: the same window of days is either a week-grouped list or a month grid, the
-// choice is remembered per person, a month grid lets several days be ticked and fixed with ONE set of times
-// (a whole week of missed punches is not a week of dialogs), the window pages backwards, and the daily-hours
-// strip will fetch the PREVIOUS window on request to show deltas against it.
+// choice is remembered per person, the window pages backwards, and the daily-hours strip will fetch the
+// PREVIOUS window on request to show deltas against it.
 //
 // None of that exists outside a browser, and none of it is asserted anywhere else.
 test.describe("attendance views", () => {
-  test("the month grid ticks several days for one correction, and the view choice is remembered", async ({ as }) => {
+  test("the month grid says how a day is fixed, and the view choice is remembered", async ({ as }) => {
     test.setTimeout(240_000);
     const page = await as("employee");
     await gotoRoute(page, "attendance", "Attendance");
@@ -25,64 +24,17 @@ test.describe("attendance views", () => {
     if ((await list.getAttribute("aria-pressed")) !== "true") await list.click();
     await expect(page.getByText(/^Week of /).first()).toBeVisible({ timeout: 30_000 });
 
-    // The month is the same days as a calendar, and it says what it is for before anything is ticked.
+    // The month is the same days as a calendar, and it says how a day is fixed before anything is opened: one
+    // time at a time, from the day's punches. There is no bulk fix to tick days for.
     await month.click();
     await expect(month).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByText("Click a day for its punches, or tick several to correct them together.")).toBeVisible({ timeout: 30_000 });
-
-    // Days that HAVE a standing are the tickable ones (a day outside the month, or before the person joined,
-    // is not). A month can open on one that has too few - so step back a month rather than assert against
-    // whatever today happens to be.
-    const ticks = page.getByRole("button", { name: /^Tick .* for a bulk correction$/ });
-    // WAITED for, not counted once. The helper line above renders from the moment the grid mounts, while the
-    // punches it draws the days from arrive after - so a count taken the instant a month opens can see zero
-    // days for no reason but that none have landed yet, which is how this read "found no days to correct" on
-    // a month that had them. And a month really can hold fewer than two (the person joined mid-month, or it
-    // sits before they joined at all), so an empty one is stepped back past instead of asserted against.
-    const enoughTicks = async (): Promise<boolean> => {
-      for (let i = 0; i < 20 && (await ticks.count()) < 2; i++) await page.waitForTimeout(500);
-      return (await ticks.count()) >= 2;
-    };
-    let found = false;
-    for (let back = 0; back < 6 && !found; back++) {
-      found = await enoughTicks();
-      if (!found) {
-        await page.getByRole("button", { name: "Previous month" }).click({ timeout: 10_000 });
-        await expect(page.getByText("Click a day for its punches, or tick several to correct them together.")).toBeVisible({ timeout: 30_000 });
-      }
-    }
-    expect(found, "no month in the last six offered two days to correct").toBe(true);
-
-    // Ticking counts, and the count is what the action is named after - a bulk fix that did not say how many
-    // days it was about to rewrite would be the wrong thing to press.
-    await ticks.nth(0).click();
-    await ticks.nth(1).click();
-    await expect(page.getByText("2 days ticked")).toBeVisible({ timeout: 30_000 });
-    const correct = page.getByRole("button", { name: "Correct 2 days" });
-    await expect(correct).toBeVisible();
-    await correct.click();
-
-    // One dialog for both days: the times are entered once and the request is one per day behind the scenes.
-    const form = page.getByRole("dialog");
-    // Named after the days it covers, not after one of them: a single-day correction is titled "Correct
-    // attendance — <day>", and this dialog is the other shape.
-    await expect(form.getByRole("heading", { name: "Correct 2 days" })).toBeVisible({ timeout: 30_000 });
-    // One press, two requests - so each day can still be approved on its own, and the button counts them.
-    await expect(form.getByRole("button", { name: "Submit 2 requests" })).toBeVisible();
-    await expect(form.getByText("These times are applied to every selected day", { exact: false })).toBeVisible();
-    // Nothing is submitted: filing a correction is `attendanceCorrection.spec.ts`, and two more of them per
-    // run would pile up in somebody's queue. Closed by its own Cancel button, not Escape: the dialog opens with
-    // focus in the "Clock in" time field, whose picker takes the first Escape for itself.
-    await form.getByRole("button", { name: "Cancel", exact: true }).click();
-    const discard = page.getByRole("dialog");
-    if (await discard.getByRole("button", { name: /Discard|Leave/ }).count()) {
-      await discard.getByRole("button", { name: /Discard|Leave/ }).click();
-    }
-    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
-
-    // Clearing the ticks puts the prompt back rather than leaving a stale count on screen.
-    await page.getByRole("button", { name: "Clear", exact: true }).click();
-    await expect(page.getByText("Click a day for its punches, or tick several to correct them together.")).toBeVisible();
+    await expect(page.getByText("Click a day for its punches, then a time to fix it.")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("button", { name: /for a bulk correction$/ })).toHaveCount(0);
+    // It opens on today, punched or not, so today's punches - or the clock-in to add - sit right under it. It
+    // used to open on the newest ROW, which early in a month was a holiday still ahead, with nothing to fix.
+    const grid = page.getByRole("group", { name: "Days of the month" });
+    await expect(grid.getByRole("button", { pressed: true })).toHaveCount(1, { timeout: 30_000 });
+    await expect(page.getByRole("main").getByText("Today", { exact: true })).toBeVisible();
 
     // The choice of view is a per-person preference, so it survives a reload - the page a person reads their
     // own attendance on should not reset to somebody else's default every morning.
@@ -266,16 +218,15 @@ test.describe("attendance views", () => {
     await expect(panel.getByText("Click a day for its punches", { exact: false })).toBeVisible({ timeout: 30_000 });
 
     // Any day the grid drew - which day it is does not matter, only that it is one with a standing. Stepping
-    // back a month rather than asserting against whatever today happens to be, the way the bulk-correction
-    // read above does.
+    // back a month rather than asserting against whatever today happens to be.
     // Inside the grid: the KPI tiles above it are buttons with a "·" in their names as soon as the person has
     // a clock-in, and the first of those is "On time", whose press switches the history to a filtered list.
     // And a day that OWES something: a holiday or a day off is not markable (the server refuses it, so the app
-    // offers no "Counts as" there) - the grid's first day was 2 Oct, Gandhi Jayanti, once the month turned.
+    // offers no "Counts as" there) - the grid's first day was 2 Oct, Gandhi Jayanti, once the month turned. Nor
+    // a day with no record at all ("Nothing recorded", today's "No punches yet"): those open only to add a punch.
     const days = panel
       .getByRole("group", { name: "Days of the month" })
-      .getByRole("button", { name: /^(?!.*· (Holiday|Worked - not a working day)\b).*·/ })
-      .filter({ hasNotText: /Tick|Untick/ });
+      .getByRole("button", { name: /^(?!.*· (Holiday|Worked - not a working day|Nothing recorded|No punches yet)\b).*·/ });
     let opened = false;
     for (let back = 0; back < 6 && !opened; back++) {
       if (await days.count()) { await days.first().click(); opened = true; break; }

@@ -3,7 +3,7 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { jsonBody } from "../http/jsonRequest";
 import {
-  listAutomations, createAutomation, updateAutomation, deleteAutomation, setAutomationEnabled, testAutomation,
+  listAutomations, createAutomation, updateAutomation, deleteAutomation, setAutomationEnabled, testAutomation, runAutomation,
   type AutomationInput,
 } from "../services/automations";
 import { toAutomationResource } from "../http/serialize";
@@ -50,6 +50,9 @@ export const automations = collectionRoutes<AutomationInput, typeof schema.autom
     // rule switched off stops firing now rather than when the cache expires.
     enable: { run: (deps, user, id) => setAutomationEnabled(deps, user, id, true) },
     disable: { run: (deps, user, id) => setAutomationEnabled(deps, user, id, false) },
+    // Run a scheduled or manual rule now, for real: today's firing, so a second run the same day is a 409.
+    // Answers how many firings ran and how many employees are queued, not the rule, so it owns its response.
+    run: { raw: async (c, id) => c.json(await runAutomation(c.get("deps"), c.get("user"), id)) },
     // Dry run: report which actions WOULD fire for a sample event, executing none of them. Answers a report,
     // not the rule, so it owns its response.
     test: {

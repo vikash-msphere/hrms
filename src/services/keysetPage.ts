@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, lt, or, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, lt, or, sql, type SQL } from "drizzle-orm";
 import type { Deps } from "../deps";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 
@@ -47,15 +47,21 @@ export async function keysetPage<T = any>(
   const keyValue: (row: any) => number = opts.order?.value ?? ((row) => +new Date(row.createdAt));
   if (cur) {
     const at = opts.order ? cur.createTimeMs : new Date(cur.createTimeMs);
-    // Strictly after the cursor in (key, uuid) order. If the token didn't decode (forged/garbage), fall back
-    // to a timestamp-only bound rather than leaking or erroring - and make that bound INCLUSIVE of the cursor's
-    // instant. With no uuid to tiebreak on, a strict compare drops every row that ties at the cursor's
-    // timestamp, and those rows are then in no page at all; rows written in one seed or one batch share a
-    // timestamp, so ties are the normal case for the tokens that land here. Re-showing a boundary row is the
-    // recoverable direction of wrong. Same rule as http/pagination.ts.
+    // Strictly after the cursor in (key, uuid) order, written as ONE row-value comparison because that is a
+    // range SQLite can SEEK to on the page index. The same bound spelled `key < at OR (key = at AND uuid < uid)`
+    // is not: D1's SQLite only filters with it, so every page walked the index again from the first row and
+    // page k read k pages (measured on a cards walk: 219, 328 and 437 rows for pages 2 to 4, against 111 each as
+    // a row value). Both halves bind as stored, the key in ms: a timestamp_ms column, or an `order` expression
+    // that is integer ms by the contract above.
+    //
+    // If the token didn't decode (forged/garbage), fall back to a timestamp-only bound rather than leaking or
+    // erroring - and make that bound INCLUSIVE of the cursor's instant. With no uuid to tiebreak on, a strict
+    // compare drops every row that ties at the cursor's timestamp, and those rows are then in no page at all;
+    // rows written in one seed or one batch share a timestamp, so ties are the normal case for the tokens that
+    // land here. Re-showing a boundary row is the recoverable direction of wrong. Same rule as http/pagination.ts.
     conds.push(
       curUid !== null
-        ? or(cmp(key, at), and(eq(key, at), cmp(table.uuid, curUid)))
+        ? sql`(${key}, ${table.uuid}) ${sql.raw(dir === "asc" ? ">" : "<")} (${cur.createTimeMs}, ${curUid})`
         : or(cmp(key, at), eq(key, at)),
     );
   }

@@ -82,6 +82,7 @@ const writeSchema = z.object({
   display_name: z.string().min(1).optional(),
   accrual_days_per_year: z.number().min(0).optional(),
   accrual_frequency: z.enum(["monthly", "semi_monthly"]).optional(),
+  accrual_cap_days: z.number().min(0).nullable().optional(),
   paid: z.boolean().optional(),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
   available_during_probation: z.boolean().optional(),

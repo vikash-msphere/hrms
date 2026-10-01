@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { gotoRoute, test, expect } from "./fixtures";
+import { collectConsole, gotoRoute, test, expect } from "./fixtures";
 
 // Every settings panel, opened.
 //
@@ -32,23 +32,17 @@ test.describe("every setting", () => {
     // Forty panels, forty lazy chunks: long on purpose.
     test.setTimeout(600_000);
     const page = await as("super");
-    let current = "";
-    const logged: string[] = [];
-    // 5xx excepted, the same class ~20 specs tolerate by name through `allowConsoleErrors`: forty panels'
-    // worth of reads is a long time to be open on a busy lane, and neither 5xx this walk has seen came from
-    // the app - a 503 is the local D1 Durable Object's queue refusing a read (fixtures.ts says so, with the
-    // worker log to back it), and a 500 has been the Prism proxy reporting an upstream socket hang up
-    // ("Request terminated with error: FetchError ... socket hang up", tmp/e2e-prism.log). What this test
-    // proves is that every panel resolves and draws, and both of those are asserted per panel below.
-    page.on("console", (m) => {
-      if (m.type() !== "error" || /status of (429|500|502|503|504)/i.test(m.text())) return;
-      logged.push(`${current}: ${m.text().slice(0, 200)}`);
-    });
-    page.on("pageerror", (e) => logged.push(`${current}: threw ${e.message}`));
+    // Gateway 5xx excepted, the same class ~20 specs tolerate by name through `allowConsoleErrors`: forty
+    // panels' worth of reads is a long time to be open on a busy lane, and a 503 is the local D1 Durable
+    // Object's queue refusing a read (fixtures.ts says so, with the worker log to back it). A 500 counts only
+    // when the APP wrote it: the Prism proxy's upstream socket hang up ("Request terminated with error:
+    // FetchError ... socket hang up", tmp/e2e-prism.log) and a dropped connection are not the app's, and
+    // `collectConsole` leaves both out. What this test proves is that every panel resolves and draws.
+    const consoleLog = collectConsole(page, /status of (429|502|503|504)/i);
 
     const failures: string[] = [];
     for (const { key, title } of PANELS) {
-      current = key;
+      consoleLog.at(key);
       await gotoRoute(page, `settings/${key}`);
       try {
         // The panel's own `<h1>`, which is the registry title: landing on the hub (or on another panel)
@@ -63,6 +57,7 @@ test.describe("every setting", () => {
     }
 
     expect(failures, `panels that did not open:\n${failures.join("\n")}`).toEqual([]);
+    const logged = await consoleLog.problems();
     expect(logged, `panels that logged an error:\n${logged.join("\n")}`).toEqual([]);
   });
 

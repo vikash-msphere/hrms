@@ -62,7 +62,11 @@ test("a card takes a checklist and a comment, and the tile counts them", async (
   const composer = card.getByPlaceholder(/Add a comment/);
   await composer.fill(comment);
   await card.getByRole("button", { name: "Comment", exact: true }).click();
-  await expect(card.getByText(comment)).toBeVisible({ timeout: 30_000 });
+  // The thread's ROW, and the box emptied: both only happen once the server has answered. A bare getByText
+  // matches the composer itself (a React textarea's text content follows its value), so it passed on the
+  // keystroke and the reload below aborted the write still in flight.
+  await expect(card.getByRole("listitem").filter({ hasText: comment })).toBeVisible({ timeout: 30_000 });
+  await expect(composer).toHaveValue("");
 
   // Read back from cold, on the card and on the wall behind it: the tile carries the checklist count, which
   // is the whole reason a checklist is worth having on a board.

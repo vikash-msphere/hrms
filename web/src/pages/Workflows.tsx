@@ -91,6 +91,7 @@ const ORDINAL = (n: number) => { const t = n % 100; const s = t >= 11 && t <= 13
 // Human summary of a rule's recurrence for the trigger pill, e.g. "Every Monday" / "Monthly on the 1st".
 function describeSchedule(s: NonNullable<Automation["schedule"]>): string {
   const per = s.scope === "perEmployee" ? ", per person" : "";
+  if (s.freq === "manual") return `When run by hand${per}`;
   if (s.freq === "daily") return `Every day${per}`;
   if (s.freq === "weekly") return `Every ${WEEKDAY_NAMES[s.day ?? 1]}${per}`;
   return `Monthly on the ${ORDINAL(s.day ?? 1)}${per}`;
@@ -179,6 +180,26 @@ function RulesTab({ canWrite, openId }: { canWrite: boolean; openId?: string }) 
     if (!ok) return;
     try { await remove(a.path, a.etag); toast({ title: "Rule deleted", variant: "success" }); reload(); } catch (e) { toast({ title: "Couldn't delete the rule", description: String((e as Error).message), variant: "destructive" }); }
   }
+  // A real firing: people get notified. It is today's firing of the rule, so the server refuses a second one
+  // the same day - the confirm says so up front rather than leaving it to the 409.
+  async function run(a: Automation) {
+    const perPerson = a.schedule?.scope === "perEmployee";
+    const ok = await confirm({
+      title: "Run this rule now?",
+      description: `"${a.name}" runs for real${perPerson ? " for every active employee its condition matches" : ""}: its notifications and other actions go out now. A rule runs at most once a day, so it cannot run again until tomorrow.`,
+      confirmLabel: "Run now",
+    });
+    if (!ok) return;
+    try {
+      const res = await invoke<{ fired: number; queued: number }>(a.path, "run");
+      toast({
+        title: "Rule ran",
+        description: `Fired ${res.fired} time${res.fired === 1 ? "" : "s"}${res.queued ? `; ${res.queued} more ${res.queued === 1 ? "person is" : "people are"} queued and will be reached over the next few hours` : ""}.`,
+        variant: "success",
+      });
+      reload();
+    } catch (e) { toast({ title: "Couldn't run the rule", description: describeError(e), variant: "destructive" }); }
+  }
   async function test(a: Automation) {
     try {
       const res = await invoke<{ matched: boolean; would_run: { kind: string }[] }>(a.path, "test", undefined, { payload: {} });
@@ -257,7 +278,7 @@ function RulesTab({ canWrite, openId }: { canWrite: boolean; openId?: string }) 
               <div className="grid gap-2">
                 {rules.map((a) => (
                   <RuleCard key={a.path} a={a} meta={meta} canWrite={canWrite}
-                    onToggle={() => toggle(a)} onTest={() => test(a)} onEdit={() => openRule(a)} onDuplicate={() => duplicateRule(a)} onDelete={() => del(a)} />
+                    onToggle={() => toggle(a)} onTest={() => test(a)} onRun={() => run(a)} onEdit={() => openRule(a)} onDuplicate={() => duplicateRule(a)} onDelete={() => del(a)} />
                 ))}
               </div>
             </section>
@@ -269,12 +290,15 @@ function RulesTab({ canWrite, openId }: { canWrite: boolean; openId?: string }) 
   );
 }
 
-function RuleCard({ a, meta, canWrite, onToggle, onTest, onEdit, onDuplicate, onDelete }: {
+function RuleCard({ a, meta, canWrite, onToggle, onTest, onRun, onEdit, onDuplicate, onDelete }: {
   a: Automation; meta: WorkflowMeta | null; canWrite: boolean;
-  onToggle: () => void; onTest: () => void; onEdit: () => void; onDuplicate: () => void; onDelete: () => void;
+  onToggle: () => void; onTest: () => void; onRun: () => void; onEdit: () => void; onDuplicate: () => void; onDelete: () => void;
 }) {
   const trigger = triggerInfo(meta?.events, a.trigger_type);
   const steps = describeActions(a.actions);
+  // Only a scheduled rule runs on demand (an event rule has no event to run against), only while it is on,
+  // and not twice in one org day - each of which the server would refuse.
+  const canRun = !!a.schedule && a.enabled && a.last_scheduled_on !== todayStr() && !!a.access?.can?.includes("run");
   return (
     <Card className={cn("p-3.5 transition-colors", !a.enabled && "bg-muted/30")}>
       <div className="flex items-start gap-3">
@@ -306,6 +330,7 @@ function RuleCard({ a, meta, canWrite, onToggle, onTest, onEdit, onDuplicate, on
               <Button variant="ghost" size="icon" className="shrink-0" title="More"><MoreHorizontal className="h-4 w-4" /></Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              {canRun && <DropdownMenuItem onClick={onRun}><Zap className="mr-2 h-4 w-4" /> Run now</DropdownMenuItem>}
               <DropdownMenuItem onClick={onTest}><Play className="mr-2 h-4 w-4" /> Test</DropdownMenuItem>
               <DropdownMenuItem onClick={onEdit}><Pencil className="mr-2 h-4 w-4" /> Edit</DropdownMenuItem>
               <DropdownMenuItem onClick={onDuplicate}><Copy className="mr-2 h-4 w-4" /> Duplicate</DropdownMenuItem>
@@ -413,7 +438,7 @@ function TestPanel({ rule, meta, dirty }: { rule: Automation; meta: WorkflowMeta
           )}
           <Textarea rows={Math.min(8, Math.max(3, fields.length + 2))} value={payload} onChange={(e) => setPayload(e.target.value)} className="font-mono text-xs" spellCheck={false} />
           <div className="flex items-center gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={() => void run()} loading={busy}>
+            <Button type="button" variant="outline" size="sm" onClick={() => run()} loading={busy}>
               <Play className="h-3.5 w-3.5" /> Run test
             </Button>
             <Button type="button" variant="ghost" size="sm" onClick={() => setPayload(samplePayload(fields))}>Reset sample</Button>

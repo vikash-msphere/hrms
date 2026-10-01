@@ -111,7 +111,7 @@ export function PushEnrollBanner() {
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
-        <Button size="sm" loading={busy} onClick={() => void enable()}>Turn on</Button>
+        <Button size="sm" loading={busy} onClick={() => enable()}>Turn on</Button>
         <Button size="sm" variant="ghost" className="h-8 w-8 p-0" aria-label="Dismiss" onClick={dismiss}>
           <X className="h-4 w-4" />
         </Button>

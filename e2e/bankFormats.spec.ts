@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import { gotoRoute, withAllowedBank, test, expect } from "./fixtures";
+import { gotoRoute, landedResponse, withAllowedBank, test, expect } from "./fixtures";
 
 // The bank payout format editor - where an org says how its bank wants a bulk-payment file.
 //
@@ -72,9 +72,13 @@ test("a bank template is read in, its columns mapped, and the debit account read
   // The reload has to come after the WRITE, not after the press: a reload that overtakes the in-flight save
   // reads the settings row as it was before it, and "the mapping did not survive" would be a lie about a
   // save that never happened.
-  const saved = page.waitForResponse((r) => /\/v1\/bank-formats\//.test(r.url()) && r.request().method() === "PATCH", { timeout: 60_000 });
+  // Save is two writes in turn - the mapping, then (for a super) the debit account - so the reload waits on
+  // BOTH: one taken on the first answer aborted the second before it was sent, and the mask never existed.
+  const saved = landedResponse(page, (r) => /\/v1\/bank-formats\//.test(r.url()) && r.request().method() === "PATCH", 60_000);
+  const debitSaved = landedResponse(page, (r) => /\/v1\/payroll-debit-accounts\//.test(r.url()) && r.request().method() === "PATCH", 60_000);
   await page.getByRole("button", { name: `Save ${bankName} format` }).click();
   expect((await saved).ok(), "the bank format was not saved").toBe(true);
+  expect((await debitSaved).ok(), "the debit account was not saved").toBe(true);
 
   // Read back from cold: the mapping survived, and the debit account comes back as a mask - never as the
   // digits that were typed. Re-added on a miss same as the first reload above: the bank NAME can be clobbered

@@ -717,7 +717,6 @@ export function DataTable<T>({
   const confirmDialog = useConfirm();
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = React.useState<string | null>(null);
-  const [loadingMore, setLoadingMore] = React.useState(false);
   // Selection tracks the FILTERED set: rows that filter out (or vanish on reload) silently drop out of it,
   // so a bulk action can never touch a row the user no longer sees.
   React.useEffect(() => {
@@ -2042,7 +2041,7 @@ export function DataTable<T>({
                 disabled={!!reason || (!!bulkBusy && bulkBusy !== a.label)}
                 loading={bulkBusy === a.label}
                 title={reason ?? undefined}
-                onClick={() => void runBulk(a)}
+                onClick={() => runBulk(a)}
               >
                 {a.icon} {a.label}
               </Button>
@@ -2422,11 +2421,7 @@ export function DataTable<T>({
               // "Load more" is how you reach records past the first page - the one control in this row that
               // must be easy to hit, and it was the smallest thing on the page at 24px.
               className="h-7 px-2 text-xs coarse:h-9 coarse:px-3"
-              loading={loadingMore}
-              onClick={() => {
-                setLoadingMore(true);
-                void Promise.resolve(onLoadMore()).finally(() => setLoadingMore(false));
-              }}
+              onClick={() => onLoadMore()}
             >
               Load more
             </Button>

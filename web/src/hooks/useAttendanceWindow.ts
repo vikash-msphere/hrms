@@ -30,8 +30,8 @@ export type AttendanceWindow = {
  * the page around the history (which fetches the whole team's punches for the SAME window) and the history
  * itself cannot drift apart - they read one object rather than mirroring each other's state.
  *
- * The per-window selections (the day whose detail is open, the days ticked for a bulk correction) belong to
- * whoever renders them and are dropped there, off `fromYmd`/`toYmd` - a different month has different days.
+ * The per-window selection (the day whose detail is open) belongs to whoever renders it and is dropped
+ * there, off `fromYmd`/`toYmd` - a different month has different days.
  */
 export function useAttendanceWindow(key: string, orgToday: string): AttendanceWindow {
   const [view, setView] = useState<AttendanceView>(() => loadView(key));

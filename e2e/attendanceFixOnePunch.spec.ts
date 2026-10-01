@@ -25,16 +25,8 @@ test("an employee fixes one clock-in from the punch log, and the rest of the day
   const recordedOut = ((await punchOut.json()) as { clock_out: string }).clock_out;
 
   await gotoRoute(page, "attendance", "Attendance");
-  // The history is newest first, so the first day with punches on it is today's. Not simply the first row: the
-  // window also draws the holidays and leave still ahead in it (2 Oct sits above 1 Oct), and those carry no
-  // punch to fix.
-  await page
-    .getByRole("row")
-    .filter({ has: page.getByRole("button", { name: /^Expand \d{4}-\d{2}-\d{2}$/ }) })
-    .filter({ hasNot: page.getByRole("cell", { name: /^(Holiday|On leave)$/ }) })
-    .first()
-    .getByRole("button", { name: /^Expand / })
-    .click();
+  // Today's row opens unfolded, so its punches are already on screen; the history is newest first, so the
+  // first clock-in to fix is today's.
   await page.getByRole("button", { name: /^Fix clock-in / }).first().click();
 
   const dialog = page.getByRole("dialog");

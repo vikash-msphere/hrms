@@ -19,13 +19,14 @@ export const accessRules = collectionRoutes<unknown, typeof schema.accessRules>(
   // manifest, which knows which collections, scopes, levels and verbs exist. A zod shape here would be a second,
   // weaker copy of that.
   createSchema: z.unknown(),
-  // `?collection=` and `?subject_kind=&subject=` narrow the list to what one editor is about (services/
-  // accessRules.ts listAccessRules says why); with neither it is every rule, as before.
+  // `?collection=`, `?subject_kind=&subject=` and `?effect=` narrow the list to what one editor is about
+  // (services/accessRules.ts listAccessRules says why); with none of them it is every rule, as before.
   list: (c, page) =>
     listAccessRules(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, {
       collection: c.req.query("collection"),
       subjectKind: c.req.query("subject_kind"),
       subject: c.req.query("subject"),
+      effect: c.req.query("effect"),
     }),
   serialize: (row) => toAccessRuleResource(row, row._objectUuid ?? null),
   decorate: (deps, _actor, rows) => withObjectRefs(deps, rows),

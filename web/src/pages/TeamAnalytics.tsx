@@ -27,7 +27,7 @@ import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { ExportButton } from "@/components/common/ExportButton";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
-import { PersonAvatar } from "@/components/common/PersonAvatar";
+import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { WhatChanged } from "@/components/common/WhatChanged";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -329,7 +329,7 @@ export default function TeamAnalytics({ me }: { me: Me }) {
                     <tr key={p.employee} className="border-b last:border-0 hover:bg-accent/40">
                       <td className="sticky left-0 z-10 bg-background py-2 pr-3">
                         <button type="button" onClick={() => setOpen(p)} className="flex min-h-[36px] items-center gap-2 text-left coarse:min-h-[44px]">
-                          <PersonAvatar name={p.name} className="h-7 w-7 text-xs" />
+                          <PhotoAvatar employeeId={idOf(p.employee)} name={p.name} photo={p.photo ?? undefined} className="h-7 w-7 text-xs" />
                           <span className="min-w-0">
                             <span className="block truncate font-medium">{p.name}</span>
                             <span className="block truncate text-xs text-muted-foreground">{p.job_title || deptName(p.department) || p.employee_number || ""}</span>
@@ -402,7 +402,7 @@ function PersonReport({ person, data, deptName, me }: {
     <SheetContent className="flex flex-col sm:max-w-lg">
       <SheetHeader>
         <SheetTitle className="flex items-center gap-3 pr-6">
-          <PersonAvatar name={person.name} />
+          <PhotoAvatar employeeId={id} name={person.name} photo={person.photo ?? undefined} className="h-9 w-9 text-xs" />
           <span className="min-w-0">
             <span className="block truncate">{person.name}</span>
             <span className="block truncate text-sm font-normal text-muted-foreground">

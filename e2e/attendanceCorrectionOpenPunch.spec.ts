@@ -1,35 +1,32 @@
 import { SPA_HEADERS, gotoRoute, test, expect, toast } from "./fixtures";
 
-// Fixing only this morning's punch while still at work.
+// Adding this morning's missed clock-in while still at work.
 //
-// The punch people miss or make late is the morning one, and they notice it mid-day: they know when they came
-// in and cannot know when they will leave. So today's correction may leave its latest clock-out blank, which
-// files a request with no `clock_out` on that session ("still clocked in"). The fix is offered next to the
-// clock, where the person notices it.
+// The punch people miss is the morning one, and they notice it mid-day: they know when they came in and cannot
+// know when they will leave. So on a day with nothing punched yet, the fix next to the clock adds a clock-in and
+// may leave the clock-out blank, which files a request with no `clock_out` on that session ("still clocked
+// in").
 //
 // `test/attendanceRegularizationFlow.test.ts` owns what approving such a request does to the day's punches.
 // What only a browser shows is that the form accepts a clock-in alone for today, says so, and files it that
-// way. The request is withdrawn at the end, so the seeded person's day is never rewritten.
-test("an employee still at work asks to correct only today's clock-in", async ({ as }) => {
-  const page = await as("employee");
+// way. As the project-manager login: no spec clocks this person, so today has no punches and the link opens
+// the add rather than the fix of an existing clock-in. The request is withdrawn at the end, so the day is
+// never rewritten.
+test("an employee still at work adds the clock-in they missed this morning", async ({ as }) => {
+  const page = await as("pm");
   const reason = `E2E morning punch ${Date.now() % 1_000_000}`;
   await gotoRoute(page, "attendance", "Attendance");
 
   await page.getByRole("button", { name: "Missed or wrong punch?" }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("heading", { name: /^Correct attendance/ })).toBeVisible();
-  await expect(dialog.getByText(/Leave the last clock-out blank/)).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: /^Add missing clock-in/ })).toBeVisible();
+  await expect(dialog.getByText(/Leave the clock-out blank/)).toBeVisible();
 
-  // Whatever other specs punched today for this person is replaced by one in/out: in at midnight, which is
-  // never later than now, and no clock-out.
-  const remove = dialog.getByRole("button", { name: "Remove this in/out" });
-  while (await remove.count()) await remove.first().click();
-  await dialog.getByRole("button", { name: /Add another in\/out/ }).click();
-  await dialog.getByLabel("Clock in, punch 1", { exact: true }).fill("00:00");
+  // In at midnight, which is never later than now, and no clock-out.
+  await dialog.getByLabel("Clock in", { exact: true }).fill("00:00");
 
-  // A blank clock-out on today's latest in/out is a running session, not a missing time.
-  await expect(dialog.getByText("Still clocked in", { exact: true })).toBeVisible();
-  await expect(dialog.getByText(/^So far/)).toBeVisible();
+  // A blank clock-out on today's in/out is a running session, not a missing time.
+  await expect(dialog.getByText("Still clocked in - clock out as usual.")).toBeVisible();
   await expect(dialog.getByText("Add the clock-out time")).toHaveCount(0);
 
   await dialog.getByLabel("Reason").fill(reason);

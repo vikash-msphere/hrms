@@ -115,7 +115,7 @@ export function SerialScanPanel({
             {/* Disabled while a start is in flight: a double-press is two `getUserMedia` calls racing, which is
                 the production route into the orphaned-stream failure the generation guard in lib/scanner.ts
                 now catches. */}
-            <Button type="button" size="sm" variant="outline" className="flex-1" disabled={cameraState === "starting"} onClick={() => { setHit(null); setDuplicate(undefined); void startCamera(); }}>
+            <Button type="button" size="sm" variant="outline" className="flex-1" disabled={cameraState === "starting"} onClick={() => { setHit(null); setDuplicate(undefined); return startCamera(); }}>
               <Camera className="h-4 w-4" /> Scan another
             </Button>
             <Button type="button" size="sm" variant="outline" className="flex-1" onClick={close}>Done</Button>
@@ -142,7 +142,7 @@ export function SerialScanPanel({
                 <ScanPauseButton scanner={scanner} className="flex-1" />
               </>
             ) : (
-              <Button type="button" size="sm" variant="outline" className="flex-1" loading={cameraState === "starting"} onClick={() => void startCamera()}><Camera className="h-4 w-4" /> Start camera</Button>
+              <Button type="button" size="sm" variant="outline" className="flex-1" loading={cameraState === "starting"} onClick={() => startCamera()}><Camera className="h-4 w-4" /> Start camera</Button>
             )}
             <Button type="button" size="sm" variant="outline" className="flex-1" onClick={() => fileRef.current?.click()}><ImageUp className="h-4 w-4" /> Upload photo</Button>
             <input

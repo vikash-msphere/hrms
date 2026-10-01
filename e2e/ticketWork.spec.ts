@@ -57,6 +57,9 @@ test("a ticket takes a checklist and a reply, and both survive a reload", async 
   const composer = detail.getByPlaceholder(/Write a reply/);
   await composer.fill(reply);
   await detail.getByRole("button", { name: /^(Reply|Send|Comment)/ }).first().click();
+  // The box empties only once the server has answered; until then a bare getByText matches the composer
+  // itself (a React textarea's text content follows its value), and the reload below aborts the write.
+  await expect(composer).toHaveValue("", { timeout: 30_000 });
   await expect(detail.getByText(reply)).toBeVisible({ timeout: 30_000 });
 
   // From cold, on the ticket itself: a comment and a tick that live only in the open dialog are a

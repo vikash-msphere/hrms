@@ -24,6 +24,7 @@ import type { AppUser } from "../env";
 import { previewAccessMany, type PreviewTarget, type PreviewVerdict } from "./accessPreview";
 import { listOwnerColumn, tableFor } from "../lib/authzResolve";
 import { failedPrecondition } from "../lib/errors";
+import { photoMarker } from "../http/serialize";
 
 /** The sections the areas are shown in, in order. */
 export const VIEWER_GROUPS = [
@@ -93,6 +94,8 @@ export type Viewer = {
   /** True when they can also CHANGE it, not just read it - the distinction people ask about second. */
   write: boolean;
   why?: string;
+  /** Their photo marker (http/serialize.ts#photoMarker), present when they have one. */
+  photo?: string;
 };
 
 export type AreaReport = {
@@ -128,12 +131,18 @@ export async function whoCanSeeMe(deps: Deps, actor: AppUser): Promise<ViewerRep
   // Active, non-deleted people only: a leaver who still has a row is not someone reading your file today, and
   // listing them would make the report read as alarming when it is not.
   const roster = await deps.db
-    .select({ uuid: schema.employees.uuid })
+    .select({ uuid: schema.employees.uuid, photoKey: schema.employees.photoKey, photoAt: schema.employees.photoAt })
     .from(schema.employees)
     .where(and(isNull(schema.employees.deleteTime), eq(schema.employees.status, "active")))
     .limit(MAX_ROSTER + 1);
   const complete = roster.length <= MAX_ROSTER;
   const subjects = roster.slice(0, MAX_ROSTER).map((r) => `employees/${r.uuid}`);
+  const photos = new Map(roster.map((r) => [`employees/${r.uuid}`, photoMarker(r)]));
+  const describe = (v: PreviewVerdict): Viewer => {
+    const viewer = describeVerdict(v);
+    const photo = photos.get(v.subject);
+    return photo ? { ...viewer, photo } : viewer;
+  };
 
   // One probe per collection area: how many rows the caller owns, and the code of one of them to grade. Issued
   // together, because each is a single indexed aggregate and the report is already behind an explicit press.
@@ -218,7 +227,7 @@ const WHY: Record<string, string> = {
 // The key is added only when there is a sentence to put in it. Keying off the verdict's scope kind instead
 // (`v.why ? {...} : {}`) spelled every unmapped kind as `why: undefined` - invisible over JSON, but a property
 // the object carries, which is one `?? ""` in a future caller away from rendering as an empty reason.
-const describe = (v: PreviewVerdict): Viewer => {
+const describeVerdict = (v: PreviewVerdict): Viewer => {
   const why = v.why ? WHY[v.why] : undefined;
   return { name: v.name, email: v.email, write: v.write, ...(why ? { why } : {}) };
 };

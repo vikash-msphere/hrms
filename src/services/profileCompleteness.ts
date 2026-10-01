@@ -27,10 +27,13 @@ async function blob(deps: Deps, enc: string | null): Promise<Record<string, unkn
   }
 }
 
-export async function computeProfileCompleteness(
-  deps: Deps,
-  row: typeof schema.employees.$inferSelect,
-): Promise<ProfileCompleteness> {
+/** The employee columns the flags are computed from, so a caller can read just these. */
+export type ProfileColumns = Pick<
+  typeof schema.employees.$inferSelect,
+  "photoKey" | "signatureKey" | "personalDetailsEnc" | "bankDetailsEnc" | "identityDetailsEnc"
+>;
+
+export async function computeProfileCompleteness(deps: Deps, row: ProfileColumns): Promise<ProfileCompleteness> {
   const personal = await blob(deps, row.personalDetailsEnc);
   const bank = await blob(deps, row.bankDetailsEnc);
   // Identity fields are org-configurable (settings/employee-fields); checking them against the config would
@@ -45,4 +48,25 @@ export async function computeProfileCompleteness(
     bank: has(bank.account_number) && has(bank.ifsc_code),
     signature: !!row.signatureKey,
   };
+}
+
+/** The /profile checklist, in the order and with the names its tiles use (web ProfileCompleteness.tsx ITEMS),
+ *  so a message naming the missing items names the tiles the reader will see. `appLock` is the one item not
+ *  on the employee row: whether their sign-in account has an app PIN. */
+const CHECKLIST: { key: keyof ProfileCompleteness | "appLock"; label: string }[] = [
+  { key: "photo", label: "Profile photo" },
+  { key: "personal", label: "Personal details" },
+  { key: "contact", label: "Contact details" },
+  { key: "emergency", label: "Emergency contact" },
+  { key: "appLock", label: "App PIN" },
+  { key: "identity", label: "Identity" },
+  { key: "bank", label: "Bank details" },
+  { key: "signature", label: "Signature" },
+];
+
+/** The checklist items still empty for one person, by label. `appPinMissing` comes from the scheduled
+ *  metrics (services/scheduledMetrics.ts), which already know who has an app PIN. */
+export async function missingProfileItems(deps: Deps, row: ProfileColumns, appPinMissing: boolean): Promise<string[]> {
+  const flags = await computeProfileCompleteness(deps, row);
+  return CHECKLIST.filter((i) => (i.key === "appLock" ? appPinMissing : !flags[i.key])).map((i) => i.label);
 }

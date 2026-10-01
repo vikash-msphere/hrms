@@ -8,7 +8,7 @@ import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, removedMeta, diffMeta } from "../lib/audit";
-import { invalidArgument, notFound, aborted, forbidden } from "../lib/errors";
+import { invalidArgument, notFound, aborted, forbidden, failedPrecondition } from "../lib/errors";
 import { isSuperGrant } from "../domain/grants";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -16,7 +16,7 @@ import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lifecycle";
 import { validateAutomation, evalCondition, isScheduled, privilegedActionKinds, type Automation, type Condition, type Action, type Schedule } from "../domain/automations";
-import { invalidateAutomationCache } from "./automationEngine";
+import { invalidateAutomationCache, runAutomationNow } from "./automationEngine";
 import { sensitiveFieldsInCondition, type DomainEvent } from "../domain/events";
 import { atVersion, checkEtag, updateAtVersion, versionConflict } from "./versionGuard";
 
@@ -212,6 +212,22 @@ export async function setAutomationEnabled(deps: Deps, actor: AppUser, id: strin
   await audit(deps, actor, `automation.${enabled ? "enable" : "disable"}`, "automations", id, { diff: { disabled: { from: row.disabled, to: !enabled } } }, updated);
   invalidateAutomationCache();
   return updated;
+}
+
+// The :run verb: fire a scheduled or manual rule now, for real. It is the rule's firing for today (see
+// runAutomationNow), so it answers 409 when today's has already happened. Running a rule is arming it for one
+// firing, so the same authoring gate as :enable applies to a rule holding privileged actions.
+export async function runAutomation(deps: Deps, actor: AppUser, id: string) {
+  const row = await getAutomation(deps, actor, id);
+  assertMayActOnStored(actor, row);
+  if (!isScheduled(row) || !row.scheduleJson) throw failedPrecondition("only a scheduled or manual rule can be run on demand; an event rule runs when its event happens");
+  if (row.disabled) throw failedPrecondition("this rule is turned off; turn it on to run it");
+  const res = await runAutomationNow(deps, row);
+  if (!res) throw failedPrecondition("this rule has already run today; it can run again tomorrow");
+  await audit(deps, actor, "automation.run", "automations", id, {
+    reason: `run by hand: fired ${res.fired} time(s)${res.queued ? `, ${res.queued} employee(s) queued for the next passes` : ""}`,
+  });
+  return { fired: res.fired, queued: res.queued };
 }
 
 // Dry-run: evaluate the rule's condition against a sample event and report which actions WOULD run, WITHOUT

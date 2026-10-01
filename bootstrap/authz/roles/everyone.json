@@ -3,7 +3,7 @@
   "label": "Everyone",
   "protected": true,
   "provisioned": false,
-  "description": "The reserved rule subject unioned into every caller except super admin (src/domain/grants.ts EVERYONE_ROLE). Never assignable to a user. Holds only what EVERY signed-in account needs whatever its role: the app shell (who am I, my preferences, my exports, the batch transport), my notifications, and the assets I hold. Every rule reaches the caller's own rows or is refused in the service for anyone else, so a role an admin builds in Access Management starts from a working app and nothing about anybody else.",
+  "description": "The reserved rule subject unioned into every caller except super admin (src/domain/grants.ts EVERYONE_ROLE). Never assignable to a user. Holds only what EVERY signed-in account needs whatever its role: the app shell (who am I, my preferences, my exports, the batch transport), my notifications, the assets I hold, and the two company-wide walls - the board (read, post, poll, kudos, react, reply, vote) and the suggestion box (read, submit, vote). Outside the two walls every rule reaches the caller's own rows or is refused in the service for anyone else, so a role an admin builds in Access Management starts from a working app and nothing private about anybody else.",
   "levels": [
     {
       "area": "account",
@@ -46,6 +46,36 @@
       "pattern": "assets",
       "level": "read",
       "why": "List the assets you are holding. Says nothing about which rows come back: actorScope finds no broad item read and resolves the breadth to own, bound as `assigned_to = me`."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.**",
+      "level": "read",
+      "why": "The company board: announcements, posts, polls and kudos."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.me.**",
+      "level": "write",
+      "why": "Edit and soft-delete own posts, polls and kudos. A board row's code is owned by its author, so `me` reaches only the caller's own. Creating needs no level: posts arrive through the `post` and `giveKudos` verbs, and the collection-level write that creates official announcements stays HR's."
+    },
+    {
+      "area": "board",
+      "pattern": "suggestions",
+      "level": "write",
+      "why": "List the suggestion box and submit to it. A bare collection pattern is the list and the create only; the item rules beside it decide the rows."
+    },
+    {
+      "area": "board",
+      "pattern": "suggestions.**",
+      "level": "read",
+      "why": "Read every suggestion on the box. An anonymous one carries no submitter on the wire (toSuggestionResource), and the list's submitter filter refuses to unmask one (listSuggestions)."
+    },
+    {
+      "area": "board",
+      "pattern": "suggestions.me.**",
+      "level": "write",
+      "why": "Edit and withdraw own suggestions. A suggestion's code is owned by its submitter, so `me` reaches only the caller's own."
     }
   ],
   "allow": [
@@ -63,6 +93,51 @@
       "area": "assets",
       "pattern": "assets.**.acknowledge",
       "why": "Confirm receipt by scanning the tag on an asset handed to you. Scoped `**` because an asset's code is flat and custody moves, so no scope token can say 'held by me'; holder-only is enforced in the service (acknowledgeAsset refuses anyone but `assigned_to`)."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.post",
+      "why": "Post to the board, or open a poll. The verb forces the kind to post or poll (routes/announcements.ts announcementPost), so it never makes an official announcement."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.giveKudos",
+      "why": "Post on the recognition wall."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.markAllRead",
+      "why": "Clear own unread state."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.*.react",
+      "why": "React to any post or reply."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.*.reply",
+      "why": "Reply to any post. The service refuses a locked post."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.*.markRead",
+      "why": "Mark a post read (own read receipt)."
+    },
+    {
+      "area": "board",
+      "pattern": "announcements.*.vote",
+      "why": "Vote in a poll. The service refuses a closed one."
+    },
+    {
+      "area": "board",
+      "pattern": "suggestions.*.upvote",
+      "why": "Upvote a suggestion (one vote per person, toggled)."
+    },
+    {
+      "area": "board",
+      "pattern": "suggestions.*.downvote",
+      "why": "Downvote a suggestion (one vote per person, toggled)."
     }
   ],
   "deny": [],
@@ -83,6 +158,23 @@
     {
       "pattern": "search | dashboard-summary | activity",
       "why": "Fan-out reads decided per collection from each caller's own grants; granting them here would add nothing and could only widen."
+    },
+    {
+      "pattern": "announcements",
+      "lane": "levels",
+      "why": "The collection-level write is the create that makes an official announcement, which is HR's. Everyone posts through the `post` and `giveKudos` verbs instead."
+    },
+    {
+      "pattern": "announcements.*.publish | unpublish | disable | enable | lock | unlock | pin | unpin",
+      "why": "Board moderation and scheduling: HR's."
+    },
+    {
+      "pattern": "suggestions.*.respond | merge | similar",
+      "why": "Triage: HR answers and folds duplicates together, and `similar` exists only to serve `merge`."
+    },
+    {
+      "pattern": "announcements.draft | suggestions.draft",
+      "why": "AI drafting runs on the free plan's Workers AI allowance; granted per role in the ACL, not to every account."
     }
   ]
 }

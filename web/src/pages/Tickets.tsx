@@ -1032,6 +1032,10 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
   const [promote, setPromote] = useState<string | null>(null); // checklist item being turned into a board task
   const threadRef = useRef<HTMLDivElement>(null);
   const replyRef = useRef<HTMLTextAreaElement>(null);
+  const photoOf = useMemo(() => {
+    const m = new Map(employees.map((e) => [idOf(e.path), e.photo]));
+    return (p: string) => m.get(idOf(p));
+  }, [employees]);
 
   // Fetch the full ticket (with its comment thread + checklist) whenever a row is opened.
   // Keyed on the PATH, deliberately: the row object is replaced wholesale by every list refetch, and
@@ -1500,7 +1504,7 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
               return (
                 <div key={i} className="flex gap-2">
                   {c.author
-                    ? <PhotoAvatar employeeId={idOf(c.author)} name={who} className="mt-0.5 h-7 w-7 shrink-0 text-[10px]" />
+                    ? <PhotoAvatar employeeId={idOf(c.author)} name={who} photo={photoOf(c.author)} className="mt-0.5 h-7 w-7 shrink-0 text-[10px]" />
                     : <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground">{initials(who)}</span>}
                   <div className="min-w-0 flex-1 rounded-lg border bg-muted/20 p-2.5 text-sm">
                     <div className="mb-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">

@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
-  AlarmClock, AlertTriangle, CalendarCheck, CalendarDays, Check, CheckSquare, ChevronLeft, ChevronRight,
+  AlarmClock, AlertTriangle, CalendarCheck, CalendarDays, ChevronLeft, ChevronRight,
   Clock, Coffee, List, Pencil, Scale, Timer, TrendingUp, Zap,
 } from "lucide-react";
 import { get, create, patch, remove } from "@/api";
@@ -59,6 +59,8 @@ export type AttendanceLeaveContext = {
   forDay: (day: string) => LeaveRequest | undefined;
 };
 
+const hasPunches = (r: AttendanceRow) => (r.summary?.sessions.length ?? 0) > 0;
+
 export function AttendanceHistory({
   employeeId, joinedYmd, trackedFromYmd, win, sched, orgToday, now: givenNow, title, canExport, exportName, canMark,
   sessions: givenSessions, loading: givenLoading, leave: givenLeave, lateEarly: givenLateEarly, onCorrect, onLogOvertime, onRequestLateEarly, emptyText, refreshKey,
@@ -97,9 +99,9 @@ export function AttendanceHistory({
   /** Approved late arrival / early departure requests the host already holds (they may be everyone's; this
    *  keeps the employee's). Omitted, the history reads its own window of them. */
   lateEarly?: LateEarlyRequest[];
-  /** Omitted on somebody else's record - see the note above. With `punch`, the request is about that one
-   *  clock-in or clock-out of the (single) day rather than the whole day. */
-  onCorrect?: (rows: AttendanceRow[], punch?: PunchTarget) => void;
+  /** Omitted on somebody else's record - see the note above. A correction changes one thing at a time: with
+   *  `punch`, that one clock-in or clock-out of the day; without, the in/out of a day that has no punches. */
+  onCorrect?: (row: AttendanceRow, punch?: PunchTarget) => void;
   onLogOvertime?: (row: AttendanceRow) => void;
   /** Ask for a late arrival / early departure to be approved for a day the punches flagged. Omitted wherever
    *  the reader may not file one for this person - the same rule as `onCorrect`. */
@@ -115,9 +117,11 @@ export function AttendanceHistory({
 }) {
   const { view, page, fromYmd, toYmd, prevWindow, windowLabel, prevLabel, switchView, goPage } = win;
   const tz = sched.timezone;
-  const [expanded, setExpanded] = useState<Set<string>>(new Set()); // days whose punch detail is unfolded
+  // Days whose punch detail is unfolded. Today starts open: it is the day most often read, and fixed.
+  // Re-opened if the org day settles after mount (or turns over at midnight).
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set([orgToday]));
+  useEffect(() => { setExpanded((prev) => (prev.has(orgToday) ? prev : new Set(prev).add(orgToday))); }, [orgToday]);
   const [selectedDay, setSelectedDay] = useState<string | null>(null); // month grid: the day whose detail is open
-  const [picked, setPicked] = useState<Set<string>>(new Set()); // month grid: days ticked for a bulk correction
   const [compare, setCompare] = useState(false); // opt-in: fetch the previous window to show deltas
   const [prevStats, setPrevStats] = useState<WindowStats | null>(null);
   const compactViewport = useMedia("(max-width: 639px)"); // phones get day cards; the day table needs a wide viewport
@@ -132,8 +136,8 @@ export function AttendanceHistory({
   }, [givenNow]);
   const now = givenNow ?? ownNow;
 
-  // A different window has different days, so neither per-window selection survives one.
-  useEffect(() => { setSelectedDay(null); setPicked(new Set()); }, [fromYmd, toYmd]);
+  // A different window has different days, so the selected day does not survive one.
+  useEffect(() => { setSelectedDay(null); }, [fromYmd, toYmd]);
 
   // ---- Punches ----
   // `ownSessions` is only ever populated when the caller supplied none; `ownLoading` starts true in that case
@@ -297,11 +301,14 @@ export function AttendanceHistory({
     return () => { live = false; };
   }, [compare, prevWindow, buildRows, employeeId, tz, schedOf, orgToday]);
 
-  // The grid opens on the day you're most likely to be looking for: today, else the newest day with a record.
+  // The grid opens on the day you're most likely to be looking for: today whenever the window holds it, punched
+  // or not, else the newest day that has happened. Not simply the newest row: the window also draws the
+  // holidays and leave still ahead in it, and opening on one of those showed a day with nothing to read or fix.
   useEffect(() => {
     if (view !== "calendar" || pageLoading || selectedDay) return;
-    setSelectedDay(rowByDay.has(orgToday) ? orgToday : rows[0]?.day ?? null);
-  }, [view, pageLoading, selectedDay, rowByDay, rows, orgToday]);
+    const today = fromYmd <= orgToday && orgToday <= toYmd ? orgToday : undefined;
+    setSelectedDay(today ?? rows.find((r) => r.day <= orgToday)?.day ?? null);
+  }, [view, pageLoading, selectedDay, rows, orgToday, fromYmd, toYmd]);
 
   const toggleDay = useCallback((day: string) => {
     setExpanded((prev) => {
@@ -335,9 +342,10 @@ export function AttendanceHistory({
     leaveType: r.status === "on_leave" || r.status === "half_day_leave" ? leaveTypeName(leaveForDay(r.day)?.leave_type) : undefined,
     holiday: r.status === "holiday" ? holidayByDay.get(r.day) : undefined,
     // Only a day that has happened: the window also draws the holidays and leave still ahead in it, and a
-    // correction for tomorrow is refused (services/attendanceRegularizations.ts).
-    onCorrect: onCorrect && r.day <= orgToday ? () => onCorrect([r]) : undefined,
-    onFixPunch: onCorrect && r.day <= orgToday ? (punch: PunchTarget) => onCorrect([r], punch) : undefined,
+    // correction for tomorrow is refused (services/attendanceRegularizations.ts). A day with punches is fixed
+    // one time at a time; only a day with none is given its in/out whole.
+    onCorrect: onCorrect && r.day <= orgToday && !hasPunches(r) ? () => onCorrect(r) : undefined,
+    onFixPunch: onCorrect && r.day <= orgToday ? (punch: PunchTarget) => onCorrect(r, punch) : undefined,
     // Offer the overtime hand-off only for a day that actually ran well past the shift (and only to callers
     // who may file one), so it stays a real signal rather than a button on every row.
     onLogOvertime: onLogOvertime && overtimeMinutes(r) >= 30 ? () => onLogOvertime(r) : undefined,
@@ -380,6 +388,8 @@ export function AttendanceHistory({
   }
 
   const selectedRow = selectedDay ? rowByDay.get(selectedDay) : undefined;
+  // The selected day when the window drew no row for it (MonthGrid opens those once they have happened).
+  const bareDay = selectedDay && !selectedRow && selectedDay <= orgToday ? selectedDay : undefined;
 
   return (
     <div className="space-y-6">
@@ -449,22 +459,13 @@ export function AttendanceHistory({
                   <button
                     key={r.day}
                     type="button"
-                    onClick={() => onCorrect([r])}
+                    onClick={() => onCorrect(r)}
                     className="inline-flex items-center gap-1.5 rounded-full border bg-background px-2.5 py-1 text-xs font-medium hover:border-foreground/30 hover:bg-muted"
                     title={`Request a correction for ${formatDate(r.day)}`}
                   >
                     <Pencil className="h-3 w-3 text-muted-foreground" aria-hidden /> {fmtDay(r.day)}
                   </button>
                 ))}
-                {absentRows.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={() => onCorrect(absentRows)}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-background px-2.5 py-1 text-xs font-medium text-destructive hover:bg-destructive/10"
-                  >
-                    <CheckSquare className="h-3 w-3" aria-hidden /> Fix all {absentRows.length} with the same times
-                  </button>
-                )}
               </div>
             </div>
           </div>
@@ -512,39 +513,37 @@ export function AttendanceHistory({
             </div>
           ) : view === "calendar" ? (
             <div className="space-y-4">
-              {/* Bulk correction: tick several days, fix them all with one set of times (a whole week of
-                  missed punches is one request per day, not one dialog per day). */}
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-xs text-muted-foreground">
-                  {!onCorrect ? "Click a day for its punches."
-                    : picked.size > 0 ? `${picked.size} day${picked.size === 1 ? "" : "s"} ticked`
-                    : "Click a day for its punches, or tick several to correct them together."}
-                </p>
-                {onCorrect && picked.size > 0 && (
-                  <div className="flex items-center gap-1.5">
-                    <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setPicked(new Set())}>Clear</Button>
-                    <Button size="sm" className="h-7" onClick={() => onCorrect([...picked].sort().map((d) => rowByDay.get(d) ?? { day: d, status: "absent" as DayStatus }))}>
-                      <Pencil className="h-3 w-3" /> Correct {picked.size} day{picked.size === 1 ? "" : "s"}
-                    </Button>
-                  </div>
-                )}
-              </div>
+              <p className="text-xs text-muted-foreground">
+                {onCorrect ? "Click a day for its punches, then a time to fix it." : "Click a day for its punches."}
+              </p>
               <MonthGrid
                 monthYmd={fromYmd}
                 rowByDay={rowByDay}
                 orgToday={orgToday}
+                firstDay={joinedYmd}
                 workDays={sched.work_days}
                 weekStart={sched.week_start ?? 0}
                 selected={selectedDay}
-                picked={picked}
                 onSelect={setSelectedDay}
-                onTick={!onCorrect ? undefined : (d) => setPicked((prev) => {
-                  const next = new Set(prev);
-                  next.has(d) ? next.delete(d) : next.add(d);
-                  return next;
-                })}
               />
-              {selectedRow ? (
+              {bareDay ? (
+                // A day with no row: today before its first punch, or a rest day nobody clocked. Nothing to
+                // fix, but a punch to add.
+                <div className="rounded-xl border p-4">
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
+                    <span className="font-medium">{fmtDayLong(bareDay)}</span>
+                    {bareDay === orgToday && <Badge variant="info">Today</Badge>}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+                    <span>{bareDay === orgToday ? "No punches yet today." : "Nothing recorded - not a working day."}</span>
+                    {onCorrect && (
+                      <Button variant="outline" size="sm" onClick={() => onCorrect({ day: bareDay, status: "absent" })}>
+                        <Pencil className="h-3 w-3" /> {bareDay === orgToday ? "Add missing clock-in" : "Worked this day? Add times"}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ) : selectedRow ? (
                 <div className="rounded-xl border p-4">
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
@@ -568,11 +567,6 @@ export function AttendanceHistory({
                         <span className="text-xs tabular-nums text-muted-foreground">
                           {selectedRow.summary.arrival ? fmtHM(selectedRow.summary.arrival, tz) : "-"} – {selectedRow.summary.departure ? fmtHM(selectedRow.summary.departure, tz) : selectedRow.summary.open ? "open" : "-"} · {fmtDuration(selectedRow.summary.workedMinutes)}
                         </span>
-                      )}
-                      {onCorrect && selectedRow.day <= orgToday && (
-                        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={() => onCorrect([selectedRow])}>
-                          <Pencil className="h-3 w-3" /> Correct
-                        </Button>
                       )}
                     </div>
                   </div>
@@ -661,10 +655,11 @@ export function AttendanceHistory({
                                       <Scale className="h-3.5 w-3.5" />
                                     </button>
                                   )}
-                                  {onCorrect && r.day <= orgToday && (
+                                  {/* A day with punches is fixed from its times, in the unfolded detail. */}
+                                  {onCorrect && r.day <= orgToday && !hasPunches(r) && (
                                     <button
                                       type="button"
-                                      onClick={(e) => { e.stopPropagation(); onCorrect([r]); }}
+                                      onClick={(e) => { e.stopPropagation(); onCorrect(r); }}
                                       className="text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus:opacity-100 group-hover:opacity-100"
                                       title={`Request a correction for ${formatDate(r.day)}`}
                                       aria-label={`Request a correction for ${formatDate(r.day)}`}
@@ -964,19 +959,19 @@ function Delta({ label, value, format, lowerIsBetter }: { label: string; value: 
   );
 }
 
-// The month grid: one cell per day, tinted by that day's status, with its hours. Clicking opens the day; the
-// checkbox in the corner ticks it for a bulk correction, and is absent for a reader who cannot file one.
-// Days with no record are inert.
-function MonthGrid({ monthYmd, rowByDay, orgToday, workDays, weekStart, selected, picked, onSelect, onTick }: {
+// The month grid: one cell per day, tinted by that day's status, with its hours. Clicking opens the day. A
+// day the window drew no row for opens too once it has happened - today before its first punch, a rest day -
+// because that is where a missed punch is added; only days still ahead with nothing on them, and days before
+// the person joined, are inert.
+function MonthGrid({ monthYmd, rowByDay, orgToday, firstDay, workDays, weekStart, selected, onSelect }: {
   monthYmd: string;
   rowByDay: Map<string, AttendanceRow>;
   orgToday: string;
+  firstDay?: string;
   workDays: number[];
   weekStart: number;
   selected: string | null;
-  picked: Set<string>;
   onSelect: (day: string) => void;
-  onTick?: (day: string) => void;
 }) {
   const month = monthYmd.slice(0, 7);
   const cells = monthGridDays(monthYmd, weekStart);
@@ -1002,14 +997,12 @@ function MonthGrid({ monthYmd, rowByDay, orgToday, workDays, weekStart, selected
             const ui = r ? STATUS_UI[r.status] : undefined;
             const isToday = day === orgToday;
             const isSel = selected === day;
-            const isPicked = picked.has(day);
             const shell = cn(
               "relative min-h-[58px] border-b border-r p-1 text-left align-top transition-colors sm:min-h-[76px] sm:p-1.5",
               i % 7 === 6 && "border-r-0",
               i >= 35 && "border-b-0",
               !inMonth ? "bg-muted/20 text-muted-foreground/40" : ui?.cell,
               isSel && "ring-2 ring-inset ring-primary",
-              isPicked && "ring-2 ring-inset ring-foreground/40",
             );
             const body = (
               <>
@@ -1033,9 +1026,23 @@ function MonthGrid({ monthYmd, rowByDay, orgToday, workDays, weekStart, selected
                 )}
               </>
             );
-            if (!r) return <div key={day} className={shell}>{body}</div>;
+            if (!r) {
+              if (!inMonth || day > orgToday || (firstDay && day < firstDay)) return <div key={day} className={shell}>{body}</div>;
+              return (
+                <div key={day} className={shell}>
+                  <button
+                    type="button"
+                    onClick={() => onSelect(day)}
+                    className="absolute inset-0 hover:bg-accent/40"
+                    aria-label={`${fmtDayLong(day)} · ${isToday ? "No punches yet" : "Nothing recorded"}`}
+                    aria-pressed={isSel}
+                  />
+                  <div className="pointer-events-none relative">{body}</div>
+                </div>
+              );
+            }
             return (
-              <div key={day} className={cn(shell, "group")}>
+              <div key={day} className={shell}>
                 <button
                   type="button"
                   onClick={() => onSelect(day)}
@@ -1046,20 +1053,6 @@ function MonthGrid({ monthYmd, rowByDay, orgToday, workDays, weekStart, selected
                   aria-pressed={isSel}
                 />
                 <div className="pointer-events-none relative">{body}</div>
-                {onTick && day <= orgToday && (
-                  <button
-                    type="button"
-                    onClick={() => onTick(day)}
-                    aria-label={`${isPicked ? "Untick" : "Tick"} ${fmtDayLong(day)} for a bulk correction`}
-                    aria-pressed={isPicked}
-                    className={cn(
-                      "absolute bottom-1 right-1 flex h-4 w-4 items-center justify-center rounded border bg-card transition-opacity",
-                      isPicked ? "border-foreground/50 opacity-100" : "opacity-0 focus:opacity-100 group-hover:opacity-100",
-                    )}
-                  >
-                    {isPicked && <Check className="h-3 w-3" />}
-                  </button>
-                )}
               </div>
             );
           })}
@@ -1210,8 +1203,9 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
   leave?: LeaveRequest;
   leaveType?: LeaveType;
   holiday?: Holiday;
+  // Add the in/out of a day that has no punches. Set only on such a day.
   onCorrect?: () => void;
-  // Fix ONE clock-in or clock-out, from the time itself. Set exactly where `onCorrect` is.
+  // Fix ONE clock-in or clock-out, from the time itself.
   onFixPunch?: (punch: PunchTarget) => void;
   onLogOvertime?: () => void;
   overtimeMinutes?: number;
@@ -1282,12 +1276,7 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
           })}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
-          {onCorrect && (
-            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={onCorrect}>
-              <Pencil className="h-3 w-3" /> {onFixPunch ? "Edit the whole day" : "Wrong times? Request a correction"}
-            </Button>
-          )}
-          {onFixPunch && <span className="text-xs text-muted-foreground">or pick a time to fix just that punch</span>}
+          {onFixPunch && <span className="px-2 text-xs text-muted-foreground">Wrong or missing time? Pick it to request a fix.</span>}
           {onLogOvertime && (
             <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={onLogOvertime}>
               <Zap className="h-3 w-3" /> Log {fmtDurationShort(overtimeMinutes)} past the shift as overtime
@@ -1307,6 +1296,14 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
       </div>
     );
   }
+
+  // Worked on a holiday or through leave without punching: the same add as an absent day, kept quiet here
+  // because it is the exception on such a day.
+  const addTimes = onCorrect && (
+    <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={onCorrect}>
+      <Pencil className="h-3 w-3" /> Worked this day? Add times
+    </Button>
+  );
 
   if ((row.status === "on_leave" || row.status === "half_day_leave") && leave) {
     // For a multi-day leave that starts/ends on a half-day, only the boundary day is partial.
@@ -1334,6 +1331,7 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
         ) : (
           <p className="text-xs italic text-muted-foreground">No reason provided.</p>
         )}
+        {addTimes}
       </div>
     );
   }
@@ -1343,6 +1341,7 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <span className="font-medium">{holiday?.display_name ?? "Holiday"}</span>
         {holiday?.kind === "optional" && <Badge variant="muted">Optional</Badge>}
+        {addTimes}
       </div>
     );
   }
@@ -1352,7 +1351,7 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
     return (
       <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
         <span>No punches recorded, and no approved leave or holiday on record for this day.</span>
-        {onCorrect && <Button variant="outline" size="sm" onClick={onCorrect}><Pencil className="h-3 w-3" /> Request correction</Button>}
+        {onCorrect && <Button variant="outline" size="sm" onClick={onCorrect}><Pencil className="h-3 w-3" /> Add missing punches</Button>}
       </div>
     );
   }

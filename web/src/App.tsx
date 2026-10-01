@@ -268,7 +268,7 @@ function SessionExpiredDialog({ open, onSignedIn }: { open: boolean; onSignedIn:
           <Button variant="outline" onClick={() => window.open("/auth/login", "_blank", "noopener")}>
             Open sign-in
           </Button>
-          <Button loading={checking} onClick={() => void checkSignedIn()}>
+          <Button loading={checking} onClick={() => checkSignedIn()}>
             I've signed in - continue
           </Button>
         </DialogFooter>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeAccrual, creditedBeforeFloor, hrmsPricingStartMs, leaveDays, roundToIncrement, ymOf } from "../src/domain/leave";
+import { capAccrual, computeAccrual, creditedBeforeFloor, hrmsPricingStartMs, leaveDays, roundToIncrement, ymOf } from "../src/domain/leave";
 import { orgScheduleOf } from "../src/domain/workSchedule";
 
 // A working week as the day-by-day resolver `leaveDays` takes (domain/workSchedule.ts). The weekday set the
@@ -565,6 +565,32 @@ describe("roundToIncrement", () => {
   });
   it("0 increment = exact (2dp)", () => {
     expect(roundToIncrement(2.414, 0)).toBe(2.41);
+  });
+});
+
+describe("capAccrual", () => {
+  it("passes a credit through when there is no cap", () => {
+    expect(capAccrual(100, 1.5, null)).toBe(1.5);
+    expect(capAccrual(100, 1.5, undefined)).toBe(1.5);
+  });
+  it("passes a credit that fits under the cap", () => {
+    expect(capAccrual(10, 1.5, 15)).toBe(1.5);
+  });
+  it("cuts a credit to what fits under the cap", () => {
+    expect(capAccrual(14, 1.5, 15)).toBe(1);
+  });
+  it("credits nothing at the cap, and never reduces a balance above it", () => {
+    expect(capAccrual(15, 1.5, 15)).toBe(0);
+    expect(capAccrual(20, 1.5, 15)).toBe(0);
+  });
+  it("leaves a claw-back (negative add) alone", () => {
+    expect(capAccrual(20, -0.5, 15)).toBe(-0.5);
+  });
+  it("takes the cap down to the rounding increment, so rounding cannot land above it", () => {
+    // 10.3 under half-day rounding is 10: a credit to 10.3 would round to 10.5.
+    expect(capAccrual(9, 2, 10.3, 0.5)).toBe(1);
+    expect(roundToIncrement(9 + capAccrual(9, 2, 10.3, 0.5), 0.5)).toBe(10);
+    expect(capAccrual(9, 2, 10.3, 0)).toBe(1.3);
   });
 });
 

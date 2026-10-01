@@ -238,7 +238,7 @@ export function TeamTriage({ goals, employees, departments = [], me, deptName, o
                   size="sm"
                   className="ml-auto text-muted-foreground"
                   loading={busy === `comment:all:${id}`}
-                  onClick={() => void nudgeAll(nudgeable, person ? person.first_name : personName, id)}
+                  onClick={() => nudgeAll(nudgeable, person ? person.first_name : personName, id)}
                 >
                   <BellRing className="h-3.5 w-3.5" /> Ask about all {nudgeable.length}
                 </Button>
@@ -282,7 +282,7 @@ export function TeamTriage({ goals, employees, departments = [], me, deptName, o
                       <AccessAction verb="approve" can={g.access?.can} label="Agree this goal">
                         {/* `person`, not the block's heading: for the unowned block that heading is the words
                             "No owner", and the confirm asked whether to approve "No owner's goal". */}
-                        <Button variant="ghost" size="sm" loading={busy === `approve:${g.path}`} onClick={() => void agree(g, person ? personName : null)}>
+                        <Button variant="ghost" size="sm" loading={busy === `approve:${g.path}`} onClick={() => agree(g, person ? personName : null)}>
                           <CheckCircle2 className="h-3.5 w-3.5" /> Agree
                         </Button>
                       </AccessAction>
@@ -299,7 +299,7 @@ export function TeamTriage({ goals, employees, departments = [], me, deptName, o
                           loading={busy === `comment:${g.path}`}
                           disabled={asked.includes(g.path)}
                           title={asked.includes(g.path) ? "You have already asked - the request is on the goal, waiting for their reply." : undefined}
-                          onClick={() => void nudge(g)}
+                          onClick={() => nudge(g)}
                         >
                           <BellRing className="h-3.5 w-3.5" /> {asked.includes(g.path) ? "Update requested" : "Ask for an update"}
                         </Button>

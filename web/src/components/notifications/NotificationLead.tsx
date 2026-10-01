@@ -1,6 +1,6 @@
 import { metaForType } from "@/lib/notificationMeta";
-import { PersonAvatar } from "@/components/common/PersonAvatar";
-import { cn } from "@/lib/utils";
+import { PhotoAvatar } from "@/components/common/PhotoAvatar";
+import { cn, idOf } from "@/lib/utils";
 import type { Notification } from "@/types";
 
 // The leading visual of a notification row. When there's an actor (an approver, a kudos-giver, ...) it's their
@@ -15,7 +15,7 @@ export function NotificationLead({ n, size = "md" }: { n: Notification; size?: "
   if (n.actor) {
     return (
       <span className="relative inline-block shrink-0">
-        <PersonAvatar name={n.actor} className={box} />
+        <PhotoAvatar employeeId={n.actor_id ? idOf(n.actor_id) : ""} name={n.actor} photo={n.actor_photo} className={cn(box, "text-xs")} />
         <span className={cn("absolute -bottom-1 -right-1 flex items-center justify-center rounded-full p-0.5 ring-2 ring-card", meta.cls)}>
           <Icon className="h-3 w-3" />
         </span>

@@ -51,7 +51,7 @@ function group<T extends Approvable>(g: { key: string; label: string; icon: Luci
 // Prior-employer tax declarations awaiting verification. A bespoke queue (not a collection), so it renders as
 // its own inbox section with a Verify/Reject that PATCHes employees/<id>/tax - the server still enforces the
 // maker-checker (you can't verify your own). Hidden for callers without the tax-verifications capability (the
-// endpoint 403s -> empty rows).
+// provider never asks for the rows).
 function TaxVerificationsCard({ rows, money, canDecide, onDone }: { rows: TaxVerification[]; money: (n: number) => string; canDecide: boolean; onDone: () => void }) {
   const { toast } = useToast();
   const [busy, setBusy] = useState<string | null>(null);
@@ -526,10 +526,10 @@ export default function Approvals({ me }: { me: Me }) {
                           </Button>
                         )}
                         <div className="min-w-4 flex-1" />
-                        <Button size="sm" variant="success" loading={bulkBusy === "approve"} disabled={bulkBusy === "reject"} onClick={() => void runBulkDecision("approve")}>
+                        <Button size="sm" variant="success" loading={bulkBusy === "approve"} disabled={bulkBusy === "reject"} onClick={() => runBulkDecision("approve")}>
                           <CheckCheck className="h-4 w-4" /> Approve selected
                         </Button>
-                        <Button size="sm" variant="outline" loading={bulkBusy === "reject"} disabled={bulkBusy === "approve"} onClick={() => void runBulkDecision("reject")}>
+                        <Button size="sm" variant="outline" loading={bulkBusy === "reject"} disabled={bulkBusy === "approve"} onClick={() => runBulkDecision("reject")}>
                           <X className="h-4 w-4" /> Reject selected
                         </Button>
                       </div>

@@ -150,7 +150,7 @@ function RecordsStart() {
             <Input type="date" value={chosen} max={todayStr()} onChange={(e) => { setDate(e.target.value); setPlan(null); }} />
           </Field>
           <AccessAction collection="employees" verb="setTrackedFrom" label="Set when HRMS records start">
-            <Button variant="outline" loading={busy === "preview"} disabled={!chosen} onClick={() => void preview()}>Preview</Button>
+            <Button variant="outline" loading={busy === "preview"} disabled={!chosen} onClick={() => preview()}>Preview</Button>
           </AccessAction>
         </div>
 
@@ -199,7 +199,7 @@ function RecordsStart() {
             {!applied && plan.counts.set > 0 && (
               <div className="flex justify-end">
                 <AccessAction collection="employees" verb="setTrackedFrom" label="Set when HRMS records start">
-                  <Button loading={busy === "apply"} onClick={() => void apply()}>
+                  <Button loading={busy === "apply"} onClick={() => apply()}>
                     Set the date for {plan.counts.set} {plan.counts.set === 1 ? "person" : "people"}
                   </Button>
                 </AccessAction>

@@ -10,16 +10,14 @@ import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
 // what this pins is the loop between the arrow and the number.
 test("a suggestion is voted up, the vote is taken back, and the score is what others see", async ({ as }) => {
   test.setTimeout(180_000);
-  // The box is opened to the company by an ACL, not by a role grant: an org grants `suggestions:upvote` and
-  // `:downvote` to the `everyone` pseudo-role, which is exactly what this spec sets up first - the seed
-  // pre-grants that only for notifications. So the setup is part of the story: without it, nobody but the
-  // submitter can move a score.
-  const admin = await as("super");
+  // The box is open to the company through the `everyone` pseudo-role: the seed grants it the suggestion
+  // reads and the `upvote` / `downvote` verbs (bootstrap/authz/roles/everyone.json), so a plain employee
+  // votes with no setup at all.
   const author = await as("super");
   const voter = await as("employee");
   const reader = await as("hr");
-  const rules = await openTheBox(admin);
-  const title = `E2E votable ${Date.now() % 100000}`;
+  // The worker slot keeps parallel copies (`--repeat-each`) that start in the same millisecond apart.
+  const title = `E2E votable ${Date.now() % 100000}-${test.info().parallelIndex}`;
 
   const made = await author.request.post("/v1/suggestions", {
     headers: SPA_HEADERS,
@@ -52,29 +50,4 @@ test("a suggestion is voted up, the vote is taken back, and the score is what ot
   await expect(theirs.getByText("-1", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
 
   await purge(author, suggestion.path);
-  for (const rule of rules) await purge(admin, rule);
 });
-
-/** Grant the vote verbs to everyone, the way an org opens its suggestion box. Returns the rules to remove. */
-async function openTheBox(admin: import("@playwright/test").Page): Promise<string[]> {
-  const made: string[] = [];
-  // Reading the box is the first half of opening it: a vote grant on a board nobody may see is inert.
-  const read = await admin.request.post("/v1/access-rules", {
-    headers: SPA_HEADERS,
-    data: { subject_kind: "role", subject: "everyone", collection: "suggestions", scope: "all", level: "read", effect: "allow" },
-  });
-  expect(read.status(), `read rule: ${await read.text()}`).toBe(200);
-  made.push(((await read.json()) as { path: string }).path);
-
-  for (const verb of ["upvote", "downvote"]) {
-    const res = await admin.request.post("/v1/access-rules", {
-      headers: SPA_HEADERS,
-      // The rule the Access Management UI writes: a VERB rule (no level) on every suggestion, for the
-      // `everyone` pseudo-role - "anybody may vote", which is what a suggestion box is.
-      data: { subject_kind: "role", subject: "everyone", collection: "suggestions", scope: "all", verb, effect: "allow" },
-    });
-    expect(res.status(), `${verb} rule: ${await res.text()}`).toBe(200);
-    made.push(((await res.json()) as { path: string }).path);
-  }
-  return made;
-}

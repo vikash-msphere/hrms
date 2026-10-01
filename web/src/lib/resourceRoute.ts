@@ -107,6 +107,14 @@ export function requestRoute(collection: string, ref: string, ownerId: string | 
   return resourceRoute(collection, ref);
 }
 
+/**
+ * Where a person's attendance opens: somebody else's on the Attendance tab of their profile, the caller's own
+ * on the Attendance page (a profile drops that tab on one's own record, so the tab URL would land on Profile).
+ */
+export function attendanceRoute(employeeId: string, selfId: string | null | undefined): string {
+  return employeeId === selfId ? "attendance" : `employees/${employeeId}/attendance`;
+}
+
 // Whether clicking navigates to the exact record (vs. just the list page) — for tooltip wording.
 export function opensExactRecord(collection: string): boolean {
   return collection in DEEP_OPEN;

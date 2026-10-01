@@ -56,7 +56,6 @@ const LEDGER = new Set([
   "components/notifications/NotificationRow.tsx",
   "lib/notificationMeta.tsx",
   "pages/Assets.tsx",
-  "pages/Attendance.tsx",
   "pages/BankFormats.tsx",
   "pages/Boards.tsx",
   "pages/CheckIns.tsx",

@@ -674,7 +674,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
                               disabled={!!r.arrears_paid}
                               title={r.arrears_paid ? "Its retro arrears have already been paid - reverse that payroll run first" : "Remove this revision"}
                               aria-label={`Remove the revision effective ${r.effective_from}`}
-                              onClick={() => void removeRevision(r)}
+                              onClick={() => removeRevision(r)}
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>

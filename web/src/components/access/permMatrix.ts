@@ -69,13 +69,17 @@ export function groupOf(collection: string): string {
 
 export const labelOf = (c: string) => metaFor(c).label;
 
-/** Narrows a rules read to what one editor is about (GET /v1/access-rules `collection`, `subject_kind` + `subject`). */
-export type AccessRuleFilter = { collection?: string } | { subject_kind: "role" | "user"; subject: string };
+/**
+ * Narrows a rules read to what one editor is about (GET /v1/access-rules `collection`, `subject_kind` +
+ * `subject`, or `effect`).
+ */
+export type AccessRuleFilter = { collection?: string } | { subject_kind: "role" | "user"; subject: string } | { effect: "allow" | "deny" };
 
 // Page through ALL access-rules (the server caps a page at 100 and there can be more), so a matrix/editor
 // reflects every rule rather than just the first page. An org holds thousands, so an editor about ONE
-// collection or ONE subject passes `filter` and pages through only those: the whole table is dozens of
-// sequential pages, which left the editor showing the pre-edit state for seconds after every change.
+// collection or ONE subject passes `filter` and pages through only those, and access mode's deny tint asks for
+// the denies alone: the whole table is dozens of sequential pages, which left the editor showing the pre-edit
+// state for seconds after every change, and every row of it is billed.
 export async function fetchAllAccessRules(filter: AccessRuleFilter = {}): Promise<AccessRule[]> {
   const all: AccessRule[] = [];
   let token: string | undefined;

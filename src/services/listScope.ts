@@ -33,10 +33,23 @@ import type { ListScope } from "../domain/access";
 //
 // GLOB is case-sensitive where LIKE was not, which is strictly tighter and changes no result: codes are
 // generated from the lowercase Crockford alphabet in domain/codes.ts, so no code has a case variant to match.
+//
+// THE OTHER SIDE OF THAT INDEX: `multiIndexOr: false`. Because every branch of the OR below can seek an index,
+// SQLite answers the whole OR as a MULTI-INDEX OR: it collects the rows EVERY branch matches, fetches them all,
+// and only then sorts and applies the LIMIT. That is the right plan when the branches are narrow (a department,
+// a share). It is the wrong one for a newest-first keyset page whose branches cover most of the table: the page
+// reads every row the caller can see in order to return a hundred of them. SQLite cannot tell the two cases
+// apart, because it prices a GLOB range at 1/64 of the table with or without ANALYZE. So the caller, which
+// knows how broad its branches are, chooses. With `multiIndexOr: false` the OR is bound as `+( ... )`. SQLite's
+// unary plus changes no row and only keeps the OR out of index selection, so the page walks its
+// (created_at, uuid) index and stops at the LIMIT. A lone branch (`own` or `dept` with nothing OR'd in) is left
+// seekable, since there is no union to avoid there. services/cards.ts `listCards` is the caller that opts out,
+// with the measured numbers.
 export function applyScope(
   scope: ListScope | undefined,
   code: AnySQLiteColumn | undefined,
   owner: AnySQLiteColumn | undefined,
+  opts: { multiIndexOr?: boolean } = {},
 ): SQL | undefined {
   if (!scope) return sql`1 = 0`; // fail closed: no scope set -> no rows
   const shares = scope.shares ?? [];
@@ -69,7 +82,10 @@ export function applyScope(
   // OR in per-object shares and subtree grants (each as its subtree). If breadth is 'all' (base undefined)
   // the caller already sees everything, so they add nothing.
   let pred = base;
-  if (widen.length && base !== undefined) pred = or(base, ...widen.map(subtree));
+  if (widen.length && base !== undefined) {
+    const any = or(base, ...widen.map(subtree))!;
+    pred = opts.multiIndexOr === false ? sql`+(${any})` : any;
+  }
 
   // AND NOT per-object denies (deny-wins, even against 'all'): a denied subtree is hidden regardless of breadth.
   //

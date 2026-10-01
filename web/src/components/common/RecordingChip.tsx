@@ -73,7 +73,7 @@ export function RecordingChip() {
       <span className="font-medium tabular-nums">
         Recording · {Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")}
       </span>
-      <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-destructive hover:bg-destructive/15" onClick={() => void stopRecording()}>
+      <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-destructive hover:bg-destructive/15" onClick={() => stopRecording()}>
         <Square className="h-3 w-3 fill-current" /> Stop
       </Button>
     </div>

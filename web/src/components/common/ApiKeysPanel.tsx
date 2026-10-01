@@ -866,7 +866,7 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
           </div>
           <p className="text-xs text-muted-foreground">Scope: {scopeSentence}.</p>
           <DialogFooter>
-            <Button variant={copied ? "default" : "outline"} onClick={() => void closeMinted()}>Done</Button>
+            <Button variant={copied ? "default" : "outline"} onClick={() => closeMinted()}>Done</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

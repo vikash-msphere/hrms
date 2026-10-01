@@ -390,7 +390,7 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
                       // The hired column's single action: open this hire's onboarding, converting them first
                       // if the board is the only place the hire ever happened.
                       const onboardBtn = (
-                        <Button size="sm" variant="outline" className="h-7 min-w-0 gap-1 px-2" loading={hiring === a.path} onClick={() => void openOnboarding(a)} title={a.hired_employee ? "Open this hire's onboarding" : "Create their employee record and start onboarding"}>
+                        <Button size="sm" variant="outline" className="h-7 min-w-0 gap-1 px-2" loading={hiring === a.path} onClick={() => openOnboarding(a)} title={a.hired_employee ? "Open this hire's onboarding" : "Create their employee record and start onboarding"}>
                           <UserPlus className="h-3.5 w-3.5 shrink-0" />
                           <span className="truncate">{a.hired_employee ? "Onboarding" : "Start onboarding"}</span>
                         </Button>

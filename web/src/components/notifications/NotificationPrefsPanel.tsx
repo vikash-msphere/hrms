@@ -141,7 +141,7 @@ function BrowserPushRow() {
             : "Get notified even when no tab is open. Applies to this browser only."}
         </span>
       </div>
-      <Button size="sm" variant={on ? "outline" : "default"} loading={busy} disabled={state === "denied"} onClick={() => void toggle()}>
+      <Button size="sm" variant={on ? "outline" : "default"} loading={busy} disabled={state === "denied"} onClick={() => toggle()}>
         {on ? "Turn off" : "Turn on"}
       </Button>
     </div>

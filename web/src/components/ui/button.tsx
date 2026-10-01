@@ -34,30 +34,82 @@ const buttonVariants = cva(
 );
 
 export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+  extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "onClick">,
     VariantProps<typeof buttonVariants> {
   asChild?: boolean;
-  // While true, the button is disabled and shows a leading spinner - so every async action gets a consistent
+  // While true, the button is disabled and shows a spinner - so every async action gets a consistent
   // in-flight state without each caller hand-rolling a disabled+"Saving…" pattern. Ignored when `asChild`.
   loading?: boolean;
+  // A handler that RETURNS a promise is the action itself: the button holds its loading state until that
+  // promise settles, so a click can't be repeated while the request is in flight. Return the promise
+  // (`onClick={() => save()}`, or an async handler) rather than dropping it with `void save()`.
+  onClick?: (event: React.MouseEvent<HTMLButtonElement>) => unknown;
+}
+
+// The spinner takes the place of the button's leading icon instead of sitting beside it, so an icon-only
+// button stays one glyph wide and a labelled one doesn't grow by an icon while it waits.
+const SPINNER_SWAP = "[&>[data-spinner]+svg]:hidden";
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return typeof (value as PromiseLike<unknown> | null)?.then === "function";
+}
+
+// Tracks the promise an onClick returns. The ref guards the gap before React re-renders the disabled
+// button, so a fast double click can't start the action twice.
+function usePendingClick(onClick: ButtonProps["onClick"]) {
+  const [pending, setPending] = React.useState(false);
+  const inFlight = React.useRef(false);
+  const handleClick = React.useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      if (inFlight.current) {
+        event.preventDefault();
+        return;
+      }
+      const result = onClick?.(event);
+      if (!isThenable(result)) return;
+      inFlight.current = true;
+      setPending(true);
+      const settle = () => {
+        inFlight.current = false;
+        setPending(false);
+      };
+      // Rethrown so a rejection the caller didn't handle still surfaces as an unhandled rejection, exactly
+      // as it did before the button watched it.
+      void Promise.resolve(result).then(settle, (err: unknown) => {
+        settle();
+        throw err;
+      });
+    },
+    [onClick],
+  );
+  return { pending, handleClick };
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, loading = false, disabled, children, ...props }, ref) => {
+  ({ className, variant, size, asChild = false, loading = false, disabled, onClick, children, ...props }, ref) => {
+    const { pending, handleClick } = usePendingClick(onClick);
     // Slot does React.Children.only, so the asChild branch must pass the child through ALONE - a second child
     // expression (even one that evaluates to `false`) makes children an array and throws.
     if (asChild) {
       // Slot forwards unknown props straight to the child, so `disabled` still lands on the real element -
       // SlotProps just doesn't model it, hence the cast.
       return (
-        <Slot className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...({ disabled } as { disabled?: boolean })} {...props}>
+        <Slot className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...({ disabled } as { disabled?: boolean })} onClick={onClick && handleClick} {...props}>
           {children}
         </Slot>
       );
     }
+    const busy = loading || pending;
     return (
-      <button className={cn(buttonVariants({ variant, size, className }))} ref={ref} disabled={disabled || loading} {...props}>
-        {loading && <Loader2 className="animate-spin" />}
+      <button
+        className={cn(buttonVariants({ variant, size, className }), busy && SPINNER_SWAP)}
+        ref={ref}
+        disabled={disabled || busy}
+        aria-busy={busy || undefined}
+        onClick={onClick && handleClick}
+        {...props}
+      >
+        {busy && <Loader2 data-spinner="" className="animate-spin" />}
         {children}
       </button>
     );

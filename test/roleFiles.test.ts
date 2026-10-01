@@ -226,11 +226,16 @@ describe("everyone: what every account needs, and nothing about anybody else", (
       expect(bare(m, p), `${m} ${p}`).toBe(false);
     }
   });
+  // A rule is its lane, pattern and level: HR's `announcements.**` write widens everyone's read of the board
+  // rather than repeating it.
   it("no role file repeats an everyone rule, so each rule has one home", () => {
+    const key = (lane: string, r: { pattern: string; level?: string }) => `${lane} ${r.pattern} ${r.level ?? ""}`;
     const everyone = ROLE_FILES.find((f) => f.role === "everyone")!;
-    const mine = new Set([...everyone.levels, ...everyone.allow].map((r) => r.pattern));
+    const mine = new Set([...everyone.levels.map((r) => key("levels", r)), ...everyone.allow.map((r) => key("allow", r))]);
     for (const f of ROLE_FILES.filter((x) => x.role !== "everyone" && x.role !== "super_admin")) {
-      for (const r of [...f.levels, ...f.allow]) expect(mine.has(r.pattern), `${f.role} repeats ${r.pattern}`).toBe(false);
+      for (const k of [...f.levels.map((r) => key("levels", r)), ...f.allow.map((r) => key("allow", r))]) {
+        expect(mine.has(k), `${f.role} repeats ${k}`).toBe(false);
+      }
     }
   });
 });
@@ -263,8 +268,19 @@ describe("employee: what the review found too broad is not granted", () => {
     expect(GRANTS.employee.allow).not.toContain("cards.**");
     expect(can("POST", `/v1/cards/${OTHER}:someFutureVerb`)).toBe(false);
   });
-  it("posting to the company board stays HR's; kudos stays open", () => {
-    expect(can("POST", "/v1/announcements:post")).toBe(false);
+  it("an official announcement stays HR's; posts, polls and kudos are open", () => {
+    expect(can("POST", "/v1/announcements")).toBe(false);
+    expect(can("POST", "/v1/announcements:post")).toBe(true);
     expect(can("POST", "/v1/announcements:giveKudos")).toBe(true);
+    expect(can("POST", `/v1/announcements/${OWN}:pin`)).toBe(false);
+    expect(can("POST", `/v1/announcements/${OTHER}:lock`)).toBe(false);
+  });
+  it("the suggestion box is open to submit and vote, and triage stays HR's", () => {
+    expect(can("POST", "/v1/suggestions")).toBe(true);
+    expect(can("GET", `/v1/suggestions/${OTHER}`)).toBe(true);
+    expect(can("PATCH", `/v1/suggestions/${OWN}`)).toBe(true);
+    expect(can("PATCH", `/v1/suggestions/${OTHER}`)).toBe(false);
+    for (const v of ["upvote", "downvote"]) expect(can("POST", `/v1/suggestions/${OTHER}:${v}`), v).toBe(true);
+    for (const v of ["respond", "merge", "similar"]) expect(can("POST", `/v1/suggestions/${OTHER}:${v}`), v).toBe(false);
   });
 });

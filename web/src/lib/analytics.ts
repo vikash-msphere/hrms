@@ -24,6 +24,7 @@ export type PersonRow = {
   name: string;
   employee_number?: string | null;
   job_title?: string | null;
+  photo?: string | null;
   department?: string | null;
   manager?: string | null;
   values: Record<string, number | null>;

@@ -46,7 +46,6 @@ const WITHHELD_COLLECTIONS: Record<string, string> = {
   roles: "the role catalogue, same reason as `policy`",
   referrals: "private + ACL by design (see the referrals module notes) - the whole collection is per-object",
   "payroll-debit-accounts": "the employer's own bank account, which the bank file is drawn on: super-only, grantable through the ACL",
-  "tax-verifications": "the prior-employer verification queue rides the `tax` capability, decided per employee sub-resource",
   moderation: "the flagged-post queue quotes public posts in full and is deliberately NOT narrowed per holder (moderating is an org-wide job), so the capability is the whole access decision - granted to a named moderator through the ACL, never seeded to a role",
   // users left this list when HR was given the account list, read-only, to reset a forgotten app PIN from it.
   // Changing who can sign in and as what is still super's act (users.write, PROTECTED_FIELDS).

@@ -389,14 +389,23 @@ export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown
   // without `source` in the predicate an automatic share on a ticket would refuse an admin's own grant on it
   // (and the share's revoke would then take the admin's away) - the two rows are separate things that happen
   // to spell the same permission.
-  const dup = (
-    await deps.db
-      .select({ id: schema.accessRules.uuid })
-      .from(schema.accessRules)
-      .where(and(eq(schema.accessRules.subject, subject), eq(schema.accessRules.subjectKind, r.subjectKind), eq(schema.accessRules.pattern, pattern), eq(schema.accessRules.effect, r.effect), eq(schema.accessRules.source, "acl"), r.condition ? eq(schema.accessRules.condition, JSON.stringify(r.condition)) : isNull(schema.accessRules.condition)))
-      .limit(1)
-  )[0];
-  if (dup) throw alreadyExists("an identical access rule already exists");
+  const same = await deps.db
+    .select({ uuid: schema.accessRules.uuid, status: schema.accessRules.status, level: schema.accessRules.level, expiresAt: schema.accessRules.expiresAt, fromIp: schema.accessRules.fromIp, window: schema.accessRules.window, requestedBy: schema.accessRules.requestedBy })
+    .from(schema.accessRules)
+    .where(and(eq(schema.accessRules.subject, subject), eq(schema.accessRules.subjectKind, r.subjectKind), eq(schema.accessRules.pattern, pattern), eq(schema.accessRules.effect, r.effect), eq(schema.accessRules.source, "acl"), r.condition ? eq(schema.accessRules.condition, JSON.stringify(r.condition)) : isNull(schema.accessRules.condition)));
+  // A row whose removal awaits approval is on its way OUT, so a DIFFERENT rule in its place is its replacement,
+  // not a duplicate. Under four-eyes an edit's delete only marks the old row `pending_delete`, and the create half
+  // has to land beside it: counted as a duplicate, every edit that keeps the pattern (a new level, expiry, fence
+  // or window) would leave its removal queued alone, a change nobody asked for.
+  const asItStands = (d: (typeof same)[number]) =>
+    d.level === values.level && (d.expiresAt?.getTime() ?? null) === (values.expiresAt?.getTime() ?? null) && d.fromIp === values.fromIp && d.window === values.window;
+  const identical = same.find((d) => d.status === "pending_delete" && asItStands(d));
+  if (same.some((d) => d.status !== "pending_delete") || (identical && identical.requestedBy !== actor.uuid)) throw alreadyExists("an identical access rule already exists");
+  // The SAME rule, re-authored by whoever asked for its removal, is that request taken back - which is how a
+  // failed edit and an undo put a rule back under four-eyes. It withdraws the removal rather than queueing a
+  // copy for approval, and needs no second pair of eyes because no authority moves: a `pending_delete` row
+  // never stopped enforcing. Anyone else re-authoring it is told it exists, which it does.
+  if (identical) return withdrawRemoval(deps, actor, identical.uuid);
 
   const [row] = await deps.db.insert(schema.accessRules).values(values).returning();
   bustGrantCache(r.subjectKind, subject); // bust the cached broad grant
@@ -407,11 +416,19 @@ export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown
   return row!;
 }
 
+// Put a rule marked for removal back to `active`, for its own requester (see the end of createAccessRule).
+async function withdrawRemoval(deps: Deps, actor: AppUser, id: string) {
+  const [row] = await deps.db.update(schema.accessRules).set({ status: "active", requestedBy: null, updatedAt: deps.clock.now() }).where(ruleById(id)).returning();
+  bustGrantCache(row!.subjectKind, row!.subject);
+  await audit(deps, actor, "access-rule.removalWithdraw", "access-rules", id, ruleMeta(row!, await subjectExtra(deps, row!)), row!);
+  return row!;
+}
+
 /** What a rules list may be narrowed to. Each one only narrows; none can widen past the caller's scope. */
-export type AccessRuleListFilters = { collection?: string; subjectKind?: string; subject?: string };
+export type AccessRuleListFilters = { collection?: string; subjectKind?: string; subject?: string; effect?: string };
 
 /**
- * One page of rules, newest first, optionally narrowed to one collection and/or one subject.
+ * One page of rules, newest first, optionally narrowed to one collection, one subject and/or one effect.
  *
  * WHY THE FILTERS. An org holds thousands of rules (every seeded role, every board's sharing, every e2e or
  * admin experiment), and the editors that show them ask about ONE collection (Manage access) or ONE subject
@@ -420,6 +437,10 @@ export type AccessRuleListFilters = { collection?: string; subjectKind?: string;
  *
  * `collection` keeps the rules whose namespace is that collection AND the `**` rules (namespace `*`), because a
  * blanket rule bears on every collection: it is what a deny check in the editor has to see.
+ *
+ * `effect` is for access mode's deny tint, which marks every on-screen target a deny covers and reads nothing
+ * else. Denies are the rare row, so `effect=deny` is one page off `ar_deny_created_idx`, where an unfiltered walk
+ * is every rule in the org - and the tint loads on each app load of an admin who leaves access mode on.
  */
 export async function listAccessRules(
   deps: Deps,
@@ -437,6 +458,10 @@ export async function listAccessRules(
   }
   // A user subject travels as `users/<id>` (decoded by the inbound edge), a role as its name.
   if (filters.subject) conds.push(eq(t.subject, filters.subject.replace(/^users\//, "")));
+  if (filters.effect) {
+    if (filters.effect !== "allow" && filters.effect !== "deny") throw invalidArgument('effect must be "allow" or "deny"');
+    conds.push(eq(t.effect, filters.effect));
+  }
   return keysetPage(deps, t, "access-rules", and(...conds.filter((c): c is NonNullable<typeof c> => !!c)), { max: maxPageSize, pageToken });
 }
 
@@ -523,6 +548,11 @@ export async function cloneAccessRules(deps: Deps, actor: AppUser, body: unknown
       ...(w.verb ? { verb: w.verb } : w.level ? { level: w.level } : {}),
       ...(w.effect === "deny" ? { effect: "deny" } : {}),
       ...(w.expire_time ? { expire_time: w.expire_time } : {}),
+      // The guards travel with the rule. Each one only SUBTRACTS from what the pattern grants, so a copy without
+      // them would be a wider rule than its source - the target holding more than the subject it was copied from.
+      ...(w.condition ? { condition: w.condition } : {}),
+      ...(w.window ? { window: w.window } : {}),
+      ...(w.from_ip ? { from_ip: w.from_ip } : {}),
     };
     try {
       const created = await createAccessRule(deps, actor, input, { quiet: true });
@@ -617,6 +647,12 @@ export async function deleteAccessRule(deps: Deps, actor: AppUser, id: string) {
   // `pending_delete` and keeps enforcing (policyLoad `live` still loads it) until a second admin approves.
   // Marking rather than deleting is what makes the removal reviewable, reversible, and non-surprising.
   // A row that is ALREADY pending is a request, not authority: withdrawing it needs no second approval.
+  // A row already MARKED for removal is the opposite case: it is still authority, so deleting it again is not a
+  // withdrawal but the removal itself, applied without the second approver it is waiting on. Only a decision
+  // moves it; its requester takes the request back by re-creating the rule as it stands (createAccessRule).
+  if (row.status === "pending_delete" && (await approvalRequired(deps))) {
+    throw failedPrecondition("this rule's removal is already awaiting approval - another access admin approves or rejects it");
+  }
   if (row.status === "active" && (await approvalRequired(deps))) {
     await deps.db.update(schema.accessRules).set({ status: "pending_delete", requestedBy: actor.uuid, updatedAt: deps.clock.now() }).where(ruleById(id));
     bustGrantCache(row.subjectKind, row.subject);

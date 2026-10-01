@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { allowConsoleErrors, gotoRoute, notTheApps500, test, expect } from "./fixtures";
+import { allowConsoleErrors, collectConsole, gotoRoute, test, expect } from "./fixtures";
 
 // Every chart in the app, drawn - and readable without eyes.
 //
@@ -115,26 +115,13 @@ test.describe("every chart", () => {
     // reason IGNORED_CONSOLE gives in fixtures.ts. A 503 is the same rare dev-Worker-restart hiccup documented
     // elsewhere in this suite (complianceRuleDelete.spec.ts et al.) landing on one of seventeen navigations in
     // one run - a page that genuinely fails to draw its charts still fails via `failures` below regardless.
-    let current = "";
-    const logged: { line: string; url: string }[] = [];
-    // A 500 the app did not write (not problem+json): a connection the dev runtime dropped on its way to the
-    // Worker. Same rule, and same reason, as `proxyFailed` in fixtures.ts - this sweep keeps its own list, so
-    // it has to apply it itself.
-    const dropped = new Set<string>();
-    const judged: Promise<void>[] = [];
-    page.on("response", (res) => {
-      if (res.status() === 500) judged.push(notTheApps500(res).then((infra) => void (infra && dropped.add(res.url()))));
-    });
-    page.on("console", (m) => {
-      if (m.type() !== "error" || /status of 429|status of 503/i.test(m.text())) return;
-      logged.push({ line: `${current}: ${m.text().slice(0, 200)}`, url: m.location()?.url ?? "" });
-    });
-    page.on("pageerror", (e) => logged.push({ line: `${current}: threw ${e.message}`, url: "" }));
+    // A 500 the app did not write is left out by `collectConsole`, by the watchdog's own rule.
+    const consoleLog = collectConsole(page, /status of 429|status of 503/i);
 
     const failures: string[] = [];
     let drawn = 0;
     for (const { route, heading } of PAGES) {
-      current = route;
+      consoleLog.at(route);
       await gotoRoute(page, route, heading);
       // Charts are rendered by one primitive as `<figure><figcaption>…</figcaption>…</figure>`, so the figures
       // on the page ARE its charts - no page-specific selector to keep in step.
@@ -203,8 +190,7 @@ test.describe("every chart", () => {
 
     // A run that drew nothing anywhere is a broken sweep, not a healthy app.
     expect(drawn, "no page drew a single chart").toBeGreaterThan(0);
-    await Promise.all(judged);
-    const problems = [...failures, ...logged.filter((l) => !l.url || !dropped.has(l.url)).map((l) => l.line)];
+    const problems = [...failures, ...(await consoleLog.problems())];
     expect(problems, `charts with problems:\n${problems.join("\n")}`).toEqual([]);
   });
 });

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Clock, LogIn, LogOut, CircleDot, Pencil, AlertTriangle, Plus, Trash2, Users, Check, X, ChevronRight, Coffee } from "lucide-react";
+import { Clock, LogIn, LogOut, CircleDot, Pencil, AlertTriangle, Users, Check, X, ChevronRight, Coffee } from "lucide-react";
 import { create, invoke } from "@/api";
 import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
 import { useScheduleView } from "@/hooks/useScheduleView";
@@ -12,7 +12,7 @@ import { exportTable } from "@/lib/exportTable";
 import { cn, idOf, formatDate, formatHHMM } from "@/lib/utils";
 import {
   summarizeByDay, buildAttendanceRows, statsOf, fmtDay, fmtHM, fmtHM24, fmtDuration, fmtDurationShort, describeCorrection,
-  seedPunches, punchInstants, punchErrors, keptPunches, isOpenPunch, punchTotal, sameTimes, type PunchRow, type OpenAllowance, type PunchTarget,
+  punchInstants, type PunchRow, type PunchTarget,
   localDay, orgDaysWindow, trackedFromOf, localMinutes, zonedInstant, weekdayOf, hhmmToMin, signedDuration, STATUS_UI, leaveRangeOf, unpaidLeaveTypes,
   type DayStatus, type AttendanceRow, type AttendanceSchedule, type LeaveRange, type WindowStats,
 } from "@/lib/attendance";
@@ -26,15 +26,9 @@ import { ExportButton } from "@/components/common/ExportButton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Field } from "@/components/common/Field";
-import { FormError } from "@/components/common/FormError";
-import { useDiscardGuard } from "@/hooks/useDiscardGuard";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
@@ -55,13 +49,12 @@ export default function Attendance({ me }: { me: Me }) {
   const [pageLoading, setPageLoading] = useState(true); // history window fetch in flight (skeleton, not "no data")
   const [now, setNow] = useState(Date.now());
   const [correctionBusy, setCorrectionBusy] = useState(false); // a correction submit in flight
-  // The day(s) a correction modal is open for. With `punch` it is the one-punch fix (PunchFixDialog); without,
-  // the whole-day editor, starting from `initial` when the one-punch fix handed its edit over.
-  const [correcting, setCorrectingState] = useState<{ rows: AttendanceRow[]; punch?: PunchTarget; initial?: PunchRow[] } | null>(null);
-  const setCorrecting = (rows: AttendanceRow[], punch?: PunchTarget) => setCorrectingState({ rows, punch });
-  const filedThisDialog = useRef<Set<string>>(new Set()); // days the open correction dialog already filed
-  // Closing is the one moment the already-filed set stops being true, so every open starts clean.
-  const closeCorrection = () => { filedThisDialog.current = new Set(); setCorrectingState(null); };
+  // The day the correction dialog is open for, and the one punch of it being fixed - none on a day with no
+  // punches, where the dialog adds the day's in/out (PunchFixDialog).
+  const [correcting, setCorrectingState] = useState<{ row: AttendanceRow; punch?: PunchTarget } | null>(null);
+  const setCorrecting = (row: AttendanceRow, punch?: PunchTarget) => setCorrectingState({ row, punch });
+  const filing = useRef(false); // a correction write in flight, claimed before its await
+  const closeCorrection = () => setCorrectingState(null);
   // Org display switches (Settings → Attendance). Absent means shown, so an org that never touched them keeps
   // the bar; the projection is a sub-toggle of the bar it sits on.
   const showDayProgress = sched.show_day_progress !== false;
@@ -296,47 +289,28 @@ export default function Attendance({ me }: { me: Me }) {
 
   // A correction request is an attendance-regularization carrying the day's full intended in/out set. On
   // approval (manager/HR, via Approvals) the day's punches are superseded and these are written as the day's
-  // sessions - no ticket, no manual data fixing. `pairs` are wall-clock "HH:MM"; [] means "remove all punches".
-  // A pair with no clock-out is today's last session, still running: it goes up without `clock_out`.
-  // Several days at once file one regularization each, so every day stays independently approvable.
-  // Files one regularization per day, each carrying that day's intended punches. Returns the failure message
-  // (rather than toasting it) so the dialog can keep it beside the form the user still has to fix.
-  async function submitCorrection(perDay: Record<string, { in: string; out: string }[]>, reason: string): Promise<string | undefined> {
-    const days = Object.keys(perDay);
+  // sessions - no ticket, no manual data fixing. `punches` are wall-clock "HH:MM"; a pair with no clock-out is
+  // today's last session, still running, and goes up without `clock_out`. Returns the failure message (rather
+  // than toasting it) so the dialog can keep it beside the form the user still has to fix.
+  async function submitCorrection(day: string, punches: PunchRow[], reason: string): Promise<string | undefined> {
+    // CLAIMED BEFORE THE AWAIT: the dialog's `busy` only reaches it on the next render, so two Enters in
+    // flight would otherwise both file the same day.
+    if (filing.current) return undefined;
+    filing.current = true;
     setCorrectionBusy(true);
-    const filed: string[] = [];
     let failure: string | undefined;
-    for (const day of days) {
-      // A retry after a partial failure must not re-file the days that already went through.
-      if (filedThisDialog.current.has(day)) continue;
-      // CLAIMED BEFORE THE AWAIT, released only if the write fails. Recording it afterwards made this ledger a
-      // guard against a retry and not against a concurrent submit: two calls in flight both passed the
-      // `has(day)` test above and both filed the same day.
-      filedThisDialog.current.add(day);
-      try {
-        const sessions = perDay[day].map((p) => punchInstants(day, p, tz));
-        await create("attendance-regularizations", { date: day, sessions, reason: reason || undefined });
-        filed.push(day);
-      } catch (e) {
-        filedThisDialog.current.delete(day); // nothing was filed for this day, so it stays retryable
-        // One rejected day (already corrected, outside the window, …) shouldn't silently swallow the rest -
-        // stop and report exactly which days were filed.
-        failure = `${formatDate(day)}: ${(e as Error).message}`;
-        break;
-      }
+    try {
+      await create("attendance-regularizations", { date: day, sessions: punches.map((p) => punchInstants(day, p, tz)), reason: reason || undefined });
+    } catch (e) {
+      failure = (e as Error).message;
     }
+    filing.current = false;
     setCorrectionBusy(false);
-    if (filed.length) {
-      toast({
-        title: filed.length === 1 ? "Correction requested" : `${filed.length} corrections requested`,
-        description: "Your manager or HR will review it - track it below and under Approvals.",
-        variant: "success",
-      });
-      reloadRegs();
-      if (!failure) closeCorrection();
-    }
-    const done = filedThisDialog.current.size;
-    return failure && done ? `Filed ${done} of ${days.length}. ${failure}` : failure;
+    if (failure) return failure;
+    toast({ title: "Correction requested", description: "Your manager or HR will review it - track it below and under Approvals.", variant: "success" });
+    reloadRegs();
+    closeCorrection();
+    return undefined;
   }
 
   // Ask for the late arrival / early departure that would have excused a flagged day, prefilled with the day and
@@ -495,21 +469,28 @@ export default function Attendance({ me }: { me: Me }) {
               <div className="flex flex-col gap-1.5 sm:items-end">
                 {myOpen ? (
                   <AccessAction collection="attendance" verb="clockOut" label="Clock out">
-                    <Button className="h-11 w-full px-6 text-base sm:w-auto" variant="destructive" loading={clock.busy} onClick={() => void punch("clockOut")}><LogOut className="h-4 w-4" /> Clock out</Button>
+                    <Button className="h-11 w-full px-6 text-base sm:w-auto" variant="destructive" loading={clock.busy} onClick={() => punch("clockOut")}><LogOut className="h-4 w-4" /> Clock out</Button>
                   </AccessAction>
                 ) : (
                   <AccessAction collection="attendance" verb="clockIn" label="Clock in">
-                    <Button className="h-11 w-full px-6 text-base sm:w-auto" loading={clock.busy} onClick={() => void punch("clockIn")}><LogIn className="h-4 w-4" /> Clock in</Button>
+                    <Button className="h-11 w-full px-6 text-base sm:w-auto" loading={clock.busy} onClick={() => punch("clockIn")}><LogIn className="h-4 w-4" /> Clock in</Button>
                   </AccessAction>
                 )}
                 <p className="text-xs text-muted-foreground sm:text-right">
                   Clock out and back in to record a break.
                   {/* The morning punch is the one people miss or make late, and they notice while still at work -
-                      so today's fix sits next to the clock rather than down in the history. */}
+                      so today's fix sits next to the clock rather than down in the history: today's first
+                      clock-in, or, with nothing punched yet, the clock-in to add. */}
                   {canCorrect && !staleOpen && (
                     <>
                       {" "}
-                      <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={() => setCorrecting([todayRow ?? { day: orgToday, status: "absent" as DayStatus }])}>
+                      <button
+                        type="button"
+                        className="font-medium text-primary underline-offset-2 hover:underline"
+                        onClick={() => todayRow?.summary?.sessions.length
+                          ? setCorrecting(todayRow, { index: 0, edge: "in" })
+                          : setCorrecting(todayRow ?? { day: orgToday, status: "absent" as DayStatus })}
+                      >
                         Missed or wrong punch?
                       </button>
                     </>
@@ -526,20 +507,22 @@ export default function Attendance({ me }: { me: Me }) {
                   You've been clocked in since {fmtHM(staleOpen.clock_in, tz)}
                   {localDay(staleOpen.clock_in, tz) !== orgToday && <> on {fmtDay(localDay(staleOpen.clock_in, tz))}</>} ({fmtDuration(openMin)}). Forgot to clock out?
                 </span>
-                <Button size="sm" variant="outline" className="h-7" loading={clock.busy} onClick={() => void punch("clockOut")}>Clock out now</Button>
+                <Button size="sm" variant="outline" className="h-7" loading={clock.busy} onClick={() => punch("clockOut")}>Clock out now</Button>
                 <Button
                   size="sm"
                   variant="ghost"
                   className="h-7 px-2"
                   onClick={() => {
                     // The day the forgotten punch belongs to, built from the recent fetch rather than read off
-                    // the history: the history may be paged back to a window that does not contain it.
+                    // the history: the history may be paged back to a window that does not contain it. The fix
+                    // is that session's missing clock-out.
                     const day = localDay(staleOpen.clock_in, tz);
                     const [row] = buildRows(recentSessions.filter((s) => mine(s.employee)), { from: day, to: day, leaves: leaveRanges, joined: joinedYmd, tracked: trackedFromYmd, excusals: myExcusals, employeeId: me.employee_id ?? undefined });
-                    setCorrecting([row ?? { day, status: "absent" as DayStatus }]);
+                    const index = row?.summary?.sessions.findIndex((s) => s.clock_in === staleOpen.clock_in) ?? -1;
+                    if (row && index >= 0) setCorrecting(row, { index, edge: "out" });
                   }}
                 >
-                  Fix the times
+                  Add the clock-out
                 </Button>
               </div>
             )}
@@ -649,26 +632,12 @@ export default function Attendance({ me }: { me: Me }) {
         )}
       </div>
 
-      {correcting?.punch && correcting.rows[0] ? (
+      {correcting && (
         <PunchFixDialog
-          key={`${correcting.rows[0].day}:${correcting.punch.index}:${correcting.punch.edge}`}
-          row={correcting.rows[0]}
+          key={`${correcting.row.day}:${correcting.punch ? `${correcting.punch.index}:${correcting.punch.edge}` : "add"}`}
+          row={correcting.row}
           punch={correcting.punch}
           tz={tz}
-          today={orgToday}
-          pendingDays={pendingCorrectionDays}
-          busy={correctionBusy}
-          onClose={closeCorrection}
-          onSubmit={submitCorrection}
-          onWholeDay={(initial) => setCorrectingState({ rows: correcting.rows, initial })}
-        />
-      ) : correcting && (
-        <CorrectionDialog
-          key={correcting.rows.map((r) => r.day).join(",")}
-          rows={correcting.rows}
-          initial={correcting.initial}
-          tz={tz}
-          sched={sched}
           today={orgToday}
           pendingDays={pendingCorrectionDays}
           busy={correctionBusy}
@@ -1088,229 +1057,3 @@ function RegStatePill({ state }: { state?: string }) {
   }
 }
 
-// Correction request modal: seeded with the day's existing sessions (one row per punch), each editable, with
-// add/remove. Submitting files an attendance-regularization carrying the FULL intended day; on approval the
-// day's punches are superseded and these become the day's sessions. Removing every row clears the day.
-// Fixing one punch is editing one field: the others are already filled with what was recorded, and the
-// changed time is marked against it. On today the latest in/out may leave its clock-out blank - the person is
-// still at work, and the approval keeps whatever clock-out they punch (services/attendanceRegularizations.ts).
-// Several days at once default to one shared set of times (the "I forgot to clock all week" case) and file one
-// request each; per-day mode gives each selected day its own times, because a real week is rarely identical.
-// The form rules (PunchRow, punchErrors, punchTotal, ...) live in lib/attendance.ts, shared with PunchFixDialog.
-function CorrectionDialog({ rows, initial, tz, sched, today, pendingDays, busy, onClose, onSubmit }: {
-  rows: AttendanceRow[];
-  // Where to start instead of the recorded day: PunchFixDialog's "Edit the whole day instead" hands its edit over.
-  initial?: PunchRow[];
-  tz: string;
-  // The org work schedule, so the standard day can be filled in with one click instead of typed twice.
-  sched: AttendanceSchedule;
-  // The org-local today: only a correction for today can leave its latest clock-out blank.
-  today: string;
-  // Days that already carry a pending correction - filing a second one for the same day is almost never meant.
-  pendingDays: string[];
-  busy: boolean;
-  onClose: () => void;
-  // Resolves to a failure message when a day was rejected, so the dialog can pin it beside the form.
-  onSubmit: (perDay: Record<string, PunchRow[]>, reason: string) => Promise<string | undefined>;
-}) {
-  const guardClose = useDiscardGuard();
-  const single = rows.length === 1 ? rows[0] : undefined;
-  const seeded = seedPunches(single?.summary?.sessions ?? [], tz);
-  const [punches, setPunches] = useState<PunchRow[]>(initial ?? (seeded.length ? seeded : [{ in: "", out: "" }]));
-  // null = every selected day takes the shared times above; a record = each day carries its own.
-  const [perDay, setPerDay] = useState<Record<string, PunchRow[]> | null>(null);
-  const [reason, setReason] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  // Only one day, and only today: the latest in/out may be left running. Read at render, which the page's own
-  // 15s tick keeps close enough for a "not later than now" check.
-  const openAllowed: OpenAllowance = single?.day === today ? { now: fmtHM24(new Date().toISOString(), tz) } : undefined;
-  // What each targeted day would become - the single source both the summary and the submit read from.
-  const targets: Record<string, PunchRow[]> = perDay ?? Object.fromEntries(rows.map((r) => [r.day, punches]));
-  const kept = keptPunches(punches);
-  const canSubmit = Object.values(targets).every((p) => !punchErrors(p, openAllowed).some(Boolean)); // an empty set clears the day
-  const total = punchTotal(punches, openAllowed);
-  const stillIn = !!openAllowed && kept.some(isOpenPunch);
-  // What the day currently says, so the request reads as "this, instead of that" rather than a bare set of times.
-  // A punch still running counts up to now on both sides, so moving this morning's clock-in reads as the
-  // difference it makes rather than as the whole open stretch.
-  const recorded = openAllowed ? punchTotal(seeded, openAllowed) : single?.summary?.workedMinutes ?? 0;
-  const delta = Math.max(0, total) - recorded;
-  const edited = !sameTimes(kept, seeded);
-  const dirty = edited || !!reason.trim() || !!perDay;
-  const clashes = rows.map((r) => r.day).filter((d) => pendingDays.includes(d));
-  // One-click fills for the two shapes almost every correction takes: the org's standard day, and no punches at all.
-  const scheduledDay = () => [{ in: sched.shift_start, out: sched.shift_end }];
-  const fillScheduled = () => setPunches(scheduledDay());
-  const restore = () => setPunches(seeded.length ? seeded : [{ in: "", out: "" }]);
-  // Switching to per-day seeds every day from the shared times, so it refines what's there instead of clearing it.
-  const splitDays = () => setPerDay(Object.fromEntries(rows.map((r) => [r.day, punches.map((p) => ({ ...p }))])));
-  const close = () => guardClose(dirty, onClose)(false);
-  const submit = async () => {
-    // `busy` as well as validity: Enter fires from any input in this dialog, and the dedupe ledger one file
-    // over records a day only AFTER its write resolves - so two Enters in flight both passed its `has(day)`
-    // test and both filed the same day, leaving duplicate correction requests to be approved or rejected
-    // individually. The ledger stops a retry; this stops a concurrent one.
-    if (!canSubmit || busy) return;
-    setError(null);
-    const failure = await onSubmit(
-      Object.fromEntries(Object.entries(targets).map(([day, p]) => [day, keptPunches(p)])),
-      reason.trim(),
-    );
-    if (failure) setError(failure);
-  };
-
-  return (
-    <Dialog open onOpenChange={(o) => { if (!o && !busy) close(); }}>
-      <DialogContent onEnterSubmit={submit}>
-        <DialogHeader>
-          <DialogTitle>{single ? `Correct attendance — ${formatDate(single.day)}` : `Correct ${rows.length} days`}</DialogTitle>
-          <DialogDescription>
-            {single
-              ? openAllowed
-                ? "Change only the time that's wrong - the rest stay as recorded. Still at work? Leave the last clock-out blank and clock out as usual. Your manager or HR approves it."
-                : "Change only the time that's wrong - the rest stay as recorded. Your manager or HR approves it, and the day is fixed. Remove every row to clear the day's punches."
-              : perDay
-                ? "Each day carries its own times, and files its own request so it can be approved on its own."
-                : "These times are applied to every selected day, filing one request per day so each can be approved on its own."}
-          </DialogDescription>
-        </DialogHeader>
-        {!single && !perDay && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            {rows.map((r) => <Badge key={r.day} variant="muted">{fmtDay(r.day)}</Badge>)}
-            <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={splitDays}>Different times per day</Button>
-          </div>
-        )}
-        {clashes.length > 0 && (
-          <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
-            {clashes.length === 1 ? `${fmtDay(clashes[0])} already has a correction awaiting approval` : `${clashes.length} of these days already have corrections awaiting approval`}. Filing again queues a second request for the same day - cancel the pending one below instead if you meant to change it.
-          </p>
-        )}
-        {perDay ? (
-          // Per-day mode: one block per selected day, each with its own punches, total and scheduled-day fill.
-          <div className="space-y-3">
-            {rows.map((r) => {
-              const dayPunches = perDay[r.day] ?? [{ in: "", out: "" }];
-              const dayKept = keptPunches(dayPunches);
-              const set = (next: PunchRow[]) => setPerDay({ ...perDay, [r.day]: next });
-              return (
-                <div key={r.day} className="space-y-2 rounded-lg border p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-sm font-medium">{fmtDay(r.day)}</span>
-                    <span className="flex flex-wrap items-center gap-1 text-xs tabular-nums text-muted-foreground">
-                      {dayKept.length === 0 ? "Clears the day" : <>Totals <span className="font-semibold text-foreground">{fmtDuration(Math.max(0, punchTotal(dayPunches, undefined)))}</span></>}
-                      <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => set(scheduledDay())}>Scheduled</Button>
-                      <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => set([{ in: "", out: "" }])}>Clear</Button>
-                    </span>
-                  </div>
-                  <PunchRows punches={dayPunches} onChange={set} labels={false} />
-                </div>
-              );
-            })}
-            <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setPerDay(null)}>Back to one set of times</Button>
-          </div>
-        ) : (
-          <>
-            {/* What the day says today, next to the shortcuts that build the usual replacement. */}
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 px-3 py-2 text-xs">
-              <span className="text-muted-foreground">
-                {single
-                  ? seeded.length
-                    ? <>Recorded now: <span className="font-medium tabular-nums text-foreground">{seeded.map((s) => `${s.in}-${s.out || (openAllowed ? "still in" : "?")}`).join(", ")}</span> · {fmtDuration(recorded)}</>
-                    : <>Nothing recorded on this day.</>
-                  : <>No punches are read from the selected days; the times below replace each day in full.</>}
-              </span>
-              <span className="flex shrink-0 items-center gap-1">
-                <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={fillScheduled}>
-                  Scheduled day <span className="ml-1 tabular-nums opacity-70">{formatHHMM(sched.shift_start)} - {formatHHMM(sched.shift_end)}</span>
-                </Button>
-                {single && edited && <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={restore}>Reset</Button>}
-              </span>
-            </div>
-            <div className="space-y-2">
-              <PunchRows punches={punches} onChange={setPunches} open={openAllowed} labels autoFocus />
-              <div className="flex items-center justify-end gap-3">
-                <span className="text-xs tabular-nums text-muted-foreground">
-                  {kept.length === 0 ? (
-                    single ? "Clears the day" : "Clears every selected day"
-                  ) : (
-                    <>
-                      {stillIn ? "So far" : single ? "Day totals" : "Each day totals"} <span className="font-semibold text-foreground">{fmtDuration(Math.max(0, total))}</span>
-                      {/* The change, not just the result: an approver is deciding on the difference. */}
-                      {single && delta !== 0 && (
-                        <span className={cn("ml-1 font-medium", delta > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400")}>
-                          ({delta > 0 ? "+" : "-"}{fmtDuration(Math.abs(delta))})
-                        </span>
-                      )}
-                    </>
-                  )}
-                </span>
-              </div>
-            </div>
-          </>
-        )}
-        <Field label="Reason" hint="Your manager or HR reads this when approving."><Textarea rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. forgot to clock in after lunch" /></Field>
-        <FormError error={error} />
-        <DialogFooter>
-          <Button variant="outline" onClick={close}>Cancel</Button>
-          <Button loading={busy} disabled={!canSubmit} onClick={submit}>{single ? "Submit request" : `Submit ${rows.length} requests`}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// One editable in/out list: a row per punch, add and remove, each row validated on its own. Shared by the
-// correction dialog's two modes (one set of times for every day, or a set per day), which is the only reason
-// it is a component rather than inline markup.
-function PunchRows({ punches, onChange, open, labels, autoFocus }: {
-  punches: PunchRow[];
-  onChange: (next: PunchRow[]) => void;
-  // Set when the list is for today, so its latest in/out may leave the clock-out blank.
-  open?: OpenAllowance;
-  // Column labels sit above the first row. A per-day block repeats the list, where repeating the labels is noise.
-  labels?: boolean;
-  autoFocus?: boolean;
-}) {
-  const set = (i: number, patch: Partial<PunchRow>) => onChange(punches.map((r, j) => (j === i ? { ...r, ...patch } : r)));
-  const errors = punchErrors(punches, open);
-  // Under a field whose time the request changes, what the record said before - so fixing one punch reads as
-  // exactly that, and the untouched ones visibly stay as they were.
-  const was = (now: string, before?: string) =>
-    before !== undefined && now !== before ? <p className="text-xs tabular-nums text-muted-foreground">was {before || "not punched"}</p> : null;
-  return (
-    <div className="space-y-2">
-      {punches.map((r, i) => {
-        const err = errors[i];
-        const running = !err && !!open && isOpenPunch(r);
-        const label = (text: string) => (labels && i === 0 ? text : "");
-        // The field the error is about, so the other one of the pair is not painted wrong alongside it.
-        const badIn = !!err && !r.in;
-        const badOut = !!err && !badIn;
-        const inNote = was(r.in, r.was?.in);
-        const outNote = running ? <p className="text-xs font-medium text-success">Still clocked in</p> : was(r.out, r.was?.out);
-        return (
-          <div key={i} className="space-y-1">
-            <div className="flex items-end gap-4">
-              <Field label={label("Clock in")} className="flex-1"><Input type="time" aria-label={`Clock in, punch ${i + 1}`} aria-invalid={badIn} className={cn(badIn && "border-destructive focus-visible:ring-destructive")} autoFocus={autoFocus && i === 0} value={r.in} onChange={(e) => set(i, { in: e.target.value })} /></Field>
-              <Field label={label("Clock out")} className="flex-1"><Input type="time" aria-label={`Clock out, punch ${i + 1}`} aria-invalid={badOut} className={cn(badOut && "border-destructive focus-visible:ring-destructive")} value={r.out} onChange={(e) => set(i, { out: e.target.value })} /></Field>
-              <Button type="button" variant="ghost" size="icon" className="mb-0.5 h-9 w-9 shrink-0 text-muted-foreground hover:text-destructive" onClick={() => onChange(punches.filter((_, j) => j !== i))} aria-label="Remove this in/out"><Trash2 className="h-4 w-4" /></Button>
-            </div>
-            {/* Same columns as the inputs above (the spacer stands in for the remove button), so each note sits under its field. */}
-            {(inNote || outNote) && (
-              <div className="flex gap-4">
-                <div className="flex-1">{inNote}</div>
-                <div className="flex-1">{outNote}</div>
-                <div className="w-9 shrink-0" aria-hidden />
-              </div>
-            )}
-            {err && <p className="text-xs font-medium text-destructive">{err}</p>}
-          </div>
-        );
-      })}
-      <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={() => onChange([...punches, { in: "", out: "" }])}>
-        <Plus className="h-3.5 w-3.5" /> Add another in/out
-      </Button>
-    </div>
-  );
-}

@@ -185,7 +185,7 @@ export default function Notifications({ me }: { me: Me }) {
             <PageSettings me={me} host="notifications" extra={me.employee_id ? [{ key: "notification-prefs" }] : []} />
             {unread > 0 && (
               <AccessAction collection="notifications" verb="markAllRead" label="Mark all read">
-                <Button size="sm" variant="outline" onClick={() => void markAllRead()}>
+                <Button size="sm" variant="outline" onClick={() => markAllRead()}>
                   <CheckCheck className="h-4 w-4" /> Mark all read
                 </Button>
               </AccessAction>

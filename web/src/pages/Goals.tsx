@@ -1573,7 +1573,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                 request for more CARDS rather than for a more honest answer. */}
             {hasMore && (
               <div className="pt-1 text-center">
-                <Button variant="outline" size="sm" loading={loadingMore} onClick={() => void pageIn()}>Load more goals</Button>
+                <Button variant="outline" size="sm" loading={loadingMore} onClick={() => pageIn()}>Load more goals</Button>
                 <p className="mt-1.5 text-xs text-muted-foreground">
                   Showing {rows.length}{counts?.states.all ? ` of ${counts.states.all}` : ""}. The chips and charts above count them all.
                 </p>
@@ -2991,11 +2991,11 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
             {dirty && (
               <div className="flex items-center gap-2">
                 <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changed? (optional)" className="h-8 text-sm" onKeyDown={(e) => { if (e.key === "Enter") void save(); }} />
-                <Button size="sm" onClick={() => void save()}>Save</Button>
+                <Button size="sm" onClick={() => save()}>Save</Button>
               </div>
             )}
             {!dirty && !closed && (
-              <Button variant="outline" size="sm" className="text-success" onClick={() => void onProgress(100)}>
+              <Button variant="outline" size="sm" className="text-success" onClick={() => onProgress(100)}>
                 <CheckCircle2 className="h-4 w-4" /> Mark complete
               </Button>
             )}
@@ -3129,7 +3129,7 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
                 {mentions.menu}
               </div>
               <AccessAction verb="comment" can={can} label="Comment on goal">
-                <Button size="sm" disabled={!draft.trim() || posting} loading={posting} onClick={() => void post()}>Post</Button>
+                <Button size="sm" disabled={!draft.trim() || posting} loading={posting} onClick={() => post()}>Post</Button>
               </AccessAction>
             </div>
           )}
@@ -3543,7 +3543,7 @@ function GoalCard({ goal, owner, parentTitle, cycleTitle, blockedByTitle, deptTi
           {canProgress && !closed && (
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-7 w-7 text-success" onClick={() => void onProgress(100)} aria-label="Mark complete"><CheckCircle2 className="h-4 w-4" /></Button>
+                <Button variant="ghost" size="icon" className="h-7 w-7 text-success" onClick={() => onProgress(100)} aria-label="Mark complete"><CheckCircle2 className="h-4 w-4" /></Button>
               </TooltipTrigger>
               <TooltipContent>Mark complete</TooltipContent>
             </Tooltip>
