@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "aa79220b-4259-409c-b072-fad9214fa941",
+  "id": "a7603f10-23fd-4de2-a4cf-7274e87d6553",
   "prevId": "16406951-d82b-4e62-a333-6cfe7ffe89e5",
   "tables": {
     "access_rules": {
@@ -170,6 +170,35 @@
             "uuid"
           ],
           "isUnique": false
+        },
+        "ar_subject_created_idx": {
+          "name": "ar_subject_created_idx",
+          "columns": [
+            "subject",
+            "subject_kind",
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
+        "ar_namespace_created_idx": {
+          "name": "ar_namespace_created_idx",
+          "columns": [
+            "namespace",
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
+        "ar_deny_created_idx": {
+          "name": "ar_deny_created_idx",
+          "columns": [
+            "effect",
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false,
+          "where": "\"access_rules\".\"effect\" = 'deny'"
         }
       },
       "foreignKeys": {},
@@ -11335,6 +11364,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'monthly'"
+        },
+        "accrual_cap_days": {
+          "name": "accrual_cap_days",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "paid": {
           "name": "paid",
