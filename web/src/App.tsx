@@ -25,6 +25,7 @@ import { AccessScope } from "./components/access/AccessScope";
 import { CapabilitiesContext, ScopesContext, hasCapability } from "./lib/perm";
 import { OrgProvider } from "./lib/org";
 import { setTablePrefsUser } from "./lib/tablePrefs";
+import { setLocalPrefUser } from "./lib/localPref";
 import { setResourceStoreUser } from "./lib/resourceStore";
 import { whenReady, gc, setClientKey } from "./lib/clientStore";
 import { useAppLock, configureLock } from "./lib/appLock";
@@ -366,6 +367,9 @@ export default function App() {
   setClientKey(me?.client_key);
   void setResourceStoreUser(cacheUser);
   setSettingsUser(cacheUser); // and the org settings snapshot, which gates other reads (see lib/settingsStore.ts)
+  // Per-person presentation prefs (lib/localPref.ts `userKey`) are keyed by the person WITHOUT the session: a
+  // remembered board or filter is meant to survive the next sign-in, which a session-scoped key never does.
+  setLocalPrefUser(me ? `${me.email}${viewAs ? `~${viewAs.subject}` : ""}` : undefined);
 
   // The stored copies live in IndexedDB, which is asynchronous, so they are loaded into memory ONCE before the
   // first read fires - a read that goes out first pays for rows this browser already has. The wait costs
@@ -752,45 +756,57 @@ export default function App() {
             onOpenMenu={() => setMobileOpen(true)}
             menuOpen={mobileOpen}
           />
-          {/* Renders nothing while the connection is up. */}
-          <OfflineBar />
-          {/* The bottom padding clears the phone's home indicator so the last row of a list is never parked
-              under it; from `md` up there is no inset and the normal rhythm applies. Vertical padding is
-              tighter on a phone, where 32px of chrome is a sixth of the screen. */}
-          {/* Focus target for a navigation (see useRouteAnnounce). `tabIndex={-1}` makes the landmark
-              focusable programmatically without adding it to the tab sequence, and `outline-none` keeps
-              that focus silent for the pointer user who never asked for a ring around the page. */}
-          <main
-            ref={mainRef}
-            tabIndex={-1}
-            aria-label="Main content"
-            // The route key, for session replay's per-page masking (SENSITIVE_PAGES in instrument.ts). Replay
-            // records text by default, and a selector on this attribute is what hides a whole sensitive route -
-            // payslips, payroll runs, documents, reviews, suggestions, check-ins, tax declarations, background
-            // checks - subtree and all. A panel added to one of THOSE routes is covered without opting in.
-            //
-            // `profile` and `employees` are deliberately NOT on that list (instrument.ts says why: masking them
-            // hid the headings, statuses and dates that make a replay readable while the values that matter are
-            // in a handful of panels). So a panel added to the profile is recorded unless it says otherwise:
-            // give it `sentry-mask`, or `data-sentry-block` for an image, the way the compensation, bank, tax,
-            // identity, personal, emergency, documents and signature panels each do for themselves.
-            data-page={page}
-            className="mx-auto w-full max-w-screen-2xl flex-1 px-4 pb-[calc(2rem+env(safe-area-inset-bottom))] pt-5 outline-none sm:px-6 sm:pt-8 md:pb-8 lg:px-8"
-          >
-            {/* Ambient access scope for the whole page: collection = the route key (the collection for most
-                pages), object = the detail id when on an item page. Shared primitives (Field, Detail, ...)
-                read this so access-mode lights up every data element/control path. ROUTE_SCOPE corrects the
-                routes whose key is NOT their wire collection; pages can still nest a narrower <AccessScope>. */}
-            <RouteAccessScope page={route.page} id={route.id}>
-              <div className="animate-fade-in">
-                {/* Per-route boundary: a single page crash shows a recoverable fallback instead of white-
-                    screening the shell. resetKey clears the error automatically when the route changes. */}
-                <ErrorBoundary resetKey={`${route.page}/${route.id ?? ""}`}>
-                  <Suspense fallback={<PageLoading />}>{renderWithWorkspace()}</Suspense>
-                </ErrorBoundary>
-              </div>
-            </RouteAccessScope>
-          </main>
+          {/* Everything under the top bar. Its right padding is the width a docked sheet takes while one is open
+              (`<Sheet dock>`, components/ui/sheet.tsx, which sets `--sheet-dock`), so the page re-centres in the
+              space left beside the panel instead of running underneath it. Zero otherwise. */}
+          <div className="flex min-w-0 flex-1 flex-col pr-[var(--sheet-dock,0px)]">
+            {/* Renders nothing while the connection is up. */}
+            <OfflineBar />
+            {/* The bottom padding clears the phone's home indicator so the last row of a list is never parked
+                under it; from `md` up there is no inset and the normal rhythm applies. Vertical padding is
+                tighter on a phone, where 32px of chrome is a sixth of the screen. */}
+            {/* Focus target for a navigation (see useRouteAnnounce). `tabIndex={-1}` makes the landmark
+                focusable programmatically without adding it to the tab sequence, and `outline-none` keeps
+                that focus silent for the pointer user who never asked for a ring around the page. */}
+            {/* The 1920px cap uses most of a 2560 or ultra-wide monitor while card text and full-width inputs
+                stay readable, and it is the SAME on every page. A workspace's tab strip and the page header sit
+                inside `<main>`, so a page of another width would resize and re-centre them on every tab switch -
+                Boards to Goals, Directory to Org Chart, Pipeline to Jobs - under the pointer that pressed the tab.
+                A canvas (board and pipeline columns, the org tree, a table's columns) grows into the cap and
+                scrolls within itself past it. Pages that read as a single column (Settings, a candidate profile)
+                cap themselves narrower, inside it. */}
+            <main
+              ref={mainRef}
+              tabIndex={-1}
+              aria-label="Main content"
+              // The route key, for session replay's per-page masking (SENSITIVE_PAGES in instrument.ts). Replay
+              // records text by default, and a selector on this attribute is what hides a whole sensitive route -
+              // payslips, payroll runs, documents, reviews, suggestions, check-ins, tax declarations, background
+              // checks - subtree and all. A panel added to one of THOSE routes is covered without opting in.
+              //
+              // `profile` and `employees` are deliberately NOT on that list (instrument.ts says why: masking them
+              // hid the headings, statuses and dates that make a replay readable while the values that matter are
+              // in a handful of panels). So a panel added to the profile is recorded unless it says otherwise:
+              // give it `sentry-mask`, or `data-sentry-block` for an image, the way the compensation, bank, tax,
+              // identity, personal, emergency, documents and signature panels each do for themselves.
+              data-page={page}
+              className="mx-auto w-full max-w-[120rem] flex-1 px-4 pb-[calc(2rem+env(safe-area-inset-bottom))] pt-5 outline-none sm:px-6 sm:pt-8 md:pb-8 lg:px-8"
+            >
+              {/* Ambient access scope for the whole page: collection = the route key (the collection for most
+                  pages), object = the detail id when on an item page. Shared primitives (Field, Detail, ...)
+                  read this so access-mode lights up every data element/control path. ROUTE_SCOPE corrects the
+                  routes whose key is NOT their wire collection; pages can still nest a narrower <AccessScope>. */}
+              <RouteAccessScope page={route.page} id={route.id}>
+                <div className="animate-fade-in">
+                  {/* Per-route boundary: a single page crash shows a recoverable fallback instead of white-
+                      screening the shell. resetKey clears the error automatically when the route changes. */}
+                  <ErrorBoundary resetKey={`${route.page}/${route.id ?? ""}`}>
+                    <Suspense fallback={<PageLoading />}>{renderWithWorkspace()}</Suspense>
+                  </ErrorBoundary>
+                </div>
+              </RouteAccessScope>
+            </main>
+          </div>
         </div>
         {/* Pull down from the top of any page to re-read it (touch only; renders nothing until pulled). */}
         <PullToRefresh />

@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 
 const EMPTY = { name: "", client: "", code: "", billable: true, goal: "none", status: "active" as "active" | "archived" };
@@ -43,6 +44,7 @@ export default function ProjectsAdmin({ openId }: { openId?: string }) {
   useDeepOpen(openId, rows, openEdit);
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Project | null>(null);
   const [form, setForm] = useState(EMPTY);
@@ -76,7 +78,7 @@ export default function ProjectsAdmin({ openId }: { openId?: string }) {
   }
   async function del(p: Project) {
     if (!(await confirm({ title: `Delete the "${p.name}" project?`, destructive: true, confirmLabel: "Delete" }))) return;
-    try { await remove(`projects/${idOf(p.path)}`); reload(); }
+    try { await remove(`projects/${idOf(p.path)}`); reload(); deleted({ path: `projects/${idOf(p.path)}`, noun: "project", can: p.access?.can, reload }); }
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
   }
 

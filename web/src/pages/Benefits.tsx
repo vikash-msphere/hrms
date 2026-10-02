@@ -22,6 +22,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessItem } from "@/components/access/AccessItem";
@@ -50,6 +51,7 @@ export default function Benefits({ me }: { me: Me }) {
   });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   const reloadAll = () => { reloadPlans(); reloadEnr(); reloadDeps(); };
@@ -106,7 +108,11 @@ export default function Benefits({ me }: { me: Me }) {
   }
   async function deleteDependent(d: Dependent) {
     if (!(await confirm({ title: `Remove ${d.name}?`, destructive: true, confirmLabel: "Remove" }))) return;
-    try { await remove(`dependents/${idOf(d.path)}`); reloadDeps(); }
+    try {
+      await remove(`dependents/${idOf(d.path)}`);
+      reloadDeps();
+      deleted({ path: `dependents/${idOf(d.path)}`, noun: "dependent", can: d.access?.can, reload: reloadDeps, title: `${d.name} removed` });
+    }
     catch (e) { toast({ title: "Couldn't remove", description: (e as Error).message, variant: "destructive" }); }
   }
   async function elect(plan: BenefitPlan, body: { status: "enrolled" | "waived"; effective_date?: string; dependents?: string[] }) {
@@ -179,9 +185,10 @@ export default function Benefits({ me }: { me: Me }) {
         {plans.length === 0 ? (
           <EmptyState icon={HeartPulse} title="No plans available" description="Benefit plans will appear here once HR adds them." />
         ) : (
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          // From `2xl` more plans per row at the size they are three across (`grid-cols-fill`), not wider ones.
+          <div className="grid gap-4 [--cell:20rem] md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-fill">
             {shownPlans.length === 0 && (
-              <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground md:col-span-2 xl:col-span-3">
+              <p className="col-span-full rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
                 No {kf.activeLabel}.{" "}
                 <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={kf.clear}>Show all plans</button>
               </p>

@@ -1120,8 +1120,15 @@ export default function Dashboard({ me }: { me: Me }) {
 
       {/* Movable sections: a flex column ordered by the viewer's saved layout (CSS `order`, so a reorder is
           visual-only and nothing remounts). A hidden section renders nothing at all - hiding the timeline
-          also skips its attendance fan-out. */}
-      <div className="flex flex-col">
+          also skips its attendance fan-out.
+          From `3xl` it is two columns: what you act on in the main one, what you glance at (holidays and
+          celebrations, the board) in a 26rem side column. The sections sit in two wrappers that are
+          `display: contents` below `3xl`, so there every section is still an item of this one column and its
+          `order` places it exactly as before; from `3xl` each wrapper is a flex column of its own, where the same
+          `order` values sort that column. Only `display` changes at the breakpoint, so nothing remounts there
+          either. A section's column is fixed by what it is; "Customize layout" orders sections within it. */}
+      <div className="flex flex-col 3xl:grid 3xl:grid-cols-[minmax(0,1fr)_26rem] 3xl:items-start 3xl:gap-x-6">
+      <div className="contents 3xl:flex 3xl:min-w-0 3xl:flex-col">
 
       {/* Shortcut tiles: the org's own pick of create flows and destinations (Settings → Dashboard →
           Shortcuts), capability-gated per caller. They lead the page - a dashboard's first job is "do the
@@ -1555,10 +1562,16 @@ export default function Dashboard({ me }: { me: Me }) {
         </div>
       )}
 
-      {/* Holidays + celebrations side by side. Both cards already draw a list skeleton while their read is
-          outstanding, and a gated read stays "loading" - so the probe is all this section needs. */}
+      {/* end of the main column's sections */}
+      </div>
+      {/* The side column (from `3xl`; `contents` below it - see the note on the flex column above). */}
+      <div className="contents 3xl:flex 3xl:min-w-0 3xl:flex-col">
+
+      {/* Holidays + celebrations side by side - stacked from `3xl`, where they are the side column. Both cards
+          already draw a list skeleton while their read is outstanding, and a gated read stays "loading" - so the
+          probe is all this section needs. */}
       {showSection("calendar") && (
-        <div ref={regionRef("calendar")} style={sectionStyle("calendar")} className="mb-6 grid gap-6 md:grid-cols-2">
+        <div ref={regionRef("calendar")} style={sectionStyle("calendar")} className="mb-6 grid gap-6 md:grid-cols-2 3xl:grid-cols-1">
           {/* Upcoming holidays */}
           <Card>
             <CardHeader>
@@ -1743,6 +1756,8 @@ export default function Dashboard({ me }: { me: Me }) {
         </Card>
       )}
 
+      {/* end of the side column's sections */}
+      </div>
       {/* end of the movable-sections flex column */}
       </div>
     </div>

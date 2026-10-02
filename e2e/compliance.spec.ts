@@ -1,4 +1,4 @@
-import { gotoRoute, inDays, purge, expect, test, toast } from "./fixtures";
+import { confirmDelete, gotoRoute, inDays, purge, expect, test, toast } from "./fixtures";
 
 // The compliance calendar: statutory obligations with dates that must not be missed.
 //
@@ -70,10 +70,11 @@ test("a compliance item is added, shows on the calendar, and is filed - and a se
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(waivedRow.getByText("Waived", { exact: true })).toBeVisible({ timeout: 30_000 });
 
-  // Deleting the waived item - a soft delete (`useSoftDelete`), so no confirmation and no success toast of
-  // its own beyond the shared one; never pressed by any compliance spec before this. Doubles as this item's
-  // own cleanup.
+  // Deleting the waived item - a soft delete (`useSoftDelete`): it asks first, and no success toast of its
+  // own beyond the shared one; never pressed by any compliance spec before this. Doubles as this item's own
+  // cleanup.
   await rowAction(page, waivedRow, "Delete");
+  await confirmDelete(page);
   await expect(toast(page, "Compliance event deleted")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("tbody tr").filter({ hasText: waivedTitle })).toHaveCount(0, { timeout: 30_000 });
 

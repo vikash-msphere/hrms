@@ -24,6 +24,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { HeartPulse } from "lucide-react";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 
 const CATEGORIES: { value: BenefitCategory; label: string }[] = [
@@ -47,6 +48,7 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
   useDeepOpen(openId, rows, openEdit);
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   const [open, setOpen] = useState(false);
@@ -75,7 +77,7 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
   }
   async function del(p: BenefitPlan) {
     if (!(await confirm({ title: `Delete the "${p.name}" plan?`, destructive: true, confirmLabel: "Delete" }))) return;
-    try { await remove(`benefit-plans/${idOf(p.path)}`); reload(); }
+    try { await remove(`benefit-plans/${idOf(p.path)}`); reload(); deleted({ path: `benefit-plans/${idOf(p.path)}`, noun: "plan", can: p.access?.can, reload }); }
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
   }
 

@@ -16,6 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
 import { BoardSharingTab } from "./BoardSharingTab";
 
@@ -45,6 +46,7 @@ export function BoardConfigPanel({ objectPath, onClose }: { objectPath: string; 
 function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: () => void; onSaved?: () => void }) {
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const [name, setName] = useState(board.name);
   const [description, setDescription] = useState(board.description ?? "");
   const [prefix, setPrefix] = useState(board.task_prefix ?? "");
@@ -88,14 +90,15 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
   async function del() {
     const ok = await confirm({
       title: `Delete ${board.name}?`,
-      description: "The board and its tasks are removed from view (soft delete). This can be restored by an admin.",
+      description: "The board and its tasks are removed from view (soft delete). Undo on the message that follows brings it back, and an admin can restore it later.",
       confirmLabel: "Delete board",
+      destructive: true,
     });
     if (!ok) return;
     setBusy(true);
     try {
       await remove(`boards/${idOf(board.path)}`, board.etag);
-      toast({ title: "Board deleted" });
+      deleted({ path: `boards/${idOf(board.path)}`, noun: "board", can: board.access?.can, reload: () => onSaved?.() });
       onClose?.();
     } catch (e) {
       toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" });

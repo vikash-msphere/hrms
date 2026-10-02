@@ -351,7 +351,9 @@ export default function Overtime({ me }: { me: Me }) {
         {monthlyTotals.length === 0 ? (
           <p className="text-sm text-muted-foreground">No approved overtime in this month.</p>
         ) : (
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          // One row per person, so from `2xl` more of them across (`grid-cols-fill`, ~19rem, their width at three
+          // across today) rather than three rows with the name and the total ever further apart.
+          <div className="grid gap-2 [--cell:19rem] sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-fill">
             {monthlyTotals.map((t) => { const e = emp(t.employee); return (
               <div key={t.employee} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
                 <span className="inline-flex min-w-0 items-center gap-2 text-sm"><PhotoAvatar employeeId={t.employee ? idOf(t.employee) : ""} name={empName(t.employee)} photo={e?.photo} className="h-6 w-6" /> <span className="truncate">{empName(t.employee)}</span></span>

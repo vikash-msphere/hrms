@@ -9,6 +9,7 @@ import { useMoney } from "@/lib/org";
 import { parsePayOpenings, payOpeningItems, payOpeningTemplate } from "@/lib/openingImport";
 import { useCollection } from "@/hooks/useCollection";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Field } from "@/components/common/Field";
@@ -43,6 +44,7 @@ const monthOf = (ym?: string) => (ym ? formatMonthYear(`${ym}-01`) : "-");
 export function PayOpenings() {
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const money = useMoney();
   const { rows: employeeRows } = useCollection<Employee>("employees", { all: true });
   const employees = useMemo(() => employeeRows.filter((e) => !e.delete_time), [employeeRows]);
@@ -69,8 +71,8 @@ export function PayOpenings() {
     if (!ok) return;
     try {
       await remove(r.path, r.etag);
-      toast({ variant: "success", title: "Removed" });
       reloadSaved();
+      deleted({ path: r.path, noun: "opening", can: r.access?.can, reload: reloadSaved, title: "Removed" });
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't remove it", description: (e as Error).message });
     }

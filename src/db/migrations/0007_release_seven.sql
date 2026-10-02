@@ -16,3 +16,12 @@ ALTER TABLE `leave_types` ADD `accrual_cap_days` real;
 CREATE INDEX `ar_subject_created_idx` ON `access_rules` (`subject`,`subject_kind`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `ar_namespace_created_idx` ON `access_rules` (`namespace`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `ar_deny_created_idx` ON `access_rules` (`effect`,`created_at`,`uuid`) WHERE "access_rules"."effect" = 'deny';
+--> statement-breakpoint
+
+-- `cron_runs` pages on `started_at` (routes/cronRuns.ts), so its paging index is keyed on that, uuid tiebreak
+-- included. The old `(created_at, uuid)` index served no query and `(started_at)` alone left the tiebreak to a
+-- sort; one index replaces both, which is one index write fewer on every recorded cron run. Index-only: no
+-- stored row changes.
+DROP INDEX IF EXISTS `cron_runs_started_idx`;--> statement-breakpoint
+DROP INDEX IF EXISTS `cron_runs_page_idx`;--> statement-breakpoint
+CREATE INDEX `cron_runs_page_idx` ON `cron_runs` (`started_at`,`uuid`);

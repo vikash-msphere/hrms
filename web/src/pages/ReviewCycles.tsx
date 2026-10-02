@@ -25,6 +25,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 import { getSetting } from "@/lib/settingsStore";
 
@@ -88,6 +89,7 @@ export default function ReviewCycles({ embedded }: { embedded?: boolean }) {
   const { rows: departments } = useCollection<Department>("departments", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<ReviewCycle | null>(null);
@@ -171,7 +173,7 @@ export default function ReviewCycles({ embedded }: { embedded?: boolean }) {
 
   async function del(c: ReviewCycle) {
     if (!(await confirm({ title: `Delete the "${c.name}" cycle?`, destructive: true, confirmLabel: "Delete" }))) return;
-    try { await remove(`review-cycles/${idOf(c.path)}`); reload(); }
+    try { await remove(`review-cycles/${idOf(c.path)}`); reload(); deleted({ path: `review-cycles/${idOf(c.path)}`, noun: "review cycle", can: c.access?.can, reload }); }
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
   }
 

@@ -16,6 +16,7 @@ import { Field } from "@/components/common/Field";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { Badge } from "@/components/ui/badge";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useUnsavedTracker } from "@/components/common/UnsavedChanges";
@@ -180,6 +181,7 @@ const REQUIRES_SELECT = (value: string, onChange: (v: string) => void) => (
  *  live preview (rendered server-side from the draft, without saving). */
 export default function LettersTab({ toast }: { toast: Toast }) {
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const { rows: employees, state: employeesState } = useCollection<Employee>("employees", { all: true });
   // The employee lookup feeds the preview picker; surface a load failure instead of a silently empty dropdown.
   useEffect(() => {
@@ -280,7 +282,8 @@ export default function LettersTab({ toast }: { toast: Toast }) {
       // for a create still propagating, but this delete genuinely means "cur is gone", so it says so here.
       if (id === selId) setSelId("");
       await reload();
-      toast({ title: "Deleted", variant: "success" });
+      // `can` off the collection row: the editor's own Template shape does not carry the access hint.
+      deleted({ path: t.id, noun: "letter type", can: rows.find((r) => r.path === t.id)?.access?.can, reload: () => void reload() });
     }
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
   }

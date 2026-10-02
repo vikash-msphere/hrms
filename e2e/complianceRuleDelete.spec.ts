@@ -1,4 +1,4 @@
-import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, confirmDelete, gotoRoute, purge, test, expect, toast } from "./fixtures";
 
 // Deleting a recurring rule - `complianceRules.spec.ts`'s own cleanup comment says why it never does this
 // through the UI itself ("purging a rule does not take its occurrences with it... a spec that only deleted
@@ -35,6 +35,7 @@ test("a recurring rule is deleted from the rules table", async ({ as }) => {
     await expect(row).toBeVisible({ timeout: 30_000 });
     await row.getByRole("button", { name: "Actions" }).click();
     await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+    await confirmDelete(page);
     // One press, patiently waited on rather than re-pressed: a re-click here (an earlier version of this test
     // did exactly that whenever the toast had not yet rendered) fires a SECOND delete on a row the first press
     // already reached the server for - a soft-deleted row 404s the same way a plain GET does (both hit the

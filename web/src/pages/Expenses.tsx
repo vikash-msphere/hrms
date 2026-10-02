@@ -32,7 +32,7 @@ import { BLANK } from "@/lib/tableFilter";
 import { countBy, duplicateIds } from "@/lib/tableSignals";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
-import { Chart, ChartCard } from "@/components/common/Chart";
+import { Chart, ChartCard, ChartStrip } from "@/components/common/Chart";
 import { ChartFilterNote } from "@/components/common/ChartFilterNote";
 import { useChartFocus } from "@/lib/chartFocus";
 import { monthlyTotals, topSlices } from "@/lib/chartTheme";
@@ -1380,7 +1380,7 @@ export default function Expenses({ me }: { me: Me }) {
       {/* Spend has a shape, and a ledger hides it: the month-by-month line is how a creeping run rate shows
           up before a budget breaches, and the category split is what the conversation about it starts from. */}
       {state === "ready" && rows.length > 2 && (
-        <div className="mb-4 grid gap-4 lg:grid-cols-2">
+        <ChartStrip id="expenses" className="mb-4">
           <ChartCard title="Spend by month" description="Approved and paid expenses, over the last twelve months.">
             <Chart
               type="line"
@@ -1404,7 +1404,7 @@ export default function Expenses({ me }: { me: Me }) {
               {...ledgerChart("category")}
             />
           </ChartCard>
-        </div>
+        </ChartStrip>
       )}
 
       {activeBudgets.length > 0 && (

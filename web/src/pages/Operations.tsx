@@ -22,7 +22,7 @@ import { useToast } from "@/components/ui/use-toast";
 // Display metadata only - run status/history comes from /v1/cron-runs; "next run" is computed below.
 const CRONS = [
   { cron: "*/5 * * * *", name: "Job drainer", cadence: "Every 5 minutes", description: "Processes queued background jobs, e.g. generating payslip PDFs after a payroll run is published, and publishes scheduled posts. A check that finds nothing to do leaves no record." },
-  { cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *", name: "AI drains", cadence: "Every 5 minutes, offset by 2", description: "Takes turns between updating the semantic search index and scanning the public walls for moderation." },
+  { cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *", name: "AI drains", cadence: "Every 5 minutes, offset by 2", description: "Takes turns between updating the semantic search index and scanning the public walls for moderation. A turn that finds nothing to do leaves no record." },
   { cron: "0 2 * * *", name: "Daily maintenance", cadence: "Daily at 02:00 UTC", description: "Accrues monthly leave balances and sends reminder emails (probation endings, work anniversaries, expiring documents)." },
 ];
 

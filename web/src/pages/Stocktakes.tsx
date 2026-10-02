@@ -23,6 +23,7 @@ import { Input } from "@/components/ui/input";
 import { exportTable } from "@/lib/exportTable";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { getSetting } from "@/lib/settingsStore";
 
 // Stocktakes: the RECORD half of the counting loop. The walk itself is the scanning modal on the Assets page
@@ -61,6 +62,7 @@ export default function Stocktakes({ me }: { me: Me }) {
   const [staleDays, setStaleDays] = useState(DEFAULT_STALE_DAYS);
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
 
   // The org's own staleness window, so "stale" means what the org said it means. One read, on page open, and
   // the default stands if the blob is absent or unreadable.
@@ -149,7 +151,7 @@ export default function Stocktakes({ me }: { me: Me }) {
       await remove(c.path, c.etag);
       setCounts((prev) => prev.filter((r) => r.path !== c.path));
       if (selected?.path === c.path) navigate("stocktakes");
-      toast({ title: "Count abandoned", variant: "success" });
+      deleted({ path: c.path, noun: "count", can: c.access?.can, reload, title: "Count abandoned" });
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't abandon the count", description: (e as Error).message });
     }

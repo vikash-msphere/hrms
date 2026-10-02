@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, confirmDelete, gotoRoute, test, expect, toast } from "./fixtures";
 
 // "Mark exited" - the row action that actually ends someone's employment.
 //
@@ -158,6 +158,7 @@ test("a notice period record is deleted from the list", async ({ as }) => {
     await expect(row).toBeVisible({ timeout: 30_000 });
     await row.getByRole("button", { name: "Actions" }).click();
     await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+    await confirmDelete(page);
     await expect(toast(page, "Notice period deleted")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator("tbody tr").filter({ hasText: fullName })).toHaveCount(0, { timeout: 30_000 });
   } finally {

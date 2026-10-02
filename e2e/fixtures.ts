@@ -543,6 +543,18 @@ export function toast(page: Page, text: string | RegExp) {
 }
 
 /**
+ * Answer the prompt every delete puts up (`useSoftDelete`, and the pages that delete by hand): the dialog
+ * titled "Delete …?", pressed through on its own button. `label` is that button when a page names it
+ * differently ("Delete task", "Remove").
+ */
+export async function confirmDelete(page: Page, label: string | RegExp = "Delete") {
+  const prompt = page.getByRole("dialog").filter({ hasText: /^(Delete|Remove|Withdraw|Retire) .+\?/ }).last();
+  await expect(prompt).toBeVisible({ timeout: 30_000 });
+  await prompt.getByRole("button", { name: label, exact: typeof label === "string" }).click();
+  await expect(prompt).toHaveCount(0, { timeout: 30_000 });
+}
+
+/**
  * A date, as a `<input type="date">` holds it, in the LOCAL day - never `toISOString()`.
  *
  * The app's forms default to the reader's own today (an offer to file remote work "today", a claim dated

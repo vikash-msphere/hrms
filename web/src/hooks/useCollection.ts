@@ -7,7 +7,7 @@ export type LoadState = "loading" | "ready" | "error";
 /** Default ceiling for `{ all: true }`. High enough that no ordinary org reaches it, low enough that a caller
  *  who points the flag at a genuinely unbounded collection pays a bounded number of requests rather than
  *  walking it to the end. Reaching it leaves `hasMore` true, so the view still admits the truncation. */
-const ALL_CAP = 1000;
+export const ALL_CAP = 1000;
 
 // Reads a collection through the shared resource store: identical reads across components are deduped into one
 // request, a short TTL lets navigations reuse cached rows, and a mutation (via api.ts) refreshes every mounted

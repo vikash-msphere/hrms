@@ -16,7 +16,29 @@ import { HistoryClose } from "@/hooks/useHistoryClose";
 // Two geometries, because a 760px right-docked panel on a 390px screen is just a screen with an unreachable
 // close button in the top corner: a phone gets a bottom sheet (grabber, drag-to-dismiss, keyboard-aware),
 // everything from `sm` up keeps the right-docked panel.
-const Sheet = DialogPrimitive.Root;
+//
+// A third, opted into with `<Sheet dock>`, for a record's detail opened from a list: on a wide screen the panel
+// sits BESIDE the list instead of over it (docs/06-responsive-ui.md, "Wide screens"). It is non-modal there - no
+// overlay, no focus trap, no scroll lock - it starts under the top bar, and the page column below the bar gives
+// up the panel's width (`--sheet-dock`, read in App.tsx), so the list re-centres in what is left rather than
+// being covered. A click outside does not close it, which is what lets a click on another row swap the detail;
+// its close button, Back, and Escape pressed from inside it still do. Below DOCK_QUERY it is the ordinary modal
+// sheet, unchanged.
+//
+// 1920px is `3xl` in web/tailwind.config.js: where a list keeps about the width a 1440 screen gives it with a
+// 32rem panel beside it. Change the two together.
+const DOCK_QUERY = "(min-width: 1920px)";
+const SheetDockContext = React.createContext(false);
+
+function Sheet({ dock, modal, ...props }: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Root> & { dock?: boolean }) {
+  const wide = useMedia(DOCK_QUERY);
+  const docked = !!dock && wide;
+  return (
+    <SheetDockContext.Provider value={docked}>
+      <DialogPrimitive.Root {...props} modal={docked ? false : modal} />
+    </SheetDockContext.Provider>
+  );
+}
 const SheetTrigger = DialogPrimitive.Trigger;
 const SheetClose = DialogPrimitive.Close;
 const SheetPortal = DialogPrimitive.Portal;
@@ -77,8 +99,23 @@ const SheetContent = React.forwardRef<
     // entry would make one panel cost two back presses.
     routed?: boolean;
   }
->(({ className, children, style, routed, ...props }, ref) => {
+>(({ className, children, style, routed, onInteractOutside, onEscapeKeyDown, ...props }, ref) => {
   const [node, setNode] = React.useState<HTMLDivElement | null>(null);
+  const docked = React.useContext(SheetDockContext);
+  // The width the page column gives up while a docked sheet is open: measured rather than restated, so a caller's
+  // own `sm:max-w-*` is what the list makes room for. Removed when the panel unmounts, after its exit animation.
+  React.useEffect(() => {
+    if (!docked || !node) return;
+    const root = document.documentElement;
+    const reserve = () => root.style.setProperty("--sheet-dock", `${node.offsetWidth}px`);
+    reserve();
+    const ro = new ResizeObserver(reserve);
+    ro.observe(node);
+    return () => {
+      ro.disconnect();
+      root.style.removeProperty("--sheet-dock");
+    };
+  }, [docked, node]);
   const setRefs = React.useCallback(
     (el: HTMLDivElement | null) => {
       setNode(el);
@@ -109,8 +146,22 @@ const SheetContent = React.forwardRef<
         "sm:inset-x-auto sm:inset-y-0 sm:right-0 sm:h-full sm:max-h-none sm:w-full sm:max-w-[760px] sm:rounded-none sm:border-l",
         "sm:data-[state=closed]:slide-out-to-right sm:data-[state=open]:slide-in-from-right",
         className,
+        // Docked: below the top bar (h-14) rather than over it, and flat - it is part of the layout now, edged by
+        // its border, not a layer floating over the page.
+        docked && "sm:top-14 sm:h-auto sm:shadow-none",
       )}
       style={{ ...(style ?? {}), ...(keyboard ? ({ "--kb": `${keyboard}px` } as React.CSSProperties) : {}) }}
+      onInteractOutside={(e) => {
+        onInteractOutside?.(e);
+        // A click on the list beside a docked panel is the reader picking another row, not dismissing the panel.
+        if (docked) e.preventDefault();
+      }}
+      onEscapeKeyDown={(e) => {
+        onEscapeKeyDown?.(e);
+        // Escape typed in the list (its search box, a row menu) belongs to the list. Pressed inside the panel, or
+        // dispatched at it (the phone drag, Back's fallback), it closes the panel as it always has.
+        if (docked && !(e.target instanceof Node && node?.contains(e.target))) e.preventDefault();
+      }}
       {...props}
     >
       {phone && (

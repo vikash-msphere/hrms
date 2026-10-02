@@ -33,6 +33,8 @@ test("blocking a card names the blocker, links to it, and shows the reverse edge
     await page.getByText(titleB).first().click();
     const cardB = page.getByRole("dialog");
     await expect(cardB.getByLabel("Title")).toHaveValue(titleB, { timeout: 30_000 });
+    // Blockers live on the Planning tab; the dialog opens on Details.
+    await cardB.getByRole("tab", { name: /^Planning/ }).click();
     // The shared picker's trigger is a BUTTON whose text is the placeholder (ui/combobox.tsx) - there is no
     // `placeholder` attribute on it to match, so it is reached by its name.
     await cardB.getByRole("button", { name: "Blocked by a task…" }).click();
@@ -53,7 +55,8 @@ test("blocking a card names the blocker, links to it, and shows the reverse edge
     await blockerLink.click();
     const cardA = page.getByRole("dialog");
     await expect(cardA.getByLabel("Title")).toHaveValue(titleA, { timeout: 15_000 });
-    // The "Blocks" line itself, told apart from the watcher note beside it ("… moves, comments and blocks",
+    await cardA.getByRole("tab", { name: /^Planning/ }).click();
+    // The "Blocks" line itself, told apart from the watcher note on Details ("… moves, comments and blocks",
     // which a bare substring match also finds) by two things at once: it is the paragraph, and the regex is
     // case-sensitive where the note's own "blocks" is lower-case.
     await expect(cardA.locator("p").filter({ hasText: /Blocks/ }).first()).toBeVisible();
@@ -65,6 +68,7 @@ test("blocking a card names the blocker, links to it, and shows the reverse edge
     await page.getByText(titleB).first().click();
     const cardB2 = page.getByRole("dialog");
     await expect(cardB2.getByLabel("Title")).toHaveValue(titleB, { timeout: 15_000 });
+    await cardB2.getByRole("tab", { name: /^Planning/ }).click();
     await cardB2.getByRole("button", { name: "Unblock", exact: true }).click();
     // Same trigger as line 35: a Combobox is a button, not an input, so it has no `placeholder` attribute.
     await expect(cardB2.getByRole("button", { name: "Blocked by a task…" })).toBeVisible({ timeout: 15_000 });

@@ -98,6 +98,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ShieldAlert } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { getSetting, saveSetting } from "@/lib/settingsStore";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
@@ -1817,6 +1818,7 @@ function TicketChecklistsTab({ toast }: { toast: Toast }) {
 // who can see/use it). Saves via PATCH only when edited; deletes the whole checklist.
 function ChecklistRow({ checklist, reload, toast }: { checklist: TicketChecklist; reload: () => void; toast: Toast }) {
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const original = (checklist.items ?? []).join("\n");
   const [name, setName] = useState(checklist.display_name);
   const [items, setItems] = useState(original);
@@ -1862,6 +1864,7 @@ function ChecklistRow({ checklist, reload, toast }: { checklist: TicketChecklist
     try {
       await remove(checklist.path, checklist.etag);
       reload();
+      deleted({ path: checklist.path, noun: "checklist", can: checklist.access?.can, reload });
     } catch (e) {
       toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" });
     } finally {
@@ -1966,6 +1969,7 @@ function LetterheadsPanel({ toast }: { toast: Toast }) {
 // somebody is actually looking at artwork - the generate picker lists names only.
 function LetterheadRow({ logo, reload, toast, onDesign }: { logo: Letterhead; reload: () => void; toast: Toast; onDesign: () => void }) {
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const path = logo.path!; // always present on a served row (readOnly, so the shared wire type has it optional)
   const [busy, setBusy] = useState(false);
   const [art, setArt] = useState<string | null>(null);
@@ -2001,6 +2005,7 @@ function LetterheadRow({ logo, reload, toast, onDesign }: { logo: Letterhead; re
     try {
       await remove(path, logo.etag);
       reload();
+      deleted({ path, noun: "letterhead", can: logo.access?.can, reload, title: "Letterhead removed" });
     } catch (e) {
       toast({ title: "Couldn't remove", description: (e as Error).message, variant: "destructive" });
     } finally {

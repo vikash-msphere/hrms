@@ -6725,7 +6725,7 @@
         "cron_runs_page_idx": {
           "name": "cron_runs_page_idx",
           "columns": [
-            "created_at",
+            "started_at",
             "uuid"
           ],
           "isUnique": false
@@ -6736,13 +6736,6 @@
             "cron",
             "started_at",
             "uuid"
-          ],
-          "isUnique": false
-        },
-        "cron_runs_started_idx": {
-          "name": "cron_runs_started_idx",
-          "columns": [
-            "started_at"
           ],
           "isUnique": false
         },

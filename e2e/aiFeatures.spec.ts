@@ -135,7 +135,8 @@ test.describe("with the AI features switched off", () => {
 
       // The three fields the suggestion would have filled still take one typed by hand, which is what makes
       // the absence above a narrowing rather than a removal. They are behind the fold on a goal with no
-      // measure, which is also where the suggestion button would have been.
+      // measure, which is also where the suggestion button would have been - on the Alignment & progress tab.
+      await form.getByRole("tab", { name: /^Alignment/ }).click();
       await form.getByRole("button", { name: "Add a measure" }).click();
       await form.getByLabel("Baseline").fill("14");
       await form.getByLabel("Target").fill("3");
@@ -277,7 +278,8 @@ test.describe("an AI feature switched on", () => {
       await expect(detail.getByText(title).first()).toBeVisible({ timeout: 30_000 });
       // NOT PRESSED. Pressing asks the index, which on this lane is the real Vectorize binding - and this
       // describe has to pass on a machine with nothing local running. That the button is there is the whole
-      // claim; `test/goalSimilar.test.ts` owns what it answers.
+      // claim; `test/goalSimilar.test.ts` owns what it answers. It sits on the drawer's Connections tab.
+      await detail.getByRole("tab", { name: /^Connections/ }).click();
       await expect(detail.getByRole("button", { name: "Find goals like this one" })).toBeVisible({ timeout: 30_000 });
       await page.keyboard.press("Escape");
 
@@ -286,7 +288,8 @@ test.describe("an AI feature switched on", () => {
       const form = page.getByRole("dialog");
       await expect(form.getByRole("heading", { name: "Edit goal" })).toBeVisible({ timeout: 30_000 });
       // Offered only where there is a gap to fill: this goal was created without a measure. Not pressed, for
-      // the same reason - it is a generation.
+      // the same reason - it is a generation. It sits with the measure, on the Alignment & progress tab.
+      await form.getByRole("tab", { name: /^Alignment/ }).click();
       await expect(form.getByRole("button", { name: "Suggest a measure" })).toBeVisible({ timeout: 30_000 });
       await form.getByRole("button", { name: "Cancel" }).click();
       await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });

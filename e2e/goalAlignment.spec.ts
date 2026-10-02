@@ -39,6 +39,8 @@ test("the alignment picker will not offer a goal its own descendant", async ({ a
     await openEdit(page, parentTitle);
     const form = page.getByRole("dialog");
     await expect(form.getByRole("heading", { name: "Edit goal" })).toBeVisible();
+    // Alignment has its own tab; the editor opens on Details.
+    await form.getByRole("tab", { name: /^Alignment/ }).click();
     await form.getByLabel("Aligns to").click();
     // Searched for by name rather than eyeballed down a list: the picker filters, and the assertion has to be
     // "this goal is not offered", not "it wasn't in the first ten rows".
@@ -61,6 +63,7 @@ test("the alignment picker will not offer a goal its own descendant", async ({ a
     await openEdit(page, childTitle);
     const childForm = page.getByRole("dialog");
     await expect(childForm.getByRole("heading", { name: "Edit goal" })).toBeVisible();
+    await childForm.getByRole("tab", { name: /^Alignment/ }).click();
     await childForm.getByLabel("Aligns to").click();
     await childForm.getByPlaceholder("Search goals…").fill(parentTitle);
     await expect(childForm.getByRole("option", { name: parentTitle })).toBeVisible({ timeout: 30_000 });

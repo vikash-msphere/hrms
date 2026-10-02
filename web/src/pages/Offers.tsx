@@ -31,6 +31,7 @@ import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreview
 import { MoneyInput } from "@/components/common/MoneyInput";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 
 const fmtDate = (iso?: string) => (iso ? new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" }) : "");
@@ -66,6 +67,7 @@ export default function Offers({ me: _me, openId }: { me: Me; openId?: string })
   const { rows, state, error, reload } = useCollection<Offer>("offers");
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const money = useMoney();
   const [dialog, setDialog] = useState<Offer | "new" | null>(null);
   // Who the offer is for, and for which role: label lists, read only when there is an offer to label or a
@@ -172,7 +174,7 @@ export default function Offers({ me: _me, openId }: { me: Me; openId?: string })
   }
   async function del(o: Offer) {
     if (!(await confirm({ title: "Delete this offer?", destructive: true, confirmLabel: "Delete" }))) return;
-    try { await remove(`offers/${idOf(o.path)}`); reload(); }
+    try { await remove(`offers/${idOf(o.path)}`); reload(); deleted({ path: `offers/${idOf(o.path)}`, noun: "offer", can: o.access?.can, reload }); }
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
   }
 

@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, confirmDelete, gotoRoute, test, expect, toast } from "./fixtures";
 
 // Two card-level actions `goals.spec.ts` never reaches, because it does everything through the DETAIL
 // drawer's own slider: the card's own one-click "Mark complete" (same `onProgress(100)` the slider fires,
@@ -24,6 +24,7 @@ test("a goal is completed from its own card in one press, then deleted", async (
   await expect(card.getByRole("button", { name: "Mark complete" })).toHaveCount(0);
 
   await card.getByRole("button", { name: "Delete", exact: true }).click();
+  await confirmDelete(page);
   await expect(toast(page, "Goal deleted")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("div.shadow-card, tbody tr, li").filter({ hasText: title })).toHaveCount(0, { timeout: 30_000 });
 

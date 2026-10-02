@@ -28,6 +28,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { DraftButton } from "@/components/common/DraftButton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -62,6 +63,7 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const canSubmit = usePermission("suggestions.write");
 
   const [open, setOpen] = useState(false);
@@ -226,7 +228,11 @@ export default function Suggestions({ me, openId, solo }: { me: Me; openId?: str
     // copy rather than in one of them having a hand-rolled prompt and the other the house one.
     if (!(await confirmDecision(confirm, "removeSuggestion", `"${s.title}"`))) return;
     // Removing the suggestion a solo page IS leaves nothing to render, so that page goes back to the board.
-    try { await remove(s.path, s.etag); toast({ title: "Suggestion removed", variant: "success" }); if (solo) navigate("suggestions"); else reload(); }
+    try {
+      await remove(s.path, s.etag);
+      if (solo) navigate("suggestions"); else reload();
+      deleted({ path: s.path, noun: "suggestion", can: s.access?.can, reload, title: "Suggestion removed" });
+    }
     catch (e) { toast({ title: "Couldn't remove", description: (e as Error).message, variant: "destructive" }); }
   }
 

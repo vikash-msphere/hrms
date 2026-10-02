@@ -35,7 +35,7 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { WriteDialog } from "@/components/common/WriteDialog";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
-import { Chart, ChartCard } from "@/components/common/Chart";
+import { Chart, ChartCard, ChartStrip } from "@/components/common/Chart";
 import { ChartFilterNote } from "@/components/common/ChartFilterNote";
 import { useChartFocus } from "@/lib/chartFocus";
 import { monthlyTotals } from "@/lib/chartTheme";
@@ -724,8 +724,10 @@ export default function Directory({ me }: { me: Me }) {
     : "No employees match";
   const gridEmpty = searching && searchState === "loading" ? "Searching…" : emptyLabel;
 
+  // From `2xl` the grid adds people instead of widening their cards: as many ~11rem cards as fit, the size they
+  // are at five across today (`grid-cols-fill`, web/tailwind.config.js) - nine across on a 2560 screen.
   const renderGrid = (people: Employee[]) => (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+    <div className="grid grid-cols-2 gap-3 [--cell:11rem] sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-fill">
       {people.map((e) => (
         <EmployeeCard key={e.path} e={e} deptLabel={deptName(e.department)} clocked={clockedIn.has(idOf(e.path))} />
       ))}
@@ -743,7 +745,7 @@ export default function Directory({ me }: { me: Me }) {
       {/* The org's shape. A directory lists people one at a time and never says how the company is
           distributed - which department carries the headcount, and when the growth actually happened. */}
       {state === "ready" && rows.length > 3 && (
-        <div className="mb-4 grid gap-4 lg:grid-cols-2">
+        <ChartStrip id="directory" className="mb-4">
           <ChartCard title="Headcount by department" description="Everyone you can see, by the team they sit in.">
             <Chart
               type="bar"
@@ -766,7 +768,7 @@ export default function Directory({ me }: { me: Me }) {
               {...cf.chart("startMonth")}
             />
           </ChartCard>
-        </div>
+        </ChartStrip>
       )}
 
       {/* Each metric focuses the table below it, so the strip sits against the table - under the charts. */}

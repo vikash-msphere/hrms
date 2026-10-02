@@ -27,6 +27,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 
 const SECTIONS = ["80C", "80CCD(1B)", "80D", "80E", "80G", "80TTA", "HRA", "Home loan interest", "Other"];
@@ -45,6 +46,7 @@ export default function TaxDeclarations({ me, openId }: { me: Me; openId?: strin
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   const [fy, setFy] = useState(FY_OPTIONS[0]);
@@ -117,7 +119,7 @@ export default function TaxDeclarations({ me, openId }: { me: Me; openId?: strin
   }
   async function del(d: TaxDeclaration) {
     if (!(await confirm({ title: "Delete this declaration?", destructive: true, confirmLabel: "Delete" }))) return;
-    try { await remove(`tax-declarations/${idOf(d.path)}`); toast({ title: "Declaration deleted", variant: "success" }); reload(); }
+    try { await remove(`tax-declarations/${idOf(d.path)}`); reload(); deleted({ path: `tax-declarations/${idOf(d.path)}`, noun: "declaration", can: d.access?.can, reload }); }
     catch (e) { toast({ title: "Couldn't delete the declaration", description: (e as Error).message, variant: "destructive" }); }
   }
   function pickProof(d: TaxDeclaration) { uploadFor.current = d; fileInput.current?.click(); }

@@ -6,6 +6,7 @@ import { useCollection, type LoadState } from "@/hooks/useCollection";
 import { useDebounced } from "@/hooks/useDebounced";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useInfiniteScroll } from "@/hooks/useInfiniteScroll";
+import { useMedia } from "@/hooks/useMedia";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useKudosLevels, useKudosCategories } from "@/lib/kudosLevels";
@@ -14,7 +15,7 @@ import { stampDay, todayStr, thisMonthStr } from "@/lib/orgDay";
 import type { Announcement, Department, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { FilterChip } from "@/components/common/FilterChips";
-import { Chart, ChartCard } from "@/components/common/Chart";
+import { Chart, ChartCard, ChartStrip } from "@/components/common/Chart";
 import { useChartFocus } from "@/lib/chartFocus";
 import { monthlyTotals, topSlices } from "@/lib/chartTheme";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -49,6 +50,13 @@ import { EmojiPicker } from "@/components/common/EmojiPicker";
 
 const thisMonth = () => thisMonthStr();
 const monthName = () => new Date().toLocaleString(undefined, { month: "long" });
+
+// The board's wide layout (docs/06-responsive-ui.md, "Wide screens"): from a 1920px screen - `3xl` in
+// web/tailwind.config.js, change the two together - what sits above the feed on a narrower one (the search and
+// filter chips, "Most recognized") moves into a side column beside it, and the pair is centred.
+const WIDE_BOARD_QUERY = "(min-width: 1920px)";
+const BOARD_SIDE_WIDTH = 352; // 22rem
+const BOARD_SIDE_GAP = 24;
 
 // How many posts the board reads at a time. The feed grows by another page each time the reader reaches its
 // foot (see useInfiniteScroll), so this is the cost of opening the page, not a cap on what can be read. Turn it
@@ -246,6 +254,11 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   const canGiveKudos = usePermission("announcements.giveKudos"); // give peer recognition (kind="kudos")
   const canMarkAllRead = usePermission("announcements.markAllRead"); // clear own unread state in one call
   const canCompose = canAnnounce || canPost || canGiveKudos;
+  // Board mode on a wide screen; a post on its own page keeps its one narrow column. `useMedia` rather than a CSS
+  // fork, the way TopBar chooses its menu: the filter bar and "Most recognized" each mount in ONE place, so the
+  // search box, its `/` shortcut and the chips are never in the accessibility tree twice. Their state (the search
+  // text, the chip) lives up here, so crossing the breakpoint keeps it.
+  const wideBoard = useMedia(WIDE_BOARD_QUERY) && !solo;
   const levels = useKudosLevels();
   const kudosCategories = useKudosCategories();
   const myEmp = me.employee_id ? `employees/${me.employee_id}` : "";
@@ -465,19 +478,15 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     }
   }
 
-  // Deleting a post asks first, which `useSoftDelete` deliberately does not do on its own.
-  //
-  // THE HOOK'S RULE IS RIGHT AND THIS IS A LOCAL EXCEPTION, so it is here rather than in the hook: a soft
-  // delete is reversible and carries an Undo on its toast, and a dialog in front of every reversible delete
-  // in the app is the noise that teaches people to click through the dialogs that matter. What is different
-  // on this card is the NEIGHBOUR. The bin now sits inches from a moderator's Hide, and hiding asks; one of
-  // two adjacent buttons asking and the other firing on the click reads as the silent one being the safer -
-  // and it is the opposite, because a hide tells the author and comes back from the queue while this takes
-  // the post off the board for everybody.
+  // Deleting a post asks first, as every delete does (`useSoftDelete`), in words that say what is
+  // particular to a post: it comes off the board for everybody, where a moderator's Hide beside it tells the
+  // author and comes back from the queue.
   async function deletePost(a: Announcement) {
     const subject = a.title?.trim() ? `"${a.title}"` : "this post";
-    if (!(await confirmDecision(confirm, "deletePost", subject))) return;
-    await sd.softDelete(a);
+    await sd.softDelete(a, {
+      subject,
+      description: `${subject} comes off the board for everyone. It goes to deleted items and can be restored from there, or with Undo on the toast.`,
+    });
   }
 
   // The same act on a reply. Its id is the reply's own, under the `announcement-replies` collection - the
@@ -938,9 +947,149 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     </Card>
   );
 
+  // The search box and the filter chips. Inline at the top of the feed, where they ride along under the top bar
+  // (h-14) so narrowing the board never needs a scroll back up; in the wide layout's side column instead
+  // (`side`), which is itself sticky, so the bar no longer covers the top of the feed while it scrolls.
+  const filterBar = (side: boolean) => (
+    <div className={side ? "flex flex-wrap items-center gap-1.5" : "sticky top-14 z-20 -mx-1 -my-2 flex flex-wrap items-center gap-1.5 bg-background/95 px-1 py-2 backdrop-blur"}>
+      {/* The board is one flat feed with no column to sort by, so text is the only way to find an old
+          post by hand. From two characters up the server matches the whole board (title, body,
+          category, kind); below that it filters the loaded window on what the card shows. */}
+      <div className={side ? "relative w-full" : "relative mr-1 w-full sm:w-64"}>
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
+        <Input
+          type="search"
+          ref={searchRef}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setQ(""); e.currentTarget.blur(); } }}
+          placeholder="Search the board…"
+          aria-label="Search the board"
+          className="h-8 rounded-full pl-8 pr-8 text-sm"
+        />
+        {q && (
+          <button
+            type="button"
+            onClick={() => { setQ(""); searchRef.current?.focus(); }}
+            aria-label="Clear the search"
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+      {([
+        ["all", "All", shownFeed.length],
+        ...(unreadCount > 0 ? [["unread", "Unread", unreadCount] as const] : []),
+        ...(shownDrafts.length > 0 ? [["drafts", "Drafts", shownDrafts.length] as const] : []),
+        ["announcement", "Announcements", kindCounts.announcement],
+        ["post", "Posts", kindCounts.post],
+        ["poll", "Polls", kindCounts.poll],
+        ["kudos", "Kudos", kindCounts.kudos],
+      ] as const)
+        .filter(([k, , n]) => k === "all" || n > 0)
+        .map(([k, label, n]) => (
+          <FilterChip key={k} active={filter === k} count={n} onClick={() => setFilter(k as typeof filter)}>{label}</FilterChip>
+        ))}
+      {authorFilter && (
+        <button
+          onClick={() => setAuthorFilter(null)}
+          className="flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/15"
+          title="Clear the author filter"
+        >
+          by {empName(authorFilter)} <X className="h-3 w-3" />
+        </button>
+      )}
+      {cf.activeLabel && (
+        <button
+          onClick={cf.clear}
+          className="flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/15"
+          title="Clear the recognition filter"
+        >
+          {cf.activeLabel} <X className="h-3 w-3" />
+        </button>
+      )}
+      {/* One way out of every narrowing at once, so a reader who stacked a kind, an author and a
+          search does not have to undo them one at a time to see the board again. */}
+      {filtered && (
+        <button
+          onClick={clearFilters}
+          className="flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          title="Show the whole board again"
+        >
+          <FilterX className="h-3.5 w-3.5" /> Clear
+        </button>
+      )}
+      {/* Catching up post by post is the slow way through a backlog - one call clears the lot. Shown
+          only while something IS unread, next to the chip that counts it. */}
+      {unreadCount > 0 && canMarkAllRead && (
+        <div className="ml-auto">
+          <AccessAction collection="announcements" verb="markAllRead" label="Mark the whole board read">
+            <button
+              onClick={markAllRead}
+              disabled={markingAll}
+              className="flex items-center gap-1 text-xs font-medium text-primary hover:underline disabled:opacity-60"
+            >
+              <CheckCheck className="h-3.5 w-3.5" /> Mark all read
+            </button>
+          </AccessAction>
+        </div>
+      )}
+      {/* The names on the cards are not in the text index, so a search for a person finds only the posts
+          that spell their name out. This offers the filter that does know: their posts, by author. */}
+      {authorSuggestions.length > 0 && (
+        <div className="flex w-full flex-wrap items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">Looking for a person?</span>
+          {authorSuggestions.map((e) => (
+            <button
+              key={e.path}
+              onClick={() => { setAuthorFilter(e.path); setQ(""); }}
+              className="rounded-full border border-dashed px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              Posts by {[e.first_name, e.last_name].filter(Boolean).join(" ")}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  // "Most recognized" this month. Above the feed on a narrower screen, where the composer right under it already
+  // offers Kudos; in the wide layout's side column it is a column away from the composer, so it carries its own
+  // "Give kudos" there (`side`) - the card that shows recognition also starts it.
+  const leaderboardCard = (side: boolean) => (
+    <Card className={side ? "p-3" : "mb-4 p-3"}>
+      {/* Wraps in the 22rem side column, where "View all kudos" may not fit beside the month's name. */}
+      <div className={cn("mb-2 flex items-center gap-1.5", side && "flex-wrap")}>
+        <p className="flex items-center gap-1.5 text-sm font-medium"><Trophy className="h-4 w-4 text-amber-500" /> Most recognized in {monthName()}</p>
+        <button type="button" onClick={() => { setFilter("kudos"); setAuthorFilter(null); }} className="ml-auto text-xs font-medium text-primary hover:underline">
+          View all kudos
+        </button>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {leaderboard.map((l, i) => { const e = l.employee ? empByPath.get(idOf(l.employee)) : undefined; return (
+          <span key={l.employee} className="inline-flex items-center gap-2 rounded-full border bg-muted/40 py-1 pl-1 pr-3 text-sm">
+            <span className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${i === 0 ? "bg-amber-400 text-amber-950 dark:bg-amber-500" : i === 1 ? "bg-zinc-300 text-zinc-700 dark:bg-zinc-400 dark:text-zinc-900" : "bg-orange-300 text-orange-900 dark:bg-orange-400 dark:text-orange-950"}`}>{i + 1}</span>
+            <PhotoAvatar employeeId={l.employee ? idOf(l.employee) : ""} name={empName(l.employee)} photo={e?.photo} className="h-5 w-5" />
+            {empName(l.employee)} <Badge variant="secondary" className="tabular-nums">{l.count}</Badge>
+          </span>
+        ); })}
+      </div>
+      {side && canGiveKudos && (
+        <AccessAction collection="announcements" verb="giveKudos" label="Give kudos">
+          <Button variant="outline" size="sm" className="mt-3 w-full" onClick={() => openComposer("kudos")}>
+            <Award className="h-4 w-4" /> Give kudos
+          </Button>
+        </AccessAction>
+      )}
+    </Card>
+  );
+
   return (
     <TooltipProvider delayDuration={150}>
-      <div>
+      {/* The wide layout centres the header, the feed and its side column as one block, so the title lines up
+          with the feed and the page's actions with the side column. */}
+      <div className={wideBoard ? "mx-auto" : undefined} style={wideBoard ? { maxWidth: FEED_WIDTH + BOARD_SIDE_GAP + BOARD_SIDE_WIDTH } : undefined}>
       {/* A post on its own page keeps none of the board's chrome - no composer, no chips, no leaderboard.
           The one thing it owes the reader is the way back to the board it came from. */}
       {solo ? (
@@ -957,31 +1106,18 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
         />
       )}
 
-      {!solo && leaderboard.length > 0 && (
-        <Card className="mb-4 p-3">
-          <div className="mb-2 flex items-center gap-1.5">
-            <p className="flex items-center gap-1.5 text-sm font-medium"><Trophy className="h-4 w-4 text-amber-500" /> Most recognized in {monthName()}</p>
-            <button type="button" onClick={() => { setFilter("kudos"); setAuthorFilter(null); }} className="ml-auto text-xs font-medium text-primary hover:underline">
-              View all kudos
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {leaderboard.map((l, i) => { const e = l.employee ? empByPath.get(idOf(l.employee)) : undefined; return (
-              <span key={l.employee} className="inline-flex items-center gap-2 rounded-full border bg-muted/40 py-1 pl-1 pr-3 text-sm">
-                <span className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${i === 0 ? "bg-amber-400 text-amber-950 dark:bg-amber-500" : i === 1 ? "bg-zinc-300 text-zinc-700 dark:bg-zinc-400 dark:text-zinc-900" : "bg-orange-300 text-orange-900 dark:bg-orange-400 dark:text-orange-950"}`}>{i + 1}</span>
-                <PhotoAvatar employeeId={l.employee ? idOf(l.employee) : ""} name={empName(l.employee)} photo={e?.photo} className="h-5 w-5" />
-                {empName(l.employee)} <Badge variant="secondary" className="tabular-nums">{l.count}</Badge>
-              </span>
-            ); })}
-          </div>
-        </Card>
-      )}
+      {!solo && !wideBoard && leaderboard.length > 0 && leaderboardCard(false)}
+
+      {/* The feed and, on a wide screen, the side column beside it. Below that both wrappers are plain blocks,
+          so the page is the single column it always was. */}
+      <div className={wideBoard ? "flex items-start" : undefined} style={wideBoard ? { gap: BOARD_SIDE_GAP } : undefined}>
+      <div className={wideBoard ? "min-w-0 flex-1" : undefined}>
 
       {/* On the kudos view, recognition as a pattern rather than a podium: who is being thanked beyond the
           top three, and whether the giving is a habit or a once-a-quarter burst. Recognition that only ever
           lands on the same two people is the thing this is worth seeing. */}
       {!solo && filter === "kudos" && kudosCharts.total > 2 && (
-        <div className="mb-4 grid gap-4 lg:grid-cols-2">
+        <ChartStrip id="kudos" className="mb-4">
           <ChartCard title="Most recognized" description="Kudos points received over the last six months.">
             <Chart
               type="bar"
@@ -1004,7 +1140,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
               {...cf.chart("month")}
             />
           </ChartCard>
-        </div>
+        </ChartStrip>
       )}
 
       <DataState state={viewState} error={viewError} onRetry={viewReload} skeleton={<FeedSkeleton />}>
@@ -1016,111 +1152,9 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
         ) : (
           <div className="mx-auto space-y-5" style={{ maxWidth: FEED_WIDTH }}>
             {!solo && starter}
-            {/* The search box and filter chips ride along under the top bar (h-14) so narrowing the board
-                never needs a scroll back to the top of a long feed. */}
-            {!solo && (
-            <div className="sticky top-14 z-20 -mx-1 -my-2 flex flex-wrap items-center gap-1.5 bg-background/95 px-1 py-2 backdrop-blur">
-              {/* The board is one flat feed with no column to sort by, so text is the only way to find an old
-                  post by hand. From two characters up the server matches the whole board (title, body,
-                  category, kind); below that it filters the loaded window on what the card shows. */}
-              <div className="relative mr-1 w-full sm:w-64">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
-                <Input
-                  type="search"
-                  ref={searchRef}
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setQ(""); e.currentTarget.blur(); } }}
-                  placeholder="Search the board…"
-                  aria-label="Search the board"
-                  className="h-8 rounded-full pl-8 pr-8 text-sm"
-                />
-                {q && (
-                  <button
-                    type="button"
-                    onClick={() => { setQ(""); searchRef.current?.focus(); }}
-                    aria-label="Clear the search"
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
-              </div>
-              {([
-                ["all", "All", shownFeed.length],
-                ...(unreadCount > 0 ? [["unread", "Unread", unreadCount] as const] : []),
-                ...(shownDrafts.length > 0 ? [["drafts", "Drafts", shownDrafts.length] as const] : []),
-                ["announcement", "Announcements", kindCounts.announcement],
-                ["post", "Posts", kindCounts.post],
-                ["poll", "Polls", kindCounts.poll],
-                ["kudos", "Kudos", kindCounts.kudos],
-              ] as const)
-                .filter(([k, , n]) => k === "all" || n > 0)
-                .map(([k, label, n]) => (
-                  <FilterChip key={k} active={filter === k} count={n} onClick={() => setFilter(k as typeof filter)}>{label}</FilterChip>
-                ))}
-              {authorFilter && (
-                <button
-                  onClick={() => setAuthorFilter(null)}
-                  className="flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/15"
-                  title="Clear the author filter"
-                >
-                  by {empName(authorFilter)} <X className="h-3 w-3" />
-                </button>
-              )}
-              {cf.activeLabel && (
-                <button
-                  onClick={cf.clear}
-                  className="flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/15"
-                  title="Clear the recognition filter"
-                >
-                  {cf.activeLabel} <X className="h-3 w-3" />
-                </button>
-              )}
-              {/* One way out of every narrowing at once, so a reader who stacked a kind, an author and a
-                  search does not have to undo them one at a time to see the board again. */}
-              {filtered && (
-                <button
-                  onClick={clearFilters}
-                  className="flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  title="Show the whole board again"
-                >
-                  <FilterX className="h-3.5 w-3.5" /> Clear
-                </button>
-              )}
-              {/* Catching up post by post is the slow way through a backlog - one call clears the lot. Shown
-                  only while something IS unread, next to the chip that counts it. */}
-              {unreadCount > 0 && canMarkAllRead && (
-                <div className="ml-auto">
-                  <AccessAction collection="announcements" verb="markAllRead" label="Mark the whole board read">
-                    <button
-                      onClick={markAllRead}
-                      disabled={markingAll}
-                      className="flex items-center gap-1 text-xs font-medium text-primary hover:underline disabled:opacity-60"
-                    >
-                      <CheckCheck className="h-3.5 w-3.5" /> Mark all read
-                    </button>
-                  </AccessAction>
-                </div>
-              )}
-              {/* The names on the cards are not in the text index, so a search for a person finds only the posts
-                  that spell their name out. This offers the filter that does know: their posts, by author. */}
-              {authorSuggestions.length > 0 && (
-                <div className="flex w-full flex-wrap items-center gap-1.5">
-                  <span className="text-xs text-muted-foreground">Looking for a person?</span>
-                  {authorSuggestions.map((e) => (
-                    <button
-                      key={e.path}
-                      onClick={() => { setAuthorFilter(e.path); setQ(""); }}
-                      className="rounded-full border border-dashed px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                    >
-                      Posts by {[e.first_name, e.last_name].filter(Boolean).join(" ")}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            )}
+            {/* The search box and filter chips (`filterBar`), at the top of the feed unless the wide layout has
+                them in its side column. */}
+            {!solo && !wideBoard && filterBar(false)}
             {/* An empty list is a dead end unless it says how to get out of it. On a solo page "empty" means
                 the one post asked for is not there - deleted, or never visible to this reader. */}
             {visibleFeed.length === 0 && (
@@ -1536,6 +1570,18 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
           </div>
         )}
       </DataState>
+      </div>
+      {/* The wide layout's side column: sticky under the top bar with a scroll of its own, so it stays in view
+          down a long feed. The filter bar is here only when the inline one would have been drawn (the board has
+          loaded and is not the empty-board pitch). `-m-1 p-1` gives the search box's focus ring room inside the
+          scroll box, which clips at its edges. */}
+      {wideBoard && (
+        <aside aria-label="Board tools" className="sticky top-16 -m-1 max-h-[calc(100dvh-5rem)] shrink-0 space-y-4 overflow-y-auto p-1" style={{ width: BOARD_SIDE_WIDTH + 8 }}>
+          {viewState === "ready" && !(feed.length === 0 && drafts.length === 0 && !filtered) && filterBar(true)}
+          {leaderboard.length > 0 && leaderboardCard(true)}
+        </aside>
+      )}
+      </div>
 
       <PostComposer
         open={open}

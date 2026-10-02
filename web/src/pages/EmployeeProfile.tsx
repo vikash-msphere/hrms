@@ -729,12 +729,18 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                     without the second copy of every value. Its edit pencil moved up with it. */}
                 {/* Personal facts and how to reach the person are the same conversation, so Contact is a card
                     on this tab rather than a tab of its own. */}
-                {canPersonal && <EmployeeProfilePersonal employeeId={id} canEdit={canPersonalEdit} />}
-                {canPersonal && <EmployeePersonalDetails employeeId={id} canEdit={canPersonalEdit} />}
-                {/* Emergency reads from the same encrypted blob and is asked for in the same sitting, so it is
-                    the third card here rather than a button in the header - `reload` because the completeness
-                    flags the meter above draws ride the employee row. */}
-                {canPersonal && <EmployeeEmergencyDetails employeeId={id} canEdit={canPersonalEdit} onSaved={reload} />}
+                {/* `card-flow`: one column, as before, until two 46rem columns fit - then two across, with the
+                    third card taking the full row (index.css). The completeness banner above stays outside it. */}
+                {canPersonal && (
+                  <div className="card-flow">
+                    <EmployeeProfilePersonal employeeId={id} canEdit={canPersonalEdit} />
+                    <EmployeePersonalDetails employeeId={id} canEdit={canPersonalEdit} />
+                    {/* Emergency reads from the same encrypted blob and is asked for in the same sitting, so it is
+                        the third card here rather than a button in the header - `reload` because the completeness
+                        flags the meter above draws ride the employee row. */}
+                    <EmployeeEmergencyDetails employeeId={id} canEdit={canPersonalEdit} onSaved={reload} />
+                  </div>
+                )}
               </TabsContent>
 
               <TabsContent value="employment" className="space-y-4">
@@ -808,7 +814,8 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                     <Card>
                       <CardHeader><CardTitle className="text-base">Leave balances</CardTitle></CardHeader>
                       <CardContent>
-                        <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+                        {/* From `2xl` more balances per row (`grid-cols-fill`) rather than four ever-wider tiles. */}
+                        <div className="grid gap-3 [--cell:12rem] sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-fill">
                           {myBalances.map((b) => (
                             <div key={b.path} className="rounded-lg border p-3">
                               <div className="text-sm text-muted-foreground">{typeName(b.leave_type)}</div>
@@ -897,32 +904,35 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
               )}
 
               {canIdentityTab && (
-                <TabsContent value="identity" className="space-y-4">
-                  {/* Government IDs and the bank account are the same errand, so they share one tab - but they
-                      are two grants, and an org is free to hand out one without the other. Each panel asks for
-                      its own, so the tab can arrive with either half. */}
-                  {canIdentity && <EmployeeIdentityDetails employeeId={id} canEdit={canIdentityEdit} />}
-                  {/* Closed until asked for: sharing this tab would otherwise read the account number, and
-                      write the audit row that says somebody read it, on every Identity open. */}
-                  {canBankDetails && <RevealCard
-                    title="Bank details"
-                    icon={<Landmark className="h-4 w-4 text-primary" />}
-                    hint="Opening this reads the account number, and records that you did."
-                    defaultOpen={isSelf}
-                    target={{ collection: "employees", objectPath: empPath, field: "bank-account", label: "Bank details" }}
-                  >
-                    <EmployeeBankDetails employeeId={id} canEdit={canBankEdit} />
-                  </RevealCard>}
-                  {/* The mark that stands in for their hand on a document. It lived only on the self page, so
-                      an admin looking at why a letter would not e-sign could not see whether one existed. */}
-                  {/* OWNER-ONLY, and not by a grant: `services/employeePhoto.ts assertOwner` refuses every
-                      read, upload and clear of a signature that is not the caller's own, and the serializer
-                      strips even the existence marker from anybody else (routes/employees.ts). So this is
-                      `isSelf`, not an identity gate - an HR admin who holds `employees.*.identity` was being
-                      shown an empty signature sheet with an Upload button that could only ever 403. A
-                      person's signature is the whole input to forging the letters this app e-signs, which is
-                      why that rule is structural rather than grantable. */}
-                  {isSelf && <SignatureField employeeId={id} signature={emp.signature} canEdit onChanged={reload} />}
+                <TabsContent value="identity">
+                  {/* `card-flow`: one column until two 46rem columns fit, then two across (index.css). */}
+                  <div className="card-flow">
+                    {/* Government IDs and the bank account are the same errand, so they share one tab - but they
+                        are two grants, and an org is free to hand out one without the other. Each panel asks for
+                        its own, so the tab can arrive with either half. */}
+                    {canIdentity && <EmployeeIdentityDetails employeeId={id} canEdit={canIdentityEdit} />}
+                    {/* Closed until asked for: sharing this tab would otherwise read the account number, and
+                        write the audit row that says somebody read it, on every Identity open. */}
+                    {canBankDetails && <RevealCard
+                      title="Bank details"
+                      icon={<Landmark className="h-4 w-4 text-primary" />}
+                      hint="Opening this reads the account number, and records that you did."
+                      defaultOpen={isSelf}
+                      target={{ collection: "employees", objectPath: empPath, field: "bank-account", label: "Bank details" }}
+                    >
+                      <EmployeeBankDetails employeeId={id} canEdit={canBankEdit} />
+                    </RevealCard>}
+                    {/* The mark that stands in for their hand on a document. It lived only on the self page, so
+                        an admin looking at why a letter would not e-sign could not see whether one existed. */}
+                    {/* OWNER-ONLY, and not by a grant: `services/employeePhoto.ts assertOwner` refuses every
+                        read, upload and clear of a signature that is not the caller's own, and the serializer
+                        strips even the existence marker from anybody else (routes/employees.ts). So this is
+                        `isSelf`, not an identity gate - an HR admin who holds `employees.*.identity` was being
+                        shown an empty signature sheet with an Upload button that could only ever 403. A
+                        person's signature is the whole input to forging the letters this app e-signs, which is
+                        why that rule is structural rather than grantable. */}
+                    {isSelf && <SignatureField employeeId={id} signature={emp.signature} canEdit onChanged={reload} />}
+                  </div>
                 </TabsContent>
               )}
               {canPerformance && (
@@ -991,25 +1001,29 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                 </TabsContent>
               )}
               {canActivity && (
-                <TabsContent value="activity" className="space-y-6">
+                <TabsContent value="activity">
                   {/* Two different questions, and the tab used to answer only the first. `resource` is writes to
                       the EMPLOYEE RECORD - a bank detail, a manager change. `subject` is everything that
                       happened to this person anywhere: the leave they filed, the pay that was revised, the
                       asset they were issued. The second is what somebody opening an employee's activity
                       actually means, and it spans a dozen collections that the record's own trail never sees. */}
-                  {/* Gated on the ORG-WIDE grant, not on employees-activity: `?subject` rides the org-wide
-                      branch server-side (a person's cross-collection timeline reveals more than any single
-                      record in it), so offering it to a caller who only holds `activity.employees.read` would
-                      render a panel that can only 403. */}
-                  {canOrgActivity && (
+                  {/* `card-flow` with the tab's own 1.5rem rhythm: stacked as before, side by side once two 46rem
+                      columns fit, so the two timelines can be read against each other (index.css). */}
+                  <div className="card-flow [--flow-gap:1.5rem]">
+                    {/* Gated on the ORG-WIDE grant, not on employees-activity: `?subject` rides the org-wide
+                        branch server-side (a person's cross-collection timeline reveals more than any single
+                        record in it), so offering it to a caller who only holds `activity.employees.read` would
+                        render a panel that can only 403. */}
+                    {canOrgActivity && (
+                      <div>
+                        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Everything about this person</p>
+                        <ActivityFeed global subject={empPath} />
+                      </div>
+                    )}
                     <div>
-                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Everything about this person</p>
-                      <ActivityFeed global subject={empPath} />
+                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Changes to the employee record</p>
+                      <ActivityFeed resource={empPath} />
                     </div>
-                  )}
-                  <div>
-                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Changes to the employee record</p>
-                    <ActivityFeed resource={empPath} />
                   </div>
                 </TabsContent>
               )}

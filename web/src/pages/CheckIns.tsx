@@ -31,6 +31,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 import { addMonthsFromAnchor } from "../../../src/domain/calendar";
 
@@ -64,6 +65,7 @@ export default function CheckIns({ me }: { me: Me }) {
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   // Prefill for the dialog. "Schedule next" from a past 1:1 carries the person AND its open action
   // items over; `source` is that past 1:1, whose carried items get marked done once the new one exists.
   const [creating, setCreating] = useState<{ counterpart?: string; counterpartName?: string; date?: string; action_items?: CheckInActionItem[]; source?: CheckIn } | null>(null);
@@ -261,7 +263,7 @@ export default function CheckIns({ me }: { me: Me }) {
   }
   async function del(c: CheckIn) {
     if (!(await confirm({ title: "Delete this 1:1?", destructive: true, confirmLabel: "Delete" }))) return;
-    try { await remove(`check-ins/${idOf(c.path)}`); reload(); }
+    try { await remove(`check-ins/${idOf(c.path)}`); reload(); deleted({ path: `check-ins/${idOf(c.path)}`, noun: "1:1", can: c.access?.can, reload }); }
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
   }
 

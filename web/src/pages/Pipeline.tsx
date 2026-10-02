@@ -365,8 +365,10 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
                   // cannot see the header above them.
                   role="group"
                   aria-label={col.label}
+                  // From `2xl` the stages share the row (18rem basis, no maximum), as on the task board: a
+                  // pipeline whose stages fit fills the width, and its cards reflow onto fewer rows (`pipe-card`).
                   className={cn(
-                    "flex w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col rounded-lg border bg-muted/20 transition-colors sm:w-72 sm:max-w-none",
+                    "flex w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col rounded-lg border bg-muted/20 transition-colors sm:w-72 sm:max-w-none 2xl:grow 2xl:basis-72",
                     overCol === col.key && "border-primary bg-primary/5",
                   )}
                   onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setOverCol(col.key); }}
@@ -403,85 +405,93 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
                           draggable={!closed}
                           onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", a.path); dragPath.current = a.path; }}
                           onDragEnd={() => { dragPath.current = null; setOverCol(null); }}
+                          // `pipe-card`: a size container, so the card reflows by its OWN width (index.css). In an
+                          // 18rem column - every column at 1440px or narrower - it is the four-row stack below. In a
+                          // column grown past ~21.5rem (from `2xl`; 19rem of the card's content), the name and job share a
+                          // line and the badges and actions share the next.
                           className={cn(
-                            "group rounded-md border bg-background p-2.5 shadow-sm transition-colors",
+                            "pipe-card group rounded-md border bg-background p-2.5 shadow-sm transition-colors",
                             !closed && "cursor-grab active:cursor-grabbing",
                             picked && "border-primary ring-1 ring-primary",
                           )}
                         >
-                          <div className="flex items-baseline justify-between gap-2">
-                            <div className="flex min-w-0 items-center gap-1.5">
-                              {/* Selection is opt-in and quiet: the box appears on hover, or stays put once
-                                  something is picked, so an ordinary board isn't a wall of checkboxes. */}
-                              <input
-                                type="checkbox"
-                                checked={picked}
-                                onChange={() => toggleSelected(a)}
-                                onClick={(e) => e.stopPropagation()}
-                                aria-label={`Select ${candName(a.candidate)}`}
-                                className={cn("h-3.5 w-3.5 shrink-0 accent-primary", !picked && selected.size === 0 && "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100")}
-                              />
-                              {/* The name truncates in a 288px column, so the title carries it in full. */}
-                              <button type="button" className="truncate text-sm font-medium hover:underline" onClick={() => openDetail(a)} title={`${candName(a.candidate)} - open this application`}>
-                                {candName(a.candidate)}
-                              </button>
+                          <div className="pipe-card-head">
+                            <div className="pipe-card-name flex items-baseline justify-between gap-2">
+                              <div className="pipe-card-who flex min-w-0 items-center gap-1.5">
+                                {/* Selection is opt-in and quiet: the box appears on hover, or stays put once
+                                    something is picked, so an ordinary board isn't a wall of checkboxes. */}
+                                <input
+                                  type="checkbox"
+                                  checked={picked}
+                                  onChange={() => toggleSelected(a)}
+                                  onClick={(e) => e.stopPropagation()}
+                                  aria-label={`Select ${candName(a.candidate)}`}
+                                  className={cn("h-3.5 w-3.5 shrink-0 accent-primary", !picked && selected.size === 0 && "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100")}
+                                />
+                                {/* The name truncates in a 288px column, so the title carries it in full. */}
+                                <button type="button" className="truncate text-sm font-medium hover:underline" onClick={() => openDetail(a)} title={`${candName(a.candidate)} - open this application`}>
+                                  {candName(a.candidate)}
+                                </button>
+                              </div>
+                              {days != null && days >= 1 && (
+                                <span className={`pipe-card-days shrink-0 text-[11px] tabular-nums ${days > 14 ? "font-medium text-warning dark:text-warning" : "text-muted-foreground"}`} title={`In this stage since ${new Date(since!).toLocaleDateString()}`}>{days}d</span>
+                              )}
                             </div>
-                            {days != null && days >= 1 && (
-                              <span className={`shrink-0 text-[11px] tabular-nums ${days > 14 ? "font-medium text-warning dark:text-warning" : "text-muted-foreground"}`} title={`In this stage since ${new Date(since!).toLocaleDateString()}`}>{days}d</span>
+                            <div className="pipe-card-job pl-5 text-xs text-muted-foreground">{reqTitle(a.requisition)}</div>
+                          </div>
+                          <div className="pipe-card-foot">
+                            <div className="pipe-card-badges mt-1 flex flex-wrap items-center gap-1 pl-5">
+                              {a.source && <Badge variant="outline" className="text-[10px]">{sourceLabel(a.source)}</Badge>}
+                              {/* The offer the stage rule drafted (or a person wrote), on the card: the work the
+                                  pipeline did for you is visible where it happened, not only in the drawer. */}
+                              {(() => {
+                                const o = liveOffer(a);
+                                if (!o) return null;
+                                const m = OFFER_STATUS_META[o.status] ?? { label: o.status, variant: "secondary" as const };
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={() => navigate(`offers/${idOf(o.path)}`)}
+                                    // No figure in the tooltip: `maskAttributes` is empty (instrument.ts), so a
+                                    // title attribute is recorded verbatim in session replay.
+                                    title={`Offer ${m.label.toLowerCase()} - open it`}
+                                    className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  >
+                                    <Badge variant={m.variant} className="text-[10px] hover:opacity-80">Offer · {m.label}</Badge>
+                                  </button>
+                                );
+                              })()}
+                              {a.status === "withdrawn" && <Badge variant="secondary" className="text-[10px]">Withdrawn</Badge>}
+                              {closed && a.rejection_reason && <span className="text-[11px] text-destructive">{a.rejection_reason}</span>}
+                            </div>
+                            {!closed && (
+                              // The action row is buttons, not text, so it starts at the card edge: the
+                              // name's checkbox indent only ever squeezed a long "Advance to …" label out
+                              // of a 288px column.
+                              <div className="pipe-card-actions mt-2 flex items-center gap-1">
+                                {hired ? (
+                                  // Already converted, so this is only navigation and needs no gate; the
+                                  // un-converted case below is a real write, so it wears the access affordance.
+                                  a.hired_employee ? onboardBtn : (
+                                    <AccessAction verb="hire" collection="applications" objectPath={a.path} can={can} label="Hire and onboard">{onboardBtn}</AccessAction>
+                                  )
+                                ) : (
+                                  <>
+                                    {can.includes("advance") && (
+                                      <AccessAction verb="advance" collection="applications" objectPath={a.path} can={can} label="Advance application">
+                                        <Button size="sm" variant="outline" className="h-7 min-w-0 gap-1 px-2" loading={advancing === a.path} onClick={() => advance(a)} title={advanceLabel}>
+                                          <span className="truncate">{advanceLabel}</span>
+                                          <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                                        </Button>
+                                      </AccessAction>
+                                    )}
+                                    {can.includes("reject") && <AccessAction verb="reject" collection="applications" objectPath={a.path} can={can} label="Reject application"><Button size="sm" variant="ghost" className="h-7 shrink-0 gap-1 px-2 text-destructive" onClick={() => setRejecting([a])}><X className="h-3.5 w-3.5" /> Reject</Button></AccessAction>}
+                                  </>
+                                )}
+                                <GripVertical className="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground/40" aria-hidden />
+                              </div>
                             )}
                           </div>
-                          <div className="pl-5 text-xs text-muted-foreground">{reqTitle(a.requisition)}</div>
-                          <div className="mt-1 flex flex-wrap items-center gap-1 pl-5">
-                            {a.source && <Badge variant="outline" className="text-[10px]">{sourceLabel(a.source)}</Badge>}
-                            {/* The offer the stage rule drafted (or a person wrote), on the card: the work the
-                                pipeline did for you is visible where it happened, not only in the drawer. */}
-                            {(() => {
-                              const o = liveOffer(a);
-                              if (!o) return null;
-                              const m = OFFER_STATUS_META[o.status] ?? { label: o.status, variant: "secondary" as const };
-                              return (
-                                <button
-                                  type="button"
-                                  onClick={() => navigate(`offers/${idOf(o.path)}`)}
-                                  // No figure in the tooltip: `maskAttributes` is empty (instrument.ts), so a
-                                  // title attribute is recorded verbatim in session replay.
-                                  title={`Offer ${m.label.toLowerCase()} - open it`}
-                                  className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                >
-                                  <Badge variant={m.variant} className="text-[10px] hover:opacity-80">Offer · {m.label}</Badge>
-                                </button>
-                              );
-                            })()}
-                            {a.status === "withdrawn" && <Badge variant="secondary" className="text-[10px]">Withdrawn</Badge>}
-                            {closed && a.rejection_reason && <span className="text-[11px] text-destructive">{a.rejection_reason}</span>}
-                          </div>
-                          {!closed && (
-                            // The action row is buttons, not text, so it starts at the card edge: the
-                            // name's checkbox indent only ever squeezed a long "Advance to …" label out
-                            // of a 288px column.
-                            <div className="mt-2 flex items-center gap-1">
-                              {hired ? (
-                                // Already converted, so this is only navigation and needs no gate; the
-                                // un-converted case below is a real write, so it wears the access affordance.
-                                a.hired_employee ? onboardBtn : (
-                                  <AccessAction verb="hire" collection="applications" objectPath={a.path} can={can} label="Hire and onboard">{onboardBtn}</AccessAction>
-                                )
-                              ) : (
-                                <>
-                                  {can.includes("advance") && (
-                                    <AccessAction verb="advance" collection="applications" objectPath={a.path} can={can} label="Advance application">
-                                      <Button size="sm" variant="outline" className="h-7 min-w-0 gap-1 px-2" loading={advancing === a.path} onClick={() => advance(a)} title={advanceLabel}>
-                                        <span className="truncate">{advanceLabel}</span>
-                                        <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                                      </Button>
-                                    </AccessAction>
-                                  )}
-                                  {can.includes("reject") && <AccessAction verb="reject" collection="applications" objectPath={a.path} can={can} label="Reject application"><Button size="sm" variant="ghost" className="h-7 shrink-0 gap-1 px-2 text-destructive" onClick={() => setRejecting([a])}><X className="h-3.5 w-3.5" /> Reject</Button></AccessAction>}
-                                </>
-                              )}
-                              <GripVertical className="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground/40" aria-hidden />
-                            </div>
-                          )}
                         </div>
                       );
                     })}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Target, Plus, Pencil, Trash2, CheckCircle2, CalendarDays, ClipboardCheck, Clock3, Eye, Hourglass, Network, Sparkles, TrendingDown, Users, Search, Link2, X, ChevronDown, ChevronLeft, ChevronRight , ListChecks, Ruler } from "lucide-react";
+import { Target, Plus, Pencil, Trash2, CheckCircle2, CalendarDays, ClipboardCheck, Clock3, Eye, Hourglass, Network, Sparkles, TrendingDown, Users, Search, Link2, X, ChevronDown, ChevronLeft, ChevronRight , ListChecks, Ruler, AlignLeft, HeartPulse, PenLine, MessageSquare, SquareKanban } from "lucide-react";
 import { create, patch, invoke, remove, get, getAllPages } from "@/api";
 import { navigate, setRouteRecord, recordUrl, routeRecord } from "@/router";
 import { describeError, isConflict } from "@/lib/formError";
@@ -16,7 +16,7 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { cn, formatDate, idOf } from "@/lib/utils";
 import { todayStr, addDaysYmd, daysBetweenYmd } from "@/lib/orgDay";
 import type { Department, Employee, Goal, GoalConfidence, GoalCounts, GoalKind, GoalStage, GoalStatus, GoalTemplate, Me, ReviewCycle, Card as KanbanCard } from "@/types";
-import { Chart, ChartCard } from "@/components/common/Chart";
+import { Chart, ChartCard, ChartStrip } from "@/components/common/Chart";
 import { ChartFilterNote } from "@/components/common/ChartFilterNote";
 import { useChartFocus } from "@/lib/chartFocus";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -39,6 +39,8 @@ import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { LinesSkeleton } from "@/components/common/Skeletons";
 import { Field, FieldRow } from "@/components/common/Field";
+import { FormSection } from "@/components/common/FormSection";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -382,6 +384,12 @@ export default function Goals({ me, openId, scope: forcedScope }: {
   // Whether the measure card is unfolded although the form holds no measure yet - the one piece of the
   // dialog's state that is not a field. Cleared when the dialog closes, so every fresh goal starts folded.
   const [measureOpen, setMeasureOpen] = useState(false);
+  // Which of the editor's tabs is showing. Every open starts on Details.
+  const [goalTab, setGoalTab] = useState("details");
+  useEffect(() => { if (open) setGoalTab("details"); }, [open]);
+  // Same rules as the task editor's panels (Boards.tsx): the gap between sections is what separates them, and
+  // an edit's panels hold one height so a tab switch does not walk Save and Cancel up and down.
+  const goalPanel = cn("grid content-start gap-7 data-[state=inactive]:hidden", editing && "sm:min-h-[30rem]");
   // The edit dialog's form as it was loaded, serialized. Only the Rebalance link reads it - see `openEdit`.
   const [editBaseline, setEditBaseline] = useState("");
   // The version the edit dialog is writing against. Refreshed from the server when a save loses a race, so the
@@ -1141,8 +1149,9 @@ export default function Goals({ me, openId, scope: forcedScope }: {
     );
   };
 
+  // From `2xl` more goals per row at the size they are three across (`grid-cols-fill`), not wider cards.
   const grid = (list: Goal[], team = false) => (
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+    <div className="grid gap-4 [--cell:20rem] md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-fill">
       {list.map((g) => (
         <AccessItem key={g.path} collection="goals" objectPath={g.path} can={g.access?.can} why={g.access?.why} label={g.title}>
           <GoalCard
@@ -1154,7 +1163,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
             deptTitle={deptName(g.department)}
             onOpen={() => openDetail(g)}
             onEdit={() => openEdit(g)}
-            onDelete={() => sd.softDelete(g)}
+            onDelete={() => sd.softDelete(g, { subject: `"${g.title}"` })}
             onProgress={(p) => setProgress(g, p)}
           />
         </AccessItem>
@@ -1272,7 +1281,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                 was the first thing on the page for anybody with a handful of goals of their own - pushing the
                 goals themselves below the fold to say what the four tiles under it already say in words. */}
             {goalCharts.total >= 6 && (
-              <div className="grid gap-4 lg:grid-cols-2">
+              <ChartStrip id="goals">
                 <ChartCard title="Goals by state" description="Every goal in view, by where it has got to.">
                   <Chart
                     type="donut"
@@ -1299,7 +1308,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                     />
                   </ChartCard>
                 )}
-              </div>
+              </ChartStrip>
             )}
 
             {/* The scoreboard is the MINE scope's, and now it only appears there. It counts the reader's own
@@ -1616,6 +1625,8 @@ export default function Goals({ me, openId, scope: forcedScope }: {
           setMeasureOpen(false);
         }}
         addAnotherLabel="Save & add another"
+        // Wide enough for the sections' name margin beside a two-column field row (FormSection).
+        className="max-w-2xl lg:max-w-3xl"
         submitAccess={(b) => (editing
           ? <AccessAction label="Edit goal" can={editing.access?.can}>{b}</AccessAction>
           : <AccessAction create label="New goal">{b}</AccessAction>)}
@@ -1635,7 +1646,16 @@ export default function Goals({ me, openId, scope: forcedScope }: {
               />
             </Field>
           )}
-          <Field label="Title" field="title"><Input value={form.title} placeholder="e.g. Ship the billing revamp" onChange={(e) => setForm({ ...form, title: e.target.value })} autoFocus /></Field>
+          {/* The title IS the dialog's heading, as on the task editor: set large and borderless, an input
+              only when touched (the border comes back on hover and focus). */}
+          <Input
+            aria-label="Title"
+            value={form.title}
+            placeholder="e.g. Ship the billing revamp"
+            onChange={(e) => setForm({ ...form, title: e.target.value })}
+            autoFocus
+            className="-mx-2 h-auto w-[calc(100%+1rem)] border-transparent bg-transparent px-2 py-1 text-lg font-semibold shadow-none hover:border-input focus-visible:border-input sm:text-xl"
+          />
           {/* THE TEMPLATE THAT MATCHES WHAT THEY ARE TYPING, which the dropdown above cannot offer: a list of
               thirty blueprints is a list nobody scrolls, so the org's agreed wording goes unused and the
               ramp-up goal gets retyped from memory every time. Words shared, nothing sent anywhere. */}
@@ -1654,8 +1674,69 @@ export default function Goals({ me, openId, scope: forcedScope }: {
               ))}
             </div>
           )}
-          <Field label="Description (optional)" field="description">
-            <div className="mb-2 flex justify-end">
+          {/* Same title already open for the same person: warned, never blocked - two goals may honestly share a
+              name, and the owner is the one who knows. Under the title, the field it is about. */}
+          {dupTitle && (
+            <p className="text-xs text-warning">
+              {dialogOwnerId === me.employee_id ? "You already have" : `${empName(`employees/${dialogOwnerId}`)} already has`} an open goal called
+              “{dupTitle.title}”{dupTitle.due_date ? `, due ${formatDate(dupTitle.due_date)}` : ""}.
+            </p>
+          )}
+          {/* The goal at a glance, from whichever tab is open: live form values, each a way to the tab that
+              holds its field. */}
+          {editing && (() => {
+            const fact = "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground";
+            const pct = measurePct ?? editing.progress;
+            return (
+              <div className="-mx-2 -mt-2 flex flex-wrap items-center gap-y-1">
+                <button type="button" className={cn(fact, "bg-muted font-medium text-foreground")} onClick={() => setGoalTab("alignment")}>
+                  <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-primary" /> {STATUSES.find((s) => s.value === form.status)?.label ?? form.status}
+                </button>
+                {pct != null && (
+                  <button type="button" className={cn(fact, "tabular-nums")} onClick={() => setGoalTab("alignment")}>
+                    {Math.round(pct)}% done
+                  </button>
+                )}
+                <button type="button" className={fact} onClick={() => setGoalTab("details")}>
+                  <Users className="h-3.5 w-3.5" /> {empName(editing.employee) || "Somebody else"}
+                </button>
+                {form.weight.trim() && (
+                  <button type="button" className={cn(fact, "tabular-nums")} onClick={() => setGoalTab("details")}>
+                    Weight {form.weight}
+                  </button>
+                )}
+                {form.due_date && (
+                  <button type="button" className={fact} onClick={() => setGoalTab("details")}>
+                    <CalendarDays className="h-3.5 w-3.5" /> {formatDate(form.due_date)}
+                  </button>
+                )}
+                <button type="button" className={fact} onClick={() => setGoalTab("alignment")}>
+                  {form.kind === "key_result" ? "Key result" : "Objective"}
+                </button>
+              </div>
+            );
+          })()}
+          {/* TWO TABS, the task editor's shape: this form asks fourteen questions, and one scroll of them put
+              Save below the fold. A tab that holds a reason Save is refused says so with a marker, since the
+              reader may not be looking at it. Panels are force-mounted and only hidden, so a switch keeps what
+              each holds and fires no read. */}
+          <Tabs value={goalTab} onValueChange={setGoalTab}>
+            <TabsList variant="segmented" aria-label="Goal sections">
+              <TabsTrigger value="details">
+                Details
+                {weightInvalid && <><span className="ml-1.5 h-2 w-2 rounded-full bg-destructive" /><span className="sr-only">(needs attention)</span></>}
+              </TabsTrigger>
+              <TabsTrigger value="alignment">
+                Alignment & progress
+                {(targetEqualsBaseline || (form.kind === "key_result" && form.parent === "none")) && <><span className="ml-1.5 h-2 w-2 rounded-full bg-destructive" /><span className="sr-only">(needs attention)</span></>}
+              </TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="details" forceMount className={goalPanel}>
+          <FormSection
+            title="Description"
+            icon={AlignLeft}
+            aside={(
               <DraftButton
                 collection="goals"
                 kind="goal"
@@ -1663,9 +1744,10 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                 hint="e.g. cut checkout errors, measured by the weekly error rate, by the end of Q2"
                 onDraft={(text) => setForm({ ...form, description: text })}
               />
-            </div>
-            <Textarea rows={3} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What does success look like?" />
-          </Field>
+            )}
+          >
+            <Textarea aria-label="Description (optional)" rows={3} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What does success look like?" />
+          </FormSection>
           {/* WHOSE GOAL IS THIS - one question, answered left to right.
               It used to be two, a form apart and both of them called something with "team" in it: a full-width
               "For" up here, and a full-width "Owned by a team (optional)" six fields below, on a page where
@@ -1674,6 +1756,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
               So the shape of the goal is asked first, and the second column relabels itself to say what the
               person picked in it IS - the owner, or the lead the department's goal hangs on. */}
           {(departments.length > 0 || !editing) && (
+            <FormSection title="Ownership" icon={Users}>
             <FieldRow>
               {departments.length > 0 && (
                 <Field label="Owned by" hint="A department's goal reads as the whole team's, and still has one lead.">
@@ -1710,6 +1793,180 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                 )}
               </Field>
             </FieldRow>
+            </FormSection>
+          )}
+          {/* How much it counts, by when, and which review scores it. */}
+          <FormSection title="Commitment" icon={CalendarDays}>
+          <FieldRow>
+            <Field
+              label="Weight"
+              field="weight"
+              hint={otherWeights > 0 ? `Other open goals total ${otherWeights}; with this one ${weightTotal} of 100.` : "Relative importance (0-100)."}
+              error={weightInvalid ? "Weight must be between 0 and 100." : undefined}
+            >
+              <Input type="number" min={0} max={100} value={form.weight} onChange={(e) => setForm({ ...form, weight: e.target.value })} placeholder="0" />
+            </Field>
+            <Field label="Due date (optional)">
+              <Input type="date" value={form.due_date} min={!editing ? todayStr() : undefined} onChange={(e) => setForm({ ...form, due_date: e.target.value })} />
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {quickDue().map((o) => (
+                  <button
+                    key={o.label}
+                    type="button"
+                    // Pressing the chip already set clears the date, the way the filter chips above clear
+                    // themselves - it was the one control on this form that could be turned on and not off.
+                    aria-pressed={form.due_date === o.value}
+                    onClick={() => setForm({ ...form, due_date: form.due_date === o.value ? "" : o.value })}
+                    className={cn(
+                      "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
+                      form.due_date === o.value ? "border-primary text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                    )}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+            </Field>
+            {/* The review cycle this goal answers to. A cycle's review scores exactly the goals attached to it,
+                so this is the field that decides whether the goal shows up in someone's review at all. */}
+            {pickableCycles.length > 0 && (
+              <Field label="Review cycle (optional)" hint="The cycle whose review scores this goal.">
+                <Select value={form.cycle} onValueChange={(v) => setForm({ ...form, cycle: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No cycle</SelectItem>
+                    {pickableCycles.map((c) => (
+                      <SelectItem key={c.path} value={`review-cycles/${idOf(c.path)}`}>
+                        {c.name}{c.state === "CLOSED" ? " (closed)" : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
+          </FieldRow>
+          {!weightInvalid && weightTotal > 100 && (
+            <p className="text-xs font-medium text-warning">
+              Open goals would total {weightTotal} weight, over the usual 100.{" "}
+              {/* THIS LINK LEAVES BY A DOOR THE DISCARD GUARD DOES NOT WATCH. It closes the dialog itself
+                  rather than through `onOpenChange`, and an edit carries no draft (`draftKey` is create-only),
+                  so pressing it used to throw away everything typed without a word. A new goal is safe - its
+                  draft is in sessionStorage - so only an edit with changes is worth stopping for. */}
+              <button
+                type="button"
+                className="font-medium text-primary hover:underline"
+                onClick={async () => {
+                  if (editing && JSON.stringify(form) !== editBaseline) {
+                    const ok = await confirm({
+                      title: "Leave this goal to rebalance?",
+                      description: "Rebalancing closes this editor, and the changes you have made to this goal have not been saved.",
+                      confirmLabel: "Leave and rebalance",
+                      destructive: true,
+                    });
+                    if (!ok) return;
+                  }
+                  setOpen(false);
+                  setMeasureOpen(false);
+                  setRebalanceFor(dialogOwnerId || null);
+                }}
+              >
+                Rebalance
+              </button>
+            </p>
+          )}
+          </FormSection>
+            </TabsContent>
+
+            {/* Where the goal sits, then how far along it is: the kind and the parent decide how progress is
+                worked out (a key result's rolls up, an objective's can come from its key results), so the
+                measure reads best under them. */}
+            <TabsContent value="alignment" forceMount className={goalPanel}>
+          {/* What kind of goal, and what it rolls up into: one decides whether the other is required. */}
+          <FormSection title="Structure" icon={Network}>
+          <FieldRow>
+            {/* Objective or key result. A KR is one of the numbers under an objective, so choosing it makes
+                the alignment beside it mandatory - and hands the objective's percentage to the arithmetic. */}
+            <Field label="Kind" hint={form.kind === "key_result" ? "A number under an objective. Its objective's progress is the weighted average of its key results." : "A goal in its own right. Add key results under it and its progress becomes theirs."}>
+              <Select value={form.kind} onValueChange={(v) => setForm({ ...form, kind: v as GoalKind })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="objective">Objective</SelectItem>
+                  <SelectItem value="key_result">Key result</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+              {/* What this rolls UP into, beside the kind that decides whether it must. */}
+              {alignables.length > 0 && (
+                <Field
+                  label={form.kind === "key_result" ? "Objective" : "Aligns to"}
+                  hint={form.kind === "key_result" ? "The objective this key result proves. Required." : "Optional parent goal this one rolls up under."}
+                  error={form.kind === "key_result" && form.parent === "none" ? "A key result needs an objective to sit under." : undefined}
+                >
+                  <Combobox
+                    value={form.parent}
+                    onValueChange={(v) => setForm({ ...form, parent: v })}
+                    searchPlaceholder="Search goals…"
+                    options={[
+                      { value: "none", label: "No alignment" },
+                      ...alignables.map((g) => ({
+                        value: `goals/${idOf(g.path)}`,
+                        label: g.employee && idOf(g.employee) !== me.employee_id ? `${g.title} - ${empName(g.employee)}` : g.title,
+                      })),
+                    ]}
+                  />
+                </Field>
+              )}
+          </FieldRow>
+          {/* A key result cannot be saved without an objective, and the picker for one was hidden whenever
+              there were no objectives to pick - so choosing "Key result" in an empty org left the form
+              refusing to save, explaining why, and offering no control that could put it right. */}
+          {alignables.length === 0 && form.kind === "key_result" && state === "ready" && (
+            <p className="text-xs text-warning">
+              There are no objectives to put this under yet. Create the objective first, then add its key results.
+            </p>
+          )}
+          </FormSection>
+          {/* What has to move FIRST - the answer to "why did this sit at 20% all quarter" far more often than
+              effort is. Gated on its OWN options, not on the alignment field's: `alignables` drops every key
+              result (nothing parents a KR), so in an org whose visible goals are all key results this field
+              vanished, although every one of them is a perfectly good thing to be waiting on. */}
+          {blockables.length > 0 && (
+            <FormSection title="Depends on" icon={Hourglass}>
+            <FieldRow>
+                <Field label="Waiting on (optional)" hint="Another goal that has to move before this one can.">
+                  <Combobox
+                    value={form.blockedBy}
+                    onValueChange={(v) => setForm({ ...form, blockedBy: v })}
+                    searchPlaceholder="Search goals…"
+                    options={[
+                      { value: "none", label: "Not blocked" },
+                      ...blockables.map((g) => ({
+                        value: `goals/${idOf(g.path)}`,
+                        label: g.employee && idOf(g.employee) !== me.employee_id ? `${g.title} - ${empName(g.employee)}` : g.title,
+                      })),
+                    ]}
+                  />
+                </Field>
+            </FieldRow>
+            </FormSection>
+          )}
+          {/* ONLY ON A GOAL THAT EXISTS. A goal being written is "Not started" - that is what writing one
+              means - and the only other honest answer at birth comes from the measure, which sets it above
+              without asking. Offering Completed and Cancelled in the same breath as Create was offering to
+              file work as finished or abandoned before it had been agreed with anybody. */}
+          {editing && (
+            <FormSection title="Status" icon={ClipboardCheck}>
+              <FieldRow>
+                <Field label="Status">
+                  <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v as GoalStatus })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {STATUSES.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </FieldRow>
+            </FormSection>
           )}
           {/* The measure. A goal that counts something doesn't need anyone's estimate of how far along it is:
               with a target and a current value the percentage is arithmetic, and the slider stops being an
@@ -1722,6 +1979,22 @@ export default function Goals({ me, openId, scope: forcedScope }: {
               Folded, the sentence sits BESIDE the button and centred on it: `min-w-0 flex-1` on the text and no
               `flex-wrap` on the row, so the buttons keep their width and the prose wraps inside what is left
               instead of dropping to a line of its own. */}
+          <FormSection
+            title="Measure"
+            icon={Ruler}
+            count={showMeasure && measurePct != null ? `${measurePct}% complete` : undefined}
+            /* The way back out. Emptying four boxes by hand was the only way to un-measure a goal, and a
+               half-emptied measure is the state that saves a target with no unit. */
+            aside={showMeasure ? (
+              <button
+                type="button"
+                className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+                onClick={() => { setForm({ ...form, unit: "", baseline: "", target: "", current: "" }); setMeasureOpen(false); }}
+              >
+                Remove
+              </button>
+            ) : undefined}
+          >
           {!showMeasure ? (
             <div className="flex items-center gap-3 rounded-lg border border-dashed p-2.5">
               <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={() => setMeasureOpen(true)}>
@@ -1756,25 +2029,8 @@ export default function Goals({ me, openId, scope: forcedScope }: {
               </p>
             </div>
           ) : (
-          <div className="rounded-lg border p-3">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-medium">Measure</p>
-              <div className="flex items-center gap-3">
-                {measurePct != null && (
-                  <span className="text-xs font-medium tabular-nums text-primary">{measurePct}% complete</span>
-                )}
-                {/* The way back out. Emptying four boxes by hand was the only way to un-measure a goal, and
-                    a half-emptied measure is the state that saves a target with no unit. */}
-                <button
-                  type="button"
-                  className="text-xs text-muted-foreground transition-colors hover:text-foreground"
-                  onClick={() => { setForm({ ...form, unit: "", baseline: "", target: "", current: "" }); setMeasureOpen(false); }}
-                >
-                  Remove
-                </button>
-              </div>
-            </div>
-            <p className="mt-0.5 text-xs text-muted-foreground">
+          <div>
+            <p className="text-xs text-muted-foreground">
               {measurePct != null
                 ? "Progress is computed from these numbers, so the slider is read-only for this goal."
                 : "Give it a target and progress stops being a guess."}
@@ -1783,9 +2039,9 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                 explaining before the one the goal is actually about - and gave "Current" no hint at all, so a
                 new goal was asked where it had got to on the day it was written. It is last now, and optional:
                 left empty on a new goal it takes the baseline (`currentFor`), which is where a goal starts. */}
-            {/* Two across on a laptop, four only when there is room for four: this sits inside a dialog, and
-                four number boxes over 640px are narrower than the numbers some of them hold. */}
-            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {/* Two across, never four: beside the section's name margin, four number boxes are narrower than
+                the numbers (and the hints) some of them hold. */}
+            <div className="mt-3 grid gap-x-3 gap-y-4 sm:grid-cols-2">
               <Field label="Target" field="target_value" hint="Where it has to get to." error={targetEqualsBaseline ? "Target and baseline are the same, so there is nothing to measure." : undefined}>
                 <Input type="number" value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })} placeholder="60" autoFocus={measureOpen && !hasMeasureValues} />
               </Field>
@@ -1847,179 +2103,10 @@ export default function Goals({ me, openId, scope: forcedScope }: {
             )}
           </div>
           )}
-          <FieldRow>
-            <Field
-              label="Weight"
-              field="weight"
-              hint={otherWeights > 0 ? `Other open goals total ${otherWeights}; with this one ${weightTotal} of 100.` : "Relative importance (0-100)."}
-              error={weightInvalid ? "Weight must be between 0 and 100." : undefined}
-            >
-              <Input type="number" min={0} max={100} value={form.weight} onChange={(e) => setForm({ ...form, weight: e.target.value })} placeholder="0" />
-            </Field>
-            <Field label="Due date (optional)">
-              <Input type="date" value={form.due_date} min={!editing ? todayStr() : undefined} onChange={(e) => setForm({ ...form, due_date: e.target.value })} />
-              <div className="mt-1.5 flex flex-wrap gap-1">
-                {quickDue().map((o) => (
-                  <button
-                    key={o.label}
-                    type="button"
-                    // Pressing the chip already set clears the date, the way the filter chips above clear
-                    // themselves - it was the one control on this form that could be turned on and not off.
-                    aria-pressed={form.due_date === o.value}
-                    onClick={() => setForm({ ...form, due_date: form.due_date === o.value ? "" : o.value })}
-                    className={cn(
-                      "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
-                      form.due_date === o.value ? "border-primary text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                    )}
-                  >
-                    {o.label}
-                  </button>
-                ))}
-              </div>
-            </Field>
-          </FieldRow>
-          {!weightInvalid && weightTotal > 100 && (
-            <p className="text-xs font-medium text-warning">
-              Open goals would total {weightTotal} weight, over the usual 100.{" "}
-              {/* THIS LINK LEAVES BY A DOOR THE DISCARD GUARD DOES NOT WATCH. It closes the dialog itself
-                  rather than through `onOpenChange`, and an edit carries no draft (`draftKey` is create-only),
-                  so pressing it used to throw away everything typed without a word. A new goal is safe - its
-                  draft is in sessionStorage - so only an edit with changes is worth stopping for. */}
-              <button
-                type="button"
-                className="font-medium text-primary hover:underline"
-                onClick={async () => {
-                  if (editing && JSON.stringify(form) !== editBaseline) {
-                    const ok = await confirm({
-                      title: "Leave this goal to rebalance?",
-                      description: "Rebalancing closes this editor, and the changes you have made to this goal have not been saved.",
-                      confirmLabel: "Leave and rebalance",
-                      destructive: true,
-                    });
-                    if (!ok) return;
-                  }
-                  setOpen(false);
-                  setMeasureOpen(false);
-                  setRebalanceFor(dialogOwnerId || null);
-                }}
-              >
-                Rebalance
-              </button>
-            </p>
-          )}
-          {/* Two short enums side by side. This form asks fourteen questions, and every one of them used to
-              own a full-width row: the fields that matter most (title, measure, weight, due date) were pushed
-              off the top of a dialog the reader then scrolled through looking for Save. */}
-          <FieldRow>
-            {/* ONLY ON A GOAL THAT EXISTS. A goal being written is "Not started" - that is what writing one
-                means - and the only other honest answer at birth comes from the measure, which sets it above
-                without asking. Offering Completed and Cancelled in the same breath as Create was offering to
-                file work as finished or abandoned before it had been agreed with anybody. */}
-            {editing && (
-              <Field label="Status">
-                <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v as GoalStatus })}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {STATUSES.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </Field>
-            )}
-            {/* Objective or key result. A KR is one of the numbers under an objective, so choosing it makes
-                the alignment below mandatory - and hands the objective's percentage to the arithmetic. */}
-            <Field label="Kind" hint={form.kind === "key_result" ? "A number under an objective. Its objective's progress is the weighted average of its key results." : "A goal in its own right. Add key results under it and its progress becomes theirs."}>
-              <Select value={form.kind} onValueChange={(v) => setForm({ ...form, kind: v as GoalKind })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="objective">Objective</SelectItem>
-                  <SelectItem value="key_result">Key result</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
-            {/* The review cycle this goal answers to. A cycle's review scores exactly the goals attached to it,
-                so this is the field that decides whether the goal shows up in someone's review at all. In the
-                same row as the two enums above: on a new goal that makes a pair of the two questions left
-                (what kind, and which cycle), instead of one half-empty row and one full-width Select. */}
-            {pickableCycles.length > 0 && (
-              <Field label="Review cycle (optional)" hint="The cycle whose review scores this goal.">
-                <Select value={form.cycle} onValueChange={(v) => setForm({ ...form, cycle: v })}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">No cycle</SelectItem>
-                    {pickableCycles.map((c) => (
-                      <SelectItem key={c.path} value={`review-cycles/${idOf(c.path)}`}>
-                        {c.name}{c.state === "CLOSED" ? " (closed)" : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-            )}
-          </FieldRow>
-          {/* A key result cannot be saved without an objective, and the picker for one was hidden whenever
-              there were no objectives to pick - so choosing "Key result" in an empty org left the form
-              refusing to save, explaining why, and offering no control that could put it right. */}
-          {alignables.length === 0 && form.kind === "key_result" && state === "ready" && (
-            <p className="text-xs text-warning">
-              There are no objectives to put this under yet. Create the objective first, then add its key results.
-            </p>
-          )}
-          {/* THE TWO GOAL LINKS, SIDE BY SIDE. Same control, same "Search goals…", asking two questions that
-              are only told apart by their labels - stacked full-width they read as one field rendered twice.
-              Up first is what this rolls UP into; beside it what has to move FIRST, which is the answer to
-              "why did this sit at 20% all quarter" far more often than effort is. */}
-          {(alignables.length > 0 || blockables.length > 0) && (
-            <FieldRow>
-              {alignables.length > 0 && (
-                <Field
-                  label={form.kind === "key_result" ? "Objective" : "Aligns to"}
-                  hint={form.kind === "key_result" ? "The objective this key result proves. Required." : "Optional parent goal this one rolls up under."}
-                  error={form.kind === "key_result" && form.parent === "none" ? "A key result needs an objective to sit under." : undefined}
-                >
-                  <Combobox
-                    value={form.parent}
-                    onValueChange={(v) => setForm({ ...form, parent: v })}
-                    searchPlaceholder="Search goals…"
-                    options={[
-                      { value: "none", label: "No alignment" },
-                      ...alignables.map((g) => ({
-                        value: `goals/${idOf(g.path)}`,
-                        label: g.employee && idOf(g.employee) !== me.employee_id ? `${g.title} - ${empName(g.employee)}` : g.title,
-                      })),
-                    ]}
-                  />
-                </Field>
-              )}
-              {/* Gated on its OWN options, not on the alignment field's. `alignables` drops every key result -
-                  nothing parents a KR - so in an org whose visible goals are all key results this field
-                  vanished, although every one of them is a perfectly good thing to be waiting on. */}
-              {blockables.length > 0 && (
-                <Field label="Waiting on (optional)" hint="Another goal that has to move before this one can.">
-                  <Combobox
-                    value={form.blockedBy}
-                    onValueChange={(v) => setForm({ ...form, blockedBy: v })}
-                    searchPlaceholder="Search goals…"
-                    options={[
-                      { value: "none", label: "Not blocked" },
-                      ...blockables.map((g) => ({
-                        value: `goals/${idOf(g.path)}`,
-                        label: g.employee && idOf(g.employee) !== me.employee_id ? `${g.title} - ${empName(g.employee)}` : g.title,
-                      })),
-                    ]}
-                  />
-                </Field>
-              )}
-            </FieldRow>
-          )}
-          {/* Same title already open for the same person: warned, never blocked - two goals may honestly share a
-              name, and the owner is the one who knows. */}
-          {dupTitle && (
-            <p className="text-xs text-warning">
-              {dialogOwnerId === me.employee_id ? "You already have" : `${empName(`employees/${dialogOwnerId}`)} already has`} an open goal called
-              “{dupTitle.title}”{dupTitle.due_date ? `, due ${formatDate(dupTitle.due_date)}` : ""}.
-            </p>
-          )}
+          </FormSection>
           {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
+            </TabsContent>
+          </Tabs>
       </WriteDialog>
 
       {/* Mounted only once the owner's own goals have been read, so the weights still seed at mount rather
@@ -2080,7 +2167,9 @@ export default function Goals({ me, openId, scope: forcedScope }: {
             onAddKeyResult={detailGoal.kind !== "key_result" ? () => { closeDetail(); openKeyResult(detailGoal); } : undefined}
             onOpenOwner={detailGoal.employee ? () => navigate(`employees/${idOf(detailGoal.employee!)}`) : undefined}
             onEdit={() => { closeDetail(); openEdit(detailGoal); }}
-            onDelete={() => { closeDetail(); void sd.softDelete(detailGoal); }}
+            // Closes only once the delete has gone through: a reader who backs out of the prompt stays on
+            // the goal they were reading.
+            onDelete={() => void sd.softDelete(detailGoal, { subject: `"${detailGoal.title}"`, onDeleted: closeDetail })}
             onProgress={(p, note) => setProgress(detailGoal, p, note)}
             onConfidence={(c) => setConfidence(detailGoal, c)}
             onRetro={(retro) => saveRetro(detailGoal, retro)}
@@ -2565,9 +2654,21 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
   // progress (services/goals.ts#recomputeObjectiveProgress) are the same arithmetic over the same rows.
   const alignedPct = weightedProgress(openKids);
 
+  // The drawer's tabs. Kept while ‹ › / j/k walk the queue: a pass through everybody's comments stays on
+  // Discussion rather than being sent back to Overview at every step.
+  const [tab, setTab] = useState("overview");
+  // What the Connections tab holds, so its trigger can say there is something behind it.
+  const connectionCount = (parent ? 1 : 0) + kids.length + (blocker ? 1 : 0) + blocking.length + Math.max(linkedCount, linked.length);
+  // The gap between sections is what separates them (FormSection draws no box).
+  const drawerPanel = "grid content-start gap-6 data-[state=inactive]:hidden";
+
   return (
-    <SheetContent className="flex flex-col sm:max-w-lg">
+    // `max-w-xl`: a little wider than the app's default drawer, for the tabs and the section lists inside it.
+    <SheetContent className="flex flex-col sm:max-w-xl">
       <SheetHeader>
+        {/* One spaced stack: SheetHeader lays its children out as a bare block, which set the nav row, the
+            title, the chips, the owner line and the actions flush against each other. */}
+        <div className="space-y-3">
         {/* Walk the list this drawer was opened from, so a review pass is one drawer instead of twelve - and
             hand over a link to this one goal, since the drawer now has a route of its own. */}
         <div className="flex items-center gap-0.5 pr-8 text-xs text-muted-foreground">
@@ -2613,46 +2714,98 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
           <GoalDueChip goal={goal} absolute />
           {goal.weight ? <span className="text-muted-foreground">· weight {goal.weight}</span> : null}
         </div>
-        {owner && !mine && (
-          // A div, not a <p>: PhotoAvatar renders a div, and a div inside a <p> is invalid HTML the browser
-          // silently reparents (React says so as a validateDOMNesting warning).
-          //
-          // The name goes to the person. Reading somebody else's goal is the moment their manager, their other
-          // goals and their leave are worth a look, and this line was a dead label on the one surface that
-          // names them.
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <PhotoAvatar employeeId={idOf(owner.path)} name={`${owner.first_name} ${owner.last_name}`} photo={owner.photo} className="h-6 w-6" />
-            {onOpenOwner ? (
-              <button type="button" className="font-medium hover:text-foreground hover:underline" onClick={onOpenOwner} title={`Open ${owner.first_name}'s profile`}>
-                {owner.first_name} {owner.last_name}
-              </button>
-            ) : (
-              <>{owner.first_name} {owner.last_name}</>
+        {/* WHO AND WHERE, as one line: the owner, the team that owns it, and the review that scores it. Three
+            stacked lines of small print used to push the goal's body down before a word of it was read. */}
+        {((owner && !mine) || deptTitle || cycleTitle) && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            {/* A div, not a <p>: PhotoAvatar renders a div, and a div inside a <p> is invalid HTML the browser
+                silently reparents (React says so as a validateDOMNesting warning).
+
+                The name goes to the person. Reading somebody else's goal is the moment their manager, their
+                other goals and their leave are worth a look. */}
+            {owner && !mine && (
+              <span className="inline-flex items-center gap-1.5">
+                <PhotoAvatar employeeId={idOf(owner.path)} name={`${owner.first_name} ${owner.last_name}`} photo={owner.photo} className="h-5 w-5" />
+                {onOpenOwner ? (
+                  <button type="button" className="font-medium hover:text-foreground hover:underline" onClick={onOpenOwner} title={`Open ${owner.first_name}'s profile`}>
+                    {owner.first_name} {owner.last_name}
+                  </button>
+                ) : (
+                  <>{owner.first_name} {owner.last_name}</>
+                )}
+              </span>
+            )}
+            {/* The team that owns it. The lead beside it stays accountable for it either way. */}
+            {deptTitle && (
+              <span className="inline-flex items-center gap-1.5">
+                <Users className="h-3.5 w-3.5" /> <Badge variant="secondary">{deptTitle}</Badge>
+              </span>
+            )}
+            {/* Which review scores this goal, and a way into it: `cycle` decides whether the goal counts toward
+                anybody's attainment at all. */}
+            {cycleTitle && (
+              <span className="inline-flex items-center gap-1.5">
+                <ClipboardCheck className="h-3.5 w-3.5 shrink-0" /> Scored in
+                <button type="button" className="font-medium text-primary hover:underline" onClick={onOpenReview} title={`Open the reviews for ${cycleTitle}`}>
+                  {cycleTitle}
+                </button>
+              </span>
             )}
           </div>
         )}
-        {/* The team that owns it. The card has carried this badge since department-owned goals existed and
-            the drawer never did - so opening the goal to check whether it really was a team goal answered
-            the question with silence. The lead above stays accountable for it either way. */}
-        {deptTitle && (
-          <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-            <Users className="h-3.5 w-3.5" /> Owned by <Badge variant="secondary">{deptTitle}</Badge>
+        {/* THE ACTIONS, up here rather than under the comment thread and the activity log, where Edit was the
+            last thing in the drawer. Delete sits apart at the far end. */}
+        {(canEdit || canDelete || (onAddKeyResult && !closed) || onCarryOver || (goal.status === "completed" && !mine && goal.employee)) && (
+          // pt-1 on top of the stack's gap: the actions are a different kind of row from the facts above.
+          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+            {canEdit && <Button variant="outline" size="sm" onClick={onEdit}><Pencil className="h-3.5 w-3.5" /> Edit</Button>}
+            {/* The rung under this objective, with the parent, the owner, the cycle and the date filled in.
+                Not offered on a key result: the ladder is one rung deep, so nothing hangs under one. */}
+            {onAddKeyResult && !closed && (
+              <AccessAction collection="goals" create label="Add a key result">
+                <Button variant="outline" size="sm" onClick={onAddKeyResult}><Plus className="h-3.5 w-3.5" /> Add key result</Button>
+              </AccessAction>
+            )}
+            {/* A completed goal is the moment recognition is worth something. Opens the kudos composer with the
+                owner filled in. */}
+            {goal.status === "completed" && !mine && goal.employee && (
+              <AccessAction collection="announcements" verb="giveKudos" label="Give kudos">
+                <Button variant="outline" size="sm" onClick={() => { navigate("announcements"); fireIntent("give-kudos", `employees/${idOf(goal.employee!)}`); }}>
+                  <Sparkles className="h-3.5 w-3.5" /> Say well done
+                </Button>
+              </AccessAction>
+            )}
+            {onCarryOver && (
+              <AccessAction collection="goals" create label="Carry goal over">
+                <Button variant="outline" size="sm" onClick={onCarryOver}><CalendarDays className="h-3.5 w-3.5" /> Carry to next quarter</Button>
+              </AccessAction>
+            )}
+            {/* Quiet until reached for: grey like the drawer's other small print, red only under the pointer.
+                It is a soft delete with an Undo on the toast, so it has no need to shout from the header of every
+                goal. */}
+            {canDelete && <Button variant="ghost" size="sm" className="ml-auto text-muted-foreground hover:bg-destructive/10 hover:text-destructive" onClick={onDelete}><Trash2 className="h-3.5 w-3.5" /> Delete</Button>}
           </div>
         )}
-        {/* Which review scores this goal, and a way into it. `cycle` is the field that decides whether the
-            goal counts toward anybody's attainment at all, the card has said so on a chip for a while, and
-            the drawer - the surface somebody opens to understand one goal - did not mention it. The traffic
-            only ran one way: a review could not reach its goals either, until the lines in it became links. */}
-        {cycleTitle && (
-          <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-            <ClipboardCheck className="h-3.5 w-3.5 shrink-0" /> Scored in
-            <button type="button" className="font-medium text-primary hover:underline" onClick={onOpenReview} title={`Open the reviews for ${cycleTitle}`}>
-              {cycleTitle}
-            </button>
-          </div>
-        )}
+        </div>
       </SheetHeader>
-      <SheetBody className="space-y-5">
+      <SheetBody>
+        {/* THREE TABS: how it is going, what it is connected to, and what people have said. One scroll of all
+            of it put the comment box below fifteen blocks. Panels are force-mounted and only hidden, so a
+            switch keeps a half-written comment or retro and fires no read. */}
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList variant="segmented" aria-label="Goal details">
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="connections">
+              Connections
+              {connectionCount > 0 && <span className="ml-1.5 rounded-full bg-background/80 px-1.5 text-[10px] leading-4 tabular-nums">{connectionCount}</span>}
+            </TabsTrigger>
+            <TabsTrigger value="discussion">
+              Discussion
+              {!!comments?.length && <span className="ml-1.5 rounded-full bg-background/80 px-1.5 text-[10px] leading-4 tabular-nums">{comments.length}</span>}
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="overview" forceMount className={drawerPanel}>
         {/* The goal-setting handshake, at the top because until it is done this goal is a proposal rather than
             an objective - and the one press it needs should not be below the fold. Nothing renders once the
             goal is agreed, which is every goal in an org that has not turned approval on. */}
@@ -2698,26 +2851,246 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
         {goal.stage === "AGREED" && goal.agreed_time && agreedByName && (
           <p className="text-xs text-muted-foreground">Agreed by {agreedByName} on {formatDate(goal.agreed_time.slice(0, 10))}.</p>
         )}
-        {parent && (
-          <p className="text-xs text-muted-foreground">
-            Aligns to{" "}
-            <button type="button" className="inline-flex max-w-full items-center gap-1 align-bottom font-medium text-primary hover:underline" onClick={() => onOpenGoal(parent)}>
-              <Link2 className="h-3 w-3 shrink-0" /> <span className="truncate">{parent.title}</span>
-            </button>
-          </p>
+        {goal.description && (
+          <FormSection stacked title="Description" icon={AlignLeft}>
+            <p className="whitespace-pre-wrap text-sm text-foreground/90">{goal.description}</p>
+          </FormSection>
         )}
-        {goal.description && <p className="whitespace-pre-wrap text-sm text-foreground/90">{goal.description}</p>}
 
-        {/* WHAT IS IN THE WAY, AND WHO IS WAITING ON THIS.
-            "Waiting on another goal" is more often the answer to "why did this sit at 20% all quarter" than
-            effort is - the edit form has always asked for it and the card has always drawn it - and the
-            DRAWER, the surface somebody opens to understand one goal, said nothing about it in either
-            direction. The reverse half existed nowhere at all: a goal holding up three other people's work is
-            the most important fact about it, and it was only visible by opening those three and reading their
-            chips. */}
+        {/* PROGRESS, AND HOW IT IS MOVED: the number itself for a measured goal, the slider for one somebody
+            estimates, and otherwise a line saying where the percentage comes from. Under it, what the goal
+            cannot answer about itself while that is still cheap to fix. */}
+        <FormSection
+          stacked
+          title="Progress"
+          icon={Ruler}
+          count={`${goal.progress ?? 0}%`}
+        >
+        {/* A measured goal reports its number, and the number is the only thing worth editing here: the slider
+            would be an opinion the next save overwrites. */}
+        {measured && (
+          <div className="space-y-2">
+            <div className="flex items-end gap-2">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium tabular-nums">
+                  {measureLabel(goal)}
+                  {goal.baseline_value != null && goal.baseline_value !== 0 && (
+                    <span className="ml-1.5 font-normal text-muted-foreground">from {goal.baseline_value}</span>
+                  )}
+                </p>
+                <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
+                  <div className={cn("h-full rounded-full", TONE_FILL[tone])} style={{ width: `${goal.progress ?? 0}%` }} />
+                </div>
+              </div>
+              {canMeasure && (
+                <div className="flex items-end gap-1.5">
+                  <Input
+                    type="number"
+                    value={cur}
+                    onChange={(e) => setCur(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && curMoved) onCurrentValue(Number(cur)); }}
+                    className="h-8 w-24 text-right tabular-nums"
+                    aria-label={`Current value${goal.unit ? ` in ${goal.unit}` : ""}`}
+                  />
+                  <Button size="sm" className="h-8" disabled={!curMoved} onClick={() => onCurrentValue(Number(cur))}>Update</Button>
+                </div>
+              )}
+            </div>
+            {curMoved && curPct != null && (
+              <p className="text-xs text-muted-foreground">
+                Saving {cur}{goal.unit ? ` ${goal.unit}` : ""} puts this at {curPct}%{curPct === 100 ? " and completes the goal" : ""}.
+              </p>
+            )}
+          </div>
+        )}
+
+        {canProgress && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <AccessAction verb="updateProgress" can={can} label="Update goal progress">
+                <input
+                  type="range" min={0} max={100} step={5} value={prog}
+                  onChange={(e) => setProg(Number(e.target.value))}
+                  className="h-1.5 w-full cursor-pointer accent-primary"
+                  aria-label="Set progress"
+                />
+              </AccessAction>
+              <span className="w-10 shrink-0 text-right text-sm font-medium tabular-nums">{prog}%</span>
+            </div>
+            {dirty && (
+              <div className="flex items-center gap-2">
+                <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changed? (optional)" className="h-8 text-sm" onKeyDown={(e) => { if (e.key === "Enter") void save(); }} />
+                <Button size="sm" onClick={() => save()}>Save</Button>
+              </div>
+            )}
+            {!dirty && !closed && (
+              <Button variant="outline" size="sm" className="text-success" onClick={() => onProgress(100)}>
+                <CheckCircle2 className="h-4 w-4" /> Mark complete
+              </Button>
+            )}
+          </div>
+        )}
+
+        {/* Neither control: the percentage is somebody else's arithmetic, so say whose. */}
+        {!measured && !canProgress && (
+          <div className="space-y-1.5">
+            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+              <div className={cn("h-full rounded-full", TONE_FILL[tone])} style={{ width: `${goal.progress ?? 0}%` }} />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {rolledUp
+                ? "The weighted average of its key results - see Connections."
+                : hasLinked
+                  ? `Follows the delivery of its linked tasks${totalPts > 0 ? ` (${deliveredPts}/${totalPts} points)` : ""} - see Connections.`
+                  : closed
+                    ? "Where it finished."
+                    : "Set by the owner."}
+            </p>
+          </div>
+        )}
+
+        {/* WHAT THIS GOAL CANNOT ANSWER ABOUT ITSELF, while it is still cheap to fix. No measure means its
+            progress is an estimate for the whole cycle and its review reads "70%" with nothing behind it.
+            Arithmetic, so it appears with the AI layer switched off - the suggest button in Edit is the only
+            part that costs anything. Hidden on a finished goal, where none of it can be acted on. */}
+        {!closed && measureGaps(goal).length > 0 && (
+          <div className="space-y-0.5 rounded-lg border border-dashed p-3">
+            {measureGaps(goal).map((g) => (
+              <p key={g} className="text-xs text-muted-foreground">{GAP_MESSAGE[g]}</p>
+            ))}
+            {canEdit && <button type="button" className="text-xs font-medium text-primary hover:underline" onClick={onEdit}>Fix it in Edit</button>}
+          </div>
+        )}
+        </FormSection>
+        {/* Where this stands, in the two senses that matter: the arithmetic (pace, silence, the shape of the
+            climb) and the owner's own call. Hidden on a finished goal - neither question applies any more. */}
+        {!closed && (
+          <FormSection
+            stacked
+            title="Health"
+            icon={HeartPulse}
+            aside={goal.expected_progress != null && (
+              <span className="text-xs tabular-nums text-muted-foreground">
+                {goal.progress ?? 0}% against {goal.expected_progress}% expected
+                {goal.drift != null && goal.drift !== 0 && (
+                  <span className={cn("ml-1 font-medium", goal.drift < 0 ? "text-warning" : "text-success")}>
+                    ({goal.drift > 0 ? "+" : ""}{goal.drift})
+                  </span>
+                )}
+              </span>
+            )}
+          >
+            {(history?.length ?? 0) > 1 && <ProgressSparkline history={history!} />}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm">Owner's call</span>
+              <AccessAction verb="setConfidence" can={can} label="Set goal confidence">
+                <ConfidencePicker value={goal.confidence} onPick={(v) => onConfidence(v)} />
+              </AccessAction>
+            </div>
+            {goal.confidence_note && <p className="text-sm text-foreground/90">{goal.confidence_note}</p>}
+            {(goal.stale_days ?? 0) >= STALE_DAYS && (
+              <p className="text-xs text-muted-foreground">Nothing has happened on this goal in {goal.stale_days} days.</p>
+            )}
+            {/* Effort against outcome, which is the pairing that catches hours going into something that is
+                not moving. The card has carried it since projects could point at a goal; the drawer, where
+                somebody goes to work out WHY a goal is behind, did not. */}
+            {goal.logged_hours != null && (
+              <p className="inline-flex items-center gap-1 text-xs tabular-nums text-muted-foreground">
+                <Clock3 className="h-3 w-3" /> {goal.logged_hours}h booked against this goal
+                {(goal.progress ?? 0) === 0 && goal.logged_hours > 0 && <span className="font-medium text-warning">· nothing moved yet</span>}
+              </p>
+            )}
+          </FormSection>
+        )}
+
+        {/* What actually happened, in the owner's words. Offered while the goal is closing or closed, and
+            carried into the review PDF - a percentage says how far it got and nothing about why. */}
+        {/* `canEdit`, not "canEdit or it is mine": the note is an ordinary field write, so an owner whose
+            policy gives them `updateProgress` but not `update` was handed a textarea and a Save button that
+            could only ever answer 403. */}
+        {(closed || (goal.progress ?? 0) >= 80) && canEdit && (
+          <FormSection stacked title="What happened" icon={PenLine}>
+            {/* START FROM THE RECORD, not from a blank box. By the time a goal closes nobody remembers the
+                shape of the quarter, so the answer is usually a sentence and a percentage that says nothing.
+                The app holds the rest: where it started, where it got to, what was delivered against it. No
+                model and no request - every line here is already on this page - and it lands as editable
+                text the owner rewrites in their own words. */}
+            {!retroDraft.trim() && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setRetroDraft(retroSeed(goal, linked, history))}
+              >
+                <ListChecks className="h-4 w-4" /> Start from the record
+              </Button>
+            )}
+            <Textarea
+              rows={3}
+              value={retroDraft}
+              onChange={(e) => setRetroDraft(e.target.value)}
+              placeholder="What actually happened here? What would you do differently?"
+            />
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="outline" disabled={retroDraft.trim() === (goal.retro ?? "").trim()} onClick={() => onRetro(retroDraft.trim())}>Save note</Button>
+              <span className="text-xs text-muted-foreground">Carried into the review for this cycle.</span>
+            </div>
+          </FormSection>
+        )}
+        {/* Written by the owner, read by everybody who can see the goal. It lived only inside the editor
+            above, so the one person who most needs it - a manager reading a finished goal they cannot edit -
+            saw a percentage and none of the words explaining it. */}
+        {!canEdit && goal.retro && (
+          <FormSection stacked title="What happened" icon={PenLine}>
+            <p className="whitespace-pre-wrap text-sm text-foreground/90">{goal.retro}</p>
+          </FormSection>
+        )}
+          </TabsContent>
+
+          <TabsContent value="connections" forceMount className={drawerPanel}>
+        {/* WHERE IT SITS: what it rolls up into, and what rolls up into it. */}
+        {(parent || kids.length > 0) && (
+          <FormSection
+            stacked
+            title={rolledUp ? "Key results" : "Alignment"}
+            icon={Network}
+            count={kids.length > 0
+              // The objective's own percentage IS this set, computed by the server over every key result -
+              // including any this viewer cannot see. Aligned goals are a client-side average over what this
+              // viewer can see, and say so.
+              ? (rolledUp ? `${goal.progress ?? 0}% weighted` : `${alignedPct}% of what you can see`)
+              : undefined}
+          >
+            {parent && (
+              <p className="text-sm text-muted-foreground">
+                Aligns to{" "}
+                <button type="button" className="inline-flex max-w-full items-center gap-1 align-bottom font-medium text-primary hover:underline" onClick={() => onOpenGoal(parent)}>
+                  <Link2 className="h-3 w-3 shrink-0" /> <span className="truncate">{parent.title}</span>
+                </button>
+              </p>
+            )}
+            {kids.length > 0 && (
+              <ul className="space-y-1.5">
+                {kids.map((k) => (
+                  <li key={k.path}>
+                    <button type="button" className="flex w-full items-center gap-2 rounded text-left text-sm hover:bg-accent/50" onClick={() => onOpenGoal(k)}>
+                      <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", k.status === "completed" ? "bg-success" : k.status === "cancelled" ? "bg-muted-foreground/40" : "bg-primary")} />
+                      <span className={cn("min-w-0 flex-1 truncate", k.status === "cancelled" && "text-muted-foreground line-through")}>{k.title}</span>
+                      <span className="text-[11px] text-muted-foreground">{kidOwnerName(k.employee)}</span>
+                      <span className="w-9 shrink-0 text-right text-xs font-medium tabular-nums">{k.progress ?? 0}%</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </FormSection>
+        )}
+
+        {/* WHAT IS IN THE WAY, AND WHO IS WAITING ON THIS. "Waiting on another goal" is more often the answer
+            to "why did this sit at 20% all quarter" than effort is. The reverse half - a goal holding up three
+            other people's work - is the most important fact about it, and was only visible by opening those
+            three and reading their chips. */}
         {(blocker || blocking.length > 0) && (
-          <div className="space-y-2 rounded-lg border p-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Dependencies</p>
+          <FormSection stacked title="Dependencies" icon={Hourglass}>
             {blocker && (
               <div className="space-y-1">
                 <div className="flex flex-wrap items-center gap-1.5 text-sm">
@@ -2760,112 +3133,7 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
                 </ul>
               </div>
             )}
-          </div>
-        )}
-
-        {/* WHAT THIS GOAL CANNOT ANSWER ABOUT ITSELF, while it is still cheap to fix. No measure means its
-            progress is an estimate for the whole cycle and its review reads "70%" with nothing behind it.
-            Arithmetic, so it appears with the AI layer switched off - the suggest button in Edit is the only
-            part that costs anything. Hidden on a finished goal, where none of it can be acted on. */}
-        {!closed && measureGaps(goal).length > 0 && (
-          <div className="space-y-0.5 rounded-lg border border-dashed p-3">
-            {measureGaps(goal).map((g) => (
-              <p key={g} className="text-xs text-muted-foreground">{GAP_MESSAGE[g]}</p>
-            ))}
-            {canEdit && <button type="button" className="text-xs font-medium text-primary hover:underline" onClick={onEdit}>Fix it in Edit</button>}
-          </div>
-        )}
-
-        {/* Duplicated effort and missing alignment, both read off the index rather than off somebody having
-            read all ninety goals. Asked for, so it costs nothing on a goal nobody is questioning. */}
-        <GoalSimilarCard
-          goalId={idOf(goal.path)}
-          can={goal.access?.can}
-          onOpenGoal={(path) => { const g = kids.find((k) => k.path === path); if (g) onOpenGoal(g); else navigate(path); }}
-        />
-
-        {/* Where this stands, in the two senses that matter: the arithmetic (pace, silence, the shape of the
-            climb) and the owner's own call. Hidden on a finished goal - neither question applies any more. */}
-        {!closed && (
-          <div className="space-y-2 rounded-lg border p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Health</p>
-              {goal.expected_progress != null && (
-                <span className="text-xs tabular-nums text-muted-foreground">
-                  {goal.progress ?? 0}% against {goal.expected_progress}% expected
-                  {goal.drift != null && goal.drift !== 0 && (
-                    <span className={cn("ml-1 font-medium", goal.drift < 0 ? "text-warning" : "text-success")}>
-                      ({goal.drift > 0 ? "+" : ""}{goal.drift})
-                    </span>
-                  )}
-                </span>
-              )}
-            </div>
-            {(history?.length ?? 0) > 1 && <ProgressSparkline history={history!} />}
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-sm">Owner's call</span>
-              <AccessAction verb="setConfidence" can={can} label="Set goal confidence">
-                <ConfidencePicker value={goal.confidence} onPick={(v) => onConfidence(v)} />
-              </AccessAction>
-            </div>
-            {goal.confidence_note && <p className="text-sm text-foreground/90">{goal.confidence_note}</p>}
-            {(goal.stale_days ?? 0) >= STALE_DAYS && (
-              <p className="text-xs text-muted-foreground">Nothing has happened on this goal in {goal.stale_days} days.</p>
-            )}
-            {/* Effort against outcome, which is the pairing that catches hours going into something that is
-                not moving. The card has carried it since projects could point at a goal; the drawer, where
-                somebody goes to work out WHY a goal is behind, did not. */}
-            {goal.logged_hours != null && (
-              <p className="inline-flex items-center gap-1 text-xs tabular-nums text-muted-foreground">
-                <Clock3 className="h-3 w-3" /> {goal.logged_hours}h booked against this goal
-                {(goal.progress ?? 0) === 0 && goal.logged_hours > 0 && <span className="font-medium text-warning">· nothing moved yet</span>}
-              </p>
-            )}
-          </div>
-        )}
-
-        {/* What actually happened, in the owner's words. Offered while the goal is closing or closed, and
-            carried into the review PDF - a percentage says how far it got and nothing about why. */}
-        {/* `canEdit`, not "canEdit or it is mine": the note is an ordinary field write, so an owner whose
-            policy gives them `updateProgress` but not `update` was handed a textarea and a Save button that
-            could only ever answer 403. */}
-        {(closed || (goal.progress ?? 0) >= 80) && canEdit && (
-          <div className="space-y-2 rounded-lg border p-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">What happened</p>
-            {/* START FROM THE RECORD, not from a blank box. By the time a goal closes nobody remembers the
-                shape of the quarter, so the answer is usually a sentence and a percentage that says nothing.
-                The app holds the rest: where it started, where it got to, what was delivered against it. No
-                model and no request - every line here is already on this page - and it lands as editable
-                text the owner rewrites in their own words. */}
-            {!retroDraft.trim() && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setRetroDraft(retroSeed(goal, linked, history))}
-              >
-                <ListChecks className="h-4 w-4" /> Start from the record
-              </Button>
-            )}
-            <Textarea
-              rows={3}
-              value={retroDraft}
-              onChange={(e) => setRetroDraft(e.target.value)}
-              placeholder="What actually happened here? What would you do differently?"
-            />
-            <div className="flex items-center gap-2">
-              <Button size="sm" variant="outline" disabled={retroDraft.trim() === (goal.retro ?? "").trim()} onClick={() => onRetro(retroDraft.trim())}>Save note</Button>
-              <span className="text-xs text-muted-foreground">Carried into the review for this cycle.</span>
-            </div>
-          </div>
-        )}
-        {/* Written by the owner, read by everybody who can see the goal. It lived only inside the editor
-            above, so the one person who most needs it - a manager reading a finished goal they cannot edit -
-            saw a percentage and none of the words explaining it. */}
-        {!canEdit && goal.retro && (
-          <div className="space-y-1.5 rounded-lg border p-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">What happened</p>
-            <p className="whitespace-pre-wrap text-sm text-foreground/90">{goal.retro}</p>
-          </div>
+          </FormSection>
         )}
 
         {/* Who else worked on this. Their share scores in THEIR review at this goal's weight scaled by it, so
@@ -2876,17 +3144,17 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
             goal to be open. Only a cancelled goal hides it - it scores for nobody, so there is no share to
             argue about. */}
         {(goal.contributors?.length || goal.suggested_contributors?.length || canEdit) && goal.status !== "cancelled" && (
-          <div className="space-y-2 rounded-lg border p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Contributors{goal.contributors?.length ? ` · ${goal.contributors.reduce((s2, c) => s2 + (c.share ?? 0), 0)}% shared` : ""}
-              </p>
-              {canEdit && (
-                <AccessAction verb="setContributors" can={can} label="Set contributors">
-                  <Button variant="ghost" size="sm" onClick={onContributors}>{goal.contributors?.length ? "Edit" : "Add"}</Button>
-                </AccessAction>
-              )}
-            </div>
+          <FormSection
+            stacked
+            title="Contributors"
+            icon={Users}
+            count={goal.contributors?.length ? `${goal.contributors.reduce((s2, c) => s2 + (c.share ?? 0), 0)}% shared` : undefined}
+            aside={canEdit && (
+              <AccessAction verb="setContributors" can={can} label="Set contributors">
+                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={onContributors}>{goal.contributors?.length ? "Edit" : "Add"}</Button>
+              </AccessAction>
+            )}
+          >
             {goal.contributors?.length ? (
               <ul className="space-y-1">
                 {goal.contributors.map((c) => (
@@ -2907,112 +3175,20 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
             ) : (
               <p className="text-sm text-muted-foreground">Nobody else is credited. A share here counts in that person's own review.</p>
             )}
-          </div>
+          </FormSection>
         )}
 
-        {kids.length > 0 && (
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              {rolledUp
-                // The objective's own percentage IS this set, computed by the server over every key result -
-                // including any this viewer cannot see. The old line ("% of what you can see") was honest
-                // about a client-side average that two people read differently; there is nothing to hedge now.
-                ? `Key results · ${goal.progress ?? 0}% weighted`
-                : `Aligned goals · ${alignedPct}% of what you can see`}
-            </p>
-            <ul className="space-y-1.5">
-              {kids.map((k) => (
-                <li key={k.path}>
-                  <button type="button" className="flex w-full items-center gap-2 rounded text-left text-sm hover:bg-accent/50" onClick={() => onOpenGoal(k)}>
-                    <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", k.status === "completed" ? "bg-success" : k.status === "cancelled" ? "bg-muted-foreground/40" : "bg-primary")} />
-                    <span className={cn("min-w-0 flex-1 truncate", k.status === "cancelled" && "text-muted-foreground line-through")}>{k.title}</span>
-                    <span className="text-[11px] text-muted-foreground">{kidOwnerName(k.employee)}</span>
-                    <span className="w-9 shrink-0 text-right text-xs font-medium tabular-nums">{k.progress ?? 0}%</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* A measured goal reports its number, and the number is the only thing worth editing here: the slider
-            would be an opinion the next save overwrites. */}
-        {measured && (
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Measure</p>
-            <div className="flex items-end gap-2">
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium tabular-nums">
-                  {measureLabel(goal)}
-                  {goal.baseline_value != null && goal.baseline_value !== 0 && (
-                    <span className="ml-1.5 font-normal text-muted-foreground">from {goal.baseline_value}</span>
-                  )}
-                </p>
-                <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
-                  <div className={cn("h-full rounded-full", TONE_FILL[tone])} style={{ width: `${goal.progress ?? 0}%` }} />
-                </div>
-              </div>
-              {canMeasure && (
-                <div className="flex items-end gap-1.5">
-                  <Input
-                    type="number"
-                    value={cur}
-                    onChange={(e) => setCur(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && curMoved) onCurrentValue(Number(cur)); }}
-                    className="h-8 w-24 text-right tabular-nums"
-                    aria-label={`Current value${goal.unit ? ` in ${goal.unit}` : ""}`}
-                  />
-                  <Button size="sm" className="h-8" disabled={!curMoved} onClick={() => onCurrentValue(Number(cur))}>Update</Button>
-                </div>
-              )}
-            </div>
-            {curMoved && curPct != null && (
-              <p className="text-xs text-muted-foreground">
-                Saving {cur}{goal.unit ? ` ${goal.unit}` : ""} puts this at {curPct}%{curPct === 100 ? " and completes the goal" : ""}.
-              </p>
-            )}
-          </div>
-        )}
-
-        {canProgress && (
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Progress</p>
-            <div className="flex items-center gap-2">
-              <AccessAction verb="updateProgress" can={can} label="Update goal progress">
-                <input
-                  type="range" min={0} max={100} step={5} value={prog}
-                  onChange={(e) => setProg(Number(e.target.value))}
-                  className="h-1.5 w-full cursor-pointer accent-primary"
-                  aria-label="Set progress"
-                />
-              </AccessAction>
-              <span className="w-10 shrink-0 text-right text-sm font-medium tabular-nums">{prog}%</span>
-            </div>
-            {dirty && (
-              <div className="flex items-center gap-2">
-                <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changed? (optional)" className="h-8 text-sm" onKeyDown={(e) => { if (e.key === "Enter") void save(); }} />
-                <Button size="sm" onClick={() => save()}>Save</Button>
-              </div>
-            )}
-            {!dirty && !closed && (
-              <Button variant="outline" size="sm" className="text-success" onClick={() => onProgress(100)}>
-                <CheckCircle2 className="h-4 w-4" /> Mark complete
-              </Button>
-            )}
-          </div>
-        )}
-
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Linked tasks{hasLinked && totalPts > 0 ? ` · ${deliveredPts}/${totalPts} pts` : ""}
-            </p>
-            {!closed && linkable.length > 0 && (
-              <button type="button" className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline" onClick={() => setPicking((p) => !p)}>
-                <Link2 className="h-3.5 w-3.5" /> Link tasks
-              </button>
-            )}
-          </div>
+        <FormSection
+          stacked
+          title="Linked tasks"
+          icon={SquareKanban}
+          count={hasLinked && totalPts > 0 ? `${deliveredPts}/${totalPts} pts` : undefined}
+          aside={!closed && linkable.length > 0 && (
+            <button type="button" className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline" onClick={() => setPicking((p) => !p)}>
+              <Link2 className="h-3.5 w-3.5" /> Link tasks
+            </button>
+          )}
+        >
           {picking && (
             <>
               <Combobox
@@ -3068,15 +3244,22 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
             <p className="text-xs text-muted-foreground">No board tasks linked - progress is set manually.</p>
           )}
           {hasLinked && <p className="text-[11px] text-muted-foreground">Progress derives from linked-task delivery.</p>}
-        </div>
+        </FormSection>
 
+        {/* Duplicated effort and missing alignment, both read off the index rather than off somebody having
+            read all ninety goals. Asked for, so it costs nothing on a goal nobody is questioning. */}
+        <GoalSimilarCard
+          goalId={idOf(goal.path)}
+          can={goal.access?.can}
+          onOpenGoal={(path) => { const g = kids.find((k) => k.path === path); if (g) onOpenGoal(g); else navigate(path); }}
+        />
+          </TabsContent>
+
+          <TabsContent value="discussion" forceMount className={drawerPanel}>
         {/* The conversation the goal used to lose. A quarterly goal gets discussed at least monthly, and until
             this existed the only writable text on it was the owner's own progress note - so the discussion
             happened in chat and the goal recorded nothing. */}
-        <div className="space-y-2 border-t pt-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Comments{comments?.length ? ` · ${comments.length}` : ""}
-          </p>
+        <FormSection stacked title="Comments" icon={MessageSquare} count={comments?.length || undefined}>
           {comments === undefined ? (
             <LinesSkeleton rows={2} />
           ) : comments.length === 0 ? (
@@ -3133,37 +3316,11 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
               </AccessAction>
             </div>
           )}
-        </div>
+        </FormSection>
 
-        <ActivitySection resource={goal.path} className="border-t pt-3" />
-
-        <div className="flex flex-wrap items-center gap-2 border-t pt-3">
-          {canEdit && <Button variant="outline" size="sm" onClick={onEdit}><Pencil className="h-3.5 w-3.5" /> Edit</Button>}
-          {/* The rung under this objective. Adding one meant New goal -> change Kind -> find this objective
-              again by title in a list of every goal in the org; from here the parent, the owner, the cycle
-              and the date are already filled in. Not offered on a key result: the ladder is one rung deep, so
-              nothing hangs under one. */}
-          {onAddKeyResult && !closed && (
-            <AccessAction collection="goals" create label="Add a key result">
-              <Button variant="outline" size="sm" onClick={onAddKeyResult}><Plus className="h-3.5 w-3.5" /> Add key result</Button>
-            </AccessAction>
-          )}
-          {/* A completed goal is the moment recognition is worth something, and it used to produce one
-              notification to one manager and nothing else. Opens the kudos composer with the owner filled in. */}
-          {goal.status === "completed" && !mine && goal.employee && (
-            <AccessAction collection="announcements" verb="giveKudos" label="Give kudos">
-              <Button variant="outline" size="sm" onClick={() => { navigate("announcements"); fireIntent("give-kudos", `employees/${idOf(goal.employee!)}`); }}>
-                <Sparkles className="h-3.5 w-3.5" /> Say well done
-              </Button>
-            </AccessAction>
-          )}
-          {onCarryOver && (
-            <AccessAction collection="goals" create label="Carry goal over">
-              <Button variant="outline" size="sm" onClick={onCarryOver}><CalendarDays className="h-3.5 w-3.5" /> Carry to next quarter</Button>
-            </AccessAction>
-          )}
-          {canDelete && <Button variant="outline" size="sm" className="text-destructive" onClick={onDelete}><Trash2 className="h-3.5 w-3.5" /> Delete</Button>}
-        </div>
+        <ActivitySection resource={goal.path} />
+          </TabsContent>
+        </Tabs>
       </SheetBody>
     </SheetContent>
   );

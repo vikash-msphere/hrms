@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, confirmDelete, gotoRoute, test, expect, toast } from "./fixtures";
 
 // Deleting something, and taking it back.
 //
@@ -22,7 +22,9 @@ test("a soft delete offers an undo, and the undo brings the row back", async ({ 
   await row.getByRole("button", { name: "Actions" }).click();
   await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
 
-  // Gone at once - no confirmation - and the way back is in the toast.
+  // It asks first, says the way back, and once answered the row is gone with the way back in the toast.
+  await expect(page.getByRole("dialog").getByText(/Undo on the message that follows brings it straight back/)).toBeVisible();
+  await confirmDelete(page);
   await expect(page.locator("tbody tr").filter({ hasText: name })).toHaveCount(0);
   const deleted = toast(page, "Vendor deleted");
   await expect(deleted).toBeVisible();

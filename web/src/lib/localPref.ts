@@ -14,7 +14,18 @@
 // NOT for anything that must actually persist, be shared between devices, or be read back by the server -
 // those go through lib/prefs.ts (a server preferences row) or lib/clientStore.ts (IndexedDB). See
 // client-storage.md.
-import { storedIdentity } from "@/lib/clientStore";
+
+// The PERSON these keys belong to (email, plus any "view as" subject), set by the shell once `/me` lands. Not
+// the record store's identity (lib/clientStore.ts `storedIdentity`): that one folds in the session, so the
+// cached rows live exactly as long as the sign-in that fetched them. A preference has to outlive the session -
+// "reopen the board I was last on" means the board from yesterday's sign-in too - and under the session-scoped
+// key every one of these was written once and never read back after the next sign-in.
+let prefUser: string | null = null;
+
+/** Namespace every `userKey` to `key` (the signed-in person, or undefined when nobody is). */
+export function setLocalPrefUser(key: string | undefined): void {
+  prefUser = key || null;
+}
 
 /**
  * `key` namespaced to the signed-in caller, or null before the identity is known.
@@ -33,8 +44,7 @@ import { storedIdentity } from "@/lib/clientStore";
  * Not for a genuinely per-DEVICE choice (the theme, the scanner's camera): those are correct as bare keys.
  */
 export function userKey(key: string): string | null {
-  const id = storedIdentity();
-  return id ? `${key}:${id}` : null;
+  return prefUser ? `${key}:${prefUser}` : null;
 }
 
 /** The stored string for `key`, or null when there is none - or when storage is unreadable. Never throws. */

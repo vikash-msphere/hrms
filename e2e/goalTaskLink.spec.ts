@@ -40,10 +40,13 @@ test("linked tasks score the goal by their delivered points", async ({ as }) => 
   await gotoRoute(page, "goals", "Goals");
   await page.getByText(title).first().click();
   const drawer = page.getByRole("dialog");
+  // Linked tasks live on the drawer's Connections tab; it opens on Overview.
+  await drawer.getByRole("tab", { name: /^Connections/ }).click();
   await expect(drawer.getByText("Linked tasks")).toBeVisible({ timeout: 30_000 });
 
-  // Nothing linked yet, so there is nothing to weigh - the section says so rather than showing 0 of 0 points.
-  await expect(drawer.getByText(/Linked tasks · /)).toHaveCount(0);
+  // Nothing linked yet, so there is nothing to weigh - the section's count says so by being absent rather
+  // than showing 0 of 0 points.
+  await expect(drawer.getByText(/^\d+\/\d+ pts$/)).toHaveCount(0);
 
   // The board is read only while this drawer is open, and what it offers is the unlinked, undelivered work.
   await drawer.getByRole("button", { name: "Link tasks" }).click();
@@ -51,15 +54,16 @@ test("linked tasks score the goal by their delivered points", async ({ as }) => 
   await drawer.getByRole("button", { name: "Select…" }).click();
   await page.getByPlaceholder("Search tasks…").fill(openTask);
   await page.getByRole("option", { name: openTask }).click();
-  // The linked list is the assertion, not the toast: it names the task, its points, and the delivered share.
-  await expect(drawer.getByText("Linked tasks · 0/5 pts")).toBeVisible({ timeout: 30_000 });
+  // The linked list is the assertion, not the toast: it names the task, its points, and the delivered share
+  // (the section's count beside its "Linked tasks" heading).
+  await expect(drawer.getByText("0/5 pts", { exact: true })).toBeVisible({ timeout: 30_000 });
 
   await drawer.getByRole("button", { name: "Link tasks" }).click();
   await drawer.getByRole("button", { name: "Select…" }).click();
   await page.getByPlaceholder("Search tasks…").fill(doneTask);
   await page.getByRole("option", { name: doneTask }).click();
   // Both linked, neither delivered: eight points of work and nothing done.
-  await expect(drawer.getByText("Linked tasks · 0/8 pts")).toBeVisible({ timeout: 30_000 });
+  await expect(drawer.getByText("0/8 pts", { exact: true })).toBeVisible({ timeout: 30_000 });
   await expect.poll(() => goalProgress(page, goal.path), { timeout: 30_000 }).toBe(0);
 
   // Delivering one is what moves the goal - "reached the delivery column" is the move verb's business, not a
@@ -84,14 +88,15 @@ test("linked tasks score the goal by their delivered points", async ({ as }) => 
   await page.reload();
   const again = page.getByRole("dialog");
   await expect(again).toBeVisible({ timeout: 30_000 });
-  await expect(again.getByText("Linked tasks · 3/8 pts")).toBeVisible({ timeout: 30_000 });
+  await again.getByRole("tab", { name: /^Connections/ }).click();
+  await expect(again.getByText("3/8 pts", { exact: true })).toBeVisible({ timeout: 30_000 });
   // The drawer wears the score in its own heading (the ring's number beside the title), which is where a
   // reader looks for "how is this goal doing".
   await expect(again.getByRole("heading", { level: 2 })).toContainText("38");
 
   // Unlinking is the same loop backwards, from the task's own row - and the score follows it.
   await again.getByRole("button", { name: `Unlink ${doneTask}` }).click();
-  await expect(again.getByText("Linked tasks · 0/5 pts")).toBeVisible({ timeout: 30_000 });
+  await expect(again.getByText("0/5 pts", { exact: true })).toBeVisible({ timeout: 30_000 });
   await expect.poll(() => goalProgress(page, goal.path), { timeout: 30_000 }).toBe(0);
 
   await purge(page, delivered.path);

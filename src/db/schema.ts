@@ -1971,7 +1971,7 @@ export const idempotencyKeys = sqliteTable("idempotency_keys", {
 
 // One row per scheduled tick, written by runScheduled, and one per manual `cron-runs:run`: makes "did it run /
 // when / how long / did it fail" observable (the crons themselves are stateless Cloudflare triggers that record
-// nothing). The exception is a five-minute tick its probe finds idle, which records nothing (cron.ts
+// nothing). The exception is a five-minute tick that had nothing to do, which records nothing (cron.ts
 // `runScheduled`). Admin-only.
 export const cronRuns = sqliteTable("cron_runs", {
   uuid: pk(),
@@ -1986,11 +1986,11 @@ export const cronRuns = sqliteTable("cron_runs", {
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({
-  pageIdx: index("cron_runs_page_idx").on(t.createdAt, t.uuid),
+  // The list pages on `started_at`, not `created_at` (routes/cronRuns.ts), so that is the paging index's key.
+  pageIdx: index("cron_runs_page_idx").on(t.startedAt, t.uuid),
   // One trigger's runs, newest first: the Operations page asks for each card's latest run this way
   // (routes/cronRuns.ts `cron`), which is a seek however many runs the other triggers have recorded since.
   cronStartedIdx: index("cron_runs_cron_started_idx").on(t.cron, t.startedAt, t.uuid),
-  startedIdx: index("cron_runs_started_idx").on(t.startedAt),
   // ONLY THE RUNS IN FLIGHT: the tick running now, and any run killed before it could record a result. Every
   // five-minute tick looks for the second kind (cron.ts `fastTickProbe`, then `reclaimStuckCronRuns`), and this
   // table keeps every run it records, so the lookup has to touch the few rows it asks about rather than the
