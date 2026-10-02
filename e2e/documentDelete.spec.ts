@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, confirmDelete, gotoRoute, test, expect, toast } from "./fixtures";
 
 // Deleting an org document - `documentLockToggle.spec.ts` proves Delete disappears from a locked document's
 // menu, but never actually presses it on an unlocked one, and none of the other document specs (upload,
@@ -22,6 +22,7 @@ test("an org document is deleted from the list", async ({ as }) => {
   await expect(row).toBeVisible({ timeout: 30_000 });
   await row.getByRole("button", { name: "Actions" }).click();
   await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await confirmDelete(page);
   await expect(toast(page, "Document deleted")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("tbody tr").filter({ hasText: title })).toHaveCount(0, { timeout: 30_000 });
 

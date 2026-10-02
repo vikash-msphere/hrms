@@ -29,6 +29,7 @@ import { WriteDialog } from "@/components/common/WriteDialog";
 import { TimeRangeField } from "@/components/common/TimeRangeField";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 import { REC_LABEL, REC_VARIANT, NEGATIVE_REC, findFreeSlots, type BusyWindow } from "@/lib/ats";
 import { buildTimedIcs, downloadIcs } from "@/lib/ics";
@@ -59,6 +60,7 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
   const cfg = useAtsConfig();
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const [dialog, setDialog] = useState<Interview | "new" | null>(null);
   // The three lists behind an interview's LABELS (which candidate, for which role) and the interviewer picker.
   // An empty schedule has nothing to label, so it reads none of them; the dialog needs all of them to offer a
@@ -206,7 +208,7 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
 
   async function del(i: Interview) {
     if (!(await confirm({ title: "Delete this interview?", destructive: true, confirmLabel: "Delete" }))) return;
-    try { await remove(`interviews/${idOf(i.path)}`); reload(); }
+    try { await remove(`interviews/${idOf(i.path)}`); reload(); deleted({ path: `interviews/${idOf(i.path)}`, noun: "interview", can: i.access?.can, reload }); }
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
   }
 

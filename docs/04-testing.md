@@ -176,7 +176,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `clock` | the top bar, the dashboard card and the Attendance page are one clock: punching in on one is immediately true on the others, with no reload |
 | `notifications` | a request filed by one person raises the unread count in their manager's bell, and the bell says what happened |
 | `bulkApproval` | the selection bar counts what is ticked, a batch asks once naming the number, and both requests leave the queue |
-| `undo` | a soft delete (which deliberately does not ask first) really offers an Undo, and the Undo puts the row back |
+| `undo` | a soft delete asks first, then really offers an Undo, and the Undo puts the row back |
 | `tableState` | sort lives in the URL, a reload restores it, and a pasted link opens the sender's view |
 | `offline` | losing the network says so, and getting it back re-reads what is on screen instead of leaving a wall of failed panels |
 | `shortcuts` | the global key layer: `g`+letter jumps, `]` walks the workspace tabs, `?` explains them - and, more importantly, that the chords are NOT eaten by a field somebody is typing in or by an open dialog |

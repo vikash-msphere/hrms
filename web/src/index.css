@@ -686,6 +686,123 @@
       --stat-per: var(--per-4, var(--per-3, var(--per-2, var(--per-1, var(--per-0, 1)))));
     }
   }
+  /* Reached only by a row on a wide screen (1600px of row needs a 1920px viewport, 1728px on the icon rail), so
+     the caps written for this rung change nothing at or below 1440. */
+  @container (min-width: 1600px) {
+    .stat-row > * {
+      --stat-per: var(--per-5, var(--per-4, var(--per-3, var(--per-2, var(--per-1, var(--per-0, 1))))));
+    }
+  }
+
+  /* Card stacks two across once there is room for two (docs/06-responsive-ui.md, "Wide screens"). One column
+     until two 46rem columns fit side by side - 1488px, which no screen at or below 1440 gives a page - and never
+     more than two: the `(100% - gap) / 2` floor leaves no room for a third track. An odd last card spans the row
+     instead of leaving a hole beside it.
+     A grid and not CSS `columns`, deliberately: multi-column rebalances whenever a card's height changes, so
+     opening an inline edit in one card would move OTHER cards between columns under the pointer. Grid rows stay
+     put; a short card leaves space under itself. `--flow-gap` is the vertical rhythm the stack had as a
+     `space-y-*` column (1rem unless the caller says otherwise), so a single column looks exactly as it did.
+     `min-width: 0` because a grid item's automatic minimum is its min-content width, which a wide table inside a
+     card would otherwise push past its track. */
+  .card-flow {
+    --flow-gap-eff: var(--flow-gap, 1rem);
+    display: grid;
+    gap: var(--flow-gap-eff);
+    align-items: start;
+    grid-template-columns: repeat(auto-fit, minmax(max(min(46rem, 100%), calc((100% - var(--flow-gap-eff)) / 2)), 1fr));
+  }
+  .card-flow > * {
+    min-width: 0;
+  }
+  .card-flow > :last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+
+  /* Board task cards reflow by their OWN width (pages/Boards.tsx, `CardTile`). The threshold is the card's CONTENT
+     box, which is the column less its own padding and border and the card's: an 18rem column (every column at
+     1440px or narrower) leaves a card 15-16rem, and a phone's widest column (20rem) at most 18rem. Below 19rem the
+     tile is the stack it always was: labels, title, details. From 19rem, which only a column grown past ~22rem
+     produces (columns grow from `2xl`; five on a 2560px board are ~22.6rem and leave ~19.6rem), the three become one
+     wrapping row: the title first, so titles line up down the column, then the labels, then the details pushed to
+     the far end. When they fit, the card is one line; when they do not, the labels and details drop under the
+     title as before, and nothing is truncated. The right padding is the slot the hover actions menu sits in
+     (absolute, top right), so on a one-line card it never covers the avatar.
+     Selectors are two classes deep so they outrank the margin utilities on the tile's rows (`mb-1.5`, `mt-2`),
+     which the stacked layout still needs. */
+  .task-tile {
+    container-type: inline-size;
+  }
+  @container (min-width: 19rem) {
+    .task-tile-body {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      column-gap: 0.75rem;
+      row-gap: 0.375rem;
+      padding-right: 1.75rem;
+    }
+    .task-tile-body > .task-tile-title {
+      flex: 1 1 auto;
+      order: 0;
+    }
+    .task-tile-body > .task-tile-labels {
+      order: 1;
+      margin: 0;
+    }
+    /* `margin-left: auto` puts the details at the end of the second line when the row wraps; on a one-line card
+       the title's growth has already taken the free space, so the auto margin is zero. */
+    .task-tile-body > .task-tile-meta {
+      order: 2;
+      margin: 0 0 0 auto;
+    }
+  }
+
+  /* Pipeline candidate cards, by the same rule (pages/Pipeline.tsx). Stacked below 19rem of content: name and
+     days in stage, the job, the badges, the actions. From 19rem the name and the job share a line with the days
+     at its end, and the badges and the actions share the next: four rows become two. `display: contents` lifts
+     the name row's two halves into the head row, so the job can sit between them. */
+  .pipe-card {
+    container-type: inline-size;
+  }
+  @container (min-width: 19rem) {
+    .pipe-card-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      column-gap: 0.5rem;
+    }
+    .pipe-card-head > .pipe-card-name {
+      display: contents;
+    }
+    .pipe-card-head .pipe-card-who {
+      order: 0;
+    }
+    .pipe-card-head > .pipe-card-job {
+      order: 1;
+      padding-left: 0;
+    }
+    .pipe-card-head > .pipe-card-job::before {
+      content: "·";
+      margin-right: 0.5rem;
+    }
+    .pipe-card-head .pipe-card-days {
+      order: 2;
+      margin-left: auto;
+    }
+    .pipe-card-foot {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    .pipe-card-foot > .pipe-card-badges {
+      margin: 0;
+    }
+    .pipe-card-foot > .pipe-card-actions {
+      margin: 0 0 0 auto;
+    }
+  }
 }
 
 /* Org chart: pure-CSS top-down tree connectors (nested ul/li). Roots (direct children of .org-tree) get no

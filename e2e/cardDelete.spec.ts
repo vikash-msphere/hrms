@@ -27,7 +27,7 @@ test("a card is deleted from its own dialog, and reads back soft-deleted", async
     await dialog.getByRole("button", { name: "Delete", exact: true }).click();
     const confirm = page.getByRole("dialog").filter({ hasText: /^Delete .+\?/ });
     await expect(confirm).toBeVisible({ timeout: 30_000 });
-    await expect(confirm.getByText(/removed from view \(soft delete\)\. Restorable by an admin\./)).toBeVisible();
+    await expect(confirm.getByText(/removed from view \(soft delete\)\. Undo on the message that follows brings it back/)).toBeVisible();
     await confirm.getByRole("button", { name: "Delete task", exact: true }).click();
     await expect(toast(page, "Task deleted")).toBeVisible({ timeout: 30_000 });
 

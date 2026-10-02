@@ -105,7 +105,7 @@ const otherWrangler = read(otherConfig);
 // --- 1a. The two configs must agree where a rehearsal depends on it -----------------------------------
 // Splitting staging into its own file removed one failure mode (a binding silently missing from an
 // `[env.staging]` block) and introduced another: the duplication is now across files, where no diff shows
-// it. Three keys are only meaningful if they match, and each one is a difference that makes staging stop
+// it. Four keys are only meaningful if they match, and each one is a difference that makes staging stop
 // rehearsing production while still looking green.
 if (otherWrangler.trim()) {
   const value = (text: string, key: string) => text.match(new RegExp(`^\\s*${key}\\s*=\\s*(.+?)\\s*(?:#.*)?$`, "m"))?.[1];
@@ -125,6 +125,14 @@ if (otherWrangler.trim()) {
   const stagingRoutes = value(staging, "run_worker_first");
   if (prodRoutes && stagingRoutes && prodRoutes !== stagingRoutes) {
     errors.push(`run_worker_first disagrees between wrangler.toml and wrangler.staging.toml. A file gated in one environment and public in the other is the difference staging exists to catch, not to have.`);
+  }
+
+  // Where the Worker runs relative to D1. Placed, each query is a short hop; unplaced, each is a round trip from
+  // the caller's edge (about 150ms in production traces). Staging placed differently from production measures
+  // a different latency, so a slow page either hides in one or is invented in the other.
+  const placementOf = (text: string) => text.match(/^\s*\[placement\][^[]*?^\s*mode\s*=\s*"([^"]*)"/m)?.[1] ?? "(none)";
+  if (placementOf(prod) !== placementOf(staging)) {
+    errors.push(`[placement] mode disagrees: wrangler.toml has ${placementOf(prod)}, wrangler.staging.toml has ${placementOf(staging)}. Staging rehearses production's latency only when both run in the same place.`);
   }
 
   // Preview URLs keep every uploaded version reachable at its own address - including the builds from before

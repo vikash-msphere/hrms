@@ -48,9 +48,8 @@ test("switching a bonus's scope recomputes who it reaches and what it costs, bef
   // both.
   const companyLine = form.getByText(/× \d+ (person|people)/);
   await expect(companyLine).toBeVisible({ timeout: 15_000 });
-  const companyCount = Number(/× (\d+)/.exec(await companyLine.innerText())![1]);
+  const companyCount = await readTotal(companyLine);
   expect(companyCount).toBeGreaterThan(0);
-  await expect(form.getByText(`₹${(1000 * companyCount).toLocaleString("en-US")}`)).toBeVisible();
 
   // Narrowed to one department: a smaller, different number, recomputed live off the same amount.
   await form.getByLabel("Who").click();
@@ -62,10 +61,9 @@ test("switching a bonus's scope recomputes who it reaches and what it costs, bef
   // a smaller number than the whole company, and money that follows it.
   const deptLine = form.getByText(/× \d+ (person|people)/);
   await expect(deptLine).toBeVisible({ timeout: 15_000 });
-  const deptCount = Number(/× (\d+)/.exec(await deptLine.innerText())![1]);
+  const deptCount = await readTotal(deptLine);
   expect(deptCount).toBeGreaterThan(0);
   expect(deptCount).toBeLessThan(companyCount);
-  await expect(form.getByText(`₹${(1000 * deptCount).toLocaleString("en-US")}`)).toBeVisible();
 
   // The confirm checkpoint repeats the SAME numbers, out loud, before anything is sent - not asserted from a
   // toast afterwards, because there is no "afterwards" here: this spec declines it.
@@ -94,6 +92,17 @@ test("switching a bonus's scope recomputes who it reaches and what it costs, bef
   const discard = page.getByRole("button", { name: /Discard|Leave/ });
   if (await discard.count()) await discard.first().click();
 });
+
+/** The preview line's headcount, after checking the total beside it is that headcount times ₹1,000. Both are
+ *  read in ONE look at the line: other specs hire while this runs and the line re-renders the two together, so
+ *  reading the count and then looking for its total can straddle a re-render and find the next company's. */
+async function readTotal(countText: import("@playwright/test").Locator): Promise<number> {
+  const text = await countText.locator("..").innerText();
+  const count = Number(/× (\d+)/.exec(text)![1]);
+  const total = Number(/₹([\d,]+)\s*$/.exec(text)![1]!.replace(/,/g, ""));
+  expect(total, `the total on "${text}" is the headcount times the amount`).toBe(1000 * count);
+  return count;
+}
 
 /** Every row of a collection, following the server's cursor to the end. */
 async function all<T>(page: import("@playwright/test").Page, collection: string): Promise<T[]> {

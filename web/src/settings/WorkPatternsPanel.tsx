@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 
 const COLORS = ["#6366f1", "#3b82f6", "#0ea5e9", "#14b8a6", "#22c55e", "#f59e0b", "#f97316", "#ef4444", "#ec4899", "#a855f7", "#64748b"];
@@ -59,6 +60,7 @@ export default function WorkPatternsPanel({ openId }: { openId?: string }) {
   useDeepOpen(openId, rows, openEdit);
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<WorkPattern | null>(null);
   const [name, setName] = useState("");
@@ -162,7 +164,7 @@ export default function WorkPatternsPanel({ openId }: { openId?: string }) {
       destructive: true,
       confirmLabel: "Retire",
     }))) return;
-    try { await remove(`work-patterns/${idOf(p.path)}`); reload(); }
+    try { await remove(`work-patterns/${idOf(p.path)}`); reload(); deleted({ path: `work-patterns/${idOf(p.path)}`, noun: "schedule", can: p.access?.can, reload, title: "Schedule retired" }); }
     catch (e) { toast({ title: "Couldn't retire it", description: (e as Error).message, variant: "destructive" }); }
   }
 

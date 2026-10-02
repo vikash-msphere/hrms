@@ -20,10 +20,16 @@ test("an employee uploads their signature, sees it, and takes it off again", asy
   // and the identity card carries a hidden file input of its own (its supporting-document picker), so a
   // panel-wide `input[type="file"]` matches two elements. `has:` page-rooted for the reason
   // `cancelOwnRequest` gives - a re-scoped one would ask each div to contain another tabpanel.
-  // `.first()` is the card root: the only inner div holding this heading wraps the title and its blurb,
-  // without the picture or the buttons.
+  // The divs holding both the heading and a file input are the card and its ancestors (the tab's `card-flow`
+  // grid among them, which also holds the identity card's input), and an ancestor comes before its descendants
+  // in document order, so `.last()` is the innermost: the card's own content.
   const signatureCard = (root: import("@playwright/test").Page) =>
-    root.getByRole("tabpanel").locator("div").filter({ has: root.getByRole("heading", { name: "Signature", exact: true }) }).first();
+    root
+      .getByRole("tabpanel")
+      .locator("div")
+      .filter({ has: root.getByRole("heading", { name: "Signature", exact: true }) })
+      .filter({ has: root.locator('input[type="file"]') })
+      .last();
   const panel = signatureCard(page);
   await expect(panel.getByText("No signature uploaded yet.")).toBeVisible();
 

@@ -51,7 +51,7 @@ export default defineConfig({
   projects: [
     {
       name: "desktop",
-      testIgnore: "**/phone.spec.ts",
+      testIgnore: ["**/phone.spec.ts", "**/wide.spec.ts"],
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1440, height: 900 },
@@ -69,6 +69,19 @@ export default defineConfig({
       use: {
         ...devices["Pixel 5"],
         viewport: { width: 390, height: 844 },
+        channel: process.env.E2E_CHANNEL ?? (process.env.CI ? undefined : "chrome"),
+      },
+    },
+    {
+      // A wide desktop, for the wide-screen layout rules (docs/06-responsive-ui.md, "Wide screens"): every one
+      // of them keys off a width past 1440, so the `desktop` project above cannot see any of it - and is, by the
+      // same rule, a baseline that none of it changes. 2560 is past both `3xl` (1920) and the width at which
+      // `<main>`'s 1920px cap binds (~2176).
+      name: "wide",
+      testMatch: "**/wide.spec.ts",
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 2560, height: 1440 },
         channel: process.env.E2E_CHANNEL ?? (process.env.CI ? undefined : "chrome"),
       },
     },

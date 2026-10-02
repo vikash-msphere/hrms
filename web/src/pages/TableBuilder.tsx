@@ -15,6 +15,7 @@ import { useKpiFocus, type FocusSpec } from "@/lib/kpiFocus";
 import { resourceRoute, opensExactRecord } from "@/lib/resourceRoute";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import type {
   Department, Me, PayPeriod, TableCatalogue, TableField, TableFieldKind, TableLink, TableRunColumn,
   TableRunResult, TableRunRow, TableView,
@@ -280,6 +281,7 @@ function TableList() {
   const { rows, state, error, reload } = useCollection<TableView>("table-views");
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ display_name: "", description: "", base: "" });
   const [bases, setBases] = useState<{ collection: string; label: string }[]>([]);
@@ -446,6 +448,7 @@ function TableList() {
     try {
       await remove(`table-views/${idOf(view.path)}`, view.etag);
       reload();
+      deleted({ path: `table-views/${idOf(view.path)}`, noun: "table", can: view.access?.can, reload });
     } catch (e) {
       toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" });
     }

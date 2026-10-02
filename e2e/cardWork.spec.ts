@@ -37,6 +37,8 @@ test("a card takes a checklist and a comment, and the tile counts them", async (
   // The card's own heading is its task key ("EWB1-1 Task"); the title lives in the field, which is where an
   // editor would change it.
   await expect(card.getByLabel("Title")).toHaveValue(title, { timeout: 30_000 });
+  // The checklist and the thread share the dialog's third tab; the dialog opens on Details.
+  await card.getByRole("tab", { name: /Checklist & comments/ }).click();
   // The Add button, not Enter: the field deliberately swallows Enter (unswallowed it reaches the dialog's
   // submit and saves the whole task while somebody is still building the list).
   const add = card.getByPlaceholder("Add a checklist item…");
@@ -78,6 +80,7 @@ test("a card takes a checklist and a comment, and the tile counts them", async (
   await page.reload();
   const reopened = page.getByRole("dialog");
   await expect(reopened).toBeVisible({ timeout: 30_000 });
+  await reopened.getByRole("tab", { name: /Checklist & comments/ }).click();
   await expect(reopened.getByText(comment)).toBeVisible({ timeout: 30_000 });
   await expect(reopened.getByText(item)).toBeVisible();
   await expect(reopened.getByRole("checkbox").first()).toBeChecked();

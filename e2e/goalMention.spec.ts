@@ -31,6 +31,8 @@ test("a goal comment offers the mention picker, posts a chip, and reaches the pe
     const detail = manager.getByRole("dialog");
     await expect(detail.getByText(title).first()).toBeVisible({ timeout: 30_000 });
 
+    // The thread is on the drawer's Discussion tab; it opens on Overview.
+    await detail.getByRole("tab", { name: /^Discussion/ }).click();
     const box = detail.getByPlaceholder(/^Add a comment/);
     await expect(box).toBeVisible();
     // Scoped to the box's own container, which is what the menu is anchored inside. The drawer names the

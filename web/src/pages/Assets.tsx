@@ -17,7 +17,7 @@ import { duplicateIds } from "@/lib/tableSignals";
 import { allScope, mineColumn, mineScope, scopesOf, unassignedScope } from "@/lib/tableScope";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
-import { Chart, ChartCard } from "@/components/common/Chart";
+import { Chart, ChartCard, ChartStrip } from "@/components/common/Chart";
 import { ChartFilterNote } from "@/components/common/ChartFilterNote";
 import { useChartFocus } from "@/lib/chartFocus";
 import { topSlices } from "@/lib/chartTheme";
@@ -676,7 +676,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
           first as counts; these answer both as proportions, which is what tells you whether "12 in repair"
           is a crisis or a rounding error. */}
       {rows.length > 2 && (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <ChartStrip id="assets">
           <ChartCard title="Inventory by state" description="Where every asset on file currently sits.">
             <Chart
               type="donut"
@@ -697,7 +697,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
               {...cf.chart("category")}
             />
           </ChartCard>
-        </div>
+        </ChartStrip>
       )}
       {/* Clicking a number narrows the table to it; "Total" is how you come back. Pressing the tile that is
           already showing also clears, so the strip is a toggle rather than a trap. It rides under the charts

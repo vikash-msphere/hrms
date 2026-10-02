@@ -20,7 +20,7 @@ import type { ApprovalDelegation, Employee, Holiday, LeaveAdjustment, LeaveBalan
 import { AdjustBalanceDialog } from "@/components/leave/AdjustBalanceDialog";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
-import { Chart, ChartCard } from "@/components/common/Chart";
+import { Chart, ChartCard, ChartStrip } from "@/components/common/Chart";
 import { ChartFilterNote } from "@/components/common/ChartFilterNote";
 import { useChartFocus } from "@/lib/chartFocus";
 import { monthlyTotals, topSlices } from "@/lib/chartTheme";
@@ -935,7 +935,7 @@ export default function Leaves({ me }: { me: Me }) {
           they cost nothing extra to draw. They lead, because everything below them is a filter for the
           tables at the bottom. */}
       {state === "ready" && leaveCharts.total > 0 && (
-        <div className="mb-6 grid gap-4 lg:grid-cols-2">
+        <ChartStrip id="leaves" className="mb-6">
           <ChartCard title="Leave taken by month" description="Approved days, over the last twelve months.">
             <Chart
               type="bar"
@@ -962,7 +962,7 @@ export default function Leaves({ me }: { me: Me }) {
               selected={typeFilter && leaveCharts.byType.paths.indexOf(typeFilter) >= 0 ? leaveCharts.byType.paths.indexOf(typeFilter) : null}
             />
           </ChartCard>
-        </div>
+        </ChartStrip>
       )}
 
       {/* Answer-first: what's left, what's spent, what's in flight, when the next break is. */}
@@ -972,8 +972,10 @@ export default function Leaves({ me }: { me: Me }) {
           narrows the tables below to that type, the "+" requests it. Note the balance is DEBITED when a
           request is made (reserved), so pending days are already out of "days left" - the bar labels say so
           rather than double-counting them. */}
+      {/* From `2xl` the row adds cards instead of widening them: about the 230px a card is at four across today
+          (`grid-cols-fill`, web/tailwind.config.js). */}
       {myBalances.length > 0 && (
-        <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="mb-6 grid gap-3 [--cell:14rem] sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-fill">
           {myBalances.map((b) => {
             const reqs = myAll.filter((r) => r.leave_type && b.leave_type && idOf(r.leave_type) === idOf(b.leave_type));
             const used = sumDays(reqs.filter((r) => upper(r.state) === "APPROVED" && r.start_date >= yearStart));
@@ -1266,8 +1268,10 @@ export default function Leaves({ me }: { me: Me }) {
       </Sheet>
 
       {/* Row detail: the whole request in one place - half-day edges, what the range skipped, the reason, and
-          the audit trail (mounted only when the Activity disclosure is opened, so no D1 read on open). */}
-      <Sheet open={!!detailRow} onOpenChange={(o) => { if (!o) setDetailPath(null); }}>
+          the audit trail (mounted only when the Activity disclosure is opened, so no D1 read on open).
+          `dock`: on a wide screen it sits beside the tables instead of over them, and a click on another row swaps
+          it (the row click sets a new `detailPath`; the panel stays open and mounted). */}
+      <Sheet dock open={!!detailRow} onOpenChange={(o) => { if (!o) setDetailPath(null); }}>
         {detailRow && (
           <SheetContent className="flex flex-col sm:max-w-lg">
             <SheetHeader>

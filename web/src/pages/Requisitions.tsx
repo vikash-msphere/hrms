@@ -27,6 +27,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { WriteDialog } from "@/components/common/WriteDialog";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 
 const EMPLOYMENT_TYPES = [
@@ -72,6 +73,7 @@ export default function Requisitions({ me, openId }: { me: Me; openId?: string }
   const { rows: payGrades } = useCollection<PayGrade>("pay-grades");
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const [dialog, setDialog] = useState<JobRequisition | "new" | null>(null);
   useDeepOpen(openId, rows, setDialog);
   // A job under discussion gets pasted into a thread; `useDeepOpen` above reads the id back.
@@ -138,7 +140,7 @@ export default function Requisitions({ me, openId }: { me: Me; openId?: string }
       destructive: true,
       confirmLabel: "Delete",
     }))) return;
-    try { await remove(`job-requisitions/${idOf(r.path)}`); reload(); }
+    try { await remove(`job-requisitions/${idOf(r.path)}`); reload(); deleted({ path: `job-requisitions/${idOf(r.path)}`, noun: "requisition", can: r.access?.can, reload }); }
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
   }
 

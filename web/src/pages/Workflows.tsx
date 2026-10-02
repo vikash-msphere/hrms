@@ -26,6 +26,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { WorkflowBuilder } from "@/components/workflows/WorkflowBuilder";
 import { useWorkflowMeta } from "@/components/workflows/useWorkflowMeta";
 import { describeActions, triggerInfo, type Step } from "@/components/workflows/describe";
@@ -135,6 +136,7 @@ function RulesTab({ canWrite, openId }: { canWrite: boolean; openId?: string }) 
   const { meta } = useWorkflowMeta();
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const [editing, setEditing] = useState<Automation | "new" | null>(null);
   // A rule being argued about over chat is pasteable, and the link reopens exactly this rule: the outbound
   // half (writing the id into the path) is `openRule`, the inbound half is `useDeepOpen`.
@@ -178,7 +180,7 @@ function RulesTab({ canWrite, openId }: { canWrite: boolean; openId?: string }) 
   async function del(a: Automation) {
     const ok = await confirm({ title: "Delete this rule?", description: `"${a.name}" stops firing and is removed. Past runs stay in the log.`, destructive: true, confirmLabel: "Delete" });
     if (!ok) return;
-    try { await remove(a.path, a.etag); toast({ title: "Rule deleted", variant: "success" }); reload(); } catch (e) { toast({ title: "Couldn't delete the rule", description: String((e as Error).message), variant: "destructive" }); }
+    try { await remove(a.path, a.etag); reload(); deleted({ path: a.path, noun: "rule", can: a.access?.can, reload }); } catch (e) { toast({ title: "Couldn't delete the rule", description: String((e as Error).message), variant: "destructive" }); }
   }
   // A real firing: people get notified. It is today's firing of the rule, so the server refuses a second one
   // the same day - the confirm says so up front rather than leaving it to the 409.

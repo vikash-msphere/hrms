@@ -7,7 +7,8 @@
 //
 //   - does this surface say anything about a phone at all, and if not, does it write any layout that would
 //     need to?
-//   - does it say anything about a wide screen?
+//   - does it say anything about a wide screen, and which of its grids of three or more columns stop adapting
+//     at `xl` or below, so that past 1280px their cells only stretch (docs/06-responsive-ui.md, rule 32)?
 //   - does a page carry all three states (waiting, empty, failed), or does it claim one while another is true?
 //
 // Run: node scripts/uiAudit.mjs [--verbose]
@@ -51,7 +52,7 @@ function* tags(src, names) {
   let m;
   while ((m = rx.exec(src))) {
     const end = tagEnd(src, m.index + m[0].length);
-    yield { line: src.slice(0, m.index).split("\n").length, el: src.slice(m.index, end + 1) };
+    yield { line: src.slice(0, m.index).split("\n").length, el: src.slice(m.index, end + 1), end: end + 1 };
     rx.lastIndex = end + 1;
   }
 }
@@ -90,6 +91,11 @@ const ACCEPTED = {
   "pages/PayslipDesignTab.tsx:no-error-state": "falls back to the default template",
   // Each settings panel owns its own read and its own failure; the hub has no read to fail.
   "pages/Settings.tsx:no-error-state": "panels own their reads",
+  // Rule 32: grids that keep their last step on a wide screen, each for a reason other than oversight.
+  "pages/Settings.tsx:grid-stops-at-xl": "hub cards inside Settings' own max-w-5xl column, which a wide screen does not widen; and four font fields (the .map fills a <select>)",
+  "pages/Operations.tsx:grid-stops-at-xl": "three fixed scheduled tasks (CRONS): three across already fills the row",
+  "components/calendar/QuarterGrid.tsx:grid-stops-at-xl": "always three months, one per column from xl",
+  "components/common/IllustrationPicker.tsx:grid-stops-at-xl": "inside the picker dialog, whose width is the dialog's, not the page's",
 };
 
 const report = [];
@@ -100,7 +106,7 @@ for (const p of files) {
   const add = (kind, line, detail) => f.findings.push({ kind, line, detail });
 
   f.phoneAware = /\bsm:|useMedia\(|coarse:|isPhone|max-sm:/.test(src);
-  f.wideAware = /\b(lg:|xl:|2xl:)/.test(src);
+  f.wideAware = /\b(lg:|xl:|2xl:|3xl:)/.test(src);
 
   for (const t of tags(src, ["div", "section", "header", "footer", "nav", "ul", "form", "aside", "main", "span", "p", "label", "dl", "table"])) {
     const cls = classOf(t.el);
@@ -116,6 +122,16 @@ for (const p of files) {
     const g = cls.match(/(?:^|\s)grid-cols-(\d+)/);
     if (g && Number(g[1]) >= 3 && !/\b(sm|md|lg|xl):grid-cols-/.test(cls) && !FIXED_BY_MEANING.test(cls)) {
       add("grid-3-no-step", t.line, cls.slice(0, 80));
+    }
+    // A card grid whose ladder stops at `xl` or below with three or more columns and nothing for a wide screen:
+    // past 1280px its cards only get wider. Either it adds columns (`2xl:grid-cols-fill`, rule 32), steps to a
+    // divisor of a fixed count (`3xl:grid-cols-6`), or it is accepted below with the reason it should not.
+    // Only grids whose children are mapped from data (a `.map(` straight after the tag): a row of four form
+    // fields is a fixed set, and four across is its finished layout at any width.
+    const steps = [...cls.matchAll(/(?:^|\s)(?:sm|md|lg|xl):grid-cols-(\d+)\b/g)].map((m) => Number(m[1]));
+    const mapped = src.slice(t.end, t.end + 400).includes(".map(");
+    if (mapped && steps.length && Math.max(...steps) >= 3 && !/\b(2xl|3xl):grid-cols-/.test(cls) && !FIXED_BY_MEANING.test(cls)) {
+      add("grid-stops-at-xl", t.line, cls.slice(0, 80));
     }
     // An absolute track in a grid template with no breakpoint prefix.
     for (const m of cls.matchAll(/(?:^|\s)(?:(sm|md|lg|xl|2xl):)?grid-cols-\[([^\]]+)\]/g)) {

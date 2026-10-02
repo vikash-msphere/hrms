@@ -10,7 +10,12 @@ Palette and design language live in `web/src/index.css`; this document is about 
 | `<640` (phone) | off-canvas drawer | top bar Menu button (`layout/TopBar`) | cards | bottom sheet |
 | `640-767` | off-canvas drawer | top bar Menu button | table | centred panel |
 | `768-1023` (`md`) | docked icon rail | sidebar | table | centred panel |
-| `>=1024` (`lg`) | docked, full | sidebar | table | centred panel |
+| `1024-1535` (`lg`, `xl`) | docked, full | sidebar | table | centred panel |
+| `1536-1919` (`2xl`) | docked, full | sidebar | table | centred panel |
+| `>=1920` (`3xl`) | docked, full | sidebar | table, with a `<Sheet dock>` detail beside it | centred panel |
+
+What changes from `2xl` up - galleries adding columns, board columns sharing the row, side columns, the docked
+detail - is in [Wide screens](#wide-screens).
 
 Two non-width conditions matter as much as the widths, and are available as Tailwind variants
 (`web/tailwind.config.js`):
@@ -92,9 +97,10 @@ Plus `pb-safe` / `pt-safe-t` spacing steps for the device safe areas (zero on a 
 
     - **The cap comes from the container, not the viewport.** `.stat-row` is a CSS container
       (`container-type: inline-size`) and the rungs are container widths (`STAT_ROW_LADDER`: 0, 480, 720,
-      1000, 1240). A page sits beside a 16rem sidebar and the same row is also used inside sheets and
-      half-width panels; a `sm:`/`lg:` rule sizes cells against room they do not have. This is the one place
-      in the app where a container query is the right tool rather than a breakpoint.
+      1000, 1240, and 1600, a wide-screen rung - rule 29). A page sits beside a 16rem sidebar and the same row
+      is also used inside sheets and half-width panels; a `sm:`/`lg:` rule sizes cells against room they do not
+      have. A container query is the right tool wherever the room an element gets is not the viewport's to
+      decide - here, and in the board's cards (rule 34).
     - **Two across on a phone, still.** The narrowest rung is 2 for strips and cards (1 for a tile with lines
       of content in it): one per row puts a screen of numbers between the reader and the list the page is
       about. A tile at that width truncates its label and value rather than wrapping them.
@@ -250,6 +256,63 @@ Plus `pb-safe` / `pt-safe-t` spacing steps for the device safe areas (zero on a 
       firing on the same hover stack two boxes over each other, so the styled one wins. If a truncated label
       under a trigger needs its own full text, put it in that tooltip's content.
 
+## Wide screens
+
+A page gets the viewport minus the 16rem sidebar and 2rem of padding each side: 1120px at 1440, 1600 at 1920.
+`<main>` is capped at 1920px on every page (`max-w-[120rem]` in `App.tsx`, rule 31), so from a ~2176px screen
+(~1984px on the icon rail) it is centred with room either side. The top bar always spans the full width. None of
+the steps below reads anything the page did not already hold: a wide layout rearranges, it does not fetch.
+
+29. **Wide means more, not bigger.** Width is a gain when it shows more: more columns, things side by side, or
+    fewer lines per item so more items fit in view. Width that only adds empty space inside an item is not. A
+    KPI card holds an icon and a number, so a wide row gets more of them - the 1600px rung of
+    `STAT_ROW_LADDER` runs strips nine across, cards and tiles six, actions five, each no narrower than the
+    preset is already read at. A board card's text wraps, so a wide board gets wider cards (rule 34).
+30. **Nothing changes at or below a 1440px viewport, sidebar open or on the icon rail.** That is the widest
+    size `scripts/uiShots.mjs` measures and the size the e2e `desktop` project runs at, so both stay baselines.
+    A wide step keys off `2xl:` (1536px), `3xl:` (1920px, added in `web/tailwind.config.js`), or a container
+    width a 1440 screen cannot reach (1312px usable on the rail). The `wide` e2e project (2560x1440, which runs
+    only `e2e/wide.spec.ts`) asserts what each rule below promises.
+31. **One cap, on every page.** `<main>` has the same width and the same edges on every route. A workspace's tab
+    strip and the page header sit inside it, so a page of another width would resize and re-centre them on every
+    tab switch (Boards to Goals, Directory to Org Chart, Pipeline to Jobs), under the pointer that pressed the
+    tab. A canvas that shows more with more width - board and pipeline columns, the org tree, a table's columns -
+    grows into the 1920px and scrolls within itself past it.
+32. **A card gallery adds columns; a fixed set steps to a divisor.** A grid whose count is data keeps its
+    ladder and adds `2xl:grid-cols-fill` with `--cell` set to about the width its cards have at `xl`
+    (`[--cell:20rem]`): as many tracks as fit, `auto-fill` so a short list keeps its card size and a short last
+    row reads as the end of the list. People, benefit plans, loans, goals, leave balances and the profile's
+    balances do this. A grid whose count is fixed steps to a column count that divides it (the holiday year,
+    `3xl:grid-cols-6`), or keeps its last step when that already fills the row (the three scheduled tasks on
+    Operations).
+33. **A card stack goes two across in a grid, never CSS columns.** `.card-flow` (`index.css`) is one column until
+    two 46rem columns fit, never more than two, and an odd last card spans the row. Multi-column layout
+    rebalances whenever a card's height changes, so an inline edit in one card would move the others between
+    columns under the pointer; grid rows stay put. `--flow-gap` keeps the rhythm the stack had as `space-y-*`.
+    Used on the profile's Profile, Identity and Activity tabs; tabs that hold tables keep the full width.
+34. **A card's layout follows its own width.** Board task cards (`.task-tile`, `CardTile` in `pages/Boards.tsx`)
+    and pipeline cards (`.pipe-card`) are size containers. At 18rem, every column's width at 1440 or below,
+    they are the stacks they always were. From 19rem of CONTENT (the column and the card each take their own
+    padding and border first, so an 18rem column leaves a card 15-16rem and a phone's 20rem column at most 18rem),
+    which only a column grown past ~22rem gives them - board and pipeline columns share the row from `2xl`
+    (`2xl:grow 2xl:basis-72`, no maximum), and five on a 2560px board are ~22.6rem - their
+    rows merge into one wrapping row: one line when everything fits, the second line back when it does not,
+    nothing truncated. The task card keeps a right padding there for its hover menu, so it never covers the
+    avatar.
+35. **A side column holds what you glance at.** From `3xl` the dashboard has a 26rem side column (holidays and
+    celebrations, the board) beside the sections you act on. The sections sit in two wrappers that are
+    `display: contents` below `3xl`, so there every section is still an item of one flex column and the saved
+    order (CSS `order`) places it exactly as before; nothing remounts at the breakpoint. On the board feed, the
+    search, the filter chips and "Most recognized" move from above the feed into a sticky 22rem side column,
+    where the leaderboard also carries "Give kudos". Each block mounts in one place (`useMedia`, as `TopBar`
+    chooses its menu), so no control is in the accessibility tree twice.
+36. **A record's detail docks beside its list.** `<Sheet dock>` (`components/ui/sheet.tsx`) is, from 1920px, a
+    non-modal panel under the top bar: no overlay, no focus trap, no scroll lock. A click on another row swaps
+    the detail instead of closing it; Escape closes it only when pressed inside it, and its close button and
+    Back always do. While open it publishes its width as `--sheet-dock`, which the column under the top bar
+    takes as right padding, so the page re-centres beside the panel rather than running under it. Below 1920px
+    it is the ordinary modal sheet. The leave request detail uses it.
+
 ## Platform behaviour the shell owns
 
 These are app-wide and already wired; a page neither implements nor opts into them.
@@ -292,7 +355,9 @@ These are app-wide and already wired; a page neither implements nor opts into th
   dialogs, sheets and the command palette.
 - `hooks/useScrollActiveIntoView.ts` — keeps the active item of a scrolling tab/chip bar in view.
 - `components/ui/sheet.tsx` — bottom sheet with a grabber and drag-to-dismiss on a phone, right-docked panel
-  from `sm` up.
+  from `sm` up, and with `dock` a non-modal panel beside the list from 1920px (rule 36).
+- `grid-cols-fill` (`web/tailwind.config.js`): the gallery template that adds columns with the width (rule 32),
+  and `3xl:`, the 1920px screen. `.card-flow`, `.task-tile` and `.pipe-card` in `index.css` (rules 33 and 34).
 - `components/common/DataTable.tsx` — table from `sm` up, cards below it, with a "Sort & filter" sheet
   standing in for the column headers that cards do not have.
 - `components/ui/table.tsx` — the scroll container every `<Table>` renders inside. It carries
@@ -340,14 +405,15 @@ Prettier-formatted at a fixed two-space step - and the cost is stated plainly in
 
 Alongside the gate there is a **report**: `node scripts/uiAudit.mjs` walks every `.tsx` under `web/src` and
 answers, per surface, whether it says anything about a phone (and if not, whether it writes any layout that
-would need to), whether it says anything about a wide screen, and whether a page carries all three of the
-states above. It is not a gate because most of its questions need a person; it exists so a sweep has an order
+would need to), whether it says anything about a wide screen, which of its grids of three or more columns stop
+adapting at `xl` or below (rule 32), and whether a page carries all three of the states above. It is not a gate because most of its questions need a person; it exists so a sweep has an order
 rather than a hunch, and so "nothing to do on this surface" is a claim someone made rather than one nobody
 checked. Findings that have been argued about live in its `ACCEPTED` map with the reason, the same convention
 the gate's allowlists use. `--verbose` adds the layout rows it judged safe.
 
 And then there is **the app itself**: `node scripts/uiShots.mjs` (needs `scripts/start.sh` and puppeteer-core)
-drives the built SPA through every route at 360, 390, 844×390, 768, 1024 and 1440, screenshots each into
+drives the built SPA through every route at 360, 390, 844×390, 768, 1024 and 1440, and at 1920, 2560 and
+3440×1440 for the wide-screen rules, screenshots each into
 `tmp/shots/<viewport>/<route>.png`, and measures what a source scan cannot — whether the page really scrolls
 sideways, how big a control is once the whole cascade has resolved, whether text is clipped, whether a control
 is off screen, whether the console threw. That is the only way most of the defects in rule 20–26 territory
@@ -372,4 +438,5 @@ Typecheck with `./node_modules/.bin/tsc -p web/tsconfig.json --noEmit` and check
 directly, since a shell hook filters `npx tsc` output and has reported "no errors" over real failures.
 
 Those two are the automated gate. They cannot see whether a layout actually *reads* well, so the remaining
-step is a human one: open the change at 360px, 390px, 768px and 1440px, and at 844x390 (phone in landscape).
+step is a human one: open the change at 360px, 390px, 768px and 1440px, and at 844x390 (phone in landscape) -
+and at 1920px and 2560px for anything rules 29 to 36 cover.

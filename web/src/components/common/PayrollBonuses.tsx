@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Plus, Gift } from "lucide-react";
 import { invoke } from "@/api";
-import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
+import { ALL_CAP, useCollection, useCollectionHasMore } from "@/hooks/useCollection";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf } from "@/lib/utils";
@@ -43,7 +43,14 @@ export function PayrollBonuses() {
   // The walk stops at ALL_CAP, so the per-batch total and the paid count below are suppressed while more rows
   // exist: a partial sum printed as a total is worse than no sum.
   const truncated = useCollectionHasMore("bonuses");
-  const { rows: employees } = useCollection<Employee>("employees", { all: true });
+  const { rows: employees, state: rosterState, hasMore: rosterHasMore } = useCollection<Employee>("employees", { all: true });
+  // The headcount below is only a COUNT once the roster's cursor walk has finished. The walk lands a page at a
+  // time, so until then a company of 104 reads "× 100 people" - and the confirm checkpoint, which exists to say
+  // the true size of a group award out loud, would repeat that short figure for money about to go out. While
+  // the walk is under way the line says it is counting and a group award waits; past the walk's cap the roster
+  // is only a floor, so the figure carries a "+" and no total is claimed.
+  const rosterCounting = rosterState !== "ready" || (rosterHasMore && employees.length < ALL_CAP);
+  const rosterFloor = rosterHasMore && !rosterCounting;
   const { rows: departments } = useCollection<Department>("departments", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -115,9 +122,14 @@ export function PayrollBonuses() {
     // One click here can create a bonus row for every employee in the company and put it on the next payroll
     // run. The dialog's own button is not enough of a checkpoint for that, so the headcount and the total are
     // said out loud first.
+    const floor = rosterFloor && form.scope !== "individual";
     const ok = await confirm({
-      title: `Award this bonus to ${recipients} ${recipients === 1 ? "person" : "people"}?`,
-      description: `${money(amount)} each, ${money(amount * recipients)} in total. It is picked up by the next payroll run for each of them.`,
+      title: floor
+        ? `Award this bonus to ${recipients}+ people?`
+        : `Award this bonus to ${recipients} ${recipients === 1 ? "person" : "people"}?`,
+      description: floor
+        ? `${money(amount)} each, to everyone in scope - more people than this page can count, so at least ${money(amount * recipients)} in total. It is picked up by the next payroll run for each of them.`
+        : `${money(amount)} each, ${money(amount * recipients)} in total. It is picked up by the next payroll run for each of them.`,
       confirmLabel: "Award bonus",
     });
     if (!ok) return;
@@ -150,7 +162,8 @@ export function PayrollBonuses() {
     </AccessAction>
   );
 
-  const valid = Number(form.amount) > 0 && (form.scope !== "department" || form.department) && (form.scope !== "individual" || form.employee);
+  const valid = Number(form.amount) > 0 && (form.scope !== "department" || form.department) && (form.scope !== "individual" || form.employee)
+    && (form.scope === "individual" || !rosterCounting);
 
   return (
     <div>
@@ -250,13 +263,16 @@ export function PayrollBonuses() {
               <Input type="date" value={form.award_date} onChange={(e) => setForm({ ...form, award_date: e.target.value })} />
             </Field>
           </FieldRow>
-          {Number(form.amount) > 0 && recipients > 0 && form.scope !== "individual" && (
+          {Number(form.amount) > 0 && form.scope !== "individual" && rosterCounting && (
+            <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground" role="status">Counting who this reaches…</div>
+          )}
+          {Number(form.amount) > 0 && recipients > 0 && form.scope !== "individual" && !rosterCounting && (
             <div className="flex items-center justify-between rounded-md border bg-muted/40 px-3 py-2 text-sm">
-              <span className="text-muted-foreground">{money(Number(form.amount))} × {recipients} {recipients === 1 ? "person" : "people"}</span>
-              <span className="font-semibold tabular-nums">{money(Number(form.amount) * recipients)}</span>
+              <span className="text-muted-foreground">{money(Number(form.amount))} × {recipients}{rosterFloor ? "+" : ""} {recipients === 1 && !rosterFloor ? "person" : "people"}</span>
+              <span className="font-semibold tabular-nums">{rosterFloor ? "at least " : ""}{money(Number(form.amount) * recipients)}</span>
             </div>
           )}
-          {form.scope === "department" && form.department && recipients === 0 && (
+          {form.scope === "department" && form.department && recipients === 0 && !rosterCounting && (
             <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">Nobody is in that department right now, so this award would reach no one.</p>
           )}
           {duplicate && (

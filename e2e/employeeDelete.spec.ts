@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, confirmDelete, gotoRoute, test, expect, toast } from "./fixtures";
 
 // Deleting an employee record from the Directory itself - the row action, not the API call every disposable-
 // employee spec this session makes to clean up after itself. Shares the generic `useSoftDelete` mechanism
@@ -24,6 +24,7 @@ test("an employee record is deleted from the Directory", async ({ as }) => {
   await expect(row).toBeVisible({ timeout: 30_000 });
   await row.getByRole("button", { name: "Actions" }).click();
   await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await confirmDelete(page);
   await expect(toast(page, "Employee deleted")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("tbody tr").filter({ hasText: fullName })).toHaveCount(0, { timeout: 30_000 });
 

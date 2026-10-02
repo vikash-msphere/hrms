@@ -14,7 +14,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { StatRow } from "@/components/common/StatRow";
-import { Chart } from "@/components/common/Chart";
+import { Chart, ChartStrip } from "@/components/common/Chart";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { TableSkeleton } from "@/components/common/Skeletons";
@@ -88,7 +88,7 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
   const { rows, state, error, reload, hasMore, loadMore, meta } = useCollection<ExpenseBudget>("expense-budgets", { deletedOnly, params });
   const summary = meta?.summary as { count: number; amount: number; spent: number; pending: number; over: number; at_risk: number } | undefined;
   const phaseCounts = (meta?.phase_counts ?? { current: 0, upcoming: 0, past: 0 }) as { current: number; upcoming: number; past: number };
-  const { rows: categories } = useCollection<ExpenseCategory>("expense-categories", { all: true });
+  const { rows: categories, reload: reloadCategories } = useCollection<ExpenseCategory>("expense-categories", { all: true });
   const { rows: departments } = useCollection<Department>("departments", { all: true });
   const { org } = useOrg();
   const { toast } = useToast();
@@ -370,11 +370,25 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
       setOpen(false);
       reload();
     } catch (e) {
-      setErr((e as Error).message);
+      const msg = (e as Error).message;
+      // The category picked was deleted after this form read its list, so the picker is still offering it and
+      // every press would fail the same way. Re-read the list; the effect below then drops the dead choice.
+      if (/category is unavailable/i.test(msg)) {
+        reloadCategories();
+        setErr("That category was deleted after this form opened. The list is refreshed - pick a category again and save.");
+      } else {
+        setErr(msg);
+      }
     } finally {
       setBusy(false);
     }
   }
+  // A new budget's category that the (re-read) list no longer has is cleared, so the picker shows the gap
+  // instead of a name that cannot be saved. Not while editing: the edit form shows the budget's stored scope.
+  useEffect(() => {
+    if (!open || editing || !form.category || !categories.length) return;
+    if (!categories.some((c) => idOf(c.path) === idOf(form.category))) setForm((f) => ({ ...f, category: "" }));
+  }, [open, editing, categories, form.category]);
 
   // ---- roll forward ---------------------------------------------------------------------------------------
   // Budgets repeat: last month's caps are next month's starting point. Copying beats retyping the scope - but
@@ -722,22 +736,24 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
                 the cap is not another quantity being compared, it is the level the spend is judged against,
                 and a line is the shape that says "the ceiling" - a bar over it reads instantly as over. */}
             {view !== "matrix" && capChart.labels.length > 0 && (
-              <div className="mb-6 rounded-xl border bg-card p-4">
-                <p className="mb-1 text-sm font-medium">Spend against cap</p>
-                <p className="mb-3 text-xs text-muted-foreground">The {capChart.labels.length} biggest caps in view, by what has been spent under them.</p>
-                <Chart
-                  type="axis-mixed"
-                  height={Math.min(320, Math.max(180, capChart.labels.length * 42 + 60))}
-                  labels={capChart.labels}
-                  datasets={[
-                    { name: "Spent", values: capChart.spent, chartType: "bar" },
-                    { name: "Cap", values: capChart.caps, chartType: "line" },
-                  ]}
-                  format={(v) => money(v)}
-                  ariaLabel="Spend against the cap, for the largest budgets in view"
-                  onSelect={(i) => { const b = capChart.budgets[i]; if (b) setDetail(b.path); }}
-                />
-              </div>
+              <ChartStrip id="expense-budgets" className="mb-6" gridClassName="grid">
+                <div className="rounded-xl border bg-card p-4">
+                  <p className="mb-1 text-sm font-medium">Spend against cap</p>
+                  <p className="mb-3 text-xs text-muted-foreground">The {capChart.labels.length} biggest caps in view, by what has been spent under them.</p>
+                  <Chart
+                    type="axis-mixed"
+                    height={Math.min(320, Math.max(180, capChart.labels.length * 42 + 60))}
+                    labels={capChart.labels}
+                    datasets={[
+                      { name: "Spent", values: capChart.spent, chartType: "bar" },
+                      { name: "Cap", values: capChart.caps, chartType: "line" },
+                    ]}
+                    format={(v) => money(v)}
+                    ariaLabel="Spend against the cap, for the largest budgets in view"
+                    onSelect={(i) => { const b = capChart.budgets[i]; if (b) setDetail(b.path); }}
+                  />
+                </div>
+              </ChartStrip>
             )}
 
             {/* Every tile narrows or re-scopes what is listed below, so the strip sits against the list -

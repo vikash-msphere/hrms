@@ -1,4 +1,4 @@
-import { allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
+import { allowConsoleErrors, confirmDelete, gotoRoute, purge, test, expect } from "./fixtures";
 
 // Every catalog an admin has to be able to add a row to.
 //
@@ -121,10 +121,9 @@ test("every catalog editor takes a new row", async ({ as }) => {
 // The other half nothing has ever pressed: every catalog's own Delete. Cleanup in the test above (and in
 // every other spec that seeds a throwaway row in these catalogs) goes straight through `purge()` - so the
 // UI's own Delete has never actually been clicked, in either shape it comes in here. Most panels share
-// `SoftDeleteRowActions` behind an "Actions" menu, with no confirm at all (`useSoftDelete`'s own comment:
-// soft delete "skips the confirm dialog" - the row vanishes immediately, reversible via the toast's Undo).
-// `projects` and `benefit-plans` are the outliers on BOTH axes: Delete is their own plain icon button, never
-// behind a menu, and it asks a plain confirm first. One loop, whichever shape answers.
+// `SoftDeleteRowActions` behind an "Actions" menu; `projects` and `benefit-plans` render Delete as their own
+// plain icon button, never behind a menu. Every one of them asks first (`useSoftDelete`, and the two pages'
+// own prompts), then offers an Undo on the toast. One loop, whichever shape answers.
 test("every catalog editor's row can also be deleted", async ({ as }) => {
   test.setTimeout(300_000);
   const page = await as("super");
@@ -171,12 +170,8 @@ test("every catalog editor's row can also be deleted", async ({ as }) => {
         await row.getByRole("button", { name: "Delete" }).click();
       }
 
-      // Either a confirm dialog names the row and asks first (projects, benefit-plans), or nothing does and
-      // the row is already gone (every `useSoftDelete` catalog) - both are a correct answer here.
-      const confirm = page.getByRole("dialog").filter({ hasText: `"${name}"` });
-      if (await confirm.waitFor({ state: "visible", timeout: 5_000 }).then(() => true).catch(() => false)) {
-        await confirm.getByRole("button", { name: "Delete", exact: true }).click();
-      }
+      // Every delete asks first.
+      await confirmDelete(page);
       // Pay components and salary structures feed the org's basic/special-allowance split - deleting a row
       // there re-solves it too (afterMutation -> promptReapply), which can raise the very same "Re-apply the
       // split?" prompt the create step above already knows to dismiss. Left open, it would block every

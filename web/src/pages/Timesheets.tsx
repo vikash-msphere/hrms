@@ -7,7 +7,7 @@ import { cn, formatDate, idOf } from "@/lib/utils";
 import { todayStr, addDaysYmd, weekStartYmd, weekdayOf } from "@/lib/orgDay";
 import type { Card as KanbanCard, Employee, Me, Project, TimeEntry, TimeEntryStatus } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
-import { Chart, ChartCard } from "@/components/common/Chart";
+import { Chart, ChartCard, ChartStrip } from "@/components/common/Chart";
 import { ChartFilterNote } from "@/components/common/ChartFilterNote";
 import { useChartFocus } from "@/lib/chartFocus";
 import { topSlices } from "@/lib/chartTheme";
@@ -400,7 +400,7 @@ export default function Timesheets({ me }: { me: Me }) {
       {/* The week the grid holds, read two ways the grid cannot: how the hours fall across the days (a
           fourteen-hour Thursday is a fact worth seeing), and which projects they went to. */}
       {weekLoaded && weekTotal > 0 && (
-        <div className="mb-4 grid gap-4 lg:grid-cols-2">
+        <ChartStrip id="timesheets" className="mb-4">
           <ChartCard title="Hours across the week" description="What was logged on each day, billable and not.">
             <Chart
               type="bar"
@@ -427,7 +427,7 @@ export default function Timesheets({ me }: { me: Me }) {
               {...cf.chart("project")}
             />
           </ChartCard>
-        </div>
+        </ChartStrip>
       )}
 
       {!weekLoaded || projectsState === "loading" ? (

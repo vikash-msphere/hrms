@@ -1,4 +1,4 @@
-import { SPA_HEADERS, allowConsoleErrors, gotoRoute, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, confirmDelete, gotoRoute, test, expect, toast } from "./fixtures";
 
 // Deleting an event - `events.spec.ts` covers RSVPs but never removes an event, and no other event spec
 // (`eventInvite`, `eventRepeat`, `eventIcs`) does either. Shares the generic `useSoftDelete` mechanism
@@ -23,6 +23,7 @@ test("an event is deleted from the list", async ({ as }) => {
   await expect(row).toBeVisible({ timeout: 30_000 });
   await row.getByRole("button", { name: "Actions" }).click();
   await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await confirmDelete(page);
   // One press, patiently waited on rather than re-pressed: a transient 500/503 on a busy lane leaves the toast
   // never arriving, and re-pressing Delete on a row already soft-deleted 404s the same way a plain GET does
   // (both hit the generic crud factory's notFound-on-deleteTime) - either the toast, or the row's own

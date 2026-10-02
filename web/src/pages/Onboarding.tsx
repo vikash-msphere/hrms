@@ -23,6 +23,7 @@ import { Combobox } from "@/components/ui/combobox";
 import { WriteDialog } from "@/components/common/WriteDialog";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 import { getSetting } from "@/lib/settingsStore";
 
@@ -51,6 +52,7 @@ export default function Onboarding({ me }: { me: Me }) {
   const { rows: employees, state: empState } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const [templates, setTemplates] = useState<TransitionTemplate[]>(DEFAULT_TRANSITION_TEMPLATES);
   // The start dialog, optionally pre-filled with who it is for and when they start (the pipeline hand-off
   // knows both). `fill` points it at a process that already exists but has no checklist yet, so choosing a
@@ -151,7 +153,7 @@ export default function Onboarding({ me }: { me: Me }) {
     if (!(await confirm({ title: `Delete the "${tr.name}" process?`, description: `For ${empName(tr.employee)}.`, destructive: true, confirmLabel: "Delete" }))) return;
     if (acting) return;
     setActing(`${tr.path}:delete`);
-    try { await remove(`transitions/${idOf(tr.path)}`); reload(); }
+    try { await remove(`transitions/${idOf(tr.path)}`); reload(); deleted({ path: `transitions/${idOf(tr.path)}`, noun: "process", can: tr.access?.can, reload }); }
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
     finally { setActing(null); }
   }

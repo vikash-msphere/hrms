@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, confirmDelete, gotoRoute, test, expect, toast } from "./fixtures";
 
 // Deleting a holiday - never pressed by `holidays.spec.ts`, `holidayBulk.spec.ts` or `holidayBridge.spec.ts`,
 // all of which only ever add or bulk-import. Holidays share the generic `useSoftDelete` mechanism
@@ -29,7 +29,8 @@ test("a holiday is deleted from the list", async ({ as }) => {
   await expect(row).toBeVisible({ timeout: 30_000 });
   await row.getByRole("button", { name: "Actions" }).click();
   await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
-  // No confirmation on a soft delete - the row is already gone by the time the toast lands.
+  // Every delete asks first; once it is answered the row is gone by the time the toast lands.
+  await confirmDelete(page);
   await expect(toast(page, "Holiday deleted")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("tbody tr").filter({ hasText: name })).toHaveCount(0, { timeout: 30_000 });
 

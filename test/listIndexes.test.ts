@@ -37,11 +37,16 @@ async function plan(sql: string): Promise<string> {
   return (res.results ?? []).map((r) => r.detail).join(" | ");
 }
 
-/** Every `<table>_page_idx` the migration declares, with the columns it is built on, in order. */
-const PAGE_INDEXES = [...migrationSql.matchAll(/CREATE INDEX `([a-z_0-9]+)_page_idx` ON `([a-z_0-9]+)` \(([^)]+)\)/g)].map((m) => ({
-  table: m[2]!,
-  cols: m[3]!.split(",").map((c) => c.trim().replace(/`/g, "")),
-}));
+/** Every `<table>_page_idx` the migrations declare, with the columns it is built on, in order. A later migration
+ *  that drops and recreates one (cron_runs, re-keyed on `started_at`) replaces the earlier definition. */
+const PAGE_INDEXES = [
+  ...new Map(
+    [...migrationSql.matchAll(/CREATE INDEX `([a-z_0-9]+)_page_idx` ON `([a-z_0-9]+)` \(([^)]+)\)/g)].map((m) => [
+      m[2]!,
+      { table: m[2]!, cols: m[3]!.split(",").map((c) => c.trim().replace(/`/g, "")) },
+    ]),
+  ).values(),
+];
 
 describe("keyset pagination walks an index", () => {
   it("the schema declares a paging index for every collection that pages", () => {

@@ -38,7 +38,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.notifications, schema.jobs, schema.cronRuns, schema.employees];
+const TABLES = [schema.notifications, schema.jobs, schema.cronRuns, schema.employees, schema.searchVectors];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
   deps.clock = { now: () => new Date() };
@@ -145,16 +145,51 @@ describe("job queue: a failure retries before it becomes a dead letter", () => {
     };
     await seedJob(); // work for the fast tick, which records itself only when it has some
     expect(await summaryOf(FAST_CRON)).toEqual(["announcementsPublished", "cronRunsReclaimed", "drained"]);
-    expect(await summaryOf(AI_CRON)).toEqual(["embedded", "moderated"]);
   });
 
   it("records nothing for a five-minute tick with nothing to do", async () => {
     // Most ticks find nothing, and a recorded one writes its row, the row's index entries, a code and two change
-    // stamps to say so.
+    // stamps to say so. The AI tick finds out by running (no AI binding here, so both drains do nothing).
     expect(await runScheduled(FAST_CRON, deps)).toBeNull();
+    expect(await runScheduled(AI_CRON, deps)).toBeNull();
     expect(await deps.db.select().from(schema.cronRuns)).toEqual([]);
-    // The AI trigger is recorded every time: its drains find out whether they are idle only by running.
-    expect(await runScheduled(AI_CRON, deps)).not.toBeNull();
+  });
+
+  // An instant on the embed drain's turn (cron.ts: `floor(now / 5min) % 2 === 0`).
+  const embedTurn = () => new Date(600_000 * Math.floor(Date.now() / 600_000));
+
+  it("records an AI tick that lost a subtask as one finished row, never a running one", async () => {
+    // An orphaned vector the embed drain must remove, and an index that refuses the removal.
+    await deps.db.insert(schema.searchVectors).values({
+      collection: "employees", recordId: genId(), textHash: "x", model: "m", embeddedAt: new Date(), checkedAt: new Date(),
+    });
+    deps.clock = { now: embedTurn };
+    deps.ai = {} as NonNullable<Deps["ai"]>;
+    deps.vectors = { remove: async () => { throw new Error("index unavailable"); } } as unknown as NonNullable<Deps["vectors"]>;
+    try {
+      const id = await runScheduled(AI_CRON, deps);
+      expect(id).not.toBeNull();
+      const runs = await deps.db.select().from(schema.cronRuns);
+      expect(runs.map((r) => r.uuid)).toEqual([id]);
+      expect(runs[0]!.status).toBe("error");
+      expect(runs[0]!.error).toContain("drainSearchEmbeddings");
+      expect(runs[0]!.finishedAt).not.toBeNull();
+      expect(Object.keys(JSON.parse(runs[0]!.summaryJson!)).sort()).toEqual(["embedded", "moderated"]);
+    } finally {
+      deps.ai = undefined;
+      deps.vectors = undefined;
+    }
+  });
+
+  it("records an AI tick that threw as an error row, and rethrows", async () => {
+    // The tick reads the clock to start, then the AI dispatch reads it to pick a turn: fail that second read.
+    let reads = 0;
+    deps.clock = { now: () => { if (++reads === 2) throw new Error("clock broke"); return new Date(); } };
+    await expect(runScheduled(AI_CRON, deps)).rejects.toThrow("clock broke");
+    const runs = await deps.db.select().from(schema.cronRuns);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.status).toBe("error");
+    expect(runs[0]!.error).toContain("clock broke");
   });
 
   it("dispatches exactly the triggers every wrangler config registers", () => {

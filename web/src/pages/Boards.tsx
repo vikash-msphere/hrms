@@ -35,6 +35,7 @@ import { StatsSkeleton, PageSkeleton } from "@/components/common/Skeletons";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIntent } from "@/lib/intent";
 import { Field, FieldRow } from "@/components/common/Field";
+import { FormSection } from "@/components/common/FormSection";
 import { StatCard } from "@/components/common/StatCard";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -63,9 +64,11 @@ import { ActivitySection } from "@/components/common/ActivitySection";
 import { isConflict } from "@/lib/formError";
 import { timeAgo } from "@/lib/activity";
 import { readLocal, writeLocal, readLocalJson, writeLocalJson, userKey } from "@/lib/localPref";
+import { readPref, writePref } from "@/lib/prefs";
 import { useMentions } from "@/components/common/MentionPicker";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
 
 // Trello-style board frame: the columns row fills from its own top edge down to the viewport bottom, so
@@ -119,6 +122,7 @@ const PRIORITY_LANES = [ // fixed swimlanes for swimlane_mode = "priority", seve
   { key: "urgent", label: "Urgent" }, { key: "high", label: "High" }, { key: "medium", label: "Medium" }, { key: "low", label: "Low" },
 ];
 const NO_DEPT = "__nodept"; // CardDialog: explicit "no department" (distinct from "" = use the org default)
+const BLOCKED_ELSEWHERE = "__elsewhere"; // CardDialog: blocked by something that is not a task on this board (note only)
 
 /**
  * A suggested checklist, as lines, into staged items.
@@ -157,9 +161,6 @@ const shiftDay = (n: number) => addDaysYmd(todayStr(), n);
 const DUE_PRESETS: { label: string; value: () => string }[] = [
   { label: "Today", value: () => shiftDay(0) },
   { label: "Tomorrow", value: () => shiftDay(1) },
-  // Next Monday, which is where "later this week" work really lands. The weekday comes off the org day too,
-  // for the same reason - the browser's own weekday can already be tomorrow's.
-  { label: "Next Mon", value: () => shiftDay(((8 - weekdayOf(todayStr())) % 7) || 7) },
   { label: "+1 week", value: () => shiftDay(7) },
 ];
 
@@ -180,6 +181,7 @@ function Chip({ active, onClick, children }: { active?: boolean; onClick: () => 
     </button>
   );
 }
+
 const RANK_STEP = 1024;
 const PRIORITIES: CardT["priority"][] = ["low", "medium", "high", "urgent"];
 const PRIORITY_TONE: Record<string, string> = {
@@ -410,8 +412,12 @@ function BoardToolbar({ filter, board, cards, empName, empPhoto, deptName }: { f
   );
 }
 
-// Namespaced to the caller, like every other per-person key. Under a shared key B landed on the board A was
-// last looking at (degraded to the first board by `valid()`, but still not theirs).
+// The last board on screen is a user preference (`preferences/boards`, `{ last: <board id> }`), so a bare
+// /boards reopens it on any device and after any sign-in. The localStorage copy is only this device's cache of
+// that row, read before the preferences snapshot lands. Namespaced to the caller, like every other per-person
+// key: under a shared key B landed on the board A was last looking at.
+const BOARDS_PREF = "boards";
+type BoardsPref = { last?: string };
 const LAST_BOARD_KEY = () => userKey("boards:last");
 const CARD_FETCH_CAP = 500; // follow one board's cards cursor up to here; past it the view's TruncationNotice takes over
 
@@ -441,17 +447,31 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [newBoard, setNewBoard] = useState(false);
   const [tab, setTab] = useState("board");
+  // The remembered board from the preferences row: undefined until the snapshot has been read, null when the
+  // caller has none. The snapshot is the one shared page-life read (lib/prefs.ts), so this costs no request.
+  const [prefLast, setPrefLast] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    readPref<BoardsPref>(BOARDS_PREF)
+      .then((v) => { if (live) setPrefLast(typeof v?.last === "string" ? v.last : null); })
+      .catch(() => { if (live) setPrefLast(null); });
+    return () => { live = false; };
+  }, []);
 
-  // Which board to show: `?board=` in the URL (shareable deep link) > last viewed (localStorage) > first.
-  // Falls back to the first board whenever the current choice stops being valid (deleted, access lost).
+  // Which board to show: `?board=` in the URL (shareable deep link) > last viewed (preferences row, then this
+  // device's copy of it) > first. Falls back to the first board whenever the current choice stops being valid
+  // (deleted, access lost).
   useEffect(() => {
     if (!boards.length) { setSelectedId(null); return; }
     const valid = (id: string | null | undefined) => (id && boards.some((b) => idOf(b.path) === id) ? id : null);
     const fromUrl = valid(route.query.board);
     if (fromUrl && fromUrl !== selectedId) { setSelectedId(fromUrl); return; }
     if (valid(selectedId)) return;
+    // Wait for the preferences row before falling back: choosing now would put a fresh device on the first
+    // board, and the remembered one arriving a moment later could not move it (the selection is already valid).
+    if (prefLast === undefined) return;
     const lastKey = LAST_BOARD_KEY();
-    const last = lastKey ? readLocal(lastKey) : null;
+    const last = prefLast ?? (lastKey ? readLocal(lastKey) : null);
     // "Not in the rows we hold" is only "deleted, access lost" once the rows ARE the collection. While the
     // walk is still short of it, a requested or remembered board that has not arrived keeps its place instead
     // of being replaced by somebody else's board (under a URL that still names theirs, or overwriting the
@@ -465,7 +485,7 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
     // the "a ref reads as a word" rule is not the one that applies.
     // eslint-disable-next-line no-restricted-syntax
     setSelectedId(fromUrl ?? valid(last) ?? idOf(boards[0]!.path));
-  }, [boards, selectedId, route.query.board, boardsHasMore]);
+  }, [boards, selectedId, route.query.board, boardsHasMore, prefLast]);
 
   // Keep the URL shareable. Written in place rather than pushed: which board is on screen is view state, not a
   // step the reader took, so it has no business spending a back press - and the unsaved-changes guard ignores
@@ -486,11 +506,17 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
 
   // Remember whichever board is on screen, however it got there - picked in the switcher, opened from a
   // `?board=` or card link, or just created - so a bare /boards reopens it. Only a board that resolved is
-  // written: an id still waiting on the boards walk is not yet known to exist.
+  // written: an id still waiting on the boards walk is not yet known to exist. The preferences row is written
+  // only when it changes (not on every visit that reopens the same board), and only once it has been read, so
+  // a deep link opened before the snapshot lands is saved when it does rather than raced against it.
   useEffect(() => {
+    if (!boardId) return;
     const lastKey = LAST_BOARD_KEY();
-    if (boardId && lastKey) writeLocal(lastKey, boardId);
-  }, [boardId]);
+    if (lastKey) writeLocal(lastKey, boardId);
+    if (prefLast === undefined || prefLast === boardId) return;
+    setPrefLast(boardId);
+    void writePref(BOARDS_PREF, { last: boardId } satisfies BoardsPref);
+  }, [boardId, prefLast]);
 
   const newBtn = (
     <AccessAction collection="boards" create label="Create a board">
@@ -837,7 +863,10 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
             // Named group: the column's heading is a plain span inside its header row, so without a name on
             // the column itself the board reads as one undifferentiated pile of cards with nothing saying
             // which column any of them is in.
-            <div key={col.key} role="group" aria-label={col.label} className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none">
+            // From `2xl` the columns share the row (18rem basis, no maximum): a board whose columns fit fills the
+            // width, and its cards widen until their content fits on one line (`CardTile`). A board with more
+            // columns than fit keeps them at 18rem and scrolls, as at any width.
+            <div key={col.key} role="group" aria-label={col.label} className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none 2xl:grow 2xl:basis-72">
               <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <span className="truncate text-sm font-medium">{col.label}</span>
@@ -880,7 +909,11 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; pendingRank.current = null; setOverCell(hoverCell(col.key, lane.key)); setLineAt(null); }}
                       onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOverCell((p) => (p === hoverCell(col.key, lane.key) ? null : p)); }}
                       onDrop={(e) => { e.preventDefault(); const r = pendingRank.current ?? undefined; pendingRank.current = null; setOverCell(null); setLineAt(null); void onDrop(col.key, lane.key, r); }}
-                      className={`flex flex-1 flex-col gap-2 rounded-md p-1 transition-colors min-h-[44px] ${overCell === cellId ? "bg-primary/10 outline-dashed outline-1 outline-primary/40" : ""}`}
+                      // Grows to fill a short column, never shrinks below its cards. The column body has a fixed
+                      // height, and `flex-1` (basis 0, shrink 1) with an explicit min-height replaces the flex
+                      // item's content-sized minimum: a full lane was squeezed to 44px and its cards spilled over
+                      // the next lane's heading and cards instead of scrolling the column.
+                      className={`flex grow shrink-0 flex-col gap-2 rounded-md p-1 transition-colors min-h-[44px] ${overCell === cellId ? "bg-primary/10 outline-dashed outline-1 outline-primary/40" : ""}`}
                     >
                       {board.swimlane_mode !== "none" && (
                         <div className="px-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -969,45 +1002,52 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, me
       onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", card.path); onDragStart(); }}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } }}
       onClick={onClick}
-      className="relative cursor-grab overflow-hidden rounded-lg border bg-card p-2.5 shadow-sm transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
+      // `task-tile`: the tile is a size container, and its content reflows by the tile's OWN width (index.css).
+      // Below 19rem of content - every tile at 1440px or narrower, in an 18rem column, and every tile on a phone -
+      // the body is the stack it always was. Wider (a column grown past ~22rem, from `2xl`), labels, title and
+      // details become one wrapping row: one line when they fit, so a wide column shows more cards rather than
+      // taller ones.
+      className="task-tile relative cursor-grab overflow-hidden rounded-lg border bg-card p-2.5 shadow-sm transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
     >
       {card.blocked && <span className="absolute inset-y-0 left-0 w-1 bg-destructive" aria-hidden />}
-      {card.labels?.length ? <div className="mb-1.5 flex flex-wrap gap-1"><LabelChips keys={card.labels} catalog={catalog} max={3} /></div> : null}
-      <p className="text-sm font-medium leading-snug">{card.title}</p>
-      <div className="mt-2 flex items-center gap-1.5">
-        <span className="font-mono text-[10px] text-muted-foreground">{taskKey(card)}</span>
-        {stale && <Tooltip><TooltipTrigger asChild><span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" /></TooltipTrigger><TooltipContent>No activity for {ageDays} days</TooltipContent></Tooltip>}
-        <Tooltip><TooltipTrigger asChild><span><PriorityIcon p={card.priority} /></span></TooltipTrigger><TooltipContent className="capitalize">{card.priority} priority</TooltipContent></Tooltip>
-        {card.size != null && <span className="rounded bg-muted px-1.5 text-[11px] font-medium tabular-nums text-muted-foreground">{card.size}</span>}
-        {(card.todo_total ?? 0) > 0 && <Tooltip><TooltipTrigger asChild><span className={cn("inline-flex items-center gap-0.5 rounded px-1.5 text-[10px] font-medium tabular-nums", card.todo_done === card.todo_total ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400" : "bg-muted text-muted-foreground")}><ListChecks className="h-3 w-3" />{card.todo_done}/{card.todo_total}</span></TooltipTrigger><TooltipContent>Checklist: {card.todo_done}/{card.todo_total} done</TooltipContent></Tooltip>}
-        {card.goal && <Tooltip><TooltipTrigger asChild><Target className="h-3.5 w-3.5 text-muted-foreground" /></TooltipTrigger><TooltipContent>{goalName ? `Goal: ${goalName}` : "Linked to a goal"}</TooltipContent></Tooltip>}
-        {deptLabel && <Tooltip><TooltipTrigger asChild><span className="inline-flex items-center gap-0.5 rounded bg-muted px-1.5 text-[10px] font-medium text-muted-foreground"><Building2 className="h-3 w-3" />{deptLabel}</span></TooltipTrigger><TooltipContent>Department: {deptLabel}</TooltipContent></Tooltip>}
-        {card.blocked && (
-          blockerKey
-            ? <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-destructive"><Ban className="h-3 w-3" />{blockerKey}</span>
-            : <Ban className="h-3.5 w-3.5 text-destructive" />
-        )}
-        {due && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className={cn("inline-flex items-center gap-0.5 text-[10px] font-medium", overdue ? "text-destructive" : dueSoon ? "text-warning" : "text-muted-foreground")}>
-                {/* Rendered in UTC because that is the timezone the value is anchored at: a date-only day
-                    formatted through the viewer's local clock names the PREVIOUS day west of UTC. */}
-                <CalendarDays className="h-3 w-3" />{due.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" })}
-              </span>
-            </TooltipTrigger>
-            <TooltipContent>{overdue ? "Overdue — was due" : "Due"} {due.toLocaleDateString(undefined, { timeZone: "UTC" })}</TooltipContent>
-          </Tooltip>
-        )}
-        {card.description && <Tooltip><TooltipTrigger asChild><AlignLeft className="h-3 w-3 text-muted-foreground/70" /></TooltipTrigger><TooltipContent>Has a description</TooltipContent></Tooltip>}
-        {(card.documents?.length ?? 0) > 0 && <Tooltip><TooltipTrigger asChild><span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-muted-foreground"><FileText className="h-3 w-3" />{card.documents!.length}</span></TooltipTrigger><TooltipContent>{card.documents!.length} linked document{card.documents!.length === 1 ? "" : "s"}</TooltipContent></Tooltip>}
-        <span className="ml-auto">
-          {assignee ? (
-            <Tooltip><TooltipTrigger asChild><span><PhotoAvatar employeeId={assignee.id} name={assignee.name} photo={assignee.photo} className="h-6 w-6 text-[10px]" /></span></TooltipTrigger><TooltipContent>{assignee.name}</TooltipContent></Tooltip>
-          ) : (
-            <span className="block h-6 w-6 rounded-full border border-dashed border-muted-foreground/40" title="Unassigned" />
+      <div className="task-tile-body">
+        {card.labels?.length ? <div className="task-tile-labels mb-1.5 flex flex-wrap gap-1"><LabelChips keys={card.labels} catalog={catalog} max={3} /></div> : null}
+        <p className="task-tile-title text-sm font-medium leading-snug">{card.title}</p>
+        <div className="task-tile-meta mt-2 flex items-center gap-1.5">
+          <span className="font-mono text-[10px] text-muted-foreground">{taskKey(card)}</span>
+          {stale && <Tooltip><TooltipTrigger asChild><span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" /></TooltipTrigger><TooltipContent>No activity for {ageDays} days</TooltipContent></Tooltip>}
+          <Tooltip><TooltipTrigger asChild><span><PriorityIcon p={card.priority} /></span></TooltipTrigger><TooltipContent className="capitalize">{card.priority} priority</TooltipContent></Tooltip>
+          {card.size != null && <span className="rounded bg-muted px-1.5 text-[11px] font-medium tabular-nums text-muted-foreground">{card.size}</span>}
+          {(card.todo_total ?? 0) > 0 && <Tooltip><TooltipTrigger asChild><span className={cn("inline-flex items-center gap-0.5 rounded px-1.5 text-[10px] font-medium tabular-nums", card.todo_done === card.todo_total ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400" : "bg-muted text-muted-foreground")}><ListChecks className="h-3 w-3" />{card.todo_done}/{card.todo_total}</span></TooltipTrigger><TooltipContent>Checklist: {card.todo_done}/{card.todo_total} done</TooltipContent></Tooltip>}
+          {card.goal && <Tooltip><TooltipTrigger asChild><Target className="h-3.5 w-3.5 text-muted-foreground" /></TooltipTrigger><TooltipContent>{goalName ? `Goal: ${goalName}` : "Linked to a goal"}</TooltipContent></Tooltip>}
+          {deptLabel && <Tooltip><TooltipTrigger asChild><span className="inline-flex items-center gap-0.5 rounded bg-muted px-1.5 text-[10px] font-medium text-muted-foreground"><Building2 className="h-3 w-3" />{deptLabel}</span></TooltipTrigger><TooltipContent>Department: {deptLabel}</TooltipContent></Tooltip>}
+          {card.blocked && (
+            blockerKey
+              ? <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-destructive"><Ban className="h-3 w-3" />{blockerKey}</span>
+              : <Ban className="h-3.5 w-3.5 text-destructive" />
           )}
-        </span>
+          {due && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className={cn("inline-flex items-center gap-0.5 text-[10px] font-medium", overdue ? "text-destructive" : dueSoon ? "text-warning" : "text-muted-foreground")}>
+                  {/* Rendered in UTC because that is the timezone the value is anchored at: a date-only day
+                      formatted through the viewer's local clock names the PREVIOUS day west of UTC. */}
+                  <CalendarDays className="h-3 w-3" />{due.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" })}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>{overdue ? "Overdue — was due" : "Due"} {due.toLocaleDateString(undefined, { timeZone: "UTC" })}</TooltipContent>
+            </Tooltip>
+          )}
+          {card.description && <Tooltip><TooltipTrigger asChild><AlignLeft className="h-3 w-3 text-muted-foreground/70" /></TooltipTrigger><TooltipContent>Has a description</TooltipContent></Tooltip>}
+          {(card.documents?.length ?? 0) > 0 && <Tooltip><TooltipTrigger asChild><span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-muted-foreground"><FileText className="h-3 w-3" />{card.documents!.length}</span></TooltipTrigger><TooltipContent>{card.documents!.length} linked document{card.documents!.length === 1 ? "" : "s"}</TooltipContent></Tooltip>}
+          <span className="ml-auto">
+            {assignee ? (
+              <Tooltip><TooltipTrigger asChild><span><PhotoAvatar employeeId={assignee.id} name={assignee.name} photo={assignee.photo} className="h-6 w-6 text-[10px]" /></span></TooltipTrigger><TooltipContent>{assignee.name}</TooltipContent></Tooltip>
+            ) : (
+              <span className="block h-6 w-6 rounded-full border border-dashed border-muted-foreground/40" title="Unassigned" />
+            )}
+          </span>
+        </div>
       </div>
     </div>
       {/* Outside the tile's own button, above it in the stack: its controls keep their roles (see the note
@@ -1150,6 +1190,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
 }) {
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const editing = !!card;
   const savedRow = useRef<CardT | undefined>(undefined);
   // Named off the employee list the dialog already holds for its pickers - no read for one line of text.
@@ -1208,6 +1249,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   // overwrite instead of guessing.
   const [conflict, setConflict] = useState<CardT | null>(null);
   const [promoting, setPromoting] = useState<string | null>(null); // id of the checklist item being turned into its own task
+  const [tab, setTab] = useState("details");
   const canEdit = !editing || (card!.access?.can ?? []).includes("update");
   const descRef = useRef<HTMLTextAreaElement>(null); // the formatting bar edits this textarea's source
   // A task's description is read far more often than it is rewritten, so an editor opens it RENDERED and steps
@@ -1501,10 +1543,15 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   }
 
   async function del() {
-    const ok = await confirm({ title: `Delete ${taskKey(card!)}?`, description: `"${card!.title}" and its comments are removed from view (soft delete). Restorable by an admin.`, destructive: true, confirmLabel: "Delete task" });
+    const ok = await confirm({ title: `Delete ${taskKey(card!)}?`, description: `"${card!.title}" and its comments are removed from view (soft delete). Undo on the message that follows brings it back, and an admin can restore it later.`, destructive: true, confirmLabel: "Delete task" });
     if (!ok) return;
     setBusy(true);
-    try { await remove(`cards/${idOf(card!.path)}`, etag); toast({ title: "Task deleted" }); onSaved(); }
+    try {
+      await remove(`cards/${idOf(card!.path)}`, etag);
+      onSaved();
+      // The Undo's reload is the board's own (`onSaved` reloads behind the dialog this delete has closed).
+      deleted({ path: `cards/${idOf(card!.path)}`, noun: "task", can: card!.access?.can, reload: () => onSaved() });
+    }
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
     finally { setBusy(false); }
   }
@@ -1547,6 +1594,15 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   // Ticking a checklist item is its own verb; the boxes still RENDER without it (see the checklist below), so
   // this is the one place a permission legitimately reaches a `disabled`.
   const canTickTodos = can.includes("toggleTodo");
+  // The reverse edge: cards waiting on THIS one. Computed from the already-loaded board cards.
+  const blocks = card ? boardCards.filter((x) => x.blocked_by && idOf(x.blocked_by) === idOf(card.path) && !x.delete_time) : [];
+  // Each tab panel holds the height of the tallest one on a saved task, so switching tabs does not resize the
+  // dialog and walk Save and Close up and down under the pointer. A new task's panels are short enough not to
+  // need it. `sm:` only: a phone's dialog is the screen, and its body scrolls either way.
+  // gap-7: the space between sections is what separates them (FormSection draws no box), so it has to be
+  // clearly wider than the gap between two fields inside one.
+  const panelClass = cn("grid content-start gap-7 data-[state=inactive]:hidden", editing && "sm:min-h-[32rem]");
+  const fieldGrid = "grid gap-x-3 gap-y-4 sm:grid-cols-2 sm:[&>*:last-child:nth-child(odd)]:col-span-2";
   return (
     <>
     <WriteDialog
@@ -1597,9 +1653,59 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
         </AccessAction>
       ) : undefined}
     >
-        <Field label="Title">
-          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs doing?" disabled={!canEdit} autoFocus={!editing} />
-        </Field>
+        {/* The title IS the dialog's heading: set large and borderless, an input only when touched (the border
+            comes back on hover and focus). A reader who cannot edit sees the same heading, not a faded box. */}
+        <div className="space-y-1.5">
+          <Input
+            aria-label="Title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="What needs doing?"
+            disabled={!canEdit}
+            autoFocus={!editing}
+            className="-mx-2 h-auto w-[calc(100%+1rem)] border-transparent bg-transparent px-2 py-1 text-lg font-semibold shadow-none hover:border-input focus-visible:border-input disabled:cursor-default disabled:opacity-100 sm:text-xl"
+          />
+          {/* The task at a glance, from whichever tab is open. Each fact is the live form value (an unsaved
+              edit shows here at once) and a way to the tab that holds its field. */}
+          {editing && (() => {
+            const who = assignee ? employees.find((e) => idOf(e.path) === assignee) : undefined;
+            const dueYmd = due && !card!.deliver_time ? due.slice(0, 10) : null;
+            const overdue = !!dueYmd && dueYmd < todayStr();
+            const dueSoon = !!dueYmd && !overdue && daysBetweenYmd(todayStr(), dueYmd) <= 3;
+            const fact = "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground";
+            return (
+              <div className="-mx-2 flex flex-wrap items-center gap-y-1">
+                <button type="button" className={cn(fact, "bg-muted font-medium text-foreground")} onClick={() => setTab("details")}>
+                  <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-primary" /> {colLabel(curColumn)}
+                </button>
+                <button type="button" className={cn(fact, "capitalize")} onClick={() => setTab("details")}>
+                  <PriorityIcon p={priority} /> {priority}
+                </button>
+                <button type="button" className={fact} onClick={() => setTab("details")}>
+                  {who
+                    ? <><PhotoAvatar employeeId={assignee} name={`${who.first_name} ${who.last_name}`} photo={who.photo} className="h-4 w-4 text-[8px]" /> {who.first_name} {who.last_name}</>
+                    : <><UserRound className="h-3.5 w-3.5" /> Unassigned</>}
+                </button>
+                {dueYmd && (
+                  <button type="button" className={cn(fact, overdue ? "text-destructive" : dueSoon && "text-warning")} onClick={() => setTab("details")}>
+                    {/* UTC, the zone a date-only value is anchored at (the tile's due chip says why). */}
+                    <CalendarDays className="h-3.5 w-3.5" /> {overdue ? "Overdue · " : ""}{new Date(`${dueYmd}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" })}
+                  </button>
+                )}
+                {size && (
+                  <button type="button" className={cn(fact, "tabular-nums")} onClick={() => setTab("planning")}>
+                    {size} {size === "1" ? "point" : "points"}
+                  </button>
+                )}
+                {blockedView.blocked && (
+                  <button type="button" className={cn(fact, "font-medium text-destructive hover:text-destructive")} onClick={() => setTab("planning")}>
+                    <Ban className="h-3.5 w-3.5" /> Blocked
+                  </button>
+                )}
+              </div>
+            );
+          })()}
+        </div>
         {dupCard && (
           <p className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -1612,20 +1718,46 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
             <span>Somebody else changed {conflictFields.join(", ")} since you opened this. Save again to overwrite their version, or close without saving to keep it.</span>
           </p>
         )}
+        {/* THREE TABS, because the task was one scroll of every field, the checklist, the thread, the blockers
+            and the insight cards. Title and the two warnings above stay outside them: Title is the one field
+            Save needs, and the conflict banner names fields on any tab. Every panel is force-mounted and only
+            hidden, so switching tabs keeps what a panel holds (an asked-for suggestion, the editor's caret)
+            and fires no read the single scroll did not. */}
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList variant="segmented" aria-label="Task sections">
+            <TabsTrigger value="details">Details</TabsTrigger>
+            <TabsTrigger value="planning">
+              Planning
+              {/* A blocked task says so on the tab, since the blockers live behind it. */}
+              {blockedView.blocked && <><span className="ml-1.5 h-2 w-2 rounded-full bg-destructive" /><span className="sr-only">(blocked)</span></>}
+            </TabsTrigger>
+            <TabsTrigger value="work">
+              {editing ? "Checklist & comments" : "Checklist"}
+              {editing ? (
+                <>
+                  {todos.length > 0 && <span className="ml-1.5 rounded-full bg-background/80 px-1.5 text-[10px] leading-4 tabular-nums">{todoDone}/{todos.length}</span>}
+                  {comments.length > 0 && <span className="ml-1 inline-flex items-center gap-0.5 rounded-full bg-background/80 px-1.5 text-[10px] leading-4 tabular-nums"><MessageSquare className="h-2.5 w-2.5" />{comments.length}</span>}
+                </>
+              ) : initialTodos.length > 0 && <span className="ml-1.5 rounded-full bg-background/80 px-1.5 text-[10px] leading-4 tabular-nums">{initialTodos.length}</span>}
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="details" forceMount className={panelClass}>
         {/* Markdown-lite source in a plain textarea (same contract as board posts): the bar transforms the
             text, storage is exactly what's shown, and richToPlain-free rendering via <RichText>. Nobody is shown
             markup they didn't ask for: a reader who can't edit gets the rendered description rather than a
             disabled box of it, and an editor gets the same rendering until they switch into the editor. */}
-        <Field
-          label="Description"
-          /* The view switch rides the label row, where it reads as part of the field's heading and doesn't push
-             the fields below it down. Editors only: a reader who can't edit has nothing to switch to. */
-          action={canEdit ? (
+        <FormSection
+          title="Description"
+          icon={AlignLeft}
+          /* The view switch rides the section's margin, under its name, where it reads as part of the heading
+             and doesn't push the text down. Editors only: a reader who can't edit has nothing to switch to. */
+          aside={canEdit ? (
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              className="h-7 px-2 text-xs text-muted-foreground"
+              className="h-7 px-2 text-xs text-muted-foreground sm:-ml-2"
               onClick={() => { descSwitched.current = true; setDescEdit((v) => !v); }}
             >
               {descEdit ? <><Eye className="h-3.5 w-3.5" /> Preview</> : <><Pencil className="h-3.5 w-3.5" /> Edit</>}
@@ -1649,7 +1781,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                   />
                 </div>
                 <RichTextToolbar textareaRef={descRef} value={description} onChange={setDescription} />
-                <Textarea ref={descRef} value={description} onChange={(e) => setDescription(e.target.value)} rows={4} className="rounded-t-none" />
+                <Textarea ref={descRef} aria-label="Description" value={description} onChange={(e) => setDescription(e.target.value)} rows={4} className="rounded-t-none" />
               </div>
             ) : (
               /* The rendered description doubles as the way into the editor: clicking the words you want to
@@ -1673,44 +1805,13 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
           ) : (
             <p className="text-sm text-muted-foreground">No description.</p>
           )}
-        </Field>
-        {/* Following, and what the task has cost so far. Both are about a saved task, so neither appears while
-            one is being written. */}
-        {editing && (
-          <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5">
-            <AccessAction verb={follow.watching ? "unwatch" : "watch"} can={can} label="Follow this task">
-              <Button variant={follow.watching ? "secondary" : "outline"} size="sm" className="h-7 text-xs" disabled={busy} onClick={toggleWatch}>
-                <Eye className="h-3.5 w-3.5" /> {follow.watching ? "Watching" : "Watch"}
-              </Button>
-            </AccessAction>
-            <span className="text-xs text-muted-foreground">
-              {follow.count > 0
-                ? `${follow.count} ${follow.count === 1 ? "person is" : "people are"} following moves, comments and blocks`
-                : "Nobody is following this yet"}
-            </span>
-            {/* Approved timesheet hours booked against this task. Absent when none are - which is not zero. */}
-            {hours != null && (
-              <span className="ml-auto inline-flex items-center gap-1 text-xs tabular-nums text-muted-foreground" title="Approved timesheet hours booked against this task">
-                <History className="h-3.5 w-3.5" /> {hours}h logged
-              </span>
-            )}
-          </div>
-        )}
-        {/* Who filed it, and when. A sentence rather than a field: it is not editable, and putting it in the
-            grid among the pickers would suggest it is. Only shown where it says something the other people on
-            the card do not - filing your own task is the assignee line already. */}
-        {editing && card!.reporter && idOf(card!.reporter) !== idOf(card!.assignee ?? "") && (
-          <p className="text-xs text-muted-foreground">
-            Reported by <span className="font-medium text-foreground">{reporterName}</span>
-            {card!.create_time ? ` · ${new Date(card!.create_time).toLocaleDateString()}` : ""}
-          </p>
-        )}
-        {/* Two-column field grid from `sm` up, one column on a phone - a pair of comboboxes side by side on a
+        </FormSection>
+        {/* Two-column field grids from `sm` up, one column on a phone - a pair of comboboxes side by side on a
             390px screen leaves neither readable. When an odd number of fields is visible (Status is edit-only;
             Labels/Swimlane are board-conditional), the lone trailing field spans both columns so no half-width
             orphan is left. */}
-        <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 sm:[&>*:last-child:nth-child(odd)]:col-span-2">
-          {/* Workflow + owner */}
+        <FormSection title="Workflow" icon={SquareKanban}>
+        <div className={fieldGrid}>
           {editing && (
             <Field label="Status">
               {/* Which column the task sits in is a fact worth reading even for someone who cannot move it, so
@@ -1737,34 +1838,16 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
               )}
             </div>
           </Field>
-          <Field label="Department">
-            <Combobox value={department} onValueChange={setDepartment} options={deptOptions} placeholder="Org default department" disabled={!canEdit} />
-          </Field>
-          {/* Only on an existing card: the suggestion comes from this card's own place in the index, and a
-              card being created is not in it yet. Filing help for a NEW card would have to embed the text on
-              the fly, which is a neuron per keystroke-pause and a different feature. */}
-          {/* Ageing against the board's own history. Separate from the triage panel above because it needs no
-              model and no binding: a deployment with the AI layer switched off still has a movement log. */}
-          {editing && card && (
-            <div className="sm:col-span-2">
-              <CardFlowCard cardId={idOf(card.path)} can={card.access?.can} />
-            </div>
-          )}
-          {editing && card && (
-            <div className="sm:col-span-2">
-              <CardTriageCard
-                cardId={idOf(card.path)}
-                can={card.access?.can}
-                onUsePriority={(p: string) => setPriority(p as CardT["priority"])}
-                // Null: this dialog cannot step sideways. It is remounted per card and guards unsaved edits
-                // (`dirty`), so following a neighbour from here would either lose what somebody typed or
-                // prompt them mid-suggestion. Neighbour titles render as text, which is enough to recognise
-                // the duplicate and go and find it.
-                onOpenCard={null}
-              />
-            </div>
-          )}
-          {/* Urgency + deadline */}
+        </div>
+        {wipNote && (
+          <p className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{wipNote} Finishing something there beats starting this.</span>
+          </p>
+        )}
+        </FormSection>
+        <FormSection title="Urgency" icon={Flag}>
+        <div className={fieldGrid}>
           <Field label="Priority">
             <Select value={priority} onValueChange={(v) => setPriority(v as CardT["priority"])} disabled={!canEdit}>
               <SelectTrigger><SelectValue /></SelectTrigger>
@@ -1786,18 +1869,56 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
               )}
             </div>
           </Field>
-          {/* Repeating work: the chore that comes back. Files the NEXT one when this is delivered, so a task
-              running late is chased rather than duplicated on top of itself. */}
-          <Field label="Repeats" info="Delivering this task files the next one, due a cadence later, with the same checklist. The linked goal and sprint are not carried over.">
-            <Select value={cadence || NO_CADENCE} onValueChange={(v) => setCadence(v === NO_CADENCE ? "" : v)} disabled={!canEdit}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value={NO_CADENCE}>Doesn't repeat</SelectItem>
-                {CADENCES.map((c) => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
+        </div>
+        </FormSection>
+        {/* Following, what the task has cost so far, and who filed it. All about a saved task, so none of it
+            appears while one is being written. Last on the tab: it is about the task, not part of editing it. */}
+        {editing && (
+          <FormSection title="Following" icon={Eye}>
+          <div className="flex flex-wrap items-center gap-2">
+            <AccessAction verb={follow.watching ? "unwatch" : "watch"} can={can} label="Follow this task">
+              <Button variant={follow.watching ? "secondary" : "outline"} size="sm" className="h-7 text-xs" disabled={busy} onClick={toggleWatch}>
+                <Eye className="h-3.5 w-3.5" /> {follow.watching ? "Watching" : "Watch"}
+              </Button>
+            </AccessAction>
+            <span className="text-xs text-muted-foreground">
+              {follow.count > 0
+                ? `${follow.count} ${follow.count === 1 ? "person is" : "people are"} following moves, comments and blocks`
+                : "Nobody is following this yet"}
+            </span>
+            {/* Approved timesheet hours booked against this task. Absent when none are - which is not zero. */}
+            {hours != null && (
+              <span className="ml-auto inline-flex items-center gap-1 text-xs tabular-nums text-muted-foreground" title="Approved timesheet hours booked against this task">
+                <History className="h-3.5 w-3.5" /> {hours}h logged
+              </span>
+            )}
+          </div>
+          {/* Who filed it, and when. A sentence rather than a field: it is not editable, and putting it among
+              the pickers would suggest it is. Only shown where it says something the other people on the card
+              do not - filing your own task is the assignee line already. */}
+          {card!.reporter && idOf(card!.reporter) !== idOf(card!.assignee ?? "") && (
+            <p className="text-xs text-muted-foreground">
+              Reported by <span className="font-medium text-foreground">{reporterName}</span>
+              {card!.create_time ? ` · ${new Date(card!.create_time).toLocaleDateString()}` : ""}
+            </p>
+          )}
+          </FormSection>
+        )}
+          </TabsContent>
+
+          <TabsContent value="planning" forceMount className={panelClass}>
+        {/* What the task is for and how big it is: Linked goal | Points. */}
+        <FormSection title="Scope" icon={Target}>
+        <div className={fieldGrid}>
+          <Field label="Linked goal">
+            <Combobox value={goal} onValueChange={setGoal} options={goalOptions} placeholder="No goal" disabled={!canEdit} />
+            {/* Which goal this task is probably serving. Only on a saved task with the field still empty:
+                the suggestion comes from the task's own place in the index, and a task being created is not
+                in it yet. */}
+            {editing && card && canEdit && (
+              <CardGoalSuggest cardId={idOf(card.path)} can={card.access?.can} current={goal} onPick={setGoal} />
+            )}
           </Field>
-          {/* Estimate + tags */}
           <Field label="Points" info={board.mode === "scrum" ? "Story points. What the sprint burndown and the velocity chart are measured in." : "Rough size, for the analytics tab. Not a schedule."}>
             <div className="space-y-1.5">
               <Input type="number" min="0" value={size} onChange={(e) => setSize(e.target.value)} disabled={!canEdit} />
@@ -1811,6 +1932,12 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
               )}
             </div>
           </Field>
+        </div>
+        </FormSection>
+        {/* Where it is filed and whether it comes back: Labels | Department, Repeats | Swimlane. Department
+            takes the whole row on a board with no labels, so the pair below it stays paired. */}
+        <FormSection title="Organize" icon={Tag}>
+        <div className={fieldGrid}>
           {board.labels.length > 0 && (
             <Field label="Labels">
               <Popover>
@@ -1830,15 +1957,19 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
               </Popover>
             </Field>
           )}
-          {/* Linkage */}
-          <Field label="Linked goal">
-            <Combobox value={goal} onValueChange={setGoal} options={goalOptions} placeholder="No goal" disabled={!canEdit} />
-            {/* Which goal this task is probably serving. Only on a saved task with the field still empty:
-                the suggestion comes from the task's own place in the index, and a task being created is not
-                in it yet. */}
-            {editing && card && canEdit && (
-              <CardGoalSuggest cardId={idOf(card.path)} can={card.access?.can} current={goal} onPick={setGoal} />
-            )}
+          <Field label="Department" className={board.labels.length > 0 ? undefined : "sm:col-span-2"}>
+            <Combobox value={department} onValueChange={setDepartment} options={deptOptions} placeholder="Org default department" disabled={!canEdit} />
+          </Field>
+          {/* Repeating work: the chore that comes back. Files the NEXT one when this is delivered, so a task
+              running late is chased rather than duplicated on top of itself. */}
+          <Field label="Repeats" info="Delivering this task files the next one, due a cadence later, with the same checklist. The linked goal and sprint are not carried over.">
+            <Select value={cadence || NO_CADENCE} onValueChange={(v) => setCadence(v === NO_CADENCE ? "" : v)} disabled={!canEdit}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_CADENCE}>Doesn't repeat</SelectItem>
+                {CADENCES.map((c) => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
           </Field>
           {board.swimlane_mode === "custom" && (
             <Field label="Swimlane">
@@ -1852,22 +1983,12 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
             </Field>
           )}
         </div>
-
-        {wipNote && (
-          <p className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>{wipNote} Finishing something there beats starting this.</span>
-          </p>
-        )}
+        </FormSection>
 
         {/* Linked documents: references into the org library (specs, policies) - the card owns no files.
             Saved with the card (part of the PATCH/create body), like every other field. */}
         {(docs.length > 0 || (canEdit && orgDocs.length > 0)) && (
-          <div className="space-y-2 border-t pt-3">
-            <p className="flex items-center gap-1.5 text-sm font-medium">
-              <FileText className="h-4 w-4" /> Linked documents
-              {docs.length > 0 && <span className="text-xs font-normal text-muted-foreground">{docs.length}</span>}
-            </p>
+          <FormSection title="Documents" icon={FileText} count={docs.length || undefined}>
             {docs.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
                 {docs.map((id) => (
@@ -1885,30 +2006,105 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
               </div>
             )}
             {canEdit && (
-              <Combobox
-                value=""
-                onValueChange={(v) => { if (v) setDocs((s) => (s.includes(v) ? s : [...s, v])); }}
-                options={orgDocs.filter((d) => !docs.includes(idOf(d.path))).map((d) => ({ value: idOf(d.path), label: d.display_name || d.file_name || "Document" }))}
-                placeholder="Link a document…"
-              />
+              /* Left column of the field grid, like the blocker picker below it. */
+              <div className="sm:w-1/2 sm:pr-1.5">
+                <Combobox
+                  value=""
+                  onValueChange={(v) => { if (v) setDocs((s) => (s.includes(v) ? s : [...s, v])); }}
+                  options={orgDocs.filter((d) => !docs.includes(idOf(d.path))).map((d) => ({ value: idOf(d.path), label: d.display_name || d.file_name || "Document" }))}
+                  placeholder="Link a document…"
+                />
+              </div>
             )}
-          </div>
+          </FormSection>
         )}
 
-        {editing && (
-          <div className="space-y-2 border-t pt-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="flex items-center gap-1.5 text-sm font-medium">
-                <ListChecks className="h-4 w-4" /> Checklist
-                {todos.length > 0 && <span className="text-xs font-normal text-muted-foreground">{todoDone}/{todos.length} done</span>}
+        {/* Only when there is something to show: a block, the means to add one, or tasks waiting on this one. */}
+        {editing && (blockedView.blocked || can.includes("block") || blocks.length > 0) && (
+          <FormSection title="Blockers" icon={Ban}>
+            {blockedView.blocked ? (
+              <div className="flex flex-wrap items-center gap-2">
+                {(() => {
+                  const blocker = blockedView.blockedBy ? boardCards.find((x) => idOf(x.path) === idOf(blockedView.blockedBy!)) : undefined;
+                  return (
+                    <span className="inline-flex items-center gap-1.5 text-sm text-destructive">
+                      <Ban className="h-4 w-4" /> Blocked
+                      {blocker && onOpenCard && (
+                        <>by <button type="button" className="font-medium underline hover:no-underline" onClick={() => onOpenCard(blocker)}>{taskKey(blocker)} {blocker.title}</button></>
+                      )}
+                      {blockedView.reason && <span className="text-muted-foreground">— {blockedView.reason}</span>}
+                    </span>
+                  );
+                })()}
+                <AccessAction verb="unblock" can={can} label="Who can unblock"><Button size="sm" variant="outline" onClick={() => act("unblock")} loading={busy}>Unblock</Button></AccessAction>
+              </div>
+            ) : (
+              can.includes("block") && (
+                /* The field grid's two columns: the picker holds the left one (it would otherwise stretch the
+                   whole dialog, and its popup, which matches the trigger, with it), the note and Block the right. */
+                <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2">
+                  {/* First option: blocked on something off the board (a vendor, a decision). That block is the
+                      note alone, so picking it makes the note the required half. */}
+                  <div className="min-w-0"><Combobox value={blockedBy} onValueChange={setBlockedBy} options={[{ value: BLOCKED_ELSEWHERE, label: "Something else (not a task)" }, ...boardCards.filter((x) => idOf(x.path) !== idOf(card!.path)).map((x) => ({ value: idOf(x.path), label: `${taskKey(x)} ${x.title}` }))]} placeholder="Blocked by a task…" /></div>
+                  {/* The note and Block appear once a blocker is picked: until then there is nothing to block on,
+                      and an idle note box and button beside the picker were two controls with no job yet. */}
+                  {blockedBy && (
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Input value={blockReason} onChange={(e) => setBlockReason(e.target.value)} placeholder={blockedBy === BLOCKED_ELSEWHERE ? "What is it waiting on?" : "Note (optional)…"} className="min-w-0 flex-1" />
+                      <AccessAction verb="block" can={can} label="Who can block"><Button variant="outline" className="shrink-0" onClick={() => act("block", { blocked_by: blockedBy === BLOCKED_ELSEWHERE ? undefined : `cards/${blockedBy}`, reason: blockReason.trim() || undefined })} loading={busy} disabled={blockedBy === BLOCKED_ELSEWHERE && !blockReason.trim()}><Ban className="h-3.5 w-3.5" /> Block</Button></AccessAction>
+                    </div>
+                  )}
+                </div>
+              )
+            )}
+            {blocks.length > 0 && (
+              <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-muted-foreground">
+                <Ban className="h-4 w-4" /> Blocks
+                {blocks.map((b) => onOpenCard
+                  ? <button key={b.path} type="button" className="font-medium text-foreground underline hover:no-underline" onClick={() => onOpenCard(b)}>{taskKey(b)} {b.title}</button>
+                  : <span key={b.path} className="font-medium text-foreground">{taskKey(b)} {b.title}</span>)}
               </p>
-              {can.includes("addTodos") && checklists.length > 0 && (
-                <Select value="" disabled={busy} onValueChange={(v) => { const cl = checklists.find((c) => c.path === v); if (cl?.items?.length) void todoAct("addTodos", { texts: cl.items }); }}>
-                  <SelectTrigger className="h-8 w-44 text-xs"><SelectValue placeholder="Apply template…" /></SelectTrigger>
-                  <SelectContent>{checklists.map((c) => <SelectItem key={c.path} value={c.path}>{c.display_name}</SelectItem>)}</SelectContent>
-                </Select>
-              )}
-            </div>
+            )}
+          </FormSection>
+        )}
+
+        {/* Only on an existing card: the suggestion comes from this card's own place in the index, and a
+            card being created is not in it yet. Filing help for a NEW card would have to embed the text on
+            the fly, which is a neuron per keystroke-pause and a different feature. */}
+        {/* Ageing against the board's own history. Separate from the triage panel below because it needs no
+            model and no binding: a deployment with the AI layer switched off still has a movement log.
+            Gated on the two verbs so a caller with neither gets no heading over nothing. */}
+        {editing && card && (can.includes("flow") || can.includes("triage")) && (
+          <FormSection title="Insights" icon={BarChart3}>
+            <CardFlowCard cardId={idOf(card.path)} can={card.access?.can} />
+            <CardTriageCard
+              cardId={idOf(card.path)}
+              can={card.access?.can}
+              onUsePriority={(p: string) => setPriority(p as CardT["priority"])}
+              // Null: this dialog cannot step sideways. It is remounted per card and guards unsaved edits
+              // (`dirty`), so following a neighbour from here would either lose what somebody typed or
+              // prompt them mid-suggestion. Neighbour titles render as text, which is enough to recognise
+              // the duplicate and go and find it.
+              onOpenCard={null}
+            />
+          </FormSection>
+        )}
+          </TabsContent>
+
+          <TabsContent value="work" forceMount className={panelClass}>
+        {editing && (
+          <FormSection
+            title="Checklist"
+            icon={ListChecks}
+            count={todos.length > 0 ? `${todoDone}/${todos.length} done` : undefined}
+            aside={can.includes("addTodos") && checklists.length > 0 && (
+              <Select value="" disabled={busy} onValueChange={(v) => { const cl = checklists.find((c) => c.path === v); if (cl?.items?.length) void todoAct("addTodos", { texts: cl.items }); }}>
+                {/* "Template…", not "Apply template…": the margin it sits in is 6rem. */}
+                <SelectTrigger aria-label="Apply a checklist template" className="h-8 w-44 px-2 text-xs sm:w-full"><SelectValue placeholder="Template…" /></SelectTrigger>
+                <SelectContent>{checklists.map((c) => <SelectItem key={c.path} value={c.path}>{c.display_name}</SelectItem>)}</SelectContent>
+              </Select>
+            )}
+          >
             {todos.length > 0 && (
               <div className="space-y-1.5">
                 {todos.map((t) => (
@@ -1946,17 +2142,17 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                 <Button size="sm" variant="outline" loading={busy} disabled={!newTodo.trim()} onClick={() => { const v = newTodo.trim(); if (!v) return; setNewTodo(""); return todoAct("addTodos", { texts: [v] }); }}><Plus className="h-4 w-4" /> Add</Button>
               </div>
             )}
-          </div>
+          </FormSection>
         )}
 
         {!editing && (
-          <div className="space-y-2 border-t pt-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="flex items-center gap-1.5 text-sm font-medium">
-                <ListChecks className="h-4 w-4" /> Checklist
-                {initialTodos.length > 0 && <span className="text-xs font-normal text-muted-foreground">{initialTodos.length} item{initialTodos.length === 1 ? "" : "s"}</span>}
-              </p>
-              <div className="flex items-center gap-2">
+          <FormSection
+            title="Checklist"
+            icon={ListChecks}
+            count={initialTodos.length > 0 ? `${initialTodos.length} item${initialTodos.length === 1 ? "" : "s"}` : undefined}
+          >
+            {/* In the content column, not the margin: two controls side by side are wider than 6rem. */}
+            <div className="flex flex-wrap items-center gap-2">
                 {/* Beside the template picker, because it answers the same question - "what are the steps?" -
                     from the task itself rather than from a catalogue. APPENDS rather than replaces, so a
                     template already applied survives, and every suggested line is removable like any other
@@ -1976,7 +2172,6 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                     <SelectContent>{checklists.map((c) => <SelectItem key={c.path} value={c.path}>{c.display_name}</SelectItem>)}</SelectContent>
                   </Select>
                 )}
-              </div>
             </div>
             {initialTodos.length > 0 && (
               <div className="space-y-1.5">
@@ -1992,15 +2187,11 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
               <Input className="h-8" placeholder="Add a checklist item…" value={newTodo} onChange={(e) => setNewTodo(e.target.value)} onKeyDown={(e) => { if (e.key !== "Enter") return; e.preventDefault(); if (newTodo.trim()) { setInitialTodos((s) => [...s, newTodo.trim()]); setNewTodo(""); } }} />
               <Button size="sm" variant="outline" disabled={!newTodo.trim()} onClick={() => { const v = newTodo.trim(); if (v) { setInitialTodos((s) => [...s, v]); setNewTodo(""); } }}><Plus className="h-4 w-4" /> Add</Button>
             </div>
-          </div>
+          </FormSection>
         )}
 
         {editing && (
-          <div className="space-y-2 border-t pt-3">
-            <p className="flex items-center gap-1.5 text-sm font-medium">
-              <MessageSquare className="h-4 w-4" /> Comments
-              {comments.length > 0 && <span className="text-xs font-normal text-muted-foreground">{comments.length}</span>}
-            </p>
+          <FormSection title="Comments" icon={MessageSquare} count={comments.length || undefined}>
             {/* A thread reads as a conversation or it doesn't get read: who said it (face), when in words, and
                 the same markdown-lite the description gets - including @mention chips. */}
             {comments.length > 0 ? (
@@ -2045,56 +2236,14 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                 <AccessAction verb="comment" can={can} label="Who can comment"><Button size="sm" onClick={addComment} loading={busy} disabled={!commentText.trim()}>Comment</Button></AccessAction>
               </div>
             )}
-          </div>
-        )}
-
-
-        {editing && (
-          <div className="space-y-2 border-t pt-3">
-            {blockedView.blocked ? (
-              <div className="flex flex-wrap items-center gap-2">
-                {(() => {
-                  const blocker = blockedView.blockedBy ? boardCards.find((x) => idOf(x.path) === idOf(blockedView.blockedBy!)) : undefined;
-                  return (
-                    <span className="inline-flex items-center gap-1.5 text-sm text-destructive">
-                      <Ban className="h-4 w-4" /> Blocked
-                      {blocker && onOpenCard && (
-                        <>by <button type="button" className="font-medium underline hover:no-underline" onClick={() => onOpenCard(blocker)}>{taskKey(blocker)} {blocker.title}</button></>
-                      )}
-                      {blockedView.reason && <span className="text-muted-foreground">— {blockedView.reason}</span>}
-                    </span>
-                  );
-                })()}
-                <AccessAction verb="unblock" can={can} label="Who can unblock"><Button size="sm" variant="outline" onClick={() => act("unblock")} loading={busy}>Unblock</Button></AccessAction>
-              </div>
-            ) : (
-              can.includes("block") && (
-                <div className="flex items-center gap-2">
-                  <div className="flex-1"><Combobox value={blockedBy} onValueChange={setBlockedBy} options={boardCards.filter((x) => idOf(x.path) !== idOf(card!.path)).map((x) => ({ value: idOf(x.path), label: `${taskKey(x)} ${x.title}` }))} placeholder="Blocked by a task…" /></div>
-                  <Input value={blockReason} onChange={(e) => setBlockReason(e.target.value)} placeholder="Note (optional)…" className="flex-1" />
-                  <AccessAction verb="block" can={can} label="Who can block"><Button variant="outline" className="shrink-0" onClick={() => act("block", { blocked_by: blockedBy ? `cards/${blockedBy}` : undefined, reason: blockReason || undefined })} loading={busy} disabled={!blockedBy && !blockReason}><Ban className="h-3.5 w-3.5" /> Block</Button></AccessAction>
-                </div>
-              )
-            )}
-            {(() => {
-              // The reverse edge: cards waiting on THIS one. Computed from the already-loaded board cards.
-              const blocks = boardCards.filter((x) => x.blocked_by && idOf(x.blocked_by) === idOf(card!.path) && !x.delete_time);
-              if (!blocks.length) return null;
-              return (
-                <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-muted-foreground">
-                  <Ban className="h-4 w-4" /> Blocks
-                  {blocks.map((b) => onOpenCard
-                    ? <button key={b.path} type="button" className="font-medium text-foreground underline hover:no-underline" onClick={() => onOpenCard(b)}>{taskKey(b)} {b.title}</button>
-                    : <span key={b.path} className="font-medium text-foreground">{taskKey(b)} {b.title}</span>)}
-                </p>
-              );
-            })()}
-          </div>
+          </FormSection>
         )}
 
         {/* Activity as a disclosure in the dialog, like every other detail dialog in the app - it used to open
             a SECOND dialog on top of this one. Still lazy: the audit query runs on the first click, not on open. */}
         {editing && <ActivitySection resource={card!.path} className="border-t pt-3" />}
+          </TabsContent>
+        </Tabs>
     </WriteDialog>
     </>
   );
@@ -2883,7 +3032,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
       >
         {/* Product backlog */}
         <div
-          className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none"
+          className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none 2xl:grow 2xl:basis-72"
           onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; pendingRank.current = null; setOverZone("backlog"); setLineAt(null); }}
           onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) { setOverZone((p) => (p === "backlog" ? null : p)); setLineAt(null); } }}
           onDrop={(e) => { e.preventDefault(); const r = pendingRank.current ?? undefined; pendingRank.current = null; setLineAt(null); void dropOnBacklog(r); }}
@@ -2937,7 +3086,8 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
             // Named group: the column's heading is a plain span inside its header row, so without a name on
             // the column itself the board reads as one undifferentiated pile of cards with nothing saying
             // which column any of them is in.
-            <div key={col.key} role="group" aria-label={col.label} className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none">
+            // From `2xl` the backlog and the sprint's columns share the row, as on the kanban grid (see there).
+            <div key={col.key} role="group" aria-label={col.label} className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none 2xl:grow 2xl:basis-72">
                 <div className="flex items-center justify-between border-b px-3 py-2">
                   <div className="flex min-w-0 items-center gap-1.5">
                     <span className="truncate text-sm font-medium">{col.label}</span>

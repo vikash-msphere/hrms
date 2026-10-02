@@ -14,7 +14,7 @@ import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
-import { Chart, ChartCard } from "@/components/common/Chart";
+import { Chart, ChartCard, ChartStrip } from "@/components/common/Chart";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import type { TableInsight } from "@/components/common/TableInsights";
 import { FilterChip } from "@/components/common/FilterChips";
@@ -374,20 +374,22 @@ export default function Payslips({ me }: { me: Me }) {
           {/* Pay over time, which a list of downloadable PDFs cannot show at all. Gross against net says
               where a raise actually landed, and where a month of extra deductions quietly ate one. */}
           {payChart.labels.length > 2 && (
-            <ChartCard className="mb-4" title="Your pay over time" description="Gross and take-home on each of your own payslips, oldest first.">
-              <Chart
-                type="axis-mixed"
-                height={200}
-                labels={payChart.labels}
-                datasets={[
-                  { name: "Gross", values: payChart.gross, chartType: "bar" },
-                  { name: "Take-home", values: payChart.net, chartType: "line" },
-                ]}
-                format={(v) => money(v)}
-                ariaLabel="Gross pay and take-home pay on each payslip"
-                onSelect={(i) => { const s = payChart.slips[i]; if (s) onPreview(s); }}
-              />
-            </ChartCard>
+            <ChartStrip id="payslips" className="mb-4" gridClassName="grid">
+              <ChartCard title="Your pay over time" description="Gross and take-home on each of your own payslips, oldest first.">
+                <Chart
+                  type="axis-mixed"
+                  height={200}
+                  labels={payChart.labels}
+                  datasets={[
+                    { name: "Gross", values: payChart.gross, chartType: "bar" },
+                    { name: "Take-home", values: payChart.net, chartType: "line" },
+                  ]}
+                  format={(v) => money(v)}
+                  ariaLabel="Gross pay and take-home pay on each payslip"
+                  onSelect={(i) => { const s = payChart.slips[i]; if (s) onPreview(s); }}
+                />
+              </ChartCard>
+            </ChartStrip>
           )}
           {latest && (
             <SummaryStrip

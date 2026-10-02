@@ -13,7 +13,7 @@ import { DEFAULT_PERFORMANCE, competenciesForCycle, competencyScore, ratingLabel
 import type { Department, Employee, Review, ReviewCycle, ReviewState, ReviewFeedback, Me, Card as KanbanCard } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
-import { Chart, ChartCard } from "@/components/common/Chart";
+import { Chart, ChartCard, ChartStrip } from "@/components/common/Chart";
 import { ChartFilterNote } from "@/components/common/ChartFilterNote";
 import { useChartFocus } from "@/lib/chartFocus";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
@@ -425,7 +425,7 @@ export default function Reviews({ me }: { me: Me }) {
           it, and what did it conclude. The distribution is the honest form for the second - an average
           rating hides whether a team is uniformly fine or split in half. */}
       {reviewCharts.total > 1 && (
-        <div className="mb-6 grid gap-4 lg:grid-cols-2">
+        <ChartStrip id="reviews" className="mb-6">
           <ChartCard title="How far the cycle has got" description="Every review you can see, by the stage it is sitting at.">
             <Chart
               type="percentage"
@@ -448,7 +448,7 @@ export default function Reviews({ me }: { me: Me }) {
               {...cf.chart("rating")}
             />
           </ChartCard>
-        </div>
+        </ChartStrip>
       )}
 
       {myRequests.length > 0 && (

@@ -30,6 +30,7 @@ import { FileDropField } from "@/components/common/FileDropField";
 import { MoneyInput } from "@/components/common/MoneyInput";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 import { getSetting } from "@/lib/settingsStore";
 
@@ -97,6 +98,7 @@ export default function Referrals({ me, openId }: { me: Me; openId?: string }) {
   const inPipeline = useMemo(() => new Map(candidates.filter((c) => c.referral).map((c) => [idOf(c.referral!), idOf(c.path)])), [candidates]);
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const { org } = useOrg();
   const money = (n?: number) => (n == null ? "" : formatMoney(n, org.default_currency, currencyDecimals(undefined, org)));
   const [dialog, setDialog] = useState<Referral | "new" | null>(null);
@@ -138,7 +140,7 @@ export default function Referrals({ me, openId }: { me: Me; openId?: string }) {
 
   async function del(r: Referral) {
     if (!(await confirm({ title: "Withdraw this referral?", destructive: true, confirmLabel: "Withdraw" }))) return;
-    try { await remove(`referrals/${idOf(r.path)}`); reload(); }
+    try { await remove(`referrals/${idOf(r.path)}`); reload(); deleted({ path: `referrals/${idOf(r.path)}`, noun: "referral", can: r.access?.can, reload, title: "Referral withdrawn" }); }
     catch (e) { toast({ title: "Couldn't withdraw", description: (e as Error).message, variant: "destructive" }); }
   }
   async function award(r: Referral) {

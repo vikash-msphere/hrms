@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, confirmDelete, gotoRoute, test, expect, toast } from "./fixtures";
 
 // Deleting a pay period - `payPeriodForm.spec.ts` proves the create form's own arithmetic but never removes
 // anything (every other payroll spec that needs a period skips the form entirely and posts one straight
@@ -28,6 +28,7 @@ test("an unused pay period is deleted from the list", async ({ as }) => {
   await expect(row).toBeVisible({ timeout: 30_000 });
   await row.getByRole("button", { name: "Actions" }).click();
   await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await confirmDelete(page);
   await expect(toast(page, "Pay period deleted")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("tbody tr").filter({ hasText: label })).toHaveCount(0, { timeout: 30_000 });
 

@@ -21,7 +21,9 @@ test("a measured goal previews its percentage, reports the count, and completes 
   await expect(form.getByRole("heading", { name: "New goal" })).toBeVisible();
   await form.getByLabel("Title").fill(title);
 
-  // The measure is folded away on a goal that has none, so asking for one is the first step.
+  // The measure lives on the Alignment & progress tab, folded away on a goal that has none, so asking for
+  // one is the first step.
+  await form.getByRole("tab", { name: /^Alignment/ }).click();
   await form.getByRole("button", { name: "Add a measure" }).click();
 
   // The measure, filled in before anything is saved - the preview has to be live off the form's own state.

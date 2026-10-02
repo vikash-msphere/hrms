@@ -43,6 +43,7 @@ import { RowActions, type RowAction } from "@/components/common/RowActions";
 import { useToast } from "@/components/ui/use-toast";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import PayPeriods from "@/pages/PayPeriods";
 import { PayrollBonuses } from "@/components/common/PayrollBonuses";
 import { PayrollBudgets } from "@/components/common/PayrollBudgets";
@@ -140,6 +141,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
   const canQuick = canWritePeriods && canWriteRuns;
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
 
@@ -517,7 +519,8 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
     if (!ok) return;
     try {
       await remove("payroll-runs/" + idOf(run.path), run.etag);
-      toast({ title: "Run deleted", variant: "success" });
+      // No Undo here in practice: payroll runs are deleted outright, so their rows carry no `restore`.
+      deleted({ path: "payroll-runs/" + idOf(run.path), noun: "run", can: run.access?.can, reload });
       reload();
     } catch (e) {
       toast({ title: "Couldn't delete run", description: (e as Error).message, variant: "destructive" });

@@ -11,7 +11,7 @@ import type { ConfirmFn } from "@/components/common/confirm";
 // reversible view state (pin, hide, mark read), and reads (preview, download, export). Friction on those is
 // noise, and noise is what teaches people to click through the dialogs that matter.
 
-export type Decision = "approve" | "reject" | "cancel" | "pay" | "disburse" | "submit" | "award" | "revoke" | "publish" | "unpublish" | "disable" | "hide" | "release" | "unhide" | "unhidePublish" | "handBack" | "deletePost" | "removeSuggestion" | "pin" | "pinReplacing" | "route" | "advance" | "decline" | "rescind" | "complete" | "reopen" | "setTrackedFrom" | "applyOpenings" | "applyPayOpenings" | "applyLeaveHistory";
+export type Decision = "approve" | "reject" | "cancel" | "pay" | "disburse" | "submit" | "award" | "revoke" | "publish" | "unpublish" | "disable" | "hide" | "release" | "unhide" | "unhidePublish" | "handBack" | "removeSuggestion" | "pin" | "pinReplacing" | "route" | "advance" | "decline" | "rescind" | "complete" | "reopen" | "setTrackedFrom" | "applyOpenings" | "applyPayOpenings" | "applyLeaveHistory";
 
 type Copy = { title: string; description: string; confirmLabel: string; destructive?: boolean };
 
@@ -42,7 +42,6 @@ const COPY: Record<Decision, (subject: string, other?: string) => Copy> = {
   // is inches from a moderator's Hide, and one of the two asking while the other fires on the click reads
   // as the silent one being the safer of the two. It is not - hiding tells the author and can be undone
   // from the queue, while this takes the post out of the feed for everybody.
-  deletePost: (s) => ({ title: "Delete this post?", description: `${s} comes off the board for everyone. It goes to deleted items and can be restored from there, or with Undo on the toast.`, confirmLabel: "Delete", destructive: true }),
   // Pinning, which is the loudest thing anybody can do to the board short of posting: it puts one post
   // above everything else for the whole company until somebody takes it down.
   //

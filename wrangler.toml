@@ -4,9 +4,9 @@
 # STAGING LIVES IN `wrangler.staging.toml`, as a standalone config rather than an `[env.staging]` block in
 # here. The block form required every top-level binding and var to be repeated inside it, and forgetting one
 # was silent - a missing `[env.staging.vars]` deploys with no vars rather than failing - so the two targets
-# now read end to end as two files. Three things must be kept in step across them by hand, and
-# `npm run preflight` checks all three rather than trusting anyone to remember: the compatibility date, the
-# `[limits]` block, and `run_worker_first`.
+# now read end to end as two files. Four things must be kept in step across them by hand, and
+# `npm run preflight` checks all four rather than trusting anyone to remember: the compatibility date, the
+# `[limits]` block, `run_worker_first`, and the `[placement]` mode.
 name = "hrms"
 main = "src/index.ts"
 # Pinned, and BUMPED DELIBERATELY rather than left to drift. The date selects the Workers runtime's behaviour
@@ -43,6 +43,20 @@ preview_urls = false
 # Stack traces stay readable through the source maps the deploy workflow uploads to Sentry
 # (.github/workflows/deploy.yml, "Worker source maps").
 minify = true
+
+# Smart Placement: run the Worker next to the D1 primary rather than at the edge nearest the caller. D1 has ONE
+# primary, and every query is a round trip from wherever the Worker runs to that region. Run at the caller's
+# edge, that round trip was about 150ms per query in production traces - even a primary-key lookup - while the
+# same queries from near the database took about 15ms. A request makes several queries in sequence (the auth
+# preamble alone is about six), so a batch of 16 cost 1.5s. Placed next to the database, the caller pays the
+# long trip once per request instead of once per query. Free on every plan; the platform watches traffic for
+# a while before it moves the Worker, so the effect shows up hours after a deploy, not at once.
+#
+# What moves with it: everything `run_worker_first` routes to the Worker, which includes the HTML shell and
+# every JS/CSS chunk. The media the `!` rules exclude stays at the edge. Keep this block identical in
+# wrangler.staging.toml - preflight compares the two.
+[placement]
+mode = "smart"
 
 # The built SPA (web/dist), served in two tiers so a signed-out browser never receives the app's code:
 #   - CODE (the shell, every JS/CSS chunk, every client-side route, the API) reaches the Worker FIRST, which

@@ -171,16 +171,47 @@ export async function finishCronRun(cron: string, deps: Deps, runId: string, sta
   }
 }
 
-// Scheduled-handler entry point: start + finish, fully awaited (the platform gives the scheduled worker its
-// own lifetime). Returns the row id, or null for a five-minute tick that had nothing to do.
+// Write a run that has already finished as ONE row, with no `running` state before it: one INSERT instead of an
+// INSERT and an UPDATE, and no entry in `cron_runs_running_idx`. Only for a tick that is not watched by the
+// stuck-run reclaim (runScheduled says which).
+async function recordFinishedRun(
+  cron: string,
+  deps: Deps,
+  runId: string,
+  start: number,
+  outcome: { summary?: Record<string, number>; error: string | null },
+): Promise<void> {
+  const end = +deps.clock.now();
+  await deps.db.insert(schema.cronRuns).values({
+    uuid: runId,
+    code: await allocFlatCode(deps, schema.cronRuns),
+    cron,
+    status: outcome.error ? "error" : "done",
+    startedAt: new Date(start),
+    finishedAt: new Date(end),
+    durationMs: end - start,
+    summaryJson: outcome.summary ? JSON.stringify(outcome.summary) : null,
+    error: outcome.error,
+  });
+}
+
+// Scheduled-handler entry point, fully awaited (the platform gives the scheduled worker its own lifetime).
+// Returns the row id, or null for a tick that recorded nothing.
 //
-// A FIVE-MINUTE TICK WITH NOTHING TO DO RECORDS NOTHING. Most of them find nothing, and a recorded tick writes
-// about a dozen rows (the run, its index entries, a code, the change stamp on insert and again on finish) and moves
-// every list's ETag (http/listEtag.ts), all to say that nothing happened. So the probe is asked first, and the tick
-// records itself only when there is work. Only a tick doing work can be stopped part-way through it, so the
-// `running` row the stuck-run reclaim depends on still exists whenever it matters. A failed probe counts as work
-// (fastTickWork), and a manual `cron-runs:run` is always recorded (routes/cronTrigger.ts).
+// A TICK WITH NOTHING TO DO RECORDS NOTHING. Most five-minute ticks find nothing, and a recorded tick writes about
+// a dozen rows (the run, its index entries, a code, the change stamp on insert and again on finish) and moves
+// every list's ETag (http/listEtag.ts), all to say that nothing happened. The two five-minute triggers get there
+// differently:
+// - The fast tick asks its probe first and records itself (start + finish) only when there is work. Only a tick
+//   doing work can be stopped part-way through it, so the `running` row the stuck-run reclaim depends on still
+//   exists whenever it matters. A failed probe counts as work (fastTickWork).
+// - The AI tick has no probe: its drains find out whether they are idle only by running. So it runs first and
+//   writes one finished row afterwards, and only when a drain did something or a subtask failed. The cost is
+//   that an AI tick killed at the CPU limit leaves no `running` row for the reclaim to flag; Workers Logs still
+//   show the invocation's outcome. What it would have half-done is a rotation that resumes on its next turn.
+// The nightly tick always records itself, and so does a manual `cron-runs:run` (routes/cronTrigger.ts).
 export async function runScheduled(cron: string, deps: Deps): Promise<string | null> {
+  if (cron === AI_CRON) return runAiTick(deps);
   const work = cron === FAST_CRON ? await fastTickWork(deps) : undefined;
   if (work && !work.announcements && !work.jobs && !work.stuckRuns) return null;
   const { runId, start } = await startCronRun(cron, deps);
@@ -189,6 +220,26 @@ export async function runScheduled(cron: string, deps: Deps): Promise<string | n
   deps.actingAs = { kind: "cron", name: cron, ref: `cron-runs/${runId}` };
   deps.trace ??= runId;
   await finishCronRun(cron, deps, runId, start, true, work);
+  return runId;
+}
+
+// The AI tick as runScheduled describes it: the id is minted before the work so the tick can name itself, and
+// the row is written only after, when there is something to record.
+async function runAiTick(deps: Deps): Promise<string | null> {
+  const runId = genId();
+  const start = +deps.clock.now();
+  deps.actingAs = { kind: "cron", name: AI_CRON, ref: `cron-runs/${runId}` };
+  deps.trace ??= runId;
+  let result: Awaited<ReturnType<typeof dispatchCron>>;
+  try {
+    result = await dispatchCron(AI_CRON, deps);
+  } catch (e) {
+    await recordFinishedRun(AI_CRON, deps, runId, start, { error: String(e) });
+    throw e;
+  }
+  const { summary, failures } = result;
+  if (!failures.length && Object.values(summary).every((n) => n === 0)) return null;
+  await recordFinishedRun(AI_CRON, deps, runId, start, { summary, error: failures.length ? `subtasks failed: ${failures.join(", ")}` : null });
   return runId;
 }
 

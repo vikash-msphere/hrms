@@ -25,8 +25,11 @@ import type { CSSProperties } from "react";
 //   track, which cannot express "four, then three".
 
 // The container widths the caps are chosen at. Fixed here because CSS has to name them literally
-// (index.css); the caps that ride on them are the caller's.
-export const STAT_ROW_LADDER = [0, 480, 720, 1000, 1240] as const;
+// (index.css); the caps that ride on them are the caller's. The 1600 rung is the wide-screen one: a row that
+// wide needs a 1920px screen (1728px on the icon rail), so what a preset says there changes nothing at or below
+// 1440 - and rung 4 keeps its caps because a 1440 screen on the rail does reach 1240 (docs/06-responsive-ui.md,
+// "Wide screens").
+export const STAT_ROW_LADDER = [0, 480, 720, 1000, 1240, 1600] as const;
 
 // Items per row, one entry per rung of the ladder above: `[2, 3, 4, 5, 7]` is "two across under 480px, three
 // from 480, four from 720, five from 1000, seven from 1240". A short list simply stops - the rungs above it
@@ -94,12 +97,17 @@ export function statRow(count: number, caps: StatRowCaps, gap?: StatRowGap): Sta
   };
 }
 
-// The shapes in the app, by how narrow the thing can be read at.
-/** Segmented strip: short label over a big number, legible at ~160px, so it runs up to seven across. */
-export const STRIP_CAPS: StatRowCaps = [2, 3, 4, 5, 7];
-/** Full StatCard: a 40px icon and a 30px number want ~230px, which caps it at four. */
-export const CARD_CAPS: StatRowCaps = [2, 2, 3, 4];
-/** A tile with a few lines of content in it (the dashboard's My day). One per row on a narrow phone. */
-export const TILE_CAPS: StatRowCaps = [1, 2, 3, 4];
-/** A labelled action button - wide enough to read the label, and no wider than it needs. */
-export const ACTION_CAPS: StatRowCaps = [1, 2, 2, 3];
+// The shapes in the app, by how narrow the thing can be read at. The 1600 rung's cap is the most that keeps a
+// cell at or above the width the preset is already read at: none of these holds text that wraps, so on a wide
+// row more of them is what extra width buys, not wider ones.
+/** Segmented strip: short label over a big number, legible at ~160px, so it runs up to seven across (nine from
+ *  1600, ~178px a segment). */
+export const STRIP_CAPS: StatRowCaps = [2, 3, 4, 5, 7, 9];
+/** Full StatCard: a 40px icon and a 30px number want ~230px, which caps it at four - six from 1600 (~253px). */
+export const CARD_CAPS: StatRowCaps = [2, 2, 3, 4, 4, 6];
+/** A tile with a few lines of content in it (the dashboard's My day). One per row on a narrow phone; six from
+ *  1600, no narrower than its two-across rung (~253px against ~232px). */
+export const TILE_CAPS: StatRowCaps = [1, 2, 3, 4, 4, 6];
+/** A labelled action button - wide enough to read the label, and no wider than it needs. Five from 1600
+ *  (~310px; it is read at ~234px two across). */
+export const ACTION_CAPS: StatRowCaps = [1, 2, 2, 3, 3, 5];

@@ -14,7 +14,7 @@ import { BLANK } from "@/lib/tableFilter";
 import type { ComplianceEvent, ComplianceRule, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
-import { Chart, ChartCard } from "@/components/common/Chart";
+import { Chart, ChartCard, ChartStrip } from "@/components/common/Chart";
 import { ChartFilterNote } from "@/components/common/ChartFilterNote";
 import { useChartFocus } from "@/lib/chartFocus";
 import { topSlices } from "@/lib/chartTheme";
@@ -499,7 +499,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
               and still cannot show that March carries four times February's load - which is the thing that
               decides whether next month needs help. */}
           {state === "ready" && complianceCharts.total > 2 && (
-            <div className="mb-4 grid gap-4 lg:grid-cols-2">
+            <ChartStrip id="compliance" className="mb-4">
               <ChartCard title="Filings ahead" description="What falls due in each of the next six months.">
                 <Chart
                   type="bar"
@@ -526,7 +526,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
                   {...cf.chart("category")}
                 />
               </ChartCard>
-            </div>
+            </ChartStrip>
           )}
 
           {/* Every metric narrows the table, so the strip sits directly on top of it - under the charts. */}

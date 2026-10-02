@@ -34,6 +34,11 @@ const VIEWPORTS = {
   tablet768: { width: 768, height: 1024, deviceScaleFactor: 2, isMobile: true, hasTouch: true },
   laptop1024: { width: 1024, height: 768, deviceScaleFactor: 1 },
   desktop1440: { width: 1440, height: 900, deviceScaleFactor: 1 },
+  // The wide-screen rules (docs/06-responsive-ui.md, "Wide screens"): `3xl` and its side columns and docked
+  // detail at 1920; `<main>`'s 1920px cap binding at 2560, and centring with wide margins at an ultra-wide.
+  desktop1920: { width: 1920, height: 1080, deviceScaleFactor: 1 },
+  desktop2560: { width: 2560, height: 1440, deviceScaleFactor: 1 },
+  ultrawide3440: { width: 3440, height: 1440, deviceScaleFactor: 1 },
 };
 
 const ROUTES = [

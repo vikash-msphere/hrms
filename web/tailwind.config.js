@@ -44,6 +44,19 @@ export default {
         // A phone held sideways: ~390px of height for the whole app. Fixed chrome that is worth 12% of a
         // portrait screen costs a third of this one, so some of it stands down here.
         short: { raw: "(max-height: 480px)" },
+        // The wide-screen step past the default `2xl` (1536): a 1920px screen, where the page has ~1600px beside
+        // the sidebar - room for a side column next to the dashboard and the board feed (docs/06-responsive-ui.md,
+        // "Wide screens"). Appended after the defaults, so it sorts after `2xl` in the generated CSS. The same
+        // number is the docked sheet's query in components/ui/sheet.tsx (`DOCK_QUERY`) and the board's in
+        // pages/Announcements.tsx; change them together.
+        "3xl": "1920px",
+      },
+      // A card gallery that adds columns as the page widens instead of stretching its cards: as many tracks of at
+      // least `--cell` as fit (`min(…, 100%)` so a cell never overflows a box narrower than it). `auto-fill`, not
+      // `auto-fit`: a short list keeps its card size, and a short last row reads as the end of the list. Used
+      // from `2xl:`, on top of each grid's own ladder, so nothing at or below 1440px changes.
+      gridTemplateColumns: {
+        fill: "repeat(auto-fill, minmax(min(var(--cell, 16rem), 100%), 1fr))",
       },
       spacing: {
         // Device safe areas as spacing steps, so a bottom-docked bar can write `pb-safe` instead of an

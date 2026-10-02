@@ -27,6 +27,7 @@ import { WriteDialog } from "@/components/common/WriteDialog";
 import { FileDropField } from "@/components/common/FileDropField";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 import { getSetting } from "@/lib/settingsStore";
 
@@ -47,6 +48,7 @@ export default function Candidates({ me }: { me: Me }) {
   const cfg = useAtsConfig();
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const [dialog, setDialog] = useState<Candidate | "new" | null>(null);
   // Applications put a "where are they in the pipeline" line on each candidate, and the dialog lists that
   // person's own applications - so an empty pool with no dialog open needs none of them.
@@ -106,7 +108,7 @@ export default function Candidates({ me }: { me: Me }) {
 
   async function del(c: Candidate) {
     if (!(await confirm({ title: "Remove this candidate?", destructive: true, confirmLabel: "Remove" }))) return;
-    try { await remove(`candidates/${idOf(c.path)}`); reload(); }
+    try { await remove(`candidates/${idOf(c.path)}`); reload(); deleted({ path: `candidates/${idOf(c.path)}`, noun: "candidate", can: c.access?.can, reload, title: "Candidate removed" }); }
     catch (e) { toast({ title: "Couldn't remove", description: (e as Error).message, variant: "destructive" }); }
   }
   function pickResume(c: Candidate) { uploadFor.current = c; fileInput.current?.click(); }

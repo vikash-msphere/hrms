@@ -1,6 +1,8 @@
 import * as React from "react";
 import type { FrappeChartType, FrappeData, FrappeOptions, Chart as FrappeChart } from "frappe-charts";
+import { BarChart3 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { readLocal, writeLocal } from "@/lib/localPref";
 import { useTheme } from "@/lib/theme";
 import { chartColors, heatmapColors, heatmapDays, heatmapPoints } from "@/lib/chartTheme";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -69,6 +71,48 @@ export function ChartCard({ title, description, actions, className, children }: 
       </div>
       {children}
     </div>
+  );
+}
+
+/**
+ * The row of charts a list page puts above its rows, with a "Hide charts" fold the reader's device remembers
+ * per page (`charts:<id>`, a bare key: a fold is a per-device presentation choice - see lib/localPref.ts).
+ *
+ * WHICH CHARTS FOLD. Only a strip that sits ABOVE the rows it summarizes: there, the picture stands between the
+ * reader and the list on every visit, and folding it gives them the list. Charts that ARE the page (an
+ * analytics report, the table builder) or sit inside one record's detail do not use this - folding them hides
+ * the content and frees nothing.
+ *
+ * The page keeps its own "is there enough to chart" test OUTSIDE the strip, so the fold control never renders
+ * over nothing. A slice picked on a chart stays applied while folded, so a page whose charts filter its rows
+ * must show that filter beside the rows (`ChartFilterNote`), not only as the highlighted mark.
+ */
+export function ChartStrip({ id, className, gridClassName = "grid gap-4 lg:grid-cols-2", children }: {
+  /** The page's slug; the fold is stored under `charts:<id>`. */
+  id: string;
+  className?: string;
+  gridClassName?: string;
+  children: React.ReactNode;
+}) {
+  const key = `charts:${id}`;
+  const [open, setOpen] = React.useState(() => readLocal(key) !== "0");
+  const gridId = React.useId();
+  const toggle = () => {
+    setOpen((o) => {
+      writeLocal(key, o ? "0" : "1");
+      return !o;
+    });
+  };
+  return (
+    <section className={cn("space-y-3", className)}>
+      <h2 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        <BarChart3 className="h-3.5 w-3.5" /> Charts
+        <button type="button" className="ml-auto font-medium normal-case tracking-normal text-primary hover:underline" aria-expanded={open} aria-controls={gridId} onClick={toggle}>
+          {open ? "Hide charts" : "Show charts"}
+        </button>
+      </h2>
+      {open && <div id={gridId} className={gridClassName}>{children}</div>}
+    </section>
   );
 }
 

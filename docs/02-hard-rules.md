@@ -69,6 +69,9 @@ breaking the rule fails `npm run verify` rather than waiting for review.
   hover-only affordance, 16px form text on a phone, and nothing docked to the bottom of a phone screen
   without clearing the home indicator and the on-screen keyboard. See `docs/06-responsive-ui.md` for the
   variants (`coarse:`, `standalone:`, `short:`) and the shared pieces.
+- **Spend a wide screen on more, not bigger**: more columns, things side by side, or fewer lines per item -
+  never the same items stretched. A wide step keys off `2xl:`/`3xl:` or a container width a 1440px screen
+  cannot reach, so nothing at or below 1440 changes. `docs/06-responsive-ui.md`, "Wide screens".
 - **Nothing is wider than the viewport except a box that declares itself a scroller.** A phone gives ~328px
   of content column: add up the widths a row states before writing it, let a control row wrap
   (`.editor-row`), and give a `flex-1` wrapper `min-w-0` so the `truncate` inside it can fire. Anything

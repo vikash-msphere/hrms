@@ -38,6 +38,8 @@ test("a manager's comment on a goal reaches the person it belongs to", async ({ 
     const detail = manager.getByRole("dialog");
     await expect(detail.getByText(title).first()).toBeVisible({ timeout: 30_000 });
 
+    // The thread is on the drawer's Discussion tab; it opens on Overview.
+    await detail.getByRole("tab", { name: /^Discussion/ }).click();
     // The box is the affordance; the button will not post an empty one.
     const box = detail.getByPlaceholder(/^Add a comment/);
     await expect(box).toBeVisible();
@@ -47,14 +49,17 @@ test("a manager's comment on a goal reaches the person it belongs to", async ({ 
     await expect(post).toBeEnabled();
     await post.click();
 
-    // In the thread, attributed - a comment with no author is not a conversation.
+    // In the thread, attributed - a comment with no author is not a conversation. The thread's own row, not
+    // the first "Mara Manager" in the drawer: the Overview tab names the manager too ("Agreed by …"), hidden
+    // behind the tab this spec is on.
     await expect(detail.getByText(note)).toBeVisible({ timeout: 30_000 });
-    await expect(detail.getByText("Mara Manager").first()).toBeVisible();
+    await expect(detail.getByRole("listitem").filter({ hasText: note }).getByText("Mara Manager")).toBeVisible();
 
     // The half that matters: the person whose goal it is opens it in their own browser and reads it.
     await gotoRoute(owner, `goals/${id}`);
     const theirs = owner.getByRole("dialog");
     await expect(theirs.getByText(title).first()).toBeVisible({ timeout: 30_000 });
+    await theirs.getByRole("tab", { name: /^Discussion/ }).click();
     await expect(theirs.getByText(note)).toBeVisible({ timeout: 30_000 });
   } finally {
     await purge(admin, path);

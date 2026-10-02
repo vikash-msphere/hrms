@@ -86,6 +86,8 @@ test("a sprint is planned from the backlog, started, charted, and completed", as
   // `writeDialog.spec.ts`'s subject, not this one's).
   await page.getByText(task).first().click();
   const editor = page.getByRole("dialog");
+  // Points lives on the Planning tab; the dialog opens on Details.
+  await editor.getByRole("tab", { name: /^Planning/ }).click();
   // The number itself: the Points field holds an input and a row of preset chips, so its label names the
   // group rather than the box.
   await editor.locator('input[type="number"]').first().fill("3");

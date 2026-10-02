@@ -32,7 +32,7 @@ import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { metaColumns } from "@/components/common/metaColumns";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
-import { Chart, ChartCard } from "@/components/common/Chart";
+import { Chart, ChartCard, ChartStrip } from "@/components/common/Chart";
 import { topSlices } from "@/lib/chartTheme";
 import { useKpiFocus } from "@/lib/kpiFocus";
 import { useChartFocus } from "@/lib/chartFocus";
@@ -733,7 +733,7 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
         {/* What the desk is carrying, and what it is carrying it for. Two questions the KPI strip cannot
             answer - the strip counts what needs YOU; these say what the whole visible queue looks like. */}
         {state === "ready" && rows.length > 2 && (
-          <div className="mb-6 grid gap-4 lg:grid-cols-2">
+          <ChartStrip id="tickets" className="mb-6">
             <ChartCard title="Where the queue stands" description="Every ticket you can see, by state.">
               <Chart
                 type="donut"
@@ -756,7 +756,7 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
                 {...cf.chart("category")}
               />
             </ChartCard>
-          </div>
+          </ChartStrip>
         )}
         {/* Every metric here narrows the tables below, so the strip sits against them - under the charts,
             which are only there to be read. */}

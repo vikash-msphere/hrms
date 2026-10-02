@@ -27,6 +27,7 @@ import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, Dia
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessItem } from "@/components/access/AccessItem";
 import { useConfirm } from "@/components/common/confirm";
+import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 
 const STATUS: Record<LoanStatus, { label: string; variant: "muted" | "secondary" | "success" | "destructive" }> = {
@@ -42,6 +43,7 @@ export default function Loans({ me }: { me: Me }) {
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const deleted = useDeletedToast();
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   const [requesting, setRequesting] = useState(false);
@@ -108,7 +110,7 @@ export default function Loans({ me }: { me: Me }) {
   }
   async function del(l: Loan) {
     if (!(await confirm({ title: "Delete this loan request?", destructive: true, confirmLabel: "Delete" }))) return;
-    try { await remove(`loans/${idOf(l.path)}`); toast({ title: "Request deleted", variant: "success" }); reload(); }
+    try { await remove(`loans/${idOf(l.path)}`); reload(); deleted({ path: `loans/${idOf(l.path)}`, noun: "request", can: l.access?.can, reload }); }
     catch (e) { toast({ title: "Couldn't delete the request", description: (e as Error).message, variant: "destructive" }); }
   }
   // The server refuses a manual repayment identical to one recorded moments ago, because from the request
@@ -174,7 +176,8 @@ export default function Loans({ me }: { me: Me }) {
               <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={kf.clear}>Show all loans</button>
             </p>
           )}
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {/* From `2xl` more loans per row at the size they are three across (`grid-cols-fill`), not wider ones. */}
+          <div className="grid gap-4 [--cell:20rem] md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-fill">
             {shown.map((l) => {
               const can = l.access?.can ?? [];
               const pct = l.principal > 0 ? Math.round((l.repaid / l.principal) * 100) : 0;

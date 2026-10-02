@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, personPath, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, confirmDelete, gotoRoute, personPath, test, expect, toast } from "./fixtures";
 
 // Deleting a background check record - neither `backgroundChecks.spec.ts` (the standard-set form) nor
 // `backgroundCheckFlow.spec.ts` (the status workflow) ever removes one; both purge via the API. Shares the
@@ -23,6 +23,7 @@ test("a background check record is deleted from the list", async ({ as }) => {
   await expect(row).toBeVisible({ timeout: 30_000 });
   await row.getByRole("button", { name: "Actions" }).click();
   await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await confirmDelete(page);
   await expect(toast(page, "Background check deleted")).toBeVisible({ timeout: 30_000 });
   await expect(page.locator("tbody tr").filter({ hasText: vendor })).toHaveCount(0, { timeout: 30_000 });
 

@@ -42,7 +42,9 @@ export function YearGrid({ year, dayOf, today, weekStart = 0, onSelect }: {
   const months = useMemo(() => monthsOf(y), [y]);
   const cols = weekdayOrder(weekStart);
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+    // Twelve months always, so the wide step is a divisor rather than "as many as fit": two rows of six from
+    // `3xl` (auto-fill would draw 5 + 5 + 2), about 250px a month on a 1920 screen.
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 3xl:grid-cols-6">
       {months.map(({ m, label, days }) => {
         // Leading blanks so the 1st sits under its weekday column.
         const lead = (new Date(Date.parse(days[0]! + "T00:00:00Z")).getUTCDay() - weekStart + 7) % 7;
