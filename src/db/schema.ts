@@ -1958,6 +1958,10 @@ export const jobs = sqliteTable("jobs", {
 // a retry of the same write is handed that answer instead of doing the write twice. `status` 0 marks a write
 // still in flight. Keyed per principal, because a key is only unique within the client that minted it. Swept
 // nightly (cron.ts) - a retry arrives within seconds, so a day is a generous window.
+//
+// No index on `created_at`. D1 bills every index entry as a written row, and the row is inserted, updated and
+// deleted once each, so that index cost a write on two of those three for one query a night. That query is a
+// full scan of one day's rows, which reads as many rows as an index range over them would.
 export const idempotencyKeys = sqliteTable("idempotency_keys", {
   principal: text("principal").notNull(),
   key: text("key").notNull(),
@@ -1967,7 +1971,7 @@ export const idempotencyKeys = sqliteTable("idempotency_keys", {
   headersJson: text("headers_json"), // the answer's Content-Type, ETag and Location, replayed with it
   body: text("body"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-}, (t) => ({ pk: primaryKey({ columns: [t.principal, t.key] }), createdIdx: index("idempotency_keys_created_idx").on(t.createdAt) }));
+}, (t) => ({ pk: primaryKey({ columns: [t.principal, t.key] }) }));
 
 // One row per scheduled tick, written by runScheduled, and one per manual `cron-runs:run`: makes "did it run /
 // when / how long / did it fail" observable (the crons themselves are stateless Cloudflare triggers that record
@@ -2135,6 +2139,29 @@ export const searchVectors = sqliteTable("search_vectors", {
   // The sweep's order. Without this the rotation below would sort the whole table every five minutes.
   checkedIdx: index("search_vectors_checked_idx").on(t.checkedAt),
 }));
+
+// How far the embed drain has reconciled each indexable collection, so a tick can tell from one row per
+// collection which collections it has to read at all (services/searchEmbed.ts).
+//
+// Without it the drain had to read every row to learn that nothing changed. Its "could this row have changed"
+// filter compares a row's `checkedAt` with its collection's `collection_versions` stamp, and that comparison
+// can only run on a row the query has already read. So an idle tick read every indexed `search_docs` row,
+// joined to its `search_vectors` row and its stamp, and the orphan check read every `search_vectors` row
+// again. That cost about five rows read per indexed record, every ten minutes.
+//
+// A collection needs reading only when its stamp has moved since the last tick that finished it. The two
+// halves of the drain finish on different terms, so each keeps its own mark. The embed half is skipped while
+// `search.semantic` is off and the orphan half never is. A collection with no row here has never been
+// finished, so a collection newly added to INDEXABLE gets read in full on its first tick.
+export const searchVectorMarks = sqliteTable("search_vector_marks", {
+  collection: text("collection").primaryKey(),
+  // The start of the last tick that left no row of this collection waiting to be embedded, and the model it
+  // embedded with. A different model in `MODELS.embed` makes the whole collection due again.
+  embeddedAt: integer("embedded_at", { mode: "timestamp_ms" }),
+  model: text("model"),
+  // The start of the last tick that left no orphaned vector in this collection.
+  prunedAt: integer("pruned_at", { mode: "timestamp_ms" }),
+});
 
 // Which public posts have been through the moderation model, and on what text.
 //

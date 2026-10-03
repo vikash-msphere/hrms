@@ -29,6 +29,8 @@ compatibility_flags = ["nodejs_compat"]
 # Off, as in production and for the same reason: each uploaded version would otherwise stay reachable at its
 # own preview address, pre-gate builds included. See the note in wrangler.toml.
 preview_urls = false
+# Off, as in production: unset, every deploy turns the workers.dev hostname back on. See the note in wrangler.toml.
+workers_dev = false
 # Minified, as in production. See the note in wrangler.toml.
 minify = true
 

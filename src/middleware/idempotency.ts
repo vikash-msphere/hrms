@@ -95,9 +95,13 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
 };
 
 /** The nightly sweep (cron.ts): a retry arrives within seconds of the write it repeats, so a day-old key is
- *  answering nobody. One statement - the table holds a day of writes, not a history. */
+ *  answering nobody. One statement - the table holds a day of writes, not a history.
+ *
+ *  Counted from `meta.changes`, not `RETURNING`: a DELETE with RETURNING cannot delete in one pass, so SQLite
+ *  collects the rowids first, seeks each row again, and copies every returned value through a temp table that
+ *  D1 bills as rows read and written. */
 export async function sweepIdempotencyKeys(deps: Deps): Promise<number> {
   const cutoff = new Date(deps.clock.now().getTime() - 24 * 60 * 60 * 1000);
-  const gone = await deps.db.delete(schema.idempotencyKeys).where(lt(schema.idempotencyKeys.createdAt, cutoff)).returning({ key: schema.idempotencyKeys.key });
-  return gone.length;
+  const res = await deps.db.delete(schema.idempotencyKeys).where(lt(schema.idempotencyKeys.createdAt, cutoff)).run();
+  return res.meta.changes;
 }

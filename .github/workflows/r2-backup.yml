@@ -1,7 +1,8 @@
 name: r2-backup
 # Weekly copy of the R2 document bucket into a SEPARATE bucket.
 #
-# WHY THIS EXISTS. D1 is recoverable two ways (Time Travel for 30 days, plus the nightly d1-backup.yml export).
+# WHY THIS EXISTS. D1 is recoverable two ways (Time Travel for 7 days on Workers Free / 30 on Paid, plus the
+# nightly d1-backup.yml snapshot).
 # The documents were recoverable zero ways: one bucket, no second copy. That asymmetry is the wrong way round
 # for what the two hold. A payslip can be rebuilt from the payroll run; a letter carrying an employee's
 # e-signature cannot be rebuilt by anything, and neither can an uploaded identity document or a signed policy
@@ -33,7 +34,7 @@ name: r2-backup
 # See docs/deploy.md "Backups & disaster recovery".
 on:
   schedule:
-    - cron: "0 4 * * 0" # Sundays 04:00 UTC, after the nightly D1 export has finished
+    - cron: "0 4 * * 0" # Sundays 04:00 UTC, hours after the nightly D1 snapshot (20:30 UTC) has finished
   workflow_dispatch: {}
 
 concurrency:
@@ -45,6 +46,8 @@ permissions: {}
 
 jobs:
   sync:
+    # prod only, for the reason d1-backup.yml gives: a schedule cannot name a branch.
+    if: github.ref == 'refs/heads/prod'
     runs-on: ubuntu-latest
     environment: production
     steps:

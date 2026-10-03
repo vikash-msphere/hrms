@@ -401,6 +401,75 @@ describe("failure leaves the index retryable", () => {
   });
 });
 
+describe("a collection is read only until a tick finishes it", () => {
+  // `search_vector_marks` lets a tick skip every collection not written since a tick last finished it. Each
+  // case here is a way a collection could be marked finished while it still had work in it, and would then
+  // never be read again: nothing writes to it, so nothing would make it due.
+  const stampAt = (collection: string, at: Date) =>
+    deps.db.insert(schema.collectionVersions).values({ collection, at })
+      .onConflictDoUpdate({ target: schema.collectionVersions.collection, set: { at } });
+  const anHourAgo = () => new Date(Date.now() - 60 * 60_000);
+  const marks = () => deps.db.select().from(schema.searchVectorMarks);
+
+  it("leaves a collection due when its rows could not be embedded", async () => {
+    // The model is down for the tick that first sees the row. Nothing is written to tickets afterwards, so
+    // only the missing mark keeps the row on the next tick's list.
+    await deps.db.insert(schema.searchDocs).values(doc());
+    await stampAt("tickets", anHourAgo());
+    model().fail = true;
+    expect((await drainSearchEmbeddings(deps)).pending).toBe(1);
+    expect((await marks()).find((m) => m.collection === "tickets")?.embeddedAt ?? null).toBeNull();
+
+    model().fail = false;
+    expect((await drainSearchEmbeddings(deps)).embedded).toBe(1);
+    expect((await marks()).find((m) => m.collection === "tickets")?.model).toBe(MODELS.embed);
+  });
+
+  it("leaves a collection due when one tick's window could not hold all of it", async () => {
+    for (let i = 0; i < BUDGET.embedsPerDrain + 3; i++) await deps.db.insert(schema.searchDocs).values(doc({ title: `Ticket ${i}` }));
+    await stampAt("tickets", anHourAgo());
+    expect((await drainSearchEmbeddings(deps)).embedded).toBe(BUDGET.embedsPerDrain);
+    expect((await marks()).find((m) => m.collection === "tickets")?.embeddedAt ?? null).toBeNull();
+    expect((await drainSearchEmbeddings(deps)).embedded).toBe(3);
+  });
+
+  it("reads a finished collection again when the embedding model changes", async () => {
+    const row = doc();
+    await deps.db.insert(schema.searchDocs).values(row);
+    await stampAt("tickets", anHourAgo());
+    await drainSearchEmbeddings(deps);
+
+    // What a deploy that changes `MODELS.embed` leaves behind: vectors and a mark from the previous model, in
+    // a collection nobody has written to since. The mark is not a mark for this model, so the collection is due.
+    const previous = "@cf/previous/embedder";
+    await deps.db.update(schema.searchVectors).set({ model: previous });
+    await deps.db.update(schema.searchVectorMarks).set({ model: previous }).where(eq(schema.searchVectorMarks.collection, "tickets"));
+    expect((await drainSearchEmbeddings(deps)).embedded).toBe(1);
+    expect((await deps.db.select().from(schema.searchVectors))[0]!.model).toBe(MODELS.embed);
+  });
+
+  it("finds an orphan in a finished collection once the collection is written", async () => {
+    const row = doc();
+    await deps.db.insert(schema.searchDocs).values(row);
+    await stampAt("tickets", anHourAgo());
+    await drainSearchEmbeddings(deps);
+    expect(index().size).toBe(1);
+
+    // The trigger that deletes a `search_docs` row bumps the same stamp.
+    await deps.db.delete(schema.searchDocs).where(eq(schema.searchDocs.recordId, row.recordId));
+    await stampAt("tickets", new Date());
+    expect((await drainSearchEmbeddings(deps)).removed).toBe(1);
+    expect(index().size).toBe(0);
+  });
+
+  it("forgets the mark of a collection taken out of INDEXABLE", async () => {
+    // Kept, it would let the collection skip its first full read if it were ever opted back in.
+    await deps.db.insert(schema.searchVectorMarks).values({ collection: "candidates", embeddedAt: new Date(), model: MODELS.embed, prunedAt: new Date() });
+    await drainSearchEmbeddings(deps);
+    expect((await marks()).map((m) => m.collection)).not.toContain("candidates");
+  });
+});
+
 describe("embedText", () => {
   it("prefixes the collection's noun and joins the label fields", () => {
     expect(embedText("vendors", "WeWork", "ops@wework.example")).toBe("Vendor: WeWork - ops@wework.example");

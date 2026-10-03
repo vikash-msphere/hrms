@@ -128,9 +128,17 @@ describe("Idempotency-Key", () => {
     const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
     await deps.db.insert(schema.idempotencyKeys).values([
       { principal: "u:u1", key: "old-aaaaaaaa", method: "POST", path: "/v1/things", status: 200, createdAt: old },
+      { principal: "u:u2", key: "old-bbbbbbbb", method: "POST", path: "/v1/things", status: 200, createdAt: old },
       { principal: "u:u1", key: "new-aaaaaaaa", method: "POST", path: "/v1/things", status: 200, createdAt: new Date() },
     ]);
-    expect(await sweepIdempotencyKeys(deps)).toBe(1);
+    expect(await sweepIdempotencyKeys(deps)).toBe(2);
     expect((await deps.db.select().from(schema.idempotencyKeys)).map((r) => r.key)).toEqual(["new-aaaaaaaa"]);
+  });
+
+  // D1 bills every index entry as a written row, and each key row is inserted, updated and swept. The primary key
+  // is the only index the lookups need; another one costs a write on every claim and every sweep.
+  it("indexes the table by its primary key alone", async () => {
+    const { results } = await b.DB.prepare("PRAGMA index_list(`idempotency_keys`)").all<{ name: string }>();
+    expect(results.map((r) => r.name)).toEqual(["sqlite_autoindex_idempotency_keys_1"]);
   });
 });

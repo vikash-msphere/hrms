@@ -367,19 +367,28 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   // through to a real request rather than turning a transient boot-time blip into a failed sign-in. It is
   // claimed OUTSIDE the retry - it is a single in-flight response, not a request that can be made again.
   const prefetched = await claimMePrefetch(path, init);
-  const isRead = (init.method ?? "GET").toUpperCase() === "GET" || !!init.safeToRepeat;
-  // A DELETE is the one write that is safe to send twice: the second copy finds the row already gone. So a
-  // gateway refusal (never a 429 - that is a budget, and the server said wait) is asked again like a read, and
-  // a 404 on a REPEAT is the earlier copy having landed with its answer lost on the way back - done, not failed.
-  // Without this, one dropped connection on a Remove press left the row on screen behind an error toast.
-  const isDelete = (init.method ?? "").toUpperCase() === "DELETE";
+  const method = (init.method ?? "GET").toUpperCase();
+  const isRead = method === "GET" || !!init.safeToRepeat;
+  // A DELETE is safe to send twice: the second copy finds the row already gone. So a gateway refusal (never a
+  // 429 - that is a budget, and the server said wait) is asked again like a read, and a 404 on a REPEAT is the
+  // earlier copy having landed with its answer lost on the way back - done, not failed. Without this, one
+  // dropped connection on a Remove press left the row on screen behind an error toast.
+  const isDelete = method === "DELETE";
+  // So is a PATCH or PUT with no `If-Match`: it SETS fields, and a second copy sets them to the same values.
+  // A preference flush or a notification marked read is this shape, and they are the bulk of the app's writes.
+  // With `If-Match` it is not: the first copy moved the ETag, so the repeat is refused 412 for a write that
+  // landed.
+  const isSet = (method === "PATCH" || method === "PUT") && !new Headers(init.headers).has("If-Match");
   // Every other write carries an Idempotency-Key, minted once for this call and re-sent with each attempt:
   // the server keeps the first copy's answer and hands it to a repeat instead of doing the write twice
   // (src/middleware/idempotency.ts). That is what makes a create or a `:submit` safe to ask again when the
   // connection drops, where before it could only fail - the write may have landed, and nothing could tell.
-  const keyed = !isRead && !isDelete;
+  // Only those writes: each key is a D1 row written, rewritten and swept, so a write that is already safe to
+  // repeat does not get one.
+  const keyed = !isRead && !isDelete && !isSet;
   const idemKey = keyed ? crypto.randomUUID() : undefined;
-  const attempts = isRead || isDelete || keyed ? READ_ATTEMPTS : 1;
+  // Every request is now safe to ask again: a read, a DELETE, a set, or a keyed write.
+  const attempts = READ_ATTEMPTS;
   let keepalive = init.keepalive ?? (!isRead && keepaliveFits(init.body));
   let tries = 0;
   for (let attempt = 1; ; attempt++) {
@@ -439,7 +448,6 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   if (!res.ok) {
     // Only user ACTIONS get the request-access offer: background reads legitimately 403 while the UI is
     // settling (and gated reads shouldn't fire at all) - a toast for those would nag constantly.
-    const method = (init.method ?? "GET").toUpperCase();
     const problem = (await res.json().catch(() => null)) as Problem | null;
     // Not every 403 is a permission wall. The attendance clock's network fence, for one, refuses a caller who
     // holds the verb perfectly well - offering them "request access to attendance" would send them to an

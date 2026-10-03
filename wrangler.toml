@@ -37,6 +37,11 @@ compatibility_flags = ["nodejs_compat"]
 # gate (src/http/staticSite.ts), which serve the whole bundle to anyone. Nothing here uses preview URLs (the
 # deploy path is `wrangler deploy`), and a setting left unset is whatever the dashboard last held.
 preview_urls = false
+# Off. The app is served on its custom domain, attached in the dashboard. Left unset, `wrangler deploy` turns the
+# `hrms.<subdomain>.workers.dev` hostname back ON at every deploy (no `routes` here, so wrangler's default is
+# on), whatever the dashboard toggle says. That hostname is outside the Cloudflare zone, so the media edge rule
+# (docs/deploy.md §10) cannot guard it.
+workers_dev = false
 # Minified. Unminified, the Worker is about 6.3MB, and a fresh isolate compiles whatever a tick or request
 # touches for the first time inside that invocation's CPU allowance - 10ms on the free plan. Function and
 # class names are kept (wrangler's default `keep_names`), so `.name` checks in dependencies still hold.
