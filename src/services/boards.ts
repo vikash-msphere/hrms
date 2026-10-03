@@ -12,7 +12,7 @@ import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
-import { audit, createdMeta, diffMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { deleteStateFilter, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
@@ -166,7 +166,7 @@ export async function updateBoard(deps: Deps, actor: AppUser, id: string, patch:
   }
   const updated = await updateAtVersion(deps, schema.boards, "board", row, set);
   if (moved) await syncBoardShares(deps, actor, id);
-  await audit(deps, actor, "board.update", "boards", id, diffMeta(row, updated, set, "boards"), updated);
+  await auditUpdate(deps, actor, "board.update", "boards", id, diffMeta(row, updated, set, "boards"), updated);
   // A department move may have added or taken away the caller's own manage rules.
   return moved ? Object.assign(updated, { _myAccess: await freshBoardAccessLevel(deps, actor, updated.code) }) : updated;
 }
@@ -259,7 +259,7 @@ export async function configureBoard(deps: Deps, actor: AppUser, id: string, inp
   // recorded name-only here, because a from→to of a whole JSON array is unreadable - lib/audit now expands
   // those three into per-key entries (`columns.in_progress`, `columns.order`), so a rename or a reorder is
   // legible and this needs no special case of its own.
-  await audit(deps, actor, "board.configure", "boards", row.uuid, diffMeta(row, updated, set, "boards"), updated);
+  await auditUpdate(deps, actor, "board.configure", "boards", row.uuid, diffMeta(row, updated, set, "boards"), updated);
   return updated;
 }
 

@@ -27,6 +27,7 @@ import { MODELS } from "../domain/aiPolicy";
 import { SEMANTIC_MAX, SEMANTIC_MIN_SCORE, SEMANTIC_WINDOW, meaningful } from "../domain/semanticSearch";
 import { explains, matchExpression, queryTerms, type QueryTerm } from "../domain/searchQuery";
 import { orgSynonymGroups } from "./searchSynonyms";
+import { collectionsNamed as namedBy } from "../domain/entityNames";
 
 export type SearchHit = {
   collection: string;
@@ -130,21 +131,12 @@ function titleShare(terms: QueryTerm[]): SQL {
 }
 
 /**
- * The searchable collections an `in:` word names. Forgiving on purpose, because people type what they call
- * the thing: the exact name (`tickets`), its singular (`ticket`), or the start of it (`leave` names leave
- * requests, leave types and leave encashments; `asset` names assets, asset categories and asset requests).
- * A start needs three letters, so `in:a` names nothing rather than half the app.
+ * The searchable collections the `in:` / `-in:` words name, by the rule in domain/entityNames.ts: a collection
+ * answers to its wire name AND to the words the app shows for it, so `in:tasks` names `cards`.
  */
 function collectionsNamed(words: string[]): Set<string> {
-  const out = new Set<string>();
-  for (const raw of words) {
-    const w = raw.toLowerCase().replace(/[^a-z-]/g, "");
-    if (!w) continue;
-    for (const { collection: c } of SEARCH_INDEX) {
-      if (c === w || c === `${w}s` || c === `${w}es` || (w.length >= 3 && (c.startsWith(w) || c.replace(/-/g, "").startsWith(w.replace(/-/g, ""))))) out.add(c);
-    }
-  }
-  return out;
+  const all = SEARCH_INDEX.map((e) => e.collection);
+  return new Set(words.flatMap((w) => namedBy(w, all)));
 }
 
 /**
@@ -158,8 +150,33 @@ function collectionsNamed(words: string[]): Set<string> {
  *   - `after` / `before` (epoch ms) keep rows created in that window, off `search_docs.created_at` (indexed).
  *   - `status` keeps rows whose own state/status column holds that value. Collections with no such column drop
  *     out, and a value that is not status-shaped answers nothing rather than being ignored.
+ *   - `reportsOf` keeps rows whose owner is one of this employee's direct reports (`is:team`).
+ *   - `dept` keeps rows filed under the departments that word names (`dept:sales`), by the same code subtree
+ *     `applyScope`'s `dept` breadth binds. Only departments the caller may list are resolved, so the word can
+ *     never confirm that a department they cannot see exists.
+ *   - The `not*` fields are the same filters turned round (`-in:holidays`, `-@priya`, `-is:mine`, `-is:team`,
+ *     `-dept:sales`, `-status:rejected`): they drop the rows the plain filter would keep, and keep everything
+ *     else - including rows the plain filter could not speak about at all. A catalogue belongs to nobody, so
+ *     `-@priya` keeps it; a collection with no status column has no row in that status, so `-status:` keeps it.
+ *     An exclusion that names nothing (`-in:nothing`, a department the caller cannot see) leaves nothing out.
+ *     Each takes a list (`-status:rejected -status:cancelled`): a row goes when ANY of them names it.
+ *   - `sort: "new"` orders a worded search newest first instead of by relevance. Not a narrowing.
  */
-export type SearchNarrowing = { collections?: string[]; ownerId?: string; after?: number; before?: number; status?: string };
+export type SearchNarrowing = {
+  collections?: string[];
+  notCollections?: string[];
+  ownerId?: string;
+  notOwnerIds?: string[];
+  reportsOf?: string;
+  notReportsOf?: string;
+  dept?: string;
+  notDepts?: string[];
+  after?: number;
+  before?: number;
+  status?: string;
+  notStatuses?: string[];
+  sort?: "new";
+};
 
 /** A collection's state/status column, as `{ prop, table, column, idColumn }`, or null when it has none. */
 function statusColumnOf(entry: SearchEntry): { prop: string; table: string; column: string; id: string } | null {
@@ -175,6 +192,43 @@ const statusLiteral = (raw: string): string | null => {
   const v = raw.trim().toLowerCase();
   return /^[a-z0-9_ -]{1,30}$/.test(v) ? v : null;
 };
+
+// An employee id or a hierarchy code, as a SQL literal. Both are server-generated from the base32 alphabet (plus
+// `-` in a code), so anything else is not one and is refused rather than quoted. Null = not an id.
+const idLiteral = (raw: string): string | null => (/^[a-z0-9-]{1,64}$/i.test(raw) ? raw : null);
+
+// A department name as `dept:` spells it: lower case, every run of anything but letters and digits one `-`.
+// The palette offers the same spelling (web/src/lib/paletteQuery.ts deptSlug).
+const deptSlug = (name: string) => name.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "");
+
+/**
+ * The codes of the departments each `dept:` / `-dept:` word names, read under the caller's own `departments`
+ * scope - ONE read however many words there are. Forgiving the way `in:` is: an exact name wins; otherwise any
+ * department whose name, or a word of it, starts with the word (three letters at least). A caller who may not
+ * list departments resolves none.
+ */
+async function deptCodesNamed(deps: Deps, words: string[], scope: ListScope | undefined): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>(words.map((w) => [w, []]));
+  if (!scope || !words.some((w) => deptSlug(w))) return out;
+  const d = schema.departments;
+  const rows = await deps.db
+    .select({ code: d.code, name: d.name })
+    .from(d)
+    // Bound the way the search index binds departments (domain/searchIndex.ts: scoped on `code` for both).
+    .where(and(sql`${d.deleteTime} is null`, applyScope(scope, d.code, d.code)));
+  for (const word of words) {
+    const w = deptSlug(word);
+    if (!w) continue;
+    const exact = rows.filter((r) => deptSlug(r.name) === w);
+    const startsWith = (slug: string) => slug.startsWith(w) || slug.split("-").some((part) => part.startsWith(w));
+    const named = exact.length ? exact : w.length >= 3 ? rows.filter((r) => startsWith(deptSlug(r.name))) : [];
+    out.set(word, named.flatMap((r) => {
+      const code = r.code ? idLiteral(r.code) : null;
+      return code ? [code] : [];
+    }));
+  }
+  return out;
+}
 
 // `collection IN (...)` as a literal - the names come from the registry, never from the caller, so they cost
 // no bound parameters. That matters: D1 caps a statement's parameters, and the scope predicates need them.
@@ -208,15 +262,27 @@ export async function globalSearch(
   const q = rawQuery.trim();
   // Filters with no words (`status:pending`, `in:tickets is:mine`) ask "which records are these", so they are
   // answered by listing, newest first, rather than by matching text there is none of.
-  const narrowed = !!narrowing.collections?.length || narrowing.ownerId !== undefined || narrowing.after !== undefined
-    || narrowing.before !== undefined || narrowing.status !== undefined;
+  const narrowed = !!narrowing.collections?.length || !!narrowing.notCollections?.length || narrowing.ownerId !== undefined
+    || !!narrowing.notOwnerIds?.length || narrowing.reportsOf !== undefined || narrowing.notReportsOf !== undefined
+    || narrowing.dept !== undefined || !!narrowing.notDepts?.length || narrowing.after !== undefined
+    || narrowing.before !== undefined || narrowing.status !== undefined || !!narrowing.notStatuses?.length;
   const browse = q.length === 0 && narrowed;
   if ((!browse && q.length < MIN_QUERY) || scopes.size === 0) return [];
   const only = narrowing.collections?.length ? collectionsNamed(narrowing.collections) : null;
   if (only && only.size === 0) return []; // `in:` named nothing searchable
+  const skip = narrowing.notCollections?.length ? collectionsNamed(narrowing.notCollections) : null;
   const owner = narrowing.ownerId;
   const status = narrowing.status !== undefined ? statusLiteral(narrowing.status) : undefined;
   if (status === null) return []; // `status:` named something that is not a status
+  const notStatuses = (narrowing.notStatuses ?? []).map(statusLiteral);
+  if (notStatuses.includes(null)) return []; // as for `status:`: not a status, so not an answer
+  const notStatusList = notStatuses as string[];
+  const reportsOf = narrowing.reportsOf !== undefined ? idLiteral(narrowing.reportsOf) : undefined;
+  if (reportsOf === null) return []; // `is:team` for a caller with no employee record: nobody reports to them
+  // Not an id: nobody reports to it, so there is no team to leave out.
+  const notReportsOf = narrowing.notReportsOf !== undefined ? idLiteral(narrowing.notReportsOf) : null;
+  const notOwners = narrowing.notOwnerIds ?? [];
+  const ownerFilter = !!owner || !!reportsOf;
 
   // Collections whose filter is identical share one OR-branch, so the statement stays small: for most callers
   // every own-scoped collection collapses into a single predicate, rather than one per collection.
@@ -225,7 +291,9 @@ export async function globalSearch(
     const scope = scopes.get(entry.collection);
     if (!scope) continue; // not listable by this caller
     if (only && !only.has(entry.collection)) continue; // `in:` asked for other collections
-    if (owner && entry.scoping.kind === "flat") continue; // a catalogue row belongs to nobody
+    if (skip?.has(entry.collection)) continue; // `-in:` left it out
+    if (ownerFilter && entry.scoping.kind === "flat") continue; // a catalogue row belongs to nobody
+    if (narrowing.dept !== undefined && entry.scoping.kind === "flat") continue; // ...nor is it filed under a department
     if (status && !statusColumnOf(entry)) continue; // a collection with no status has no row in that status
     // ...nor does one whose status column cannot hold the value. Answered from the schema, so a half-typed
     // `status:pen` costs no read at all, rather than a walk of the index for rows that cannot exist.
@@ -241,6 +309,15 @@ export async function globalSearch(
     else groups.set(key, { collections: [entry.collection], pred: publicOnly ? and(pred, eq(docs.restricted, false)) : pred });
   }
   if (groups.size === 0) return [];
+  // `dept:` and `-dept:` words become the codes of the departments they name, the caller's own departments scope
+  // deciding which ones they may name. One read for all of them, only when asked for, and after the loop above,
+  // so a filter that already ruled everything out reads nothing.
+  const notDepts = narrowing.notDepts ?? [];
+  const deptWords = [...(narrowing.dept !== undefined ? [narrowing.dept] : []), ...notDepts];
+  const deptNamed = deptWords.length ? await deptCodesNamed(deps, deptWords, scopes.get("departments")) : new Map<string, string[]>();
+  const deptCodes = narrowing.dept !== undefined ? deptNamed.get(narrowing.dept)! : null;
+  if (deptCodes && deptCodes.length === 0) return []; // `dept:` named no department this caller can see
+  const notDeptCodes = notDepts.flatMap((w) => deptNamed.get(w) ?? []);
   // The org's own synonym groups ride beside the built-in ones (services/searchSynonyms.ts). Loaded only once
   // some collection is left to search, so a filter that rules everything out reads nothing.
   const synonyms = browse ? [] : await orgSynonymGroups(deps);
@@ -249,22 +326,64 @@ export async function globalSearch(
 
   // The owner narrowing rides INSIDE each branch, so the semantic half's re-read (which reuses `branches`)
   // is narrowed by it too.
-  // So do the date window and the status, as LITERALS: a bound parameter per branch per filter would spend the
-  // statement's 100-parameter budget the scope predicates need.
+  // So do the date window, the status, the team and the department, as LITERALS: a bound parameter per branch
+  // per filter would spend the statement's 100-parameter budget the scope predicates need.
   const after = Number.isFinite(narrowing.after) ? sql.raw(`"search_docs"."created_at" >= ${Math.floor(narrowing.after!)}`) : undefined;
   const before = Number.isFinite(narrowing.before) ? sql.raw(`"search_docs"."created_at" < ${Math.floor(narrowing.before!)}`) : undefined;
+  // `is:team`: one lookup on the manager index, not a list of ids sent in.
+  const teamOf = (managerId: string) => `"search_docs"."owner_id" in (select "uuid" from "employees" where "manager_id" = '${managerId}')`;
+  const team = reportsOf ? sql.raw(teamOf(reportsOf)) : undefined;
+  // `dept:`: each named department's code and its subtree, boundary-safe exactly as listScope.ts binds it.
+  const underDepts = (codes: string[]) => `(${codes.map((c) => `"search_docs"."code" = '${c}' OR "search_docs"."code" glob '${c}-*'`).join(" OR ")})`;
+  const inDept = deptCodes ? sql.raw(underDepts(deptCodes)) : undefined;
+  // The exclusions keep a row the plain filter cannot speak about: one with no owner, or no code. `NOT` alone
+  // would drop those too, because `NOT (NULL = x)` is NULL, not true. The people are literals like the rest: a
+  // bound id per person per branch is what spends the parameter budget. One that is not an id is nobody's, so
+  // leaving it out leaves nothing out.
+  const notOwnerIds = notOwners.flatMap((id) => idLiteral(id) ?? []);
+  const excluded = [
+    notOwnerIds.length
+      ? sql.raw(`("search_docs"."owner_id" is null or "search_docs"."owner_id" not in (${notOwnerIds.map((id) => `'${id}'`).join(", ")}))`)
+      : undefined,
+    notReportsOf ? sql.raw(`("search_docs"."owner_id" is null or not ${teamOf(notReportsOf)})`) : undefined,
+    notDeptCodes.length ? sql.raw(`("search_docs"."code" is null or not ${underDepts(notDeptCodes)})`) : undefined,
+  ];
+  // The status test on one collection's own row - its status is one of `values` - or null when that collection
+  // has no status column.
+  const statusTest = (c: string, values: string[]): string | null => {
+    const s = statusColumnOf(SEARCH_INDEX.find((e) => e.collection === c)!);
+    return s
+      ? `exists (select 1 from "${s.table}" t where t."${s.id}" = "search_docs"."record_id" and lower(t."${s.column}") in (${values.map((v) => `'${v}'`).join(", ")}))`
+      : null;
+  };
   const statusIn = (collections: string[]): SQL | undefined => {
     if (!status) return undefined;
     const parts = collections.flatMap((c) => {
-      const s = statusColumnOf(SEARCH_INDEX.find((e) => e.collection === c)!);
-      return s ? [`("search_docs"."collection" = '${c}' AND exists (select 1 from "${s.table}" t where t."${s.id}" = "search_docs"."record_id" and lower(t."${s.column}") = '${status}'))`] : [];
+      const test = statusTest(c, [status]);
+      return test ? [`("search_docs"."collection" = '${c}' AND ${test})`] : [];
     });
     return sql.raw(parts.length ? `(${parts.join(" OR ")})` : "0");
   };
+  // `-status:`: each collection is tested only for the values its status column can hold; every other row stays.
+  const statusNotIn = (collections: string[]): SQL | undefined => {
+    if (!notStatusList.length) return undefined;
+    const parts = collections.flatMap((c) => {
+      const values = notStatusList.filter((v) => statusValuesOf(SEARCH_INDEX.find((e) => e.collection === c)!).includes(v));
+      const test = values.length ? statusTest(c, values) : null;
+      return test ? [`("search_docs"."collection" = '${c}' AND ${test})`] : [];
+    });
+    return parts.length ? sql.raw(`not (${parts.join(" OR ")})`) : undefined;
+  };
   const branches = [...groups.values()].map((g) => {
     const inList = collectionIn(g.collections);
-    return and(inList, g.pred, owner ? eq(docs.ownerId, owner) : undefined, after, before, statusIn(g.collections))!;
+    return and(inList, g.pred, owner ? eq(docs.ownerId, owner) : undefined, team, inDept, ...excluded, after, before, statusIn(g.collections), statusNotIn(g.collections))!;
   });
+  const probes: Probes = {
+    owner: ownerFilter || notOwnerIds.length > 0 || !!notReportsOf,
+    status,
+    notStatuses: notStatusList,
+    dept: !!deptCodes || notDeptCodes.length > 0,
+  };
 
   // Filters alone: the same branches, walked newest first down the created_at index, and stopped at the same
   // cap - so a common filter reads about a page of rows, and none of it touches the FTS index. Nothing was
@@ -277,7 +396,7 @@ export async function globalSearch(
       order by ${docs.createdAt} desc
       limit ${sql.raw(String(TOTAL))}
     `);
-    return gated(deps, listed.map((r) => ({ ...r, exact: true as const })), [], { owner, status }, gate);
+    return gated(deps, listed.map((r) => ({ ...r, exact: true as const })), [], probes, gate);
   }
 
   // The boosts, as 0/1 terms. `coalesce` because a row with no owner compares NULL, and a NULL factor would
@@ -285,12 +404,16 @@ export async function globalSearch(
   const mine = user.employeeId ? sql`coalesce(${docs.ownerId} = ${user.employeeId}, 0)` : sql`0`;
   const recent = sql`coalesce(${docs.createdAt} > ${deps.clock.now().getTime() - RECENT_MS}, 0)`;
   const inTitle = titleShare(queryTerms(q, synonyms));
+  // `sort:new` keeps the same matches and only changes which TOTAL of them come back: the newest, not the best.
+  const order = narrowing.sort === "new"
+    ? sql`${docs.createdAt} desc`
+    : sql`bm25("search_fts") * (1.0 + ${sql.raw(String(TITLE_BOOST))} * ${inTitle} + ${sql.raw(String(OWN_BOOST))} * ${mine} + ${sql.raw(String(RECENT_BOOST))} * ${recent})`;
   // The FTS table is named, not aliased: bm25() takes the table itself as its first argument.
   const rows = await deps.db.all<SearchHit & { code: string | null }>(sql`
     select ${docs.collection} as collection, ${docs.recordId} as id, ${docs.code} as code, ${docs.title} as title, ${docs.subtitle} as subtitle
     from "search_fts" join ${docs} on ${docs}."rowid" = "search_fts"."rowid"
     where "search_fts" match ${match!} and ${eq(docs.deleted, false)} and (${or(...branches)})
-    order by bm25("search_fts") * (1.0 + ${sql.raw(String(TITLE_BOOST))} * ${inTitle} + ${sql.raw(String(OWN_BOOST))} * ${mine} + ${sql.raw(String(RECENT_BOOST))} * ${recent})
+    order by ${order}
     limit ${sql.raw(String(TOTAL))}
   `);
   const matched = rows.map((r) => ({ collection: r.collection, id: r.id, code: r.code, title: r.title, subtitle: r.subtitle }));
@@ -313,27 +436,33 @@ export async function globalSearch(
     ? []
     : await semanticHits(deps, q, [...groups.values()].flatMap((g) => g.collections), branches);
   const hits = semantic.length ? appendRelated(keyword, semantic) : keyword;
-  return gated(deps, hits, queryTerms(q, synonyms), { owner, status }, gate);
+  return gated(deps, hits, queryTerms(q, synonyms), probes, gate);
 }
+
+/** Which columns the narrowing asked a question about, for the probes in `gated`. */
+type Probes = { owner: boolean; status?: string; notStatuses: string[]; dept: boolean };
 
 /** The field gate over a page of hits, however they were found: the narrowing probes, then `narrowRedacted`. */
 async function gated(
   deps: Deps,
   hits: ScoredHit[],
   terms: QueryTerm[],
-  { owner, status }: { owner?: string; status?: string },
+  { owner, status, notStatuses, dept }: Probes,
   gate?: RedactionGate,
 ): Promise<SearchHit[]> {
-  // An owner narrowing is a question about the owner COLUMN. A caller denied that column on a row may still
-  // list the row, but must not learn whose it is by asking `@name` and watching it come back.
-  // A status narrowing is the same kind of question about the status column.
-  const probed = (owner || status) && gate
+  // An owner narrowing (`@name`, `is:mine`, `is:team`) is a question about the owner COLUMN. A caller denied
+  // that column on a row may still list the row, but must not learn whose it is by asking and watching it
+  // come back.
+  // A status narrowing, or exclusion, is the same kind of question about the status column, and a `dept:`
+  // narrowing about the row's department.
+  const probed = (owner || status || notStatuses.length || dept) && gate
     ? hits.filter((h) => {
         const entry = SEARCH_INDEX.find((e) => e.collection === h.collection);
         if (!entry) return true;
         const denied = gate(h.collection, h.code);
         if (owner && entry.scoping.kind !== "flat" && denied.includes(wireOf(entry.scoping.owner))) return false;
-        const s = status ? statusColumnOf(entry) : null;
+        if (dept && denied.includes("department_id")) return false;
+        const s = status || notStatuses.some((v) => statusValuesOf(entry).includes(v)) ? statusColumnOf(entry) : null;
         return !(s && denied.includes(wireOf(s.prop)));
       })
     : hits;

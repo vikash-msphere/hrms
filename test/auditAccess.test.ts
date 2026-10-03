@@ -175,6 +175,9 @@ describe("mutationAudit", () => {
       "/v1/personal-documents:previewLetter", "/v1/personal-documents/pd1:download",
       "/v1/org-documents/od1:download", "/v1/candidates/c1:download", "/v1/referrals/r1:download",
       "/v1/expenses/ex1:download", "/v1/reimbursements/rb1:download", "/v1/tax-declarations/td1:download",
+      "/v1/cards/c1:suggestGoal", "/v1/cards/c1:suggestSteps", "/v1/cards/c1:flow", "/v1/cards/c1:triage",
+      "/v1/goals/g1:suggestMeasure", "/v1/goals/g1:similar",
+      "/v1/boards/b1:narrate", "/v1/boards/b1:duplicates", "/v1/employees/me:viewers",
     ]) {
       expect(mutationAudit("POST", p), p).toBeNull();
     }
@@ -207,6 +210,10 @@ describe("mutationAudit", () => {
     expect(mutationAudit("POST", "/v1/announcements/a1:vote")).toBeNull();
     expect(mutationAudit("POST", "/v1/suggestions/s1:upvote")).toBeNull();
     expect(mutationAudit("POST", "/v1/suggestions/s1:downvote")).toBeNull();
+    expect(mutationAudit("POST", "/v1/cards/c1:watch")).toBeNull();
+    expect(mutationAudit("POST", "/v1/cards/c1:unwatch")).toBeNull();
+    expect(mutationAudit("POST", "/v1/goals/g1:watch")).toBeNull();
+    expect(mutationAudit("POST", "/v1/goals/g1:unwatch")).toBeNull();
     // …but a real comment/reply on the same collection IS an accountability event.
     expect(mutationAudit("POST", "/v1/announcements/a1:reply")).toMatchObject({ action: "announcements.reply" });
   });

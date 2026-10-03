@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
@@ -105,7 +105,7 @@ export async function updateReviewCycle(deps: Deps, actor: AppUser, id: string, 
   // selection that would narrow every review to nothing.
   if (has("competency_keys")) set.competencyKeysJson = patch.competency_keys?.length ? JSON.stringify([...new Set(patch.competency_keys)]) : null;
   const updated = await updateAtVersion(deps, schema.reviewCycles, "review cycle", row, set);
-  await audit(deps, actor, "review-cycle.update", "review-cycles", id, diffMeta(row, updated, set, "review-cycles"), updated);
+  await auditUpdate(deps, actor, "review-cycle.update", "review-cycles", id, diffMeta(row, updated, set, "review-cycles"), updated);
   return updated;
 }
 

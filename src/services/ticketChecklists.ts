@@ -10,7 +10,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
@@ -76,7 +76,7 @@ export async function updateTicketChecklist(deps: Deps, actor: AppUser, id: stri
   }
   if (has("items")) set.items = JSON.stringify(cleanItems(patch.items));
   const updated = await updateAtVersion(deps, schema.ticketChecklists, "ticket checklist", row, set);
-  await audit(deps, actor, "ticket_checklist.update", "ticket-checklists", id, diffMeta(row, updated, set, "ticket-checklists"), updated);
+  await auditUpdate(deps, actor, "ticket_checklist.update", "ticket-checklists", id, diffMeta(row, updated, set, "ticket-checklists"), updated);
   return updated;
 }
 

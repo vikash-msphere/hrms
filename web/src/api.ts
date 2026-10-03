@@ -79,7 +79,11 @@ let signInWaiters: (() => void)[] = [];
 export function waitForSignIn(): Promise<void> {
   return new Promise((resolve) => signInWaiters.push(resolve));
 }
+// Which session a request was sent under. Bumped each time the dialog confirms the person is back, so a 401 to a
+// request sent BEFORE that is recognisably about the session they have since replaced (see `staleRefusal`).
+let signInEpoch = 0;
 export function notifySignedIn(): void {
+  signInEpoch++;
   const waiting = signInWaiters;
   signInWaiters = [];
   for (const resume of waiting) resume();
@@ -147,6 +151,16 @@ export function unauthorized(problem: unknown): ApiError {
 }
 async function on401(res: Response): Promise<never> {
   throw unauthorized(await res.json().catch(() => null));
+}
+/**
+ * A 401 that answers a request sent before the person last signed back in. It is about the dead session, not
+ * the live one, so it must not run `sessionDead` again: a read or a background preference flush sent while the
+ * tab was signed out (with network latency, the answer can land after "I've signed in - continue" has already
+ * succeeded) used to put the "Signed out" dialog straight back over a person who had just signed in. The caller
+ * sends the request again instead - every request `api()` makes is safe to repeat (see the notes there).
+ */
+function staleRefusal(res: Response, sentIn: number): boolean {
+  return res.status === 401 && sentIn !== signInEpoch;
 }
 // The cached copies of server data come OFF THE DISK when the session dies, not only when somebody chooses
 // "Sign out" from the menu. That menu item was the sole caller of a purge, so the ordinary exits - a 12-hour
@@ -393,6 +407,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   let tries = 0;
   for (let attempt = 1; ; attempt++) {
     tries = attempt;
+    const sentIn = signInEpoch;
     try {
       res =
         (attempt === 1 ? prefetched : undefined) ??
@@ -414,6 +429,12 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
       keepalive = false;
       if (attempt >= attempts) throw networkError();
       await settle(attempt);
+      continue;
+    }
+    // Ahead of the attempt cap: the copy sent under the live session has not been tried yet. It cannot loop,
+    // since that copy is stamped with the current epoch and its own 401 is an ordinary lapse.
+    if (staleRefusal(res, sentIn)) {
+      await discard(res);
       continue;
     }
     if (attempt >= attempts) break;
@@ -805,6 +826,7 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<{ blob: Blob;
   // letterhead designer showing "the server had a problem" with no preview and no way back to one until the
   // design was edited again).
   for (let attempt = 1; ; attempt++) {
+    const sentIn = signInEpoch;
     try {
       res = await fetch(`/v1/${path}:${opts.verb ?? "download"}${qs}`, {
         method: "POST",
@@ -817,6 +839,12 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<{ blob: Blob;
       if (opts.signal?.aborted) throw e; // cancelled on purpose - let the caller's own abort handling see it, not a network-error toast
       if (attempt >= READ_ATTEMPTS) throw networkError(); // a download is the request most likely to be attempted on a bad connection
       await settle(attempt);
+      continue;
+    }
+    // Sent before the person signed back in: about the dead session, so asked again rather than signing the tab
+    // out a second time - see `staleRefusal`.
+    if (staleRefusal(res, sentIn) && !opts.signal?.aborted) {
+      await discard(res);
       continue;
     }
     // A BUDGET REFUSAL IS HONOURED HERE TOO, on the same rule `api()` applies to a read: the server always

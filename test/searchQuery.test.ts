@@ -51,13 +51,19 @@ describe("explains", () => {
 });
 
 describe("startOfPeriod", () => {
-  it("reads a month or a day as the UTC instant it starts", () => {
-    expect(startOfPeriod("2026-01")).toBe(Date.UTC(2026, 0, 1));
-    expect(startOfPeriod("2026-03-15")).toBe(Date.UTC(2026, 2, 15));
+  it("reads a month or a day as the instant it starts in the org timezone", () => {
+    expect(startOfPeriod("2026-01", "UTC")).toBe(Date.UTC(2026, 0, 1));
+    expect(startOfPeriod("2026-03-15", "UTC")).toBe(Date.UTC(2026, 2, 15));
+    // IST midnight is 18:30 UTC the evening before.
+    expect(startOfPeriod("2026-10-03", "Asia/Kolkata")).toBe(Date.UTC(2026, 9, 2, 18, 30));
+    // West of UTC, and on the day New York leaves daylight saving (midnight is still EDT, -4h).
+    expect(startOfPeriod("2026-11-01", "America/New_York")).toBe(Date.UTC(2026, 10, 1, 4));
+    // The day after, midnight is EST (-5h).
+    expect(startOfPeriod("2026-11-02", "America/New_York")).toBe(Date.UTC(2026, 10, 2, 5));
   });
 
   it("refuses anything that is not a real month or day", () => {
-    for (const bad of ["2026-02-30", "2026-13", "jan", "2026-1", ""]) expect(startOfPeriod(bad)).toBeNull();
+    for (const bad of ["2026-02-30", "2026-13", "jan", "2026-1", ""]) expect(startOfPeriod(bad, "UTC")).toBeNull();
   });
 });
 

@@ -18668,12 +18668,17 @@ paths:
           in: query
           required: false
           schema: { type: string }
-          description: "Search text. Fewer than 2 characters returns no results - except absent or empty alongside a narrowing parameter (in, owner, mine, after, before, status), which lists the newest records that narrowing names."
+          description: "Search text. Fewer than 2 characters returns no results - except absent or empty alongside a narrowing parameter (in, notin, owner, notowner, mine, notmine, team, notteam, dept, notdept, after, before, status, notstatus), which lists the newest records that narrowing names."
         - name: in
           in: query
           required: false
           schema: { type: string }
-          description: "Comma-separated collections to narrow to (at most 12). A collection the caller may not list contributes nothing."
+          description: "Comma-separated words naming collections to narrow to (at most 12). A word names a collection by its collection name or by the name the app shows for it (tasks for cards, people for employees), singular or plural, or by the start of either (3+ characters). A collection the caller may not list contributes nothing."
+        - name: notin
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Comma-separated words naming collections to leave out (at most 12), named the same way as in."
         - name: owner
           in: query
           required: false
@@ -18684,21 +18689,63 @@ paths:
           required: false
           schema: { type: string, enum: ['1'] }
           description: "1 = narrow to rows belonging to the caller."
+        - name: team
+          in: query
+          required: false
+          schema: { type: string, enum: ['1'] }
+          description: "1 = narrow to rows belonging to the caller's direct reports. Catalogues belong to nobody and drop out."
+        - name: dept
+          in: query
+          required: false
+          schema: { type: string }
+          description: "A department name: narrow to rows filed under that department and its sub-departments. Matches the exact name (any run of spaces or punctuation as one dash, case-insensitive), else any department whose name or a word of it starts with the value (3+ characters). Only departments the caller may list are named; naming none answers nothing."
         - name: after
           in: query
           required: false
           schema: { type: string }
-          description: "YYYY-MM or YYYY-MM-DD: narrow to rows created on or after the start of that month or day (UTC). A value that is not a date answers nothing."
+          description: "YYYY-MM or YYYY-MM-DD: narrow to rows created on or after the start of that month or day in the org timezone (settings/attendance). A value that is not a date answers nothing."
         - name: before
           in: query
           required: false
           schema: { type: string }
-          description: "YYYY-MM or YYYY-MM-DD: narrow to rows created before the start of that month or day (UTC). A value that is not a date answers nothing."
+          description: "YYYY-MM or YYYY-MM-DD: narrow to rows created before the start of that month or day in the org timezone (settings/attendance). A value that is not a date answers nothing."
         - name: status
           in: query
           required: false
           schema: { type: string }
           description: "Narrow to rows whose own state or status column holds this value (case-insensitive). Collections with no such column drop out."
+        - name: notstatus
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Comma-separated values (at most 12): leave out rows whose own state or status column holds any of them (case-insensitive). Collections with no such column stay."
+        - name: notowner
+          in: query
+          required: false
+          schema: { type: array, items: { type: string } }
+          style: form
+          explode: true
+          description: "employees/{employee}, repeated once per person (at most 12): leave out rows belonging to any of them. Rows that belong to nobody stay."
+        - name: notmine
+          in: query
+          required: false
+          schema: { type: string, enum: ['1'] }
+          description: "1 = leave out rows belonging to the caller. Rows that belong to nobody stay."
+        - name: notteam
+          in: query
+          required: false
+          schema: { type: string, enum: ['1'] }
+          description: "1 = leave out rows belonging to the caller's direct reports. Rows that belong to nobody stay."
+        - name: notdept
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Comma-separated department names (at most 12), each matched as dept is: leave out rows filed under any of those departments and their sub-departments. Rows filed under no department stay; a name that matches no department the caller may list leaves nothing out."
+        - name: sort
+          in: query
+          required: false
+          schema: { type: string, enum: ['new'] }
+          description: "new = newest first instead of by relevance."
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }

@@ -43,28 +43,20 @@ export function kudosArtUrl(file: string): string {
 // Die-cut backing for dark mode, for BOTH art sets. The kudos stickers letter their slogans in dark navy, and
 // the unDraw illustrations paint hair/trousers/shoes/outlines in near-black Blue 950 (see
 // web/public/assets/illustrations/README.md) - either one disappears against a dark card, so all card art gets a
-// solid white silhouette behind it - the printed-sticker look - rather than a rectangular plate.
+// faint white silhouette behind it - the printed-sticker look - rather than a rectangular plate.
 //
-// Four chained zero-blur opaque drop-shadows do it. A drop-shadow paints the ALPHA SILHOUETTE behind the element,
-// and each filter in a chain applies to the previous one's output, so the horizontal pair spreads the silhouette
-// +-Npx and the vertical pair then spreads that union, filling the corners: a square-kernel dilation, solid
-// because the shadow colour is opaque. It follows every glyph too, since each letter is its own island on
-// transparency - which is the point, that is where the legibility comes from. A `background` cannot do this; it
-// would fill the element's box.
+// The SVG filter `#art-diecut` in web/index.html does it: feMorphology dilates the art's ALPHA SILHOUETTE by 1px (a
+// square kernel, so corners fill), an 8% white flood is clipped to that shape, and the art is merged back on top. It follows every glyph too, since each letter is its own island on transparency - which is
+// the point, that is where the legibility comes from. A `background` cannot do this; it would fill the element's
+// box. Chained CSS drop-shadows can only build the shape with an opaque colour: a translucent one shadows the
+// previous shadows too, so the alpha stacks unevenly (denser along edges and between letters, faint at corners).
 //
-// 2px on the card is where the slogans read clearly while adjacent letters stay separate (at 4px they merge into
-// a blob); thumbnails take 1px so the outline stays proportional. Light mode gets none of this.
-//
-// Spelled out in full rather than built from a radius, because Tailwind only emits classes it can see literally
-// in the source - a composed string would leave these rules out of the stylesheet entirely.
+// One width serves the card and the thumbnails alike: 1px is the thinnest outline, since browsers round the
+// dilate radius down to whole device pixels and anything under 1px vanishes on a 1x screen. Light mode gets none
+// of this.
 
-/** Solid white die-cut silhouette behind full-size card art, dark mode only. */
-export const ART_DIECUT =
-  "dark:[filter:drop-shadow(2px_0_0_#fff)_drop-shadow(-2px_0_0_#fff)_drop-shadow(0_2px_0_#fff)_drop-shadow(0_-2px_0_#fff)]";
-
-/** Same, one pixel thinner, for previews and picker thumbnails. */
-export const ART_DIECUT_SM =
-  "dark:[filter:drop-shadow(1px_0_0_#fff)_drop-shadow(-1px_0_0_#fff)_drop-shadow(0_1px_0_#fff)_drop-shadow(0_-1px_0_#fff)]";
+/** Faint white die-cut silhouette behind card art and its thumbnails, dark mode only. */
+export const ART_DIECUT = "dark:[filter:url(#art-diecut)]";
 
 // "good-job.png" -> "Good job". For labelling the choices in the editor.
 export function kudosArtLabel(file: string): string {

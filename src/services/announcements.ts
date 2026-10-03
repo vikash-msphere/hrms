@@ -4,7 +4,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
-import { audit, createdMeta, diffMeta, noteMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, noteMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, isMissingParentRow } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { applyScope } from "./listScope";
@@ -526,7 +526,7 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
   if (gated) set.heldAt = deps.clock.now();
 
   const updated = await updateAtVersion(deps, schema.announcements, "announcement", row, set);
-  await audit(deps, actor, "announcement.update", "announcements", id, diffMeta(row, updated, set, "announcements"), updated);
+  await auditUpdate(deps, actor, "announcement.update", "announcements", id, diffMeta(row, updated, set, "announcements"), updated);
 
   if (gated && !(await moderationGate(deps, "announcements", id, actor.uuid))) {
     // Held: the post is off the wall as of this edit, and the people its new text names are NOT told - a

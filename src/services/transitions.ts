@@ -8,7 +8,7 @@ import { byIdChunks } from "../lib/dbBatch";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { deleteStateFilter, purgeRow, type PurgeCascade } from "./softDelete";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
@@ -210,7 +210,7 @@ export async function updateTransition(deps: Deps, actor: AppUser, id: string, p
     const subject = (await deps.db.select({ managerId: schema.employees.managerId }).from(schema.employees).where(eq(schema.employees.uuid, row.employeeId)).limit(1))[0];
     await instantiateTemplate(deps, actor, tpl, id, row.employeeId, subject?.managerId ?? null, updated.anchorDate ? +new Date(updated.anchorDate) : NaN);
   }
-  await audit(deps, actor, "transition.update", "transitions", id, diffMeta(row, updated, set, "transitions"), updated);
+  await auditUpdate(deps, actor, "transition.update", "transitions", id, diffMeta(row, updated, set, "transitions"), updated);
   return updated;
 }
 

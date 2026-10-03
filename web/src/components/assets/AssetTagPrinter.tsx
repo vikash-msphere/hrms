@@ -81,7 +81,7 @@ function loadStored(settings?: AssetTagSettings): StoredState {
 function Backdrop({ onClose, children }: { onClose: () => void; children: ReactNode }) {
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 sm:p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4 sm:p-6"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}

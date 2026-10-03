@@ -14,7 +14,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, auditMany, diffMeta } from "../lib/audit";
+import { audit, auditMany, auditUpdate, diffMeta } from "../lib/audit";
 import { runBatch, runBatchChecked, byIdChunks, type BatchStmt } from "../lib/dbBatch";
 import { genId } from "../lib/idCodec";
 import { etagOf } from "../http/serialize";
@@ -831,11 +831,14 @@ export async function updateCompensation(deps: Deps, actor: AppUser, id: string,
   if (prev && from !== +new Date(row.effectiveFrom))
     await deps.db.update(schema.compensation).set({ effectiveTo: new Date(from), updatedAt: new Date() }).where(eq(schema.compensation.uuid, prev.uuid));
 
-  await audit(deps, actor, "compensation.update", "compensation", id, {
+  // The subject is stamped on every entry, so it cannot be what says whether anything changed: the diff (and the
+  // settled-arrears note, which records a value the service chose to keep) decides that.
+  const changes = diffMeta(row, updated, set, "compensation");
+  await auditUpdate(deps, actor, "compensation.update", "compensation", id, changes || settled ? {
     employee: `employees/${row.employeeId}`,
-    ...(diffMeta(row, updated, set, "compensation") ?? {}),
+    ...(changes ?? {}),
     ...(settled ? { reason: "retro arrears already paid out, so the stored arrears were left at the amount disbursed" } : {}),
-  }, updated);
+  } : undefined, updated);
   // A correction to what someone is paid is news to them, the same as a revision is.
   if (row.employeeId !== actor.employeeId && (annualCtc !== row.ctcAnnual || from !== +new Date(row.effectiveFrom)))
     await notify(deps, { recipient: row.employeeId, type: "compensation.revised", title: "Your compensation was corrected", body: `Effective ${ymd(from)}.`, link: "profile", subject: `compensation/${id}`, actorId: actor.employeeId });

@@ -113,9 +113,11 @@ export async function setTrackedFrom(deps: Deps, actor: AppUser, input: { date: 
     await auditMany(
       deps,
       actor,
-      landed.map(({ row, ymd }) => {
+      // A row whose date already matched changed nothing, so it gets no entry (the same rule as auditUpdate).
+      landed.flatMap(({ row, ymd }) => {
         const set = { trackedFrom: new Date(`${ymd}T00:00:00Z`) };
-        return { action: "employee.update", entity: "employees", entityId: row.uuid, meta: diffMeta(row, { ...row, ...set }, set, "employees"), snapshot: row };
+        const meta = diffMeta(row, { ...row, ...set }, set, "employees");
+        return meta ? [{ action: "employee.update", entity: "employees", entityId: row.uuid, meta, snapshot: row }] : [];
       }),
     );
     // A row somebody else dated between the read and the write kept THEIR date, which this read never saw - so

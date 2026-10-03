@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
-import { orgNameFontStack } from "@/lib/fonts";
+import { readingFaceStyle } from "@/lib/fonts";
 import { splitSource } from "@/lib/splitSource";
 import { parseAttrLine, type RichAttrs } from "@/lib/richTextEdit";
 
@@ -52,8 +52,9 @@ const MUTED = "text-muted-foreground";
 // `withSize` is for the one block that carries a font-size of its own: see the heading branch in RichText.
 const attrClass = (a: RichAttrs, withSize = true) => cn(a.align && ALIGN[a.align], withSize && a.size && SIZE[a.size], a.muted && MUTED);
 // The typeface is the one thing that cannot be a class: the stacks are shared data (lib/fonts.ts), not a fixed
-// Tailwind vocabulary, and Tailwind only emits classes it can see spelled out in the source.
-const attrStyle = (a: RichAttrs) => (a.face ? { fontFamily: orgNameFontStack(a.face) } : undefined);
+// Tailwind vocabulary, and Tailwind only emits classes it can see spelled out in the source. It carries the face's
+// reading corrections too (readingFaceStyle), so a decorative face reads as easily as the UI font at body size.
+const attrStyle = (a: RichAttrs, heading = false) => readingFaceStyle(a.face, heading);
 
 // ---- Blocks ------------------------------------------------------------------------------------------------
 
@@ -363,7 +364,7 @@ export function RichText({
           // leaving it alone. Inside, the parent is the heading, and the step means what it says.
           const step = b.attrs.size ? SIZE[b.attrs.size] : "";
           return (
-            <H key={key} style={attrStyle(b.attrs)} className={cn("font-semibold", size, attrClass(b.attrs, false))}>
+            <H key={key} style={attrStyle(b.attrs, true)} className={cn("font-semibold", size, attrClass(b.attrs, false))}>
               {step ? <span className={step}>{renderInline(b.text, key)}</span> : renderInline(b.text, key)}
             </H>
           );

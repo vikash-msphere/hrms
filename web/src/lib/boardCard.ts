@@ -14,11 +14,14 @@ export const CARD_WIDTH = FEED_WIDTH - AUTHOR_COLUMN;
 // Kudos accent by level tier (index into the configured levels): a soft card tint + the appreciation-icon
 // colour, so a kudo reads as a normal board post with a light recognition accent. Literal class strings (not
 // interpolated) so Tailwind's JIT keeps them. Levels past the 4th reuse the top tier.
+// Dark mode tints with the bright 400 shade at a few percent, not a 950 shade: a near-black hue over the
+// blue-grey card either disappears (blue, emerald) or turns it muddy brown (amber). Amber gets more alpha
+// because a warm hue over a cool card cancels to plain grey at the others' strength.
 export const KUDOS_TIERS = [
-  { icon: "text-emerald-500", card: "border-emerald-200/70 bg-emerald-50/40 dark:border-emerald-900/50 dark:bg-emerald-950/20" },
-  { icon: "text-blue-500", card: "border-blue-200/70 bg-blue-50/40 dark:border-blue-900/50 dark:bg-blue-950/20" },
-  { icon: "text-amber-500", card: "border-amber-200/70 bg-amber-50/40 dark:border-amber-900/50 dark:bg-amber-950/20" },
-  { icon: "text-violet-500", card: "border-violet-200/70 bg-violet-50/40 dark:border-violet-900/50 dark:bg-violet-950/20" },
+  { icon: "text-emerald-500", card: "border-emerald-200/70 bg-emerald-50/40 dark:border-emerald-400/[0.12] dark:bg-emerald-400/[0.035]" },
+  { icon: "text-blue-500", card: "border-blue-200/70 bg-blue-50/40 dark:border-blue-400/[0.12] dark:bg-blue-400/[0.035]" },
+  { icon: "text-amber-500", card: "border-amber-200/70 bg-amber-50/40 dark:border-amber-400/[0.12] dark:bg-amber-400/[0.06]" },
+  { icon: "text-violet-500", card: "border-violet-200/70 bg-violet-50/40 dark:border-violet-400/[0.12] dark:bg-violet-400/[0.04]" },
 ];
 
 export function kudosTier(levels: KudosLevel[], level?: string | null) {

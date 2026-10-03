@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { auditUpdate } from "../lib/audit";
 import { notFound } from "../lib/errors";
 import { validateManifest } from "../domain/policyValidate";
 import { clearCache } from "../lib/cache";
@@ -36,6 +36,6 @@ export async function updatePolicy(deps: Deps, actor: AppUser, key: string, valu
   if (key === "manifest") clearCache("manifest");
   // The access manifest is the app's highest-leverage config: "who changed the protected-field list" has to be
   // answerable from the trail alone, and the key plus a timestamp does not answer it.
-  await audit(deps, actor, "policy.update", "policy", key, { diff: { value: { from: existingJson, to: json.length > 140 ? `${json.slice(0, 140)}…` : json } } }, row);
+  await auditUpdate(deps, actor, "policy.update", "policy", key, prev === json ? undefined : { diff: { value: { from: existingJson, to: json.length > 140 ? `${json.slice(0, 140)}…` : json } } }, row);
   return row!;
 }

@@ -422,15 +422,51 @@ function blobsChanged(before: Record<string, unknown>, after: Record<string, unk
 }
 
 // Convenience for update audits: the `{ diff }` meta from before→after over the `set` object's keys, plus the
-// names of any blob columns that moved but are not expanded (see blobsChanged). Undefined when nothing
-// meaningful changed. `set` is the Drizzle update object (its keys = touched columns).
+// names of any columns that moved but whose values the trail may not carry. Undefined when NOTHING changed,
+// which is what lets `auditUpdate` drop the row for a save that changed nothing. `set` is the Drizzle update
+// object (its keys = touched columns).
 export function diffMeta(before: Record<string, unknown> | undefined, after: Record<string, unknown> | undefined, set: Record<string, unknown>, collection?: string) {
   if (!before || !after) return undefined;
   const keys = Object.keys(set);
   const diff = fieldDiff(before, after, keys, collection);
-  const changed = blobsChanged(before, after, keys, collection);
+  const changed = [...blobsChanged(before, after, keys, collection), ...hiddenChanged(before, after, keys, collection)];
   if (!Object.keys(diff).length && !changed.length) return undefined;
   return { ...(Object.keys(diff).length ? { diff } : {}), ...(changed.length ? { changed } : {}) };
+}
+
+// The secret, encrypted and denied columns that changed, by NAME only. fieldDiff leaves them out because their
+// values must not reach the trail, but the fact that one moved must: without it, an update that changed only
+// a secret reads as a save that changed nothing, and `auditUpdate` writes no row for it at all. The at-rest
+// `Enc` suffix comes off so the name reads as the field it is.
+function hiddenChanged(before: Record<string, unknown>, after: Record<string, unknown>, keys: string[], collection?: string): string[] {
+  const denied = deniedColumns(collection);
+  return keys
+    .filter((k) => (SECRETISH.test(k) || denied.includes(k)) && JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))
+    .map((k) => k.replace(/Enc$/, ""));
+}
+
+/**
+ * The audit row for an UPDATE, written only when the update changed something.
+ *
+ * A save that changed nothing is not an event: it wrote a row per press of Save, with an empty Details cell,
+ * that told the reader nothing they could act on. `meta` is the update's change meta (`diffMeta`, or the
+ * service's own diff), undefined exactly when nothing moved. Skipping still marks the request as audited, or
+ * the authz write backstop would log the same no-op as a generic row instead.
+ */
+export async function auditUpdate(
+  deps: Deps,
+  actor: AppUser | string,
+  action: string,
+  entity: string,
+  entityId: string | undefined,
+  meta: unknown,
+  snapshot?: Record<string, unknown> | null,
+) {
+  if (meta === undefined) {
+    if (typeof actor !== "string") actor.audited = true;
+    return;
+  }
+  return audit(deps, actor, action, entity, entityId, meta, snapshot);
 }
 
 /** One audit entry, for the batched form below: the same arguments audit() takes, minus the deps/actor. */

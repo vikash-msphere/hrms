@@ -17,6 +17,7 @@
 //
 // A group is a set of terms that should find each other. Keep them TIGHT: every member widens every other,
 // so a loose member ("pay" in the payslip group) turns one precise query into a browse.
+import { localDayStartMs } from "./attendance";
 
 export const MAX_TOKENS = 6; // a search box query; more terms than this is a paste, not a search
 
@@ -147,15 +148,17 @@ export function matchExpression(raw: string, extra: SynonymGroups = []): string 
     .join(" AND ");
 }
 
-/** `YYYY-MM` or `YYYY-MM-DD` (a search's `after:` / `before:`) as the UTC instant that month or day starts,
- *  or null when it is not one - including a date the calendar would roll over (2026-02-30). */
-export function startOfPeriod(raw: string): number | null {
+/** `YYYY-MM` or `YYYY-MM-DD` (a search's `after:` / `before:`) as the instant that month or day starts in the
+ *  org timezone `tz`, or null when it is not one - including a date the calendar would roll over (2026-02-30).
+ *  An org-local day, because that is the day the palette counts `today` and `7d` from: read at UTC midnight, a
+ *  record created in the first hours of an IST morning fell outside `on:today`. */
+export function startOfPeriod(raw: string, tz: string): number | null {
   const m = /^(\d{4})-(\d{2})(?:-(\d{2}))?$/.exec(raw.trim());
   if (!m) return null;
   const [y, mo, d] = [Number(m[1]), Number(m[2]), m[3] ? Number(m[3]) : 1];
-  const ms = Date.UTC(y, mo - 1, d);
-  const back = new Date(ms);
-  return back.getUTCFullYear() === y && back.getUTCMonth() === mo - 1 && back.getUTCDate() === d ? ms : null;
+  const back = new Date(Date.UTC(y, mo - 1, d));
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d) return null;
+  return localDayStartMs(back.toISOString().slice(0, 10), tz);
 }
 
 /**

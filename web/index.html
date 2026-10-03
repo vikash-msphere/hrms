@@ -25,6 +25,17 @@
     <script src="/theme-init.js"></script>
   </head>
   <body>
+    <!-- The dark-mode die-cut halo behind card art, referenced by ART_DIECUT in src/lib/kudosArt.ts. A CSS filter
+         can only point at an SVG filter in the same document, so it lives here. Absolutely positioned at 0x0 so it never takes up a line box; not display:none, which stops some browsers
+         rendering the filter at all. -->
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <filter id="art-diecut" color-interpolation-filters="sRGB">
+        <feMorphology in="SourceAlpha" operator="dilate" radius="1" result="spread" />
+        <feFlood flood-color="#fff" flood-opacity="0.08" />
+        <feComposite in2="spread" operator="in" result="halo" />
+        <feMerge><feMergeNode in="halo" /><feMergeNode in="SourceGraphic" /></feMerge>
+      </filter>
+    </svg>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

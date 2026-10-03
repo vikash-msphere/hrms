@@ -8,7 +8,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, auditMany, createdMeta, diffMeta, removedMeta } from "../lib/audit";
+import { audit, auditMany, auditUpdate, createdMeta, diffMeta, removedMeta } from "../lib/audit";
 import { chunk, insertBatches, runBatch } from "../lib/dbBatch";
 import { invalidArgument, notFound, aborted, forbidden, failedPrecondition, isCodeCollision, isAssetTagCollision } from "../lib/errors";
 import { etagOf } from "../http/serialize";
@@ -552,7 +552,7 @@ export async function updateAsset(deps: Deps, actor: AppUser, id: string, patch:
   }
   if (set.status !== undefined && set.status !== row.status) set.custodySince = isPending(set.status as string) ? new Date() : null;
   const updated = await updateAtVersion(deps, schema.assets, "asset", row, set);
-  await audit(deps, actor, "asset.update", "assets", id, diffMeta(row, updated, set, "assets"), updated);
+  await auditUpdate(deps, actor, "asset.update", "assets", id, diffMeta(row, updated, set, "assets"), updated);
   // Newly assigned to someone (a reassignment) notifies the new owner - with the "scan it" ask when the
   // org requires acknowledgement.
   if (derivedAssigned && derivedAssigned !== row.assignedTo && derivedAssigned !== actor.employeeId) await notifyAssignee(deps, actor, updated!);

@@ -10,7 +10,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, noteMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, noteMeta } from "../lib/audit";
 import { getDefaultDepartmentId } from "./settings";
 import { orgToday, dayStartMs } from "./orgDay";
 import { genId } from "../lib/idCodec";
@@ -654,7 +654,7 @@ export async function updateCard(deps: Deps, actor: AppUser, id: string, patch: 
   // (assignee, department, sprint, goal) into `<collection>/<id>` refs instead of the raw internal ids they are
   // in the row - an internal id must not reach the wire, and a ref is what the feed resolves to a NAME. It also
   // reports the label/document blobs as `changed` instead of dumping them into the diff.
-  await audit(deps, actor, "card.update", "cards", id, diffMeta(row, updated, set, "cards"));
+  await auditUpdate(deps, actor, "card.update", "cards", id, diffMeta(row, updated, set, "cards"));
   if (has("assignee")) await notifyCardAssigned(deps, actor, updated, row.assigneeId);
   // Recompute the new goal (size/reassign may change its roll-up) and, if the link moved, the old goal too.
   await recomputeGoalProgress(deps, actor, updated.goalId);

@@ -8,7 +8,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { dayStartMs, orgToday } from "./orgDay";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
@@ -137,7 +137,7 @@ export async function updateNoticePeriod(deps: Deps, actor: AppUser, id: string,
   if (has("status") && updated.status === "completed") {
     await terminateForOffboarding(deps, actor, updated.employeeId, updated.lastWorkingDay);
   }
-  await audit(deps, actor, "notice_period.update", "notice-periods", id, diffMeta(row, updated, set, "notice-periods"), updated);
+  await auditUpdate(deps, actor, "notice_period.update", "notice-periods", id, diffMeta(row, updated, set, "notice-periods"), updated);
   return updated;
 }
 

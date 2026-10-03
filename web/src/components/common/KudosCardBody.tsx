@@ -153,8 +153,8 @@ export function KudosCardBody({
       artUrl={artUrl}
       flowClassName="hidden w-[200px] shrink-0 sm:block"
     >
-      {/* ART_DIECUT (inside StickerImage) gives dark mode a solid white silhouette behind the art; without it
-          the dark-navy slogans and near-black illustration ink vanish into the card. */}
+      {/* ART_DIECUT (inside StickerImage) gives dark mode a faint white silhouette behind the art;
+          without it the dark-navy slogans and near-black illustration ink vanish into the card. */}
       <StickerImage url={artUrl} onAspect={setAspect} onBroken={setArtBroken} />
     </PlacedElement>
   ) : null;

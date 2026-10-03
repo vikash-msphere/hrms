@@ -38,7 +38,7 @@ export function QuarterGrid({
                       className={cn(
                         "relative flex h-7 items-center justify-center rounded-[3px] text-[11px] tabular-nums transition-colors",
                         !inMonth && "opacity-25",
-                        hol ? "bg-violet-100 dark:bg-violet-950/40" : nonWorking ? "bg-brand-neutral-100/70 dark:bg-brand-neutral-800/40" : "bg-muted/40",
+                        hol ? "bg-violet-100 dark:bg-violet-950/40" : nonWorking ? "bg-brand-neutral-100/70 dark:bg-muted" : "bg-muted/40",
                         // Same reason as MonthGrid: a quarter view that shows a closed fortnight as ordinary
                         // days contradicts the picker that refuses them.
                         closedOn(ymd) && "bg-warning/15",

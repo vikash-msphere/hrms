@@ -228,7 +228,7 @@ export function Sidebar({
       {/* Scrim behind the mobile drawer. `inert` when closed so it cannot swallow taps meant for the page. */}
       <div
         className={cn(
-          "fixed inset-0 z-40 bg-foreground/40 backdrop-blur-sm transition-opacity md:hidden",
+          "fixed inset-0 z-40 bg-overlay backdrop-blur-sm transition-opacity md:hidden",
           mobileOpen ? "opacity-100" : "pointer-events-none opacity-0"
         )}
         aria-hidden
@@ -411,9 +411,9 @@ export function Sidebar({
             title={rail ? "Expand sidebar" : "Collapse sidebar"}
             aria-label={rail ? "Expand sidebar" : "Collapse sidebar"}
             // One neutral step LIGHTER than the sidebar in both themes, so the handle sits slightly raised off
-            // the nav rows and off the page it overhangs. Not bg-background: in dark mode the page is darker
-            // than the sidebar, so the handle read as a hole and its outer half matched the page. Card is that
-            // step in light (white on neutral-100) and muted is it in dark (neutral-800 on neutral-900).
+            // the nav rows and off the page it overhangs. Not bg-background: the handle's outer half would match
+            // the page it overhangs. Card is that step in light (white on neutral-100) and muted is it in dark
+            // (night-750 on night-950, lighter than the night-900 page too).
             className="absolute bottom-4 right-0 z-20 hidden h-6 w-6 translate-x-1/2 items-center justify-center rounded-full border border-sidebar-border bg-card text-sidebar-foreground/80 shadow-sm transition-colors hover:text-foreground dark:bg-muted md:flex"
           >
             {rail ? <ChevronsRight className="h-3.5 w-3.5" /> : <ChevronsLeft className="h-3.5 w-3.5" />}

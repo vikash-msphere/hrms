@@ -24,9 +24,9 @@ import { resourceRoute } from "@/lib/resourceRoute";
 import { entityLabel, entityLabelSingular, iconOf, toneOf, TONE_CLS, type Tone } from "@/lib/entityKinds";
 import type { OrgSettings } from "@/lib/org";
 import type { LucideIcon } from "lucide-react";
-import type { Employee, Me, SearchHit, SearchPage } from "@/types";
+import type { Department, Employee, Me, SearchHit, SearchPage } from "@/types";
 import { useAiFeature } from "@/lib/aiFeatures";
-import { applySuggestion, highlightParts, highlightTokens, isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, searchParams, suggestFilters, tokenAt, type FilterSuggestion, type FilterVocabulary } from "@/lib/paletteQuery";
+import { GUIDE_WORD, applySuggestion, highlightParts, highlightTokens, isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, searchParams, suggestFilters, tokenAt, type FilterSuggestion, type FilterVocabulary } from "@/lib/paletteQuery";
 import { orgDayFromToday, todayStr } from "@/lib/orgDay";
 
 // One row of the palette. Everything the palette can offer - a create flow, a page, a settings panel, or an
@@ -196,18 +196,36 @@ const statusLabel = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).replac
 // list teaches the syntax that typing it would have needed.
 function filterItem(s: FilterSuggestion<{ id: string; first: string; last: string; e: Employee }>, accept: (token: string) => void): Item {
   const base = { key: `filter:${s.token}`, badge: "Filter", tone: "action" as const, icon: ListFilter, stay: true, completes: true, run: () => accept(s.token) };
+  // A `-` filter reads as what it keeps: everything except the thing named.
+  const except = (negate: boolean | undefined, label: string) => (negate ? `Except ${label}` : label);
   switch (s.kind) {
     case "in":
-      return { ...base, label: entityLabel(s.collection), detail: s.token };
+      return { ...base, label: except(s.negate, entityLabel(s.collection)), detail: s.token };
     case "status": {
       const names = s.collections.slice(0, 3).map(entityLabel).join(", ");
       const more = s.collections.length > 3 ? ` +${s.collections.length - 3}` : "";
-      return { ...base, label: statusLabel(s.status), detail: `${s.token} · ${names}${more}` };
+      return { ...base, label: except(s.negate, statusLabel(s.status)), detail: `${s.token} · ${names}${more}` };
     }
     case "person":
-      return { ...base, label: `${s.person.first} ${s.person.last}`, detail: [s.token, s.person.e.job_title].filter(Boolean).join(" · "), icon: User };
+      return { ...base, label: except(s.negate, `${s.person.first} ${s.person.last}`), detail: [s.token, s.person.e.job_title].filter(Boolean).join(" · "), icon: User };
     case "is":
-      return { ...base, label: "Mine", detail: `${s.token} · records that belong to you` };
+      if (s.negate) {
+        return s.value === "team"
+          ? { ...base, label: "Except my team", detail: `${s.token} · leaves out what belongs to your direct reports` }
+          : { ...base, label: "Except mine", detail: `${s.token} · leaves out what belongs to you` };
+      }
+      return s.value === "team"
+        ? { ...base, label: "My team", detail: `${s.token} · records that belong to your direct reports` }
+        : { ...base, label: "Mine", detail: `${s.token} · records that belong to you` };
+    case "dept":
+      return s.negate
+        ? { ...base, label: except(true, s.department.name), detail: `${s.token} · leaves out this department and the ones under it` }
+        : { ...base, label: s.department.name, detail: `${s.token} · this department and the ones under it` };
+    case "sort":
+      return { ...base, label: "Newest first", detail: `${s.token} · instead of best match` };
+    case "key":
+      // A filter that can be turned round shows how, beside its plain example.
+      return { ...base, label: s.label, detail: s.leaveOut ? `${s.example}   ·   leave out with ${s.leaveOut}` : s.example };
     case "date":
       return { ...base, label: s.label, detail: s.token, icon: CalendarDays };
   }
@@ -287,7 +305,7 @@ export function CommandPalette({
   const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: opened });
   // The directory as `@name` and "did you mean" read it.
   const directory = useMemo(() => employees.map((e) => ({ id: idOf(e.path), first: e.first_name ?? "", last: e.last_name ?? "", e })), [employees]);
-  const parsed = useMemo(() => parsePaletteQuery(query, directory), [query, directory]);
+  const parsed = useMemo(() => parsePaletteQuery(query, directory, todayStr()), [query, directory]);
   const narrowed = isNarrowed(parsed);
   const askOn = useAiFeature("search.ask");
   const [ask, setAsk] = useState<AskState>({ status: "idle" });
@@ -303,7 +321,16 @@ export function CommandPalette({
     setVocabulary(null);
     vocabularyAsked.current = false;
   }, [me.email]);
-  const wantsVocabulary = /^(in|status):/i.test(tokenAt(query, caret).text);
+  const wantsVocabulary = /^-?(in|status):/i.test(tokenAt(query, caret).text);
+  // The departments `dept:` completes with, read the first time somebody types it - the cached list every
+  // department picker shares, and only the ones this caller may list.
+  const [wantedDepartments, setWantedDepartments] = useState(false);
+  const wantsDepartments = /^-?dept:/i.test(tokenAt(query, caret).text);
+  useEffect(() => {
+    if (wantsDepartments) setWantedDepartments(true);
+  }, [wantsDepartments]);
+  const { rows: departmentRows } = useCollection<Department>("departments", { all: true, enabled: wantedDepartments });
+  const departments = useMemo(() => departmentRows.flatMap((d) => (d.display_name ? [{ name: d.display_name }] : [])), [departmentRows]);
   useEffect(() => {
     if (!wantsVocabulary || vocabulary || vocabularyAsked.current) return;
     vocabularyAsked.current = true;
@@ -314,8 +341,8 @@ export function CommandPalette({
       });
   }, [wantsVocabulary, vocabulary]);
   const filterOffers = useMemo(
-    () => suggestFilters(query, caret, { people: directory, vocabulary, labelOf: entityLabel, today: todayStr(), daysAgo30: orgDayFromToday(-30) }),
-    [query, caret, directory, vocabulary],
+    () => suggestFilters(query, caret, { people: directory, vocabulary, labelOf: entityLabel, today: todayStr(), daysAgo30: orgDayFromToday(-30), departments }),
+    [query, caret, directory, vocabulary, departments],
   );
   // New text for the box that the person did not type (a completion, a recent search, See all), with the caret
   // put where it belongs - the end, unless said otherwise - so the word being completed is the right one.
@@ -380,9 +407,10 @@ export function CommandPalette({
   const [refreshTick, setRefreshTick] = useState(0);
   // Keyed by the whole request, narrowing included: `in:tickets laptop` and `laptop` are different questions.
   // Filters with no words at all are a question too - "which records are these" - which the server answers
-  // with the newest ones; a single stray letter after them is still waited on.
+  // with the newest ones; a single stray letter after them is still waited on, and so is a `-@name` that does
+  // not name one person yet (lib/paletteQuery.ts `incomplete`).
   const plainWords = parsed.text.trim();
-  const requestKey = plainWords.length >= 2 || (narrowed && !plainWords) ? searchParams(parsed) : "";
+  const requestKey = !parsed.incomplete && (plainWords.length >= 2 || (narrowed && !plainWords)) ? searchParams(parsed) : "";
   // WHICH request the hits on screen answer. Between a keystroke and the effect below flipping `searching`
   // there is a render where the hits are still the last query's (or none), and anything that concludes
   // "nothing was found" from that render - Did you mean, the nothing-found offers, the spoken count - flashed
@@ -794,7 +822,7 @@ export function CommandPalette({
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm data-[state=open]:animate-in data-[state=open]:fade-in-0" />
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-overlay backdrop-blur-sm data-[state=open]:animate-in data-[state=open]:fade-in-0" />
         <DialogPrimitive.Content
           aria-describedby={undefined}
           style={keyboard ? ({ "--kb": `${keyboard}px` } as React.CSSProperties) : undefined}
@@ -904,12 +932,24 @@ export function CommandPalette({
           {/* Hints for what this box does beyond a plain search list, for devices with a keyboard. The
               conventions every list shares (arrows, Enter, Esc) go unsaid, and the Tab hint shows only while Tab
               does something on the highlighted row. Below md the filter syntax is hidden, so with none of the
-              others to say the row goes too rather than leave an empty bar. */}
-          <div className={cn("hidden shrink-0 items-center gap-4 border-t px-4 py-2 text-[11px] text-muted-foreground", canComplete || canOpenActions || askOn ? "sm:flex" : "md:flex")}>
-            {canComplete && <span>⇥ complete</span>}
-            {canOpenActions && <span>⇥ actions</span>}
-            {askOn && <span>⌘↵ ask</span>}
-            <span className="hidden md:inline">in:tickets · @name · is:mine · status:pending · after:2026-01</span>
+              others to say the row goes too rather than leave an empty bar. There is room for a few filters, not
+              all of them: the examples give way first, and "all filters" opens the guide `?` does
+              (lib/paletteQuery.ts FILTER_GUIDE), so the rest are one click or one keystroke away. */}
+          <div className={cn("hidden shrink-0 items-center gap-4 border-t px-4 py-2 text-[13px] text-muted-foreground", canComplete || canOpenActions || askOn ? "sm:flex" : "md:flex")}>
+            {canComplete && <span className="shrink-0">⇥ complete</span>}
+            {canOpenActions && <span className="shrink-0">⇥ actions</span>}
+            {askOn && <span className="shrink-0">⌘↵ ask</span>}
+            <span className="hidden min-w-0 truncate md:inline">in:tickets · @name · is:mine · dept:sales · after:7d</span>
+            <button
+              type="button"
+              className="ml-auto hidden shrink-0 rounded-sm hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring md:inline"
+              onClick={() => {
+                const raw = query.trim();
+                replaceQuery(raw ? `${raw} ${GUIDE_WORD}` : GUIDE_WORD);
+              }}
+            >
+              ? all filters
+            </button>
           </div>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>

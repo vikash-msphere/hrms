@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { notify, notifyManager } from "./notifications";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
@@ -111,7 +111,7 @@ export async function updateTimeEntry(deps: Deps, actor: AppUser, id: string, pa
   if (has("description")) set.description = patch.description?.trim() || null;
   if (has("billable")) set.billable = !!patch.billable;
   const updated = await updateAtVersion(deps, schema.timeEntries, "time entry", row, set);
-  await audit(deps, actor, "time-entry.update", "time-entries", id, diffMeta(row, updated, set, "time-entries"), updated);
+  await auditUpdate(deps, actor, "time-entry.update", "time-entries", id, diffMeta(row, updated, set, "time-entries"), updated);
   return updated;
 }
 

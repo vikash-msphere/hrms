@@ -113,6 +113,16 @@ export const READ_VERBS = new Set([
   // colleagues. Both handlers read and answer ("Nothing is written: nominating is still a separate act"), so
   // opening a review must not land in the trail as a change to it.
   "reviews:evidence", "reviews:collaborators",
+  // The hints a card, goal or board dialog asks for: the goal a card probably serves, the steps comparable work
+  // took, its flow percentiles and triage, a goal's look-alikes and proposed measure, a board's narration and
+  // duplicate pairs. Each answers and writes nothing to a record (accepting a hint is the ordinary PATCH, with
+  // its own row). `cards:suggestGoal` runs on EVERY card dialog open, so leaving it out filled the trail with a
+  // bodiless `cards.suggestGoal` row per open.
+  "cards:suggestGoal", "cards:suggestSteps", "cards:flow", "cards:triage",
+  "goals:suggestMeasure", "goals:similar",
+  "boards:narrate", "boards:duplicates",
+  // "Who can see my data?" - a report, not a change to the employee.
+  "employees:viewers",
 ]);
 
 // Collections whose writes never reach the activity feed. These are recipient/caller-owned personal state with
@@ -131,9 +141,11 @@ const NO_AUDIT_COLLECTIONS = new Set(["notifications", "preferences", "attendanc
 //   announcements:markAllRead     — the same receipt, for every post they can see (the "Mark all read" action)
 //   announcements:react / :vote   — an emoji reaction / a poll answer (poll answers are deliberately private)
 //   suggestions:upvote/:downvote  — a vote on a suggestion (the box may be anonymous)
+//   cards / goals :watch/:unwatch - following somebody else's work; who reads along is not a change to the work
 const NO_AUDIT_VERBS = new Set([
   "announcements:markRead", "announcements:markAllRead", "announcements:react", "announcements:vote",
   "suggestions:upvote", "suggestions:downvote",
+  "cards:watch", "cards:unwatch", "goals:watch", "goals:unwatch",
 ]);
 
 // Sub-resources (last path segment) that are caller-owned personal settings — skipped regardless of the parent

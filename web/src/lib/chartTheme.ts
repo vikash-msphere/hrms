@@ -26,7 +26,7 @@ export const chartColor = (resolved: "light" | "dark", i: number) =>
 /** The heatmap's five steps, lightest (no activity) to darkest (a full day). Frappe wants exactly five. */
 export function heatmapColors(resolved: "light" | "dark"): string[] {
   return resolved === "dark"
-    ? ["#26262b", "#123a63", "#1a5591", "#2470c4", "#3987e5"]
+    ? ["#313745", "#123a63", "#1a5591", "#2470c4", "#3987e5"]
     : ["#ebedf0", "#c6dcf7", "#8ebbef", "#569ae4", "#2a78d6"];
 }
 

@@ -12,7 +12,7 @@ import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { CODE_WIDTH, allocFlatCode, withFreshCode } from "./codeAlloc";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta } from "../lib/audit";
 import { notFound, aborted, alreadyExists, unimplemented, invalidArgument, errorChainText } from "../lib/errors";
 
 // The shape of an internal resource id (lib/idCodec isInternalId): the only id a caller-supplied `?id` may be,
@@ -316,7 +316,7 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
         if (!still) throw notFound(spec.notFound);
         throw aborted("the record changed since it was read; re-read it and try again");
       }
-      await audit(deps, actor, `${auditName}.update`, collection, id, diffMeta(row, updated, set, collection), updated);
+      await auditUpdate(deps, actor, `${auditName}.update`, collection, id, diffMeta(row, updated, set, collection), updated);
       if (spec.afterUpdate) await spec.afterUpdate(deps, actor, updated, row, patch);
       return updated;
     },

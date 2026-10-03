@@ -12,7 +12,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { round2 } from "../domain/money";
 import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
@@ -473,7 +473,7 @@ export async function updateExpense(deps: Deps, actor: AppUser, id: string, patc
   // split somebody must redo than to charge cost centres a total the company never paid.
   if (patch.allocations !== undefined) await replaceAllocations(deps, id, updated.amount, patch.allocations);
   else if (updated.amount !== row.amount) await deps.db.delete(schema.expenseAllocations).where(eq(schema.expenseAllocations.expenseId, id));
-  await audit(deps, actor, "expense.update", "expenses", id, diffMeta(row, updated, set, "expenses"), updated);
+  await auditUpdate(deps, actor, "expense.update", "expenses", id, diffMeta(row, updated, set, "expenses"), updated);
   return updated;
 }
 

@@ -5,7 +5,7 @@ import { and, eq, type SQL } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, auditUpdate, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { moveDepartment } from "./codeCascade";
 import { departmentSubtree, syncBoardsUnder } from "./boardShares";
@@ -104,7 +104,7 @@ export async function updateDepartment(deps: Deps, actor: AppUser, id: string, p
   // re-parent that was working perfectly. Re-read only on the path that moved something.
   const version = moved ? (await deps.db.select().from(schema.departments).where(eq(schema.departments.uuid, id)).limit(1))[0] ?? row : row;
   const updated = await updateAtVersion(deps, schema.departments, "department", version, set);
-  await audit(deps, actor, "department.update", "departments", id, diffMeta(row, updated, set, "departments"), updated);
+  await auditUpdate(deps, actor, "department.update", "departments", id, diffMeta(row, updated, set, "departments"), updated);
   // A department's managers manage the boards filed under it AND under every department below it
   // (services/boardShares.ts), so a change of managers, or of where the department sits, moves board access
   // across the whole subtree.

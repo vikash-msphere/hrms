@@ -82,18 +82,20 @@ async function decodeBodyRefs<T>(body: T, codec: IdCodec): Promise<T> {
 }
 
 // Decode `<collection>/<token>` query-param values (e.g. ?employee=employees/<token>) -> internal id.
+//
+// Every value is decoded in place, a REPEATED key included (`?notowner=employees/<a>&notowner=employees/<b>`):
+// the params are rebuilt entry by entry, in order. `searchParams.set(k, ...)` would have replaced ALL of a
+// key's values with the one being decoded, so the second ref silently became a copy of the first.
 async function decodeSearchParams(url: URL, codec: IdCodec): Promise<boolean> {
   let changed = false;
+  const out = new URLSearchParams();
   for (const [k, v] of [...url.searchParams.entries()]) {
     const m = BODY_REF_RE.exec(v);
-    if (m && ENCODABLE.has(m[1]!)) {
-      const internal = await codec.decode(m[1]!, m[2]!);
-      if (internal) {
-        url.searchParams.set(k, `${m[1]}/${internal}`);
-        changed = true;
-      }
-    }
+    const internal = m && ENCODABLE.has(m[1]!) ? await codec.decode(m[1]!, m[2]!) : null;
+    if (internal) changed = true;
+    out.append(k, internal ? `${m![1]}/${internal}` : v);
   }
+  if (changed) url.search = out.toString();
   return changed;
 }
 

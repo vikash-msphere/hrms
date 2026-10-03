@@ -6,7 +6,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta } from "../lib/audit";
 import { notify } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { recordBonus } from "./bonuses";
@@ -101,7 +101,7 @@ export async function updateReferral(deps: Deps, actor: AppUser, id: string, pat
     set.bonusAmount = patch.bonus_amount ?? null;
   }
   const updated = await updateAtVersion(deps, schema.referrals, "referral", row, set);
-  await audit(deps, actor, "referral.update", "referrals", id, diffMeta(row, updated, set, "referrals"), updated);
+  await auditUpdate(deps, actor, "referral.update", "referrals", id, diffMeta(row, updated, set, "referrals"), updated);
   // Keep the referrer in the loop as recruiting moves their candidate along (skip a no-op or self-update).
   if (patch.status !== undefined && updated.status !== row.status && row.referrerId !== actor.employeeId)
     await notify(deps, { recipient: row.referrerId, type: "referral.status", title: "Referral update", body: `${updated.candidateName} is now ${updated.status.replace(/_/g, " ")}.`, link: "referrals", subject: `referrals/${id}`, actorId: actor.employeeId });
