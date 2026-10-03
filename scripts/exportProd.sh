@@ -175,6 +175,7 @@ EXPORT_SCRIPTS=(
   edgeRule.ts             # `npm run edge:rule`: mints the media edge key and builds the WAF rule that checks it
   esignChain.ts           # which CCA root a provider's signed PDF chains to (web/src/lib/ccaRoots.ts says when)
   testEmail.ts            # email-provider smoke test; env overrides beat .dev.vars, so it runs without one
+  d1Backup.ts             # .github/workflows/d1-backup.yml: the nightly D1 dump (wrangler d1 export refuses FTS5)
 )
 # The unit gate's two scripts. `test:gate` is the last step of `verify`, and `posttest*` reaps the workerd
 # processes a run leaves behind. Both go when --no-tests drops the suite.

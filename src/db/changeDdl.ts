@@ -170,6 +170,9 @@ export const UNSTAMPED_TABLES: Record<string, string> = {
   // One hop further back than the FTS index and the same argument - a row here moves only when the row it
   // describes has already been written and stamped, and nothing over the wire carries its values.
   search_vectors: "index bookkeeping for stamped rows; search results are never stored",
+  // How far the embed drain has reconciled each collection. Written only by the drain, read only by it, and
+  // never over the wire. Stamping it would also bump a stamp on every tick that finishes a collection.
+  search_vector_marks: "embed drain progress; read only by the drain, never over the wire",
   // Per-VIEWER UI state (theme, tab badges), fetched by its own key-addressed route and never listed. The
   // browser that wrote it is the only one that reads it back.
   preferences: "per-viewer UI state, key-addressed, never listed",

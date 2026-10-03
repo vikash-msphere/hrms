@@ -144,6 +144,14 @@ if (otherWrangler.trim()) {
     }
   }
 
+  // The workers.dev hostname. With no `routes` in the file, an unset `workers_dev` makes every deploy turn it
+  // back on, overriding the dashboard toggle, and the media edge rule cannot guard a hostname outside the zone.
+  for (const [file, text] of [["wrangler.toml", prod], ["wrangler.staging.toml", staging]] as const) {
+    if (value(text, "workers_dev") !== "false") {
+      errors.push(`${file} must set \`workers_dev = false\`: unset, every deploy re-enables the *.workers.dev hostname, which the media edge rule cannot guard.`);
+    }
+  }
+
   // The CPU envelope. Without it staging runs on the platform default (30s) against production's 60s, and a
   // payslip batch that outgrew its invocation fails there, gets written off as "staging is slower", and
   // passes in production for another month.

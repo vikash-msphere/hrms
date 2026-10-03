@@ -58,6 +58,14 @@ describe("SPA fallback", () => {
     }
   });
 
+  // The app is served on its custom domain. With no `routes` in the file, an unset `workers_dev` makes every
+  // deploy turn the workers.dev hostname back on, and the media edge rule cannot guard a hostname outside the zone.
+  it("turns the workers.dev hostname off in every wrangler config", () => {
+    for (const [path, toml] of wranglerConfigs) {
+      expect(toml.match(/^\s*workers_dev\s*=\s*(\S+)/m)?.[1], path).toBe("false");
+    }
+  });
+
   // The media tier skips the session check, so a pattern that happens to match app code ungates that code. The
   // names below are the shapes Vite emits (web/vite.config.ts manualChunks), including the pdf.js worker chunk.
   it("no media pattern matches app code, apart from the two scripts it names on purpose", () => {

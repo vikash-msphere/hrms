@@ -60,8 +60,9 @@ hold. `docs/deploy.md` is the runbook; this is the ordered list, and the order i
 
 **Stand up the instance**
 
-5. Decide the production hostname. `wrangler.toml` declares no route, so today the app answers on
-   `*.workers.dev`. It is baked into the OAuth redirect URI and into every bookmark, so it comes first.
+5. Decide the production hostname and attach it to the Worker as a custom domain in the dashboard. Both
+   wrangler files set `workers_dev = false`, so the custom domain is the only address the app answers on. It
+   is baked into the OAuth redirect URI and into every bookmark, so it comes first.
 6. Create the Google OAuth client (redirect `https://<host>/auth/callback`). `ALLOWED_EMAIL_DOMAINS` is
    already set; MFA and device policy are enforced in the Google Workspace admin console.
 7. Verify the email sending domain with DKIM and SPF. Unverified, every notification, letter and workflow

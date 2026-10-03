@@ -57,6 +57,20 @@
       "when": 1790878498001,
       "tag": "0007_release_seven",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1791012899167,
+      "tag": "0008_idempotency_keys_drop_created_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1791013832280,
+      "tag": "0009_search_vector_marks",
+      "breakpoints": true
     }
   ]
 }

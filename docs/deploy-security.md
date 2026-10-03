@@ -576,8 +576,8 @@ This tier is weaker on purpose, and the trade is only made for files that carry 
   are referenced only from gated code, so the key alone does not say what exists.
 - Custom rules are a separate allowance from the one Free-plan rate-limiting rule in §1 (five of them), so
   this does not compete with the sign-in rate limit.
-- The rule only reaches hostnames in a Cloudflare zone. On `*.workers.dev`, media is unguarded (the code is
-  still gated there) - another reason for `workers_dev = false` once the custom domain is live.
+- The rule only reaches hostnames in a Cloudflare zone. On `*.workers.dev`, media would be unguarded, which is
+  one reason both wrangler files set `workers_dev = false` (preflight refuses a config without it).
 
 Setup and rotation are `npm run edge:rule` (`scripts/edgeRule.ts` explains both); the steps, and why the Worker
 must get the key a day BEFORE the rule is switched on, are in `docs/deploy.md` step 10. Rotate after someone

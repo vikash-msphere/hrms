@@ -160,9 +160,8 @@ Today, a lazy chunk that 401s shows the ErrorBoundary's "This tab is out of date
 
 - **Builds published before the gate** were public. They may sit in web archives or caches: check
   `web.archive.org/web/*/<host>/*`. Preview URLs are closed by section 1.
-- **`workers.dev`** is served by the current Worker, so the gate covers it. Sign-in cannot finish there (its
-  redirect URI is not registered). Set `workers_dev = false` once the custom domain is confirmed as the only
-  entry point.
+- **`workers.dev`** is off: both wrangler files set `workers_dev = false`, so the custom domain is the only
+  entry point, and preflight refuses a config without it.
 - **The exported repository:** if the repository `exportProd.sh` pushes to is public, the source is public
   whatever this change does.
 - **Visible by design:** the `/auth/login` redirect (client id, hostname), `/v1` 401 bodies, the health

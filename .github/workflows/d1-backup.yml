@@ -1,14 +1,14 @@
 name: d1-backup
-# Nightly logical export of the production D1 to R2 (retention beyond D1 Time Travel's 30-day window). The
-# Workers runtime has no D1 export API, so this must run from CI, not the Worker. See docs/deploy.md
-# "Backups & disaster recovery".
+# Nightly snapshot of the production D1 to R2 (retention beyond D1 Time Travel's window: 7 days on Workers Free,
+# 30 on Paid). It runs from CI, not the Worker: a Free-plan invocation gets 10 ms of CPU and 50 queries, far short
+# of reading and checking the whole database. See docs/deploy.md "Backups & disaster recovery".
 #
-# The dump is NEVER stored on GitHub - no artifact, no cache. It is the whole production database in plain SQL,
-# and anything uploaded here is downloadable by everyone with read access to the repo. It exists on the runner
-# only for the seconds between the export and the upload, and the runner is discarded after the job.
+# The dump is NEVER stored on GitHub - no artifact, no cache. It is the whole production database as SQL, and
+# anything uploaded here is downloadable by everyone with read access to the repo. It exists on the runner only
+# for the seconds between the snapshot and the upload, and the runner is discarded after the job.
 on:
   schedule:
-    - cron: "30 3 * * *" # 03:30 UTC, after the 02:00 nightly accrual/reminders cron has settled
+    - cron: "30 20 * * *" # 20:30 UTC = 02:00 IST, when nobody is clocking in or approving
   workflow_dispatch: {}
 
 concurrency:
@@ -21,7 +21,12 @@ permissions:
 
 jobs:
   backup:
+    # prod only. A schedule cannot name a branch: GitHub fires it from the default branch, and it kept firing
+    # on `dev` after the default moved to `prod`. A manual dispatch can also pick any branch. This skips the
+    # job on every ref but prod.
+    if: github.ref == 'refs/heads/prod'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: production
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -36,12 +41,16 @@ jobs:
       # wrangler validates `[assets].directory` on every subcommand, so the d1/r2 calls below need
       # web/dist to exist. This job uploads no assets, so an empty directory is enough - no SPA build.
       - run: mkdir -p web/dist
-      - name: Export production D1
+      # Not `wrangler d1 export`: D1 refuses to export a database that holds a virtual table, and the search
+      # index `search_fts` is one. The script reads every table in ONE D1 transaction, restores the dump into a
+      # scratch SQLite and checks it, and writes the file only when every check passes - so a failed check fails
+      # this step and nothing is uploaded. Its header says what the dump holds and how to restore it.
+      - name: Snapshot production D1
         run: |
           STAMP="$(date -u +%F)"
           echo "STAMP=$STAMP" >> "$GITHUB_ENV"
-          npx wrangler d1 export hrms --remote --output="hrms-$STAMP.sql"
+          node --import ./scripts/tsResolve.mjs scripts/d1Backup.ts --out "hrms-$STAMP.sql.gz"
       # The one copy: the existing DOCS bucket, under a backups/ prefix. r2-backup.yml leaves that prefix out
       # of its copy to hrms-backup, and retention is an R2 lifecycle rule on `backups/`.
-      - name: Upload export to R2
-        run: npx wrangler r2 object put "hrms/backups/db/hrms-${STAMP}.sql" --file="hrms-${STAMP}.sql" --remote
+      - name: Upload snapshot to R2
+        run: npx wrangler r2 object put "hrms/backups/db/hrms-${STAMP}.sql.gz" --file="hrms-${STAMP}.sql.gz" --content-type application/gzip --remote

@@ -556,7 +556,11 @@ export default function Goals({ me, openId, scope: forcedScope }: {
       const e = empById.get(id);
       return e ? `${e.first_name} ${e.last_name}` : id;
     };
+    // The owner bar grows a row per owner; the donut takes the same height when they share the strip. Frappe
+    // draws the ring from the height, so a fixed 200 sat as a small ring in a card stretched to the bar's 320.
+    const ownersH = Math.min(320, Math.max(160, owners.length * 34 + 60));
     return {
+      heights: { owners: ownersH, states: Math.max(260, owners.length > 1 ? ownersH : 0) },
       total: counts?.states.all ?? 0,
       // A goal state is the same state the cards, chips and rings show, so it keeps that meaning's colour.
       states: { labels: states.map((s) => s.label), values: states.map((s) => s.n), colors: states.map((s) => s.color), keys: states.map((s) => s.key), names: new Map(states.map((s) => [s.key, s.label])) },
@@ -1285,7 +1289,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                 <ChartCard title="Goals by state" description="Every goal in view, by where it has got to.">
                   <Chart
                     type="donut"
-                    height={200}
+                    height={goalCharts.heights.states}
                     labels={goalCharts.states.labels}
                     datasets={[{ name: "Goals", values: goalCharts.states.values }]}
                     colors={goalCharts.states.colors}
@@ -1297,7 +1301,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                   <ChartCard title="Progress by owner" description="Weighted average progress across each person's goals in flight.">
                     <Chart
                       type="bar"
-                      height={Math.min(320, Math.max(160, goalCharts.owners.labels.length * 34 + 60))}
+                      height={goalCharts.heights.owners}
                       labels={goalCharts.owners.labels}
                       datasets={[{ name: "Progress", values: goalCharts.owners.values }]}
                       markers={goalCharts.ownerAvg > 0 ? [{ label: `Team ${goalCharts.ownerAvg}%`, value: goalCharts.ownerAvg }] : undefined}

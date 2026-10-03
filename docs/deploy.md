@@ -68,9 +68,10 @@ browsers, and both must stay as committed:
   `<version>-hrms.<subdomain>.workers.dev` address, including builds from before the gate. Preflight refuses
   a config without it.
 
-`workers_dev` is left unset, which keeps the `*.workers.dev` hostname on. The Worker gates the code there too,
-but the media edge rule (step 10) can only guard hostnames in a Cloudflare zone. Once the app has its custom
-domain, set `workers_dev = false` in both files.
+- `workers_dev = false` - the app is served on its custom domain, attached in the dashboard. Neither file
+  declares `routes`, so an unset `workers_dev` makes every `wrangler deploy` turn the `*.workers.dev` hostname
+  back on, whatever the dashboard toggle says, and the media edge rule (step 10) cannot guard a hostname
+  outside the Cloudflare zone. Preflight refuses a config without it.
 
 **Staging is a second file, not a section.** `wrangler.staging.toml` is a standalone config for the
 `hrms-staging` Worker, reached with `--config` (`npm run deploy:staging`, `npm run db:migrate:staging`,
@@ -374,25 +375,45 @@ the Worker.
 
 Two layers, both required:
 
-1. **D1 Time Travel** — Cloudflare retains a restorable history of the D1 database for the last **30 days**
-   automatically. To restore: `npx wrangler d1 time-travel restore hrms --timestamp <ISO8601>` (or
-   `--bookmark`). Use `... time-travel info hrms` to list restore points. This covers accidental
-   writes/deletes within the window; it is NOT a substitute for exports.
+1. **D1 Time Travel** — Cloudflare retains a restorable history of the D1 database automatically: the last
+   **7 days on the Workers Free plan** (the plan in use, `CF_PLAN`), 30 days on Workers Paid. To restore:
+   `npx wrangler d1 time-travel restore hrms --timestamp <ISO8601>` (or `--bookmark`). Use
+   `... time-travel info hrms` to list restore points. A restore overwrites the whole database in place: it
+   cannot restore into a copy, so getting back one table or one row means rolling back every write since.
+   This covers accidental writes/deletes within the window; it is NOT a substitute for the snapshots below.
 
-2. **Scheduled export to R2** (retention beyond 30 days / off-platform copy) — Time Travel alone is a 30-day
-   window. Take a periodic logical export and keep it:
+2. **Nightly snapshot to R2** (retention beyond the Time Travel window / a copy outside the database):
 
    ```bash
-   npx wrangler d1 export hrms --remote --output=hrms-$(date +%F).sql
-   # then upload to a retained bucket / off-site store
+   node --import ./scripts/tsResolve.mjs scripts/d1Backup.ts --out hrms-$(date +%F).sql.gz
    ```
 
-   This runs from CI, not the Worker (the Workers runtime has no D1 export API): the
-   **`.github/workflows/d1-backup.yml`** workflow does it nightly (03:30 UTC) and on `workflow_dispatch` —
-   `wrangler d1 export` → `wrangler r2 object put hrms/backups/db/<date>.sql`. It uses the same
-   `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` secrets as the deploy workflow. The dump is never stored
-   on GitHub (no artifact): it is the whole database in plain SQL, and a repo artifact is downloadable by
-   everyone with read access. Set retention with an R2 lifecycle rule on the `backups/` prefix of `hrms`.
+   `wrangler d1 export` cannot do this: D1 refuses to export any database holding a virtual table, and the
+   search index `search_fts` is an FTS5 one. `scripts/d1Backup.ts` reads every table in **one D1
+   transaction** (a single batch over the query API), so the dump is a point-in-time copy, like a Time
+   Travel restore point. It writes SQL that keeps rowids (the search index joins on them) and creates
+   triggers after the rows. Before writing anything it restores the dump into a scratch SQLite and checks
+   integrity, foreign keys, the FTS index, the row count of every table, the schema, and D1's 100 KB statement
+   limit. A dump that fails any check is not written, so every file in `backups/db/` is one that restores.
+
+   **`.github/workflows/d1-backup.yml`** runs it nightly at 20:30 UTC (02:00 IST) and on `workflow_dispatch`,
+   on the `prod` branch only, then `wrangler r2 object put hrms/backups/db/hrms-<date>.sql.gz`. It runs from
+   CI because a Free-plan Worker invocation gets 10 ms of CPU and 50 queries. It uses the same
+   `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` secrets as the deploy workflow; the query endpoint needs
+   D1 Read. Each run logs the table and row counts, the database size and the rows it read. The dump is never
+   stored on GitHub (no artifact): it is the whole database, and a repo artifact is downloadable by everyone
+   with read access. Set retention with an R2 lifecycle rule on the `backups/` prefix of `hrms`.
+
+   **Restore** into an **empty** database (a new one, or staging):
+
+   ```bash
+   npx wrangler r2 object get hrms/backups/db/hrms-<date>.sql.gz --file=hrms.sql.gz --remote
+   gunzip hrms.sql.gz
+   npx wrangler d1 execute <empty database> --remote --file=hrms.sql
+   ```
+
+   To recover a few rows without restoring anything, load the dump locally and query it:
+   `sqlite3 scratch.db < hrms.sql`.
 
 3. **Weekly R2 document sync** — the documents need their own answer, because they are the part nothing can
    rebuild. A payslip can be regenerated from its payroll run; a letter carrying an employee's e-signature,
@@ -410,11 +431,11 @@ Two layers, both required:
      the workflow file.
 
 > **The backups are only as recoverable as `FIELD_ENCRYPTION_KEY`.** Every document body in R2 is encrypted
-> under it, and encrypted fields in the D1 export are too. Escrow the key somewhere outside Cloudflare when
+> under it, and encrypted fields in the D1 snapshot are too. Escrow the key somewhere outside Cloudflare when
 > you first set it (§4): a complete backup plus a lost key restores nothing. Rotating it in place has the
 > same effect — see `docs/deploy-security.md` §2.
 
-To rehearse a restore, apply the export to the **staging** D1 (`wrangler d1 execute hrms-staging --remote
---config wrangler.staging.toml --file=<export>.sql`) and smoke-test before trusting it against production. Confirm the first nightly D1
-export and the first weekly R2 sync actually landed, rather than assuming a green workflow means a usable
-copy.
+To rehearse a restore, apply a snapshot to an emptied **staging** D1 (`wrangler d1 execute hrms-staging
+--remote --config wrangler.staging.toml --file=hrms.sql`) and smoke-test it. Confirm the first nightly D1
+snapshot and the first weekly R2 sync actually landed in R2. A green D1 run proves the file restores; it does not
+prove the upload's retention rule is in place.
