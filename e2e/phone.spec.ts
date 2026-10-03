@@ -1,4 +1,4 @@
-import { gotoRoute, test, expect } from "./fixtures";
+import { gotoRoute, test, expect, makeThrowawayPerson, retireThrowawayPerson, allowConsoleErrors } from "./fixtures";
 
 // The phone, measured rather than reasoned about.
 //
@@ -177,5 +177,60 @@ test.describe("phone", () => {
     await gotoRoute(page, "dashboard");
     await expect(page.getByRole("main")).not.toBeEmpty();
     await expect(page.getByRole("button", { name: "Menu", exact: true })).toBeVisible();
+  });
+
+  test("the lock screen's pad sits under the thumb, fits upright and sideways, and a tapped PIN opens the app", async ({ as }) => {
+    // A login of its own: a PIN on one of the seeded five would lock every other worker signed in as them.
+    const admin = await as("super");
+    const person = await makeThrowawayPerson(admin, "PhoneLock");
+    try {
+      const page = await as({ email: person.email });
+      allowConsoleErrors(page, /status of 401/);
+      // The PIN and the lock through the API, from a static file of the app's own origin so the requests are
+      // same-site like the app's; the setup screen is appLock.spec.ts's subject.
+      await page.goto("/favicon.svg");
+      for (const [path, method, body] of [["/auth/lock/pin", "PUT", { pin: "482916" }], ["/auth/lock", "POST", {}]] as const) {
+        const status = await page.evaluate(
+          async ([p, m, b]) => (await fetch(p, { method: m, credentials: "include", headers: { "X-Requested-By": "hrms-spa", "Content-Type": "application/json" }, body: b })).status,
+          [path, method, JSON.stringify(body)] as const,
+        );
+        // 200 for the PIN, 204 for the lock.
+        expect(status, `${method} ${path}`).toBeGreaterThanOrEqual(200);
+        expect(status, `${method} ${path}`).toBeLessThan(300);
+      }
+      await page.goto("/dashboard");
+      await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible({ timeout: 30_000 });
+
+      const pad = page.getByRole("group", { name: "Number pad" });
+      const key = (d: string) => pad.getByRole("button", { name: d, exact: true });
+      // The phone's own keyboard must never open over the pad.
+      await expect(page.getByLabel("Enter your 6-digit PIN")).toHaveAttribute("inputmode", "none");
+
+      const fits = () => page.evaluate(() => document.documentElement.scrollHeight - document.documentElement.clientHeight);
+      const viewport = page.viewportSize()!;
+      expect(await fits(), "the lock screen scrolls upright").toBeLessThanOrEqual(1);
+      // The pad pinned to the bottom, every row's centre in the lower half of the screen, where a thumb holding
+      // the phone reaches.
+      const top = (await key("1").boundingBox())!;
+      const bottom = (await key("0").boundingBox())!;
+      expect(top.y + top.height / 2, "the pad's top row is above the thumb's reach").toBeGreaterThan(viewport.height / 2);
+      expect(bottom.y + bottom.height, "the pad is not pinned to the bottom of the screen").toBeGreaterThan(viewport.height * 0.85);
+      expect(top.height, "a pad key under the 44px touch floor").toBeGreaterThanOrEqual(44);
+      await expect(key("0")).toBeInViewport({ ratio: 1 });
+
+      // Sideways the pad moves beside the rest, and the whole screen still fits.
+      await page.setViewportSize({ width: viewport.height, height: viewport.width });
+      await expect(key("0")).toBeInViewport({ ratio: 1 });
+      await expect(key("1")).toBeInViewport({ ratio: 1 });
+      expect(await fits(), "the lock screen scrolls sideways-on").toBeLessThanOrEqual(1);
+      expect((await key("1").boundingBox())!.height, "a pad key under the 44px touch floor").toBeGreaterThanOrEqual(44);
+      await page.setViewportSize(viewport);
+
+      // Taps, not typing: the pad is the only way in on a phone.
+      for (const d of "482916") await key(d).tap();
+      await expect(page.getByRole("main")).toBeVisible({ timeout: 30_000 });
+    } finally {
+      await retireThrowawayPerson(admin, person.path);
+    }
   });
 });

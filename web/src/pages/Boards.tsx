@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import {
   KanbanSquare, Plus, BarChart3, Ban, X, ChevronUp, ChevronDown, ChevronsUp, ChevronLeft, ChevronRight,
   AlertTriangle, Trash2, Flag, Target, Search, Tag, Info, MessageSquare, CalendarDays, History, Building2, ListChecks, AlignLeft,
@@ -118,6 +118,10 @@ function useOpenCard(openId: string | undefined, cards: CardT[], setRows: (updat
 }
 
 const NONE = "__none"; // lane key for cards with no assignee/goal/class/swimlane
+const EMPTY_CARDS: CardT[] = []; // a column with no cards, with one identity across renders
+// Where a task created without picking a column goes: the first column that takes new tasks, as the server
+// places one (domain/boards.ts `entryColumn`). Only those columns offer "Add a task" at all.
+const entryColumnKey = (board: Board) => board.columns.find((c) => c.allowCreate)?.key;
 const PRIORITY_LANES = [ // fixed swimlanes for swimlane_mode = "priority", severity high→low
   { key: "urgent", label: "Urgent" }, { key: "high", label: "High" }, { key: "medium", label: "Medium" }, { key: "low", label: "Low" },
 ];
@@ -590,6 +594,94 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
   );
 }
 
+// ---- A column's WIP limit: its load, the drop guard, and the count on its header -----------------------------
+
+// One column's load against its WIP limit, counted the way the server's move guard counts it (services/cards.ts
+// moveCard): every live card in the column, or per assignee with unassigned work as a bucket of its own.
+// `full` is the state the server refuses a move into - at the limit, not only past it - so it is what the
+// header warns about. `people` holds the per-assignee buckets at or past the limit.
+type WipLoad = { count: number; limit: number | null; perAssignee: boolean; full: boolean; over: boolean; people: { id: string | null; n: number }[] };
+
+function wipLoad(col: BoardColumn, inCol: CardT[]): WipLoad {
+  const limit = col.wipLimit ?? null;
+  const perAssignee = col.limitScope === "assignee";
+  const count = inCol.length;
+  if (limit == null) return { count, limit, perAssignee, full: false, over: false, people: [] };
+  if (!perAssignee) return { count, limit, perAssignee, full: count >= limit, over: count > limit, people: [] };
+  const byAssignee = new Map<string | null, number>();
+  for (const c of inCol) { const a = c.assignee ? idOf(c.assignee) : null; byAssignee.set(a, (byAssignee.get(a) ?? 0) + 1); }
+  const people = [...byAssignee.entries()].filter(([, n]) => n >= limit).map(([id, n]) => ({ id, n }));
+  return { count, limit, perAssignee, full: people.length > 0, over: people.some((p) => p.n > limit), people };
+}
+
+// Whether the server would refuse moving `card` into this column: only a move IN from another column is
+// checked, so reordering inside a full column and moving out of one stay allowed. Refusing the drop here makes
+// the cursor say no while the card hovers, instead of the card landing and snapping back with an error toast.
+function wipRefuses(col: BoardColumn, inCol: CardT[], card: CardT): boolean {
+  if (col.wipLimit == null || card.column_key === col.key) return false;
+  if (col.limitScope !== "assignee") return inCol.length >= col.wipLimit;
+  const mine = card.assignee ? idOf(card.assignee) : null;
+  return inCol.filter((c) => (c.assignee ? idOf(c.assignee) : null) === mine).length >= col.wipLimit;
+}
+
+const wipVariant = (load: WipLoad) => (load.over ? "destructive" : load.full ? "warning" : "secondary");
+
+// What the count on a column header says when hovered: what the limit is and means, and once the column (or a
+// person in it) is full, that nothing more can be moved in. A column with no limit gets the bare count.
+function wipExplainer(label: string, load: WipLoad, nameOf: (id: string | null) => string): { title: string; body: string } | null {
+  const { limit, count } = load;
+  if (limit == null) return null;
+  const tasks = (n: number) => `${n} task${n === 1 ? "" : "s"}`;
+  if (!load.perAssignee) {
+    if (load.over) return { title: `Over the WIP limit (${count} of ${limit})`, body: `${label} holds more than its limit of ${limit}, from tasks added straight to it or a limit lowered after they arrived. No task can be moved in until it is back under ${limit}.` };
+    if (load.full) return { title: `WIP limit reached (${count} of ${limit})`, body: `No more tasks can be moved into ${label} until one here moves on. Tasks already here can still be reordered or moved out.` };
+    return { title: `WIP limit: ${limit}`, body: `${count} of ${limit} in use. A work-in-progress limit caps how many tasks ${label} holds at once, so work here gets finished before more is started.` };
+  }
+  const per = `Each person can hold at most ${tasks(limit)} in ${label} at once, so nobody starts something new before finishing their own.`;
+  if (!load.full) return { title: `WIP limit: ${limit} per person`, body: per };
+  const who = load.people.map((p) => `${nameOf(p.id)} (${p.n})`).join(", ");
+  return { title: `WIP limit reached: ${who}`, body: `${per} No more of their tasks can be moved in until one of them moves on.` };
+}
+
+// The right-hand side of a column header: whoever is at a per-person limit, then the column's count. The
+// limit itself lives in the count's tooltip, not beside the number - the heading carries one number, and a
+// warning sign on it once the column takes no more.
+function ColumnLoad({ col, load, empName, empPhoto }: { col: BoardColumn; load: WipLoad; empName: (ref?: string) => string; empPhoto: (ref?: string) => string | undefined }) {
+  const nameOf = (id: string | null) => (id ? empName(`employees/${id}`) : "Unassigned");
+  const say = wipExplainer(col.label, load, nameOf);
+  const badge = (
+    <Badge variant={wipVariant(load)} tabIndex={say ? 0 : undefined} aria-label={say ? `${load.count} tasks. ${say.title}` : `${load.count} tasks`} className={say ? "cursor-help" : undefined}>
+      {load.full && <AlertTriangle className="h-3 w-3" aria-hidden />}
+      {load.count}
+    </Badge>
+  );
+  return (
+    <>
+      {load.people.filter((p) => p.id).map(({ id, n }) => (
+        // tapToOpen: a ringed avatar is the whole warning; who it is and why it is ringed is here.
+        <Tooltip key={id} tapToOpen>
+          <TooltipTrigger asChild>
+            <span className={cn("rounded-full ring-2", n > load.limit! ? "ring-destructive" : "ring-warning")}><PhotoAvatar employeeId={id!} name={nameOf(id)} photo={empPhoto(`employees/${id}`)} className="h-5 w-5 text-[9px]" /></span>
+          </TooltipTrigger>
+          <TooltipContent>
+            {nameOf(id)}: {n} here, {n > load.limit! ? "over" : "at"} the {load.limit}-per-person limit. No more of their tasks can be moved in.
+          </TooltipContent>
+        </Tooltip>
+      ))}
+      {say ? (
+        // tapToOpen: the limit is written nowhere else on the board, so a finger must be able to read it.
+        <Tooltip tapToOpen>
+          <TooltipTrigger asChild>{badge}</TooltipTrigger>
+          <TooltipContent className="max-w-xs">
+            <p className="flex items-center gap-1 font-semibold">{load.full && <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden />}{say.title}</p>
+            <p className="mt-0.5 font-normal opacity-80">{say.body}</p>
+          </TooltipContent>
+        </Tooltip>
+      ) : badge}
+    </>
+  );
+}
+
 // ---- Board view: columns x swimlanes, native HTML5 drag-and-drop, WIP + policy on the header ----------------
 
 function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: string }) {
@@ -598,8 +690,8 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const boardId = idOf(board.path);
   const [addTo, setAddTo] = useState<string | null>(null); // column key for the full "add card" dialog
   const [quick, setQuick] = useState<string | null>(null); // column key with the inline title composer open
-  // "+ New → Create a task" quick action: open the full composer on this board's first column.
-  useIntent("new-card", () => { const k = board.columns[0]?.key; if (k && worksTasks(board)) setAddTo(k); });
+  // "+ New → Create a task" quick action: open the full composer on the first column that takes new tasks.
+  useIntent("new-card", () => { const k = entryColumnKey(board); if (k && worksTasks(board)) setAddTo(k); });
   const dragId = useRef<string | null>(null);
   const { ref: fillRef, height: fillH } = useFillHeight();
   const pendingRank = useRef<number | null>(null); // rank computed from the hovered gap, for precise insertion
@@ -656,11 +748,32 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const blockerKeyOf = (c: CardT) => (c.blocked_by ? (cardById.get(idOf(c.blocked_by)) && taskKey(cardById.get(idOf(c.blocked_by))!)) || undefined : undefined);
 
   const cols = board.columns;
-  const countByCol = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const c of cards) m.set(c.column_key, (m.get(c.column_key) ?? 0) + 1);
+  // Every live card per column, unfiltered: a WIP limit is about the work in the column, not the filtered view.
+  const cardsByCol = useMemo(() => {
+    const m = new Map<string, CardT[]>();
+    for (const c of cards) (m.get(c.column_key) ?? m.set(c.column_key, []).get(c.column_key)!).push(c);
     return m;
   }, [cards]);
+  const inColumn = (colKey: string) => cardsByCol.get(colKey) ?? EMPTY_CARDS;
+  // The column a dragged card hovers that will not take it (see `wipRefuses`): outlined, and told why.
+  const [fullCol, setFullCol] = useState<string | null>(null);
+  // Capture phase, so it runs before the lane and card handlers inside the column that accept the drop:
+  // stopping it there leaves the event un-prevented, which is what makes it a no-drop target.
+  const refuseWhenFull = (col: BoardColumn) => (e: DragEvent) => {
+    const card = dragId.current ? cardById.get(dragId.current) : undefined;
+    if (!card || !wipRefuses(col, inColumn(col.key), card)) { setFullCol((p) => (p === col.key ? null : p)); return; }
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "none";
+    pendingRank.current = null; setOverCell(null); setLineAt(null); setFullCol(col.key);
+  };
+  const leaveFull = (colKey: string) => (e: DragEvent) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) setFullCol((p) => (p === colKey ? null : p));
+  };
+  const wipRefusal = (col: BoardColumn, load: WipLoad, card?: CardT) => {
+    if (!load.perAssignee) return `${col.label} holds ${load.count} tasks against a WIP limit of ${load.limit}. One has to move on before another comes in.`;
+    const who = card?.assignee ? empName(card.assignee) : "Unassigned work";
+    return `${who} already has ${load.limit} task${load.limit === 1 ? "" : "s"} in ${col.label}, the most one person can hold here.`;
+  };
 
   // Swimlanes: derive the lane set + a card's lane key from the board's mode. `useCallback` because the lane
   // memo below calls it - its identity moves with the board's swimlane mode, which is the only thing it reads.
@@ -828,30 +941,21 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
         className="scroll-shadow-x flex snap-x snap-mandatory items-stretch gap-3 overflow-x-auto sm:snap-none"
       >
         {cols.map((col) => {
-          const count = countByCol.get(col.key) ?? 0;
-          const perAssignee = col.limitScope === "assignee";
-          const overWip = col.wipLimit != null && !perAssignee && count > col.wipLimit;
-          const atWip = col.wipLimit != null && !perAssignee && count >= col.wipLimit;
-          // Per-assignee WIP: surface WHO is over (board-wide limits already color the count badge).
-          const wipOffenders = perAssignee && col.wipLimit != null
-            ? (() => {
-                const byAssignee = new Map<string, number>();
-                for (const c of cards) if (c.column_key === col.key && c.assignee) { const a = idOf(c.assignee); byAssignee.set(a, (byAssignee.get(a) ?? 0) + 1); }
-                return [...byAssignee.entries()].filter(([, n]) => n > col.wipLimit!);
-              })()
-            : [];
+          const load = wipLoad(col, inColumn(col.key));
+          const refusing = fullCol === col.key;
           if (collapsed.has(col.key)) {
             return (
               <div
                 key={col.key}
+                onDragOverCapture={refuseWhenFull(col)}
                 onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setOverCell(`${col.key}::__collapsed`); }}
-                onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOverCell((p) => (p === `${col.key}::__collapsed` ? null : p)); }}
+                onDragLeave={(e) => { leaveFull(col.key)(e); if (!e.currentTarget.contains(e.relatedTarget as Node)) setOverCell((p) => (p === `${col.key}::__collapsed` ? null : p)); }}
                 onDrop={(e) => { e.preventDefault(); setOverCell(null); setLineAt(null); void onDrop(col.key, null); }}
-                className={cn("flex min-h-0 w-10 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted/20 transition-colors", overCell === `${col.key}::__collapsed` && "bg-primary/10 outline-dashed outline-1 outline-primary/40")}
+                className={cn("flex min-h-0 w-10 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted/20 transition-colors", overCell === `${col.key}::__collapsed` && "bg-primary/10 outline-dashed outline-1 outline-primary/40", refusing && "bg-destructive/5 outline-dashed outline-1 outline-destructive/60")}
               >
-                <button type="button" onClick={() => toggleCollapse(col.key)} className="flex h-full w-full flex-col items-center gap-2 py-2 hover:bg-accent/40" title={`Expand ${col.label}`}>
+                <button type="button" onClick={() => toggleCollapse(col.key)} className="flex h-full w-full flex-col items-center gap-2 py-2 hover:bg-accent/40" title={load.full ? `Expand ${col.label} - at its WIP limit` : `Expand ${col.label}`}>
                   <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                  <Badge variant={overWip ? "destructive" : "secondary"}>{count}</Badge>
+                  <Badge variant={wipVariant(load)} className="flex-col gap-0.5 px-1.5">{load.full && <AlertTriangle className="h-3 w-3" aria-hidden />}{load.count}</Badge>
                   <span className="text-xs font-medium text-muted-foreground [writing-mode:vertical-rl]">{col.label}</span>
                 </button>
               </div>
@@ -866,7 +970,14 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
             // From `2xl` the columns share the row (18rem basis, no maximum): a board whose columns fit fills the
             // width, and its cards widen until their content fits on one line (`CardTile`). A board with more
             // columns than fit keeps them at 18rem and scrolls, as at any width.
-            <div key={col.key} role="group" aria-label={col.label} className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none 2xl:grow 2xl:basis-72">
+            <div
+              key={col.key}
+              role="group"
+              aria-label={col.label}
+              onDragOverCapture={refuseWhenFull(col)}
+              onDragLeave={leaveFull(col.key)}
+              className={cn("flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none 2xl:grow 2xl:basis-72", refusing && "bg-destructive/5 outline-dashed outline-1 outline-destructive/60")}
+            >
               <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <span className="truncate text-sm font-medium">{col.label}</span>
@@ -877,19 +988,8 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                   {col.policy && <Tooltip tapToOpen><TooltipTrigger asChild><span className="cursor-help text-xs text-muted-foreground">ⓘ</span></TooltipTrigger><TooltipContent className="max-w-xs">{col.policy}</TooltipContent></Tooltip>}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
-                  {wipOffenders.map(([id, n]) => (
-                    // tapToOpen: a ringed avatar is the whole warning; who it is and why it is ringed is here.
-                    <Tooltip key={id} tapToOpen>
-                      <TooltipTrigger asChild>
-                        <span className="rounded-full ring-2 ring-destructive"><PhotoAvatar employeeId={id} name={empName(`employees/${id}`)} photo={empPhoto(`employees/${id}`)} className="h-5 w-5 text-[9px]" /></span>
-                      </TooltipTrigger>
-                      <TooltipContent>{empName(`employees/${id}`)}: {n} here — over the {col.wipLimit}-per-person limit</TooltipContent>
-                    </Tooltip>
-                  ))}
-                  <Badge variant={overWip ? "destructive" : "secondary"} className={atWip && !overWip ? "border-warning text-warning" : ""} title={perAssignee && col.wipLimit != null ? `Max ${col.wipLimit} per assignee` : undefined}>
-                    {count}{col.wipLimit != null ? (perAssignee ? ` (≤${col.wipLimit}/ea)` : ` / ${col.wipLimit}`) : ""}
-                  </Badge>
-                  {worksTasks(board) && (
+                  <ColumnLoad col={col} load={load} empName={empName} empPhoto={empPhoto} />
+                  {worksTasks(board) && col.allowCreate && (
                     <AccessAction collection="cards" create label="Add a task">
                       <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label={`Add a task to ${col.label}`} className="h-6 w-6 text-muted-foreground coarse:h-9 coarse:w-9" onClick={() => setQuick((k) => (k === col.key ? null : col.key))}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
                     </AccessAction>
@@ -898,6 +998,13 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                 </div>
               </div>
 
+              {/* The header's tooltip cannot open mid-drag, so the refusal says itself where the card is. */}
+              {refusing && (
+                <p role="status" className="flex items-center gap-1.5 border-b bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  {wipRefusal(col, load, dragId.current ? cardById.get(dragId.current) : undefined)}
+                </p>
+              )}
               <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
                 {quick === col.key && <QuickAddCard board={board} column={col.key} onClose={() => setQuick(null)} onCreated={reload} />}
                 {visibleLanes.map((lane) => {
@@ -1244,7 +1351,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
     const m = new Map(orgDocs.map((d) => [idOf(d.path), d.display_name || d.file_name || "Document"]));
     return (id: string) => m.get(id) ?? "Document";
   }, [orgDocs]);
-  const [curColumn, setCurColumn] = useState(card?.column_key ?? column ?? board.columns[0]?.key ?? "");
+  const [curColumn, setCurColumn] = useState(card?.column_key ?? column ?? entryColumnKey(board) ?? "");
   // The server's version of this card after a lost save race, so the reader can see what they are about to
   // overwrite instead of guessing.
   const [conflict, setConflict] = useState<CardT | null>(null);
@@ -1422,7 +1529,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   async function promoteTodo(todo: { id: string; text: string }) {
     const ok = await confirm({
       title: "Make this its own task?",
-      description: `“${todo.text}” is filed on ${board.name}, in ${board.columns[0]?.label ?? "the first column"}, keeping this task's assignee. The checklist item is ticked and points at the new task.`,
+      description: `“${todo.text}” is filed on ${board.name}, in ${board.columns.find((c) => c.key === entryColumnKey(board))?.label ?? "the first column that takes new tasks"}, keeping this task's assignee. The checklist item is ticked and points at the new task.`,
       confirmLabel: "Make it a task",
     });
     if (!ok) return;
@@ -3049,7 +3156,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
             )}
           </div>
           <div className={zoneCls("backlog")}>
-            {quickBacklog && <QuickAddCard board={board} column={board.columns[0]?.key ?? ""} onClose={() => setQuickBacklog(false)} onCreated={reload} />}
+            {quickBacklog && <QuickAddCard board={board} column={entryColumnKey(board) ?? ""}onClose={() => setQuickBacklog(false)} onCreated={reload} />}
             {(() => {
               const items = backlog.filter(filter.match);
               return items.map((c, idx) => (
@@ -3078,7 +3185,8 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
         {/* The selected sprint's board */}
         {sprint ? (
           board.columns.map((col) => {
-            const items = sprintCards.filter((c) => c.column_key === col.key && filter.match(c)).sort(byRank);
+            const held = sprintCards.filter((c) => c.column_key === col.key);
+            const items = held.filter(filter.match).sort(byRank);
             const zid = `col:${col.key}`;
             return (
               // 86vw on a phone: the column all but fills the screen, with a sliver of the next one showing so
@@ -3095,44 +3203,21 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                     {col.delivery && <Tooltip tapToOpen><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-success" /></TooltipTrigger><TooltipContent>Delivery point — work is done here</TooltipContent></Tooltip>}
                     {col.policy && <Tooltip tapToOpen><TooltipTrigger asChild><span className="cursor-help text-xs text-muted-foreground">ⓘ</span></TooltipTrigger><TooltipContent className="max-w-xs">{col.policy}</TooltipContent></Tooltip>}
                   </div>
-                  {(() => {
-                    const perAssignee = col.limitScope === "assignee";
-                    // The column's REAL load, not the filtered view of it. A WIP limit is a statement about
-                    // the work in the column, and counting `items` made it move with the board's own filter -
-                    // so turning on "My tasks" took a column from 6/5 to 1/5 and the warning with it. The
-                    // kanban grid counts the column itself; this one did not.
-                    const held = sprintCards.filter((c) => c.column_key === col.key).length;
-                    const atWip = col.wipLimit != null && !perAssignee && held >= col.wipLimit;
-                    // Over the limit is its own state, as it is on the kanban grid - at the limit is a warning
-                    // not to start another, past it is a breach, and scrum drew both the same.
-                    const overWip = col.wipLimit != null && !perAssignee && held > col.wipLimit;
-                    const offenders = perAssignee && col.wipLimit != null
-                      ? (() => {
-                          const byAssignee = new Map<string, number>();
-                          for (const c of sprintCards) if (c.column_key === col.key && c.assignee) { const a = idOf(c.assignee); byAssignee.set(a, (byAssignee.get(a) ?? 0) + 1); }
-                          return [...byAssignee.entries()].filter(([, n]) => n > col.wipLimit!);
-                        })()
-                      : [];
-                    return (
-                      <div className="flex shrink-0 items-center gap-1">
-                        {offenders.map(([id, n]) => (
-                          <Tooltip key={id}>
-                            <TooltipTrigger asChild>
-                              <span className="rounded-full ring-2 ring-destructive"><PhotoAvatar employeeId={id} name={empName(`employees/${id}`)} photo={empPhoto(`employees/${id}`)} className="h-5 w-5 text-[9px]" /></span>
-                            </TooltipTrigger>
-                            <TooltipContent>{empName(`employees/${id}`)}: {n} here — over the {col.wipLimit}-per-person limit</TooltipContent>
-                          </Tooltip>
-                        ))}
-                        <Badge variant={overWip ? "destructive" : "secondary"} className={atWip && !overWip ? "border-warning text-warning" : ""} title={perAssignee && col.wipLimit != null ? `Max ${col.wipLimit} per assignee` : undefined}>
-                          {held}{col.wipLimit != null ? (perAssignee ? ` (≤${col.wipLimit}/ea)` : ` / ${col.wipLimit}`) : ""}
-                        </Badge>
-                      </div>
-                    );
-                  })()}
+                  {/* The column's REAL load, not the filtered view of it. A WIP limit is a statement about the
+                      work in the column, and counting `items` made it move with the board's own filter - so
+                      turning on "My tasks" took a column from 6/5 to 1/5 and the warning with it. */}
+                  <div className="flex shrink-0 items-center gap-1">
+                    <ColumnLoad col={col} load={wipLoad(col, held)} empName={empName} empPhoto={empPhoto} />
+                  </div>
                 </div>
                 <div
                   className={zoneCls(zid)}
-                  onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setOverZone(zid); }}
+                  onDragOver={(e) => {
+                    // A column at its WIP limit stays an un-prevented, no-drop target (see `wipRefuses`).
+                    const card = dragId.current ? cards.find((c) => idOf(c.path) === dragId.current) : undefined;
+                    if (card && wipRefuses(col, held, card)) { e.dataTransfer.dropEffect = "none"; setOverZone(null); return; }
+                    e.preventDefault(); e.dataTransfer.dropEffect = "move"; setOverZone(zid);
+                  }}
                   onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOverZone((p) => (p === zid ? null : p)); }}
                   onDrop={(e) => { e.preventDefault(); void dropOnColumn(col.key); }}
                 >
@@ -3167,7 +3252,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
       {newSprint && <NewSprintDialog board={board} sprints={sprints} cards={cards} onClose={() => setNewSprint(false)} onSaved={(id) => { setSelId(id); reloadSprints(); }} />}
       {/* `boardCards` and `meId` on the create path for the reason the kanban grid gives: the duplicate-title
           warning, the WIP note and the "Me" shortcut are all for the moment a task is filed. */}
-      {addBacklog && <CardDialog board={board} column={board.columns[0]?.key} employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onClose={() => setAddBacklog(false)} onSaved={() => { setAddBacklog(false); reload(); }} />}
+      {addBacklog && <CardDialog board={board} column={entryColumnKey(board)}employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onClose={() => setAddBacklog(false)} onSaved={() => { setAddBacklog(false); reload(); }} />}
       {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} queue={screenQueue} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={savedCard} />}
     </TooltipProvider>
   );

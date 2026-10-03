@@ -31,8 +31,10 @@ export interface BadgeProps
 // call sites put it inside a <p>. A <div> there is invalid nesting: the browser closes the paragraph before
 // the badge and reopens one after, which silently splits the row it was part of. `inline-flex` above already
 // does the layout, so the element itself may as well be one that is legal wherever a badge reads naturally.
-function Badge({ className, variant, ...props }: BadgeProps) {
-  return <span className={cn(badgeVariants({ variant }), className)} {...props} />;
-}
+// The ref is forwarded so a badge can be a tooltip or popover trigger itself (`asChild`), with no wrapper.
+const Badge = React.forwardRef<HTMLSpanElement, BadgeProps>(({ className, variant, ...props }, ref) => (
+  <span ref={ref} className={cn(badgeVariants({ variant }), className)} {...props} />
+));
+Badge.displayName = "Badge";
 
 export { Badge, badgeVariants };

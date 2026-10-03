@@ -71,7 +71,7 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
     const taken = new Set(cs.map((c) => c.key));
     let n = cs.length + 1;
     while (taken.has(`col_${n}`)) n++;
-    return [...cs, { key: `col_${n}`, label: "New column", wipLimit: null, policy: "", commitment: false, delivery: false }];
+    return [...cs, { key: `col_${n}`, label: "New column", wipLimit: null, policy: "", commitment: false, delivery: false, allowCreate: false }];
   });
   const removeCol = (i: number) => setCols((cs) => cs.filter((_, j) => j !== i));
   const moveCol = (i: number, d: -1 | 1) => setCols((cs) => {
@@ -112,8 +112,14 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
     true,
     save,
   );
+  // The server refuses a board no task could ever be created on; saying so here names the control to change.
+  const noEntry = !cols.some((c) => c.allowCreate);
   async function save() {
     if (!name.trim()) return;
+    if (noEntry) {
+      toast({ title: "Couldn't save", description: "Tick \"New tasks can be created here\" on at least one column.", variant: "destructive" });
+      return;
+    }
     setBusy(true);
     // Ensure keys are unique slugs (labels drive keys for freshly added columns).
     //
@@ -220,8 +226,13 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
         </TabsContent>
 
         <TabsContent value="columns" className="mt-3 space-y-2">
-          <div className="flex items-center justify-end">
-            <Button size="sm" variant="outline" onClick={addCol}><Plus className="h-3.5 w-3.5" /> Add column</Button>
+          <div className="flex items-start justify-between gap-3">
+            <p className={noEntry ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
+              {noEntry
+                ? "No column takes new tasks yet. Tick \"New tasks can be created here\" on at least one."
+                : "New tasks are created only in the columns ticked to take them, and reach the others by being moved."}
+            </p>
+            <Button size="sm" variant="outline" className="shrink-0" onClick={addCol}><Plus className="h-3.5 w-3.5" /> Add column</Button>
           </div>
           {cols.map((c, i) => (
             <div key={i} className="rounded-md border p-2.5">
@@ -245,7 +256,8 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
                   </Select>
                 </div>
               )}
-              <div className="mt-2 flex items-center gap-4 text-sm">
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+                <label className="flex items-center gap-1.5"><Checkbox checked={c.allowCreate} onCheckedChange={(v) => setCol(i, { allowCreate: !!v })} /> New tasks can be created here</label>
                 <label className="flex items-center gap-1.5"><Checkbox checked={c.commitment} onCheckedChange={(v) => setFlag(i, "commitment", !!v)} /> Commitment point</label>
                 <label className="flex items-center gap-1.5"><Checkbox checked={c.delivery} onCheckedChange={(v) => setFlag(i, "delivery", !!v)} /> Delivery point</label>
               </div>

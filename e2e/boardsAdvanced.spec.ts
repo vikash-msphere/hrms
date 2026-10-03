@@ -61,12 +61,20 @@ test("a board's WIP limit, swimlanes and flow metrics", async ({ as }) => {
     await expect(page.getByRole("tab", { name: "Swimlanes" })).toHaveCount(0);
   }).toPass({ timeout: 60_000 });
 
-  // On the wall: the count is now read against the limit, and the priority lanes are there to drop into.
+  // On the wall: the count is now read against the limit, and the priority lanes are there to drop into. The
+  // header carries the count alone, warned once full; the limit and what it means are in the count's tooltip.
   await expect(page.getByRole("main")).toBeVisible();
   await expect(page.getByText(`E2E flow card ${stamp}-1`)).toBeVisible({ timeout: 30_000 });
   const backlog = page.getByRole("group", { name: "Backlog", exact: true });
-  await expect(backlog.getByText("2 / 2")).toBeVisible();
+  const fullCount = backlog.getByLabel("2 tasks. WIP limit reached (2 of 2)");
+  await expect(fullCount).toBeVisible();
+  await fullCount.hover();
+  // `.first()`: Radix renders the text twice, the visible bubble and then a visually hidden copy for readers.
+  await expect(page.getByText("No more tasks can be moved into Backlog until one here moves on.", { exact: false }).first()).toBeVisible();
   await expect(page.getByText("Urgent").first()).toBeVisible();
+  // Only the columns set to take new tasks offer to add one: the starter board's backlog, not the columns
+  // after it, which work reaches by being moved.
+  await expect(page.getByRole("button", { name: "Add a task to In progress" })).toHaveCount(0);
 
   // A limit is a signal, not a lock: a third task can still be filed (work does not stop because a number
   // says so), and the column then reads over its limit rather than silently refusing.
@@ -74,7 +82,7 @@ test("a board's WIP limit, swimlanes and flow metrics", async ({ as }) => {
   const quickAdd = page.getByPlaceholder("What needs doing?");
   await quickAdd.fill(`E2E flow card ${stamp}-3`);
   await quickAdd.press("Enter");
-  await expect(backlog.getByText("3 / 2")).toBeVisible({ timeout: 30_000 });
+  await expect(backlog.getByLabel("3 tasks. Over the WIP limit (3 of 2)")).toBeVisible({ timeout: 30_000 });
 
   // And opening that task SAYS the consequence, in the editor where somebody could move it somewhere else.
   await page.getByText(`E2E flow card ${stamp}-3`).first().click();
