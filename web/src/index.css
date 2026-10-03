@@ -221,6 +221,29 @@
   box-shadow: var(--shadow-pop);
 }
 
+/* `space-y-*` keeps its Tailwind 3 meaning, which every one of its ~650 uses was written and laid out against.
+   Tailwind 4 moved the gap to the other side and dropped its weight: `:where(.space-y-4 > :not(:last-child))`
+   puts a margin-bottom on each child but the last, at zero specificity. Two things changed with that:
+     - a child's own margin now REPLACES the gap instead of being overridden by it. `mb-0` on a SummaryStrip
+       (there to cancel its built-in `mb-6`) took a 24px gap to nothing; a Chart's `m-0` did the same; a hint's
+       `-mt-1` and a skeleton's `mt-6`, both dead under v3, started moving things.
+     - a hidden or absolutely placed LAST child now leaves a stray gap under the one before it.
+   So the v3 rule is restored here: every visible child after the first gets the gap as its margin-top, at the
+   v3 rule's weight, so it wins over the child's own margins exactly as it did. Tailwind's own rule is still
+   emitted (a core utility cannot be switched off), and the second rule cancels the one thing of it that
+   survives - the gap it puts under the FIRST child. `:is(*, html)` is there for its weight alone: it matches
+   any element, and gives the rule (0,0,1), which beats Tailwind's zero-weight `:where()` whatever the order
+   and still loses to a margin utility the first child sets itself, as v3 let it. */
+@utility space-y-* {
+  & > :not([hidden]) ~ :not([hidden]) {
+    margin-top: calc(var(--spacing) * --value(number));
+    margin-bottom: 0;
+  }
+  :where(&) > :is(*, html) {
+    margin-block-end: 0;
+  }
+}
+
 @layer base {
   /* ============================================================================================
      THE PALETTE. This block is the single source of colour for the whole web app: the brand ramps
@@ -1415,7 +1438,15 @@ html[data-lock-shade] #root {
   align-items: baseline;
   gap: 4px;
   white-space: nowrap;
-  animation: 10s cubic-bezier(0.6, 0, 0.3, 1) 2s infinite backwards;
+  /* Longhands, not the `animation:` shorthand: the timing is shared here and each row names its own keyframes
+     below, and a shorthand with no name is rewritten to `animation: none` by the build's CSS minifier
+     (Lightning CSS, via @tailwindcss/vite). The rows then had a name but no duration, never rolled, and both
+     captions showed at once on top of each other. */
+  animation-duration: 10s;
+  animation-timing-function: cubic-bezier(0.6, 0, 0.3, 1);
+  animation-delay: 2s;
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
 }
 .org-anniv__row b {
   font-weight: 800;
