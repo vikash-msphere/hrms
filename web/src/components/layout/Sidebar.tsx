@@ -249,7 +249,9 @@ export function Sidebar({
           // edge is what the status bar/notch overlaps.
           // `pl-safe-l` is the landscape notch: the drawer is fixed to the left edge on a phone, so it is
           // exactly what the notch covers. From `md` it is sticky inside the shell, which pads itself.
-          "fixed inset-y-0 left-0 z-50 flex flex-col border-r border-sidebar-border bg-sidebar pl-safe-l transition-[transform,width,margin] standalone:pt-safe-t md:sticky md:top-0 md:h-screen md:shrink-0 md:translate-x-0 md:pl-0",
+          // `translate`, not `transform`, in the transition: Tailwind 4's `-translate-x-full` sets the CSS
+          // `translate` property, so a `transform` transition left the phone drawer snapping open and shut.
+          "fixed inset-y-0 left-0 z-50 flex flex-col border-r border-sidebar-border bg-sidebar pl-safe-l transition-[translate,width,margin] standalone:pt-safe-t md:sticky md:top-0 md:h-screen md:shrink-0 md:translate-x-0 md:pl-0",
           iconsOnly ? "w-16" : "w-64",
           peeking && "-mr-48 shadow-xl",
           mobileOpen ? "translate-x-0" : "-translate-x-full"
