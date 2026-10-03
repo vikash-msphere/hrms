@@ -973,7 +973,7 @@ export default function Leaves({ me }: { me: Me }) {
           request is made (reserved), so pending days are already out of "days left" - the bar labels say so
           rather than double-counting them. */}
       {/* From `2xl` the row adds cards instead of widening them: about the 230px a card is at four across today
-          (`grid-cols-fill`, web/tailwind.config.js). */}
+          (`grid-cols-fill`, web/src/index.css). */}
       {myBalances.length > 0 && (
         <div className="mb-6 grid gap-3 [--cell:14rem] sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-fill">
           {myBalances.map((b) => {
@@ -997,7 +997,7 @@ export default function Leaves({ me }: { me: Me }) {
                 onClick={() => toggleTypeFilter(b.leave_type)}
                 onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleTypeFilter(b.leave_type); } }}
                 className={cn(
-                  "group relative cursor-pointer overflow-hidden rounded-xl border bg-card p-4 pl-5 text-card-foreground shadow-card transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  "group relative cursor-pointer overflow-hidden rounded-xl border bg-card p-4 pl-5 text-card-foreground shadow-card transition-shadow hover:shadow-md focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
                   active && "ring-2 ring-primary",
                 )}
               >
@@ -1013,7 +1013,7 @@ export default function Leaves({ me }: { me: Me }) {
                         aria-label={`Request ${typeName(b.leave_type)}`}
                         title={`Request ${typeName(b.leave_type)}`}
                         onClick={(e) => { e.stopPropagation(); requestType(b.leave_type); }}
-                        className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 coarse:flex coarse:h-9 coarse:w-9 coarse:items-center coarse:justify-center coarse:p-0"
+                        className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 coarse:flex coarse:h-9 coarse:w-9 coarse:items-center coarse:justify-center coarse:p-0"
                       >
                         <Plus className="h-4 w-4" />
                       </button>

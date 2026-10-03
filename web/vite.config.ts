@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { sentryVitePlugin } from "@sentry/vite-plugin";
 import { fileURLToPath, URL } from "node:url";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
@@ -447,6 +448,8 @@ export default defineConfig(({ mode }) => ({
     preloadUiFont(),
     dropFinderJunk(),
     react(),
+    // Compiles src/index.css, which carries the whole Tailwind configuration and names its own sources.
+    tailwindcss(),
     pwaManifest(mode),
     apiLatency(),
     // Source maps, uploaded to the error tracker and then DELETED from the build.

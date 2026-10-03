@@ -140,7 +140,7 @@ export function NotificationBell() {
                   type="button"
                   onClick={() => rowClick(n)}
                   aria-label={`Open: ${n.title}`}
-                  className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                  className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                 />
                 {!isSnoozed && !n.read && <span className={cn("absolute left-0 top-0 h-full w-0.5", priorityMeta[n.priority]?.dot ?? "bg-primary")} />}
                 <span className="pointer-events-none relative"><NotificationLead n={n} size="sm" /></span>
@@ -165,7 +165,7 @@ export function NotificationBell() {
                     onClick={() => void unsnooze(n)}
                     title="Wake now"
                     aria-label={`Wake now: ${n.title}`}
-                    className="relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <BellRing className="h-4 w-4" />
                   </button>

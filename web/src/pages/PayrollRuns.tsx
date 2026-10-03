@@ -1256,7 +1256,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
                             reader can hear. `role="button"` on the <tr> would replace its row semantics, so
                             the expanded state is announced with aria-expanded on the row itself. */}
                         <tr
-                          className="cursor-pointer border-b hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                          className="cursor-pointer border-b hover:bg-accent/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                           tabIndex={0}
                           aria-expanded={expanded.has(it.employee)}
                           onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setExpanded((s) => { const n = new Set(s); n.has(it.employee) ? n.delete(it.employee) : n.add(it.employee); return n; }); } }}

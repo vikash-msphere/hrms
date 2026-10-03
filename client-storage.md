@@ -109,9 +109,10 @@ their face.
 
 ## Cleanup
 
-- **Sign-out purges everything**: `purgeAll()` deletes the database and clears localStorage and sessionStorage,
-  keeping only the theme (a visual preference rather than anything about the person, and dropping it would flash
-  the wrong palette at whoever signs in next). It is awaited before the navigation, so nothing is abandoned.
+- **Sign-out purges everything but the look**: `purgeAll()` deletes the database and sessionStorage, and every
+  localStorage key except `LOOK_KEYS` in `lib/clientStore.ts`: the theme, folds, view modes, zooms and "seen"
+  marks. None of those can carry a name, and the per-person ones are namespaced to their owner, so keeping them
+  hands nothing to the next person. It is awaited before the navigation, so nothing is abandoned.
 - **A different identity purges the previous one's records** at hydration.
 - **Deletions flush immediately**, not on the next idle callback like a write, and again on `pagehide` and
   `visibilitychange`. A deletion is how a stale copy is disowned, and it has to be gone before the page can be
@@ -156,8 +157,8 @@ another record's key fails to open.
   never writes plain text.
 - **Locking** reloads into a fresh page and the server refuses the key to a locked browser, so what is on disk
   cannot be read; it is not deleted either, which is what makes an unlock warm and keeps drafts. What a lock
-  does remove is everything readable without the key: sessionStorage, localStorage except a short list of
-  visual toggles (`KEPT_ON_LOCK` in `lib/clientStore.ts`), Cache Storage, and any record still in plain text.
+  does remove is everything readable without the key: sessionStorage, localStorage except the visual toggles a
+  sign-out keeps plus the lock's own bookkeeping and the sync point (`KEPT_ON_LOCK` in `lib/clientStore.ts`), Cache Storage, and any record still in plain text.
 - **An admin PIN reset** moves the person's key epoch: records written under the old key fail to decrypt and are
   deleted at the next hydration.
 - **Upgrading from plain text**: version-2 records are deleted at hydration, except drafts, which are

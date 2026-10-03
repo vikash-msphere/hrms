@@ -37,7 +37,7 @@ const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLI
           // viewport instead, and the row's own siblings go with it. Zeroing the floor here fixes every
           // such row in the app at once rather than at ~90 call sites, and costs nothing where there is
           // room (the `w-full`/`flex-1` basis still claims all of it).
-          "flex h-9 w-full min-w-0 rounded-md border border-input bg-card px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50",
+          "flex h-9 w-full min-w-0 rounded-md border border-input bg-card px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50",
           // Safari renders a search field with its own rounded chrome and an inner clear button of its own
           // metrics; the appearance reset keeps `type="search"` a semantic choice rather than a visual one.
           type === "search" && "[&::-webkit-search-cancel-button]:appearance-none",

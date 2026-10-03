@@ -47,7 +47,7 @@ export function StatCard({
         accentClass,
         (onPin || onHide) && "group", // hover-reveal for the pin/hide affordances even on non-clickable cards
         onClick &&
-          "group cursor-pointer transition-all hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-card-hover active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+          "group cursor-pointer transition-all hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-card-hover active:translate-y-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
       )}
       style={style}
       onClick={onClick}

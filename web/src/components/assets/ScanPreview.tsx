@@ -163,7 +163,7 @@ export function ScanPreview({ scanner, className }: { scanner: CodeScanner; clas
     width: Math.abs(drag.x1 - drag.x0),
     height: Math.abs(drag.y1 - drag.y0),
   };
-  const iconBtn = "rounded p-1.5 text-white/70 drop-shadow transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/70";
+  const iconBtn = "rounded p-1.5 text-white/70 drop-shadow transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/70";
 
   const preview = (
     <div className={cn("relative", full ? "h-full w-full" : "overflow-hidden rounded-md border", className)}>

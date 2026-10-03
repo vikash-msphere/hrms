@@ -50,7 +50,7 @@ With the sidebar collapsed to its icon rail, every width below the cap gains 192
    columns, the org tree and an open table grow into the cap and scroll within it past that; a five-column board
    still gets ~360px columns at 2560, enough for one-line cards (item 5). The top bar stays full width.
 
-2. **Card galleries add columns (`web/tailwind.config.js`, the pages).** `3xl` is a new 1920px screen and
+2. **Card galleries add columns (`web/src/index.css`, the pages).** `3xl` is a new 1920px screen and
    `grid-cols-fill` a new template (`repeat(auto-fill, minmax(min(var(--cell, 16rem), 100%), 1fr))`). Each grid
    whose count is data keeps its ladder and adds `2xl:grid-cols-fill` with `--cell` at about its card width at `xl`:
 

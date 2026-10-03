@@ -63,6 +63,12 @@ test("caches what it reads, then takes it off the machine on sign-out", async ({
   // mode an external redirect. Stubbed, the browser stays on this origin, and storage is per-origin.
   await page.route("**/auth/login**", (r) => r.fulfill({ status: 200, contentType: "text/html", body: "<title>signed out</title>" }));
 
+  // One key of each kind: a chart fold says only how a page looks, a saved table view can carry a name.
+  await page.evaluate(() => {
+    localStorage.setItem("charts:e2e-probe", "0");
+    localStorage.setItem("dt:e2e-probe", "{}");
+  });
+
   // The avatar in the top bar is the only route to sign out; its title is "<name> · <role>", which is the one
   // stable thing about it whatever the seeded person is called.
   const loggedOut = page.waitForResponse((r) => r.url().includes("/auth/logout"));
@@ -76,7 +82,9 @@ test("caches what it reads, then takes it off the machine on sign-out", async ({
   const after = await storedState(page);
   expect(after.records, "cached rows, faces and snapshots are gone").toBe(0);
   expect(after.sessionKeys, "and any in-progress drafts with them").toEqual([]);
-  // The theme is the one thing kept: it is a visual preference rather than anything about the person, and
-  // dropping it would flash the wrong palette at whoever signs in next.
-  expect(after.localKeys.filter((k) => k !== "theme")).toEqual([]);
+  // Look-only keys (clientStore.ts LOOK_KEYS) are kept, so a folded chart stays folded after signing back in.
+  // Anything that can carry a name goes, and so does the sync point: the records it described are gone.
+  expect(after.localKeys, "a chart fold survives").toContain("charts:e2e-probe");
+  expect(after.localKeys, "a saved table view does not").not.toContain("dt:e2e-probe");
+  expect(after.localKeys.filter((k) => k.startsWith("hrms.sync:")), "nor the sync point").toEqual([]);
 });

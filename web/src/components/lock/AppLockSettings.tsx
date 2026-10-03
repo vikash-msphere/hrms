@@ -216,7 +216,7 @@ function AppLockPanel({ onDone, startSetup }: { onDone?: () => void; startSetup?
                 key={n}
                 type="button"
                 onClick={() => go({ kind: "setup-enter", length: n })}
-                className="flex flex-col items-center gap-2 rounded-lg border bg-card px-3 py-4 transition-colors hover:border-primary hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="flex flex-col items-center gap-2 rounded-lg border bg-card px-3 py-4 transition-colors hover:border-primary hover:bg-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <span aria-hidden className="flex gap-1">
                   {Array.from({ length: n }, (_, i) => <span key={i} className="h-2 w-2 rounded-full bg-foreground/70" />)}

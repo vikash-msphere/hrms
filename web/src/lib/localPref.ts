@@ -14,6 +14,11 @@
 // NOT for anything that must actually persist, be shared between devices, or be read back by the server -
 // those go through lib/prefs.ts (a server preferences row) or lib/clientStore.ts (IndexedDB). See
 // client-storage.md.
+//
+// SIGN-OUT AND THE APP LOCK WIPE THESE. Both delete every localStorage key not listed in lib/clientStore.ts
+// `LOOK_KEYS`, and a browser with a PIN opens every new session on the lock screen. A new key that only says
+// how something LOOKS (a fold, a view mode, a zoom) goes on that list, or it is forgotten every time the
+// browser is reopened. A key that can carry a name (a filter on a person, a search) stays off it.
 
 // The PERSON these keys belong to (email, plus any "view as" subject), set by the shell once `/me` lands. Not
 // the record store's identity (lib/clientStore.ts `storedIdentity`): that one folds in the session, so the
@@ -31,8 +36,8 @@ export function setLocalPrefUser(key: string | undefined): void {
  * `key` namespaced to the signed-in caller, or null before the identity is known.
  *
  * WHY EVERY PER-PERSON KEY NEEDS IT. localStorage is per BROWSER, not per person, and an ordinary session end
- * does not clear it (`clientStore.purgeCachedData` deliberately leaves localStorage alone; only the sign-out
- * menu's `purgeAll` calls `localStorage.clear()`). So a key holding one person's choices is handed to whoever
+ * does not clear it (`clientStore.purgeCachedData` deliberately leaves localStorage alone; and the sign-out
+ * menu's `purgeAll` keeps the look-only keys). So a key holding one person's choices is handed to whoever
  * signs in next on a shared machine - which for a board filter pinned to a named colleague, a remembered letter
  * template or a dismissed enrolment prompt is somebody else's state presented as yours. `tab_seen:`, `dt:`,
  * `draft:`, `nav:collapsed:` and `palette:frecent:` already do this, and three separate modules document the

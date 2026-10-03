@@ -2231,7 +2231,7 @@ export function DataTable<T>({
                   <TableRow
                     key={getRowId(r)}
                     className={cn(
-                      onRowClick && "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                      onRowClick && "cursor-pointer focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                       isChild && "bg-muted/30",
                       rowClassName?.(r),
                     )}

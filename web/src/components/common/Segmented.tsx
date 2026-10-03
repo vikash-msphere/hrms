@@ -23,7 +23,7 @@ export function Segmented<T extends string | number>({ value, onChange, options,
             title={o.hint}
             onClick={() => onChange(o.value)}
             className={cn(
-              "min-w-0 flex-1 truncate rounded px-2 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "min-w-0 flex-1 truncate rounded px-2 py-1.5 text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
               active ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
             )}
           >

@@ -18,7 +18,7 @@ What changes from `2xl` up - galleries adding columns, board columns sharing the
 detail - is in [Wide screens](#wide-screens).
 
 Two non-width conditions matter as much as the widths, and are available as Tailwind variants
-(`web/tailwind.config.js`):
+(`@custom-variant` in `web/src/index.css`):
 
 - `coarse:` — `(pointer: coarse)`. A finger, not a cursor. This, not a width, is what decides whether a
   control needs a 44px target: a touch laptop at 1440px still needs one, and a 380px browser window on a
@@ -270,7 +270,7 @@ the steps below reads anything the page did not already hold: a wide layout rear
     preset is already read at. A board card's text wraps, so a wide board gets wider cards (rule 34).
 30. **Nothing changes at or below a 1440px viewport, sidebar open or on the icon rail.** That is the widest
     size `scripts/uiShots.mjs` measures and the size the e2e `desktop` project runs at, so both stay baselines.
-    A wide step keys off `2xl:` (1536px), `3xl:` (1920px, added in `web/tailwind.config.js`), or a container
+    A wide step keys off `2xl:` (1536px), `3xl:` (1920px, `--breakpoint-3xl` in `web/src/index.css`), or a container
     width a 1440 screen cannot reach (1312px usable on the rail). The `wide` e2e project (2560x1440, which runs
     only `e2e/wide.spec.ts`) asserts what each rule below promises.
 31. **One cap, on every page.** `<main>` has the same width and the same edges on every route. A workspace's tab
@@ -356,7 +356,7 @@ These are app-wide and already wired; a page neither implements nor opts into th
 - `hooks/useScrollActiveIntoView.ts` — keeps the active item of a scrolling tab/chip bar in view.
 - `components/ui/sheet.tsx` — bottom sheet with a grabber and drag-to-dismiss on a phone, right-docked panel
   from `sm` up, and with `dock` a non-modal panel beside the list from 1920px (rule 36).
-- `grid-cols-fill` (`web/tailwind.config.js`): the gallery template that adds columns with the width (rule 32),
+- `grid-cols-fill` (the `@theme` block in `web/src/index.css`): the gallery template that adds columns with the width (rule 32),
   and `3xl:`, the 1920px screen. `.card-flow`, `.task-tile` and `.pipe-card` in `index.css` (rules 33 and 34).
 - `components/common/DataTable.tsx` — table from `sm` up, cards below it, with a "Sort & filter" sheet
   standing in for the column headers that cards do not have.

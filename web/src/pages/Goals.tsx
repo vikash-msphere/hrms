@@ -3603,7 +3603,7 @@ function GoalCard({ goal, owner, parentTitle, cycleTitle, blockedByTitle, deptTi
       // other clickable card in the app (a leave request, a board card) draws one, and a keyboard reader
       // tabbing a wall of goals could not tell which one Enter would open.
       className={cn(
-        "group flex cursor-pointer flex-col gap-3 p-4 transition-colors hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "group flex cursor-pointer flex-col gap-3 p-4 transition-colors hover:border-primary/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
         overdue && "border-destructive/40",
         goal.status === "cancelled" && "opacity-75",
       )}

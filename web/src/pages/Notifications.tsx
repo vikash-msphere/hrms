@@ -95,7 +95,7 @@ function SnoozedRow({ n }: { n: Notification }) {
       tabIndex={0}
       onClick={go}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } }}
-      className="group relative flex w-full cursor-pointer items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      className="group relative flex w-full cursor-pointer items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
     >
       <NotificationLead n={n} />
       <span className="min-w-0 flex-1">
@@ -115,7 +115,7 @@ function SnoozedRow({ n }: { n: Notification }) {
         onClick={(e) => { e.stopPropagation(); void unsnooze(n); }}
         title="Wake now"
         aria-label="Wake now"
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 group-focus-within:opacity-100"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 group-focus-within:opacity-100"
       >
         <BellRing className="h-4 w-4" />
       </button>

@@ -58,7 +58,7 @@ export function PushEnrollButton() {
       title="Turn on browser notifications for this device"
       aria-label="Turn on browser notifications for this device"
       className={cn(
-        "flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
         busy && "pointer-events-none opacity-60",
       )}
     >

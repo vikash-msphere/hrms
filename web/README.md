@@ -7,7 +7,7 @@ The SPA is served as static assets by the Worker (`web/dist`, SPA fallback). It 
 ```
 npm create vite@latest web -- --template react-ts   # if starting fresh; this kit already has src/ samples
 cd web && npm i
-npm i -D tailwindcss postcss autoprefixer && npx tailwindcss init -p
+npm i -D tailwindcss @tailwindcss/vite   # Tailwind 4: the plugin goes in vite.config.ts, the config in src/index.css
 # optional: npx shadcn@latest init   (then `npx shadcn@latest add button table dialog input ...`)
 ```
 Set `build.outDir` to `../web/dist` in `web/vite.config.ts`, and proxy `/v1` to `http://localhost:8787`

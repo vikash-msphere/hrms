@@ -35,7 +35,7 @@ const Textarea = React.forwardRef<HTMLTextAreaElement, React.TextareaHTMLAttribu
         className={cn(
           // min-w-0: a <textarea>'s intrinsic width comes from its `cols` attribute (20 by default), and
           // that becomes its automatic minimum size as a flex item. See ui/input.tsx.
-          "flex min-h-[80px] w-full min-w-0 resize-none overflow-hidden rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50",
+          "flex min-h-[80px] w-full min-w-0 resize-none overflow-hidden rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50",
           className
         )}
         {...props}

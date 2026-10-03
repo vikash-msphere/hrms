@@ -31,6 +31,9 @@ export default defineWorkersConfig({
     // specs into the workers pool - where `@playwright/test` cannot even be imported (workerd forbids I/O in
     // global scope) and where they mean nothing anyway. The browser lane is `npm run test:e2e`.
     include: ["test/**/*.test.ts"],
+    // Vitest replaces every stylesheet it is not told about with an empty string, a `?raw` import included. The
+    // web app's Tailwind configuration lives in its stylesheet, and test/responsiveCoverage.test.ts reads it.
+    css: { include: [/web\/src\/index\.css/] },
     // A killed run otherwise leaves one orphaned workerd per test file holding its memory; see the script.
     globalSetup: ["./scripts/workerdWatchdog.mjs"],
     // The local-model integration test is OPT-IN (`npm run test:ai`), and this is the one exclusion in the

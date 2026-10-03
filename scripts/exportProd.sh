@@ -161,7 +161,7 @@ EXPORT_ROOT=(
   .gitignore
 )
 # web/ config. The SPA root is ./web (vite.config.ts `root`), output ../web/dist.
-EXPORT_WEB=(index.html vite.config.ts tsconfig.json tailwind.config.js postcss.config.js .env .env.example)
+EXPORT_WEB=(index.html vite.config.ts tsconfig.json .env .env.example)
 # scripts/ - only the files the deploy path, bootstrap/ or an exported npm script actually use.
 EXPORT_SCRIPTS=(
   tsResolve.mjs           # ts loader every node script runs through

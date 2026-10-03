@@ -135,7 +135,7 @@ function TicketStatusMenu({ ticket, busy, onPick, align = "start" }: {
           type="button"
           aria-label={`Status: ${ticketStatusLabel(stateU)} - change it`}
           onClick={(e) => e.stopPropagation()} // inside a table row, whose click opens the drawer
-          className="inline-flex items-center gap-1 rounded-full outline-none transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+          className="inline-flex items-center gap-1 rounded-full outline-hidden transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
         >
           <StatusBadge state={ticket.state} />
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />

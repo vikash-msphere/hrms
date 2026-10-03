@@ -766,7 +766,7 @@ export default function App() {
                 under it; from `md` up there is no inset and the normal rhythm applies. Vertical padding is
                 tighter on a phone, where 32px of chrome is a sixth of the screen. */}
             {/* Focus target for a navigation (see useRouteAnnounce). `tabIndex={-1}` makes the landmark
-                focusable programmatically without adding it to the tab sequence, and `outline-none` keeps
+                focusable programmatically without adding it to the tab sequence, and `outline-hidden` keeps
                 that focus silent for the pointer user who never asked for a ring around the page. */}
             {/* The 1920px cap uses most of a 2560 or ultra-wide monitor while card text and full-width inputs
                 stay readable, and it is the SAME on every page. A workspace's tab strip and the page header sit
@@ -790,7 +790,7 @@ export default function App() {
               // give it `sentry-mask`, or `data-sentry-block` for an image, the way the compensation, bank, tax,
               // identity, personal, emergency, documents and signature panels each do for themselves.
               data-page={page}
-              className="mx-auto w-full max-w-[120rem] flex-1 px-4 pb-[calc(2rem+env(safe-area-inset-bottom))] pt-5 outline-none sm:px-6 sm:pt-8 md:pb-8 lg:px-8"
+              className="mx-auto w-full max-w-[120rem] flex-1 px-4 pb-[calc(2rem+env(safe-area-inset-bottom))] pt-5 outline-hidden sm:px-6 sm:pt-8 md:pb-8 lg:px-8"
             >
               {/* Ambient access scope for the whole page: collection = the route key (the collection for most
                   pages), object = the detail id when on an item page. Shared primitives (Field, Detail, ...)

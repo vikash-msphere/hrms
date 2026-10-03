@@ -81,7 +81,7 @@ export function SummaryStrip({ items, className }: { items: SummaryItem[]; class
             onClick={it.onClick}
             aria-pressed={!!it.active}
             style={rows.cell(i)}
-            className={cn(shell, "text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring", it.active && "bg-muted/60")}
+            className={cn(shell, "text-left transition-colors hover:bg-muted/50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring", it.active && "bg-muted/60")}
           >
             {body}
           </button>

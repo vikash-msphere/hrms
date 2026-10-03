@@ -13,7 +13,7 @@ const Checkbox = React.forwardRef<
       // A 16px box is the right SIZE and the wrong TARGET. On touch an invisible pseudo-element extends the
       // hit area to ~36px in every direction without changing the layout a single caller wrote - growing the
       // box itself would reflow every row, table header and settings list it appears in.
-      "peer relative h-4 w-4 shrink-0 rounded-[4px] border border-input shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground coarse:before:absolute coarse:before:-inset-2.5 coarse:before:content-['']",
+      "peer relative h-4 w-4 shrink-0 rounded-[4px] border border-input shadow-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground coarse:before:absolute coarse:before:-inset-2.5 coarse:before:content-['']",
       className
     )}
     {...props}

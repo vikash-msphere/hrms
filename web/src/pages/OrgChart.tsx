@@ -324,7 +324,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     const width = el.scrollWidth;
     // BUILT AS NODES, not as an HTML string. Nothing interpolated here is caller-controlled (a view name, a
     // count, today's date), so the string form was not a hole - but the app's rule is that text reaches the
-    // DOM as text (lib/richText.tsx says so, and tailwind.config.js relies on it), and one exception is how a
+    // DOM as text (lib/richText.tsx says so, and the Tailwind source list in index.css relies on it), and one exception is how a
     // rule stops being one. `textContent` cannot be parsed as markup whatever it is handed.
     const header = document.createElement("div");
     header.style.cssText = `width:${width}px;text-align:center;padding:8px 0 20px;font-size:16px;font-weight:600;`;

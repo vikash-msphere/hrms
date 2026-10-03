@@ -19,7 +19,7 @@ export function ColorPicker({ value, onChange, presets, label = "Choose color", 
         <button
           type="button"
           aria-label={label}
-          className={cn("h-8 w-8 shrink-0 rounded-md border ring-offset-2 ring-offset-background transition hover:ring-2 hover:ring-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", className)}
+          className={cn("h-8 w-8 shrink-0 rounded-md border ring-offset-2 ring-offset-background transition hover:ring-2 hover:ring-ring focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring", className)}
           style={{ backgroundColor: value }}
         />
       </PopoverTrigger>

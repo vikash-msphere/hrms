@@ -75,7 +75,7 @@ export function StickerField({
   const tiles = (value && !suggestions.includes(value) ? [value, ...suggestions] : suggestions).slice(0, TILES);
 
   const tileClass =
-    "group relative flex aspect-square w-full items-center justify-center rounded-xl border bg-muted/30 p-1.5 transition-all hover:-translate-y-0.5 hover:bg-muted hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+    "group relative flex aspect-square w-full items-center justify-center rounded-xl border bg-muted/30 p-1.5 transition-all hover:-translate-y-0.5 hover:bg-muted hover:shadow-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring";
 
   const slider = (name: string, key: "size" | "opacity", min: number, max: number, step: number) => (
     <label className="flex items-center gap-2 text-xs text-muted-foreground">

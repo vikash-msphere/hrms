@@ -392,7 +392,7 @@ function Month({
                 onKeyDown={(e) => onKey(e, ymd)}
                 className={cn(
                   "relative mx-auto flex h-9 w-9 items-center justify-center rounded-full text-sm tabular-nums transition-colors",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+                  "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
                   // A day off is quieter, not shaded: a fill per weekend and holiday turns the month into a
                   // checkerboard, and the dots below already say which is which.
                   nonWorking && !isEdge && "text-muted-foreground/50",

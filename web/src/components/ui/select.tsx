@@ -42,7 +42,7 @@ const SelectTrigger = React.forwardRef<
       // and the box is usually a flex child of a filter row, so without a zeroed floor the row's width
       // is the sum of every option label it might show. `truncate` on the label so the shrink degrades
       // into an ellipsis rather than the text sliding out under the chevron.
-      "flex h-9 w-full min-w-0 items-center justify-between gap-1 rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 coarse:min-h-10 [&>span]:line-clamp-1 [&>span]:truncate [&>span]:text-left",
+      "flex h-9 w-full min-w-0 items-center justify-between gap-1 rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm ring-offset-background placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 coarse:min-h-10 [&>span]:line-clamp-1 [&>span]:truncate [&>span]:text-left",
       className
     )}
     {...props}
@@ -106,7 +106,7 @@ const SelectItem = React.forwardRef<
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex w-full cursor-pointer select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "relative flex w-full cursor-pointer select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-hidden focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className
     )}
     {...props}
