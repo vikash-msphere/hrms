@@ -203,12 +203,8 @@ describe("responsive coverage", () => {
   // silently generate nothing - every one of those targets would quietly go back to being too small, with no
   // build error to notice.
   //
-  // (index.css itself is NOT asserted here: Vite's CSS pipeline resolves a `?raw` import of a stylesheet to an
-  // empty string inside the workers pool, so a content check would pass vacuously. The rules that live there -
-  // the hover-reveal override, the 16px form floor, the touch-target floors - are documented in
-  // docs/06-responsive-ui.md and covered by the per-site gates below.)
   it("the touch/PWA variants exist in the Tailwind config", () => {
-    const cfg = import.meta.glob("../web/tailwind.config.js", { query: "?raw", import: "default", eager: true }) as Record<
+    const cfg = import.meta.glob("../web/src/index.css", { query: "?raw", import: "default", eager: true }) as Record<
       string,
       string
     >;
@@ -219,7 +215,7 @@ describe("responsive coverage", () => {
       ["standalone", "display-mode: standalone"],
       ["short", "max-height: 480px"],
     ]) {
-      expect(src, `the ${variant}: variant is used across the app`).toContain(query!);
+      expect(src, `the ${variant}: variant is used across the app`).toContain(`@custom-variant ${variant} (@media (${query}))`);
     }
   });
 

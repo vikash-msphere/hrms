@@ -1007,7 +1007,7 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, me
       // the body is the stack it always was. Wider (a column grown past ~22rem, from `2xl`), labels, title and
       // details become one wrapping row: one line when they fit, so a wide column shows more cards rather than
       // taller ones.
-      className="task-tile relative cursor-grab overflow-hidden rounded-lg border bg-card p-2.5 shadow-sm transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
+      className="task-tile relative cursor-grab overflow-hidden rounded-lg border bg-card p-2.5 shadow-sm transition-shadow hover:shadow-md focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
     >
       {card.blocked && <span className="absolute inset-y-0 left-0 w-1 bg-destructive" aria-hidden />}
       <div className="task-tile-body">
@@ -1793,7 +1793,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                 title="Click to edit"
                 onClick={() => { descSwitched.current = true; setDescEdit(true); }}
                 onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); descSwitched.current = true; setDescEdit(true); } }}
-                className="min-h-[5.5rem] cursor-text rounded-md border bg-background px-3 py-2 text-left transition-colors hover:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="min-h-[5.5rem] cursor-text rounded-md border bg-background px-3 py-2 text-left transition-colors hover:border-ring focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               >
                 {description.trim()
                   ? <RichText source={description} className="space-y-1.5 text-sm" />

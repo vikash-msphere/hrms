@@ -2183,7 +2183,7 @@ function QuickActionsTab({ toast }: { toast: Toast }) {
       }}
       aria-label={`Reorder ${label}`}
       title="Drag, or use the arrow keys, to reorder"
-      className="flex h-7 w-5 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground/40 hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:h-9 coarse:w-7"
+      className="flex h-7 w-5 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground/40 hover:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring coarse:h-9 coarse:w-7"
     >
       <GripVertical className="h-4 w-4" />
     </button>

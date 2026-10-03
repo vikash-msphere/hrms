@@ -455,7 +455,7 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
                                     // No figure in the tooltip: `maskAttributes` is empty (instrument.ts), so a
                                     // title attribute is recorded verbatim in session replay.
                                     title={`Offer ${m.label.toLowerCase()} - open it`}
-                                    className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                    className="rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                                   >
                                     <Badge variant={m.variant} className="text-[10px] hover:opacity-80">Offer · {m.label}</Badge>
                                   </button>

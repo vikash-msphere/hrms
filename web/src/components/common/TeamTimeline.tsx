@@ -1018,7 +1018,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
                       type="button"
                       onClick={() => navigate(attendanceRoute(eid, me.employee_id))}
                       title="Open attendance"
-                      className="relative z-[1] flex min-w-0 items-center gap-2 rounded-md text-left hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      className="relative z-[1] flex min-w-0 items-center gap-2 rounded-md text-left hover:opacity-80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       <span className="shrink-0">
                         <PhotoAvatar employeeId={person.id} name={person.name} photo={person.photo} className={cn("text-sm", isPhone ? "h-9 w-9" : "h-10 w-10")} />

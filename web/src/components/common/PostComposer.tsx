@@ -922,7 +922,7 @@ export function PostComposer({
                       <button
                         type="button"
                         aria-label={`Post type: ${form.kind}`}
-                        className="group inline-flex items-center gap-1.5 rounded-lg border border-dashed border-primary/40 bg-primary/5 px-2 py-1 capitalize text-primary outline-none transition-colors hover:border-primary/60 hover:bg-primary/10 focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:border-solid data-[state=open]:bg-primary/10"
+                        className="group inline-flex items-center gap-1.5 rounded-lg border border-dashed border-primary/40 bg-primary/5 px-2 py-1 capitalize text-primary outline-hidden transition-colors hover:border-primary/60 hover:bg-primary/10 focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:border-solid data-[state=open]:bg-primary/10"
                       >
                         {(() => { const Icon = KIND_ICONS[form.kind]; return <Icon className="h-4 w-4 shrink-0" />; })()}
                         {form.kind}

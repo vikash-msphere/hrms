@@ -33,7 +33,7 @@ export function FormError({ error }: { error?: string | null }) {
       ref={ref}
       role="alert"
       tabIndex={-1}
-      className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive outline-none ring-offset-2 focus-visible:ring-2 focus-visible:ring-destructive/50"
+      className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive outline-hidden ring-offset-2 focus-visible:ring-2 focus-visible:ring-destructive/50"
     >
       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
       <span className="min-w-0">{error}</span>

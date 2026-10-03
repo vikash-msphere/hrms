@@ -33,7 +33,7 @@ export function NotificationRow({ n, when, indent }: { n: Notification; when: st
         type="button"
         onClick={open}
         aria-label={`Open: ${n.title}`}
-        className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       />
       {!n.read && <span className={cn("absolute left-0 top-0 h-full w-0.5", priorityMeta[n.priority]?.dot ?? "bg-primary")} />}
       {!indent && <span className="pointer-events-none relative"><NotificationLead n={n} /></span>}

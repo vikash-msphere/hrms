@@ -554,23 +554,42 @@ if (typeof document !== "undefined") {
 // ---- Purge --------------------------------------------------------------------------------------------------
 
 /**
+ * The localStorage keys that only say how something LOOKS or what has been seen: the theme, a fold, a view
+ * mode, a zoom, a tab's "seen" mark. None can carry a name, so they are kept through both a sign-out and a lock;
+ * the per-person ones are already namespaced to their owner (lib/localPref.ts `userKey`), so the next person to
+ * sign in on this browser never reads them. Every other key goes, including every key nobody listed here - a
+ * search history, a saved table view, a filter can each carry a name, so an unknown key is treated as one that
+ * might.
+ */
+const LOOK_KEYS = [
+  "theme", "nav:collapsed:", "nav:rail:", "am:", "hrms:overflow-probe", "hrms.scanCamera", "hrms.attendance.view:",
+  "events:view", "goals:view", "goals:rollup", "goals:scope", "orgchart.", "directory:", "boards:collapsed:",
+  "charts:", "hrms.letters.rail", "tickets-last-seen", "tab_seen:", "dash.personal:", "push-enroll-dismissed",
+];
+
+/** Remove every localStorage key outside `keep` (exact keys or prefixes). Never throws. */
+function clearLocalExcept(keep: string[]): void {
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && !keep.some((p) => k === p || k.startsWith(p))) localStorage.removeItem(k);
+    }
+  } catch {
+    /* storage denied: nothing was written to begin with */
+  }
+}
+
+/**
  * Delete everything this app has stored in this browser: the database and every localStorage key except the
- * theme, which is a visual preference rather than anything about the person and would otherwise flash the wrong
- * palette at whoever signs in next (the server row corrects it either way).
+ * LOOK_KEYS above, so signing out and back in does not reopen every folded chart and reset every view mode.
  *
- * Called on sign-out. `localStorage.clear()` is safe to reach for because the origin is entirely ours.
+ * Called on sign-out.
  */
 export async function purgeAll(): Promise<void> {
   queued.clear();
   index.clear();
   for (const cls of Object.keys(used) as StoreClass[]) used[cls] = 0;
-  try {
-    const theme = localStorage.getItem("theme");
-    localStorage.clear();
-    if (theme) localStorage.setItem("theme", theme);
-  } catch {
-    /* storage denied: nothing was written to begin with */
-  }
+  clearLocalExcept(LOOK_KEYS);
   try {
     sessionStorage.clear();
   } catch {
@@ -603,16 +622,11 @@ export async function purgeAll(): Promise<void> {
 }
 
 /**
- * The localStorage keys a LOCK leaves behind: the theme, the lock's own bookkeeping, the change-feed sync point
- * that pairs with the encrypted copies, and toggles that only say how something LOOKS. Everything else goes,
- * including every key nobody listed here - a search history, a saved table view, a filter can each carry a
- * name, so an unknown key is treated as one that might.
+ * The localStorage keys a LOCK leaves behind: the LOOK_KEYS a sign-out keeps, plus the lock's own bookkeeping
+ * and the change-feed sync point that pairs with the encrypted copies. A sign-out keeps neither of those two:
+ * it deletes the copies the sync point describes, and there is no lock left to keep books on.
  */
-const KEPT_ON_LOCK = [
-  "theme", "hrms.lock.", "hrms.sync:", "nav:collapsed:", "nav:rail:", "am:", "hrms:overflow-probe", "hrms.scanCamera",
-  "hrms.attendance.view:", "events:view", "goals:view", "goals:rollup", "orgchart.", "directory:", "boards:collapsed:",
-  "tickets-last-seen", "tab_seen:", "dash.personal:", "push-enroll-dismissed",
-];
+const KEPT_ON_LOCK = [...LOOK_KEYS, "hrms.lock.", "hrms.sync:"];
 
 /**
  * What the app lock takes off this browser (web/src/lib/appLock.ts). The encrypted records STAY: without the key
@@ -630,14 +644,7 @@ export async function purgeForLock(): Promise<void> {
   keyGiven = undefined;
   keyReady = Promise.resolve(null);
   for (const set of hydrators.values()) set.forEach((h) => h.onReset?.());
-  try {
-    for (let i = localStorage.length - 1; i >= 0; i--) {
-      const k = localStorage.key(i);
-      if (k && !KEPT_ON_LOCK.some((p) => k === p || k.startsWith(p))) localStorage.removeItem(k);
-    }
-  } catch {
-    /* storage denied: nothing was written to begin with */
-  }
+  clearLocalExcept(KEPT_ON_LOCK);
   try {
     sessionStorage.clear();
   } catch {

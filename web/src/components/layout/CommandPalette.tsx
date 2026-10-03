@@ -835,7 +835,7 @@ export function CommandPalette({
               // text-base on a phone: at 14px iOS zooms the page on focus and leaves it zoomed, so the
               // results you were about to read are off screen. (index.css enforces the same floor globally;
               // stated here too because this is the one input in the app that is always focused on open.)
-              className="h-12 w-full bg-transparent text-base outline-none placeholder:text-muted-foreground sm:text-sm"
+              className="h-12 w-full bg-transparent text-base outline-hidden placeholder:text-muted-foreground sm:text-sm"
             />
             {searching && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />}
             {/* Esc closes it on a keyboard; a phone has no Esc, so it gets a button. */}

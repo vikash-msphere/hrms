@@ -18,7 +18,7 @@ export function NotificationRowMenu({ n, className }: { n: Notification; classNa
         <button
           onClick={stop}
           aria-label="Notification actions"
-          className={cn("flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", className)}
+          className={cn("flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring", className)}
         >
           <MoreHorizontal className="h-4 w-4" />
         </button>

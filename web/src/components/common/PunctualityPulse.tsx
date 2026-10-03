@@ -585,7 +585,7 @@ function Strip({ icon: Icon, label, domain, marks, plans, zones, ticks, tickLabe
                   // The 1px offset in the strip's own ground keeps each ring off its avatar and off the avatar
                   // stacked behind it - without it, dark avatars in dark mode run into one blob.
                   className={cn(
-                    "absolute rounded-full ring-offset-1 ring-offset-background transition-transform hover:z-20 hover:scale-110 focus-visible:z-20 focus-visible:outline-none",
+                    "absolute rounded-full ring-offset-1 ring-offset-background transition-transform hover:z-20 hover:scale-110 focus-visible:z-20 focus-visible:outline-hidden",
                     ghost
                       ? item.p.pending ? "outline outline-2 outline-dashed outline-offset-1 outline-warning" : "ring-2 ring-muted-foreground/50 dark:ring-muted-foreground/80"
                       : cn("ring-2", RING[item.verdict]),

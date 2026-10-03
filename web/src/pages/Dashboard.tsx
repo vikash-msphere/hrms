@@ -1074,7 +1074,7 @@ export default function Dashboard({ me }: { me: Me }) {
                           }}
                           aria-label={`Reorder ${def.label}`}
                           title="Drag, or use the arrow keys, to reorder"
-                          className="flex h-6 w-5 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground/40 hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:h-9 coarse:w-7"
+                          className="flex h-6 w-5 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground/40 hover:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring coarse:h-9 coarse:w-7"
                         >
                           <GripVertical className="h-3.5 w-3.5" />
                         </button>
@@ -1848,7 +1848,7 @@ function QuickAction({ label, icon: Icon, onClick, style }: { label: string; ico
     <button
       onClick={onClick}
       style={style}
-      className="group flex items-center justify-between rounded-xl border bg-card p-4 text-left text-sm font-medium shadow-sm transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+      className="group flex items-center justify-between rounded-xl border bg-card p-4 text-left text-sm font-medium shadow-sm transition-colors hover:bg-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
     >
       <span className="flex items-center gap-3">
         <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">

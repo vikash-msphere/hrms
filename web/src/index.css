@@ -8,9 +8,217 @@
    app has no copy to render. latin-ext covers the European diacritics; widen the subset list in main.tsx
    and lib/fonts.ts together if the app ever ships another script. */
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* ==============================================================================================
+   TAILWIND. Version 4, configured here in CSS: there is no tailwind.config.js and no PostCSS step. The
+   Vite plugin (@tailwindcss/vite, web/vite.config.ts) compiles this file, and Lightning CSS inside it does
+   the vendor prefixing autoprefixer used to.
+
+   Sources are stated relative to THIS file, not the working directory, so a build started from anywhere
+   scans the same files. `source(none)` turns off the automatic scan (which would also walk web/public and
+   anything else under the root) so the two lines below are the whole list.
+   ============================================================================================== */
+@import "tailwindcss" source(none);
+/* The enter/exit animation utilities (`animate-in`, `fade-in-0`, `zoom-in-95`, `slide-in-from-top-2`) the
+   Radix overlays use. The CSS-only successor to the tailwindcss-animate plugin, with the same class names. */
+@import "tw-animate-css";
+
+@source "../index.html";
+@source "./";
+
+/* Decoration utilities the kudos cards use that don't appear in scanned source (creative glow blobs, the
+   gradient wash + accent rail, the quote mark, the message hero). Listed so the bundle includes them.
+   NO COLOUR PATTERNS HERE. A brace-expanded colour range is not the ~1k rules it reads like: expanded across
+   7 prefixes x 14 families x 11 shades with their opacity steps, it was ~48k rules and a 5.1 MB render-blocking
+   stylesheet. Nothing needed it - the card bodies (KudosCardBody/PostCardBody) are React components the
+   scanner already reads, rich text renders to React nodes rather than an HTML string (there is no
+   `dangerouslySetInnerHTML` in the app, see web/src/lib/richText.tsx), and no seed or settings blob carries a
+   Tailwind class. The one place that DOES build class names by interpolation, web/src/lib/notificationMeta.tsx,
+   keeps them scannable itself with a literal `_KEEP` string. Any future dynamic class belongs in a literal like
+   that, next to the code that builds it - not in a pattern here. */
+@source inline("to-card bg-gradient-to-r blur-2xl blur-3xl rounded-2xl");
+@source inline("h-0.5 h-36 w-36 h-40 w-40 h-32 w-32 h-64 w-64 h-96 w-96");
+@source inline("inset-x-0 pointer-events-none -right-12 -top-12 -bottom-16 -left-10 -bottom-4 -right-4");
+@source inline("-translate-x-1/2 -translate-y-1/2");
+@source inline("opacity-10 opacity-20 opacity-25 dark:opacity-20 dark:opacity-25 dark:opacity-30");
+@source inline("ring-offset-card text-[15px] text-foreground/70");
+@source inline("min-h-[440px] p-8 flex flex-col justify-center");
+@source inline("h-28 w-28 h-24 w-24 ring-offset-4 flex-1 gap-5 py-6");
+@source inline("text-2xl text-lg max-w-md text-[11px] tracking-wider px-3 py-1");
+
+/* Dark mode is the `.dark` class on <html> (lib/theme), not the OS setting. `:is(.dark *)` rather than v4's
+   suggested `:where(...)`: `:is` carries the class's specificity, so a `dark:` utility outranks the plain one
+   it overrides by specificity and not only by its place in the stylesheet. */
+@custom-variant dark (&:is(.dark *));
+
+/* Non-width media conditions, usable as ordinary variants (`coarse:h-11`, `standalone:pt-4`).
+   `coarse` is "a finger, not a cursor" - the one thing a width breakpoint cannot tell you, and what decides
+   whether a control needs a 44px target. `standalone` is the installed-PWA case, where the app paints under
+   the status bar and has to reserve the inset itself. */
+@custom-variant coarse (@media (pointer: coarse));
+@custom-variant fine (@media (pointer: fine));
+@custom-variant standalone (@media (display-mode: standalone));
+/* A phone held sideways: ~390px of height for the whole app. Fixed chrome that is worth 12% of a portrait
+   screen costs a third of this one, so some of it stands down here. */
+@custom-variant short (@media (max-height: 480px));
+
+@theme {
+  /* The wide-screen step past the default `2xl` (1536): a 1920px screen, where the page has ~1600px beside the
+     sidebar - room for a side column next to the dashboard and the board feed (docs/06-responsive-ui.md,
+     "Wide screens"). Breakpoints sort by size, so it lands after `2xl`. The same number is the docked sheet's
+     query in components/ui/sheet.tsx (`DOCK_QUERY`) and the board's in pages/Announcements.tsx; change them
+     together. */
+  --breakpoint-3xl: 120rem;
+
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* Device safe areas as spacing steps, so a bottom-docked bar can write `pb-safe` instead of an
+     arbitrary-value class each time. Zero on every device without a notch/home indicator.
+     The two side insets are the LANDSCAPE case: held sideways, the notch eats one edge and the home indicator
+     the other, and a `fixed inset-x-0` bar runs straight under both. Flow content gets these from the shell
+     (`[data-app-shell]` below); anything `fixed` has to reserve them itself. */
+  --spacing-safe: env(safe-area-inset-bottom);
+  --spacing-safe-t: env(safe-area-inset-top);
+  --spacing-safe-l: env(safe-area-inset-left);
+  --spacing-safe-r: env(safe-area-inset-right);
+
+  --animate-accordion-down: accordion-down 0.2s ease-out;
+  --animate-accordion-up: accordion-up 0.2s ease-out;
+  --animate-fade-in: fade-in 0.25s ease-out;
+
+  @keyframes accordion-down {
+    from { height: 0; }
+    to { height: var(--radix-accordion-content-height); }
+  }
+  @keyframes accordion-up {
+    from { height: var(--radix-accordion-content-height); }
+    to { height: 0; }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
+/* THE APP'S SHADOW, BLUR AND RING SCALE. Tailwind 4 moved its small steps down a name - its `shadow-sm` is the
+   old bare `shadow`, its `blur-sm` the old bare `blur`, a bare `ring` went from 3px to 1px. The steps below keep
+   every class in this app drawing exactly what it drew before, so `shadow-sm` here is a hairline shadow and
+   `ring` is a 3px ring, whatever the Tailwind 4 docs say those names mean.
+   `inline` for the bare `drop-shadow`: Tailwind splits that value at its commas into one `drop-shadow()` per
+   shadow, and it can only do that to the literal value, not to a variable holding it. */
+@theme inline {
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --blur-sm: 4px;
+  --blur: 8px;
+  --drop-shadow-sm: 0 1px 1px rgb(0 0 0 / 0.05);
+  --drop-shadow: 0 1px 2px rgb(0 0 0 / 0.1), 0 1px 1px rgb(0 0 0 / 0.06);
+  --default-ring-width: 3px;
+}
+
+/* A card gallery that adds columns as the page widens instead of stretching its cards: as many tracks of at least
+   `--cell` as fit (`min(…, 100%)` so a cell never overflows a box narrower than it). `auto-fill`, not `auto-fit`: a
+   short list keeps its card size, and a short last row reads as the end of the list. Used from `2xl:` as
+   `grid-cols-fill`, on top of each grid's own ladder, so nothing at or below 1440px changes.
+   `inline` because each grid states its own `--cell` (`[--cell:11rem]`). A theme value is a variable on :root, and a
+   `var()` inside a variable resolves where that variable is declared - every grid would get the 16rem fallback. */
+@theme inline {
+  --grid-template-columns-fill: repeat(auto-fill, minmax(min(var(--cell, 16rem), 100%), 1fr));
+}
+
+/* The colour and radius names, pointing at the palette below. `inline` because the values are references to
+   variables that change per theme (`.dark` re-points them): each utility carries `hsl(var(--primary))` itself
+   rather than a theme variable resolved once on :root. An opacity modifier (`bg-primary/90`) mixes the colour
+   with transparent. */
+@theme inline {
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-sidebar: hsl(var(--sidebar));
+  --color-sidebar-foreground: hsl(var(--sidebar-foreground));
+  --color-sidebar-accent: hsl(var(--sidebar-accent));
+  --color-sidebar-accent-foreground: hsl(var(--sidebar-accent-foreground));
+  --color-sidebar-border: hsl(var(--sidebar-border));
+  --color-success: hsl(var(--success));
+  --color-success-foreground: hsl(var(--success-foreground));
+  --color-warning: hsl(var(--warning));
+  --color-warning-foreground: hsl(var(--warning-foreground));
+
+  /* The raw brand ramps, for the few places that need a specific step rather than a semantic role (chart
+     series, illustration fills, decorative washes). Prefer the semantic names above: those re-skin with the
+     theme, these do not. */
+  --color-brand-blue-50: hsl(var(--blue-50));
+  --color-brand-blue-100: hsl(var(--blue-100));
+  --color-brand-blue-200: hsl(var(--blue-200));
+  --color-brand-blue-300: hsl(var(--blue-300));
+  --color-brand-blue-400: hsl(var(--blue-400));
+  --color-brand-blue-500: hsl(var(--blue-500));
+  --color-brand-blue-600: hsl(var(--blue-600));
+  --color-brand-blue-700: hsl(var(--blue-700));
+  --color-brand-blue-800: hsl(var(--blue-800));
+  --color-brand-blue-900: hsl(var(--blue-900));
+  --color-brand-blue-950: hsl(var(--blue-950));
+  --color-brand-cyan-50: hsl(var(--cyan-50));
+  --color-brand-cyan-100: hsl(var(--cyan-100));
+  --color-brand-cyan-200: hsl(var(--cyan-200));
+  --color-brand-cyan-300: hsl(var(--cyan-300));
+  --color-brand-cyan-400: hsl(var(--cyan-400));
+  --color-brand-cyan-500: hsl(var(--cyan-500));
+  --color-brand-cyan-600: hsl(var(--cyan-600));
+  --color-brand-cyan-700: hsl(var(--cyan-700));
+  --color-brand-cyan-800: hsl(var(--cyan-800));
+  --color-brand-cyan-900: hsl(var(--cyan-900));
+  --color-brand-cyan-950: hsl(var(--cyan-950));
+  --color-brand-neutral-50: hsl(var(--neutral-50));
+  --color-brand-neutral-100: hsl(var(--neutral-100));
+  --color-brand-neutral-200: hsl(var(--neutral-200));
+  --color-brand-neutral-300: hsl(var(--neutral-300));
+  --color-brand-neutral-400: hsl(var(--neutral-400));
+  --color-brand-neutral-500: hsl(var(--neutral-500));
+  --color-brand-neutral-600: hsl(var(--neutral-600));
+  --color-brand-neutral-700: hsl(var(--neutral-700));
+  --color-brand-neutral-800: hsl(var(--neutral-800));
+  --color-brand-neutral-900: hsl(var(--neutral-900));
+  --color-brand-neutral-950: hsl(var(--neutral-950));
+
+  /* Corner radii from branding.json (Primitive.Radius 8/16/24/32), all derived from the single --radius knob
+     in :root below. md (8) is the control radius - buttons, inputs, badges; xl (16) is the card radius; 2xl
+     (24) covers dialogs/sheets; 3xl (32) is the pill-ish feature surface. lg sits between md and xl for the
+     small inline panels that 16px would over-round. A bare `rounded` stays Tailwind's 4px. */
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 4px);
+  --radius-xl: calc(var(--radius) + 8px);
+  --radius-2xl: calc(var(--radius) + 16px);
+  --radius-3xl: calc(var(--radius) + 24px);
+}
+
+/* Elevation utilities backed by themeable tokens (see --shadow-card and friends in :root below). Utilities
+   rather than plain classes so variants apply (`hover:shadow-card-hover`). */
+@utility shadow-card {
+  box-shadow: var(--shadow-card);
+}
+@utility shadow-card-hover {
+  box-shadow: var(--shadow-card-hover);
+}
+@utility shadow-pop {
+  box-shadow: var(--shadow-pop);
+}
 
 @layer base {
   /* ============================================================================================
@@ -22,8 +230,9 @@
      Ramps come from branding.json (Figma design tokens): a navy Brand Blue (anchored at 800, #15396D;
      the app carries the identity one step lighter at 700 - see --primary below),
      an electric Brand Cyan anchored at 400 (#00F6FF), and a cool blue-biased Neutral ramp. Values are
-     bare HSL triplets, not hex, because Tailwind wraps them as hsl(var(--x) / <alpha>) - that is what
-     makes `bg-primary/90`, `text-foreground/70` and friends work.
+     bare HSL triplets, not hex, so a hand-written rule can add its own alpha (`hsl(var(--primary) / 0.55)`).
+     The Tailwind colour names wrap them as `hsl(var(--x))` in the `@theme inline` block above, and an
+     opacity modifier (`bg-primary/90`, `text-foreground/70`) mixes that with transparent.
      ============================================================================================ */
   :root {
     /* --- Primitive: Brand Blue (branding.json Primitive.Color.Brand.Blue) ---------------------- */
@@ -135,7 +344,7 @@
     --shadow-pop: 0 12px 32px -8px rgba(7, 19, 38, 0.18), 0 2px 6px -2px rgba(7, 19, 38, 0.09);
 
     /* One radius knob. The Tailwind scale derives every step from it and lands on the branding
-       corner radii: md = 8, xl = 16, 2xl = 24, 3xl = 32 (see tailwind.config.js). */
+       corner radii: md = 8, xl = 16, 2xl = 24, 3xl = 32 (see the `--radius-*` steps in @theme above). */
     --radius: 0.5rem;
   }
 
@@ -194,6 +403,20 @@
 
   * {
     @apply border-border;
+  }
+  /* Two defaults Tailwind 3's reset set and Tailwind 4's does not. A button shows the hand cursor (4 leaves
+     the browser's arrow), and a placeholder is a mid grey rather than half the field's text colour. */
+  button,
+  [role="button"] {
+    cursor: pointer;
+  }
+  :disabled {
+    cursor: default;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    opacity: 1;
+    color: var(--color-gray-400);
   }
   html,
   body,
@@ -621,17 +844,6 @@
     }
   }
 
-  /* Elevation utilities backed by themeable tokens (see --shadow-* above). */
-  .shadow-card {
-    box-shadow: var(--shadow-card);
-  }
-  .shadow-card-hover {
-    box-shadow: var(--shadow-card-hover);
-  }
-  .shadow-pop {
-    box-shadow: var(--shadow-pop);
-  }
-
   /* Balanced metric rows (see web/src/lib/statRows.ts, which computes the numbers).
      A row of tiles whose count does not divide the column count leaves an orphan row - four KPIs then three
      against a hole - and the hole is the first thing the eye finds. So the count is split into rows as evenly
@@ -942,12 +1154,12 @@
    CHARTS (frappe-charts). Two things about this library decide how the block below has to be
    written, and both of them silently delete a rule that looks perfectly correct.
 
-   ONE: IT IS NOT IN A @layer. Tailwind tree-shakes `@layer components` against the content globs -
-   a rule there survives only if a class in its selector appears somewhere in the scanned source.
-   Nothing in this app ever writes `graph-svg-tip` or `svg-pointer`; the library does, at runtime.
-   Written inside the layer, every tooltip rule here was dropped from the built stylesheet and the
-   tooltip stayed the library's black box with #959da5 text on both themes. Plain CSS, outside the
-   layer, always ships. Anything targeting a class only the library emits belongs down here.
+   ONE: IT IS NOT IN A @layer. Tailwind's `@layer base/components/utilities` are real CSS cascade
+   layers, and any rule outside every layer beats every rule inside one, whatever the specificity.
+   The library's own stylesheet is outside every layer, so a rule written inside `@layer components`
+   loses to it however loud its selector is. Plain CSS, outside the layers, competes with the library
+   on specificity and order alone, which is what the next point relies on. Anything answering a rule
+   of the library's belongs down here.
 
    TWO: THE DOUBLED CLASS. The library carries its stylesheet as a string and injects it from JS -
    `styleInject` APPENDS a <style> to <head> when the module is imported, which here is lazily, long

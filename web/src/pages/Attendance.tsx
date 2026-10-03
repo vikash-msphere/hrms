@@ -938,7 +938,7 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
                     // stop and Enter/Space, the same shape a day row in the history has.
                     <tr
                       key={r.id}
-                      className="group cursor-pointer border-b last:border-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring hover:bg-muted/40"
+                      className="group cursor-pointer border-b last:border-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring hover:bg-muted/40"
                       tabIndex={0}
                       onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setOpened(r); } }}
                       onClick={() => setOpened(r)}

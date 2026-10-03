@@ -150,7 +150,7 @@ export function IllustrationPicker({
     tiles[Math.max(0, Math.min(tiles.length - 1, to))]?.focus();
   }
 
-  const tileClass = "flex flex-col items-center gap-1 rounded-lg border p-2 text-center transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  const tileClass = "flex flex-col items-center gap-1 rounded-lg border p-2 text-center transition-colors hover:bg-muted focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring";
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

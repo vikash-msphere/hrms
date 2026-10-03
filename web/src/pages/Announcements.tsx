@@ -52,7 +52,7 @@ const thisMonth = () => thisMonthStr();
 const monthName = () => new Date().toLocaleString(undefined, { month: "long" });
 
 // The board's wide layout (docs/06-responsive-ui.md, "Wide screens"): from a 1920px screen - `3xl` in
-// web/tailwind.config.js, change the two together - what sits above the feed on a narrower one (the search and
+// web/src/index.css, change the two together - what sits above the feed on a narrower one (the search and
 // filter chips, "Most recognized") moves into a side column beside it, and the pair is centred.
 const WIDE_BOARD_QUERY = "(min-width: 1920px)";
 const BOARD_SIDE_WIDTH = 352; // 22rem
@@ -1352,7 +1352,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
                         aria-controls={`thread-${idOf(a.path)}`}
                         aria-label={isOpen ? "Hide this post's replies" : "Show this post's replies"}
                         className={cn(
-                          "flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                          "flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
                           // Same hover-reveal as the tools beside it, except once the fold is open the chevron is
                           // the only way back - it stays put then.
                           "opacity-0 focus-visible:opacity-100 group-hover:opacity-100 max-sm:opacity-100",
@@ -1430,7 +1430,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
                             <button
                               type="button"
                               onClick={(e) => { e.stopPropagation(); toggleExpand(a); }}
-                              className="rounded-full px-3 py-0.5 text-xs font-medium text-primary hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              className="rounded-full px-3 py-0.5 text-xs font-medium text-primary hover:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                             >
                               Read more
                             </button>
@@ -1488,7 +1488,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
                               <button
                                 type="button"
                                 onClick={(e) => { e.stopPropagation(); setFullThread((s) => new Set(s).add(a.path)); }}
-                                className="flex items-center gap-1.5 text-xs font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                className="flex items-center gap-1.5 text-xs font-medium text-primary hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                               >
                                 <ChevronUp className="h-3.5 w-3.5" /> Show {hidden} earlier {hidden === 1 ? "reply" : "replies"}
                               </button>

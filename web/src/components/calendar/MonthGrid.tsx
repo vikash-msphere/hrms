@@ -143,7 +143,7 @@ export function MonthGrid({
                           onSelect(isSel ? null : ymd);
                         }}
                         className={cn(
-                          "relative block h-full min-h-[106px] w-full select-none border-b border-r p-1 text-left align-top transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:min-h-[122px] sm:p-1.5",
+                          "relative block h-full min-h-[106px] w-full select-none border-b border-r p-1 text-left align-top transition-colors hover:bg-accent/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:min-h-[122px] sm:p-1.5",
                           i === 6 && "border-r-0",
                           !inMonth && "bg-muted/20 text-muted-foreground/50",
                           hol ? "bg-violet-100/60 dark:bg-violet-950/30" : nonWorking && inMonth && "bg-brand-neutral-100/60 dark:bg-brand-neutral-800/30",

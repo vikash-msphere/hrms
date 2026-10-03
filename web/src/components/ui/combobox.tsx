@@ -108,7 +108,7 @@ export function Combobox({
             // min-w-0 / truncate: see ui/input.tsx. The selected label can be an employee's full name or
             // a whole cost centre, and without a zeroed minimum the trigger claims that width from
             // whatever row it sits in - which on a phone is the row that then runs off screen.
-            "flex h-9 w-full min-w-0 items-center justify-between gap-2 rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 coarse:min-h-10",
+            "flex h-9 w-full min-w-0 items-center justify-between gap-2 rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm ring-offset-background focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 coarse:min-h-10",
             !selected && "text-muted-foreground",
             className,
           )}
@@ -155,7 +155,7 @@ export function Combobox({
             autoCorrect="off"
             spellCheck={false}
             enterKeyHint="go"
-            className="h-9 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            className="h-9 w-full bg-transparent text-sm outline-hidden placeholder:text-muted-foreground"
           />
         </div>
         {/* Bounded by the room Radix measured, so on a phone the list ends above the screen edge instead of
